@@ -164,41 +164,46 @@ pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i
         return Ok(HashMap::new());
     }
 
-    let mut by_track = HashMap::new();
-
-    for chunk in track_ids.chunks(TRACK_GENRE_CHUNK_SIZE) {
-        let mut query = String::from(
-            "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
-                SELECT id, parent_id, name
-                FROM genres
-                WHERE parent_id IS NULL
+    // Pre-compute genre paths once instead of recursive CTE per chunk.
+    let genre_paths: HashMap<i64, String> = {
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE paths(id, parent_id, path) AS (
+                SELECT id, parent_id, name FROM genres WHERE parent_id IS NULL
                 UNION ALL
-                SELECT g.id, g.parent_id, genre_paths.path || ' > ' || g.name
-                FROM genres g
-                JOIN genre_paths ON g.parent_id = genre_paths.id
+                SELECT g.id, g.parent_id, paths.path || ' > ' || g.name
+                FROM genres g JOIN paths ON g.parent_id = paths.id
             )
-            SELECT tg.track_id, genre_paths.path
-            FROM track_genres tg
-            JOIN genre_paths ON genre_paths.id = tg.genre_id
-            WHERE tg.track_id IN (",
-        );
-        for idx in 0..chunk.len() {
-            if idx > 0 {
-                query.push_str(", ");
-            }
-            query.push('?');
-            query.push_str(&(idx + 1).to_string());
+            SELECT id, path FROM paths",
+        )?;
+        let mut map = HashMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
+            map.insert(id, path);
         }
-        query.push(')');
-        query.push_str(" ORDER BY tg.track_id, genre_paths.path");
+        map
+    };
 
-        let mut stmt = conn.prepare(&query)?;
+    let mut by_track = HashMap::new();
+    for chunk in track_ids.chunks(TRACK_GENRE_CHUNK_SIZE) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT track_id, genre_id FROM track_genres WHERE track_id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let params = rusqlite::params_from_iter(chunk.iter());
         let mut rows = stmt.query(params)?;
         while let Some(row) = rows.next()? {
             let track_id: i64 = row.get(0)?;
-            let path: String = row.get(1)?;
-            by_track.entry(track_id).or_insert_with(Vec::new).push(path);
+            let genre_id: i64 = row.get(1)?;
+            if let Some(path) = genre_paths.get(&genre_id) {
+                by_track.entry(track_id).or_insert_with(Vec::new).push(path.clone());
+            }
         }
     }
 
@@ -226,19 +231,70 @@ pub fn get_track_by_id(conn: &Connection, track_id: i64) -> Result<Option<Track>
 }
 
 fn normalize_positions(conn: &Connection) -> Result<()> {
-    let ids = {
+    // Single batched UPDATE using a temporary table to avoid N individual statements.
+    // We rebuild positions sequentially: each row gets the next available position
+    // ordered by the current position/id.
+    conn.execute_batch("
+        CREATE TEMPORARY TABLE IF NOT EXISTS _queue_reorder (id INTEGER PRIMARY KEY, new_pos INTEGER);
+        DELETE FROM _queue_reorder;
+    ")?;
+
+    let ids: Vec<(i64, i32)> = {
         let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
         stmt.query_map([], |row| row.get::<_, i64>(0))?
+            .enumerate()
+            .map(|(i, id_r)| Ok((id_r?, i as i32)))
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    for (position, id) in ids.into_iter().enumerate() {
-        conn.execute(
-            "UPDATE queue SET position = ?1 WHERE id = ?2",
-            params![position as i32, id],
-        )?;
+    if ids.is_empty() {
+        return Ok(());
     }
+
+    // Insert all new positions in one transaction.
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("INSERT INTO _queue_reorder (id, new_pos) VALUES (?1, ?2)")?;
+        for &(id, pos) in &ids {
+            stmt.execute(params![id, pos])?;
+        }
+    }
+    tx.execute("UPDATE queue SET position = (SELECT new_pos FROM _queue_reorder WHERE _queue_reorder.id = queue.id) WHERE id IN (SELECT id FROM _queue_reorder)", [])?;
+    tx.execute("DELETE FROM _queue_reorder", [])?;
+    tx.commit()?;
     Ok(())
+}
+
+/// Fetch multiple tracks by their IDs in a single query.
+/// Returns only the tracks that were found, in the order of the input IDs.
+pub fn get_tracks_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Track>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=ids.len())
+        .map(|i| format!("?{}", i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
+                t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                t.best_quality, t.best_source, t.fidelity_score,
+                t.is_favorite, t.play_count, t.last_played_at,
+                t.date_added, t.source, al.artwork_url
+         FROM tracks t
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE t.id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(ids.iter());
+    let tracks = stmt
+        .query_map(params, |row| track_from_row_with_offset(row, 0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(tracks)
 }
 
 fn track_from_row_with_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<Track> {

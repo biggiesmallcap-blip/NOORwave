@@ -615,13 +615,17 @@ fn build_automix_extension(
     excluded_track_ids.sort_unstable();
     excluded_track_ids.dedup();
 
-    let mut candidates = queries::get_tracks_excluding(conn, &excluded_track_ids)?;
+    // Load at most 500 candidates to keep memory bounded while still
+    // providing enough diversity for scoring and genre shuffling.
+    const MAX_CANDIDATES: usize = 500;
+
+    let mut candidates = queries::get_tracks_excluding_with_limit(conn, &excluded_track_ids, MAX_CANDIDATES)?;
     if candidates.is_empty() {
         let queue_track_ids = queue_items
             .iter()
             .map(|item| item.track.id)
             .collect::<Vec<_>>();
-        candidates = queries::get_tracks_excluding(conn, &queue_track_ids)?;
+        candidates = queries::get_tracks_excluding_with_limit(conn, &queue_track_ids, MAX_CANDIDATES)?;
     }
 
     if candidates.is_empty() {
@@ -677,15 +681,21 @@ fn build_session_taste_profile(
 
     let mut feedback_tracks = Vec::new();
     let mut feedback_entries = Vec::new();
+
+    // Batch load all feedback tracks in a single query instead of N individual SELECTs.
+    let feedback_track_ids: Vec<i64> = feedback_rows.iter().map(|(id, _)| *id).collect();
+    let found_tracks = queue::get_tracks_by_ids(conn, &feedback_track_ids)?;
+    let track_map: HashMap<i64, &Track> = found_tracks.iter().map(|t| (t.id, t)).collect();
+
     for (track_id, completed) in feedback_rows {
         profile.recent_track_ids.insert(track_id);
         if !completed {
             profile.skipped_track_ids.insert(track_id);
         }
 
-        if let Some(track) = queue::get_track_by_id(conn, track_id)? {
-            feedback_tracks.push(track.clone());
-            feedback_entries.push((track, completed));
+        if let Some(track) = track_map.get(&track_id) {
+            feedback_tracks.push((**track).clone());
+            feedback_entries.push((**track, completed));
         }
     }
 
@@ -823,25 +833,31 @@ fn order_automix_candidates(
 /// Spread tracks from the same album apart so they don't run consecutively.
 /// Preserves the score ordering as much as possible while ensuring no two
 /// adjacent tracks share the same album_id.
-fn decluster_by_album(mut tracks: Vec<Track>) -> Vec<Track> {
+/// Uses a visited-set pattern instead of Vec::remove to avoid O(n²).
+fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     if tracks.len() <= 1 {
         return tracks;
     }
     let mut result = Vec::with_capacity(tracks.len());
+    let mut visited = vec![false; tracks.len()];
     let mut last_album: Option<i64> = None;
 
-    while !tracks.is_empty() {
+    for _ in 0..tracks.len() {
         let pos = if let Some(last_id) = last_album {
             tracks
                 .iter()
-                .position(|t| t.album_id.map_or(true, |aid| aid != last_id))
-                .unwrap_or(0)
+                .enumerate()
+                .position(|(i, t)| !visited[i] && t.album_id.map_or(true, |aid| aid != last_id))
+                .unwrap_or_else(|| {
+                    // Fallback: pick the first unvisited track.
+                    tracks.iter().enumerate().find(|(i, _)| !visited[i]).map(|(i, _)| i).unwrap_or(0)
+                })
         } else {
             0
         };
-        let track = tracks.remove(pos);
-        last_album = track.album_id;
-        result.push(track);
+        visited[pos] = true;
+        last_album = tracks[pos].album_id;
+        result.push(tracks[pos].clone());
     }
     result
 }
@@ -909,10 +925,10 @@ fn automix_score(track: &Track, genres: &[String], taste: &SessionTasteProfile) 
 }
 
 /// Parse an ISO-8601 timestamp and return days elapsed since then.
-/// Returns 999.0 on failure so old/malformed timestamps get no penalty.
+/// Returns `f64::MAX` on failure so malformed timestamps get maximum recency penalty.
 fn parse_days_since_last_played(timestamp: &str) -> f64 {
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
-        return 999.0;
+        return f64::MAX;
     };
     let elapsed = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
     elapsed.num_seconds().max(0) as f64 / 86_400.0

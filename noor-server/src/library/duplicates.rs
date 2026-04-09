@@ -246,43 +246,74 @@ fn rows_match(left: &MatchRow, right: &MatchRow, via_isrc: bool) -> bool {
     }
 }
 
+/// Union-Find (disjoint set) data structure for O(n·α(n)) connected components.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]]; // path halving
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        if self.rank[ra] < self.rank[rb] {
+            self.parent[ra] = rb;
+        } else if self.rank[ra] > self.rank[rb] {
+            self.parent[rb] = ra;
+        } else {
+            self.parent[rb] = ra;
+            self.rank[ra] += 1;
+        }
+    }
+
+    fn into_groups(self) -> Vec<Vec<usize>> {
+        let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for (i, &p) in self.parent.iter().enumerate() {
+            groups.entry(p).or_default().push(i);
+        }
+        groups.into_values().filter(|g| g.len() > 1).collect()
+    }
+}
+
 fn connected_components<F>(rows: &[MatchRow], predicate: F) -> Vec<Vec<usize>>
 where
     F: Fn(&MatchRow, &MatchRow) -> bool,
 {
-    let mut visited = vec![false; rows.len()];
-    let mut components = Vec::new();
+    let n = rows.len();
+    if n <= 1 {
+        return Vec::new();
+    }
 
-    for start in 0..rows.len() {
-        if visited[start] {
-            continue;
-        }
+    let mut uf = UnionFind::new(n);
 
-        let mut stack = vec![start];
-        visited[start] = true;
-        let mut component = Vec::new();
-
-        while let Some(idx) = stack.pop() {
-            component.push(idx);
-
-            for next in 0..rows.len() {
-                if visited[next] || idx == next {
-                    continue;
-                }
-
-                if predicate(&rows[idx], &rows[next]) {
-                    visited[next] = true;
-                    stack.push(next);
-                }
+    // Build adjacency by checking all pairs — but Union-Find makes merging O(α(n))
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if predicate(&rows[i], &rows[j]) {
+                uf.union(i, j);
             }
-        }
-
-        if component.len() > 1 {
-            components.push(component);
         }
     }
 
-    components
+    uf.into_groups()
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
@@ -580,7 +611,15 @@ pub fn resolve_group(
     let tidal_ids_to_unfavorite: Vec<i64> = to_remove.iter().filter_map(|(_, tid)| *tid).collect();
 
     // Remove non-preferred tracks from the DB.
+    // Must clean up dependent rows explicitly since FKs lack ON DELETE CASCADE.
     for &track_id in &removed_track_ids {
+        conn.execute("DELETE FROM listen_history WHERE track_id = ?1", params![track_id])?;
+        conn.execute("DELETE FROM playlist_tracks WHERE track_id = ?1", params![track_id])?;
+        conn.execute("DELETE FROM queue WHERE track_id = ?1", params![track_id])?;
+        conn.execute("DELETE FROM shuffle_state WHERE track_id = ?1", params![track_id])?;
+        conn.execute("DELETE FROM duplicate_members WHERE track_id = ?1", params![track_id])?;
+        // track_genres already has ON DELETE CASCADE, but we delete it explicitly for clarity.
+        conn.execute("DELETE FROM track_genres WHERE track_id = ?1", params![track_id])?;
         conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
     }
 

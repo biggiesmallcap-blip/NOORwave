@@ -74,6 +74,8 @@ The server starts on `http://localhost:3333` and auto-creates `noor.db` at the w
 |---|---|---|
 | `NOOR_DB` | `<workspace>/noor.db` | Override the database path |
 | `RUST_LOG` | `noor_server=info` | Log level |
+| `TIDAL_CLIENT_ID` | *(built-in)* | Override TIDAL OAuth2 client ID |
+| `TIDAL_CLIENT_SECRET` | *(built-in)* | Override TIDAL OAuth2 client secret |
 
 ### Frontend
 

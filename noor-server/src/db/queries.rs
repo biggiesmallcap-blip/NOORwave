@@ -12,6 +12,7 @@ pub fn get_tracks(
     sort_dir: &str,
     limit: i64,
     offset: i64,
+    favorite_only: bool,
 ) -> Result<Vec<Track>> {
     let order_col = match sort_by {
         "title" => "t.title",
@@ -26,6 +27,8 @@ pub fn get_tracks(
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
+    let fav_filter = if favorite_only { " WHERE t.is_favorite = 1" } else { "" };
+
     let sql = format!(
         "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
                 t.album_id, al.title as album_title,
@@ -37,7 +40,7 @@ pub fn get_tracks(
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
-         WHERE t.is_favorite = 1
+         {fav_filter}
          ORDER BY {order_col} {dir}
          LIMIT ?1 OFFSET ?2"
     );
@@ -50,9 +53,10 @@ pub fn get_tracks(
     Ok(tracks)
 }
 
-pub fn get_track_count(conn: &Connection) -> Result<i64> {
+pub fn get_track_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
+    let filter = if favorite_only { " WHERE is_favorite = 1" } else { "" };
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM tracks WHERE is_favorite = 1",
+        &format!("SELECT COUNT(*) FROM tracks{filter}"),
         [],
         |row| row.get(0),
     )?)
@@ -66,6 +70,7 @@ pub fn get_albums(
     sort_dir: &str,
     limit: i64,
     offset: i64,
+    favorite_only: bool,
 ) -> Result<Vec<Album>> {
     let order_col = match sort_by {
         "title" => "al.title",
@@ -75,13 +80,15 @@ pub fn get_albums(
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
+    let fav_filter = if favorite_only { " WHERE al.is_favorite = 1" } else { "" };
+
     let sql = format!(
         "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
                 a.name as artist_name, al.year, al.artwork_url,
                 al.release_type, al.label, al.track_count, al.is_favorite, al.source
          FROM albums al
          LEFT JOIN artists a ON al.artist_id = a.id
-         WHERE al.is_favorite = 1
+         {fav_filter}
          ORDER BY {order_col} {dir}
          LIMIT ?1 OFFSET ?2"
     );
@@ -110,9 +117,10 @@ pub fn get_albums(
     Ok(albums)
 }
 
-pub fn get_album_count(conn: &Connection) -> Result<i64> {
+pub fn get_album_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
+    let filter = if favorite_only { " WHERE is_favorite = 1" } else { "" };
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM albums WHERE is_favorite = 1",
+        &format!("SELECT COUNT(*) FROM albums{filter}"),
         [],
         |row| row.get(0),
     )?)
@@ -1077,6 +1085,17 @@ pub fn get_discovery_candidate_tracks(conn: &Connection, limit: i64) -> Result<V
 }
 
 pub fn get_tracks_excluding(conn: &Connection, excluded_track_ids: &[i64]) -> Result<Vec<Track>> {
+    get_tracks_excluding_with_limit(conn, excluded_track_ids, 0)
+}
+
+/// Variant with an optional LIMIT for automix candidate selection.
+/// When `max_candidates` > 0, only the top N tracks (by the default ordering) are returned,
+/// dramatically reducing memory usage for automix which would otherwise load all 32k tracks.
+pub fn get_tracks_excluding_with_limit(
+    conn: &Connection,
+    excluded_track_ids: &[i64],
+    max_candidates: usize,
+) -> Result<Vec<Track>> {
     let mut sql = String::from(
         "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
@@ -1096,6 +1115,10 @@ pub fn get_tracks_excluding(conn: &Connection, excluded_track_ids: &[i64]) -> Re
     }
 
     sql.push_str(" ORDER BY t.is_favorite DESC, t.play_count ASC, t.fidelity_score DESC, t.date_added DESC, t.title ASC");
+
+    if max_candidates > 0 {
+        sql.push_str(&format!(" LIMIT {}", max_candidates));
+    }
 
     let mut stmt = conn.prepare(&sql)?;
     let params = params_from_iter(excluded_track_ids.iter().copied());

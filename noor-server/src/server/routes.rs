@@ -34,6 +34,7 @@ pub struct ListParams {
     sort_dir: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    favorite_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,23 +300,28 @@ async fn get_tracks(
     let sort_dir = params.sort_dir.as_deref().unwrap_or("desc");
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
+    let favorite_only = params.favorite_only.unwrap_or(true);
 
     state
         .db
         .with_conn(|conn| {
-            let tracks = queries::get_tracks(conn, sort_by, sort_dir, limit, offset)?;
-            let total = queries::get_track_count(conn)?;
+            let tracks = queries::get_tracks(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+            let total = queries::get_track_count(conn, favorite_only)?;
             Ok(Json(json!({ "tracks": tracks, "total": total })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn get_track_count(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn get_track_count(
+    State(state): State<SharedState>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let favorite_only = params.favorite_only.unwrap_or(true);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let count = queries::get_track_count(conn)?;
+            let count = queries::get_track_count(conn, favorite_only)?;
             Ok(Json(json!({ "count": count })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -330,12 +336,13 @@ async fn get_albums(
     let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
     let limit = params.limit.unwrap_or(100);
     let offset = params.offset.unwrap_or(0);
+    let favorite_only = params.favorite_only.unwrap_or(true);
 
     state
         .db
         .with_conn(|conn| {
-            let albums = queries::get_albums(conn, sort_by, sort_dir, limit, offset)?;
-            let total = queries::get_album_count(conn)?;
+            let albums = queries::get_albums(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+            let total = queries::get_album_count(conn, favorite_only)?;
             Ok(Json(json!({ "albums": albums, "total": total })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -436,12 +443,33 @@ async fn get_playlists(State(state): State<SharedState>) -> Result<Json<Value>, 
         .db
         .with_conn(|conn| {
             let mut playlists = queries::get_playlists(conn)?;
-            for playlist in &mut playlists {
-                if playlist.is_smart {
-                    let tracks = resolve_smart_playlist_tracks(conn, playlist)?;
-                    playlist.track_count = tracks.len() as i32;
+
+            // Count smart playlists — if none, skip expensive loading.
+            let smart_count = playlists.iter().filter(|p| p.is_smart).count();
+            if smart_count > 0 {
+                // Load all data once, build a shared context.
+                let tracks = queries::get_all_tracks(conn)?;
+                let genre_map = queries::get_track_genre_paths(conn)?;
+                let playlist_memberships = queries::get_playlist_memberships(conn)?;
+
+                let mut context = PlaylistEvaluationContext::new();
+                for (track_id, genres) in genre_map {
+                    context = context.with_track_genres(track_id, genres);
+                }
+                for (pid, tids) in playlist_memberships {
+                    context = context.with_playlist_tracks(pid, tids);
+                }
+
+                for playlist in &mut playlists {
+                    if playlist.is_smart {
+                        let tracks = resolve_smart_playlist_tracks_with_context(
+                            playlist, &tracks, &context,
+                        )?;
+                        playlist.track_count = tracks.len() as i32;
+                    }
                 }
             }
+
             Ok(Json(json!({ "playlists": playlists })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -1783,6 +1811,23 @@ async fn batch_delete_items(
         StatusCode::BAD_GATEWAY
     })?;
 
+    // Also delete from local DB so removed items disappear immediately.
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    if let Err(e) = db.with_conn(|conn| {
+        for &(local_id, _) in &track_pairs {
+            conn.execute("DELETE FROM tracks WHERE id = ?1", rusqlite::params![local_id])?;
+        }
+        for &(local_id, _) in &album_pairs {
+            conn.execute("DELETE FROM albums WHERE id = ?1", rusqlite::params![local_id])?;
+        }
+        Ok(())
+    }) {
+        warn!("Batch delete: local DB cleanup failed: {e}");
+    }
+
     {
         let state = state.read().await;
         let _ = state.event_tx.send(AppEvent::LibrarySynced);
@@ -2090,7 +2135,7 @@ async fn resolve_duplicate_group(
     Json(payload): Json<ResolveGroupRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     // Get TIDAL tokens for unfavorite calls.
-    let (tokens, http) = {
+    let (mut tokens, http) = {
         let s = state.read().await;
         let tokens = s.tidal_tokens.clone();
         (tokens, s.http_client.clone())
@@ -2102,18 +2147,36 @@ async fn resolve_duplicate_group(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
-    // Best-effort unfavorite on TIDAL (don't fail the whole request if it errors).
-    if let Some(tokens) = tokens {
+    // Best-effort unfavorite on TIDAL with session refresh retry.
+    if let Some(t) = tokens.clone() {
         for tidal_id in &result.tidal_ids_to_unfavorite {
             if let Err(e) = tidal_mutations::remove_favorite_track(
                 &http,
-                &tokens.access_token,
-                &tokens.user_id,
+                &t.access_token,
+                &t.user_id,
                 *tidal_id,
-                &tokens.country_code,
+                &t.country_code,
             )
             .await
             {
+                // If it looks like a session expiry, try to refresh and retry once.
+                if e.to_string().contains("401") || e.to_string().to_lowercase().contains("unauthorized") {
+                    if let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await {
+                        if let Err(e2) = tidal_mutations::remove_favorite_track(
+                            &http,
+                            &refreshed.access_token,
+                            &refreshed.user_id,
+                            *tidal_id,
+                            &refreshed.country_code,
+                        )
+                        .await
+                        {
+                            error!("Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}");
+                        }
+                        tokens = Some(refreshed);
+                        continue;
+                    }
+                }
                 warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");
             }
         }
@@ -2978,21 +3041,37 @@ async fn status() -> Json<Value> {
 }
 
 fn dedupe_positive_ids(ids: &[i64]) -> Vec<i64> {
-    let mut ids: Vec<i64> = ids.iter().copied().filter(|id| *id > 0).collect();
+    let (filtered, dropped): (Vec<i64>, Vec<i64>) = ids.iter().copied().partition(|id| *id > 0);
+    if !dropped.is_empty() {
+        warn!("dedupe_positive_ids: dropped {} non-positive IDs (ephemeral/discovery tracks): {:?}", dropped.len(), &dropped[..dropped.len().min(5)]);
+    }
+    let mut ids: Vec<i64> = filtered;
     ids.sort_unstable();
     ids.dedup();
     ids
 }
 
-fn resolve_smart_playlist_tracks(
-    conn: &rusqlite::Connection,
+fn resolve_smart_playlist_tracks_with_context(
     playlist: &crate::db::models::Playlist,
+    tracks: &[crate::db::models::Track],
+    context: &PlaylistEvaluationContext,
 ) -> anyhow::Result<Vec<crate::db::models::Track>> {
     let Some(raw_rules) = playlist.smart_rules.as_deref() else {
         return Ok(Vec::new());
     };
 
     let definition: SmartPlaylistDefinition = serde_json::from_str(raw_rules)?;
+    let resolved = evaluate_playlist(&definition, tracks, context)
+        .into_iter()
+        .cloned()
+        .collect();
+    Ok(resolved)
+}
+
+fn resolve_smart_playlist_tracks(
+    conn: &rusqlite::Connection,
+    playlist: &crate::db::models::Playlist,
+) -> anyhow::Result<Vec<crate::db::models::Track>> {
     let tracks = queries::get_all_tracks(conn)?;
     let genre_map = queries::get_track_genre_paths(conn)?;
     let playlist_memberships = queries::get_playlist_memberships(conn)?;
@@ -3005,11 +3084,7 @@ fn resolve_smart_playlist_tracks(
         context = context.with_playlist_tracks(playlist_id, track_ids);
     }
 
-    let resolved = evaluate_playlist(&definition, &tracks, &context)
-        .into_iter()
-        .cloned()
-        .collect();
-    Ok(resolved)
+    resolve_smart_playlist_tracks_with_context(playlist, &tracks, &context)
 }
 
 // ─── TIDAL Endpoints ──────────────────────────────────────
@@ -3027,34 +3102,53 @@ async fn tidal_login(State(state): State<SharedState>) -> Result<Json<Value>, St
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Cancel any previous in-flight login polling
+    {
+        let mut s = state.write().await;
+        s.tidal_login_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        s.tidal_login_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    }
+
     // Poll for token in background, then persist to DB
     let state_clone = state.clone();
     let http_clone = http.clone();
+    let cancel = {
+        let s = state.read().await;
+        s.tidal_login_cancel.clone()
+    };
     tokio::spawn(async move {
-        match tidal_auth::poll_for_token(&http_clone, &device_code, interval).await {
-            Ok(tokens) => {
-                tracing::info!("TIDAL auth successful! User: {}", tokens.user_id);
-                // Persist tokens to DB so they survive restarts
-                {
-                    let s = state_clone.read().await;
-                    let _ = s.db.with_conn(|conn| {
-                        let token_json = serde_json::to_string(&tokens)?;
-                        conn.execute(
-                            "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
-                             VALUES ('tidal', ?1, ?2, datetime('now'))
-                             ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                             user_id=excluded.user_id, connected_at=excluded.connected_at",
-                            rusqlite::params![token_json.as_bytes(), tokens.user_id],
-                        )?;
-                        Ok(())
-                    });
-                }
-                let mut s = state_clone.write().await;
-                s.tidal_tokens = Some(tokens);
-                let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!("TIDAL login polling cancelled (new login started)");
+                return;
             }
-            Err(e) => {
-                tracing::error!("TIDAL polling failed: {}", e);
+            match tidal_auth::poll_for_token(&http_clone, &device_code, interval).await {
+                Ok(tokens) => {
+                    tracing::info!("TIDAL auth successful! User: {}", tokens.user_id);
+                    // Persist tokens to DB so they survive restarts
+                    {
+                        let s = state_clone.read().await;
+                        let _ = s.db.with_conn(|conn| {
+                            let token_json = serde_json::to_string(&tokens)?;
+                            conn.execute(
+                                "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
+                                 VALUES ('tidal', ?1, ?2, datetime('now'))
+                                 ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
+                                 user_id=excluded.user_id, connected_at=excluded.connected_at",
+                                rusqlite::params![token_json.as_bytes(), tokens.user_id],
+                            )?;
+                            Ok(())
+                        });
+                    }
+                    let mut s = state_clone.write().await;
+                    s.tidal_tokens = Some(tokens);
+                    let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("TIDAL polling failed: {}", e);
+                    return;
+                }
             }
         }
     });
@@ -4269,7 +4363,9 @@ fn flush_active_listen_session_locked(
 
     session.pause(now);
     let listened_ms = session.listened_ms_at(now);
-    if listened_ms <= 0 {
+    // Skip sessions shorter than 5 seconds to avoid spurious near-zero entries
+    // from rapid track changes or accidental clicks.
+    if listened_ms < 5_000 {
         return Ok(None);
     }
 

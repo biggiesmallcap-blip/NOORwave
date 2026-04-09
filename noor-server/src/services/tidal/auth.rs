@@ -3,9 +3,16 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 const TIDAL_AUTH_URL: &str = "https://auth.tidal.com/v1/oauth2";
-// Current tidalapi credentials (device code flow client)
-const TIDAL_CLIENT_ID: &str = "fX2JxdmntZWK0ixT";
-const TIDAL_CLIENT_SECRET: &str = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg==";
+
+/// Returns TIDAL client ID from env var `TIDAL_CLIENT_ID`, falling back to the default.
+fn tidal_client_id() -> String {
+    std::env::var("TIDAL_CLIENT_ID").unwrap_or_else(|_| "fX2JxdmntZWK0ixT".to_string())
+}
+
+/// Returns TIDAL client secret from env var `TIDAL_CLIENT_SECRET`, falling back to the default.
+fn tidal_client_secret() -> String {
+    std::env::var("TIDAL_CLIENT_SECRET").unwrap_or_else(|_| "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg==".to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TidalTokens {
@@ -61,7 +68,7 @@ pub async fn start_device_login(http: &reqwest::Client) -> Result<(String, Strin
     let resp: DeviceCodeResponse = http
         .post(format!("{}/device_authorization", TIDAL_AUTH_URL))
         .form(&[
-            ("client_id", TIDAL_CLIENT_ID),
+            ("client_id", tidal_client_id().as_str()),
             ("scope", "r_usr w_usr w_sub"),
         ])
         .send()
@@ -100,8 +107,8 @@ pub async fn poll_for_token(
         let resp = http
             .post(format!("{}/token", TIDAL_AUTH_URL))
             .form(&[
-                ("client_id", TIDAL_CLIENT_ID),
-                ("client_secret", TIDAL_CLIENT_SECRET),
+                ("client_id", tidal_client_id().as_str()),
+                ("client_secret", tidal_client_secret().as_str()),
                 ("device_code", device_code),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("scope", "r_usr w_usr w_sub"),
@@ -147,8 +154,8 @@ pub async fn refresh_token(http: &reqwest::Client, refresh_token: &str) -> Resul
     let resp = http
         .post(format!("{}/token", TIDAL_AUTH_URL))
         .form(&[
-            ("client_id", TIDAL_CLIENT_ID),
-            ("client_secret", TIDAL_CLIENT_SECRET),
+            ("client_id", tidal_client_id().as_str()),
+            ("client_secret", tidal_client_secret().as_str()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
         ])

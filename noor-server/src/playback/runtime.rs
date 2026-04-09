@@ -22,7 +22,14 @@ use tracing::{error, info, warn};
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
 /// How many milliseconds before track end we emit `NearEnd` and start pre-decoding the next track.
-const NEAR_END_THRESHOLD_MS: u64 = 15_000;
+const NEAR_END_THRESHOLD_MS: i64 = 15_000;
+
+// Thread-local reusable buffers for the hot decode path.
+// Each decode thread gets its own buffers — no contention, no per-packet allocation.
+thread_local! {
+    static CHANNEL_BUF: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::with_capacity(65536));
+    static RESAMPLE_BUF: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::with_capacity(65536));
+}
 
 #[derive(Debug, Clone)]
 pub struct PlaybackRuntimeConfig {
@@ -378,9 +385,27 @@ fn run_runtime_loop(
                             .map(|g| g.finished)
                             .unwrap_or(false);
                         if is_decoded {
+                            // Copy next track's pre-decoded samples into xfade_incoming
+                            // so the outgoing engine's CPAL callback can mix them during the overlap.
+                            if let Ok(buf) = next.shared.buffer.lock() {
+                                let mut xfade = state
+                                    .engine
+                                    .as_ref()
+                                    .and_then(|e| e.shared.xfade_incoming.lock().ok());
+                                if let Some(ref mut xfade_buf) = xfade {
+                                    xfade_buf.clone_from(&buf.samples);
+                                }
+                            }
+                            state
+                                .engine
+                                .as_ref()
+                                .map(|e| e.shared.xfade_read_pos.store(0, Ordering::Relaxed));
+
                             // Record position-0 as fade-in start so the callback can ramp gain.
                             next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
-                            next.shared.paused.store(false, Ordering::SeqCst);
+                            // Pause next engine's stream — we'll output its samples directly
+                            // from the outgoing engine's callback for proper audio mixing.
+                            next.shared.paused.store(true, Ordering::SeqCst);
                         }
                         // If not decoded yet, NextDecodeComplete will start it.
                     }
@@ -397,8 +422,19 @@ fn run_runtime_loop(
                             .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
                             .unwrap_or(false);
                         if crossfade_started {
+                            // Set up xfade_incoming for the outgoing engine's callback.
+                            if let Ok(buf) = next.shared.buffer.lock() {
+                                if let Some(ref eng) = state.engine {
+                                    if let Ok(mut xfade) = eng.shared.xfade_incoming.lock() {
+                                        xfade.clone_from(&buf.samples);
+                                    }
+                                    eng.shared.xfade_read_pos.store(0, Ordering::Relaxed);
+                                }
+                            }
                             next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
-                            next.shared.paused.store(false, Ordering::SeqCst);
+                            // Pause next engine's stream — we'll output its samples directly
+                            // from the outgoing engine's callback for proper audio mixing.
+                            next.shared.paused.store(true, Ordering::SeqCst);
                         }
                     }
                 }
@@ -773,8 +809,94 @@ fn write_output_buffer<T>(
         1.0f32
     };
 
+    // Determine if we're in the crossfade window where we need to mix both tracks.
+    let total = shared.total_samples.load(Ordering::Relaxed);
+    let pos = shared.position_samples.load(Ordering::Relaxed);
+    let in_crossfade_window = xfade > 0 && total > 0 && total.saturating_sub(pos) < xfade;
+
+    // Pre-lock xfade buffer if we might need it.
+    let xfade_buf_lock = if in_crossfade_window {
+        shared.xfade_incoming.lock().ok()
+    } else {
+        None
+    };
+    let xfade_buf_len = xfade_buf_lock.as_ref().map_or(0, |b| b.len());
+    let xfade_read = shared.xfade_read_pos.load(Ordering::Relaxed);
+
+    // Fade-in gain for incoming track — based on how many incoming samples we've output so far,
+    // NOT the outgoing track's position.
+    let in_fade_gain = if in_crossfade_window && xfade_buf_len > 0 {
+        if xfade_read < xfade {
+            (xfade_read as f32 / xfade as f32).min(1.0)
+        } else {
+            1.0f32
+        }
+    } else {
+        1.0f32
+    };
+
     let written = if guard.started {
-        guard.drain_into(data, &|s: f32| convert(s * volume * fade_gain))
+        if in_crossfade_window && xfade_buf_len > 0 {
+            // Mix outgoing + incoming samples sample-by-sample for proper crossfade.
+            let mut wrote = 0;
+            for i in 0..data.len() {
+                let out_idx = guard.read_pos + i;
+                if out_idx >= guard.samples.len() {
+                    // Outgoing buffer exhausted — fill remaining with incoming.
+                    break;
+                }
+                let out_sample = guard.samples[out_idx];
+                let in_idx = xfade_read as usize + wrote;
+                if in_idx < xfade_buf_len {
+                    let in_sample = xfade_buf_lock.as_ref().unwrap()[in_idx];
+                    // Crossfade: outgoing fades out, incoming fades in.
+                    let mixed = out_sample * fade_gain + in_sample * in_fade_gain;
+                    data[i] = convert(mixed * volume);
+                } else {
+                    // No more incoming samples — just output outgoing with fade-out.
+                    data[i] = convert(out_sample * fade_gain * volume);
+                }
+                wrote += 1;
+            }
+            guard.read_pos += wrote;
+            shared
+                .xfade_read_pos
+                .fetch_add(wrote as u64, Ordering::Relaxed);
+
+            // If outgoing buffer exhausted, continue with incoming samples.
+            if wrote < data.len() {
+                let remaining = data.len() - wrote;
+                let new_xfade_read = shared.xfade_read_pos.load(Ordering::Relaxed);
+                let xfade_remaining = xfade_buf_len.saturating_sub(new_xfade_read as usize);
+                let mix_count = remaining.min(xfade_remaining);
+                for i in 0..mix_count {
+                    let sample_idx = new_xfade_read as usize + i;
+                    // Fade-in gain based on incoming track's absolute position.
+                    let in_elapsed = new_xfade_read + i as u64;
+                    let in_gain = if in_elapsed < xfade {
+                        (in_elapsed as f32 / xfade as f32).min(1.0)
+                    } else {
+                        1.0f32
+                    };
+                    data[wrote + i] = convert(xfade_buf_lock.as_ref().unwrap()[sample_idx] * volume * in_gain);
+                }
+                shared
+                    .xfade_read_pos
+                    .fetch_add(mix_count as u64, Ordering::Relaxed);
+                wrote += mix_count;
+
+                // Fill rest with silence.
+                if wrote < data.len() {
+                    for slot in data.iter_mut().skip(wrote) {
+                        *slot = convert(0.0);
+                    }
+                    wrote = data.len();
+                }
+            }
+            wrote
+        } else {
+            guard.drain_into(data, &|s: f32| convert(s * volume * fade_gain))
+        }
     } else {
         data.fill_with(|| convert(0.0));
         0
@@ -870,6 +992,12 @@ struct PlaybackSharedState {
     /// Interleaved sample count at which this engine was unpaused for its fade-in.
     /// 0 = not yet started. Used by the CPAL callback to compute the fade-in gain ramp.
     fadein_start_samples: AtomicU64,
+    /// Pre-decoded samples from the next track, populated when crossfade starts.
+    /// The CPAL callback reads from this after the main buffer is exhausted during
+    /// the crossfade window, applying fade-in gain for a proper audio-level blend.
+    xfade_incoming: Mutex<Vec<f32>>,
+    /// Read position within `xfade_incoming` (interleaved samples).
+    xfade_read_pos: AtomicU64,
     /// Device sample rate (Hz) — needed in CPAL callback for `NearEnd` threshold calculation.
     device_sample_rate: u32,
     /// Device channel count — needed in CPAL callback for `NearEnd` threshold calculation.
@@ -914,6 +1042,8 @@ impl PlaybackSharedState {
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
             fadein_start_samples: AtomicU64::new(0),
+            xfade_incoming: Mutex::new(Vec::new()),
+            xfade_read_pos: AtomicU64::new(0),
             device_sample_rate,
             device_channels,
         }
@@ -923,6 +1053,10 @@ impl PlaybackSharedState {
         if let Ok(mut guard) = self.buffer.lock() {
             guard.reset();
         }
+        if let Ok(mut xfade) = self.xfade_incoming.lock() {
+            xfade.clear();
+        }
+        self.xfade_read_pos.store(0, Ordering::Relaxed);
     }
 
     fn signal_terminal(&self, outcome: PlaybackTerminalReason) -> Result<()> {
@@ -1089,16 +1223,28 @@ impl Read for StreamPipe {
 impl Seek for StreamPipe {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let target = match pos {
-            SeekFrom::Start(n) => n as usize,
-            SeekFrom::Current(n) => (self.read_pos as i64 + n).max(0) as usize,
+            SeekFrom::Start(n) => {
+                let t = n as usize;
+                if t > self.data.len() {
+                    self.fill_to(t);
+                }
+                t.min(self.data.len())
+            }
+            SeekFrom::Current(n) => {
+                let t = (self.read_pos as i64 + n).max(0) as usize;
+                if t > self.data.len() {
+                    self.fill_to(t);
+                }
+                t.min(self.data.len())
+            }
             SeekFrom::End(n) => {
-                self.fill_to(usize::MAX);
+                // Fill until EOF so we know the total file size.
+                while !self.eof {
+                    self.recv_chunk();
+                }
                 (self.data.len() as i64 + n).max(0) as usize
             }
         };
-        if target > self.data.len() {
-            self.fill_to(target);
-        }
         self.read_pos = target.min(self.data.len());
         Ok(self.read_pos as u64)
     }
@@ -1238,23 +1384,39 @@ fn decode_and_buffer_job(
 
                 // Channel-adapt and resample this packet's samples, then push to buffer.
                 // Releasing the lock between packets lets the CPAL callback drain freely.
-                let channelized = adapt_channels(
-                    sb.samples(),
-                    decoded_channels as usize,
-                    device_channels as usize,
-                );
-                let resampled = resample_interleaved(
-                    &channelized,
-                    device_channels as usize,
-                    decoded_sample_rate,
-                    device_sample_rate,
-                );
+                // Thread-local reusable buffers avoid per-packet allocations in the hot decode path.
+                let channelized_len = CHANNEL_BUF.with(|cell| {
+                    let mut buf = cell.borrow_mut();
+                    buf.clear();
+                    buf.reserve((sb.samples().len() / decoded_channels as usize) * device_channels as usize);
+                    adapt_channels_into(sb.samples(), decoded_channels as usize, device_channels as usize, &mut buf);
+                    buf.len()
+                });
+                let resampled_len = RESAMPLE_BUF.with(|cell| {
+                    let mut buf = cell.borrow_mut();
+                    buf.clear();
+                    let cl = channelized_len;
+                    buf.reserve(cl * device_sample_rate as usize / decoded_sample_rate as usize + 16);
+                    resample_interleaved_into_ptr(
+                        CHANNEL_BUF.with(|c| c.borrow().as_ptr()),
+                        decoded_channels as usize,
+                        decoded_sample_rate,
+                        device_sample_rate,
+                        channelized_len,
+                        &mut buf,
+                    );
+                    buf.len()
+                });
 
                 let mut guard = shared
                     .buffer
                     .lock()
                     .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                guard.extend(&resampled);
+                // Directly extend from the thread-local buffer without cloning.
+                RESAMPLE_BUF.with(|cell| {
+                    let buf = cell.borrow();
+                    guard.samples.extend_from_slice(&buf[..resampled_len]);
+                });
                 // Lock released here — CPAL callback can drain immediately
             }
 
@@ -1356,7 +1518,7 @@ fn resample_interleaved(
     }
 
     let output_frames =
-        ((input_frames as f64) * output_rate as f64 / input_rate as f64).ceil() as usize;
+        ((input_frames as f64) * output_rate as f64 / input_rate as f64).round() as usize;
     let frame_step = input_rate as f64 / output_rate as f64;
     let mut output = Vec::with_capacity(output_frames * channels);
 
@@ -1374,6 +1536,129 @@ fn resample_interleaved(
     }
 
     output
+}
+
+/// In-place variant: writes into a pre-allocated buffer to avoid per-packet allocations.
+fn adapt_channels_into(samples: &[f32], input_channels: usize, output_channels: usize, output: &mut Vec<f32>) {
+    if input_channels == 0 || output_channels == 0 || samples.is_empty() {
+        return;
+    }
+
+    if input_channels == output_channels {
+        output.extend_from_slice(samples);
+        return;
+    }
+
+    let needed = (samples.len() / input_channels) * output_channels;
+    output.reserve(needed);
+    for frame in samples.chunks(input_channels) {
+        match (input_channels, output_channels) {
+            (_, 1) => {
+                let mix = frame.iter().copied().sum::<f32>() / frame.len().max(1) as f32;
+                output.push(mix);
+            }
+            (1, channels) => {
+                for _ in 0..channels {
+                    output.push(frame[0]);
+                }
+            }
+            _ => {
+                for channel in 0..output_channels {
+                    let index = channel.min(frame.len().saturating_sub(1));
+                    output.push(frame[index]);
+                }
+            }
+        }
+    }
+}
+
+/// In-place variant: writes into a pre-allocated buffer to avoid per-packet allocations.
+fn resample_interleaved_into(
+    samples: &[f32],
+    channels: usize,
+    input_rate: u32,
+    output_rate: u32,
+    output: &mut Vec<f32>,
+) {
+    if samples.is_empty()
+        || channels == 0
+        || input_rate == 0
+        || output_rate == 0
+        || input_rate == output_rate
+    {
+        output.extend_from_slice(samples);
+        return;
+    }
+
+    let input_frames = samples.len() / channels;
+    if input_frames == 0 {
+        return;
+    }
+
+    let output_frames =
+        ((input_frames as f64) * output_rate as f64 / input_rate as f64).round() as usize;
+    let frame_step = input_rate as f64 / output_rate as f64;
+    output.reserve(output_frames * channels);
+
+    for frame_index in 0..output_frames {
+        let source_pos = frame_index as f64 * frame_step;
+        let left_index = source_pos.floor() as usize;
+        let right_index = (left_index + 1).min(input_frames - 1);
+        let fraction = (source_pos - left_index as f64) as f32;
+
+        for channel in 0..channels {
+            let left = samples[left_index * channels + channel];
+            let right = samples[right_index * channels + channel];
+            let mixed = left + (right - left) * fraction;
+            output.push(mixed);
+        }
+    }
+}
+
+/// Pointer-based variant: takes a raw pointer to input samples to avoid borrow conflicts
+/// with the thread-local output buffer.
+fn resample_interleaved_into_ptr(
+    input_ptr: *const f32,
+    channels: usize,
+    input_rate: u32,
+    output_rate: u32,
+    input_frames: usize,
+    output: &mut Vec<f32>,
+) {
+    if input_frames == 0 || channels == 0 || input_rate == 0 || output_rate == 0 {
+        return;
+    }
+
+    if input_rate == output_rate {
+        // Safety: caller guarantees input_ptr is valid for input_frames * channels.
+        unsafe {
+            let slice = std::slice::from_raw_parts(input_ptr, input_frames * channels);
+            output.extend_from_slice(slice);
+        }
+        return;
+    }
+
+    let output_frames =
+        ((input_frames as f64) * output_rate as f64 / input_rate as f64).round() as usize;
+    let frame_step = input_rate as f64 / output_rate as f64;
+    output.reserve(output_frames * channels);
+
+    for frame_index in 0..output_frames {
+        let source_pos = frame_index as f64 * frame_step;
+        let left_index = source_pos.floor() as usize;
+        let right_index = (left_index + 1).min(input_frames - 1);
+        let fraction = (source_pos - left_index as f64) as f32;
+
+        for channel in 0..channels {
+            // Safety: caller guarantees input_ptr is valid and indices are in bounds.
+            unsafe {
+                let left = *input_ptr.add(left_index * channels + channel);
+                let right = *input_ptr.add(right_index * channels + channel);
+                let mixed = left + (right - left) * fraction;
+                output.push(mixed);
+            }
+        }
+    }
 }
 
 fn samples_from_ms(ms: i32, sample_rate: u32, channels: u16) -> usize {
