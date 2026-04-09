@@ -1,0 +1,189 @@
+import type { Genre, GenreHeat } from '$lib/api/client';
+import {
+	GALAXY_ROOT_RING_RADIUS,
+	ROOT_FAMILY_COLORS,
+	familyKeyFromSlug,
+	type GalaxyData,
+	type GalaxyEdge,
+	type GalaxyNode,
+	type RootFamilyKey
+} from './galaxy.types';
+import { runSimulation } from './simulation';
+
+function nodeRadius(depth: number, trackCount: number): number {
+	const base = depth === 0 ? 18 : depth === 1 ? 10 : depth === 2 ? 7 : 5.5;
+	const scale = depth === 0 ? 2.8 : depth === 1 ? 1.7 : 1.15;
+	const max = depth === 0 ? 36 : depth === 1 ? 20 : 14;
+	return Math.min(base + Math.sqrt(trackCount / 10 + 1) * scale, max);
+}
+
+function edgeWeight(source: GalaxyNode, target: GalaxyNode, type: GalaxyEdge['type']): number {
+	const averageHeat = (source.heatNorm + target.heatNorm) / 2;
+	return type === 'parent-child' ? 0.14 + averageHeat * 0.86 : 0.05 + averageHeat * 0.35;
+}
+
+function placeChildren(
+	children: Genre[],
+	parent: GalaxyNode,
+	nodes: GalaxyNode[],
+	edges: GalaxyEdge[],
+	heatById: Map<number, GenreHeat>,
+	maxListenCount: number,
+	depth: number,
+	familyId: number,
+	familyKey: RootFamilyKey,
+	familyName: string,
+	rootAngle: number
+) {
+	if (children.length === 0) return;
+
+	const orderedChildren = [...children].sort((left, right) => {
+		const leftCount = left.track_count ?? 0;
+		const rightCount = right.track_count ?? 0;
+		return rightCount - leftCount || left.name.localeCompare(right.name);
+	});
+	const spread = depth === 1 ? Math.min(Math.PI * 0.9, 0.72 + orderedChildren.length * 0.14) : Math.min(Math.PI * 0.62, 0.34 + orderedChildren.length * 0.12);
+	const anchorAngle = depth === 1 ? rootAngle + Math.PI : Math.atan2(parent.y, parent.x) + Math.PI;
+	const radius = depth === 1 ? 148 : depth === 2 ? 74 : 48;
+
+	orderedChildren.forEach((child, index) => {
+		const offset =
+			orderedChildren.length === 1
+				? 0
+				: -spread / 2 + (spread * index) / (orderedChildren.length - 1);
+		const angle = anchorAngle + offset;
+		const heat = heatById.get(child.id);
+		const listenCount = heat?.listen_count ?? 0;
+		const totalListenedMs = heat?.total_listened_ms ?? 0;
+		const heatNorm = maxListenCount > 0 ? Math.log1p(listenCount) / Math.log1p(maxListenCount) : 0;
+		const palette = ROOT_FAMILY_COLORS[familyKey];
+
+		const node: GalaxyNode = {
+			id: child.id,
+			name: child.name,
+			slug: child.slug,
+			parentId: child.parent_id,
+			familyId,
+			familyKey,
+			familyName,
+			depth,
+			trackCount: child.track_count ?? 0,
+			listenCount,
+			totalListenedMs,
+			x: parent.x + Math.cos(angle) * radius,
+			y: parent.y + Math.sin(angle) * radius,
+			vx: 0,
+			vy: 0,
+			radius: nodeRadius(depth, child.track_count ?? 0),
+			heatNorm,
+			color: palette.color,
+			glowColor: palette.glowColor
+		};
+
+		nodes.push(node);
+		edges.push({
+			sourceId: parent.id,
+			targetId: node.id,
+			type: 'parent-child',
+			weight: 0
+		});
+
+		placeChildren(
+			child.children ?? [],
+			node,
+			nodes,
+			edges,
+			heatById,
+			maxListenCount,
+			depth + 1,
+			familyId,
+			familyKey,
+			familyName,
+			rootAngle
+		);
+	});
+}
+
+export function buildGalaxyData(genres: Genre[], heat: GenreHeat[]): GalaxyData {
+	if (genres.length === 0) {
+		return { nodes: [], edges: [] };
+	}
+
+	const heatById = new Map(heat.map((entry) => [entry.genre_id, entry]));
+	const maxListenCount = heat.reduce((max, entry) => Math.max(max, entry.listen_count), 0);
+	const nodes: GalaxyNode[] = [];
+	const edges: GalaxyEdge[] = [];
+	const rootCount = genres.length;
+
+	genres.forEach((root, index) => {
+		const familyKey = familyKeyFromSlug(root.slug);
+		const palette = ROOT_FAMILY_COLORS[familyKey];
+		const angle = -Math.PI / 2 + (Math.PI * 2 * index) / rootCount;
+		const rootHeat = heatById.get(root.id);
+		const listenCount = rootHeat?.listen_count ?? 0;
+		const totalListenedMs = rootHeat?.total_listened_ms ?? 0;
+		const heatNorm = maxListenCount > 0 ? Math.log1p(listenCount) / Math.log1p(maxListenCount) : 0;
+
+		const rootNode: GalaxyNode = {
+			id: root.id,
+			name: root.name,
+			slug: root.slug,
+			parentId: root.parent_id,
+			familyId: root.id,
+			familyKey,
+			familyName: root.name,
+			depth: 0,
+			trackCount: root.track_count ?? 0,
+			listenCount,
+			totalListenedMs,
+			x: Math.cos(angle) * GALAXY_ROOT_RING_RADIUS,
+			y: Math.sin(angle) * GALAXY_ROOT_RING_RADIUS,
+			vx: 0,
+			vy: 0,
+			radius: nodeRadius(0, root.track_count ?? 0),
+			heatNorm,
+			color: palette.color,
+			glowColor: palette.glowColor
+		};
+
+		nodes.push(rootNode);
+		placeChildren(
+			root.children ?? [],
+			rootNode,
+			nodes,
+			edges,
+			heatById,
+			maxListenCount,
+			1,
+			root.id,
+			familyKey,
+			root.name,
+			angle
+		);
+	});
+
+	const roots = nodes.filter((node) => node.depth === 0);
+	for (let index = 0; index < roots.length; index += 1) {
+		const source = roots[index];
+		const target = roots[(index + 1) % roots.length];
+		if (!source || !target) continue;
+		edges.push({
+			sourceId: source.id,
+			targetId: target.id,
+			type: 'sibling',
+			weight: 0
+		});
+	}
+
+	runSimulation(nodes, edges, 200);
+
+	const nodeById = new Map(nodes.map((node) => [node.id, node]));
+	for (const edge of edges) {
+		const source = nodeById.get(edge.sourceId);
+		const target = nodeById.get(edge.targetId);
+		if (!source || !target) continue;
+		edge.weight = edgeWeight(source, target, edge.type);
+	}
+
+	return { nodes, edges };
+}

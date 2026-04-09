@@ -1,0 +1,1269 @@
+use crate::db::{
+    models::{PlaybackState, QueueItem, Track},
+    queries,
+};
+use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
+use crate::playback::queue::{self, ShuffleMode};
+use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
+use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use rand::Rng;
+use rusqlite::{Connection, OptionalExtension, params};
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone)]
+pub struct PlaybackSnapshot {
+    pub state: PlaybackState,
+    pub queue: Vec<QueueItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackSourceRequest {
+    LocalLibrary,
+    TidalStream(StreamRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackSourceKind {
+    LocalLibrary,
+    TidalStream,
+}
+
+impl PlaybackSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalLibrary => "local",
+            Self::TidalStream => "tidal",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedPlaybackJob {
+    pub track: Track,
+    pub source: PlaybackSourceRequest,
+    pub gapless: GaplessPlan,
+}
+
+pub type PlaybackPreparation = PreparedPlaybackJob;
+
+#[derive(Debug, Clone)]
+pub struct ActiveListenSession {
+    pub track_id: i64,
+    pub started_at: DateTime<Utc>,
+    pub accumulated_ms: i64,
+    pub resumed_at: Option<DateTime<Utc>>,
+}
+
+pub const AUTOMIX_MIN_UPCOMING: usize = 8;
+const AUTOMIX_BATCH_SIZE: usize = 12;
+const SESSION_FEEDBACK_LIMIT: i64 = 60;
+const TRUE_SHUFFLE_POOL_MULTIPLIER: usize = 12;
+
+#[derive(Debug, Default)]
+struct SessionTasteProfile {
+    positive_artists: HashMap<i64, f64>,
+    negative_artists: HashMap<i64, f64>,
+    positive_genres: HashMap<String, f64>,
+    negative_genres: HashMap<String, f64>,
+    recent_track_ids: HashSet<i64>,
+    skipped_track_ids: HashSet<i64>,
+    current_artist_id: Option<i64>,
+    current_album_id: Option<i64>,
+    current_source: Option<String>,
+    current_genres: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScoredTrack {
+    track: Track,
+    score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenSessionEndReason {
+    Replaced,
+    QueueEnded,
+    Stopped,
+}
+
+impl PlaybackSourceRequest {
+    pub fn kind(&self) -> PlaybackSourceKind {
+        match self {
+            Self::LocalLibrary => PlaybackSourceKind::LocalLibrary,
+            Self::TidalStream(_) => PlaybackSourceKind::TidalStream,
+        }
+    }
+
+    pub fn stream_request(&self) -> Option<&StreamRequest> {
+        match self {
+            Self::LocalLibrary => None,
+            Self::TidalStream(request) => Some(request),
+        }
+    }
+}
+
+impl PreparedPlaybackJob {
+    pub fn new(track: Track, source: PlaybackSourceRequest, gapless: GaplessPlan) -> Self {
+        Self {
+            track,
+            source,
+            gapless,
+        }
+    }
+
+    pub fn source_kind(&self) -> PlaybackSourceKind {
+        self.source.kind()
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self.source, PlaybackSourceRequest::LocalLibrary)
+    }
+
+    pub fn is_tidal(&self) -> bool {
+        matches!(self.source, PlaybackSourceRequest::TidalStream(_))
+    }
+
+    pub fn stream_request(&self) -> Option<&StreamRequest> {
+        self.source.stream_request()
+    }
+
+    pub fn track_id(&self) -> i64 {
+        self.track.id
+    }
+
+    pub fn source_label(&self) -> &'static str {
+        self.source_kind().as_str()
+    }
+}
+
+impl ActiveListenSession {
+    pub fn start(track_id: i64, now: DateTime<Utc>) -> Self {
+        Self {
+            track_id,
+            started_at: now,
+            accumulated_ms: 0,
+            resumed_at: Some(now),
+        }
+    }
+
+    pub fn pause(&mut self, now: DateTime<Utc>) {
+        if let Some(resumed_at) = self.resumed_at.take() {
+            self.accumulated_ms += (now - resumed_at).num_milliseconds().max(0);
+        }
+    }
+
+    pub fn resume(&mut self, now: DateTime<Utc>) {
+        if self.resumed_at.is_none() {
+            self.resumed_at = Some(now);
+        }
+    }
+
+    pub fn listened_ms_at(&self, now: DateTime<Utc>) -> i64 {
+        let live_ms = self
+            .resumed_at
+            .map(|resumed_at| (now - resumed_at).num_milliseconds().max(0))
+            .unwrap_or(0);
+        self.accumulated_ms + live_ms
+    }
+}
+
+pub fn load_snapshot(conn: &Connection) -> Result<PlaybackSnapshot> {
+    let state = load_state(conn)?;
+    let queue = queue::load_queue(conn)?;
+    Ok(PlaybackSnapshot { state, queue })
+}
+
+pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
+    let row = conn
+        .query_row(
+            "SELECT current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms, automix_discover_new
+             FROM playback_state
+             WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, bool>(6)?,
+                    row.get::<_, i32>(7)?,
+                    row.get::<_, bool>(8)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("playback_state row missing"))?;
+
+    let current_track = match row.0 {
+        Some(track_id) => queue::get_track_by_id(conn, track_id)?,
+        None => None,
+    };
+
+    Ok(PlaybackState {
+        current_track,
+        position_ms: row.1,
+        is_playing: row.2,
+        volume: row.3,
+        shuffle_mode: row.4,
+        repeat_mode: row.5,
+        automix_enabled: row.6,
+        crossfade_ms: row.7,
+        automix_discover_new: row.8,
+    })
+}
+
+pub fn enqueue_track(conn: &Connection, track_id: i64, source: &str) -> Result<Vec<QueueItem>> {
+    let track = queue::get_track_by_id(conn, track_id)?
+        .ok_or_else(|| anyhow!("track {track_id} not found"))?;
+    queue::append_tracks(conn, &[track], source)
+}
+
+pub fn replace_queue_with_tracks(
+    conn: &Connection,
+    track_ids: &[i64],
+    source: &str,
+) -> Result<Vec<QueueItem>> {
+    let mut tracks = Vec::new();
+    for track_id in track_ids {
+        if let Some(track) = queue::get_track_by_id(conn, *track_id)? {
+            tracks.push(track);
+        }
+    }
+    queue::replace_queue(conn, &tracks, source)
+}
+
+pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapshot> {
+    let track = queue::get_track_by_id(conn, track_id)?
+        .ok_or_else(|| anyhow!("track {track_id} not found"))?;
+
+    let current_ids = queue::queue_track_ids(conn)?;
+    if !current_ids.contains(&track_id) {
+        queue::append_tracks(conn, std::slice::from_ref(&track), "playback")?;
+    }
+
+    conn.execute(
+        "UPDATE playback_state
+         SET current_track_id = ?1, position_ms = 0, is_playing = 1
+         WHERE id = 1",
+        params![track_id],
+    )?;
+
+    load_snapshot(conn)
+}
+
+pub fn pause(conn: &Connection) -> Result<PlaybackSnapshot> {
+    conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", [])?;
+    load_snapshot(conn)
+}
+
+pub fn resume(conn: &Connection) -> Result<PlaybackSnapshot> {
+    conn.execute("UPDATE playback_state SET is_playing = 1 WHERE id = 1", [])?;
+    load_snapshot(conn)
+}
+
+pub fn set_position(conn: &Connection, position_ms: i64) -> Result<PlaybackSnapshot> {
+    conn.execute(
+        "UPDATE playback_state SET position_ms = ?1 WHERE id = 1",
+        params![position_ms],
+    )?;
+    load_snapshot(conn)
+}
+
+pub fn set_volume(conn: &Connection, volume: f64) -> Result<PlaybackSnapshot> {
+    let clamped = volume.clamp(0.0, 1.0);
+    conn.execute(
+        "UPDATE playback_state SET volume = ?1 WHERE id = 1",
+        params![clamped],
+    )?;
+    load_snapshot(conn)
+}
+
+pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<PlaybackSnapshot> {
+    let current_track_id: Option<i64> = conn.query_row(
+        "SELECT current_track_id FROM playback_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE playback_state SET shuffle_mode = ?1 WHERE id = 1",
+        params![mode.as_str()],
+    )?;
+    queue::apply_shuffle(conn, mode, current_track_id)?;
+    load_snapshot(conn)
+}
+
+pub fn set_automix_enabled(conn: &Connection, enabled: bool) -> Result<PlaybackSnapshot> {
+    conn.execute(
+        "UPDATE playback_state SET automix_enabled = ?1 WHERE id = 1",
+        params![enabled],
+    )?;
+    load_snapshot(conn)
+}
+
+pub fn set_automix_discover_new(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE playback_state SET automix_discover_new = ?1 WHERE id = 1",
+        params![enabled],
+    )?;
+    Ok(())
+}
+
+pub fn set_repeat_mode(conn: &Connection, mode: &str) -> Result<PlaybackSnapshot> {
+    let mode = match mode {
+        "all" | "one" => mode,
+        _ => "off",
+    };
+    conn.execute(
+        "UPDATE playback_state SET repeat_mode = ?1 WHERE id = 1",
+        params![mode],
+    )?;
+    load_snapshot(conn)
+}
+
+pub fn set_crossfade_ms(conn: &Connection, crossfade_ms: i32) -> Result<()> {
+    conn.execute(
+        "UPDATE playback_state SET crossfade_ms = ?1 WHERE id = 1",
+        params![crossfade_ms.max(0)],
+    )?;
+    Ok(())
+}
+
+pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
+    let repeat_mode: String = conn.query_row(
+        "SELECT repeat_mode FROM playback_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let current_track_id: Option<i64> = conn.query_row(
+        "SELECT current_track_id FROM playback_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING)?;
+    if queue_items.is_empty() {
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = NULL, is_playing = 0, position_ms = 0 WHERE id = 1",
+            [],
+        )?;
+        return load_snapshot(conn);
+    }
+
+    let current_index = current_track_id.and_then(|track_id| {
+        queue_items
+            .iter()
+            .position(|item| item.track.id == track_id)
+    });
+
+    let next_track = match repeat_mode.as_str() {
+        "one" => current_index
+            .and_then(|idx| queue_items.get(idx))
+            .or_else(|| queue_items.first()),
+        _ => {
+            let next = current_index
+                .and_then(|idx| queue_items.get(idx + 1))
+                .or_else(|| {
+                    if repeat_mode == "all" {
+                        queue_items.first()
+                    } else {
+                        None
+                    }
+                });
+            next
+        }
+    };
+
+    if let Some(item) = next_track {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![item.track.id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, position_ms = 0, is_playing = 0
+             WHERE id = 1",
+            [],
+        )?;
+    }
+
+    load_snapshot(conn)
+}
+
+pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
+    let (current_track_id, position_ms): (Option<i64>, i64) = conn.query_row(
+        "SELECT current_track_id, position_ms FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let queue_items = queue::load_queue(conn)?;
+    if queue_items.is_empty() {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, position_ms = 0, is_playing = 0
+             WHERE id = 1",
+            [],
+        )?;
+        return load_snapshot(conn);
+    }
+
+    if let Some(track_id) = current_track_id {
+        if position_ms >= 3_000 {
+            conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
+            return load_snapshot(conn);
+        }
+
+        let current_index = queue_items
+            .iter()
+            .position(|item| item.track.id == track_id);
+
+        if let Some(previous_item) = current_index
+            .and_then(|idx| idx.checked_sub(1))
+            .and_then(|idx| queue_items.get(idx))
+        {
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = ?1, position_ms = 0, is_playing = 1
+                 WHERE id = 1",
+                params![previous_item.track.id],
+            )?;
+            return load_snapshot(conn);
+        }
+
+        conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
+        return load_snapshot(conn);
+    }
+
+    if let Some(first_item) = queue_items.first() {
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = ?1, position_ms = 0, is_playing = 1
+             WHERE id = 1",
+            params![first_item.track.id],
+        )?;
+    }
+
+    load_snapshot(conn)
+}
+
+pub fn current_track_id(conn: &Connection) -> Result<Option<i64>> {
+    let current_track_id = conn.query_row(
+        "SELECT current_track_id FROM playback_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(current_track_id)
+}
+
+/// Returns the track that would play next **without** advancing the queue or
+/// mutating any playback state. Used for gapless pre-buffering.
+pub fn peek_next_track(conn: &Connection) -> Result<Option<Track>> {
+    let (current_track_id, repeat_mode): (Option<i64>, String) = conn.query_row(
+        "SELECT current_track_id, repeat_mode FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING)?;
+    if queue_items.is_empty() {
+        return Ok(None);
+    }
+
+    let current_index = current_track_id.and_then(|track_id| {
+        queue_items
+            .iter()
+            .position(|item| item.track.id == track_id)
+    });
+
+    let next = match repeat_mode.as_str() {
+        "one" => current_index
+            .and_then(|idx| queue_items.get(idx))
+            .or_else(|| queue_items.first()),
+        _ => current_index
+            .and_then(|idx| queue_items.get(idx + 1))
+            .or_else(|| {
+                if repeat_mode == "all" {
+                    queue_items.first()
+                } else {
+                    None
+                }
+            }),
+    };
+
+    Ok(next.map(|item| item.track.clone()))
+}
+
+pub fn queue_tracks(snapshot: &PlaybackSnapshot) -> Vec<Track> {
+    snapshot
+        .queue
+        .iter()
+        .map(|item| item.track.clone())
+        .collect()
+}
+
+pub fn preferred_tidal_quality(track: &Track) -> &str {
+    track
+        .best_quality
+        .as_deref()
+        .unwrap_or(stream::DEFAULT_AUDIO_QUALITY)
+}
+
+pub fn build_tidal_stream_request(track: &Track) -> Option<StreamRequest> {
+    track
+        .tidal_id
+        .map(|track_id| StreamRequest::new(track_id, preferred_tidal_quality(track)))
+}
+
+pub fn build_playback_preparation(
+    track: &Track,
+    stream_info: Option<&StreamInfo>,
+    crossfade_ms: i32,
+) -> PlaybackPreparation {
+    let source = build_tidal_stream_request(track)
+        .map(PlaybackSourceRequest::TidalStream)
+        .unwrap_or(PlaybackSourceRequest::LocalLibrary);
+    let gapless = gapless::plan_from_stream(stream_info, GaplessSettings::new(true, crossfade_ms));
+
+    PreparedPlaybackJob::new(track.clone(), source, gapless)
+}
+
+pub fn playback_source_kind(track: &Track) -> &'static str {
+    if track.tidal_id.is_some() {
+        "tidal"
+    } else {
+        "local"
+    }
+}
+
+pub fn listen_completion_threshold_ms(track: &Track) -> Option<i64> {
+    track
+        .duration_ms
+        .map(|duration_ms| ((duration_ms as f64 * 0.9) as i64).min(240_000))
+}
+
+pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
+    listen_completion_threshold_ms(track)
+        .map(|threshold_ms| listened_ms >= threshold_ms)
+        .unwrap_or(false)
+}
+
+pub fn ensure_automix_queue_depth(conn: &Connection, target_upcoming: usize) -> Result<Vec<QueueItem>> {
+    let state = load_state(conn)?;
+    let queue_items = queue::load_queue(conn)?;
+
+    if !state.automix_enabled || state.repeat_mode == "one" {
+        return Ok(queue_items);
+    }
+
+    let Some(current_track) = state.current_track.as_ref() else {
+        return Ok(queue_items);
+    };
+
+    let current_index = queue_items
+        .iter()
+        .position(|item| item.track.id == current_track.id);
+
+    // If the current track isn't found in the queue (e.g. queue was replaced or cleared),
+    // treat upcoming count as 0 so automix still extends rather than bailing.
+    let upcoming_count = current_index
+        .map(|idx| queue_items.len().saturating_sub(idx + 1))
+        .unwrap_or(0);
+
+    if upcoming_count >= target_upcoming {
+        return Ok(queue_items);
+    }
+
+    let needed = (target_upcoming - upcoming_count).max(AUTOMIX_BATCH_SIZE);
+    let extension = build_automix_extension(
+        conn,
+        current_track,
+        &queue_items,
+        ShuffleMode::parse(&state.shuffle_mode),
+        needed,
+    )?;
+
+    if extension.is_empty() {
+        return Ok(queue_items);
+    }
+
+    queue::append_tracks(conn, &extension, "automix")?;
+    queue::load_queue(conn)
+}
+
+fn build_automix_extension(
+    conn: &Connection,
+    current_track: &Track,
+    queue_items: &[QueueItem],
+    mode: ShuffleMode,
+    needed: usize,
+) -> Result<Vec<Track>> {
+    let taste = build_session_taste_profile(conn, current_track)?;
+    let mut excluded_track_ids = queue_items
+        .iter()
+        .map(|item| item.track.id)
+        .collect::<Vec<_>>();
+    excluded_track_ids.extend(taste.recent_track_ids.iter().copied());
+    excluded_track_ids.sort_unstable();
+    excluded_track_ids.dedup();
+
+    let mut candidates = queries::get_tracks_excluding(conn, &excluded_track_ids)?;
+    if candidates.is_empty() {
+        let queue_track_ids = queue_items
+            .iter()
+            .map(|item| item.track.id)
+            .collect::<Vec<_>>();
+        candidates = queries::get_tracks_excluding(conn, &queue_track_ids)?;
+    }
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let candidate_genres = queue::get_track_genres(conn, &candidates)?;
+    let ordered = order_automix_candidates(mode, candidates, &candidate_genres, &taste, needed);
+    let ordered = decluster_by_album(ordered);
+    Ok(ordered.into_iter().take(needed).collect())
+}
+
+fn build_session_taste_profile(
+    conn: &Connection,
+    current_track: &Track,
+) -> Result<SessionTasteProfile> {
+    let mut profile = SessionTasteProfile {
+        current_artist_id: Some(current_track.artist_id),
+        current_album_id: current_track.album_id,
+        current_source: Some(current_track.source.clone()),
+        ..SessionTasteProfile::default()
+    };
+
+    if current_track.artist_id != 0 {
+        *profile
+            .positive_artists
+            .entry(current_track.artist_id)
+            .or_insert(0.0) += 3.0;
+    }
+
+    let current_track_genres = queue::get_track_genres(conn, std::slice::from_ref(current_track))?;
+    for genre in current_track_genres
+        .get(&current_track.id)
+        .into_iter()
+        .flat_map(|genres| genres.iter())
+    {
+        let normalized = normalize_genre_key(genre);
+        profile.current_genres.insert(normalized.clone());
+        *profile.positive_genres.entry(normalized).or_insert(0.0) += 2.2;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT track_id, completed
+         FROM listen_history
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let feedback_rows = stmt
+        .query_map(params![SESSION_FEEDBACK_LIMIT], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut feedback_tracks = Vec::new();
+    let mut feedback_entries = Vec::new();
+    for (track_id, completed) in feedback_rows {
+        profile.recent_track_ids.insert(track_id);
+        if !completed {
+            profile.skipped_track_ids.insert(track_id);
+        }
+
+        if let Some(track) = queue::get_track_by_id(conn, track_id)? {
+            feedback_tracks.push(track.clone());
+            feedback_entries.push((track, completed));
+        }
+    }
+
+    let feedback_genres = queue::get_track_genres(conn, &feedback_tracks)?;
+    for (index, (track, completed)) in feedback_entries.iter().enumerate() {
+        let recency = (SESSION_FEEDBACK_LIMIT - index as i64).max(1) as f64 / 6.0;
+        let artist_weight = if *completed {
+            0.8 + recency
+        } else {
+            1.1 + recency
+        };
+        let genre_weight = if *completed {
+            0.7 + recency
+        } else {
+            1.0 + recency
+        };
+
+        let artist_buckets = if *completed {
+            &mut profile.positive_artists
+        } else {
+            &mut profile.negative_artists
+        };
+        if track.artist_id != 0 {
+            *artist_buckets.entry(track.artist_id).or_insert(0.0) += artist_weight;
+        }
+
+        let genre_buckets = if *completed {
+            &mut profile.positive_genres
+        } else {
+            &mut profile.negative_genres
+        };
+        for genre in feedback_genres
+            .get(&track.id)
+            .into_iter()
+            .flat_map(|genres| genres.iter())
+        {
+            let normalized = normalize_genre_key(genre);
+            *genre_buckets.entry(normalized).or_insert(0.0) += genre_weight;
+        }
+    }
+
+    Ok(profile)
+}
+
+fn order_automix_candidates(
+    mode: ShuffleMode,
+    candidates: Vec<Track>,
+    candidate_genres: &HashMap<i64, Vec<String>>,
+    taste: &SessionTasteProfile,
+    needed: usize,
+) -> Vec<Track> {
+    let mut scored = candidates
+        .into_iter()
+        .map(|track| {
+            let score = automix_score(
+                &track,
+                candidate_genres
+                    .get(&track.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                taste,
+            );
+            ScoredTrack { track, score }
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.track.title.cmp(&right.track.title))
+    });
+
+    match mode {
+        ShuffleMode::Off => scored.into_iter().map(|entry| entry.track).collect(),
+        ShuffleMode::True => {
+            let pool_size = (needed * TRUE_SHUFFLE_POOL_MULTIPLIER).max(48);
+            let pool = scored
+                .into_iter()
+                .take(pool_size)
+                .map(|entry| entry.track)
+                .collect::<Vec<_>>();
+            true_shuffle(&pool)
+        }
+        ShuffleMode::Weighted => {
+            let pool_size = (needed * TRUE_SHUFFLE_POOL_MULTIPLIER).max(48);
+            let pool = scored.into_iter().take(pool_size).collect::<Vec<_>>();
+            weighted_session_shuffle(&pool)
+        }
+        ShuffleMode::Genre => {
+            let mut preferred = Vec::new();
+            let mut fallback = Vec::new();
+
+            for entry in scored {
+                let genres = candidate_genres
+                    .get(&entry.track.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if matches_preferred_genres(genres, taste) {
+                    preferred.push(entry.track);
+                } else {
+                    fallback.push(entry.track);
+                }
+            }
+
+            // Interleave preferred and fallback at ~3:1 ratio so the queue
+            // never becomes a solid wall of one genre type, but still leans
+            // toward the current session's taste.
+            let preferred_shuffled = genre_shuffle(&preferred, candidate_genres);
+            let fallback_shuffled = genre_shuffle(&fallback, candidate_genres);
+            let total = preferred_shuffled.len() + fallback_shuffled.len();
+            let mut ordered = Vec::with_capacity(total);
+            let mut pi = 0usize;
+            let mut fi = 0usize;
+            let mut streak = 0usize;
+            while pi < preferred_shuffled.len() || fi < fallback_shuffled.len() {
+                let take_pref = pi < preferred_shuffled.len()
+                    && (fi >= fallback_shuffled.len() || streak < 3);
+                if take_pref {
+                    ordered.push(preferred_shuffled[pi].clone());
+                    pi += 1;
+                    streak += 1;
+                } else {
+                    ordered.push(fallback_shuffled[fi].clone());
+                    fi += 1;
+                    streak = 0;
+                }
+            }
+            ordered
+        }
+    }
+}
+
+/// Spread tracks from the same album apart so they don't run consecutively.
+/// Preserves the score ordering as much as possible while ensuring no two
+/// adjacent tracks share the same album_id.
+fn decluster_by_album(mut tracks: Vec<Track>) -> Vec<Track> {
+    if tracks.len() <= 1 {
+        return tracks;
+    }
+    let mut result = Vec::with_capacity(tracks.len());
+    let mut last_album: Option<i64> = None;
+
+    while !tracks.is_empty() {
+        let pos = if let Some(last_id) = last_album {
+            tracks
+                .iter()
+                .position(|t| t.album_id.map_or(true, |aid| aid != last_id))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let track = tracks.remove(pos);
+        last_album = track.album_id;
+        result.push(track);
+    }
+    result
+}
+
+fn automix_score(track: &Track, genres: &[String], taste: &SessionTasteProfile) -> f64 {
+    let mut score = 1.0;
+
+    // Hard suppression for recently skipped tracks
+    if taste.skipped_track_ids.contains(&track.id) {
+        score *= 0.1;
+    }
+
+    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
+    // Artist spread is handled at the queue level by decluster_by_album.
+    if Some(track.artist_id) == taste.current_artist_id && track.artist_id != 0 {
+        score *= 1.1;
+    }
+
+    if taste.current_source.as_deref() == Some(track.source.as_str()) {
+        score *= 1.05;
+    }
+
+    if track.is_favorite {
+        score *= 1.2;
+    }
+
+    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
+    if track.play_count == 0 {
+        score *= 1.35;
+    } else if let Some(last_played) = track.last_played_at.as_deref() {
+        // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
+        let days_since = parse_days_since_last_played(last_played);
+        if days_since < 14.0 {
+            let penalty = 0.5 + 0.5 * (days_since / 14.0);
+            score *= penalty;
+        }
+    }
+
+    if track.artist_id != 0 {
+        score += taste
+            .positive_artists
+            .get(&track.artist_id)
+            .copied()
+            .unwrap_or(0.0)
+            * 0.5;
+        score -= taste
+            .negative_artists
+            .get(&track.artist_id)
+            .copied()
+            .unwrap_or(0.0)
+            * 0.65;
+    }
+
+    let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
+    for genre in normalized_genres {
+        if taste.current_genres.contains(&genre) {
+            score += 1.8;
+        }
+        score += taste.positive_genres.get(&genre).copied().unwrap_or(0.0) * 0.4;
+        score -= taste.negative_genres.get(&genre).copied().unwrap_or(0.0) * 0.5;
+    }
+
+    score += (track.fidelity_score.max(0) as f64) * 0.003;
+    score.max(0.05)
+}
+
+/// Parse an ISO-8601 timestamp and return days elapsed since then.
+/// Returns 999.0 on failure so old/malformed timestamps get no penalty.
+fn parse_days_since_last_played(timestamp: &str) -> f64 {
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return 999.0;
+    };
+    let elapsed = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
+    elapsed.num_seconds().max(0) as f64 / 86_400.0
+}
+
+fn matches_preferred_genres(genres: &[String], taste: &SessionTasteProfile) -> bool {
+    genres
+        .iter()
+        .map(|genre| normalize_genre_key(genre))
+        .any(|genre| {
+            taste.current_genres.contains(&genre) || taste.positive_genres.contains_key(&genre)
+        })
+}
+
+fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {
+    let profile = WeightedShuffleProfile::default();
+    let mut rng = rand::thread_rng();
+    let mut weighted = entries
+        .iter()
+        .map(|entry| {
+            let weight = profile.weight_for(&entry.track) * entry.score.max(0.05);
+            let uniform = rng.gen_range(f64::EPSILON..1.0);
+            let key = -uniform.ln() / weight;
+            (key, entry.track.clone())
+        })
+        .collect::<Vec<_>>();
+
+    weighted.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
+    weighted.into_iter().map(|(_, track)| track).collect()
+}
+
+fn normalize_genre_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT);
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                artist_id INTEGER NOT NULL,
+                album_id INTEGER,
+                disc_number INTEGER,
+                track_number INTEGER,
+                duration_ms INTEGER,
+                isrc TEXT,
+                tidal_id INTEGER,
+                ytmusic_id TEXT,
+                soundcloud_id INTEGER,
+                best_quality TEXT,
+                best_source TEXT,
+                fidelity_score INTEGER DEFAULT 0,
+                is_favorite INTEGER DEFAULT 0,
+                play_count INTEGER DEFAULT 0,
+                last_played_at TEXT,
+                date_added TEXT,
+                source TEXT DEFAULT 'tidal'
+            );
+            CREATE TABLE queue (
+                id INTEGER PRIMARY KEY,
+                track_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                source TEXT DEFAULT 'user'
+            );
+            CREATE TABLE genres (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                parent_id INTEGER
+            );
+            CREATE TABLE track_genres (
+                track_id INTEGER NOT NULL,
+                genre_id INTEGER NOT NULL,
+                source TEXT,
+                confidence REAL DEFAULT 1.0
+            );
+            CREATE TABLE listen_history (
+                id INTEGER PRIMARY KEY,
+                track_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                duration_listened_ms INTEGER DEFAULT 0,
+                completed INTEGER DEFAULT 0
+            );
+            CREATE TABLE playback_state (
+                id INTEGER PRIMARY KEY,
+                current_track_id INTEGER,
+                position_ms INTEGER NOT NULL DEFAULT 0,
+                is_playing INTEGER NOT NULL DEFAULT 0,
+                volume REAL NOT NULL DEFAULT 1.0,
+                shuffle_mode TEXT NOT NULL DEFAULT 'off',
+                repeat_mode TEXT NOT NULL DEFAULT 'off',
+                automix_enabled INTEGER NOT NULL DEFAULT 0,
+                crossfade_ms INTEGER NOT NULL DEFAULT 0,
+                automix_discover_new INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])
+            .unwrap();
+        for id in 1..=6 {
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc,
+                    tidal_id, ytmusic_id, soundcloud_id, best_quality, best_source, fidelity_score,
+                    is_favorite, play_count, last_played_at, date_added, source
+                ) VALUES (?1, ?2, 1, NULL, 1, ?1, 180000, NULL, ?1, NULL, NULL, 'LOSSLESS', 'tidal', 10, 0, 0, NULL, '2025-01-01', 'tidal')",
+                params![id, format!("Track {id}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO playback_state (
+                id, current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms
+            ) VALUES (1, NULL, 0, 0, 1.0, 'off', 'off', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn load_tracks(conn: &Connection, ids: &[i64]) -> Vec<Track> {
+        ids.iter()
+            .map(|id| queue::get_track_by_id(conn, *id).unwrap().unwrap())
+            .collect()
+    }
+
+    fn track_with_tidal_id(id: i64, tidal_id: Option<i64>, quality: Option<&str>) -> Track {
+        Track {
+            id,
+            title: format!("Track {id}"),
+            artist_id: 1,
+            artist_name: Some("A".to_string()),
+            album_id: None,
+            album_title: None,
+            disc_number: Some(1),
+            track_number: Some(id as i32),
+            duration_ms: Some(180_000),
+            isrc: None,
+            tidal_id,
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: quality.map(|s| s.to_string()),
+            best_source: tidal_id.map(|_| "tidal".to_string()),
+            fidelity_score: 10,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: Some("2025-01-01".to_string()),
+            source: if tidal_id.is_some() {
+                "tidal".to_string()
+            } else {
+                "local".to_string()
+            },
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn previous_track_moves_back_when_under_threshold() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 2, position_ms = 2500, is_playing = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(snapshot.state.position_ms, 0);
+        assert!(snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn previous_track_restarts_current_track_when_over_threshold() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 2, position_ms = 3000, is_playing = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 2);
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_restarts_first_track_when_no_previous_exists() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 1, position_ms = 1000, is_playing = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(snapshot.state.position_ms, 0);
+    }
+
+    #[test]
+    fn previous_track_selects_first_queue_item_when_nothing_is_playing() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 1);
+        assert_eq!(snapshot.state.position_ms, 0);
+        assert!(snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn previous_track_clears_state_when_queue_is_empty() {
+        let conn = conn();
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 1, position_ms = 1500, is_playing = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = previous_track(&conn).unwrap();
+
+        assert!(snapshot.state.current_track.is_none());
+        assert_eq!(snapshot.state.position_ms, 0);
+        assert!(!snapshot.state.is_playing);
+        assert!(snapshot.queue.is_empty());
+    }
+
+    #[test]
+    fn build_tidal_stream_request_uses_track_quality_or_defaults() {
+        let track = track_with_tidal_id(42, Some(88), Some("HI_RES_LOSSLESS"));
+
+        let request = build_tidal_stream_request(&track).unwrap();
+
+        assert_eq!(request.track_id, 88);
+        assert_eq!(request.audio_quality, "HI_RES_LOSSLESS");
+        assert_eq!(request.playback_mode, "STREAM");
+        assert_eq!(request.asset_presentation, "FULL");
+    }
+
+    #[test]
+    fn build_playback_preparation_marks_local_tracks_as_local_library() {
+        let track = track_with_tidal_id(7, None, None);
+
+        let prep = build_playback_preparation(&track, None, 1500);
+
+        assert!(prep.is_local());
+        assert_eq!(prep.source_kind(), PlaybackSourceKind::LocalLibrary);
+        assert!(prep.stream_request().is_none());
+        assert!(!prep.gapless.enabled);
+        assert_eq!(prep.track.id, 7);
+    }
+
+    #[test]
+    fn build_playback_preparation_includes_tidal_stream_request() {
+        let track = track_with_tidal_id(7, Some(77), Some("LOSSLESS"));
+        let stream = StreamInfo {
+            url: "https://example.com/stream.flac".to_string(),
+            track_id: 77,
+            audio_quality: "LOSSLESS".to_string(),
+            codec: "audio/flac".to_string(),
+            sample_rate: Some(44_100),
+            bit_depth: Some(16),
+        };
+
+        let prep = build_playback_preparation(&track, Some(&stream), 1500);
+
+        assert!(prep.is_tidal());
+        assert_eq!(prep.source_kind(), PlaybackSourceKind::TidalStream);
+        let request = prep.stream_request().expect("expected a tidal request");
+        assert_eq!(request.track_id, 77);
+        assert_eq!(request.audio_quality, "LOSSLESS");
+        assert!(prep.gapless.enabled);
+        assert_eq!(prep.gapless.overlap_ms, 1500);
+    }
+
+    #[test]
+    fn completed_listen_uses_ninety_percent_or_four_minute_cap() {
+        let short_track = track_with_tidal_id(1, Some(42), Some("LOSSLESS"));
+        assert!(is_completed_listen(&short_track, 162_000));
+        assert!(!is_completed_listen(&short_track, 161_999));
+
+        let long_track = Track {
+            duration_ms: Some(600_000),
+            ..track_with_tidal_id(2, Some(99), Some("LOSSLESS"))
+        };
+        assert!(is_completed_listen(&long_track, 240_000));
+        assert!(!is_completed_listen(&long_track, 239_999));
+    }
+
+    #[test]
+    fn next_track_extends_queue_when_automix_is_enabled() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, position_ms = 0, is_playing = 1, automix_enabled = 1, shuffle_mode = 'off'
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = next_track(&conn).unwrap();
+
+        assert_eq!(snapshot.state.current_track.unwrap().id, 3);
+        assert!(snapshot.queue.len() > 2);
+        assert!(snapshot.queue.iter().any(|item| item.source == "automix"));
+    }
+
+    #[test]
+    fn peek_next_track_can_see_generated_automix_track() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, position_ms = 0, is_playing = 1, automix_enabled = 1, shuffle_mode = 'off'
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let next = peek_next_track(&conn)
+            .unwrap()
+            .expect("generated automix track");
+
+        assert_eq!(next.id, 3);
+        let queue_items = queue::load_queue(&conn).unwrap();
+        assert!(queue_items.len() > 2);
+    }
+}

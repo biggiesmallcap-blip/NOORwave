@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+build/
+.svelte-kit/
+noor.db
+noor.db-wal
+noor.db-shm
+*.exe
+.env

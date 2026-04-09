@@ -1,0 +1,3 @@
+[workspace]
+members = ["noor-server"]
+resolver = "2"
