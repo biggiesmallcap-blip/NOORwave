@@ -382,6 +382,7 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 
+		// Deep space gradient
 		const fill = ctx.createRadialGradient(width * 0.5, height * 0.5, 40, width * 0.5, height * 0.5, width * 0.78);
 		fill.addColorStop(0, 'rgba(17, 19, 34, 0.98)');
 		fill.addColorStop(0.55, 'rgba(10, 12, 22, 0.98)');
@@ -389,6 +390,7 @@
 		ctx.fillStyle = fill;
 		ctx.fillRect(0, 0, width, height);
 
+		// Nebula clouds
 		const nebulaA = ctx.createRadialGradient(width * 0.22, height * 0.28, 0, width * 0.22, height * 0.28, width * 0.32);
 		nebulaA.addColorStop(0, 'rgba(124, 128, 255, 0.16)');
 		nebulaA.addColorStop(1, 'rgba(124, 128, 255, 0)');
@@ -407,20 +409,45 @@
 		ctx.fillStyle = nebulaC;
 		ctx.fillRect(0, 0, width, height);
 
+		// Subtle grid texture
+		ctx.save();
+		ctx.globalAlpha = 0.03;
+		ctx.strokeStyle = '#8888cc';
+		ctx.lineWidth = 0.5;
+		const gridSize = 80 * dpr;
+		for (let gx = 0; gx < width; gx += gridSize) {
+			ctx.beginPath();
+			ctx.moveTo(gx, 0);
+			ctx.lineTo(gx, height);
+			ctx.stroke();
+		}
+		for (let gy = 0; gy < height; gy += gridSize) {
+			ctx.beginPath();
+			ctx.moveTo(0, gy);
+			ctx.lineTo(width, gy);
+			ctx.stroke();
+		}
+		ctx.restore();
+
+		// Stars — more and brighter
 		let seed = 42;
 		const random = () => {
 			seed = (seed * 1664525 + 1013904223) >>> 0;
 			return seed / 4294967296;
 		};
 
-		const starCount = isCompactViewport ? 120 : 200;
+		const starCount = isCompactViewport ? 180 : 350;
 		for (let index = 0; index < starCount; index += 1) {
 			const x = random() * width;
 			const y = random() * height;
-			const size = 0.4 + random() * 1.9;
-			const alpha = 0.2 + random() * 0.65;
+			const size = 0.5 + random() * 2.2;
+			const alpha = 0.3 + random() * 0.7;
+			// Some stars are slightly warm or cool
+			const tint = random() > 0.85 ? `rgba(200, 210, 255, ${alpha})` :
+			             random() > 0.85 ? `rgba(255, 230, 200, ${alpha})` :
+			             `rgba(255, 255, 255, ${alpha})`;
+			ctx.fillStyle = tint;
 			ctx.beginPath();
-			ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
 			ctx.arc(x, y, size, 0, Math.PI * 2);
 			ctx.fill();
 		}
@@ -680,6 +707,7 @@
 	function drawNodesAndLabels(ctx: CanvasRenderingContext2D) {
 		const visibleNodes = nodes.filter(nodeIsVisible);
 
+		// Pass 1: glow halos (tight, outer only — no save/restore)
 		for (const node of visibleNodes) {
 			const screen = worldToScreen(node.x, node.y);
 			const radius = node.radius;
@@ -687,19 +715,34 @@
 			if (activity < 0.16) continue;
 			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
 
-			// Single gradient: core + glow in one pass, no shadowBlur
-			const glowRadius = radius * (1.6 + nodeHeat * 3.2) * (0.84 + activity * 0.42);
-			const gradient = ctx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, radius + glowRadius);
-			gradient.addColorStop(0, node.color);
-			gradient.addColorStop(Math.min(0.4, radius / (radius + glowRadius)), `${node.color}b3`);
+			// Glow extends only slightly past the node edge
+			const haloExtend = 2 + radius * 0.4 + nodeHeat * radius * 0.6;
+			const haloRadius = radius + haloExtend;
+			const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, haloRadius);
+			gradient.addColorStop(0, hexToRgba(node.color, 0.25 * activity));
 			gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
 			ctx.fillStyle = gradient;
 			ctx.beginPath();
-			ctx.arc(screen.x, screen.y, radius + glowRadius, 0, Math.PI * 2);
+			ctx.arc(screen.x, screen.y, haloRadius, 0, Math.PI * 2);
 			ctx.fill();
 		}
 
-		// Rings and selection (no save/restore needed)
+		// Pass 2: solid sharp cores (no blur)
+		for (const node of visibleNodes) {
+			const screen = worldToScreen(node.x, node.y);
+			const radius = node.radius;
+			const activity = nodeActivity(node);
+			if (activity < 0.16) continue;
+
+			ctx.globalAlpha = activity;
+			ctx.fillStyle = node.color;
+			ctx.beginPath();
+			ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+			ctx.fill();
+		}
+		ctx.globalAlpha = 1;
+
+		// Pass 3: rings and selection
 		for (const node of visibleNodes) {
 			const screen = worldToScreen(node.x, node.y);
 			const radius = node.radius;
