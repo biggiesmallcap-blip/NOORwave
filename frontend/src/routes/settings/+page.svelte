@@ -43,6 +43,35 @@
 	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
+	let galaxyRefreshLabel = $state('');
+
+	async function refreshGalaxy() {
+		galaxyRefreshLabel = 'Refreshing genre data…';
+		try {
+			const genres = await api.getGenres();
+			const heat = await api.getGenreHeat(90);
+			markServerOnline();
+			const genreCount = countGenres(genres.genres);
+			const activeHeat = heat.heat.filter((e) => e.listen_count > 0).length;
+			galaxyRefreshLabel = `Galaxy ready: ${genreCount} genres, ${activeHeat} with recent heat data.`;
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				galaxyRefreshLabel = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				markServerOnline();
+				galaxyRefreshLabel = `Galaxy refresh failed: ${error}`;
+			}
+		}
+	}
+
+	function countGenres(genres) {
+		let count = 0;
+		for (const genre of genres) {
+			count += 1 + countGenres(genre.children ?? []);
+		}
+		return count;
+	}
 
 	onMount(() => {
 		wsUnsubscribe = wsMessages.subscribe((messages) => {
@@ -500,7 +529,11 @@
 									? 'Resume enrichment'
 									: 'Start enrichment'}
 					</button>
+					<button class="btn btn-glass" onclick={refreshGalaxy}>Refresh genre galaxy</button>
 				</div>
+				{#if galaxyRefreshLabel}
+					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
+				{/if}
 			</section>
 
 			<section class="glass-panel section-panel">
@@ -701,6 +734,12 @@
 
 	.runtime-error {
 		color: var(--state-error);
+	}
+
+	.galaxy-refresh-label {
+		margin: 4px 0 0;
+		font-size: 0.82rem;
+		color: var(--signal-text);
 	}
 
 	.roadmap-item {

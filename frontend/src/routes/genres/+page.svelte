@@ -25,6 +25,7 @@
 	let loadingArtistNodes = $state<Set<number>>(new Set());
 	let wsUnsubscribe: Unsubscriber | null = null;
 	let galaxyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	let galaxyDailyRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let pendingRefreshKind: 'heat' | 'full' | null = null;
 	let viewMode = $state<GalaxyViewMode>('map');
 	let labelsEnabled = $state(true);
@@ -461,11 +462,17 @@
 			}
 		});
 
+		// Daily auto-refresh to pick up new enrichment tags.
+		galaxyDailyRefreshTimer = setInterval(() => {
+			void refreshGalaxyTopology();
+		}, 24 * 60 * 60 * 1000);
+
 		void loadGalaxy();
 
 		return () => {
 			wsUnsubscribe?.();
 			if (galaxyRefreshTimer) clearTimeout(galaxyRefreshTimer);
+			if (galaxyDailyRefreshTimer) clearInterval(galaxyDailyRefreshTimer);
 		};
 	});
 </script>
