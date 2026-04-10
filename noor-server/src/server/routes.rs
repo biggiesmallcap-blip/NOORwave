@@ -459,10 +459,17 @@ async fn get_genre_co_occurrence(
     state
         .db
         .with_conn(|conn| {
-            let pairs = queries::get_genre_co_occurrence(conn, days, window, min)?;
+            let pairs = queries::get_genre_co_occurrence(conn, days, window, min)
+                .map_err(|e| {
+                    tracing::error!("co-occurrence query failed: {e:#}");
+                    anyhow::anyhow!("co-occurrence query failed: {e:#}")
+                })?;
             Ok(Json(json!({ "pairs": pairs })))
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| {
+            tracing::error!("co-occurrence handler error: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 #[derive(Debug, Deserialize)]

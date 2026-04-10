@@ -1153,55 +1153,44 @@ pub struct GenreCoOccurrence {
 pub fn get_genre_co_occurrence(
     conn: &Connection,
     days: i64,
-    window_minutes: i64,
+    _window_minutes: i64,
     min_count: i64,
 ) -> Result<Vec<GenreCoOccurrence>> {
-    let window_seconds = window_minutes * 60;
+    // Find genre pairs that appear together on the same tracks
+    // (co-tagged genres), then score by Jaccard similarity.
     let mut stmt = conn.prepare(
-        "WITH recent_listens AS (
-            SELECT lh.track_id, lh.started_at, lh.id AS listen_id
-            FROM listen_history lh
-            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+        "WITH track_genre_pairs AS (
+            SELECT a.genre_id AS genre_a, b.genre_id AS genre_b
+            FROM track_genres a
+            JOIN track_genres b ON b.track_id = a.track_id AND b.genre_id > a.genre_id
         ),
-        genre_listens AS (
-            SELECT tg.genre_id, rl.started_at, rl.listen_id
-            FROM recent_listens rl
-            JOIN track_genres tg ON tg.track_id = rl.track_id
-        ),
-        pairs AS (
-            SELECT
-                MIN(a.genre_id) AS genre_a,
-                MAX(a.genre_id) AS genre_b,
-                COUNT(*) AS raw_count
-            FROM genre_listens a
-            JOIN genre_listens b
-                ON b.listen_id >= a.listen_id
-               AND b.listen_id <= a.listen_id + ?2
-               AND b.genre_id > a.genre_id
+        pair_counts AS (
+            SELECT genre_a, genre_b, COUNT(*) AS co_count
+            FROM track_genre_pairs
             GROUP BY genre_a, genre_b
-            HAVING raw_count >= ?3
+            HAVING co_count >= ?1
         ),
         genre_totals AS (
-            SELECT genre_id, COUNT(DISTINCT listen_id) AS total_listens
-            FROM genre_listens
+            SELECT genre_id, COUNT(DISTINCT track_id) AS total_tracks
+            FROM track_genres
             GROUP BY genre_id
         )
         SELECT
             ga.id, ga.name,
             gb.id, gb.name,
-            p.raw_count,
-            CAST(p.raw_count AS REAL) /
-                (gt_a.total_listens + gt_b.total_listens - p.raw_count) AS jaccard
-        FROM pairs p
-        JOIN genres ga ON ga.id = p.genre_a
-        JOIN genres gb ON gb.id = p.genre_b
-        JOIN genre_totals gt_a ON gt_a.genre_id = p.genre_a
-        JOIN genre_totals gt_b ON gt_b.genre_id = p.genre_b
-        ORDER BY jaccard DESC, p.raw_count DESC",
+            pc.co_count,
+            CAST(pc.co_count AS REAL) /
+                MAX(1, gt_a.total_tracks + gt_b.total_tracks - pc.co_count) AS jaccard
+        FROM pair_counts pc
+        JOIN genres ga ON ga.id = pc.genre_a
+        JOIN genres gb ON gb.id = pc.genre_b
+        JOIN genre_totals gt_a ON gt_a.genre_id = pc.genre_a
+        JOIN genre_totals gt_b ON gt_b.genre_id = pc.genre_b
+        ORDER BY jaccard DESC, pc.co_count DESC",
     )?;
 
     let rows = stmt.query_map(
-        params![days, window_seconds, min_count],
+        params![min_count],
         |row| {
             Ok(GenreCoOccurrence {
                 genre_a_id: row.get(0)?,
