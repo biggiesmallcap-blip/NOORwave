@@ -426,6 +426,13 @@
 		}
 	}
 
+	// Pre-filter co-listening edges for rendering (only top N by weight)
+	let coListeningRenderEdges = $derived(
+		edges.filter(e => e.type === 'co-listening' && e.weight > 0.04)
+			.sort((a, b) => b.weight - a.weight)
+			.slice(0, 120)
+	);
+
 	function drawConnectionsLayer() {
 		if (!connCanvas || width === 0 || height === 0) return;
 		const ctx = connCanvas.getContext('2d');
@@ -434,13 +441,57 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 
-		for (const edge of edges) {
+		// Draw co-listening bridges (limited set, no shadow, solid color, batched)
+		ctx.save();
+		ctx.strokeStyle = 'rgba(180, 190, 240, 1)';
+		ctx.setLineDash([3, 5]);
+		for (const edge of coListeningRenderEdges) {
 			const source = nodeById.get(edge.sourceId);
 			const target = nodeById.get(edge.targetId);
 			if (!source || !target) continue;
 
 			const sourceScreen = worldToScreen(source.x, source.y);
 			const targetScreen = worldToScreen(target.x, target.y);
+			// Early viewport cull
+			if (
+				(sourceScreen.x < -120 && targetScreen.x < -120) ||
+				(sourceScreen.x > width + 120 && targetScreen.x > width + 120) ||
+				(sourceScreen.y < -120 && targetScreen.y < -120) ||
+				(sourceScreen.y > height + 120 && targetScreen.y > height + 120)
+			) continue;
+
+			const activity = edgeActivity(edge);
+			const opacity = (0.04 + edge.weight * 0.14) * activity;
+			const lineWidth = (0.4 + edge.weight * 0.8) * (0.6 + activity * 0.3);
+			const dx = targetScreen.x - sourceScreen.x;
+			const dy = targetScreen.y - sourceScreen.y;
+			const distance = Math.max(1, Math.hypot(dx, dy));
+			const normalX = -dy / distance;
+			const normalY = dx / distance;
+			const curve = Math.min(60, distance * 0.14);
+			const curveSign = ((edge.sourceId + edge.targetId) & 1) === 0 ? 1 : -1;
+			const controlX = (sourceScreen.x + targetScreen.x) * 0.5 + normalX * curve * curveSign;
+			const controlY = (sourceScreen.y + targetScreen.y) * 0.5 + normalY * curve * curveSign;
+
+			ctx.globalAlpha = opacity;
+			ctx.lineWidth = lineWidth;
+			ctx.beginPath();
+			ctx.moveTo(sourceScreen.x, sourceScreen.y);
+			ctx.quadraticCurveTo(controlX, controlY, targetScreen.x, targetScreen.y);
+			ctx.stroke();
+		}
+		ctx.restore();
+
+		// Draw taxonomy edges (full set, with gradients)
+		for (const edge of edges) {
+			if (edge.type === 'co-listening') continue;
+			const source = nodeById.get(edge.sourceId);
+			const target = nodeById.get(edge.targetId);
+			if (!source || !target) continue;
+
+			const sourceScreen = worldToScreen(source.x, source.y);
+			const targetScreen = worldToScreen(target.x, target.y);
+			// Early viewport cull
 			if (
 				(sourceScreen.x < -120 && targetScreen.x < -120) ||
 				(sourceScreen.x > width + 120 && targetScreen.x > width + 120) ||
@@ -453,21 +504,18 @@
 			const activity = edgeActivity(edge);
 			const isSelectedEdge = selectedId !== null && (edge.sourceId === selectedId || edge.targetId === selectedId);
 			const emphasis = isSelectedEdge ? 1.28 : 1;
-
-			// Co-listening edges: dashed, lower opacity, silver-tinted
-			const isCoListening = edge.type === 'co-listening';
-			const baseOpacity = isCoListening
-				? 0.06 + edge.weight * 0.18
-				: edge.type === 'parent-child'
+			const opacity =
+				(edge.type === 'parent-child'
 					? 0.18 + edge.weight * 0.22
-					: 0.06 + edge.weight * 0.1;
-			const opacity = baseOpacity * activity * emphasis;
-			const baseWidth = isCoListening
-				? 0.5 + edge.weight * 1.2
-				: edge.type === 'parent-child'
+					: 0.06 + edge.weight * 0.1) *
+				activity *
+				emphasis;
+			const lineWidth =
+				(edge.type === 'parent-child'
 					? 0.8 + edge.weight * 1.5
-					: 0.6 + edge.weight * 0.9;
-			const lineWidth = baseWidth * (0.72 + activity * 0.42) * emphasis;
+					: 0.6 + edge.weight * 0.9) *
+				(0.72 + activity * 0.42) *
+				emphasis;
 			const dx = targetScreen.x - sourceScreen.x;
 			const dy = targetScreen.y - sourceScreen.y;
 			const distance = Math.max(1, Math.hypot(dx, dy));
@@ -476,35 +524,22 @@
 			const curve =
 				edge.type === 'sibling'
 					? Math.min(44, distance * 0.1)
-					: isCoListening
-						? Math.min(60, distance * 0.14) // more arc for co-listening bridges
-						: Math.min(26, distance * 0.06);
+					: Math.min(26, distance * 0.06);
 			const curveSign = ((edge.sourceId + edge.targetId) & 1) === 0 ? 1 : -1;
 			const controlX = (sourceScreen.x + targetScreen.x) * 0.5 + normalX * curve * curveSign;
 			const controlY = (sourceScreen.y + targetScreen.y) * 0.5 + normalY * curve * curveSign;
-
 			const gradient = ctx.createLinearGradient(sourceScreen.x, sourceScreen.y, targetScreen.x, targetScreen.y);
-			if (isCoListening) {
-				// Silver/white bridges for co-listening
-				const bridgeAlpha = clamp(0.3 + edge.weight * 0.5, 0.3, 0.7);
-				gradient.addColorStop(0, `rgba(200, 210, 240, ${bridgeAlpha * 0.7})`);
-				gradient.addColorStop(0.5, `rgba(220, 225, 255, ${bridgeAlpha})`);
-				gradient.addColorStop(1, `rgba(200, 210, 240, ${bridgeAlpha * 0.7})`);
-			} else {
-				gradient.addColorStop(0, hexToRgba(source.color, clamp(0.38 + edge.weight * 0.4, 0.35, 0.92)));
-				gradient.addColorStop(1, hexToRgba(target.color, clamp(0.28 + edge.weight * 0.36, 0.28, 0.84)));
-			}
+			gradient.addColorStop(0, hexToRgba(source.color, clamp(0.38 + edge.weight * 0.4, 0.35, 0.92)));
+			gradient.addColorStop(1, hexToRgba(target.color, clamp(0.28 + edge.weight * 0.36, 0.28, 0.84)));
 
 			ctx.save();
 			ctx.beginPath();
 			ctx.globalAlpha = opacity;
 			ctx.lineWidth = lineWidth;
 			ctx.strokeStyle = gradient;
-			if (isCoListening) {
-				ctx.setLineDash([4, 6]);
-			}
-			ctx.shadowBlur = isCoListening ? 6 * edge.weight * activity : edge.type === 'parent-child' ? 10 * edge.weight * (0.4 + activity * 0.8) : 0;
-			ctx.shadowColor = isCoListening ? 'rgba(180, 190, 240, 0.3)' : source.glowColor;
+			ctx.shadowBlur = edge.type === 'parent-child' ? 10 * edge.weight * (0.4 + activity * 0.8) : 0;
+			ctx.shadowColor = source.glowColor;
+			ctx.setLineDash([]);
 			ctx.moveTo(sourceScreen.x, sourceScreen.y);
 			ctx.quadraticCurveTo(controlX, controlY, targetScreen.x, targetScreen.y);
 			ctx.stroke();
@@ -532,17 +567,15 @@
 			if (activity < 0.2) continue;
 			const isSelectedEdge = selectedId !== null && (edge.sourceId === selectedId || edge.targetId === selectedId);
 			const edgeFade = particle.t < 0.15 ? particle.t / 0.15 : particle.t > 0.85 ? (1 - particle.t) / 0.15 : 1;
-			ctx.save();
 			const heatFactor = heatEnabled || viewMode === 'heat' ? 0.72 + edge.weight * 0.8 : 0.54;
+			// Skip shadow for performance
 			ctx.globalAlpha = particle.alpha * edgeFade * activity * heatFactor * (isSelectedEdge ? 1.15 : 1);
 			ctx.fillStyle = source.color;
-			ctx.shadowBlur = 12;
-			ctx.shadowColor = source.glowColor;
 			ctx.beginPath();
 			ctx.arc(x, y, particle.size * (0.85 + activity * 0.25), 0, Math.PI * 2);
 			ctx.fill();
-			ctx.restore();
 		}
+		ctx.globalAlpha = 1;
 	}
 
 	function drawFamilyFields(ctx: CanvasRenderingContext2D) {
@@ -563,21 +596,13 @@
 				fieldRadius
 			);
 			const heatBoost = heatEnabled || viewMode === 'heat' ? 0.75 + node.heatNorm * 1.35 : 0.78;
-			const warmTint = viewMode === 'heat' && node.heatNorm > 0.45 ? 'rgba(255, 168, 98, 0.12)' : null;
 			glow.addColorStop(0, hexToRgba(node.color, 0.14 * activity * heatBoost));
 			glow.addColorStop(0.42, hexToRgba(node.color, 0.07 * activity * heatBoost));
 			glow.addColorStop(1, hexToRgba(node.color, 0));
-			ctx.save();
-			ctx.globalAlpha = clamp(0.5 + node.heatNorm * 0.5, 0.45, 1);
 			ctx.fillStyle = glow;
 			ctx.beginPath();
 			ctx.arc(screen.x, screen.y, fieldRadius, 0, Math.PI * 2);
 			ctx.fill();
-			if (warmTint) {
-				ctx.fillStyle = warmTint;
-				ctx.fill();
-			}
-			ctx.restore();
 		}
 	}
 
@@ -654,7 +679,6 @@
 
 	function drawNodesAndLabels(ctx: CanvasRenderingContext2D) {
 		const visibleNodes = nodes.filter(nodeIsVisible);
-		const pulse = 0.65 + Math.sin(Date.now() / 480) * 0.35;
 
 		for (const node of visibleNodes) {
 			const screen = worldToScreen(node.x, node.y);
@@ -663,33 +687,35 @@
 			if (activity < 0.16) continue;
 			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
 
-			ctx.save();
-			ctx.globalAlpha = activity;
-			const gradient = ctx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, radius * 2.4);
+			// Single gradient: core + glow in one pass, no shadowBlur
+			const glowRadius = radius * (1.6 + nodeHeat * 3.2) * (0.84 + activity * 0.42);
+			const gradient = ctx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, radius + glowRadius);
 			gradient.addColorStop(0, node.color);
-			gradient.addColorStop(0.42, `${node.color}b3`);
+			gradient.addColorStop(Math.min(0.4, radius / (radius + glowRadius)), `${node.color}b3`);
 			gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
 			ctx.fillStyle = gradient;
-			ctx.shadowBlur = radius * (1.8 + nodeHeat * 4.4) * (0.84 + activity * 0.42);
-			ctx.shadowColor = node.glowColor;
 			ctx.beginPath();
-			ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+			ctx.arc(screen.x, screen.y, radius + glowRadius, 0, Math.PI * 2);
 			ctx.fill();
-			ctx.restore();
+		}
+
+		// Rings and selection (no save/restore needed)
+		for (const node of visibleNodes) {
+			const screen = worldToScreen(node.x, node.y);
+			const radius = node.radius;
+			const activity = nodeActivity(node);
+			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
 
 			if (node.depth === 0) {
-				ctx.save();
 				ctx.globalAlpha = clamp(0.18 + activity * 0.18, 0.16, 0.38);
 				ctx.lineWidth = 1.2;
 				ctx.strokeStyle = hexToRgba(node.color, 0.55);
 				ctx.beginPath();
 				ctx.arc(screen.x, screen.y, radius + 10 + nodeHeat * 8, 0, Math.PI * 2);
 				ctx.stroke();
-				ctx.restore();
 			}
 
 			if (nodeIsSeed(node.id)) {
-				ctx.save();
 				ctx.globalAlpha = 0.76 * activity;
 				ctx.setLineDash([3, 6]);
 				ctx.lineWidth = 1.6;
@@ -697,27 +723,21 @@
 				ctx.beginPath();
 				ctx.arc(screen.x, screen.y, radius + 8, 0, Math.PI * 2);
 				ctx.stroke();
-				ctx.restore();
+				ctx.setLineDash([]);
 			}
 
 			if (selectedId === node.id) {
-				ctx.save();
-				ctx.beginPath();
 				ctx.lineWidth = 2.2;
 				ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
-				ctx.shadowBlur = 18 * pulse;
-				ctx.shadowColor = node.glowColor;
+				ctx.beginPath();
 				ctx.arc(screen.x, screen.y, radius + 4, 0, Math.PI * 2);
 				ctx.stroke();
-				ctx.restore();
 			} else if (hoveredNodeId === node.id && !isDragging) {
-				ctx.save();
-				ctx.beginPath();
 				ctx.lineWidth = 1.6;
 				ctx.strokeStyle = node.color;
+				ctx.beginPath();
 				ctx.arc(screen.x, screen.y, radius + 3, 0, Math.PI * 2);
 				ctx.stroke();
-				ctx.restore();
 			}
 		}
 
@@ -979,7 +999,8 @@
 		const rect = wrapEl.getBoundingClientRect();
 		width = Math.max(1, Math.floor(rect.width));
 		height = Math.max(1, Math.floor(rect.height));
-		dpr = window.devicePixelRatio || 1;
+		// Cap DPR to 2x to prevent excessive pixel counts on hi-res monitors
+		dpr = Math.min(window.devicePixelRatio || 1, 2);
 
 		const nextWidth = Math.max(1, Math.floor(width * dpr));
 		const nextHeight = Math.max(1, Math.floor(height * dpr));
