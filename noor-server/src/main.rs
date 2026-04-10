@@ -135,9 +135,8 @@ async fn main() -> Result<()> {
             .with_conn(|conn| db::queries::get_auto_sync_services(conn))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to query auto-sync services: {}", e);
-                Ok(vec![])
-            })
-            .unwrap_or_default();
+                vec![]
+            });
         drop(state_read);
 
         if !auto_sync_services.is_empty() {

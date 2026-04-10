@@ -1303,7 +1303,7 @@ pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort
     let mut cohort_map: std::collections::HashMap<String, GenreCohort> =
         std::collections::HashMap::new();
 
-    for (genre_id, genre_name, time_slot, day_type, listens, listened_ms) in entries {
+    for (genre_id, _genre_name, time_slot, day_type, listens, listened_ms) in entries {
         let (id, label, icon) = match (time_slot.as_str(), day_type.as_str()) {
             ("night", _) => ("night_owl", "Night Owl", "🌙"),
             ("morning", "weekday") => ("morning_commute", "Morning Commute", "☀"),

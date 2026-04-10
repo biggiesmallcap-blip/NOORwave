@@ -3478,9 +3478,11 @@ async fn get_sync_info(
     state
         .db
         .with_conn(|conn| {
-            let info = queries::get_sync_info(conn, service).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let info = queries::get_sync_info(conn, service)
+                .map_err(|e| anyhow::anyhow!("sync info failed: {e}"))?;
             Ok(Json(json!({ "sync": info })))
         })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Set auto-sync daily toggle.
@@ -3500,9 +3502,10 @@ async fn set_auto_sync(
         .db
         .with_conn(|conn| {
             queries::set_auto_sync_daily(conn, service, payload.enabled)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|e| anyhow::anyhow!("set auto sync failed: {e}"))?;
             Ok(Json(json!({ "service": service, "auto_sync_daily": payload.enabled })))
         })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Public function to trigger auto-sync from server startup.
@@ -3528,7 +3531,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     
     // Record sync timestamp
     state.read().await.db.with_conn(|conn| {
-        queries::update_sync_timestamp(conn, "tidal", stats.tracks, stats.albums)
+        queries::update_sync_timestamp(conn, "tidal", stats.tracks as i64, stats.albums as i64)
     })?;
     
     // Broadcast event
@@ -3591,7 +3594,7 @@ async fn tidal_sync_library(
                 );
                 // Record sync timestamp in DB
                 if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
-                    queries::update_sync_timestamp(conn, "tidal", stats.tracks, stats.albums)
+                    queries::update_sync_timestamp(conn, "tidal", stats.tracks as i64, stats.albums as i64)
                 }) {
                     tracing::warn!("Failed to record sync timestamp: {}", e);
                 }
