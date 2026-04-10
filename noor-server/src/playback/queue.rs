@@ -202,7 +202,10 @@ pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i
             let track_id: i64 = row.get(0)?;
             let genre_id: i64 = row.get(1)?;
             if let Some(path) = genre_paths.get(&genre_id) {
-                by_track.entry(track_id).or_insert_with(Vec::new).push(path.clone());
+                by_track
+                    .entry(track_id)
+                    .or_insert_with(Vec::new)
+                    .push(path.clone());
             }
         }
     }

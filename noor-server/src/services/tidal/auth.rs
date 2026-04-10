@@ -11,7 +11,8 @@ fn tidal_client_id() -> String {
 
 /// Returns TIDAL client secret from env var `TIDAL_CLIENT_SECRET`, falling back to the default.
 fn tidal_client_secret() -> String {
-    std::env::var("TIDAL_CLIENT_SECRET").unwrap_or_else(|_| "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg==".to_string())
+    std::env::var("TIDAL_CLIENT_SECRET")
+        .unwrap_or_else(|_| "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg==".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

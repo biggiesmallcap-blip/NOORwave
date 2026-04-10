@@ -130,6 +130,32 @@ export interface PlaybackRuntimeInfo {
 	last_error: string | null;
 }
 
+export interface MusicBrainzStatus {
+	total_tracks: number;
+	checked_tracks: number;
+	enriched_tracks: number;
+	remaining: number;
+	complete: boolean;
+}
+
+export interface PortableMusicBrainzSnapshotStatus {
+	exists: boolean;
+	path: string;
+	generated_at: string | null;
+	checked_rows: number;
+	genre_rows: number;
+}
+
+export interface PortableMusicBrainzSnapshotAction {
+	status: 'exported' | 'imported';
+	snapshot: PortableMusicBrainzSnapshotStatus;
+	checked_inserted?: number;
+	checked_skipped?: number;
+	genre_inserted?: number;
+	track_skipped?: number;
+	genre_skipped?: number;
+}
+
 export interface TrackFavoriteResponse {
 	track_id: number;
 	tidal_id: number;
@@ -550,6 +576,30 @@ export const api = {
 	getPlaybackRuntime() {
 		return fetchApi<{ available: boolean; runtime: PlaybackRuntimeInfo | null }>(
 			'/api/playback/runtime'
+		);
+	},
+
+	getMusicBrainzStatus() {
+		return fetchApi<MusicBrainzStatus>('/api/library/enrich/musicbrainz/status');
+	},
+
+	getPortableMusicBrainzSnapshot() {
+		return fetchApi<PortableMusicBrainzSnapshotStatus>('/api/library/enrich/musicbrainz/portable');
+	},
+
+	exportPortableMusicBrainzSnapshot() {
+		return fetchApi<PortableMusicBrainzSnapshotAction>(
+			'/api/library/enrich/musicbrainz/portable/export',
+			undefined,
+			{ method: 'POST' }
+		);
+	},
+
+	importPortableMusicBrainzSnapshot() {
+		return fetchApi<PortableMusicBrainzSnapshotAction>(
+			'/api/library/enrich/musicbrainz/portable/import',
+			undefined,
+			{ method: 'POST' }
 		);
 	},
 

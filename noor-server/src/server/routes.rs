@@ -248,6 +248,18 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/library/enrich/musicbrainz/status",
             get(get_musicbrainz_status),
         )
+        .route(
+            "/api/library/enrich/musicbrainz/portable",
+            get(get_musicbrainz_portable_snapshot),
+        )
+        .route(
+            "/api/library/enrich/musicbrainz/portable/export",
+            post(export_musicbrainz_portable_snapshot),
+        )
+        .route(
+            "/api/library/enrich/musicbrainz/portable/import",
+            post(import_musicbrainz_portable_snapshot),
+        )
         .route("/api/library/tracks/favorite", post(set_track_favorite))
         // Duplicates
         .route("/api/library/duplicates/scan", post(scan_duplicates))
@@ -306,7 +318,8 @@ async fn get_tracks(
     state
         .db
         .with_conn(|conn| {
-            let tracks = queries::get_tracks(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+            let tracks =
+                queries::get_tracks(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
             let total = queries::get_track_count(conn, favorite_only)?;
             Ok(Json(json!({ "tracks": tracks, "total": total })))
         })
@@ -342,7 +355,8 @@ async fn get_albums(
     state
         .db
         .with_conn(|conn| {
-            let albums = queries::get_albums(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+            let albums =
+                queries::get_albums(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
             let total = queries::get_album_count(conn, favorite_only)?;
             Ok(Json(json!({ "albums": albums, "total": total })))
         })
@@ -1166,16 +1180,25 @@ async fn tidal_discovery_provider(
 async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db::models::Track) {
     let (tokens, http, db, event_tx) = {
         let guard = state.read().await;
-        let Some(tokens) = guard.tidal_tokens.clone() else { return };
-        (tokens, guard.http_client.clone(), guard.db.clone(), guard.event_tx.clone())
+        let Some(tokens) = guard.tidal_tokens.clone() else {
+            return;
+        };
+        (
+            tokens,
+            guard.http_client.clone(),
+            guard.db.clone(),
+            guard.event_tx.clone(),
+        )
     };
 
     // Build search queries from current track's artist and genres
     let current_track_clone = current_track.clone();
     let (artist_name, genre_hints) = db
         .with_conn(move |conn| {
-            let genres =
-                crate::playback::queue::get_track_genres(conn, std::slice::from_ref(&current_track_clone))?;
+            let genres = crate::playback::queue::get_track_genres(
+                conn,
+                std::slice::from_ref(&current_track_clone),
+            )?;
             let genre_list = genres
                 .get(&current_track_clone.id)
                 .cloned()
@@ -1819,10 +1842,16 @@ async fn batch_delete_items(
     };
     if let Err(e) = db.with_conn(|conn| {
         for &(local_id, _) in &track_pairs {
-            conn.execute("DELETE FROM tracks WHERE id = ?1", rusqlite::params![local_id])?;
+            conn.execute(
+                "DELETE FROM tracks WHERE id = ?1",
+                rusqlite::params![local_id],
+            )?;
         }
         for &(local_id, _) in &album_pairs {
-            conn.execute("DELETE FROM albums WHERE id = ?1", rusqlite::params![local_id])?;
+            conn.execute(
+                "DELETE FROM albums WHERE id = ?1",
+                rusqlite::params![local_id],
+            )?;
         }
         Ok(())
     }) {
@@ -1878,7 +1907,10 @@ async fn set_track_favorite(
             .db
             .with_conn(|conn| queue::get_track_by_id(conn, payload.track_id))
             .map_err(|error| {
-                error!("Failed to load track {} for favorite toggle: {error}", payload.track_id);
+                error!(
+                    "Failed to load track {} for favorite toggle: {error}",
+                    payload.track_id
+                );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
@@ -2095,6 +2127,103 @@ async fn get_musicbrainz_status(
     })))
 }
 
+async fn get_musicbrainz_portable_snapshot(
+    State(_state): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let snapshot =
+        crate::services::musicbrainz::read_portable_snapshot_status().map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "message": "NOOR couldn't read the portable MusicBrainz snapshot status.",
+                    "details": error.to_string(),
+                })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "exists": snapshot.exists,
+        "path": snapshot.path,
+        "generated_at": snapshot.generated_at,
+        "checked_rows": snapshot.checked_rows,
+        "genre_rows": snapshot.genre_rows,
+    })))
+}
+
+async fn export_musicbrainz_portable_snapshot(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let snapshot = {
+        let state = state.read().await;
+        state
+            .db
+            .with_conn(crate::services::musicbrainz::export_portable_snapshot)
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "message": "NOOR couldn't write the portable MusicBrainz snapshot.",
+                        "details": error.to_string(),
+                    })),
+                )
+            })?
+            .status
+    };
+
+    Ok(Json(json!({
+        "status": "exported",
+        "snapshot": {
+            "exists": snapshot.exists,
+            "path": snapshot.path,
+            "generated_at": snapshot.generated_at,
+            "checked_rows": snapshot.checked_rows,
+            "genre_rows": snapshot.genre_rows,
+        }
+    })))
+}
+
+async fn import_musicbrainz_portable_snapshot(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let imported = {
+        let state = state.read().await;
+        state
+            .db
+            .with_conn(crate::services::musicbrainz::import_portable_snapshot)
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "NOOR couldn't import the portable MusicBrainz snapshot.",
+                        "details": error.to_string(),
+                    })),
+                )
+            })?
+    };
+
+    {
+        let state = state.read().await;
+        let _ = state.event_tx.send(AppEvent::MusicBrainzEnriched);
+        let _ = state.event_tx.send(AppEvent::LibrarySynced);
+    }
+
+    Ok(Json(json!({
+        "status": "imported",
+        "checked_inserted": imported.checked_inserted,
+        "checked_skipped": imported.checked_skipped,
+        "genre_inserted": imported.genre_inserted,
+        "track_skipped": imported.track_skipped,
+        "genre_skipped": imported.genre_skipped,
+        "snapshot": {
+            "exists": imported.status.exists,
+            "path": imported.status.path,
+            "generated_at": imported.status.generated_at,
+            "checked_rows": imported.status.checked_rows,
+            "genre_rows": imported.status.genre_rows,
+        }
+    })))
+}
+
 // ── Duplicate detection ───────────────────────────────────────────────────────
 
 /// Scan the library for duplicates. Runs synchronously (usually <5s for 32k tracks).
@@ -2161,7 +2290,9 @@ async fn resolve_duplicate_group(
             .await
             {
                 // If it looks like a session expiry, try to refresh and retry once.
-                if e.to_string().contains("401") || e.to_string().to_lowercase().contains("unauthorized") {
+                if e.to_string().contains("401")
+                    || e.to_string().to_lowercase().contains("unauthorized")
+                {
                     if let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await {
                         if let Err(e2) = tidal_mutations::remove_favorite_track(
                             &http,
@@ -2172,7 +2303,9 @@ async fn resolve_duplicate_group(
                         )
                         .await
                         {
-                            error!("Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}");
+                            error!(
+                                "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
+                            );
                         }
                         tokens = Some(refreshed);
                         continue;
@@ -2701,12 +2834,21 @@ async fn next_track(
     // inject any that aren't already in the library. Runs as a detached background task
     // so the next_track response returns immediately without blocking on TIDAL API calls.
     if snapshot.state.automix_discover_new {
-        let current_track_id = snapshot.state.current_track.as_ref().map(|t| t.id).unwrap_or(-1);
-        let current_pos = snapshot.queue.iter()
+        let current_track_id = snapshot
+            .state
+            .current_track
+            .as_ref()
+            .map(|t| t.id)
+            .unwrap_or(-1);
+        let current_pos = snapshot
+            .queue
+            .iter()
             .find(|q| q.track.id == current_track_id)
             .map(|q| q.position)
             .unwrap_or(0);
-        let new_upcoming = snapshot.queue.iter()
+        let new_upcoming = snapshot
+            .queue
+            .iter()
             .filter(|q| q.position > current_pos && q.source == "automix-new")
             .count();
         if new_upcoming < 2 {
@@ -2984,7 +3126,9 @@ async fn set_playback_automix(
 
     drop(state_guard);
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-    Ok(Json(json!({ "state": snapshot.state, "queue": snapshot.queue })))
+    Ok(Json(
+        json!({ "state": snapshot.state, "queue": snapshot.queue }),
+    ))
 }
 
 async fn add_queue_track(
@@ -3044,7 +3188,11 @@ async fn status() -> Json<Value> {
 fn dedupe_positive_ids(ids: &[i64]) -> Vec<i64> {
     let (filtered, dropped): (Vec<i64>, Vec<i64>) = ids.iter().copied().partition(|id| *id > 0);
     if !dropped.is_empty() {
-        warn!("dedupe_positive_ids: dropped {} non-positive IDs (ephemeral/discovery tracks): {:?}", dropped.len(), &dropped[..dropped.len().min(5)]);
+        warn!(
+            "dedupe_positive_ids: dropped {} non-positive IDs (ephemeral/discovery tracks): {:?}",
+            dropped.len(),
+            &dropped[..dropped.len().min(5)]
+        );
     }
     let mut ids: Vec<i64> = filtered;
     ids.sort_unstable();
@@ -3106,7 +3254,8 @@ async fn tidal_login(State(state): State<SharedState>) -> Result<Json<Value>, St
     // Cancel any previous in-flight login polling
     {
         let mut s = state.write().await;
-        s.tidal_login_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        s.tidal_login_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         s.tidal_login_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     }
 
@@ -3268,9 +3417,9 @@ async fn tidal_sync_library(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Get tokens and http client
-    let persisted_tokens = load_persisted_tidal_tokens(&state)
-        .await
-        .map_err(|error| TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response())?;
+    let persisted_tokens = load_persisted_tidal_tokens(&state).await.map_err(|error| {
+        TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response()
+    })?;
     let (tokens, _http) = {
         let s = state.read().await;
         let tokens = s
@@ -4665,7 +4814,8 @@ mod tests {
 
     #[tokio::test]
     async fn genre_heat_route_defaults_to_ninety_days() {
-        let db_path = std::env::temp_dir().join(format!("noor-genre-heat-{}.db", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("noor-genre-heat-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(&db_path).expect("db opened");
         db.run_migrations().expect("migrations");
         db.with_conn(|conn| {

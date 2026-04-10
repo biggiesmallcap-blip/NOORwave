@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
-	import { api, getApiBase, type PlaybackRuntimeInfo } from '$lib/api/client';
+	import {
+		api,
+		getApiBase,
+		type MusicBrainzStatus,
+		type PlaybackRuntimeInfo,
+		type PortableMusicBrainzSnapshotStatus
+	} from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import {
 		tidalStatus,
@@ -33,7 +39,10 @@
 	let mbStatus = $state<'idle' | 'running' | 'done'>('idle');
 	let mbLiveProgress = $state<number | null>(null);
 	let mbProgressLabel = $state('');
-	let mbStats = $state<{ total_tracks: number; checked_tracks: number; enriched_tracks: number; remaining: number } | null>(null);
+	let mbStats = $state<MusicBrainzStatus | null>(null);
+	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
+	let portableAction = $state<'export' | 'import' | null>(null);
+	let portableStatusLabel = $state('');
 
 	onMount(() => {
 		wsUnsubscribe = wsMessages.subscribe((messages) => {
@@ -45,6 +54,7 @@
 				void refreshTidalStatus();
 				void loadPlaybackRuntime();
 				void loadMbStatus();
+				void loadPortableSnapshot();
 			}
 
 			if (latest.type === 'sync_progress' && latest.service === 'musicbrainz') {
@@ -65,6 +75,7 @@
 		void refreshTidalStatus();
 		void loadPlaybackRuntime();
 		void loadMbStatus();
+		void loadPortableSnapshot();
 
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
@@ -194,9 +205,8 @@
 
 	async function loadMbStatus() {
 		try {
-			const resp = await fetch(`${getApiBase()}/api/library/enrich/musicbrainz/status`);
+			mbStats = await api.getMusicBrainzStatus();
 			markServerOnline();
-			mbStats = await resp.json();
 			if (!mbStats) return;
 			if (mbStats.remaining === 0) {
 				mbStatus = 'done';
@@ -215,6 +225,19 @@
 			if (isFetchConnectionError(error)) {
 				markServerOffline();
 			}
+		}
+	}
+
+	async function loadPortableSnapshot() {
+		try {
+			portableSnapshot = await api.getPortableMusicBrainzSnapshot();
+			markServerOnline();
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				return;
+			}
+			portableStatusLabel = `Snapshot status failed: ${error}`;
 		}
 	}
 
@@ -249,6 +272,53 @@
 			}
 		}
 		void loadMbStatus();
+	}
+
+	async function exportPortableSnapshot() {
+		portableAction = 'export';
+		portableStatusLabel = 'Writing the current MusicBrainz coverage into the portable snapshot…';
+		try {
+			const result = await api.exportPortableMusicBrainzSnapshot();
+			markServerOnline();
+			portableSnapshot = result.snapshot;
+			portableStatusLabel = `Exported ${result.snapshot.checked_rows.toLocaleString()} checked tracks and ${result.snapshot.genre_rows.toLocaleString()} genre rows to ${result.snapshot.path}.`;
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				portableStatusLabel = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				markServerOnline();
+				portableStatusLabel = `Export failed: ${error}`;
+			}
+		} finally {
+			portableAction = null;
+			void loadPortableSnapshot();
+			void loadMbStatus();
+		}
+	}
+
+	async function importPortableSnapshot() {
+		portableAction = 'import';
+		portableStatusLabel = 'Applying the portable MusicBrainz snapshot into this library…';
+		try {
+			const result = await api.importPortableMusicBrainzSnapshot();
+			markServerOnline();
+			portableSnapshot = result.snapshot;
+			portableStatusLabel = `Imported ${result.checked_inserted?.toLocaleString() ?? '0'} checked markers and ${result.genre_inserted?.toLocaleString() ?? '0'} genre rows.`;
+			mbProgressLabel = 'Portable snapshot imported into the local library.';
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				portableStatusLabel = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				markServerOnline();
+				portableStatusLabel = `Import failed: ${error}`;
+			}
+		} finally {
+			portableAction = null;
+			void loadPortableSnapshot();
+			void loadMbStatus();
+		}
 	}
 
 	let tidalBadgeLabel = $derived(
@@ -305,6 +375,16 @@
 			: mbStatus === 'done'
 				? 'Genre coverage is complete for the current library snapshot.'
 				: 'Run enrichment in the background and this panel will keep updating.'
+	);
+	let portableGeneratedLabel = $derived(
+		portableSnapshot?.generated_at
+			? new Date(portableSnapshot.generated_at).toLocaleString()
+			: 'Not exported yet'
+	);
+	let portableSnapshotCopy = $derived(
+		portableSnapshot?.exists
+			? 'Export here after enrichment, commit `data/musicbrainz`, then pull and import on the other machine.'
+			: 'No portable snapshot is present yet. Export one here first, then commit and push it.'
 	);
 </script>
 
@@ -419,6 +499,49 @@
 								: mbStats && mbStats.checked_tracks > 0
 									? 'Resume enrichment'
 									: 'Start enrichment'}
+					</button>
+				</div>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Transfer" title="Portable MusicBrainz snapshot" subtitle="Move enrichment between machines through the repo snapshot in `data/musicbrainz`." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
+					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
+				</div>
+
+				<div class="portable-card glass">
+					<div class="info-list">
+						<div class="info-row">
+							<span>Snapshot state</span>
+							<strong>{portableSnapshot?.exists ? 'Available' : 'Missing'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Generated</span>
+							<strong>{portableGeneratedLabel}</strong>
+						</div>
+						<div class="info-row">
+							<span>Path</span>
+							<strong class="path-value">{portableSnapshot?.path ?? 'data/musicbrainz'}</strong>
+						</div>
+					</div>
+					<p class="page-copy">{portableSnapshotCopy}</p>
+					{#if portableStatusLabel}
+						<p class="page-copy">{portableStatusLabel}</p>
+					{/if}
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={exportPortableSnapshot} disabled={portableAction !== null}>
+						{portableAction === 'export' ? 'Exporting…' : 'Export snapshot'}
+					</button>
+					<button
+						class="btn btn-glass"
+						onclick={importPortableSnapshot}
+						disabled={portableAction !== null || !portableSnapshot?.exists}
+					>
+						{portableAction === 'import' ? 'Importing…' : 'Import snapshot'}
 					</button>
 				</div>
 			</section>
@@ -545,8 +668,18 @@
 		gap: 12px;
 	}
 
+	.portable-card {
+		padding: 16px;
+		display: grid;
+		gap: 12px;
+	}
+
 	.verify-link {
 		color: var(--accent-strong);
+		word-break: break-all;
+	}
+
+	.path-value {
 		word-break: break-all;
 	}
 

@@ -556,7 +556,10 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
         .unwrap_or(false)
 }
 
-pub fn ensure_automix_queue_depth(conn: &Connection, target_upcoming: usize) -> Result<Vec<QueueItem>> {
+pub fn ensure_automix_queue_depth(
+    conn: &Connection,
+    target_upcoming: usize,
+) -> Result<Vec<QueueItem>> {
     let state = load_state(conn)?;
     let queue_items = queue::load_queue(conn)?;
 
@@ -619,13 +622,15 @@ fn build_automix_extension(
     // providing enough diversity for scoring and genre shuffling.
     const MAX_CANDIDATES: usize = 500;
 
-    let mut candidates = queries::get_tracks_excluding_with_limit(conn, &excluded_track_ids, MAX_CANDIDATES)?;
+    let mut candidates =
+        queries::get_tracks_excluding_with_limit(conn, &excluded_track_ids, MAX_CANDIDATES)?;
     if candidates.is_empty() {
         let queue_track_ids = queue_items
             .iter()
             .map(|item| item.track.id)
             .collect::<Vec<_>>();
-        candidates = queries::get_tracks_excluding_with_limit(conn, &queue_track_ids, MAX_CANDIDATES)?;
+        candidates =
+            queries::get_tracks_excluding_with_limit(conn, &queue_track_ids, MAX_CANDIDATES)?;
     }
 
     if candidates.is_empty() {
@@ -813,8 +818,8 @@ fn order_automix_candidates(
             let mut fi = 0usize;
             let mut streak = 0usize;
             while pi < preferred_shuffled.len() || fi < fallback_shuffled.len() {
-                let take_pref = pi < preferred_shuffled.len()
-                    && (fi >= fallback_shuffled.len() || streak < 3);
+                let take_pref =
+                    pi < preferred_shuffled.len() && (fi >= fallback_shuffled.len() || streak < 3);
                 if take_pref {
                     ordered.push(preferred_shuffled[pi].clone());
                     pi += 1;
@@ -850,7 +855,12 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
                 .position(|(i, t)| !visited[i] && t.album_id.map_or(true, |aid| aid != last_id))
                 .unwrap_or_else(|| {
                     // Fallback: pick the first unvisited track.
-                    tracks.iter().enumerate().find(|(i, _)| !visited[*i]).map(|(i, _)| i).unwrap_or(0)
+                    tracks
+                        .iter()
+                        .enumerate()
+                        .find(|(i, _)| !visited[*i])
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
                 })
         } else {
             0

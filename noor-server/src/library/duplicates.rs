@@ -285,7 +285,8 @@ impl UnionFind {
     }
 
     fn into_groups(self) -> Vec<Vec<usize>> {
-        let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
         for (i, &p) in self.parent.iter().enumerate() {
             groups.entry(p).or_default().push(i);
         }
@@ -613,13 +614,28 @@ pub fn resolve_group(
     // Remove non-preferred tracks from the DB.
     // Must clean up dependent rows explicitly since FKs lack ON DELETE CASCADE.
     for &track_id in &removed_track_ids {
-        conn.execute("DELETE FROM listen_history WHERE track_id = ?1", params![track_id])?;
-        conn.execute("DELETE FROM playlist_tracks WHERE track_id = ?1", params![track_id])?;
+        conn.execute(
+            "DELETE FROM listen_history WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM playlist_tracks WHERE track_id = ?1",
+            params![track_id],
+        )?;
         conn.execute("DELETE FROM queue WHERE track_id = ?1", params![track_id])?;
-        conn.execute("DELETE FROM shuffle_state WHERE track_id = ?1", params![track_id])?;
-        conn.execute("DELETE FROM duplicate_members WHERE track_id = ?1", params![track_id])?;
+        conn.execute(
+            "DELETE FROM shuffle_state WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        conn.execute(
+            "DELETE FROM duplicate_members WHERE track_id = ?1",
+            params![track_id],
+        )?;
         // track_genres already has ON DELETE CASCADE, but we delete it explicitly for clarity.
-        conn.execute("DELETE FROM track_genres WHERE track_id = ?1", params![track_id])?;
+        conn.execute(
+            "DELETE FROM track_genres WHERE track_id = ?1",
+            params![track_id],
+        )?;
         conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
     }
 

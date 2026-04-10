@@ -27,7 +27,11 @@ pub fn get_tracks(
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
-    let fav_filter = if favorite_only { " WHERE t.is_favorite = 1" } else { "" };
+    let fav_filter = if favorite_only {
+        " WHERE t.is_favorite = 1"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
@@ -54,12 +58,16 @@ pub fn get_tracks(
 }
 
 pub fn get_track_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
-    let filter = if favorite_only { " WHERE is_favorite = 1" } else { "" };
-    Ok(conn.query_row(
-        &format!("SELECT COUNT(*) FROM tracks{filter}"),
-        [],
-        |row| row.get(0),
-    )?)
+    let filter = if favorite_only {
+        " WHERE is_favorite = 1"
+    } else {
+        ""
+    };
+    Ok(
+        conn.query_row(&format!("SELECT COUNT(*) FROM tracks{filter}"), [], |row| {
+            row.get(0)
+        })?,
+    )
 }
 
 // ─── Albums ───────────────────────────────────────────────
@@ -80,7 +88,11 @@ pub fn get_albums(
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
-    let fav_filter = if favorite_only { " WHERE al.is_favorite = 1" } else { "" };
+    let fav_filter = if favorite_only {
+        " WHERE al.is_favorite = 1"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
@@ -118,12 +130,16 @@ pub fn get_albums(
 }
 
 pub fn get_album_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
-    let filter = if favorite_only { " WHERE is_favorite = 1" } else { "" };
-    Ok(conn.query_row(
-        &format!("SELECT COUNT(*) FROM albums{filter}"),
-        [],
-        |row| row.get(0),
-    )?)
+    let filter = if favorite_only {
+        " WHERE is_favorite = 1"
+    } else {
+        ""
+    };
+    Ok(
+        conn.query_row(&format!("SELECT COUNT(*) FROM albums{filter}"), [], |row| {
+            row.get(0)
+        })?,
+    )
 }
 
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
@@ -1531,8 +1547,11 @@ mod tests {
             [],
         )
         .expect("genres inserted");
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Rufige Kru')", [])
-            .expect("artist inserted");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Rufige Kru')",
+            [],
+        )
+        .expect("artist inserted");
         conn.execute(
             "INSERT INTO tracks (
                 id, title, artist_id, duration_ms, tidal_id, best_quality, best_source, fidelity_score, is_favorite, source

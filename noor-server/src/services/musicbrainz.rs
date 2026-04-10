@@ -1,12 +1,22 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use tracing::{info, warn};
 
 const MB_API_BASE: &str = "https://musicbrainz.org/ws/2";
 const MB_USER_AGENT: &str = "NOOR/0.1 (noor-music-app)";
 /// MusicBrainz rate limit: 1 request per second (their policy).
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1100);
+const PORTABLE_SNAPSHOT_DIR: &str = "data/musicbrainz";
+const PORTABLE_CHECKED_FILE: &str = "musicbrainz_checked.csv";
+const PORTABLE_GENRES_FILE: &str = "musicbrainz_genres.csv";
+const PORTABLE_MANIFEST_FILE: &str = "manifest.json";
 
 // ── MusicBrainz API response types ───────────────────────────────────────────
 
@@ -219,6 +229,307 @@ pub struct EnrichmentProgress {
     pub processed: usize,
     pub total: usize,
     pub genres_assigned: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PortableSnapshotFiles {
+    checked: String,
+    genres: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PortableSnapshotManifest {
+    generated_at: String,
+    db_path: String,
+    checked_rows: usize,
+    genre_rows: usize,
+    files: PortableSnapshotFiles,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortableSnapshotStatus {
+    pub exists: bool,
+    pub path: String,
+    pub generated_at: Option<String>,
+    pub checked_rows: usize,
+    pub genre_rows: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableSnapshotExportResult {
+    pub status: PortableSnapshotStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableSnapshotImportResult {
+    pub status: PortableSnapshotStatus,
+    pub checked_inserted: usize,
+    pub checked_skipped: usize,
+    pub genre_inserted: usize,
+    pub track_skipped: usize,
+    pub genre_skipped: usize,
+}
+
+fn resolve_db_path() -> PathBuf {
+    if let Ok(path) = std::env::var("NOOR_DB") {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return path;
+        }
+        return std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path);
+    }
+
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()?
+                .parent()?
+                .parent()
+                .map(|root| root.join("noor.db"))
+        })
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("noor.db")
+        })
+}
+
+fn snapshot_dir() -> PathBuf {
+    resolve_db_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(PORTABLE_SNAPSHOT_DIR)
+}
+
+fn snapshot_manifest_path() -> PathBuf {
+    snapshot_dir().join(PORTABLE_MANIFEST_FILE)
+}
+
+fn snapshot_checked_path() -> PathBuf {
+    snapshot_dir().join(PORTABLE_CHECKED_FILE)
+}
+
+fn snapshot_genres_path() -> PathBuf {
+    snapshot_dir().join(PORTABLE_GENRES_FILE)
+}
+
+fn parse_manifest(path: &Path) -> Result<PortableSnapshotManifest> {
+    let file = File::open(path)?;
+    Ok(serde_json::from_reader(BufReader::new(file))?)
+}
+
+pub fn read_portable_snapshot_status() -> Result<PortableSnapshotStatus> {
+    let dir = snapshot_dir();
+    let manifest_path = snapshot_manifest_path();
+    let checked_path = snapshot_checked_path();
+    let genres_path = snapshot_genres_path();
+    if !manifest_path.exists() || !checked_path.exists() || !genres_path.exists() {
+        return Ok(PortableSnapshotStatus {
+            exists: false,
+            path: dir.to_string_lossy().into_owned(),
+            generated_at: None,
+            checked_rows: 0,
+            genre_rows: 0,
+        });
+    }
+
+    let manifest = parse_manifest(&manifest_path)?;
+    Ok(PortableSnapshotStatus {
+        exists: true,
+        path: dir.to_string_lossy().into_owned(),
+        generated_at: Some(manifest.generated_at),
+        checked_rows: manifest.checked_rows,
+        genre_rows: manifest.genre_rows,
+    })
+}
+
+pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExportResult> {
+    let dir = snapshot_dir();
+    fs::create_dir_all(&dir)?;
+
+    let checked_path = snapshot_checked_path();
+    let genres_path = snapshot_genres_path();
+    let manifest_path = snapshot_manifest_path();
+
+    let mut checked_rows = 0usize;
+    {
+        let file = File::create(&checked_path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "tidal_id")?;
+        let mut stmt = conn.prepare(
+            "SELECT t.tidal_id
+             FROM musicbrainz_checked mc
+             JOIN tracks t ON t.id = mc.track_id
+             WHERE t.tidal_id IS NOT NULL
+             ORDER BY t.tidal_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        for row in rows {
+            writeln!(writer, "{}", row?)?;
+            checked_rows += 1;
+        }
+        writer.flush()?;
+    }
+
+    let mut genre_rows = 0usize;
+    {
+        let file = File::create(&genres_path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "tidal_id,genre_slug,confidence")?;
+        let mut stmt = conn.prepare(
+            "SELECT t.tidal_id, g.slug, tg.confidence
+             FROM track_genres tg
+             JOIN tracks t ON t.id = tg.track_id
+             JOIN genres g ON g.id = tg.genre_id
+             WHERE tg.source = 'musicbrainz'
+               AND t.tidal_id IS NOT NULL
+             ORDER BY t.tidal_id ASC, g.slug ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (tidal_id, genre_slug, confidence) = row?;
+            writeln!(writer, "{tidal_id},{genre_slug},{confidence}")?;
+            genre_rows += 1;
+        }
+        writer.flush()?;
+    }
+
+    let manifest = PortableSnapshotManifest {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        db_path: resolve_db_path().to_string_lossy().into_owned(),
+        checked_rows,
+        genre_rows,
+        files: PortableSnapshotFiles {
+            checked: PORTABLE_CHECKED_FILE.to_string(),
+            genres: PORTABLE_GENRES_FILE.to_string(),
+        },
+    };
+    let manifest_file = File::create(&manifest_path)?;
+    serde_json::to_writer_pretty(BufWriter::new(manifest_file), &manifest)?;
+
+    Ok(PortableSnapshotExportResult {
+        status: PortableSnapshotStatus {
+            exists: true,
+            path: dir.to_string_lossy().into_owned(),
+            generated_at: Some(manifest.generated_at),
+            checked_rows,
+            genre_rows,
+        },
+    })
+}
+
+pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImportResult> {
+    let manifest_path = snapshot_manifest_path();
+    let checked_path = snapshot_checked_path();
+    let genres_path = snapshot_genres_path();
+    if !manifest_path.exists() || !checked_path.exists() || !genres_path.exists() {
+        anyhow::bail!(
+            "No portable MusicBrainz snapshot was found at {}",
+            snapshot_dir().to_string_lossy()
+        );
+    }
+
+    let track_map = {
+        let mut stmt =
+            conn.prepare("SELECT tidal_id, id FROM tracks WHERE tidal_id IS NOT NULL")?;
+        stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?
+    };
+    let genre_map = {
+        let mut stmt = conn.prepare("SELECT slug, id FROM genres")?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    let mut insert_checked =
+        tx.prepare("INSERT OR IGNORE INTO musicbrainz_checked (track_id) VALUES (?1)")?;
+    let mut insert_genre = tx.prepare(
+        "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence)
+         VALUES (?1, ?2, 'musicbrainz', ?3)",
+    )?;
+
+    let mut checked_inserted = 0usize;
+    let mut checked_skipped = 0usize;
+    for (line_number, line) in BufReader::new(File::open(&checked_path)?)
+        .lines()
+        .enumerate()
+    {
+        let line = line?;
+        if line_number == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let tidal_id: i64 = line
+            .trim()
+            .parse()
+            .with_context(|| format!("Invalid tidal_id in {}", checked_path.display()))?;
+        let Some(track_id) = track_map.get(&tidal_id) else {
+            checked_skipped += 1;
+            continue;
+        };
+        checked_inserted += insert_checked.execute(params![track_id])? as usize;
+    }
+
+    let mut genre_inserted = 0usize;
+    let mut track_skipped = 0usize;
+    let mut genre_skipped = 0usize;
+    for (line_number, line) in BufReader::new(File::open(&genres_path)?)
+        .lines()
+        .enumerate()
+    {
+        let line = line?;
+        if line_number == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, ',');
+        let tidal_id: i64 = parts
+            .next()
+            .context("Missing tidal_id in portable MusicBrainz genre snapshot")?
+            .parse()
+            .with_context(|| format!("Invalid tidal_id in {}", genres_path.display()))?;
+        let genre_slug = parts
+            .next()
+            .context("Missing genre_slug in portable MusicBrainz genre snapshot")?;
+        let confidence: f64 = parts
+            .next()
+            .context("Missing confidence in portable MusicBrainz genre snapshot")?
+            .parse()
+            .with_context(|| format!("Invalid confidence in {}", genres_path.display()))?;
+
+        let Some(track_id) = track_map.get(&tidal_id) else {
+            track_skipped += 1;
+            continue;
+        };
+        let Some(genre_id) = genre_map.get(genre_slug) else {
+            genre_skipped += 1;
+            continue;
+        };
+        genre_inserted += insert_genre.execute(params![track_id, genre_id, confidence])? as usize;
+    }
+    drop(insert_genre);
+    drop(insert_checked);
+    tx.commit()?;
+
+    let status = read_portable_snapshot_status()?;
+    Ok(PortableSnapshotImportResult {
+        status,
+        checked_inserted,
+        checked_skipped,
+        genre_inserted,
+        track_skipped,
+        genre_skipped,
+    })
 }
 
 // ── Main enrichment runner ────────────────────────────────────────────────────

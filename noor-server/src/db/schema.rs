@@ -1,7 +1,13 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005];
+const MIGRATIONS: &[&str] = &[
+    MIGRATION_001,
+    MIGRATION_002,
+    MIGRATION_003,
+    MIGRATION_004,
+    MIGRATION_005,
+];
 
 const MIGRATION_001: &str = r#"
 -- =============================================

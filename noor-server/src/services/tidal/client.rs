@@ -179,12 +179,16 @@ impl TidalClient {
         let body = resp.text().await.context("Failed to read response body")?;
         tracing::debug!(
             "TIDAL response (first 200 chars): {}",
-            body.char_indices().nth(200).map_or(&body[..], |(i, _)| &body[..i])
+            body.char_indices()
+                .nth(200)
+                .map_or(&body[..], |(i, _)| &body[..i])
         );
         serde_json::from_str(&body).context(format!(
             "Failed to parse TIDAL response from {}. Body preview: {}",
             url,
-            body.char_indices().nth(500).map_or(&body[..], |(i, _)| &body[..i])
+            body.char_indices()
+                .nth(500)
+                .map_or(&body[..], |(i, _)| &body[..i])
         ))
     }
 
