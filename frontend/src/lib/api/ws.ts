@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import { getApiBase } from '$lib/api/client';
 import { refreshPlaybackState } from '$lib/stores/player';
+import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
 
 export const wsConnected = writable(false);
 
@@ -52,6 +53,15 @@ export function connectWebSocket() {
 				data?.type === 'playback_failed'
 			) {
 				void refreshPlaybackState();
+			}
+			if (data?.type === 'connected') {
+				void loadTidalStatus();
+			}
+			if (data?.type === 'sync_progress' && data?.service === 'tidal') {
+				handleSyncProgress(data.progress ?? 0);
+			}
+			if (data?.type === 'library_synced') {
+				handleSyncComplete();
 			}
 		} catch {}
 	};

@@ -37,7 +37,14 @@ impl GaplessPlan {
 /// Build a playback transition plan from the current stream metadata and player settings.
 pub fn plan_from_stream(stream: Option<&StreamInfo>, settings: GaplessSettings) -> GaplessPlan {
     if !settings.enabled {
-        return GaplessPlan::disabled();
+        // Even without gapless, we need a small prebuffer to avoid starting playback
+        // with an empty buffer (causes stuttering). 500ms is enough to decode ~20+ packets.
+        return GaplessPlan {
+            enabled: false,
+            overlap_ms: 0,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
     }
 
     let overlap_ms = settings.crossfade_ms;
@@ -46,7 +53,7 @@ pub fn plan_from_stream(stream: Option<&StreamInfo>, settings: GaplessSettings) 
     let prebuffer_ms = if enabled {
         overlap_ms.saturating_add(250)
     } else {
-        0
+        500
     };
 
     GaplessPlan {
@@ -83,7 +90,7 @@ mod tests {
         let plan = plan_from_stream(Some(&stream("audio/flac")), GaplessSettings::new(true, 0));
         assert!(!plan.enabled);
         assert_eq!(plan.overlap_ms, 0);
-        assert_eq!(plan.prebuffer_ms, 0);
+        assert_eq!(plan.prebuffer_ms, 500); // still has startup buffer
     }
 
     #[test]
@@ -103,6 +110,7 @@ mod tests {
         let plan = plan_from_stream(Some(&stream("audio/ogg")), GaplessSettings::new(true, 1500));
         assert!(!plan.enabled);
         assert_eq!(plan.overlap_ms, 0);
+        assert_eq!(plan.prebuffer_ms, 500); // still has startup buffer
     }
 
     #[test]
@@ -110,7 +118,7 @@ mod tests {
         let plan = plan_from_crossfade(1500);
         assert!(!plan.enabled);
         assert_eq!(plan.overlap_ms, 0);
-        assert_eq!(plan.prebuffer_ms, 0);
+        assert_eq!(plan.prebuffer_ms, 500); // still has startup buffer
         assert!(!plan.requires_stream_metadata);
     }
 }

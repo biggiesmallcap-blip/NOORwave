@@ -6,7 +6,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
 use futures::StreamExt as _;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -271,8 +271,8 @@ fn run_runtime_loop(
     });
 
     info!(
-        "Playback runtime ready on {} at {} Hz / {} channels",
-        state.device_name, state.device_sample_rate, state.device_channels
+        "Playback runtime ready on {} at {} Hz / {} channels / {:?}",
+        state.device_name, state.device_sample_rate, state.device_channels, output_sample_format
     );
 
     while let Ok(command) = command_rx.recv() {
@@ -776,6 +776,12 @@ fn write_output_buffer<T>(
 
     let ready_to_start = guard.is_ready();
     if ready_to_start && !guard.started {
+        info!(
+            "[NOOR-DIAG] playback starting: {} samples buffered, threshold {}, callback size {}",
+            guard.samples.len().saturating_sub(guard.read_pos),
+            guard.start_threshold_samples,
+            data.len()
+        );
         guard.started = true;
     }
 
@@ -796,11 +802,16 @@ fn write_output_buffer<T>(
                 1.0f32
             }
         } else {
-            // Fade-in: engine whose total is not yet known (incoming, started at pos=0)
+            // Fade-in: only for engines explicitly marked as crossfade-incoming
+            // (fadein_start_samples != u64::MAX). Regular tracks play at full volume.
             let fadein_start = shared.fadein_start_samples.load(Ordering::Relaxed);
-            let elapsed = pos.saturating_sub(fadein_start);
-            if elapsed < xfade {
-                (elapsed as f32 / xfade as f32).min(1.0)
+            if fadein_start != u64::MAX {
+                let elapsed = pos.saturating_sub(fadein_start);
+                if elapsed < xfade {
+                    (elapsed as f32 / xfade as f32).min(1.0)
+                } else {
+                    1.0f32
+                }
             } else {
                 1.0f32
             }
@@ -931,10 +942,10 @@ fn write_output_buffer<T>(
         if total > 0 {
             let pos = shared.position_samples.load(Ordering::Relaxed);
             let threshold = NEAR_END_THRESHOLD_MS
-                * shared.device_sample_rate as u64
-                * shared.device_channels as u64
+                * shared.device_sample_rate as i64
+                * shared.device_channels as i64
                 / 1000;
-            if total.saturating_sub(pos) <= threshold {
+            if total.saturating_sub(pos) <= threshold as u64 {
                 shared.near_end_signaled.store(true, Ordering::Relaxed);
                 let _ = event_tx.send(PlaybackRuntimeEvent::NearEnd {
                     track_id: shared.track_id,
@@ -1041,7 +1052,7 @@ impl PlaybackSharedState {
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
-            fadein_start_samples: AtomicU64::new(0),
+            fadein_start_samples: AtomicU64::new(u64::MAX), // u64::MAX = no fade-in
             xfade_incoming: Mutex::new(Vec::new()),
             xfade_read_pos: AtomicU64::new(0),
             device_sample_rate,
@@ -1382,9 +1393,7 @@ fn decode_and_buffer_job(
                 let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
                 sb.copy_interleaved_ref(decoded);
 
-                // Channel-adapt and resample this packet's samples, then push to buffer.
-                // Releasing the lock between packets lets the CPAL callback drain freely.
-                // Thread-local reusable buffers avoid per-packet allocations in the hot decode path.
+                // Channel-adapt and resample this packet's samples into thread-local buffers.
                 let channelized_len = CHANNEL_BUF.with(|cell| {
                     let mut buf = cell.borrow_mut();
                     buf.clear();
@@ -1392,11 +1401,10 @@ fn decode_and_buffer_job(
                     adapt_channels_into(sb.samples(), decoded_channels as usize, device_channels as usize, &mut buf);
                     buf.len()
                 });
-                let resampled_len = RESAMPLE_BUF.with(|cell| {
+                RESAMPLE_BUF.with(|cell| {
                     let mut buf = cell.borrow_mut();
                     buf.clear();
-                    let cl = channelized_len;
-                    buf.reserve(cl * device_sample_rate as usize / decoded_sample_rate as usize + 16);
+                    buf.reserve(channelized_len * device_sample_rate as usize / decoded_sample_rate as usize + 16);
                     resample_interleaved_into_ptr(
                         CHANNEL_BUF.with(|c| c.borrow().as_ptr()),
                         decoded_channels as usize,
@@ -1405,19 +1413,21 @@ fn decode_and_buffer_job(
                         channelized_len,
                         &mut buf,
                     );
-                    buf.len()
                 });
 
-                let mut guard = shared
-                    .buffer
-                    .lock()
-                    .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                // Directly extend from the thread-local buffer without cloning.
-                RESAMPLE_BUF.with(|cell| {
+                // Flush decoded samples to the shared buffer each packet so the CPAL callback
+                // always has fresh data. Mutex hold time is microseconds — no meaningful contention.
+                RESAMPLE_BUF.with(|cell| -> Result<()> {
                     let buf = cell.borrow();
-                    guard.samples.extend_from_slice(&buf[..resampled_len]);
-                });
-                // Lock released here — CPAL callback can drain immediately
+                    if !buf.is_empty() {
+                        let mut guard = shared
+                            .buffer
+                            .lock()
+                            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+                        guard.samples.extend_from_slice(&buf);
+                    }
+                    Ok(())
+                })?;
             }
 
             // Apply fade-in / fade-out ramps and mark the stream complete.
@@ -1427,25 +1437,7 @@ fn decode_and_buffer_job(
                     .lock()
                     .map_err(|_| anyhow!("playback buffer poisoned"))?;
 
-                let crossfade_ms = job.gapless.overlap_ms as u64;
-                if crossfade_ms > 0 {
-                    let fade_samples =
-                        (crossfade_ms * device_sample_rate as u64 * device_channels as u64 / 1000)
-                            as usize;
-                    let total_len = guard.samples.len();
-                    if total_len > fade_samples * 2 {
-                        // Fade-in: first `fade_samples` ramp from 0 → 1
-                        for i in 0..fade_samples {
-                            let ramp = i as f32 / fade_samples as f32;
-                            guard.samples[i] *= ramp;
-                        }
-                        // Fade-out: last `fade_samples` ramp from 1 → 0
-                        for i in 0..fade_samples {
-                            let ramp = i as f32 / fade_samples as f32;
-                            guard.samples[total_len - fade_samples + i] *= 1.0 - ramp;
-                        }
-                    }
-                }
+                // Fade ramps are applied dynamically in the CPAL callback — no baking needed.
 
                 guard.mark_finished();
                 guard.samples.len() as u64

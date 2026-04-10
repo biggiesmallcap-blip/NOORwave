@@ -695,7 +695,7 @@ fn build_session_taste_profile(
 
         if let Some(track) = track_map.get(&track_id) {
             feedback_tracks.push((**track).clone());
-            feedback_entries.push((**track, completed));
+            feedback_entries.push(((**track).clone(), completed));
         }
     }
 
@@ -850,7 +850,7 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
                 .position(|(i, t)| !visited[i] && t.album_id.map_or(true, |aid| aid != last_id))
                 .unwrap_or_else(|| {
                     // Fallback: pick the first unvisited track.
-                    tracks.iter().enumerate().find(|(i, _)| !visited[i]).map(|(i, _)| i).unwrap_or(0)
+                    tracks.iter().enumerate().find(|(i, _)| !visited[*i]).map(|(i, _)| i).unwrap_or(0)
                 })
         } else {
             0

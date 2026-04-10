@@ -3,6 +3,13 @@
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, getApiBase, type PlaybackRuntimeInfo } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
+	import {
+		tidalStatus,
+		tidalUserId,
+		syncStatus,
+		syncProgress,
+		loadTidalStatus as refreshTidalStatus
+	} from '$lib/stores/tidal';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
@@ -13,13 +20,9 @@
 		'NOOR cannot reach the local server on port 3333, so it cannot verify your current TIDAL session.';
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
-	let tidalStatus = $state<'disconnected' | 'connecting' | 'connected'>('disconnected');
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
 	let userCode = $state('');
 	let verifyUrl = $state('');
-	let tidalUserId = $state('');
-	let syncStatus = $state<'idle' | 'syncing' | 'done'>('idle');
-	let syncProgress = $state<number | null>(null);
 	let errorMsg = $state('');
 	let playbackRuntime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
@@ -39,18 +42,9 @@
 
 			if (latest.type === 'connected') {
 				markServerOnline();
-				void loadTidalStatus();
+				void refreshTidalStatus();
 				void loadPlaybackRuntime();
 				void loadMbStatus();
-			}
-
-			if (latest.type === 'sync_progress' && latest.service === 'tidal' && syncStatus === 'syncing') {
-				syncProgress = Math.max(0, Math.min(100, Math.round((latest.progress ?? 0) * 100)));
-			}
-
-			if (latest.type === 'library_synced' && syncStatus === 'syncing') {
-				syncStatus = 'done';
-				syncProgress = 100;
 			}
 
 			if (latest.type === 'sync_progress' && latest.service === 'musicbrainz') {
@@ -68,7 +62,7 @@
 			}
 		});
 
-		void loadTidalStatus();
+		void refreshTidalStatus();
 		void loadPlaybackRuntime();
 		void loadMbStatus();
 
@@ -96,30 +90,8 @@
 		serverStatus = 'offline';
 	}
 
-	async function loadTidalStatus() {
-		try {
-			const resp = await fetch(`${getApiBase()}/api/tidal/status`);
-			markServerOnline();
-			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-			const data = await resp.json();
-			if (data.connected) {
-				tidalStatus = 'connected';
-				tidalUserId = data.user_id;
-				userCode = '';
-				verifyUrl = '';
-			} else {
-				tidalStatus = 'disconnected';
-				tidalUserId = '';
-			}
-		} catch (error) {
-			if (isFetchConnectionError(error)) {
-				markServerOffline();
-			}
-		}
-	}
-
 	async function connectTidal() {
-		tidalStatus = 'connecting';
+		tidalStatus.set('connecting');
 		errorMsg = '';
 		try {
 			const resp = await fetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
@@ -137,21 +109,19 @@
 					markServerOnline();
 					const pollData = await pollResp.json();
 					if (pollData.status === 'authenticated') {
-						tidalStatus = 'connected';
-						tidalUserId = pollData.user_id;
+						tidalStatus.set('connected');
+						tidalUserId.set(pollData.user_id);
 						userCode = '';
 						verifyUrl = '';
 						if (pollTimer) clearInterval(pollTimer);
 						pollTimer = null;
 					}
 				} catch (error) {
-					if (isFetchConnectionError(error)) {
-						markServerOffline();
-					}
+					if (isFetchConnectionError(error)) markServerOffline();
 				}
 			}, 3000);
 		} catch (e) {
-			tidalStatus = 'disconnected';
+			tidalStatus.set('disconnected');
 			if (isFetchConnectionError(e)) {
 				markServerOffline();
 				errorMsg = SERVER_UNREACHABLE_MESSAGE;
@@ -163,8 +133,8 @@
 	}
 
 	async function syncLibrary() {
-		syncStatus = 'syncing';
-		syncProgress = 0;
+		syncStatus.set('syncing');
+		syncProgress.set(0);
 		errorMsg = '';
 		try {
 			const resp = await fetch(`${getApiBase()}/api/tidal/sync`, { method: 'POST' });
@@ -175,8 +145,8 @@
 				throw new Error(data.message ?? 'Sync could not start');
 			}
 		} catch (e) {
-			syncStatus = 'idle';
-			syncProgress = null;
+			syncStatus.set('idle');
+			syncProgress.set(null);
 			if (isFetchConnectionError(e)) {
 				markServerOffline();
 				errorMsg = SERVER_UNREACHABLE_MESSAGE;
@@ -192,12 +162,12 @@
 			const resp = await fetch(`${getApiBase()}/api/tidal/logout`, { method: 'POST' });
 			markServerOnline();
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-			tidalStatus = 'disconnected';
-			tidalUserId = '';
+			tidalStatus.set('disconnected');
+			tidalUserId.set('');
 			userCode = '';
 			verifyUrl = '';
-			syncStatus = 'idle';
-			syncProgress = null;
+			syncStatus.set('idle');
+			syncProgress.set(null);
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
 				markServerOffline();
@@ -284,18 +254,18 @@
 	let tidalBadgeLabel = $derived(
 		serverStatus === 'offline'
 			? 'TIDAL unknown'
-			: tidalStatus === 'connected'
+			: $tidalStatus === 'connected'
 				? 'TIDAL connected'
-				: tidalStatus === 'connecting'
+				: $tidalStatus === 'connecting'
 					? 'Authorizing TIDAL'
 					: 'TIDAL offline'
 	);
 	let tidalBadgeTone = $derived<BadgeTone>(
 		serverStatus === 'offline'
 			? 'warning'
-			: tidalStatus === 'connected'
+			: $tidalStatus === 'connected'
 				? 'success'
-				: tidalStatus === 'connecting'
+				: $tidalStatus === 'connecting'
 					? 'active'
 					: 'muted'
 	);
@@ -360,7 +330,7 @@
 	{/if}
 
 	<section class="stat-grid">
-		<MetricPair label="Sync" value={syncStatus === 'syncing' ? `${syncProgress ?? 0}%` : syncStatus === 'done' ? 'Done' : 'Ready'} copy="Current TIDAL library sync state." />
+		<MetricPair label="Sync" value={$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : 'Ready'} copy="Current TIDAL library sync state." />
 		<MetricPair label="Enrichment" value={`${enrichmentPercent}%`} copy="Tracks with MusicBrainz genre coverage." />
 		<MetricPair label="Output" value={playbackRuntime?.device_name ?? 'Waiting'} copy="Current playback target." />
 	</section>
@@ -370,21 +340,21 @@
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Sign in once, then NOOR can sync favorites, playlists, and playback-ready metadata." />
 
-				{#if serverStatus === 'offline' && tidalStatus !== 'connecting'}
+				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
 					<div class="auth-card glass">
 						<p class="page-copy">
 							NOOR cannot reach the backend on port 3333, so it cannot confirm whether your saved
 							TIDAL session is still active.
 						</p>
 						<div class="action-row">
-							<button class="btn btn-glass" onclick={() => void loadTidalStatus()}>Retry status</button>
+							<button class="btn btn-glass" onclick={() => void refreshTidalStatus()}>Retry status</button>
 						</div>
 					</div>
-				{:else if tidalStatus === 'disconnected'}
+				{:else if $tidalStatus === 'disconnected'}
 					<div class="action-row">
 						<button class="btn btn-primary" onclick={connectTidal}>Connect TIDAL</button>
 					</div>
-				{:else if tidalStatus === 'connecting'}
+				{:else if $tidalStatus === 'connecting'}
 					<div class="auth-card glass">
 						<p class="page-copy">Finish authorization in the browser, then return here.</p>
 						<a class="verify-link" href={verifyUrl} target="_blank">{verifyUrl}</a>
@@ -395,14 +365,14 @@
 					<div class="info-list">
 						<div class="info-row">
 							<span>Signed in as</span>
-							<strong>{tidalUserId}</strong>
+							<strong>{$tidalUserId}</strong>
 						</div>
 						<div class="info-row">
 							<span>Sync state</span>
 							<strong>
-								{#if syncStatus === 'syncing'}
-									{syncProgress ?? 0}% complete
-								{:else if syncStatus === 'done'}
+								{#if $syncStatus === 'syncing'}
+									{$syncProgress ?? 0}% complete
+								{:else if $syncStatus === 'done'}
 									Library synced
 								{:else}
 									Ready to sync
@@ -411,8 +381,8 @@
 						</div>
 					</div>
 					<div class="action-row">
-						<button class="btn btn-primary" onclick={syncLibrary} disabled={syncStatus === 'syncing'}>
-							{syncStatus === 'syncing' ? 'Syncing…' : syncStatus === 'done' ? 'Sync again' : 'Sync library'}
+						<button class="btn btn-primary" onclick={syncLibrary} disabled={$syncStatus === 'syncing'}>
+							{$syncStatus === 'syncing' ? 'Syncing…' : $syncStatus === 'done' ? 'Sync again' : 'Sync library'}
 						</button>
 						<button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button>
 					</div>

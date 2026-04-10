@@ -143,6 +143,8 @@ impl TidalClient {
     pub fn new(access_token: String, country_code: String) -> Self {
         let http = reqwest::Client::builder()
             .user_agent("TIDAL_ANDROID/1039 okhttp/3.14.9")
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
         Self {
@@ -177,12 +179,12 @@ impl TidalClient {
         let body = resp.text().await.context("Failed to read response body")?;
         tracing::debug!(
             "TIDAL response (first 200 chars): {}",
-            &body[..body.len().min(200)]
+            body.char_indices().nth(200).map_or(&body[..], |(i, _)| &body[..i])
         );
         serde_json::from_str(&body).context(format!(
             "Failed to parse TIDAL response from {}. Body preview: {}",
             url,
-            &body[..body.len().min(500)]
+            body.char_indices().nth(500).map_or(&body[..], |(i, _)| &body[..i])
         ))
     }
 
