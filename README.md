@@ -100,6 +100,28 @@ npm run build
 3. Trigger a library sync — progress streams live via WebSocket
 4. Start playing
 
+### Portable MusicBrainz Snapshot
+
+If you want to move MusicBrainz enrichment between machines without copying the full `noor.db`, export just the portable enrichment snapshot:
+
+```bash
+python3 scripts/export_musicbrainz_enrichment.py --db noor.db --out-dir data/musicbrainz
+```
+
+That writes:
+
+- `data/musicbrainz/musicbrainz_checked.csv`
+- `data/musicbrainz/musicbrainz_genres.csv`
+- `data/musicbrainz/manifest.json`
+
+On the other machine, sync the library first so the `tracks` table exists, then import the snapshot:
+
+```bash
+python3 scripts/import_musicbrainz_enrichment.py --db noor.db --from-dir data/musicbrainz
+```
+
+The transfer is keyed by stable `tidal_id` values and genre `slug`, so it does not depend on matching local SQLite row IDs. Keep `noor.db` out of Git because it also contains local auth/session data.
+
 ---
 
 ## Architecture
