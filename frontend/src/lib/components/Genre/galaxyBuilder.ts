@@ -1,4 +1,4 @@
-import type { Genre, GenreHeat } from '$lib/api/client';
+import type { Genre, GenreHeat, GenreCoOccurrence, GenreCohort, GenreEvolutionPoint } from '$lib/api/client';
 import {
 	GALAXY_ROOT_RING_RADIUS,
 	ROOT_FAMILY_COLORS,
@@ -19,6 +19,7 @@ function nodeRadius(depth: number, trackCount: number): number {
 
 function edgeWeight(source: GalaxyNode, target: GalaxyNode, type: GalaxyEdge['type']): number {
 	const averageHeat = (source.heatNorm + target.heatNorm) / 2;
+	if (type === 'co-listening') return 0.08 + averageHeat * 0.52;
 	return type === 'parent-child' ? 0.14 + averageHeat * 0.86 : 0.05 + averageHeat * 0.35;
 }
 
@@ -77,7 +78,10 @@ function placeChildren(
 			radius: nodeRadius(depth, child.track_count ?? 0),
 			heatNorm,
 			color: palette.color,
-			glowColor: palette.glowColor
+			glowColor: palette.glowColor,
+			orbitRadius: 0,
+			cohortId: null,
+			evolutionHistory: []
 		};
 
 		nodes.push(node);
@@ -104,25 +108,155 @@ function placeChildren(
 	});
 }
 
-export function buildGalaxyData(genres: Genre[], heat: GenreHeat[]): GalaxyData {
+/**
+ * Compute orbit radius for each node: genres you listen to frequently
+ * orbit closer to center; neglected ones drift outward.
+ */
+function computeOrbitRadii(nodes: GalaxyNode[], maxListenCount: number): number {
+	const maxRadius = GALAXY_ROOT_RING_RADIUS * 0.85;
+	const minRadius = 40;
+	let maxRadiusUsed = 0;
+
+	nodes.forEach(node => {
+		if (maxListenCount === 0) {
+			node.orbitRadius = maxRadius;
+		} else {
+			const inverseHeat = 1 - Math.log1p(node.listenCount) / Math.log1p(maxListenCount);
+			node.orbitRadius = minRadius + inverseHeat * (maxRadius - minRadius);
+		}
+		maxRadiusUsed = Math.max(maxRadiusUsed, node.orbitRadius);
+	});
+
+	return maxRadiusUsed;
+}
+
+/**
+ * Assign cohort IDs to nodes based on cohort data from backend.
+ */
+function assignCohorts(nodes: GalaxyNode[], cohorts: GenreCohort[]): Map<number, string> {
+	const assignment = new Map<number, string>();
+	for (const cohort of cohorts) {
+		const ids = cohort.genre_ids ?? [];
+		for (const genreId of ids) {
+			assignment.set(genreId, cohort.id);
+		}
+	}
+	for (const node of nodes) {
+		node.cohortId = assignment.get(node.id) ?? null;
+	}
+	return assignment;
+}
+
+/**
+ * Attach evolution history to nodes.
+ */
+function attachEvolution(nodes: GalaxyNode[], evolution: GenreEvolutionPoint[]) {
+	const byGenreId = new Map<number, { periodStart: string; listenCount: number }[]>();
+	for (const point of evolution) {
+		const list = byGenreId.get(point.genre_id) ?? [];
+		list.push({ periodStart: point.period_start, listenCount: point.listen_count });
+		byGenreId.set(point.genre_id, list);
+	}
+	// Sort each list chronologically
+	for (const [, points] of byGenreId) {
+		points.sort((a, b) => a.periodStart.localeCompare(b.periodStart));
+	}
+	for (const node of nodes) {
+		node.evolutionHistory = byGenreId.get(node.id) ?? [];
+	}
+}
+
+/**
+ * Build co-listening edges from backend co-occurrence data.
+ */
+function buildCoListeningEdges(
+	nodes: GalaxyNode[],
+	coOccurrences: GenreCoOccurrence[]
+): GalaxyEdge[] {
+	const nodeById = new Map(nodes.map(n => [n.id, n]));
+	const edges: GalaxyEdge[] = [];
+
+	for (const pair of coOccurrences) {
+		const nodeA = nodeById.get(pair.genre_a_id);
+		const nodeB = nodeById.get(pair.genre_b_id);
+		if (!nodeA || !nodeB) continue;
+
+		// Skip if already connected by taxonomy
+		const existingTaxonomyEdge = edges.find(
+			e => (e.sourceId === nodeA.id && e.targetId === nodeB.id) ||
+			     (e.sourceId === nodeB.id && e.targetId === nodeA.id)
+		);
+		if (existingTaxonomyEdge) continue;
+
+		edges.push({
+			sourceId: nodeA.id,
+			targetId: nodeB.id,
+			type: 'co-listening',
+			weight: pair.jaccard
+		});
+	}
+
+	return edges;
+}
+
+export function buildGalaxyData(
+	genres: Genre[],
+	heat: GenreHeat[],
+	options: {
+		coOccurrences?: GenreCoOccurrence[];
+		cohorts?: GenreCohort[];
+		evolution?: GenreEvolutionPoint[];
+		listeningDriven?: boolean;
+	} = {}
+): GalaxyData {
 	if (genres.length === 0) {
 		return { nodes: [], edges: [] };
 	}
 
-	const heatById = new Map(heat.map((entry) => [entry.genre_id, entry]));
+	const { coOccurrences = [], cohorts = [], evolution = [], listeningDriven = false } = options;
+
+	const heatById = new Map(heat.map(entry => [entry.genre_id, entry]));
 	const maxListenCount = heat.reduce((max, entry) => Math.max(max, entry.listen_count), 0);
 	const nodes: GalaxyNode[] = [];
 	const edges: GalaxyEdge[] = [];
 	const rootCount = genres.length;
 
+	// Phase 1: Compute orbit radii for listening-driven layout
+	if (listeningDriven) {
+		computeOrbitRadii(nodes, maxListenCount);
+	}
+
+	// Assign cohorts
+	assignCohorts(nodes, cohorts);
+
+	// Attach evolution history
+	attachEvolution(nodes, evolution);
+
 	genres.forEach((root, index) => {
 		const familyKey = familyKeyFromSlug(root.slug);
 		const palette = ROOT_FAMILY_COLORS[familyKey];
-		const angle = -Math.PI / 2 + (Math.PI * 2 * index) / rootCount;
 		const rootHeat = heatById.get(root.id);
 		const listenCount = rootHeat?.listen_count ?? 0;
 		const totalListenedMs = rootHeat?.total_listened_ms ?? 0;
 		const heatNorm = maxListenCount > 0 ? Math.log1p(listenCount) / Math.log1p(maxListenCount) : 0;
+
+		let x: number, y: number, angle: number;
+
+		if (listeningDriven) {
+			// Distribute on a ring but shift by heat — hotter genres pull toward top
+			const baseAngle = (Math.PI * 2 * index) / rootCount;
+			const heatOffset = (1 - heatNorm) * Math.PI * 0.15;
+			angle = baseAngle + heatOffset;
+			const rootOrbitRadius = maxListenCount > 0
+				? 200 + (1 - heatNorm) * 180
+				: GALAXY_ROOT_RING_RADIUS;
+			x = Math.cos(angle) * rootOrbitRadius;
+			y = Math.sin(angle) * rootOrbitRadius;
+		} else {
+			angle = -Math.PI / 2 + (Math.PI * 2 * index) / rootCount;
+			x = Math.cos(angle) * GALAXY_ROOT_RING_RADIUS;
+			y = Math.sin(angle) * GALAXY_ROOT_RING_RADIUS;
+		}
 
 		const rootNode: GalaxyNode = {
 			id: root.id,
@@ -136,14 +270,19 @@ export function buildGalaxyData(genres: Genre[], heat: GenreHeat[]): GalaxyData 
 			trackCount: root.track_count ?? 0,
 			listenCount,
 			totalListenedMs,
-			x: Math.cos(angle) * GALAXY_ROOT_RING_RADIUS,
-			y: Math.sin(angle) * GALAXY_ROOT_RING_RADIUS,
+			x,
+			y,
 			vx: 0,
 			vy: 0,
 			radius: nodeRadius(0, root.track_count ?? 0),
 			heatNorm,
 			color: palette.color,
-			glowColor: palette.glowColor
+			glowColor: palette.glowColor,
+			orbitRadius: listeningDriven ? (maxListenCount > 0
+				? 200 + (1 - heatNorm) * 180
+				: GALAXY_ROOT_RING_RADIUS) : 0,
+			cohortId: cohorts.find(c => c.genre_ids.includes(root.id))?.id ?? null,
+			evolutionHistory: []
 		};
 
 		nodes.push(rootNode);
@@ -158,11 +297,15 @@ export function buildGalaxyData(genres: Genre[], heat: GenreHeat[]): GalaxyData 
 			root.id,
 			familyKey,
 			root.name,
-			angle
+			listeningDriven ? Math.atan2(y, x) : angle
 		);
 	});
 
-	const roots = nodes.filter((node) => node.depth === 0);
+	// Attach evolution to root nodes too
+	attachEvolution(nodes, evolution);
+
+	// Sibling edges between roots
+	const roots = nodes.filter(node => node.depth === 0);
 	for (let index = 0; index < roots.length; index += 1) {
 		const source = roots[index];
 		const target = roots[(index + 1) % roots.length];
@@ -175,9 +318,15 @@ export function buildGalaxyData(genres: Genre[], heat: GenreHeat[]): GalaxyData 
 		});
 	}
 
-	runSimulation(nodes, edges, 200);
+	// Phase 2: Add co-listening edges (emergent cross-genre bridges)
+	if (coOccurrences.length > 0) {
+		const coEdges = buildCoListeningEdges(nodes, coOccurrences);
+		edges.push(...coEdges);
+	}
 
-	const nodeById = new Map(nodes.map((node) => [node.id, node]));
+	runSimulation(nodes, edges, 200, { listeningDriven });
+
+	const nodeById = new Map(nodes.map(node => [node.id, node]));
 	for (const edge of edges) {
 		const source = nodeById.get(edge.sourceId);
 		const target = nodeById.get(edge.targetId);

@@ -7,6 +7,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_003,
     MIGRATION_004,
     MIGRATION_005,
+    MIGRATION_006,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -295,6 +296,19 @@ CREATE INDEX idx_albums_favorite ON albums(is_favorite);
 
 const MIGRATION_005: &str = r#"
 ALTER TABLE playback_state ADD COLUMN automix_discover_new INTEGER NOT NULL DEFAULT 0;
+"#;
+
+const MIGRATION_006: &str = r#"
+CREATE TABLE IF NOT EXISTS sync_metadata (
+    service TEXT PRIMARY KEY,
+    last_sync_at TEXT DEFAULT (datetime('now')),
+    auto_sync_daily INTEGER NOT NULL DEFAULT 0,
+    last_sync_track_count INTEGER DEFAULT 0,
+    last_sync_album_count INTEGER DEFAULT 0
+);
+-- Seed TIDAL sync row
+INSERT OR IGNORE INTO sync_metadata (service, last_sync_at, auto_sync_daily)
+VALUES ('tidal', datetime('now'), 0);
 "#;
 
 const MIGRATION_004: &str = r#"

@@ -127,6 +127,61 @@ async fn main() -> Result<()> {
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
     }));
 
+    // Check for auto-sync daily services and trigger sync if needed
+    {
+        let state_read = state.read().await;
+        let auto_sync_services = state_read
+            .db
+            .with_conn(|conn| db::queries::get_auto_sync_services(conn))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to query auto-sync services: {}", e);
+                Ok(vec![])
+            })
+            .unwrap_or_default();
+        drop(state_read);
+
+        if !auto_sync_services.is_empty() {
+            for service in &auto_sync_services {
+                tracing::info!(
+                    target: "noor.auto_sync",
+                    event = "startup_sync",
+                    service = %service,
+                    "Auto-sync daily enabled — triggering sync on startup"
+                );
+            }
+            // Spawn background sync for TIDAL if enabled
+            if auto_sync_services.iter().any(|s| s == "tidal") {
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    // Wait a bit for server to fully start
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    
+                    match server::routes::trigger_auto_sync(&state_clone, "tidal").await {
+                        Ok(stats) => {
+                            tracing::info!(
+                                target: "noor.auto_sync",
+                                event = "startup_sync_complete",
+                                service = "tidal",
+                                tracks = stats.tracks,
+                                albums = stats.albums,
+                                "Auto-sync daily completed on startup"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "noor.auto_sync",
+                                event = "startup_sync_failed",
+                                service = "tidal",
+                                error = %e,
+                                "Auto-sync daily failed on startup"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     // Start HTTP + WebSocket server
     let addr = std::env::var("NOOR_ADDR").unwrap_or_else(|_| "0.0.0.0:3333".to_string());
     info!("Starting server on http://{}", addr);

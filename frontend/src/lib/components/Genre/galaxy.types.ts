@@ -45,13 +45,41 @@ export interface GalaxyNode {
 	heatNorm: number;
 	color: string;
 	glowColor: string;
+	// Phase 1: listening-driven topology
+	orbitRadius: number;
+	cohortId: string | null;
+	// Phase 3: evolution data
+	evolutionHistory: { periodStart: string; listenCount: number }[];
 }
 
 export interface GalaxyEdge {
 	sourceId: number;
 	targetId: number;
-	type: 'parent-child' | 'sibling';
+	type: 'parent-child' | 'sibling' | 'co-listening';
 	weight: number;
+}
+
+export interface CoListeningEdge {
+	genreA: number;
+	genreB: number;
+	coListenCount: number;
+	jaccard: number;
+}
+
+export interface GalaxyCohort {
+	id: string;
+	label: string;
+	icon: string;
+	genreIds: number[];
+	listenCount: number;
+}
+
+export interface GalaxyConfig {
+	viewMode: 'map' | 'constellations' | 'mood' | 'heat' | 'paths';
+	listeningDriven: boolean;
+	showCohorts: boolean;
+	showEvolution: boolean;
+	showCoListening: boolean;
 }
 
 export interface Camera {

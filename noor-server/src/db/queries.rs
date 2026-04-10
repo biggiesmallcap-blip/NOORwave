@@ -1,6 +1,7 @@
 use super::models::*;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -1076,6 +1077,316 @@ pub fn get_behavior_metrics(conn: &Connection) -> Result<AnalyticsBehavior> {
         repeat_track_count,
         active_days,
     })
+}
+
+// ─── Sync Metadata ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncInfo {
+    pub service: String,
+    pub last_sync_at: String,
+    pub auto_sync_daily: bool,
+    pub last_sync_track_count: i64,
+    pub last_sync_album_count: i64,
+}
+
+pub fn get_sync_info(conn: &Connection, service: &str) -> Result<Option<SyncInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT service, last_sync_at, auto_sync_daily, last_sync_track_count, last_sync_album_count
+         FROM sync_metadata WHERE service = ?1",
+    )?;
+    let result = stmt.query_row([service], |row| {
+        Ok(SyncInfo {
+            service: row.get(0)?,
+            last_sync_at: row.get(1)?,
+            auto_sync_daily: row.get::<_, i64>(2)? != 0,
+            last_sync_track_count: row.get(3)?,
+            last_sync_album_count: row.get(4)?,
+        })
+    }).optional()?;
+    Ok(result)
+}
+
+pub fn update_sync_timestamp(conn: &Connection, service: &str, track_count: i64, album_count: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_metadata (service, last_sync_at, auto_sync_daily, last_sync_track_count, last_sync_album_count)
+         VALUES (?1, datetime('now'), 0, ?2, ?3)
+         ON CONFLICT(service) DO UPDATE SET
+             last_sync_at = datetime('now'),
+             last_sync_track_count = ?2,
+             last_sync_album_count = ?3",
+        rusqlite::params![service, track_count, album_count],
+    )?;
+    Ok(())
+}
+
+pub fn set_auto_sync_daily(conn: &Connection, service: &str, enabled: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_metadata SET auto_sync_daily = ?1 WHERE service = ?2",
+        rusqlite::params![if enabled { 1 } else { 0 }, service],
+    )?;
+    Ok(())
+}
+
+pub fn get_auto_sync_services(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT service FROM sync_metadata WHERE auto_sync_daily = 1")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+// ─── Genre Co-Occurrence (co-listening pairs) ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreCoOccurrence {
+    pub genre_a_id: i64,
+    pub genre_a_name: String,
+    pub genre_b_id: i64,
+    pub genre_b_name: String,
+    pub co_listen_count: i64,
+    pub jaccard: f64,
+}
+
+/// Find genre-genre pairs that are co-listened within the same session window.
+/// Two genres "co-occur" if a user listened to tracks from both genres within
+/// `window_minutes` of each other (default 30 min). Returns pairs with at least
+/// `min_count` co-occurrences, sorted by Jaccard similarity.
+pub fn get_genre_co_occurrence(
+    conn: &Connection,
+    days: i64,
+    window_minutes: i64,
+    min_count: i64,
+) -> Result<Vec<GenreCoOccurrence>> {
+    let window_seconds = window_minutes * 60;
+    let mut stmt = conn.prepare(
+        "WITH recent_listens AS (
+            SELECT lh.track_id, lh.started_at, lh.id AS listen_id
+            FROM listen_history lh
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+        ),
+        genre_listens AS (
+            SELECT tg.genre_id, rl.started_at, rl.listen_id
+            FROM recent_listens rl
+            JOIN track_genres tg ON tg.track_id = rl.track_id
+        ),
+        pairs AS (
+            SELECT
+                MIN(a.genre_id) AS genre_a,
+                MAX(a.genre_id) AS genre_b,
+                COUNT(*) AS raw_count
+            FROM genre_listens a
+            JOIN genre_listens b
+                ON b.listen_id >= a.listen_id
+               AND b.listen_id <= a.listen_id + ?2
+               AND b.genre_id > a.genre_id
+            GROUP BY genre_a, genre_b
+            HAVING raw_count >= ?3
+        ),
+        genre_totals AS (
+            SELECT genre_id, COUNT(DISTINCT listen_id) AS total_listens
+            FROM genre_listens
+            GROUP BY genre_id
+        )
+        SELECT
+            ga.id, ga.name,
+            gb.id, gb.name,
+            p.raw_count,
+            CAST(p.raw_count AS REAL) /
+                (gt_a.total_listens + gt_b.total_listens - p.raw_count) AS jaccard
+        FROM pairs p
+        JOIN genres ga ON ga.id = p.genre_a
+        JOIN genres gb ON gb.id = p.genre_b
+        JOIN genre_totals gt_a ON gt_a.genre_id = p.genre_a
+        JOIN genre_totals gt_b ON gt_b.genre_id = p.genre_b
+        ORDER BY jaccard DESC, p.raw_count DESC",
+    )?;
+
+    let rows = stmt.query_map(
+        params![days, window_seconds, min_count],
+        |row| {
+            Ok(GenreCoOccurrence {
+                genre_a_id: row.get(0)?,
+                genre_a_name: row.get(1)?,
+                genre_b_id: row.get(2)?,
+                genre_b_name: row.get(3)?,
+                co_listen_count: row.get(4)?,
+                jaccard: row.get(5)?,
+            })
+        },
+    )?;
+
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+// ─── Genre Cohorts (personal clusters from time-based listening) ─────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreCohort {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub genre_ids: Vec<i64>,
+    pub listen_count: i64,
+    pub total_listened_ms: i64,
+}
+
+/// Derive personal listening cohorts by analyzing time-of-day and day-of-week
+/// patterns. Groups genres into clusters like "Late Night", "Morning Commute",
+/// "Weekend", "Deep Focus", etc.
+pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort>> {
+    // We bucket listens into 4 time-of-day slots + weekend/weekday
+    // Slot 0: 0-6 (Night), Slot 1: 6-12 (Morning), Slot 2: 12-18 (Afternoon), Slot 3: 18-24 (Evening)
+    // Then find genres that dominate each slot.
+    let mut stmt = conn.prepare(
+        "WITH recent AS (
+            SELECT
+                lh.id AS listen_id,
+                lh.track_id,
+                lh.started_at,
+                lh.duration_listened_ms,
+                CAST(strftime('%H', lh.started_at) AS INTEGER) AS hour,
+                CAST(strftime('%w', lh.started_at) AS INTEGER) AS dow
+            FROM listen_history lh
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+        ),
+        genre_buckets AS (
+            SELECT
+                tg.genre_id,
+                g.name AS genre_name,
+                CASE
+                    WHEN r.hour < 6 THEN 'night'
+                    WHEN r.hour < 12 THEN 'morning'
+                    WHEN r.hour < 18 THEN 'afternoon'
+                    ELSE 'evening'
+                END AS time_slot,
+                CASE
+                    WHEN r.dow = 0 OR r.dow = 6 THEN 'weekend'
+                    ELSE 'weekday'
+                END AS day_type,
+                COUNT(*) AS listens,
+                COALESCE(SUM(r.duration_listened_ms), 0) AS listened_ms
+            FROM recent r
+            JOIN track_genres tg ON tg.track_id = r.track_id
+            JOIN genres g ON g.id = tg.genre_id
+            GROUP BY tg.genre_id, time_slot, day_type
+        ),
+        dominant AS (
+            SELECT
+                genre_id,
+                genre_name,
+                time_slot,
+                day_type,
+                listens,
+                listened_ms,
+                ROW_NUMBER() OVER (PARTITION BY genre_id ORDER BY listens DESC) AS rn
+            FROM genre_buckets
+        )
+        SELECT genre_id, genre_name, time_slot, day_type, listens, listened_ms
+        FROM dominant
+        WHERE rn = 1
+        ORDER BY listens DESC",
+    )?;
+
+    let rows = stmt.query_map(params![days], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+
+    let entries: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
+
+    // Build cohorts from the dominant assignments
+    let mut cohort_map: std::collections::HashMap<String, GenreCohort> =
+        std::collections::HashMap::new();
+
+    for (genre_id, genre_name, time_slot, day_type, listens, listened_ms) in entries {
+        let (id, label, icon) = match (time_slot.as_str(), day_type.as_str()) {
+            ("night", _) => ("night_owl", "Night Owl", "🌙"),
+            ("morning", "weekday") => ("morning_commute", "Morning Commute", "☀"),
+            ("morning", "weekend") => ("lazy_morning", "Weekend Morning", "🌤"),
+            ("afternoon", "weekday") => ("afternoon_drift", "Afternoon Drift", "☁"),
+            ("afternoon", "weekend") => ("weekend_afternoon", "Weekend Afternoon", "🌿"),
+            ("evening", "weekday") => ("evening_wind_down", "Evening Wind-Down", "🌆"),
+            ("evening", "weekend") => ("weekend_evening", "Weekend Evening", "🎶"),
+            _ => ("other", "Other", "✦"),
+        };
+
+        let cohort = cohort_map
+            .entry(id.to_string())
+            .or_insert_with(|| GenreCohort {
+                id: id.to_string(),
+                label: label.to_string(),
+                icon: icon.to_string(),
+                genre_ids: vec![],
+                listen_count: 0,
+                total_listened_ms: 0,
+            });
+
+        cohort.genre_ids.push(genre_id);
+        cohort.listen_count += listens;
+        cohort.total_listened_ms += listened_ms;
+    }
+
+    let mut cohorts: Vec<_> = cohort_map.into_values().collect();
+    cohorts.sort_by(|a, b| b.listen_count.cmp(&a.listen_count));
+
+    Ok(cohorts)
+}
+
+// ─── Genre Evolution (time-sliced heat for temporal trails) ──────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreEvolutionPoint {
+    pub genre_id: i64,
+    pub genre_name: String,
+    pub period_start: String,
+    pub listen_count: i64,
+    pub total_listened_ms: i64,
+}
+
+/// Return genre heat broken into weekly time slices over the past N days.
+/// Each (genre_id, week_start) pair is one evolution point.
+pub fn get_genre_evolution(conn: &Connection, days: i64) -> Result<Vec<GenreEvolutionPoint>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE closure(ancestor_id, genre_id) AS (
+            SELECT id, id FROM genres
+            UNION ALL
+            SELECT closure.ancestor_id, g.id
+            FROM closure JOIN genres g ON g.parent_id = closure.genre_id
+        ),
+        weekly AS (
+            SELECT
+                tg.genre_id,
+                g.name AS genre_name,
+                date(lh.started_at, 'weekday 0', '-6 days') AS period_start,
+                COUNT(DISTINCT lh.id) AS listen_count,
+                COALESCE(SUM(lh.duration_listened_ms), 0) AS total_listened_ms
+            FROM listen_history lh
+            JOIN track_genres tg ON tg.track_id = lh.track_id
+            JOIN genres g ON g.id = tg.genre_id
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
+            GROUP BY tg.genre_id, period_start
+        )
+        SELECT genre_id, genre_name, period_start, listen_count, total_listened_ms
+        FROM weekly
+        ORDER BY genre_id, period_start",
+    )?;
+
+    let rows = stmt.query_map(params![days], |row| {
+        Ok(GenreEvolutionPoint {
+            genre_id: row.get(0)?,
+            genre_name: row.get(1)?,
+            period_start: row.get(2)?,
+            listen_count: row.get(3)?,
+            total_listened_ms: row.get(4)?,
+        })
+    })?;
+
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn get_discovery_candidate_tracks(conn: &Connection, limit: i64) -> Result<Vec<Track>> {

@@ -218,6 +218,32 @@ export interface GenreHeat {
 	total_listened_ms: number;
 }
 
+export interface GenreCoOccurrence {
+	genre_a_id: number;
+	genre_a_name: string;
+	genre_b_id: number;
+	genre_b_name: string;
+	co_listen_count: number;
+	jaccard: number;
+}
+
+export interface GenreCohort {
+	id: string;
+	label: string;
+	icon: string;
+	genre_ids: number[];
+	listen_count: number;
+	total_listened_ms: number;
+}
+
+export interface GenreEvolutionPoint {
+	genre_id: number;
+	genre_name: string;
+	period_start: string;
+	listen_count: number;
+	total_listened_ms: number;
+}
+
 export interface AnalyticsActivityPoint {
 	day: string;
 	listens: number;
@@ -428,6 +454,26 @@ export const api = {
 
 	getGenreHeat(days = 90) {
 		return fetchApi<{ heat: GenreHeat[] }>('/api/genres/heat', {
+			days: String(days)
+		});
+	},
+
+	getGenreCoOccurrence(days = 90, windowMinutes = 30, minCount = 3) {
+		return fetchApi<{ pairs: GenreCoOccurrence[] }>('/api/genres/co-occurrence', {
+			days: String(days),
+			window_minutes: String(windowMinutes),
+			min_count: String(minCount)
+		});
+	},
+
+	getGenreCohorts(days = 90) {
+		return fetchApi<{ cohorts: GenreCohort[] }>('/api/genres/cohorts', {
+			days: String(days)
+		});
+	},
+
+	getGenreEvolution(days = 90) {
+		return fetchApi<{ evolution: GenreEvolutionPoint[] }>('/api/genres/evolution', {
 			days: String(days)
 		});
 	},

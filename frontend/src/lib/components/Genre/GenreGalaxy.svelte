@@ -28,7 +28,8 @@
 		onSelect = () => {},
 		onToggleSeed = () => {},
 		onMix = () => {},
-		onZoomFamily = () => {}
+		onZoomFamily = () => {},
+		onEnterInterior = () => {}
 	}: {
 		nodes?: GalaxyNode[];
 		edges?: GalaxyEdge[];
@@ -45,6 +46,7 @@
 		onToggleSeed?: (id: number) => void;
 		onMix?: (id: number) => void;
 		onZoomFamily?: (familyId: number) => void;
+		onEnterInterior?: (id: number) => void;
 	} = $props();
 
 	let wrapEl: HTMLDivElement | null = null;
@@ -451,18 +453,21 @@
 			const activity = edgeActivity(edge);
 			const isSelectedEdge = selectedId !== null && (edge.sourceId === selectedId || edge.targetId === selectedId);
 			const emphasis = isSelectedEdge ? 1.28 : 1;
-			const opacity =
-				(edge.type === 'parent-child'
+
+			// Co-listening edges: dashed, lower opacity, silver-tinted
+			const isCoListening = edge.type === 'co-listening';
+			const baseOpacity = isCoListening
+				? 0.06 + edge.weight * 0.18
+				: edge.type === 'parent-child'
 					? 0.18 + edge.weight * 0.22
-					: 0.06 + edge.weight * 0.1) *
-				activity *
-				emphasis;
-			const lineWidth =
-				(edge.type === 'parent-child'
+					: 0.06 + edge.weight * 0.1;
+			const opacity = baseOpacity * activity * emphasis;
+			const baseWidth = isCoListening
+				? 0.5 + edge.weight * 1.2
+				: edge.type === 'parent-child'
 					? 0.8 + edge.weight * 1.5
-					: 0.6 + edge.weight * 0.9) *
-				(0.72 + activity * 0.42) *
-				emphasis;
+					: 0.6 + edge.weight * 0.9;
+			const lineWidth = baseWidth * (0.72 + activity * 0.42) * emphasis;
 			const dx = targetScreen.x - sourceScreen.x;
 			const dy = targetScreen.y - sourceScreen.y;
 			const distance = Math.max(1, Math.hypot(dx, dy));
@@ -471,21 +476,35 @@
 			const curve =
 				edge.type === 'sibling'
 					? Math.min(44, distance * 0.1)
-					: Math.min(26, distance * 0.06);
+					: isCoListening
+						? Math.min(60, distance * 0.14) // more arc for co-listening bridges
+						: Math.min(26, distance * 0.06);
 			const curveSign = ((edge.sourceId + edge.targetId) & 1) === 0 ? 1 : -1;
 			const controlX = (sourceScreen.x + targetScreen.x) * 0.5 + normalX * curve * curveSign;
 			const controlY = (sourceScreen.y + targetScreen.y) * 0.5 + normalY * curve * curveSign;
+
 			const gradient = ctx.createLinearGradient(sourceScreen.x, sourceScreen.y, targetScreen.x, targetScreen.y);
-			gradient.addColorStop(0, hexToRgba(source.color, clamp(0.38 + edge.weight * 0.4, 0.35, 0.92)));
-			gradient.addColorStop(1, hexToRgba(target.color, clamp(0.28 + edge.weight * 0.36, 0.28, 0.84)));
+			if (isCoListening) {
+				// Silver/white bridges for co-listening
+				const bridgeAlpha = clamp(0.3 + edge.weight * 0.5, 0.3, 0.7);
+				gradient.addColorStop(0, `rgba(200, 210, 240, ${bridgeAlpha * 0.7})`);
+				gradient.addColorStop(0.5, `rgba(220, 225, 255, ${bridgeAlpha})`);
+				gradient.addColorStop(1, `rgba(200, 210, 240, ${bridgeAlpha * 0.7})`);
+			} else {
+				gradient.addColorStop(0, hexToRgba(source.color, clamp(0.38 + edge.weight * 0.4, 0.35, 0.92)));
+				gradient.addColorStop(1, hexToRgba(target.color, clamp(0.28 + edge.weight * 0.36, 0.28, 0.84)));
+			}
 
 			ctx.save();
 			ctx.beginPath();
 			ctx.globalAlpha = opacity;
 			ctx.lineWidth = lineWidth;
 			ctx.strokeStyle = gradient;
-			ctx.shadowBlur = edge.type === 'parent-child' ? 10 * edge.weight * (0.4 + activity * 0.8) : 0;
-			ctx.shadowColor = source.glowColor;
+			if (isCoListening) {
+				ctx.setLineDash([4, 6]);
+			}
+			ctx.shadowBlur = isCoListening ? 6 * edge.weight * activity : edge.type === 'parent-child' ? 10 * edge.weight * (0.4 + activity * 0.8) : 0;
+			ctx.shadowColor = isCoListening ? 'rgba(180, 190, 240, 0.3)' : source.glowColor;
 			ctx.moveTo(sourceScreen.x, sourceScreen.y);
 			ctx.quadraticCurveTo(controlX, controlY, targetScreen.x, targetScreen.y);
 			ctx.stroke();
@@ -734,6 +753,19 @@
 				ctx.shadowBlur = 8;
 				ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
 				ctx.fillText(label, screen.x, chipY + chipHeight / 2);
+
+				// Cohort indicator dot below the label chip
+				if (node.cohortId) {
+					const dotY = chipY + chipHeight + 6;
+					const dotRadius = 3;
+					ctx.globalAlpha = alpha * activity * 0.7;
+					ctx.beginPath();
+					ctx.arc(screen.x, dotY, dotRadius, 0, Math.PI * 2);
+					ctx.fillStyle = 'rgba(255, 220, 160, 0.85)';
+					ctx.shadowBlur = 6;
+					ctx.shadowColor = 'rgba(255, 200, 120, 0.4)';
+					ctx.fill();
+				}
 			} else {
 				ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
 				ctx.shadowBlur = 10;
@@ -1057,6 +1089,12 @@
 		onpointercancel={finishPointer}
 		onpointerleave={handlePointerLeave}
 		onwheel={handleWheel}
+		ondblclick={(event) => {
+			const node = getNodeAtPoint(event.offsetX, event.offsetY);
+			if (node) {
+				onEnterInterior(node.id);
+			}
+		}}
 	></canvas>
 
 	{#if hoveredNode && mixPillPosition && !isDragging}

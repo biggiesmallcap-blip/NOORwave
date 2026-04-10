@@ -12,7 +12,9 @@ function repulsionForDepth(depth: number): number {
 }
 
 function springLength(source: GalaxyNode, target: GalaxyNode): number {
-	return Math.max(source.depth, target.depth) <= 1 ? 96 : 42;
+	if (source.depth === 0 && target.depth === 0) return 220;
+	if (source.depth <= 1 && target.depth <= 1) return 96;
+	return 42;
 }
 
 function clampVelocity(node: GalaxyNode) {
@@ -24,15 +26,38 @@ function clampVelocity(node: GalaxyNode) {
 	node.vy *= ratio;
 }
 
-export function runSimulation(nodes: GalaxyNode[], edges: GalaxyEdge[], iterations = 200): GalaxyNode[] {
+export function runSimulation(
+	nodes: GalaxyNode[],
+	edges: GalaxyEdge[],
+	iterations = 200,
+	options: { listeningDriven?: boolean } = {}
+): GalaxyNode[] {
 	if (nodes.length === 0) return nodes;
 
-	const nodeById = new Map(nodes.map((node) => [node.id, node]));
+	const { listeningDriven = false } = options;
+	const nodeById = new Map(nodes.map(node => [node.id, node]));
 	const rootAnchors = new Map(
-		nodes.filter((node) => node.depth === 0).map((node) => [node.id, { x: node.x, y: node.y }])
+		nodes.filter(node => node.depth === 0).map(node => [node.id, { x: node.x, y: node.y }])
 	);
 
+	// Pre-compute cohort centroids for Phase 2
+	const cohortCentroids = new Map<string, { x: number; y: number; count: number }>();
+	if (listeningDriven) {
+		for (const node of nodes) {
+			if (!node.cohortId) continue;
+			const entry = cohortCentroids.get(node.cohortId) ?? { x: 0, y: 0, count: 0 };
+			entry.x += node.x;
+			entry.y += node.y;
+			entry.count += 1;
+			cohortCentroids.set(node.cohortId, entry);
+		}
+	}
+
+	// Pre-compute co-listening edge list for gravity
+	const coListeningEdges = edges.filter(e => e.type === 'co-listening');
+
 	for (let tick = 0; tick < iterations; tick += 1) {
+		// All-pairs repulsion
 		for (let i = 0; i < nodes.length; i += 1) {
 			const a = nodes[i];
 			for (let j = i + 1; j < nodes.length; j += 1) {
@@ -52,6 +77,7 @@ export function runSimulation(nodes: GalaxyNode[], edges: GalaxyEdge[], iteratio
 			}
 		}
 
+		// Spring attraction for all edges
 		for (const edge of edges) {
 			const source = nodeById.get(edge.sourceId);
 			const target = nodeById.get(edge.targetId);
@@ -60,8 +86,22 @@ export function runSimulation(nodes: GalaxyNode[], edges: GalaxyEdge[], iteratio
 			const dx = target.x - source.x;
 			const dy = target.y - source.y;
 			const distance = Math.max(Math.hypot(dx, dy), 1);
-			const targetLength = edge.type === 'sibling' ? 220 : springLength(source, target);
-			const stiffness = edge.type === 'sibling' ? 0.0048 : 0.024;
+
+			let targetLength: number;
+			let stiffness: number;
+
+			if (edge.type === 'co-listening') {
+				// Co-listening edges: stronger pull for higher jaccard
+				targetLength = 120 - edge.weight * 60; // 60-120px range
+				stiffness = 0.012 * edge.weight; // weighted by co-listening strength
+			} else if (edge.type === 'sibling') {
+				targetLength = 220;
+				stiffness = 0.0048;
+			} else {
+				targetLength = springLength(source, target);
+				stiffness = 0.024;
+			}
+
 			const displacement = (distance - targetLength) * stiffness;
 			const fx = (dx / distance) * displacement;
 			const fy = (dy / distance) * displacement;
@@ -72,31 +112,58 @@ export function runSimulation(nodes: GalaxyNode[], edges: GalaxyEdge[], iteratio
 			target.vy -= fy;
 		}
 
-		const centroids = new Map<number, { x: number; y: number; count: number }>();
+		// Family centroids (taxonomy-based grouping)
+		const familyCentroids = new Map<number, { x: number; y: number; count: number }>();
 		for (const node of nodes) {
-			const entry = centroids.get(node.familyId) ?? { x: 0, y: 0, count: 0 };
+			const entry = familyCentroids.get(node.familyId) ?? { x: 0, y: 0, count: 0 };
 			entry.x += node.x;
 			entry.y += node.y;
 			entry.count += 1;
-			centroids.set(node.familyId, entry);
+			familyCentroids.set(node.familyId, entry);
 		}
 
 		for (const node of nodes) {
-			if (node.depth > 0) {
-				const centroid = centroids.get(node.familyId);
-				if (centroid && centroid.count > 0) {
-					const centerX = centroid.x / centroid.count;
-					const centerY = centroid.y / centroid.count;
-					node.vx += (centerX - node.x) * 0.0033;
-					node.vy += (centerY - node.y) * 0.0033;
+			// Phase 1: Listening-driven orbital pull toward center
+			if (listeningDriven && node.orbitRadius > 0) {
+				const distFromCenter = Math.hypot(node.x, node.y);
+				const targetDist = node.orbitRadius;
+				const orbitalPull = (targetDist - distFromCenter) * 0.0018;
+				if (distFromCenter > 0) {
+					node.vx += (node.x / distFromCenter) * orbitalPull;
+					node.vy += (node.y / distFromCenter) * orbitalPull;
 				}
 			}
 
+			// Phase 2: Cohort gravity pull
+			if (listeningDriven && node.cohortId) {
+				const centroid = cohortCentroids.get(node.cohortId);
+				if (centroid && centroid.count > 1) {
+					const centerX = centroid.x / centroid.count;
+					const centerY = centroid.y / centroid.count;
+					node.vx += (centerX - node.x) * 0.0022;
+					node.vy += (centerY - node.y) * 0.0022;
+				}
+			}
+
+			// Taxonomy family pull (always, weaker when listening-driven)
+			if (node.depth > 0) {
+				const centroid = familyCentroids.get(node.familyId);
+				if (centroid && centroid.count > 0) {
+					const centerX = centroid.x / centroid.count;
+					const centerY = centroid.y / centroid.count;
+					const pullStrength = listeningDriven ? 0.0012 : 0.0033;
+					node.vx += (centerX - node.x) * pullStrength;
+					node.vy += (centerY - node.y) * pullStrength;
+				}
+			}
+
+			// Root anchoring
 			if (node.depth === 0) {
 				const anchor = rootAnchors.get(node.id);
 				if (anchor) {
-					node.vx += (anchor.x - node.x) * 0.01;
-					node.vy += (anchor.y - node.y) * 0.01;
+					const anchorStrength = listeningDriven ? 0.006 : 0.01;
+					node.vx += (anchor.x - node.x) * anchorStrength;
+					node.vy += (anchor.y - node.y) * anchorStrength;
 				}
 			}
 

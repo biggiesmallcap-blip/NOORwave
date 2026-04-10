@@ -302,6 +302,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/logout", post(tidal_logout))
+        .route("/api/sync/info", get(get_sync_info))
+        .route("/api/sync/auto", post(set_auto_sync))
         // Status
         .route("/api/status", get(status))
         .with_state(state)
@@ -316,7 +318,7 @@ async fn get_tracks(
     let sort_dir = params.sort_dir.as_deref().unwrap_or("desc");
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
-    let favorite_only = params.favorite_only.unwrap_or(true);
+    let favorite_only = params.favorite_only.unwrap_or(false);
 
     state
         .db
@@ -333,7 +335,7 @@ async fn get_track_count(
     State(state): State<SharedState>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let favorite_only = params.favorite_only.unwrap_or(true);
+    let favorite_only = params.favorite_only.unwrap_or(false);
     let state = state.read().await;
     state
         .db
@@ -353,7 +355,7 @@ async fn get_albums(
     let sort_dir = params.sort_dir.as_deref().unwrap_or("asc");
     let limit = params.limit.unwrap_or(100);
     let offset = params.offset.unwrap_or(0);
-    let favorite_only = params.favorite_only.unwrap_or(true);
+    let favorite_only = params.favorite_only.unwrap_or(false);
 
     state
         .db
@@ -3466,6 +3468,76 @@ async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({ "status": "logged_out" }))
 }
 
+/// Get sync info (last sync time, auto-sync settings).
+async fn get_sync_info(
+    State(state): State<SharedState>,
+    Query(params): Query<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<Value>, StatusCode> {
+    let service = params.get("service").and_then(|v| v.as_str()).unwrap_or("tidal");
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let info = queries::get_sync_info(conn, service).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(json!({ "sync": info })))
+        })
+}
+
+/// Set auto-sync daily toggle.
+#[derive(Debug, Deserialize)]
+struct AutoSyncRequest {
+    service: Option<String>,
+    enabled: bool,
+}
+
+async fn set_auto_sync(
+    State(state): State<SharedState>,
+    Json(payload): Json<AutoSyncRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let service = payload.service.as_deref().unwrap_or("tidal");
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            queries::set_auto_sync_daily(conn, service, payload.enabled)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(json!({ "service": service, "auto_sync_daily": payload.enabled })))
+        })
+}
+
+/// Public function to trigger auto-sync from server startup.
+pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Result<SyncStats> {
+    if service != "tidal" {
+        return Err(anyhow::anyhow!("Unsupported auto-sync service: {}", service));
+    }
+
+    // Get tokens
+    let persisted_tokens = load_persisted_tidal_tokens(state).await?;
+    let tokens = {
+        let s = state.read().await;
+        s.tidal_tokens
+            .clone()
+            .or(persisted_tokens)
+            .ok_or_else(|| anyhow::anyhow!("No TIDAL tokens available for auto-sync"))?
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    
+    // Run sync
+    let stats = run_tidal_sync_with_reauth(&client, state, tokens).await?;
+    
+    // Record sync timestamp
+    state.read().await.db.with_conn(|conn| {
+        queries::update_sync_timestamp(conn, "tidal", stats.tracks, stats.albums)
+    })?;
+    
+    // Broadcast event
+    let s = state.read().await;
+    let _ = s.event_tx.send(AppEvent::LibrarySynced);
+    
+    Ok(stats)
+}
+
 /// Sync TIDAL library into local database.
 async fn tidal_sync_library(
     State(state): State<SharedState>,
@@ -3517,6 +3589,12 @@ async fn tidal_sync_library(
                     playlists = stats.playlists,
                     "TIDAL sync complete"
                 );
+                // Record sync timestamp in DB
+                if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
+                    queries::update_sync_timestamp(conn, "tidal", stats.tracks, stats.albums)
+                }) {
+                    tracing::warn!("Failed to record sync timestamp: {}", e);
+                }
                 let s = state_clone.read().await;
                 let _ = s.event_tx.send(AppEvent::LibrarySynced);
             }
@@ -4776,11 +4854,11 @@ fn collect_genre_values(value: &Value, output: &mut Vec<String>) {
 }
 
 #[derive(Default)]
-struct SyncStats {
-    artists: usize,
-    albums: usize,
-    tracks: usize,
-    playlists: usize,
+pub struct SyncStats {
+    pub artists: usize,
+    pub albums: usize,
+    pub tracks: usize,
+    pub playlists: usize,
 }
 
 #[cfg(test)]

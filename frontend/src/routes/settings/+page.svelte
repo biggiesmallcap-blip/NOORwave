@@ -14,7 +14,10 @@
 		tidalUserId,
 		syncStatus,
 		syncProgress,
-		loadTidalStatus as refreshTidalStatus
+		syncInfo,
+		loadTidalStatus as refreshTidalStatus,
+		loadSyncInfo,
+		setAutoSyncDaily
 	} from '$lib/stores/tidal';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
@@ -65,7 +68,7 @@
 		}
 	}
 
-	function countGenres(genres) {
+	function countGenres(genres: any[]): number {
 		let count = 0;
 		for (const genre of genres) {
 			count += 1 + countGenres(genre.children ?? []);
@@ -81,6 +84,7 @@
 			if (latest.type === 'connected') {
 				markServerOnline();
 				void refreshTidalStatus();
+				void loadSyncInfo();
 				void loadPlaybackRuntime();
 				void loadMbStatus();
 				void loadPortableSnapshot();
@@ -102,6 +106,7 @@
 		});
 
 		void refreshTidalStatus();
+		void loadSyncInfo();
 		void loadPlaybackRuntime();
 		void loadMbStatus();
 		void loadPortableSnapshot();
@@ -170,6 +175,28 @@
 				errorMsg = `Failed to connect: ${e}`;
 			}
 		}
+	}
+
+	function formatSyncDate(isoString: string): string {
+		if (!isoString) return 'Never';
+		// Handle both formats: with and without timezone
+		const date = isoString.endsWith('Z') || isoString.includes('+') 
+			? new Date(isoString) 
+			: new Date(isoString + 'Z');
+		const now = new Date();
+		const diffMs = now.getTime() - date.getTime();
+		const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+		const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+		if (diffHours < 1) return 'Just now';
+		if (diffHours < 24) return `${diffHours}h ago`;
+		if (diffDays < 7) return `${diffDays}d ago`;
+		return date.toLocaleDateString();
+	}
+
+	async function toggleAutoSync() {
+		const current = $syncInfo?.auto_sync_daily ?? false;
+		await setAutoSyncDaily(!current);
 	}
 
 	async function syncLibrary() {
@@ -477,15 +504,35 @@
 							<strong>{$tidalUserId}</strong>
 						</div>
 						<div class="info-row">
-							<span>Sync state</span>
+							<span>Last sync</span>
 							<strong>
 								{#if $syncStatus === 'syncing'}
 									{$syncProgress ?? 0}% complete
+								{:else if $syncInfo?.last_sync_at}
+									{formatSyncDate($syncInfo.last_sync_at)}
+									{#if $syncInfo.last_sync_track_count > 0}
+										<span class="sync-count">
+											({$syncInfo.last_sync_track_count.toLocaleString()} tracks)
+										</span>
+									{/if}
 								{:else if $syncStatus === 'done'}
-									Library synced
+									Just completed
 								{:else}
-									Ready to sync
+									Never synced
 								{/if}
+							</strong>
+						</div>
+						<div class="info-row">
+							<span>Auto-sync daily</span>
+							<strong>
+								<label class="toggle-switch">
+									<input
+										type="checkbox"
+										checked={$syncInfo?.auto_sync_daily ?? false}
+										onchange={() => void toggleAutoSync()}
+									/>
+									<span class="toggle-slider"></span>
+								</label>
 							</strong>
 						</div>
 					</div>
@@ -772,5 +819,64 @@
 		.action-row :global(.btn) {
 			width: 100%;
 		}
+	}
+
+	/* Toggle switch for auto-sync */
+	.toggle-switch {
+		position: relative;
+		display: inline-block;
+		width: 44px;
+		height: 24px;
+		cursor: pointer;
+	}
+
+	.toggle-switch input {
+		opacity: 0;
+		width: 0;
+		height: 0;
+	}
+
+	.toggle-slider {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: rgba(255, 255, 255, 0.12);
+		border-radius: 24px;
+		transition: background 0.2s ease;
+	}
+
+	.toggle-slider::before {
+		content: '';
+		position: absolute;
+		height: 18px;
+		width: 18px;
+		left: 3px;
+		bottom: 3px;
+		background: white;
+		border-radius: 50%;
+		transition: transform 0.2s ease;
+	}
+
+	.toggle-switch input:checked + .toggle-slider {
+		background: var(--accent);
+	}
+
+	.toggle-switch input:checked + .toggle-slider::before {
+		transform: translateX(20px);
+	}
+
+	.toggle-switch input:disabled + .toggle-slider {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.sync-count {
+		display: inline-block;
+		margin-left: 4px;
+		font-size: 0.85em;
+		color: rgba(255, 255, 255, 0.5);
+		font-weight: normal;
 	}
 </style>

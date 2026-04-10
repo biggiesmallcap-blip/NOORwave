@@ -1,17 +1,21 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
-	import { api, type Genre, type GenreHeat, type Track } from '$lib/api/client';
+	import { api, type Genre, type GenreHeat, type GenreCoOccurrence, type GenreCohort, type GenreEvolutionPoint, type Track } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
 	import GenrePanel from '$lib/components/Genre/GenrePanel.svelte';
+	import GenreInterior from '$lib/components/Genre/GenreInterior.svelte';
 	import { buildGalaxyData } from '$lib/components/Genre/galaxyBuilder';
 	import type { GalaxyViewMode } from '$lib/components/Genre/galaxy.types';
 
 	let taxonomy = $state<Genre[]>([]);
 	let heat = $state<GenreHeat[]>([]);
+	let coOccurrences = $state<GenreCoOccurrence[]>([]);
+	let cohorts = $state<GenreCohort[]>([]);
+	let evolution = $state<GenreEvolutionPoint[]>([]);
 	let selectedId = $state<number | null>(null);
 	let loading = $state(true);
 	let refreshingTopology = $state(false);
@@ -31,13 +35,26 @@
 	let labelsEnabled = $state(true);
 	let heatEnabled = $state(true);
 	let autoDrift = $state(true);
+	let listeningDriven = $state(false);
+	let showCohorts = $state(true);
+	let showCoListening = $state(true);
 	let searchQuery = $state('');
 	let focusNodeId = $state<number | null>(null);
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
+	let interiorOpen = $state(false);
 	const viewModes: GalaxyViewMode[] = ['map', 'constellations', 'mood', 'heat', 'paths'];
 
-	let galaxyData = $derived(taxonomy.length > 0 ? buildGalaxyData(taxonomy, heat) : { nodes: [], edges: [] });
+	let galaxyData = $derived(
+		taxonomy.length > 0
+			? buildGalaxyData(taxonomy, heat, {
+					coOccurrences: showCoListening ? coOccurrences : [],
+					cohorts: showCohorts ? cohorts : [],
+					evolution,
+					listeningDriven
+				})
+			: { nodes: [], edges: [] }
+	);
 	let heatById = $derived(new Map(heat.map((entry) => [entry.genre_id, entry])));
 	let selectedNode = $derived(
 		selectedId === null ? null : galaxyData.nodes.find((node) => node.id === selectedId) ?? null
@@ -68,7 +85,27 @@
 			? rootStats.filter((root) => root.listens > 0).length - 1
 			: 0
 	);
+	let coListeningBridgeCount = $derived(
+		coOccurrences.filter((p) => p.jaccard > 0.1).length
+	);
+	let activeCohortCount = $derived(
+		cohorts.filter((c) => c.genre_ids.length > 0).length
+	);
 	let activeModeCopy = $derived.by(() => {
+		if (listeningDriven) {
+			switch (viewMode) {
+				case 'constellations':
+					return 'Your personal listening clusters, shaped by when and how you listen.';
+				case 'mood':
+					return 'Emotional field mapped to your taste gravity.';
+				case 'heat':
+					return 'Momentum halos — your current taste orbit.';
+				case 'paths':
+					return 'Co-listening bridges between genres you bridge in real life.';
+				default:
+					return 'Your personal genre cosmos — shaped by what you actually listen to.';
+			}
+		}
 		switch (viewMode) {
 			case 'constellations':
 				return 'Editorial scene clusters and orbit guides.';
@@ -92,6 +129,11 @@
 		}
 		return lineage;
 	});
+	let selectedNodeCohort = $derived(
+		selectedNode?.cohortId
+			? cohorts.find((c) => c.id === selectedNode.cohortId)
+			: null
+	);
 	let nearbyGenres = $derived.by(() => {
 		if (!selectedNode) return [] as string[];
 		const genre = genreById.get(selectedNode.id);
@@ -130,26 +172,35 @@
 	type GalaxySnapshot = {
 		genres: Genre[];
 		heat: GenreHeat[];
+		coOccurrences: GenreCoOccurrence[];
+		cohorts: GenreCohort[];
+		evolution: GenreEvolutionPoint[];
 	};
 
 	async function fetchGalaxySnapshot(): Promise<GalaxySnapshot> {
 		const genreResponse = await api.getGenres();
-		try {
-			const heatResponse = await api.getGenreHeat(90);
-			return {
-				genres: genreResponse.genres,
-				heat: heatResponse.heat
-			};
-		} catch (reason) {
+		const heatResponse = await api.getGenreHeat(90).catch((reason) => {
 			if (isNotFoundError(reason)) {
 				console.warn('Genre heat endpoint unavailable; rendering galaxy with zero heat.');
-				return {
-					genres: genreResponse.genres,
-					heat: buildZeroHeat(genreResponse.genres)
-				};
+				return { heat: buildZeroHeat(genreResponse.genres) };
 			}
 			throw reason;
-		}
+		});
+
+		// Fetch new data in parallel — these are lightweight queries
+		const [coOccurrencesResp, cohortsResp, evolutionResp] = await Promise.allSettled([
+			api.getGenreCoOccurrence(90, 30, 3),
+			api.getGenreCohorts(90),
+			api.getGenreEvolution(90)
+		]);
+
+		return {
+			genres: genreResponse.genres,
+			heat: heatResponse.heat,
+			coOccurrences: coOccurrencesResp.status === 'fulfilled' ? coOccurrencesResp.value.pairs : [],
+			cohorts: cohortsResp.status === 'fulfilled' ? cohortsResp.value.cohorts : [],
+			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : []
+		};
 	}
 
 	function clearGalaxyCaches() {
@@ -168,6 +219,9 @@
 		const nextIds = new Set(flattenGenres(snapshot.genres).map((genre) => genre.id));
 		taxonomy = snapshot.genres;
 		heat = snapshot.heat;
+		coOccurrences = snapshot.coOccurrences;
+		cohorts = snapshot.cohorts;
+		evolution = snapshot.evolution;
 
 		if (invalidateCaches) {
 			clearGalaxyCaches();
@@ -268,14 +322,19 @@
 	async function refreshHeat() {
 		refreshingHeat = true;
 		try {
-			const response = await api.getGenreHeat(90);
-			heat = response.heat;
+			const [heatResp, coResp, cohortResp, evolResp] = await Promise.allSettled([
+				api.getGenreHeat(90),
+				api.getGenreCoOccurrence(90, 30, 3),
+				api.getGenreCohorts(90),
+				api.getGenreEvolution(90)
+			]);
+			if (heatResp.status === 'fulfilled') heat = heatResp.value.heat;
+			else if (isNotFoundError(heatResp.reason)) heat = buildZeroHeat(taxonomy);
+			if (coResp.status === 'fulfilled') coOccurrences = coResp.value.pairs;
+			if (cohortResp.status === 'fulfilled') cohorts = cohortResp.value.cohorts;
+			if (evolResp.status === 'fulfilled') evolution = evolResp.value.evolution;
 		} catch (reason) {
-			if (isNotFoundError(reason)) {
-				heat = buildZeroHeat(taxonomy);
-				return;
-			}
-			console.error('Failed to refresh genre heat', reason);
+			console.error('Failed to refresh galaxy data', reason);
 		} finally {
 			refreshingHeat = false;
 		}
@@ -319,6 +378,7 @@
 
 	function handleSelect(id: number | null) {
 		selectedId = id;
+		interiorOpen = false;
 		actionError = null;
 		if (id === null) {
 			focusNodeId = null;
@@ -517,6 +577,7 @@
 					onToggleSeed={toggleSeed}
 					onMix={(id) => void handleMix(id)}
 					onZoomFamily={(familyId) => void loadArtistChipsForFamily(familyId)}
+					onEnterInterior={(id) => { handleSelect(id); interiorOpen = true; }}
 				/>
 			</div>
 
@@ -543,8 +604,13 @@
 					<div><strong>{taxonomy.length}</strong><span>families</span></div>
 					<div><strong>{galaxyData.nodes.length}</strong><span>mapped</span></div>
 					<div><strong>{activeThisMonthCount}</strong><span>active</span></div>
-					<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
-					<div><strong>{liveBridgeCount}</strong><span>bridges</span></div>
+					{#if listeningDriven}
+						<div><strong>{activeCohortCount}</strong><span>clusters</span></div>
+						<div><strong>{coListeningBridgeCount}</strong><span>bridges</span></div>
+					{:else}
+						<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
+						<div><strong>{liveBridgeCount}</strong><span>bridges</span></div>
+					{/if}
 				</div>
 			</div>
 
@@ -589,6 +655,15 @@
 
 				<button class="dock-btn" onclick={handleBackOut}>Back</button>
 				<button class="dock-btn" onclick={() => (resetViewToken += 1)}>Center map</button>
+				<button class:active={listeningDriven} class="dock-btn" onclick={() => (listeningDriven = !listeningDriven)}>
+					Gravity mode
+				</button>
+				<button class:active={showCohorts} class="dock-btn" onclick={() => (showCohorts = !showCohorts)}>
+					Clusters
+				</button>
+				<button class:active={showCoListening} class="dock-btn" onclick={() => (showCoListening = !showCoListening)}>
+					Bridges
+				</button>
 				<button class:active={labelsEnabled} class="dock-btn" onclick={() => (labelsEnabled = !labelsEnabled)}>
 					Labels
 				</button>
@@ -629,11 +704,21 @@
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
 				loading={selectedTrackLoading}
 				error={selectedTrackError}
-				open={selectedNode !== null}
+				open={selectedNode !== null && !interiorOpen}
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
 			/>
+
+			{#if interiorOpen && selectedNode}
+				<GenreInterior
+					node={selectedNode}
+					heat={selectedHeat}
+					cohortLabel={selectedNodeCohort?.label ?? null}
+					onClose={() => (interiorOpen = false)}
+					onPlayMix={() => selectedNode && void handleMix(selectedNode.id)}
+				/>
+			{/if}
 		{/if}
 	</div>
 </div>
@@ -742,6 +827,10 @@
 		display: grid;
 		grid-template-columns: repeat(5, minmax(0, 1fr));
 		gap: 8px;
+	}
+
+	.hud-stats:has(> :nth-child(6)) {
+		grid-template-columns: repeat(6, minmax(0, 1fr));
 	}
 
 	.hud-stats div {
