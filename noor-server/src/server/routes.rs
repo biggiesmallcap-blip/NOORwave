@@ -210,6 +210,9 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
         .route("/api/genres", get(get_genres))
         .route("/api/genres/heat", get(get_genre_heat))
+        .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
+        .route("/api/genres/cohorts", get(get_genre_cohorts))
+        .route("/api/genres/evolution", get(get_genre_evolution))
         .route("/api/genres/{id}/tracks", get(get_genre_tracks))
         .route("/api/playlists", get(get_playlists))
         .route("/api/playlists/{id}/tracks", get(get_playlist_tracks))
@@ -432,6 +435,70 @@ async fn get_genre_heat(
         .with_conn(|conn| {
             let heat = queries::get_genre_heat(conn, days)?;
             Ok(Json(json!({ "heat": heat })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct GenreCoOccurrenceParams {
+    days: Option<i64>,
+    window_minutes: Option<i64>,
+    min_count: Option<i64>,
+}
+
+async fn get_genre_co_occurrence(
+    State(state): State<SharedState>,
+    Query(params): Query<GenreCoOccurrenceParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let days = params.days.unwrap_or(90).max(1);
+    let window = params.window_minutes.unwrap_or(30).max(5);
+    let min = params.min_count.unwrap_or(3).max(1);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let pairs = queries::get_genre_co_occurrence(conn, days, window, min)?;
+            Ok(Json(json!({ "pairs": pairs })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct GenreCohortParams {
+    days: Option<i64>,
+}
+
+async fn get_genre_cohorts(
+    State(state): State<SharedState>,
+    Query(params): Query<GenreCohortParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let days = params.days.unwrap_or(90).max(1);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let cohorts = queries::get_genre_cohorts(conn, days)?;
+            Ok(Json(json!({ "cohorts": cohorts })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct GenreEvolutionParams {
+    days: Option<i64>,
+}
+
+async fn get_genre_evolution(
+    State(state): State<SharedState>,
+    Query(params): Query<GenreEvolutionParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let days = params.days.unwrap_or(90).max(7);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let evolution = queries::get_genre_evolution(conn, days)?;
+            Ok(Json(json!({ "evolution": evolution })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -1887,20 +1954,6 @@ async fn set_track_favorite(
         ));
     }
 
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "not_connected",
-                    "message": "Connect TIDAL before liking tracks.",
-                })),
-            )
-        })?;
-        (state.http_client.clone(), tokens)
-    };
-
     let track = {
         let state = state.read().await;
         state
@@ -1930,79 +1983,80 @@ async fn set_track_favorite(
             })?
     };
 
-    let tidal_id = track.tidal_id.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "track_not_remote",
-                "message": "This track is not linked to a TIDAL favorite.",
-            })),
-        )
-    })?;
+    // Try to sync with TIDAL if track has tidal_id and tokens are available
+    let tidal_id = track.tidal_id;
+    let has_tidal = tidal_id.is_some();
+    
+    if let (Some(tidal_id), Some(tokens)) = (tidal_id, {
+        let state = state.read().await;
+        state.tidal_tokens.clone()
+    }) {
+        // Only call TIDAL API if the state is actually changing
+        if track.is_favorite != payload.favorite {
+            let http_client = {
+                let state = state.read().await;
+                state.http_client.clone()
+            };
+            
+            let mutation_result = if payload.favorite {
+                tidal_mutations::add_favorite_track(
+                    &http_client,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    tidal_id,
+                    &tokens.country_code,
+                )
+                .await
+            } else {
+                tidal_mutations::remove_favorite_track(
+                    &http_client,
+                    &tokens.access_token,
+                    &tokens.user_id,
+                    tidal_id,
+                    &tokens.country_code,
+                )
+                .await
+            };
 
-    if track.is_favorite != payload.favorite {
-        let mutation_result = if payload.favorite {
-            tidal_mutations::add_favorite_track(
-                &http,
-                &tokens.access_token,
-                &tokens.user_id,
-                tidal_id,
-                &tokens.country_code,
-            )
-            .await
-        } else {
-            tidal_mutations::remove_favorite_track(
-                &http,
-                &tokens.access_token,
-                &tokens.user_id,
-                tidal_id,
-                &tokens.country_code,
-            )
-            .await
-        };
-
-        mutation_result.map_err(|error| {
-            error!(
-                "Failed to {} favorite for track {} (tidal {}): {error}",
-                if payload.favorite { "set" } else { "clear" },
-                payload.track_id,
-                tidal_id
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "status": "favorite_update_failed",
-                    "message": if payload.favorite {
-                        "TIDAL did not accept the like request."
-                    } else {
-                        "TIDAL did not accept the unlike request."
-                    },
-                })),
-            )
-        })?;
+            if let Err(error) = mutation_result {
+                warn!(
+                    "Failed to sync {} favorite for track {} (tidal {}): {error}",
+                    if payload.favorite { "set" } else { "clear" },
+                    payload.track_id,
+                    tidal_id
+                );
+                // Continue to local DB update even if TIDAL sync fails
+            }
+        }
+    } else if has_tidal && track.is_favorite != payload.favorite {
+        warn!(
+            "Track {} has tidal_id but no tokens available for sync",
+            payload.track_id
+        );
     }
 
+    // Always update local database
     {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
                 conn.execute(
-                    "UPDATE tracks SET is_favorite = ?1 WHERE tidal_id = ?2",
-                    rusqlite::params![if payload.favorite { 1 } else { 0 }, tidal_id],
+                    "UPDATE tracks SET is_favorite = ?1 WHERE id = ?2",
+                    rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.track_id],
                 )?;
                 Ok(())
             })
             .map_err(|error| {
                 error!(
-                    "Failed to persist favorite state for track {} (tidal {}): {error}",
-                    payload.track_id, tidal_id
+                    "Failed to persist favorite state for track {}: {error}",
+                    payload.track_id
                 );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
                         "status": "favorite_persist_failed",
-                        "message": "TIDAL updated, but NOOR couldn't refresh the local favorite state.",
+                        "message": "NOOR couldn't refresh the local favorite state.",
                     })),
                 )
             })?;

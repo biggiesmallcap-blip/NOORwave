@@ -42,6 +42,7 @@
 	let mobileScrollDirection = $state<'up' | 'down' | 'idle'>('idle');
 	let mobileQueueOpen = $state(false);
 	let mobileFavoritePending = $state(false);
+	let desktopFavoritePending = $state(false);
 	let mobileScrollTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastScrollY = 0;
 
@@ -240,7 +241,7 @@
 	});
 
 	async function handleMobileFavoriteToggle() {
-		if (!$currentTrack || !$currentTrack.tidal_id || mobileFavoritePending) return;
+		if (!$currentTrack || mobileFavoritePending) return;
 		mobileFavoritePending = true;
 		try {
 			await toggleTrackFavorite($currentTrack.id);
@@ -248,6 +249,22 @@
 			mobileFavoritePending = false;
 		}
 	}
+
+	async function handleDesktopFavoriteToggle() {
+		if (!$currentTrack || desktopFavoritePending) return;
+		desktopFavoritePending = true;
+		try {
+			await toggleTrackFavorite($currentTrack.id);
+		} finally {
+			desktopFavoritePending = false;
+		}
+	}
+
+	$effect(() => {
+		if ($currentTrack) {
+			desktopFavoritePending = false;
+		}
+	});
 </script>
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible}>
@@ -360,6 +377,16 @@
 			</div>
 
 			<div class="transport">
+				<button
+					class:active={$currentTrack?.is_favorite}
+					class="tp-btn tp-like-btn"
+					title={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+					aria-label={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+					onclick={() => void handleDesktopFavoriteToggle()}
+					disabled={desktopFavoritePending || !$currentTrack}
+				>
+					{$currentTrack?.is_favorite ? '♥' : '♡'}
+				</button>
 				<button
 					class:active={$shuffleMode !== 'off'}
 					class="tp-btn"
@@ -669,9 +696,9 @@
 					class="mobile-player-chip"
 					class:active={$currentTrack.is_favorite}
 					type="button"
-					disabled={mobileFavoritePending || !$currentTrack.tidal_id}
-					aria-label={$currentTrack.is_favorite ? 'Unlike track' : 'Like track'}
-					title={$currentTrack.is_favorite ? 'Remove from TIDAL favorites' : 'Save to TIDAL favorites'}
+					disabled={mobileFavoritePending || !$currentTrack}
+					aria-label={$currentTrack.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+					title={$currentTrack.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
 					onclick={() => void handleMobileFavoriteToggle()}
 				>
 					<span>{$currentTrack.is_favorite ? '♥' : '♡'}</span>
@@ -1163,6 +1190,33 @@
 		border-color: var(--accent-line);
 		color: var(--accent-strong);
 		box-shadow: 0 0 14px color-mix(in srgb, var(--accent-glow) 70%, transparent);
+	}
+
+	.tp-like-btn {
+		font-size: 18px;
+		color: var(--text-secondary);
+		transition:
+			transform var(--motion-fast),
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast),
+			box-shadow var(--motion-fast);
+	}
+
+	.tp-like-btn:active {
+		transform: scale(0.92);
+	}
+
+	.tp-like-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.tp-like-btn.active {
+		color: #ff4d6d;
+		background: color-mix(in srgb, #ff4d6d 15%, transparent);
+		border-color: color-mix(in srgb, #ff4d6d 40%, transparent);
+		box-shadow: 0 0 12px color-mix(in srgb, #ff4d6d 30%, transparent);
 	}
 
 	.tp-play {
