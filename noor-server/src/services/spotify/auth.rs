@@ -21,7 +21,7 @@ pub struct SpotifyTokens {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DeviceCodeResponse {
+pub struct DeviceCodeResponse {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
@@ -121,16 +121,16 @@ pub async fn poll_token(
         let error_body: serde_json::Value = response.json().await.unwrap_or_default();
         let error = error_body["error"].as_str().unwrap_or("unknown");
 
-        match error {
+        return match error {
             "authorization_pending" => Ok(None),
             "slow_down" => {
                 warn!("Spotify told us to slow down polling.");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                return Ok(None);
+                Ok(None)
             }
             "expired_token" => anyhow::bail!("Spotify device code expired"),
             _ => anyhow::bail!("Spotify poll error: {}", error),
-        }
+        };
     }
 
     anyhow::bail!("Unexpected Spotify poll status: {}", status)

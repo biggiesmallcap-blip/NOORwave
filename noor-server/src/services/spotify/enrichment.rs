@@ -72,7 +72,7 @@ where
                  WHERE t.id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')
                  LIMIT 2000", 
             )?;
-            stmt.query_map([], |row| {
+            Ok(stmt.query_map([], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -81,7 +81,7 @@ where
                 ))
             })?
             .filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>())
         })?;
 
     let total = tracks_to_enrich.len();
