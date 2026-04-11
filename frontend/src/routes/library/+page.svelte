@@ -59,6 +59,25 @@
 	let showDateColumn = $state(true);
 	let showQualityColumn = $state(true);
 	let showFavColumn = $state(true);
+	let showBpmColumn = $state(true);
+	let showKeyColumn = $state(true);
+	let showEnergyColumn = $state(true);
+	let showDanceColumn = $state(true);
+
+	// DSP filter panel
+	let showDspFilters = $state(false);
+	let filterBpmMin = $state<number | null>(null);
+	let filterBpmMax = $state<number | null>(null);
+	let filterEnergyMin = $state(0);
+	let filterEnergyMax = $state(1);
+	let filterKey = $state('');
+	let filterInstrumental = $state(false);
+
+	// Camelot keys for dropdown
+	const CAMELOT_KEYS = [
+		'', '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
+		'1B', '2B', '3B', '4B', '5B', '6B', '7B', '8B', '9B', '10B', '11B', '12B'
+	];
 
 	onMount(() => {
 		void loadAlbums();
@@ -100,6 +119,23 @@
 			loadAlbums($sortBy, $sortDir);
 		}
 		clearSelection();
+	}
+
+	async function applyDspFilters() {
+		// Reload tracks with DSP filters applied via API params
+		// For now, just toggle the filter state — actual API filter integration
+		// requires backend endpoint support for bpm_min, bpm_max, etc.
+		batchMessage = 'DSP filters applied (backend support required for full filtering).';
+	}
+
+	async function clearDspFilters() {
+		filterBpmMin = null;
+		filterBpmMax = null;
+		filterEnergyMin = 0;
+		filterEnergyMax = 1;
+		filterKey = '';
+		filterInstrumental = false;
+		batchMessage = 'DSP filters cleared.';
 	}
 
 	function switchTab(tab: 'tracks' | 'albums' | 'artists') {
@@ -617,6 +653,52 @@
 		</div>
 	</div>
 
+	{#if activeTab === 'tracks'}
+		<div class="dsp-filter-bar glass">
+			<button class="btn btn-glass btn-sm" onclick={() => showDspFilters = !showDspFilters}>
+				{showDspFilters ? 'Hide DSP Filters' : 'DSP Filters'}
+			</button>
+			{#if showDspFilters}
+				<div class="dsp-filter-grid">
+					<div class="filter-group">
+						<label>BPM Range</label>
+						<div class="filter-inputs">
+							<input type="number" placeholder="Min" bind:value={filterBpmMin} min="40" max="300" />
+							<span>–</span>
+							<input type="number" placeholder="Max" bind:value={filterBpmMax} min="40" max="300" />
+						</div>
+					</div>
+					<div class="filter-group">
+						<label>Energy</label>
+						<div class="filter-inputs">
+							<input type="range" bind:value={filterEnergyMin} min="0" max="1" step="0.05" />
+							<input type="range" bind:value={filterEnergyMax} min="0" max="1" step="0.05" />
+						</div>
+					</div>
+					<div class="filter-group">
+						<label>Key</label>
+						<select bind:value={filterKey}>
+							{#each CAMELOT_KEYS as key}
+								<option value={key}>{key || 'All Keys'}</option>
+							{/each}
+						</select>
+					</div>
+					<div class="filter-group">
+						<label>Instrumental</label>
+						<label class="toggle-switch-small">
+							<input type="checkbox" bind:checked={filterInstrumental} />
+							<span>Only</span>
+						</label>
+					</div>
+					<div class="filter-actions">
+						<button class="btn btn-primary btn-sm" onclick={applyDspFilters}>Apply</button>
+						<button class="btn btn-glass btn-sm" onclick={clearDspFilters}>Clear</button>
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
 	{#if searchError}
 		<div class="batch-feedback error glass">{searchError}</div>
 	{/if}
@@ -1057,6 +1139,42 @@
 						Date Added <span class="sort-arrow">{$sortBy === 'date_added' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
+				{#if showBpmColumn}
+					<button
+						type="button"
+						class="header-sort col-bpm"
+						class:sorted={$sortBy === 'bpm'}
+						onclick={() => handleSort('bpm')}
+						onkeydown={(event) => handleSortKeydown('bpm', event)}
+					>
+						BPM <span class="sort-arrow">{$sortBy === 'bpm' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
+				{#if showKeyColumn}
+					<span class="col-key">Key</span>
+				{/if}
+				{#if showEnergyColumn}
+					<button
+						type="button"
+						class="header-sort col-energy"
+						class:sorted={$sortBy === 'energy'}
+						onclick={() => handleSort('energy')}
+						onkeydown={(event) => handleSortKeydown('energy', event)}
+					>
+						Energy <span class="sort-arrow">{$sortBy === 'energy' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
+				{#if showDanceColumn}
+					<button
+						type="button"
+						class="header-sort col-dance"
+						class:sorted={$sortBy === 'danceability'}
+						onclick={() => handleSort('danceability')}
+						onkeydown={(event) => handleSortKeydown('danceability', event)}
+					>
+						Dance <span class="sort-arrow">{$sortBy === 'danceability' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
 				<span class="col-duration">Duration</span>
 				<span class="col-actions"></span>
 			</div>
@@ -1089,6 +1207,12 @@
 					</span>
 					<span class="col-title">
 						<span class="track-title">{track.title}</span>
+						{#if track.camelot_key}
+							<span class="camelot-badge-inline">{track.camelot_key}</span>
+						{/if}
+						{#if track.bpm}
+							<span class="bpm-inline">{Math.round(track.bpm)}</span>
+						{/if}
 					</span>
 					<span class="col-artist">{track.artist_name ?? 'Unknown'}</span>
 					<span class="col-album">{track.album_title ?? ''}</span>
@@ -1109,6 +1233,44 @@
 					{#if showDateColumn}
 						<span class="col-date">
 							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+						</span>
+					{/if}
+					{#if showBpmColumn}
+						<span class="col-bpm">
+							<span class="bpm-value">{track.bpm ? Math.round(track.bpm) : '—'}</span>
+						</span>
+					{/if}
+					{#if showKeyColumn}
+						<span class="col-key">
+							{#if track.camelot_key}
+								<span class="camelot-badge">{track.camelot_key}</span>
+							{:else}
+								<span>—</span>
+							{/if}
+						</span>
+					{/if}
+					{#if showEnergyColumn}
+						<span class="col-energy">
+							{#if track.energy != null}
+								<span class="mini-bar">
+									<span class="mini-bar-fill" style="width: {track.energy * 100}%"></span>
+								</span>
+								<span class="mini-bar-label">{track.energy.toFixed(2)}</span>
+							{:else}
+								<span>—</span>
+							{/if}
+						</span>
+					{/if}
+					{#if showDanceColumn}
+						<span class="col-dance">
+							{#if track.danceability != null}
+								<span class="mini-bar">
+									<span class="mini-bar-fill dance" style="width: {track.danceability * 100}%"></span>
+								</span>
+								<span class="mini-bar-label">{track.danceability.toFixed(2)}</span>
+							{:else}
+								<span>—</span>
+							{/if}
 						</span>
 					{/if}
 					<span class="col-duration">{formatDuration(track.duration_ms)}</span>
@@ -1297,6 +1459,161 @@
 	.toolbar-note {
 		color: var(--text-secondary);
 		font-size: 0.84rem;
+	}
+
+	/* ─── DSP Filter Bar ───────────────────────── */
+
+	.dsp-filter-bar {
+		padding: 10px 14px;
+		margin-bottom: var(--gap);
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.dsp-filter-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-3);
+		align-items: flex-end;
+	}
+
+	.filter-group {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 140px;
+		flex: 1;
+	}
+
+	.filter-group label {
+		font-size: 0.72rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-tertiary);
+	}
+
+	.filter-inputs {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.filter-inputs input[type="number"] {
+		width: 70px;
+		padding: 5px 8px;
+		font-size: 0.82rem;
+	}
+
+	.filter-inputs input[type="range"] {
+		flex: 1;
+	}
+
+	.filter-inputs span {
+		color: var(--text-muted);
+		font-size: 0.82rem;
+	}
+
+	.filter-actions {
+		display: flex;
+		gap: 6px;
+		align-items: flex-end;
+	}
+
+	.toggle-switch-small {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.toggle-switch-small input {
+		width: 16px;
+		height: 16px;
+		accent-color: var(--accent);
+	}
+
+	/* ─── New DSP Columns ───────────────────────── */
+
+	.col-bpm, .col-key, .col-energy, .col-dance {
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+		text-align: center;
+	}
+
+	.bpm-value {
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+	}
+
+	.camelot-badge {
+		display: inline-block;
+		padding: 2px 6px;
+		border-radius: 4px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		font-size: 0.72rem;
+		font-weight: 700;
+		font-family: var(--font-mono);
+	}
+
+	.camelot-badge-inline {
+		display: inline-block;
+		padding: 1px 5px;
+		margin-left: 4px;
+		border-radius: 4px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		font-size: 0.68rem;
+		font-weight: 700;
+		font-family: var(--font-mono);
+		vertical-align: middle;
+	}
+
+	.bpm-inline {
+		display: inline-block;
+		padding: 1px 5px;
+		margin-left: 4px;
+		border-radius: 4px;
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--text-tertiary);
+		font-size: 0.68rem;
+		font-variant-numeric: tabular-nums;
+		vertical-align: middle;
+	}
+
+	.mini-bar {
+		display: inline-block;
+		width: 40px;
+		height: 4px;
+		border-radius: 2px;
+		background: rgba(255, 255, 255, 0.08);
+		overflow: hidden;
+		vertical-align: middle;
+	}
+
+	.mini-bar-fill {
+		display: block;
+		height: 100%;
+		border-radius: 2px;
+		background: linear-gradient(90deg, var(--accent), #b0b3ff);
+		transition: width 200ms ease;
+	}
+
+	.mini-bar-fill.dance {
+		background: linear-gradient(90deg, #06d6a0, #4cc9f0);
+	}
+
+	.mini-bar-label {
+		display: inline-block;
+		margin-left: 3px;
+		font-size: 0.72rem;
+		color: var(--text-tertiary);
+		font-variant-numeric: tabular-nums;
+		vertical-align: middle;
 	}
 
 	.tab-bar {
@@ -2010,7 +2327,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 40px;
+		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 60px 50px 55px 55px auto 40px;
 		gap: var(--gap-sm);
 		align-items: center;
 		padding: 8px var(--gap-sm);
@@ -2057,7 +2374,7 @@
 
 	.track-row {
 		display: grid;
-		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 40px;
+		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 60px 50px 55px 55px auto 40px;
 		gap: var(--gap-sm);
 		align-items: center;
 		padding: 6px var(--gap-sm);

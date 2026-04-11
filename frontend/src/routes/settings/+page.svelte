@@ -20,6 +20,20 @@
 		loadSyncInfo,
 		setAutoSyncDaily
 	} from '$lib/stores/tidal';
+	import {
+		audioAnalysis,
+		startAnalysis,
+		stopAnalysis,
+		clearAllAnalysis,
+		loadAudioStats
+	} from '$lib/stores/audio_analysis';
+	import {
+		acrCloud,
+		loadAcrCloudStatus,
+		configureAcrCloud,
+		deleteAcrCloudConfig,
+		startAcrCloudScan
+	} from '$lib/stores/acrcloud';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
@@ -49,6 +63,15 @@
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
+
+	// ACRCloud form state
+	let acrKey = $state('');
+	let acrSecret = $state('');
+	let acrRegion = $state('eu-west-1');
+
+	async function connectAcrCloud() {
+		await configureAcrCloud(acrKey, acrSecret, acrRegion);
+	}
 
 	async function refreshGalaxy() {
 		galaxyRefreshLabel = 'Refreshing genre data…';
@@ -114,6 +137,8 @@
 		void loadMbStatus();
 		void loadPortableSnapshot();
 		void loadDiscoveryStatus();
+		void loadAudioStats();
+		void loadAcrCloudStatus();
 
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
@@ -740,6 +765,82 @@
 					</div>
 				</div>
 			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="DSP" title="Audio Analysis" subtitle="Extract BPM, key, energy, and danceability from your library." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
+					<MetricPair label="Avg BPM" value={$audioAnalysis.stats?.avg_bpm?.toFixed(1) ?? '—'} copy="Average tempo across analyzed tracks." />
+					<MetricPair label="Top Key" value={$audioAnalysis.stats?.top_key ?? '—'} copy="Most common key signature." />
+					<MetricPair label="Avg Energy" value={$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'} copy="Average energy level (0–1)." />
+				</div>
+
+				{#if $audioAnalysis.isRunning}
+					<div class="progress-bar">
+						<div class="progress-fill" style="width: {($audioAnalysis.total > 0 ? $audioAnalysis.analyzed / $audioAnalysis.total : 0) * 100}%"></div>
+					</div>
+					<p class="analysis-progress-label">
+						Analyzing... {$audioAnalysis.analyzed.toLocaleString()} / {$audioAnalysis.total.toLocaleString()} tracks ({Math.round(($audioAnalysis.total > 0 ? $audioAnalysis.analyzed / $audioAnalysis.total : 0) * 100)}%)
+					</p>
+				{/if}
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={() => void startAnalysis('preview')} disabled={$audioAnalysis.isRunning}>
+						{$audioAnalysis.isRunning ? 'Analyzing…' : 'Analyze Library (TIDAL)'}
+					</button>
+					<button class="btn btn-glass" onclick={stopAnalysis} disabled={!$audioAnalysis.isRunning}>Stop</button>
+					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
+				</div>
+
+				<details class="advanced-details">
+					<summary>Advanced Settings</summary>
+					<div class="setting-row">
+						<label>Max duration per track (seconds)</label>
+						<input type="number" value="30" min="10" max="120" />
+					</div>
+					<div class="setting-row">
+						<label>Re-analyze interval (days)</label>
+						<input type="number" value="30" min="1" max="365" />
+					</div>
+				</details>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Recognition" title="Sample Recognition (ACRCloud)" subtitle="Identify samples and covers in your library via ACRCloud." />
+
+				{#if !$acrCloud.connected}
+					<p class="page-copy">Connect ACRCloud to identify samples in your library.</p>
+					<div class="form-row">
+						<input type="text" placeholder="Access Key" bind:value={acrKey} />
+						<input type="password" placeholder="Access Secret" bind:value={acrSecret} />
+						<select bind:value={acrRegion}>
+							<option value="eu-west-1">EU (Ireland)</option>
+							<option value="us-east-1">US (Virginia)</option>
+						</select>
+						<button class="btn btn-primary" onclick={connectAcrCloud}>Connect</button>
+					</div>
+				{:else}
+					<div class="status-row">
+						<StateBadge label="Connected" tone="success" />
+						<span class="acrcloud-daily-count">{$acrCloud.scanned_today.toLocaleString()} / {$acrCloud.daily_limit.toLocaleString()} requests today</span>
+					</div>
+					{#if $acrCloud.isScanning}
+						<div class="progress-bar">
+							<div class="progress-fill" style="width: {($acrCloud.total > 0 ? $acrCloud.scanned / $acrCloud.total : 0) * 100}%"></div>
+						</div>
+						<p class="analysis-progress-label">
+							Scanning... {$acrCloud.scanned.toLocaleString()} / {$acrCloud.total.toLocaleString()} ({$acrCloud.matches_found} matches)
+						</p>
+					{/if}
+					<div class="action-row">
+						<button class="btn btn-primary" onclick={() => void startAcrCloudScan()} disabled={$acrCloud.isScanning}>
+							{$acrCloud.isScanning ? 'Scanning…' : 'Scan Library'}
+						</button>
+						<button class="btn btn-glass danger" onclick={() => void deleteAcrCloudConfig()}>Disconnect</button>
+					</div>
+				{/if}
+			</section>
 		</div>
 	</section>
 </div>
@@ -949,5 +1050,98 @@
 		font-size: 0.85em;
 		color: rgba(255, 255, 255, 0.5);
 		font-weight: normal;
+	}
+
+	/* Audio analysis progress bar */
+	.progress-bar {
+		position: relative;
+		height: 10px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		overflow: hidden;
+	}
+
+	.progress-fill {
+		height: 100%;
+		border-radius: inherit;
+		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
+		transition: width 200ms ease;
+	}
+
+	.analysis-progress-label {
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+		margin: 6px 0 0;
+	}
+
+	/* Danger button */
+	.btn.danger {
+		background: rgba(232, 135, 138, 0.12);
+		border: 1px solid rgba(232, 135, 138, 0.24);
+		color: var(--state-error);
+	}
+
+	.btn.danger:hover:not(:disabled) {
+		background: rgba(232, 135, 138, 0.2);
+		border-color: rgba(232, 135, 138, 0.4);
+	}
+
+	/* Advanced details */
+	.advanced-details {
+		margin-top: 4px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		padding: 10px 14px;
+	}
+
+	.advanced-details summary {
+		cursor: pointer;
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.setting-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: 8px 0;
+	}
+
+	.setting-row label {
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+	}
+
+	.setting-row input {
+		width: 80px;
+	}
+
+	/* ACRCloud form row */
+	.form-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+		align-items: center;
+	}
+
+	.form-row input,
+	.form-row select {
+		flex: 1;
+		min-width: 140px;
+	}
+
+	/* ACRCloud status row */
+	.status-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+	}
+
+	.acrcloud-daily-count {
+		font-size: 0.82rem;
+		color: var(--text-secondary);
 	}
 </style>

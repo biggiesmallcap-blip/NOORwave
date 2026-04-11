@@ -1,4 +1,4 @@
-import type { Genre, GenreHeat, GenreCoOccurrence, GenreCohort, GenreEvolutionPoint } from '$lib/api/client';
+import type { Genre, GenreHeat, GenreCoOccurrence, GenreCohort, GenreEvolutionPoint, GenreAudioMetrics } from '$lib/api/client';
 import {
 	GALAXY_ROOT_RING_RADIUS,
 	ROOT_FAMILY_COLORS,
@@ -34,7 +34,8 @@ function placeChildren(
 	familyId: number,
 	familyKey: RootFamilyKey,
 	familyName: string,
-	rootAngle: number
+	rootAngle: number,
+	metricsById?: Map<number, GenreAudioMetrics>
 ) {
 	if (children.length === 0) return;
 
@@ -59,6 +60,8 @@ function placeChildren(
 		const heatNorm = maxListenCount > 0 ? Math.log1p(listenCount) / Math.log1p(maxListenCount) : 0;
 		const palette = ROOT_FAMILY_COLORS[familyKey];
 
+		const metrics = metricsById?.get(child.id);
+
 		const node: GalaxyNode = {
 			id: child.id,
 			name: child.name,
@@ -81,7 +84,10 @@ function placeChildren(
 			glowColor: palette.glowColor,
 			orbitRadius: 0,
 			cohortId: null,
-			evolutionHistory: []
+			evolutionHistory: [],
+			avgBpm: metrics?.avg_bpm ?? null,
+			avgEnergy: metrics?.avg_energy ?? null,
+			avgDanceability: metrics?.avg_danceability ?? null,
 		};
 
 		nodes.push(node);
@@ -103,7 +109,8 @@ function placeChildren(
 			familyId,
 			familyKey,
 			familyName,
-			rootAngle
+			rootAngle,
+			metricsById
 		);
 	});
 }
@@ -206,6 +213,7 @@ export function buildGalaxyData(
 		coOccurrences?: GenreCoOccurrence[];
 		cohorts?: GenreCohort[];
 		evolution?: GenreEvolutionPoint[];
+		metrics?: GenreAudioMetrics[];
 		listeningDriven?: boolean;
 	} = {}
 ): GalaxyData {
@@ -213,9 +221,10 @@ export function buildGalaxyData(
 		return { nodes: [], edges: [] };
 	}
 
-	const { coOccurrences = [], cohorts = [], evolution = [], listeningDriven = false } = options;
+	const { coOccurrences = [], cohorts = [], evolution = [], metrics = [], listeningDriven = false } = options;
 
 	const heatById = new Map(heat.map(entry => [entry.genre_id, entry]));
+	const metricsById = metrics.length > 0 ? new Map(metrics.map(m => [m.genre_id, m])) : undefined;
 	const maxListenCount = heat.reduce((max, entry) => Math.max(max, entry.listen_count), 0);
 	const nodes: GalaxyNode[] = [];
 	const edges: GalaxyEdge[] = [];
@@ -258,6 +267,8 @@ export function buildGalaxyData(
 			y = Math.sin(angle) * GALAXY_ROOT_RING_RADIUS;
 		}
 
+		const rootMetrics = metricsById?.get(root.id);
+
 		const rootNode: GalaxyNode = {
 			id: root.id,
 			name: root.name,
@@ -282,7 +293,10 @@ export function buildGalaxyData(
 				? 200 + (1 - heatNorm) * 180
 				: GALAXY_ROOT_RING_RADIUS) : 0,
 			cohortId: cohorts.find(c => c.genre_ids.includes(root.id))?.id ?? null,
-			evolutionHistory: []
+			evolutionHistory: [],
+			avgBpm: rootMetrics?.avg_bpm ?? null,
+			avgEnergy: rootMetrics?.avg_energy ?? null,
+			avgDanceability: rootMetrics?.avg_danceability ?? null,
 		};
 
 		nodes.push(rootNode);
@@ -297,7 +311,8 @@ export function buildGalaxyData(
 			root.id,
 			familyKey,
 			root.name,
-			listeningDriven ? Math.atan2(y, x) : angle
+			listeningDriven ? Math.atan2(y, x) : angle,
+			metricsById
 		);
 	});
 

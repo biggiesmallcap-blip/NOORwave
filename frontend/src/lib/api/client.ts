@@ -30,6 +30,13 @@ export interface Track {
 	date_added: string | null;
 	source: string;
 	artwork_url: string | null;
+	bpm?: number | null;
+	key_signature?: string | null;
+	camelot_key?: string | null;
+	energy?: number | null;
+	danceability?: number | null;
+	is_instrumental?: boolean | null;
+	samples_analyzed?: number | null;
 }
 
 export interface Album {
@@ -487,6 +494,57 @@ export interface HomeNewsResponse {
 	news: RSSFeedItem[];
 	sources: string[];
 	source: string;
+}
+
+// ─── Audio Analysis Types ───────────────────────────────────────────────
+
+export interface AudioDspFeatures {
+	track_id: number;
+	bpm: number | null;
+	key_signature: string | null;
+	camelot_key: string | null;
+	loudness_lufs: number | null;
+	energy: number | null;
+	danceability: number | null;
+	beat_strength: number | null;
+	spectral_centroid: number | null;
+	stereo_width: number | null;
+	is_instrumental: boolean | null;
+	analysis_source: string;
+	analysis_offset_ms: number;
+	samples_analyzed: number;
+	analyzed_at: string;
+	analysis_version: string;
+}
+
+export interface AudioFeaturesStats {
+	total_analyzed: number;
+	avg_bpm: number | null;
+	top_key: string | null;
+	avg_energy: number | null;
+	key_distribution: Record<string, number>;
+}
+
+export interface GenreAudioMetrics {
+	genre_id: number;
+	genre_name: string;
+	avg_bpm: number | null;
+	avg_energy: number | null;
+	avg_danceability: number | null;
+	analyzed_count: number;
+}
+
+export interface AcrCloudStatus {
+	connected: boolean;
+	scanned_today: number;
+	daily_limit: number;
+}
+
+export interface AcrCloudScanStatus {
+	running: boolean;
+	scanned: number;
+	total: number;
+	matches_found: number;
 }
 
 async function fetchApiResponse(
@@ -973,5 +1031,61 @@ export const api = {
 
 	getHomeNews() {
 		return fetchApi<HomeNewsResponse>('/api/home/news');
+	},
+
+	// ─── Audio Analysis ───────────────────────────────────────────────
+
+	startAudioAnalysis(mode: 'preview' | 'local', localPath?: string) {
+		return fetchApi<{ status: string; mode: string }>('/api/library/analyze/audio-features', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ mode, local_path: localPath }),
+		});
+	},
+
+	getAudioAnalysisStatus() {
+		return fetchApi<{ running: boolean; analyzed: number }>('/api/library/analyze/status');
+	},
+
+	getTrackAudioFeatures(trackId: number) {
+		return fetchApi<{ features: AudioDspFeatures | null }>(`/api/tracks/${trackId}/audio-features`);
+	},
+
+	getAudioFeaturesStats() {
+		return fetchApi<{ stats: AudioFeaturesStats }>('/api/library/audio-features/stats');
+	},
+
+	resetAudioAnalysis() {
+		return fetchApi<{ status: string }>('/api/library/analyze/reset', undefined, {
+			method: 'DELETE',
+		});
+	},
+
+	getGenreAudioMetrics() {
+		return fetchApi<{ metrics: GenreAudioMetrics[] }>('/api/genres/audio-metrics');
+	},
+
+	// ─── ACRCloud ─────────────────────────────────────────────────────
+
+	getAcrCloudStatus() {
+		return fetchApi<AcrCloudStatus>('/api/acrcloud/status');
+	},
+
+	configureAcrCloud(accessKey: string, accessSecret: string, region: string) {
+		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ access_key: accessKey, access_secret: accessSecret, region }),
+		});
+	},
+
+	deleteAcrCloudConfig() {
+		return fetchApi<{ status: string }>('/api/acrcloud/configure', undefined, {
+			method: 'DELETE',
+		});
+	},
+
+	startAcrCloudScan() {
+		return fetchApi<{ status: string }>('/api/library/acrcloud/scan', undefined, {
+			method: 'POST',
+		});
 	},
 };

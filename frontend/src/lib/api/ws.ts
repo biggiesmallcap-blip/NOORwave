@@ -3,6 +3,8 @@ import { getApiBase } from '$lib/api/client';
 import { refreshPlaybackState } from '$lib/stores/player';
 import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
+import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
+import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
 
 export const wsConnected = writable(false);
 
@@ -16,7 +18,11 @@ export type WsMessage =
 	| { type: 'library_synced' }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }
-	| { type: 'training_progress'; stage: string; progress: number; message: string };
+	| { type: 'training_progress'; stage: string; progress: number; message: string }
+	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
+	| { type: 'audio_analysis_complete'; analyzed: number }
+	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
+	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number };
 
 export const wsMessages = writable<WsMessage[]>([]);
 
@@ -72,6 +78,18 @@ export function connectWebSocket() {
 					// Give a small delay to let the final state settle
 					setTimeout(() => handleTrainingComplete(), 500);
 				}
+			}
+			if (data?.type === 'audio_analysis_progress') {
+				handleAnalysisProgress(data);
+			}
+			if (data?.type === 'audio_analysis_complete') {
+				handleAnalysisComplete(data);
+			}
+			if (data?.type === 'acrcloud_scan_progress') {
+				handleAcrCloudProgress(data);
+			}
+			if (data?.type === 'acrcloud_scan_complete') {
+				handleAcrCloudComplete(data);
 			}
 		} catch {}
 	};

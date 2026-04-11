@@ -74,6 +74,20 @@
 	let hoveredNode = $derived(
 		hoveredNodeId === null ? null : nodeById.get(hoveredNodeId) ?? null
 	);
+
+	// Vibe mode: energy color mapping
+	function energyColor(energy: number | null): string {
+		if (energy == null) return '';
+		// Blue (220°) → Amber (45°) → Red (0°)
+		const hue = 220 - energy * 220;
+		return `hsl(${hue}, 70%, 50%)`;
+	}
+
+	// Vibe mode: danceability glow
+	function danceGlowRadius(danceability: number | null, baseRadius: number): number {
+		if (danceability == null) return baseRadius + 6;
+		return baseRadius + 6 + danceability * 14;
+	}
 	let selectedSeedSet = $derived(new Set(selectedSeedIds));
 	let selectedLineageSet = $derived.by(() => {
 		const lineage = new Set<number>();
@@ -488,7 +502,15 @@
 			) continue;
 
 			const activity = edgeActivity(edge);
-			const opacity = (0.04 + edge.weight * 0.14) * activity;
+			// Vibe mode: fade edges when BPM diff > 60
+			let bpmFade = 1;
+			if (viewMode === 'vibe' && source.avgBpm != null && target.avgBpm != null) {
+				const bpmDiff = Math.abs(source.avgBpm - target.avgBpm);
+				if (bpmDiff > 60) {
+					bpmFade = Math.max(0, 1 - (bpmDiff - 60) / 60);
+				}
+			}
+			const opacity = (0.04 + edge.weight * 0.14) * activity * bpmFade;
 			const lineWidth = (0.4 + edge.weight * 0.8) * (0.6 + activity * 0.3);
 			const dx = targetScreen.x - sourceScreen.x;
 			const dy = targetScreen.y - sourceScreen.y;
@@ -531,12 +553,21 @@
 			const activity = edgeActivity(edge);
 			const isSelectedEdge = selectedId !== null && (edge.sourceId === selectedId || edge.targetId === selectedId);
 			const emphasis = isSelectedEdge ? 1.28 : 1;
+			// Vibe mode: fade edges when BPM diff > 60
+			let bpmFade = 1;
+			if (viewMode === 'vibe' && source.avgBpm != null && target.avgBpm != null) {
+				const bpmDiff = Math.abs(source.avgBpm - target.avgBpm);
+				if (bpmDiff > 60) {
+					bpmFade = Math.max(0, 1 - (bpmDiff - 60) / 60);
+				}
+			}
 			const opacity =
 				(edge.type === 'parent-child'
 					? 0.18 + edge.weight * 0.22
 					: 0.06 + edge.weight * 0.1) *
 				activity *
-				emphasis;
+				emphasis *
+				bpmFade;
 			const lineWidth =
 				(edge.type === 'parent-child'
 					? 0.8 + edge.weight * 1.5
@@ -715,6 +746,22 @@
 			if (activity < 0.16) continue;
 			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
 
+			// Vibe mode: use energy color for glow
+			if (viewMode === 'vibe') {
+				const eColor = energyColor(node.avgEnergy);
+				if (eColor) {
+					const glowR = danceGlowRadius(node.avgDanceability, radius);
+					const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, glowR);
+					gradient.addColorStop(0, eColor.replace('50%)', '60%)').replace('hsl', 'hsla').replace(')', ', 0.3)'));
+					gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+					ctx.fillStyle = gradient;
+					ctx.beginPath();
+					ctx.arc(screen.x, screen.y, glowR, 0, Math.PI * 2);
+					ctx.fill();
+					continue;
+				}
+			}
+
 			// Glow extends only slightly past the node edge
 			const haloExtend = 2 + radius * 0.4 + nodeHeat * radius * 0.6;
 			const haloRadius = radius + haloExtend;
@@ -735,7 +782,13 @@
 			if (activity < 0.16) continue;
 
 			ctx.globalAlpha = activity;
-			ctx.fillStyle = node.color;
+			// Vibe mode: energy-colored nodes
+			if (viewMode === 'vibe') {
+				const eColor = energyColor(node.avgEnergy);
+				ctx.fillStyle = eColor || node.color;
+			} else {
+				ctx.fillStyle = node.color;
+			}
 			ctx.beginPath();
 			ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
 			ctx.fill();
@@ -1173,6 +1226,24 @@
 			▶ Mix
 		</button>
 	{/if}
+
+	{#if hoveredNode && viewMode === 'vibe' && !isDragging}
+		<div
+			class="vibe-tooltip"
+			style={`transform: translate(${(mixPillPosition?.x ?? 0)}px, ${(mixPillPosition?.y ?? 0) + 16}px) translate(-50%, 0);`}
+		>
+			<span class="vibe-tooltip-name">{hoveredNode.name}</span>
+			{#if hoveredNode.avgBpm != null}
+				<span class="vibe-tooltip-metric">BPM: {Math.round(hoveredNode.avgBpm)}</span>
+			{/if}
+			{#if hoveredNode.avgEnergy != null}
+				<span class="vibe-tooltip-metric">Energy: {hoveredNode.avgEnergy.toFixed(2)}</span>
+			{/if}
+			{#if hoveredNode.avgDanceability != null}
+				<span class="vibe-tooltip-metric">Dance: {hoveredNode.avgDanceability.toFixed(2)}</span>
+			{/if}
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -1248,5 +1319,33 @@
 		.mix-pill {
 			display: none;
 		}
+	}
+
+	/* Vibe mode tooltip */
+	.vibe-tooltip {
+		position: absolute;
+		pointer-events: none;
+		z-index: 10;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		padding: 8px 12px;
+		border-radius: var(--radius-sm);
+		background: rgba(10, 10, 18, 0.92);
+		backdrop-filter: blur(8px);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+	}
+
+	.vibe-tooltip-name {
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.vibe-tooltip-metric {
+		font-size: 0.72rem;
+		color: var(--text-secondary);
+		font-variant-numeric: tabular-nums;
 	}
 </style>
