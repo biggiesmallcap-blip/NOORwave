@@ -34,12 +34,15 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<AppEvent>,
     pub http_client: reqwest::Client,
     pub tidal_tokens: Option<services::tidal::auth::TidalTokens>,
+    pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
     /// Cancellation flag for in-flight TIDAL device code login polling.
     pub tidal_login_cancel: Arc<AtomicBool>,
+    /// RSS feed aggregator for music news and articles
+    pub rss_aggregator: Arc<services::rss_feeds::FeedAggregator>,
 }
 
 /// Events broadcast across the application
@@ -53,6 +56,7 @@ pub enum AppEvent {
     QueueUpdated,
     ListenHistoryUpdated { track_id: i64 },
     PlaybackFailed { message: String },
+    TrainingProgress { stage: String, progress: f32, message: String },
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -114,17 +118,41 @@ async fn main() -> Result<()> {
         })
         .unwrap_or(None);
 
+    // Load persisted Spotify tokens if available
+    let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = db
+        .with_conn(|conn| {
+            let result = conn.query_row(
+                "SELECT access_token_enc FROM service_auth WHERE service='spotify'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            );
+            Ok(match result {
+                Ok(bytes) => String::from_utf8(bytes)
+                    .ok()
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .inspect(|t: &services::spotify::auth::SpotifyTokens| {
+                        info!("Loaded persisted Spotify tokens for user {}", t.user_id);
+                    }),
+                Err(_) => None,
+            })
+        })
+        .unwrap_or(None);
+
     let http_client = reqwest::Client::new();
+    let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(http_client.clone()));
+    
     let state = Arc::new(RwLock::new(AppState {
         db,
         event_tx,
         http_client,
         tidal_tokens,
+        spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,
         active_listen_session: None,
         external_playback_track: None,
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
+        rss_aggregator,
     }));
 
     // Check for auto-sync daily services and trigger sync if needed
@@ -182,7 +210,7 @@ async fn main() -> Result<()> {
     }
 
     // Start HTTP + WebSocket server
-    let addr = std::env::var("NOOR_ADDR").unwrap_or_else(|_| "0.0.0.0:3333".to_string());
+    let addr = std::env::var("NOOR_ADDR").unwrap_or_else(|_| "0.0.0.0:3334".to_string());
     info!("Starting server on http://{}", addr);
     server::start(state, &addr).await?;
 

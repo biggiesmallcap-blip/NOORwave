@@ -1,836 +1,735 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { get, type Unsubscriber } from 'svelte/store';
+	import { get } from 'svelte/store';
 	import {
 		api,
-		type DiscoveryConnectionTrailItem,
 		type DiscoveryExternalFeed,
-		type DiscoveryExternalResult,
 		type DiscoveryMode,
-		type DiscoveryPreset,
-		type DiscoveryProviderCapability,
-		type DiscoveryService
+		type DiscoveryPreviewResult,
+		type DiscoveryRadioResult,
+		type DiscoveryStatus,
+		type Track
 	} from '$lib/api/client';
-	import { wsMessages } from '$lib/api/ws';
-	import { formatDuration } from '$lib/stores/library';
-	import { hydratePlayback, playerError } from '$lib/stores/player';
+	import { currentTrack, addTrackToQueue, playTrackNow } from '$lib/stores/player';
+	import { training } from '$lib/stores/training';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
-	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
-	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 
-	type ActionTone = 'success' | 'error' | 'info';
+	type DiscoverTab = 'radio' | 'explore';
 
-	let prompt = $state('late-night drive with glassy synths');
+	let activeTab = $state<DiscoverTab>('radio');
+	let seedTrack = $state<Track | null>(null);
+	let radioResults = $state<DiscoveryRadioResult[]>([]);
+	let radioLoading = $state(false);
+	let trainingButtonLoading = $state(false);
+	let discoveryStatus = $state<DiscoveryStatus | null>(null);
+	let statusInterval = $state<ReturnType<typeof setInterval> | null>(null);
+	let trainingState = $state<import('$lib/stores/training').TrainingState>({
+		isRunning: false,
+		stage: '',
+		progress: 0,
+		message: '',
+		lastCompletedAt: null
+	});
+	let isTraining = $derived(trainingState.isRunning || discoveryStatus?.latest_run?.status === 'running');
+	let creativity = $state(0.25);
+	let contextWindow = $state(5);
+	let playedIds = $state<number[]>([]);
+	let radioFetched = $state(false);
+	let computingSimilarity = $state(false);
+	let computePolling = $state(false);
+	let computePollAttempt = $state(0);
+	let computeLabel = $derived(computingSimilarity ? 'Sending request...' : 'Compute similarity now');
+	let prompt = $state('glassy synthwave night drive');
 	let mode = $state<DiscoveryMode>('mood');
-	let useTidal = $state(true);
-	let useSoundcloud = $state(false);
-	let useBandcamp = $state(false);
-	let useYtmusic = $state(false);
-	let feed = $state<DiscoveryExternalFeed | null>(null);
-	let presets = $state<DiscoveryPreset[]>([]);
-	let trail = $state<DiscoveryConnectionTrailItem[]>([]);
-	let loading = $state(true);
-	let refreshing = $state(false);
-	let savingPreset = $state(false);
-	let actingTrackId = $state<string | null>(null);
+	let previewLoading = $state(false);
+	let preview = $state<DiscoveryExternalFeed | null>(null);
+	let libraryPreviewResults = $state<DiscoveryPreviewResult[]>([]);
+	let libraryAnchors = $state<string[]>([]);
 	let error = $state<string | null>(null);
-	let presetName = $state('');
-	let isDirty = $state(false);
-	let needsRefreshHint = $state(false);
-	let actionMessage = $state<string | null>(null);
-	let actionTone = $state<ActionTone>('info');
-	let wsUnsubscribe: Unsubscriber | null = null;
-	let actionMessageTimer: ReturnType<typeof setTimeout> | null = null;
 
-	const modeOptions: Array<{ value: DiscoveryMode; label: string; copy: string }> = [
-		{ value: 'mood', label: 'Mood', copy: 'Follow atmosphere and texture.' },
-		{ value: 'reference', label: 'Reference', copy: 'Start from artists and adjacent records.' },
-		{ value: 'dj', label: 'DJ', copy: 'Bias toward flow and mix-friendly movement.' },
-		{ value: 'word-cloud', label: 'Word cloud', copy: 'Cast a broader language net.' }
-	];
+	function formatDuration(ms: number | null): string {
+		if (!ms) return '—';
+		const totalSec = Math.floor(ms / 1000);
+		return `${Math.floor(totalSec / 60)}:${(totalSec % 60).toString().padStart(2, '0')}`;
+	}
 
-	const serviceOptions: Array<{ value: DiscoveryService; label: string; copy: string }> = [
-		{ value: 'tidal', label: 'TIDAL', copy: 'Live now for search, save, play, and connections.' },
-		{ value: 'soundcloud', label: 'SoundCloud', copy: 'Planned next.' },
-		{ value: 'bandcamp', label: 'Bandcamp', copy: 'Planned later.' },
-		{ value: 'ytmusic', label: 'YouTube Music', copy: 'Metadata-first later.' }
-	];
+	function formatPercent(value: number): string {
+		return `${Math.round(value * 100)}%`;
+	}
+
+	async function loadStatus() {
+		try {
+			const response = await api.getDiscoveryStatus();
+			discoveryStatus = response.status;
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : String(reason);
+		}
+	}
+
+	async function startTraining(mode: 'full' | 'incremental') {
+		trainingButtonLoading = true;
+		error = null;
+		try {
+			const result = await api.startDiscoveryTraining(mode);
+			if ((result as { status?: string }).status === 'already_running') {
+				error = 'Training is already running — wait for it to finish before starting another.';
+			}
+			await loadStatus();
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : String(reason);
+		} finally {
+			trainingButtonLoading = false;
+		}
+	}
+
+	async function startRadio() {
+		if (!seedTrack) return;
+		radioLoading = true;
+		error = null;
+		try {
+			const response = await api.getRadioTracks({
+				seed_track_id: seedTrack.id,
+				creativity,
+				context_window: contextWindow,
+				limit: 18,
+				exclude_ids: playedIds
+			});
+			radioResults = response.tracks;
+		radioFetched = true;
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : String(reason);
+			radioResults = [];
+			radioFetched = true;
+		} finally {
+			radioLoading = false;
+		}
+	}
+
+	async function computeSimilarity() {
+		if (!seedTrack) return;
+		computingSimilarity = true;
+		computePolling = false;
+		error = null;
+		try {
+			await api.computeRadioSimilarity();
+			computePolling = true;
+			computePollAttempt = 0;
+			// Poll radio every 4 seconds until results arrive (max 10 attempts)
+			for (let i = 0; i < 10; i++) {
+				computePollAttempt = i + 1;
+				await new Promise((r) => setTimeout(r, 4000));
+				const res = await api.getRadioTracks({
+					seed_track_id: seedTrack!.id,
+					creativity,
+					context_window: contextWindow,
+					limit: 18,
+					exclude_ids: playedIds
+				});
+				if (res.tracks.length > 0) {
+					radioResults = res.tracks;
+					radioFetched = true;
+					break;
+				}
+			}
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : String(reason);
+		} finally {
+			computingSimilarity = false;
+			computePolling = false;
+		}
+	}
+
+	async function recordFeedback(candidateTrackId: number, action: string) {
+		if (!seedTrack) return;
+		try {
+			await api.recordDiscoveryFeedback(seedTrack.id, candidateTrackId, action, activeTab, {
+				creativity,
+				contextWindow
+			});
+		} catch {
+			// keep feedback best-effort so the UI never stalls on it
+		}
+	}
+
+	async function playRadioTrack(track: DiscoveryRadioResult) {
+		playedIds = [...playedIds, track.track_id];
+		await recordFeedback(track.track_id, 'play');
+		await playTrackNow(track.track_id);
+		seedTrack = {
+			id: track.track_id,
+			title: track.title,
+			artist_id: 0,
+			artist_name: track.artist_name,
+			album_id: null,
+			album_title: track.album_title,
+			duration_ms: track.duration_ms,
+			best_quality: track.best_quality,
+			is_favorite: false,
+			play_count: 0,
+			source: 'tidal',
+			artwork_url: track.artwork_url,
+			tidal_id: null
+		} as Track;
+		await startRadio();
+	}
+
+	async function queueRadioTrack(track: DiscoveryRadioResult) {
+		await recordFeedback(track.track_id, 'queue');
+		await addTrackToQueue(track.track_id);
+	}
+
+	async function rateRadioTrack(track: DiscoveryRadioResult, action: 'like' | 'dislike') {
+		await recordFeedback(track.track_id, action);
+	}
+
+	async function loadExplore() {
+		previewLoading = true;
+		error = null;
+		try {
+			const [libraryResponse, externalResponse] = await Promise.all([
+				api.previewDiscovery(prompt, mode, ['tidal'], 8),
+				api.discoverNewMusic(prompt, mode, ['tidal'], 8)
+			]);
+			libraryPreviewResults = libraryResponse.preview.results;
+			libraryAnchors = libraryResponse.preview.profile.top_artists;
+			preview = externalResponse.feed;
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : String(reason);
+			libraryPreviewResults = [];
+			libraryAnchors = [];
+			preview = null;
+		} finally {
+			previewLoading = false;
+		}
+	}
 
 	onMount(() => {
-		wsUnsubscribe = wsMessages.subscribe((messages) => {
-			const latest = messages.at(-1);
-			if (!latest) return;
-			if (latest.type !== 'listen_history_updated' && latest.type !== 'library_synced') return;
-			if (!feed) return;
-			if (isDirty) {
-				needsRefreshHint = true;
-				return;
-			}
-			void runDiscovery();
+		seedTrack = get(currentTrack);
+		void loadStatus();
+
+		// Subscribe to real-time training progress from WebSocket
+		const unsubscribe = training.subscribe((state) => {
+			trainingState.isRunning = state.isRunning;
+			trainingState.stage = state.stage;
+			trainingState.progress = state.progress;
+			trainingState.message = state.message;
+			trainingState.lastCompletedAt = state.lastCompletedAt;
 		});
 
-		void loadPage();
+		// Poll every 2s while training is running
+		statusInterval = setInterval(() => {
+			void loadStatus();
+		}, 2000);
 
 		return () => {
-			wsUnsubscribe?.();
-			if (actionMessageTimer) clearTimeout(actionMessageTimer);
+			unsubscribe();
+			if (statusInterval) clearInterval(statusInterval);
 		};
 	});
-
-	function selectedServices(): DiscoveryService[] {
-		return [
-			...(useTidal ? (['tidal'] as DiscoveryService[]) : []),
-			...(useSoundcloud ? (['soundcloud'] as DiscoveryService[]) : []),
-			...(useBandcamp ? (['bandcamp'] as DiscoveryService[]) : []),
-			...(useYtmusic ? (['ytmusic'] as DiscoveryService[]) : [])
-		];
-	}
-
-	function setServices(services: string[]) {
-		useTidal = services.includes('tidal');
-		useSoundcloud = services.includes('soundcloud');
-		useBandcamp = services.includes('bandcamp');
-		useYtmusic = services.includes('ytmusic');
-	}
-
-	function markComposerDirty() {
-		isDirty = true;
-		error = null;
-	}
-
-	function setActionMessage(message: string, tone: ActionTone) {
-		actionMessage = message;
-		actionTone = tone;
-		if (actionMessageTimer) clearTimeout(actionMessageTimer);
-		actionMessageTimer = setTimeout(() => {
-			actionMessage = null;
-		}, 3200);
-	}
-
-	async function loadPage() {
-		await Promise.all([runDiscovery(true), loadPresets()]);
-	}
-
-	async function loadPresets() {
-		try {
-			const response = await api.getDiscoveryPresets();
-			presets = response.presets;
-		} catch (reason) {
-			error = reason instanceof Error ? reason.message : String(reason);
-		}
-	}
-
-	async function runDiscovery(initial = false) {
-		const nextPrompt = prompt.trim();
-		if (!nextPrompt) {
-			error = 'Add a few words first so NOOR can search beyond your library.';
-			return;
-		}
-
-		if (initial) loading = true;
-		else refreshing = true;
-
-		error = null;
-		try {
-			const response = await api.discoverNewMusic(nextPrompt, mode, selectedServices(), 10);
-			feed = response.feed;
-			trail = [];
-			isDirty = false;
-			needsRefreshHint = false;
-		} catch (reason) {
-			error = reason instanceof Error ? reason.message : String(reason);
-		} finally {
-			loading = false;
-			refreshing = false;
-		}
-	}
-
-	async function savePreset() {
-		const name = presetName.trim() || prompt.trim();
-		const trimmedPrompt = prompt.trim();
-		if (!name || !trimmedPrompt) return;
-
-		savingPreset = true;
-		error = null;
-		try {
-			const response = await api.createDiscoveryPreset(name, trimmedPrompt, mode, selectedServices());
-			presets = [response.preset, ...presets];
-			presetName = '';
-			setActionMessage(`Saved “${response.preset.name}”.`, 'success');
-		} catch (reason) {
-			const message = reason instanceof Error ? reason.message : String(reason);
-			error = message;
-			setActionMessage(message, 'error');
-		} finally {
-			savingPreset = false;
-		}
-	}
-
-	function applyPreset(preset: DiscoveryPreset) {
-		prompt = preset.prompt;
-		mode = preset.mode;
-		setServices(preset.services);
-		isDirty = false;
-		needsRefreshHint = false;
-		void runDiscovery();
-	}
-
-	async function handleSave(result: DiscoveryExternalResult) {
-		actingTrackId = result.provider_track_id;
-		try {
-			const response = await api.saveDiscoveryTrack(result);
-			updateResultState(result.provider_track_id, { is_saved: true });
-			setActionMessage(response.message, 'success');
-		} catch (reason) {
-			setActionMessage(reason instanceof Error ? reason.message : String(reason), 'error');
-		} finally {
-			actingTrackId = null;
-		}
-	}
-
-	async function handlePlay(result: DiscoveryExternalResult) {
-		actingTrackId = result.provider_track_id;
-		try {
-			playerError.set(null);
-			const snapshot = await api.playDiscoveryTrack(result);
-			hydratePlayback(snapshot);
-			const latestError = get(playerError);
-			if (latestError) {
-				setActionMessage(latestError, 'error');
-				return;
-			}
-			setActionMessage(`Now playing “${result.title}”.`, 'success');
-		} catch (reason) {
-			setActionMessage(reason instanceof Error ? reason.message : String(reason), 'error');
-		} finally {
-			actingTrackId = null;
-		}
-	}
-
-	async function handleFindConnected(result: DiscoveryExternalResult) {
-		actingTrackId = result.provider_track_id;
-		error = null;
-		try {
-			const response = await api.findDiscoveryConnections(prompt.trim(), mode, selectedServices(), result, 8);
-			feed = response.feed;
-			if (response.feed.trail_item) {
-				const nextTrail = [...trail];
-				const exists = nextTrail.some(
-					(item) =>
-						item.provider === response.feed?.trail_item?.provider &&
-						item.provider_track_id === response.feed?.trail_item?.provider_track_id
-				);
-				if (!exists) nextTrail.push(response.feed.trail_item);
-				trail = nextTrail;
-			}
-			setActionMessage(`Opened a new connection trail from “${result.title}”.`, 'info');
-		} catch (reason) {
-			setActionMessage(reason instanceof Error ? reason.message : String(reason), 'error');
-		} finally {
-			actingTrackId = null;
-		}
-	}
-
-	function updateResultState(providerTrackId: string, patch: Partial<DiscoveryExternalResult>) {
-		if (!feed) return;
-		feed = {
-			...feed,
-			results: feed.results.map((result) =>
-				result.provider_track_id === providerTrackId ? { ...result, ...patch } : result
-			)
-		};
-	}
-
-	function capabilityFor(provider: DiscoveryService): DiscoveryProviderCapability | undefined {
-		return capabilities.find((item) => item.provider === provider);
-	}
-
-	function providerEnabled(provider: DiscoveryService): boolean {
-		return provider === 'tidal' || Boolean(capabilityFor(provider)?.can_fetch_connections);
-	}
-
-	function toggleService(provider: DiscoveryService) {
-		if (!providerEnabled(provider)) return;
-		if (provider === 'tidal') useTidal = !useTidal;
-		if (provider === 'soundcloud') useSoundcloud = !useSoundcloud;
-		if (provider === 'bandcamp') useBandcamp = !useBandcamp;
-		if (provider === 'ytmusic') useYtmusic = !useYtmusic;
-		markComposerDirty();
-	}
-
-	function modeLabel(value: DiscoveryMode): string {
-		return modeOptions.find((option) => option.value === value)?.label ?? 'Mood';
-	}
-
-	function unique(values: string[]): string[] {
-		const seen = new Set<string>();
-		return values.filter((value) => {
-			const key = value.trim().toLowerCase();
-			if (!key || seen.has(key)) return false;
-			seen.add(key);
-			return true;
-		});
-	}
-
-	function metadataContext(result: DiscoveryExternalResult): string | null {
-		const parts = [
-			result.discogs_label,
-			result.discogs_year ? String(result.discogs_year) : null,
-			result.discogs_styles.length ? result.discogs_styles.slice(0, 2).join(' · ') : null
-		].filter(Boolean);
-		return parts.length ? parts.join(' · ') : null;
-	}
-
-	function signalPills(result: DiscoveryExternalResult): string[] {
-		return unique([
-			...result.lastfm_tags.slice(0, 2).map((tag) => `Last.fm: ${tag}`),
-			...result.discogs_styles.slice(0, 2).map((style) => `Discogs: ${style}`)
-		]);
-	}
-
-	function resetTrail() {
-		trail = [];
-		void runDiscovery();
-	}
-
-	let capabilities = $derived(
-		feed?.capabilities ?? [
-			{ provider: 'tidal', can_save: true, can_play_inline: true, can_fetch_connections: true, can_map_genres: true },
-			{ provider: 'soundcloud', can_save: false, can_play_inline: false, can_fetch_connections: false, can_map_genres: false },
-			{ provider: 'bandcamp', can_save: false, can_play_inline: false, can_fetch_connections: false, can_map_genres: false },
-			{ provider: 'ytmusic', can_save: false, can_play_inline: false, can_fetch_connections: false, can_map_genres: false }
-		]
-	);
-	let activeServices = $derived(selectedServices());
-	let selectedMode = $derived(modeOptions.find((option) => option.value === mode) ?? modeOptions[0]);
-	let leadResult = $derived(feed?.results[0] ?? null);
-	let secondaryResults = $derived(feed?.results.slice(1) ?? []);
-	let composerState = $derived(
-		needsRefreshHint
-			? 'The library changed. Refresh when you want the feed updated.'
-			: isDirty
-				? 'Changes are waiting for a new search.'
-				: 'Searching outward from your existing taste profile.'
-	);
 </script>
 
-<svelte:head>
-	<title>Discover | NOOR</title>
-</svelte:head>
-
-<div class="page-shell discover-page animate-in">
+<div class="discover-page">
 	<PageHeader
 		eyebrow="Discover"
-		title="Search outward from the library you already know."
-		subtitle="Start with a scene, a reference, or a feeling. NOOR searches outside your collection while filtering out what you already have."
-	>
-		{#snippet actions()}
-			<button class="btn btn-primary" onclick={() => void runDiscovery()} disabled={loading || refreshing || !useTidal}>
-				{loading || refreshing ? 'Searching…' : isDirty || needsRefreshHint ? 'Refresh search' : 'Find music'}
-			</button>
-		{/snippet}
-	</PageHeader>
+		title="NOOR is learning your next track."
+		subtitle="Radio is the main discovery surface now: NOOR learns from sessions, playlists, what you finish, what you skip, and how you branch."
+	/>
 
-	<section class="composer-panel glass-panel">
-		<div class="composer-main">
-			<label class="composer-field">
-				<span class="eyebrow">Prompt</span>
-				<textarea
-					bind:value={prompt}
-					rows="4"
-					placeholder="Try: ecstatic deep house after midnight, hazy shoegaze with warmth, or dusty cosmic jazz"
-					oninput={markComposerDirty}
-				></textarea>
-			</label>
+	{#if error}
+		<div class="error-banner">{error}</div>
+	{/if}
 
-			<div class="control-stack">
-				<div class="chip-row">
-					{#each modeOptions as option}
-						<button
-							class:selected={mode === option.value}
-							class="mode-chip"
-							onclick={() => {
-								mode = option.value;
-								markComposerDirty();
-							}}
-						>
-							{option.label}
-						</button>
-					{/each}
+	<section class="glass engine-panel">
+		<div>
+			<h3>Discovery Engine</h3>
+			{#if isTraining}
+				<p class="training-status">
+					<span class="spinner-dot"></span>
+					{trainingState.message || discoveryStatus?.latest_run?.stage || 'Training…'}
+				</p>
+				<div class="progress-bar">
+					<div
+						class="progress-fill"
+						style="width: {(trainingState.progress || discoveryStatus?.latest_run?.progress || 0) * 100}%"
+					></div>
 				</div>
-
-				<div class="provider-list">
-					{#each serviceOptions as option}
-						<button
-							class:selected={activeServices.includes(option.value)}
-							class:disabled={!providerEnabled(option.value)}
-							class="provider-row"
-							onclick={() => toggleService(option.value)}
-						>
-							<span>{option.label}</span>
-							<p>{option.copy}</p>
-						</button>
-					{/each}
-				</div>
-			</div>
-		</div>
-
-		<div class="composer-side">
-			<StateBadge label={composerState} tone={needsRefreshHint ? 'warning' : isDirty ? 'active' : 'muted'} />
-			<StateBadge label={`Mode: ${selectedMode.label}`} tone="muted" />
-			{#if actionMessage}
-				<StateBadge label={actionMessage} tone={actionTone === 'success' ? 'success' : actionTone === 'error' ? 'error' : 'active'} />
+			{:else if discoveryStatus?.active_model}
+				<p>{discoveryStatus.active_model.model_key} is active with {formatPercent(discoveryStatus.coverage_ratio)} learned coverage.</p>
+			{:else}
+				<p>The learned engine has not been activated yet. Radio is using fallback similarity.</p>
 			{/if}
-			<input bind:value={presetName} type="text" placeholder="Optional scene name" />
-			<button class="btn btn-glass" onclick={savePreset} disabled={savingPreset || !prompt.trim()}>
-				{savingPreset ? 'Saving…' : 'Save scene'}
+		</div>
+		<div class="engine-metrics">
+			<span>{discoveryStatus?.embedded_tracks ?? 0} embedded</span>
+			<span>{discoveryStatus?.neighbor_tracks ?? 0} neighbor roots</span>
+			<span>{discoveryStatus?.clip_cache_tracks ?? 0} audio features</span>
+		</div>
+		<div class="engine-actions">
+			<button class="btn btn-primary" onclick={() => startTraining('incremental')} disabled={isTraining}>
+				{isTraining ? 'Training…' : 'Incremental refresh'}
+			</button>
+			<button class="btn btn-glass" onclick={() => startTraining('full')} disabled={isTraining}>
+				Full retrain
 			</button>
 		</div>
 	</section>
 
-	{#if error}
-		<EmptyState title="Discovery paused" copy={error}>
-			{#snippet actions()}
-				<button class="btn btn-glass" onclick={() => void runDiscovery()} disabled={loading || refreshing}>Try again</button>
-			{/snippet}
-		</EmptyState>
-	{/if}
+	<div class="tab-row">
+		<button class:active={activeTab === 'radio'} onclick={() => (activeTab = 'radio')}>Radio</button>
+		<button class:active={activeTab === 'explore'} onclick={() => (activeTab = 'explore')}>Explore</button>
+	</div>
 
-	<div class="discover-layout">
-		<section class="results-column">
-			{#if loading}
-				<div class="feed-loading">
-					<span class="feed-loading-ring"></span>
-					<p>Searching outside the library…</p>
-				</div>
-			{:else if leadResult}
-				<article class="lead-card glass-panel">
-					{#if leadResult.artwork_url}
-						<img class="lead-art" src={leadResult.artwork_url} alt="" />
-					{:else}
-						<div class="lead-art placeholder">NOOR</div>
-					{/if}
-
-					<div class="lead-copy">
-						<div class="lead-meta">
-							<StateBadge label={leadResult.provider} tone="muted" compact={true} />
-							{#if leadResult.in_library}
-								<StateBadge label="Already in library" tone="warning" compact={true} />
-							{:else}
-								<StateBadge label="New to you" tone="success" compact={true} />
-							{/if}
-							{#if leadResult.is_saved}
-								<StateBadge label="Saved" tone="active" compact={true} />
-							{/if}
-						</div>
-
+	{#if activeTab === 'radio'}
+		<section class="glass radio-panel">
+			<div class="seed-row">
+				<div>
+					<span class="label">Seed</span>
+					<div class="seed-card">
+						{#if seedTrack?.artwork_url}
+							<img src={seedTrack.artwork_url} alt="" />
+						{:else}
+							<div class="art-placeholder">♫</div>
+						{/if}
 						<div>
-							<h2>{leadResult.title}</h2>
-							<p class="lead-subtitle">{leadResult.artist_name ?? 'Unknown artist'}{leadResult.album_title ? ` · ${leadResult.album_title}` : ''}</p>
-							<p class="lead-subtitle">
-								{#if leadResult.duration_ms}
-									{formatDuration(leadResult.duration_ms)}
-								{/if}
-								{#if leadResult.audio_quality}
-									<span> · {leadResult.audio_quality}</span>
-								{/if}
-								{#if metadataContext(leadResult)}
-									<span> · {metadataContext(leadResult)}</span>
-								{/if}
-							</p>
-						</div>
-
-						<div class="tag-row">
-							{#each [...leadResult.tags, ...leadResult.normalized_genres].slice(0, 8) as tag}
-								<span class="tag">{tag}</span>
-							{/each}
-						</div>
-
-						<div class="lead-actions">
-							<button class="btn btn-primary" onclick={() => void handleSave(leadResult)} disabled={actingTrackId === leadResult.provider_track_id || leadResult.is_saved}>
-								{leadResult.is_saved ? 'Saved' : actingTrackId === leadResult.provider_track_id ? 'Working…' : 'Save'}
-							</button>
-							<button class="btn btn-glass" onclick={() => void handlePlay(leadResult)} disabled={actingTrackId === leadResult.provider_track_id || !leadResult.is_playable}>
-								Play
-							</button>
-							<button class="btn btn-glass" onclick={() => void handleFindConnected(leadResult)} disabled={actingTrackId === leadResult.provider_track_id}>
-								Find connected
-							</button>
+							<strong>{seedTrack?.title ?? 'Nothing playing yet'}</strong>
+							<span>{seedTrack?.artist_name ?? 'Play a track to seed radio'}</span>
 						</div>
 					</div>
-				</article>
-
-				<div class="result-list">
-					{#each secondaryResults as result}
-						<article class="result-card glass">
-							<div class="result-main">
-								<div>
-									<h3>{result.title}</h3>
-									<p>{result.artist_name ?? 'Unknown artist'}{result.album_title ? ` · ${result.album_title}` : ''}</p>
-									{#if metadataContext(result)}
-										<p>{metadataContext(result)}</p>
-									{/if}
-								</div>
-								<div class="tag-row compact">
-									{#each [...result.tags, ...result.normalized_genres].slice(0, 5) as tag}
-										<span class="tag">{tag}</span>
-									{/each}
-								</div>
-							</div>
-							<div class="result-side">
-								<span class="score">{result.score}%</span>
-								<div class="result-actions">
-									<button class="btn btn-glass" onclick={() => void handleSave(result)} disabled={actingTrackId === result.provider_track_id || result.is_saved}>
-										{result.is_saved ? 'Saved' : 'Save'}
-									</button>
-									<button class="btn btn-glass" onclick={() => void handlePlay(result)} disabled={actingTrackId === result.provider_track_id || !result.is_playable}>
-										Play
-									</button>
-									<button class="btn btn-glass" onclick={() => void handleFindConnected(result)} disabled={actingTrackId === result.provider_track_id}>
-										Connect
-									</button>
-								</div>
-							</div>
-						</article>
-					{/each}
 				</div>
-			{:else}
-				<EmptyState title="No external feed yet" copy="Start from a mood, reference, or scene and run the search." />
-			{/if}
+				<div class="controls">
+					<label>
+						<span>Learning strength</span>
+						<input type="range" min="0" max="1" step="0.05" bind:value={creativity} />
+					</label>
+					<label>
+						<span>Context memory</span>
+						<input type="range" min="1" max="15" step="1" bind:value={contextWindow} />
+					</label>
+					<button class="btn btn-primary" onclick={startRadio} disabled={!seedTrack || radioLoading}>
+						{radioLoading ? 'Listening…' : 'Start radio'}
+					</button>
+				</div>
+			</div>
 		</section>
 
-		<aside class="support-column">
-			<section class="glass-panel support-panel">
-				<SectionHeader eyebrow="Trail" title="Connection trail" subtitle="Each time you ask for a connected result, the path builds here.">
-					{#snippet actions()}
-						{#if trail.length > 0}
-							<button class="btn btn-glass" onclick={resetTrail}>Reset</button>
+		{#if radioResults.length > 0}
+			<div class="results-grid">
+				{#each radioResults as track (track.track_id)}
+					<article class="glass result-card">
+						{#if track.artwork_url}
+							<img class="cover" src={track.artwork_url} alt="" />
+						{:else}
+							<div class="cover placeholder">♫</div>
 						{/if}
-					{/snippet}
-				</SectionHeader>
-				{#if trail.length === 0}
-					<EmptyState title="No trail yet" copy="Choose a result and follow it deeper." />
-				{:else}
-					<div class="support-list">
-						{#each trail as item, index}
-							<article class="support-card">
-								<p class="eyebrow">Hop {index + 1}</p>
-								<h4>{item.title}</h4>
-								<p>{item.artist_name ?? 'Unknown artist'}</p>
-								<p>{item.connection_reason}</p>
-							</article>
-						{/each}
-					</div>
-				{/if}
-			</section>
-
-			<section class="glass-panel support-panel">
-				<SectionHeader eyebrow="Signals" title="Why the lead result fits" subtitle="Quiet metadata and similarity cues supporting the current pick." />
-				{#if leadResult}
-					<div class="support-list">
-						{#if signalPills(leadResult).length}
-							<div class="tag-row compact">
-								{#each signalPills(leadResult) as signal}
-									<span class="tag">{signal}</span>
+						<div class="meta">
+							<h3>{track.title}</h3>
+							<p>{track.artist_name ?? 'Unknown artist'}</p>
+							<p>{track.album_title ?? 'No album'} · {formatDuration(track.duration_ms)}</p>
+							<div class="pill-row">
+								{#each track.reason_tags as tag}
+									<span>{tag}</span>
 								{/each}
 							</div>
+						</div>
+						<div class="actions">
+							<span class="score">{formatPercent(track.similarity_score)}</span>
+							<button class="btn btn-primary btn-sm" onclick={() => playRadioTrack(track)}>Play</button>
+							<button class="btn btn-glass btn-sm" onclick={() => queueRadioTrack(track)}>Queue</button>
+							<button class="btn btn-glass btn-sm" onclick={() => rateRadioTrack(track, 'like')}>More like this</button>
+							<button class="btn btn-glass btn-sm" onclick={() => rateRadioTrack(track, 'dislike')}>Less like this</button>
+							<button class="btn btn-glass btn-sm" onclick={() => recordFeedback(track.track_id, 'save')}>Save</button>
+						</div>
+					</article>
+				{/each}
+			</div>
+		{:else}
+			<div class="empty-state">
+				{#if computePolling}
+					<div class="compute-status">
+						<div class="spinner"></div>
+						<p>Building similarity graph — check {computePollAttempt}/10</p>
+						<span class="poll-sub">Polling every 4s until tracks appear</span>
+					</div>
+				{:else if radioFetched}
+					<p>No similar tracks found. Run similarity computation to build the graph.</p>
+					<button class="btn btn-glass" onclick={computeSimilarity} disabled={computingSimilarity}>{computeLabel}</button>
+				{:else}
+					<p>Start radio from the current track to see NOOR's learned neighborhood.</p>
+				{/if}
+			</div>
+		{/if}
+	{:else}
+		<section class="glass explore-panel">
+			<div class="explore-inputs">
+				<textarea bind:value={prompt} rows="3" placeholder="Try: dubbed-out night drive, smoky spiritual jazz, ecstatic deep house at sunrise"></textarea>
+				<div class="explore-actions">
+					<select bind:value={mode}>
+						<option value="mood">Mood</option>
+						<option value="reference">Reference</option>
+						<option value="dj">DJ</option>
+						<option value="word-cloud">Word cloud</option>
+					</select>
+					<button class="btn btn-primary" onclick={loadExplore} disabled={previewLoading}>
+						{previewLoading ? 'Exploring…' : 'Explore'}
+					</button>
+				</div>
+			</div>
+		</section>
+
+		{#if libraryPreviewResults.length > 0 || (preview && preview.results.length > 0)}
+			{#if libraryPreviewResults.length > 0}
+				<div class="explore-section">
+					<div class="explore-section-header">
+						<span class="explore-section-label">From your library</span>
+						{#if libraryAnchors.length > 0}
+							<span class="explore-anchors">anchored by {libraryAnchors.join(', ')}</span>
 						{/if}
-						{#each feed?.reasons ?? [] as reason}
-							<article class="support-card">
-								<div class="reason-top">
-									<h4>{reason.label}</h4>
-									<span>{reason.weight}%</span>
+					</div>
+					<div class="results-grid">
+						{#each libraryPreviewResults as result (result.track_id)}
+							<article class="glass result-card">
+								{#if result.artwork_url}
+									<img class="cover" src={result.artwork_url} alt="" />
+								{:else}
+									<div class="cover placeholder">♫</div>
+								{/if}
+								<div class="meta">
+									<h3>{result.title}</h3>
+									<p>{result.artist_name ?? 'Unknown artist'}</p>
+									<p>{result.album_title ?? 'No album'} · {formatDuration(result.duration_ms)}</p>
+									<div class="pill-row">
+										{#each result.tags.slice(0, 4) as tag}
+											<span>{tag}</span>
+										{/each}
+										<span class="score-pill">{result.score}%</span>
+									</div>
 								</div>
-								<p>{reason.detail}</p>
 							</article>
 						{/each}
 					</div>
-				{:else}
-					<EmptyState title="Signals will appear here" copy="Run a search to see why a result surfaced." />
-				{/if}
-			</section>
+				</div>
+			{/if}
 
-			<section class="glass-panel support-panel">
-				<SectionHeader eyebrow="Scenes" title="Saved searches" subtitle="Return to prompts that already worked well." />
-				{#if presets.length === 0}
-					<EmptyState title="No saved scenes yet" copy="Save a search when the prompt and provider mix feels right." />
-				{:else}
-					<div class="support-list">
-						{#each presets as preset}
-							<button class="preset-card" onclick={() => applyPreset(preset)}>
-								<div>
-									<h4>{preset.name}</h4>
-									<p>{preset.prompt}</p>
+			{#if preview && preview.results.length > 0}
+				<div class="explore-section">
+					<div class="explore-section-header">
+						<span class="explore-section-label">New from TIDAL</span>
+					</div>
+					<div class="results-grid">
+						{#each preview.results as result (result.provider + result.provider_track_id)}
+							<article class="glass result-card">
+								{#if result.artwork_url}
+									<img class="cover" src={result.artwork_url} alt="" />
+								{:else}
+									<div class="cover placeholder">♫</div>
+								{/if}
+								<div class="meta">
+									<h3>{result.title}</h3>
+									<p>{result.artist_name ?? 'Unknown artist'}</p>
+									<p>{result.album_title ?? 'No album'} · {formatDuration(result.duration_ms)}</p>
+									<div class="pill-row">
+										{#each [...result.tags, ...(result.embedding_score ? [`embedding ${(result.embedding_score * 100).toFixed(0)}%`] : [])].slice(0, 5) as tag}
+											<span>{tag}</span>
+										{/each}
+									</div>
 								</div>
-								<span>{modeLabel(preset.mode)} · {preset.services.join(' · ')}</span>
-							</button>
+							</article>
 						{/each}
 					</div>
-				{/if}
-			</section>
-		</aside>
-	</div>
+				</div>
+			{/if}
+		{:else}
+			<div class="empty-state">
+				<p>Prompt explore is now secondary. Use it when you want to steer the learned engine outward.</p>
+			</div>
+		{/if}
+	{/if}
 </div>
 
 <style>
-	.composer-panel {
-		padding: 22px;
-		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+	.discover-page {
+		display: flex;
+		flex-direction: column;
 		gap: var(--space-4);
 	}
 
-	.composer-main,
-	.composer-side,
-	.control-stack,
-	.support-panel,
-	.support-list {
+	.error-banner,
+	.engine-panel,
+	.radio-panel,
+	.explore-panel {
+		padding: 18px;
+		border-radius: var(--radius);
+	}
+
+	.error-banner {
+		background: rgba(255, 77, 109, 0.12);
+		border: 1px solid rgba(255, 77, 109, 0.25);
+		color: #ff6b6b;
+	}
+
+	.engine-panel,
+	.radio-panel,
+	.explore-panel,
+	.result-card {
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		backdrop-filter: blur(16px);
+	}
+
+	.engine-panel,
+	.seed-row,
+	.engine-actions,
+	.engine-metrics,
+	.explore-actions,
+	.actions,
+	.pill-row,
+	.tab-row {
+		display: flex;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+
+	.engine-panel,
+	.radio-panel,
+	.explore-panel {
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
 	}
 
-	.composer-field {
+	.training-status {
 		display: flex;
-		flex-direction: column;
+		align-items: center;
 		gap: 8px;
+		font-size: 0.88rem;
+		color: var(--accent, #7c80ff);
+		font-weight: 600;
 	}
 
-	.chip-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
+	.spinner-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--accent, #7c80ff);
+		animation: pulse 1.4s ease-in-out infinite;
 	}
 
-	.mode-chip {
-		padding: 8px 12px;
+	@keyframes pulse {
+		0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+		40% { opacity: 1; transform: scale(1.1); }
+	}
+
+	.progress-bar {
+		width: 100%;
+		height: 4px;
+		border-radius: 2px;
+		background: rgba(255, 255, 255, 0.06);
+		overflow: hidden;
+	}
+
+	.progress-fill {
+		height: 100%;
+		background: linear-gradient(90deg, var(--accent, #7c80ff), #a78bfa);
+		border-radius: 2px;
+		transition: width 1s ease-out;
+	}
+
+	.tab-row button {
+		padding: 8px 14px;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.1);
 		color: var(--text-secondary);
 	}
 
-	.mode-chip.selected {
-		background: rgba(124, 128, 255, 0.12);
-		border-color: rgba(124, 128, 255, 0.22);
+	.tab-row button.active {
+		background: rgba(124, 128, 255, 0.14);
+		border-color: rgba(124, 128, 255, 0.28);
 		color: var(--text-primary);
 	}
 
-	.provider-list {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 8px;
-	}
-
-	.provider-row {
-		padding: 12px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		text-align: left;
-	}
-
-	.provider-row.selected {
-		background: rgba(124, 128, 255, 0.1);
-		border-color: rgba(124, 128, 255, 0.22);
-	}
-
-	.provider-row:hover:not(.disabled) {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.14);
-	}
-
-	.provider-row.disabled {
-		opacity: 0.42;
-		cursor: not-allowed;
-	}
-
-	.provider-row p {
-		margin-top: 4px;
-		color: var(--text-secondary);
-	}
-
-	.discover-layout {
-		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-		gap: var(--space-4);
-	}
-
-	.results-column,
-	.support-column {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-
-	.lead-card {
-		padding: 22px;
-		display: grid;
-		grid-template-columns: 220px minmax(0, 1fr);
-		gap: var(--space-4);
-	}
-
-	.lead-art {
-		width: 100%;
-		aspect-ratio: 1;
-		border-radius: var(--radius);
-		object-fit: cover;
-		background: rgba(255, 255, 255, 0.03);
-	}
-
-	.placeholder {
-		display: grid;
-		place-items: center;
-		color: var(--text-tertiary);
-	}
-
-	.lead-copy,
-	.result-main,
-	.lead-actions,
-	.result-actions {
+	.explore-section {
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
 	}
 
-	.lead-meta {
+	.explore-section-header {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
-	}
-
-	.lead-subtitle,
-	.result-card p,
-	.preset-card span {
-		color: var(--text-secondary);
-	}
-
-	.tag-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
-	}
-
-	.tag {
-		padding: 6px 9px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		color: var(--text-secondary);
-		font-size: 0.76rem;
-	}
-
-	.result-list {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.result-card {
-		padding: 16px;
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--space-4);
-	}
-
-	.result-side {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
+		align-items: baseline;
 		gap: 10px;
 	}
 
-	.score {
-		font-family: var(--font-display);
-		font-size: 1.6rem;
+	.explore-section-label {
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
 	}
 
-	.result-actions {
-		align-items: flex-end;
+	.explore-anchors {
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		opacity: 0.6;
 	}
 
-	.support-panel {
-		padding: 20px;
+	.score-pill {
+		font-size: 0.7rem;
+		opacity: 0.7;
 	}
 
-	.support-card,
-	.preset-card {
+	.label {
+		display: block;
+		margin-bottom: 6px;
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+	}
+
+	.seed-card {
+		display: flex;
+		gap: 12px;
+		align-items: center;
+	}
+
+	.seed-card img,
+	.cover {
+		width: 56px;
+		height: 56px;
+		border-radius: 10px;
+		object-fit: cover;
+		background: rgba(255, 255, 255, 0.04);
+	}
+
+	.cover {
+		width: 100%;
+		height: auto;
+		aspect-ratio: 1;
+	}
+
+	.art-placeholder,
+	.placeholder {
+		display: grid;
+		place-items: center;
+		color: var(--text-secondary);
+	}
+
+	.controls {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 12px;
+		flex: 1;
+	}
+
+	.controls label,
+	.explore-inputs {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	textarea,
+	select,
+	input[type='range'] {
+		width: 100%;
+	}
+
+	.results-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+		gap: var(--space-3);
+	}
+
+	.result-card {
 		padding: 14px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
-		text-align: left;
-		transition: background var(--motion-fast), border-color var(--motion-fast);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
 	}
 
-	.preset-card:hover {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.12);
+	.meta {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
 	}
 
-	.tag-row.compact {
-		gap: 5px;
+	.meta h3,
+	.meta p {
+		margin: 0;
 	}
 
-	.tag-row.compact .tag {
-		padding: 4px 7px;
+	.meta p {
+		color: var(--text-secondary);
+		font-size: 0.84rem;
+	}
+
+	.pill-row span {
+		padding: 4px 8px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.08);
 		font-size: 0.72rem;
+		color: var(--text-secondary);
 	}
 
-	.feed-loading {
+	.actions {
+		align-items: center;
+	}
+
+	.score {
+		margin-right: auto;
+		color: var(--accent);
+		font-weight: 600;
+	}
+
+	.btn-sm {
+		padding: 6px 10px;
+		font-size: 0.78rem;
+	}
+
+	.empty-state {
+		padding: 32px 12px;
+		text-align: center;
+		color: var(--text-secondary);
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 16px;
-		padding: 60px 0;
-		color: var(--text-secondary);
-		font-size: 0.9rem;
+		gap: 14px;
 	}
 
-	.feed-loading-ring {
+	.compute-status {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.poll-sub {
+		font-size: 0.75rem;
+		opacity: 0.5;
+	}
+
+	.spinner {
 		width: 28px;
 		height: 28px;
+		border: 2px solid rgba(255, 255, 255, 0.1);
+		border-top-color: var(--accent, #7c80ff);
 		border-radius: 50%;
-		border: 2px solid var(--border-subtle);
-		border-top-color: var(--accent);
-		animation: spin 700ms linear infinite;
+		animation: spin 0.9s linear infinite;
 	}
 
 	@keyframes spin {
 		to { transform: rotate(360deg); }
 	}
 
-	.reason-top {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 8px;
-		margin-bottom: 6px;
-	}
-
-	@media (max-width: 1060px) {
-		.composer-panel,
-		.discover-layout {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	@media (max-width: 760px) {
-		.provider-list {
+	@media (max-width: 640px) {
+		.results-grid {
 			grid-template-columns: 1fr;
 		}
 
-		.lead-card,
-		.result-card {
-			grid-template-columns: 1fr;
+		.seed-row {
 			flex-direction: column;
-		}
-
-		.result-side,
-		.result-actions {
-			align-items: flex-start;
+			align-items: stretch;
 		}
 	}
 </style>

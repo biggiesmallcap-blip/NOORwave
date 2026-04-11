@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 import { getApiBase } from '$lib/api/client';
 import { refreshPlaybackState } from '$lib/stores/player';
 import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
+import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
 
 export const wsConnected = writable(false);
 
@@ -14,7 +15,8 @@ export type WsMessage =
 	| { type: 'playback_failed'; message: string }
 	| { type: 'library_synced' }
 	| { type: 'musicbrainz_enriched' }
-	| { type: 'sync_progress'; service: string; progress: number };
+	| { type: 'sync_progress'; service: string; progress: number }
+	| { type: 'training_progress'; stage: string; progress: number; message: string };
 
 export const wsMessages = writable<WsMessage[]>([]);
 
@@ -62,6 +64,14 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'library_synced') {
 				handleSyncComplete();
+			}
+			if (data?.type === 'training_progress') {
+				handleTrainingProgress(data);
+				// Check if this is the final message (evaluate stage at 96%)
+				if (data.stage === 'evaluate' && data.progress >= 0.95) {
+					// Give a small delay to let the final state settle
+					setTimeout(() => handleTrainingComplete(), 500);
+				}
 			}
 		} catch {}
 	};

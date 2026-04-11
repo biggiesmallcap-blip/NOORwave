@@ -1,5 +1,9 @@
 pub mod discovery;
+pub mod discovery_trainer;
+pub mod learning;
 pub mod musicbrainz;
+pub mod rss_feeds;
+pub mod spotify;
 pub mod tidal;
 
 /// Trait that all streaming services implement

@@ -7,6 +7,8 @@ export const position = writable(0);
 export const volume = writable(1.0);
 export const automixEnabled = writable(false);
 export const automixDiscoverNew = writable(false);
+export const automixUseLearning = writable(true);
+export const automixAllowExternal = writable(false);
 
 // ─── Client-side position ticker ──────────────────────────────────────────────
 // Increments position every second while playing so the progress bar moves
@@ -59,6 +61,8 @@ function applyState(state: PlaybackState) {
 	automixEnabled.set(state.automix_enabled);
 	crossfadeMs.set(state.crossfade_ms);
 	automixDiscoverNew.set(state.automix_discover_new);
+	automixUseLearning.set(state.automix_use_learning);
+	automixAllowExternal.set(state.automix_allow_external);
 }
 
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
@@ -169,13 +173,27 @@ export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) 
 	}
 }
 
-export async function setPlayerAutomixEnabled(enabled: boolean, crossfade_ms?: number, discover_new?: boolean) {
+export async function setPlayerAutomixEnabled(
+	enabled: boolean,
+	crossfade_ms?: number,
+	discover_new?: boolean,
+	use_learning?: boolean,
+	allow_external?: boolean
+) {
 	try {
-		const result = await api.setPlaybackAutomix(enabled, crossfade_ms, discover_new);
+		const result = await api.setPlaybackAutomix(
+			enabled,
+			crossfade_ms,
+			discover_new,
+			use_learning,
+			allow_external
+		);
 		// Only sync automix fields — applying full state would clobber the local position ticker.
 		automixEnabled.set(result.state.automix_enabled);
 		crossfadeMs.set(result.state.crossfade_ms);
 		automixDiscoverNew.set(result.state.automix_discover_new);
+		automixUseLearning.set(result.state.automix_use_learning);
+		automixAllowExternal.set(result.state.automix_allow_external);
 		if (result.queue) playbackQueue.set(result.queue);
 		playerError.set(null);
 	} catch (error) {
@@ -189,6 +207,26 @@ export async function setPlayerCrossfadeMs(ms: number) {
 
 export async function setPlayerDiscoverNew(enabled: boolean) {
 	await setPlayerAutomixEnabled(get(automixEnabled), get(crossfadeMs), enabled);
+}
+
+export async function setPlayerAutomixUseLearning(enabled: boolean) {
+	await setPlayerAutomixEnabled(
+		get(automixEnabled),
+		get(crossfadeMs),
+		get(automixDiscoverNew),
+		enabled,
+		get(automixAllowExternal)
+	);
+}
+
+export async function setPlayerAutomixAllowExternal(enabled: boolean) {
+	await setPlayerAutomixEnabled(
+		get(automixEnabled),
+		get(crossfadeMs),
+		get(automixDiscoverNew),
+		get(automixUseLearning),
+		enabled
+	);
 }
 
 export async function togglePlayerAutomix() {

@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:3333';
+const API_BASE = 'http://localhost:3334';
 
 export function getApiBase(): string {
 	if (typeof window === 'undefined') {
@@ -6,7 +6,7 @@ export function getApiBase(): string {
 	}
 
 	const { protocol, hostname } = window.location;
-	return `${protocol}//${hostname}:3333`;
+	return `${protocol}//${hostname}:3334`;
 }
 
 export interface Track {
@@ -19,12 +19,14 @@ export interface Track {
 	disc_number: number | null;
 	track_number: number | null;
 	duration_ms: number | null;
+	isrc: string | null;
 	tidal_id: number | null;
 	best_quality: string | null;
 	best_source: string | null;
 	fidelity_score: number;
 	is_favorite: boolean;
 	play_count: number;
+	last_played_at: string | null;
 	date_added: string | null;
 	source: string;
 	artwork_url: string | null;
@@ -115,6 +117,8 @@ export interface PlaybackState {
 	automix_enabled: boolean;
 	crossfade_ms: number;
 	automix_discover_new: boolean;
+	automix_use_learning: boolean;
+	automix_allow_external: boolean;
 }
 
 export interface PlaybackSnapshot {
@@ -352,6 +356,7 @@ export interface DiscoveryExternalResult {
 	in_library: boolean;
 	is_saved: boolean;
 	is_playable: boolean;
+	embedding_score: number | null;
 	score: number;
 	tags: string[];
 }
@@ -373,6 +378,115 @@ export interface DiscoveryExternalFeed {
 	results: DiscoveryExternalResult[];
 	capabilities: DiscoveryProviderCapability[];
 	trail_item: DiscoveryConnectionTrailItem | null;
+}
+
+export interface DiscoveryNeighborReason {
+	key: string;
+	label: string;
+	weight: number;
+}
+
+export interface EmbeddingModel {
+	id: number;
+	model_key: string;
+	family: string;
+	dimension: number;
+	status: string;
+	is_active: boolean;
+	trained_at: string | null;
+	config_json: string | null;
+	metrics_json: string | null;
+	created_at: string;
+}
+
+export interface DiscoveryTrainingRun {
+	id: number;
+	model_id: number | null;
+	stage: string;
+	status: string;
+	progress: number;
+	items_total: number | null;
+	items_done: number;
+	started_at: string;
+	finished_at: string | null;
+	error_text: string | null;
+}
+
+export interface DiscoveryStatus {
+	fallback_active: boolean;
+	active_model: EmbeddingModel | null;
+	latest_run: DiscoveryTrainingRun | null;
+	coverage_ratio: number;
+	playable_tracks: number;
+	embedded_tracks: number;
+	neighbor_tracks: number;
+	clip_cache_tracks: number;
+}
+
+export interface DiscoveryRadioResult {
+	track_id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	best_quality: string | null;
+	similarity_score: number;
+	adjusted_score: number;
+	co_listen_score: number;
+	co_album_score: number;
+	co_artist_score: number;
+	genre_proximity: number;
+	reason_tags: string[];
+	model_key: string | null;
+	source_mode: string;
+}
+
+// ─── Home Page Discovery Types ───────────────────────────────────────────────
+
+export interface RSSFeedItem {
+	title: string;
+	link: string;
+	description: string;
+	author: string | null;
+	published_at: string | null;
+	image_url: string | null;
+	source: string;
+	category: string;
+}
+
+export interface HomeReleasesResponse {
+	releases: RSSFeedItem[];
+	source: string;
+}
+
+export interface HomePickTrack {
+	id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	play_count: number;
+	reason: string;
+	genre?: string;
+}
+
+export interface HomePicksResponse {
+	top_picks: HomePickTrack[];
+	genre_variety: HomePickTrack[];
+	source: string;
+}
+
+export interface HomeArticlesResponse {
+	articles: RSSFeedItem[];
+	source: string;
+}
+
+export interface HomeNewsResponse {
+	news: RSSFeedItem[];
+	sources: string[];
+	source: string;
 }
 
 async function fetchApiResponse(
@@ -552,6 +666,34 @@ export const api = {
 		return fetchApi<{ presets: DiscoveryPreset[] }>('/api/discovery/presets');
 	},
 
+	getDiscoveryStatus() {
+		return fetchApi<{ status: DiscoveryStatus }>('/api/discovery/status');
+	},
+
+	getDiscoveryTrainingStatus() {
+		return fetchApi<{ run: DiscoveryTrainingRun | null }>('/api/discovery/train/status');
+	},
+
+	startDiscoveryTraining(mode: 'full' | 'incremental', rebuild_audio = false) {
+		return fetchApi<{ status: string; mode: string }>('/api/discovery/train', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ mode, rebuild_audio }),
+		});
+	},
+
+	recordDiscoveryFeedback(
+		seed_track_id: number,
+		candidate_track_id: number,
+		action: string,
+		surface: string,
+		context?: Record<string, unknown>
+	) {
+		return fetchApi<{ recorded: boolean }>('/api/discovery/feedback', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ seed_track_id, candidate_track_id, action, surface, context }),
+		});
+	},
+
 	createDiscoveryPreset(
 		name: string,
 		prompt: string,
@@ -604,6 +746,35 @@ export const api = {
 		return fetchApi<{ feed: DiscoveryExternalFeed }>('/api/discovery/connections', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ prompt, mode, services, seed, limit }),
+		});
+	},
+
+	// Similar Radio
+	getRadioTracks(params: {
+		seed_track_id: number;
+		creativity?: number;
+		context_window?: number;
+		limit?: number;
+		exclude_ids?: number[];
+	}) {
+		return fetchApi<{
+			tracks: DiscoveryRadioResult[];
+			seed_track_id: number;
+			creativity: number;
+			context_window: number;
+			computed_at: string | null;
+			model_family: string | null;
+			model_key: string | null;
+			reasons: string[];
+		}>('/api/discovery/radio', undefined, {
+			method: 'POST',
+			body: JSON.stringify(params),
+		});
+	},
+
+	computeRadioSimilarity() {
+		return fetchApi<{ status: string; message: string }>('/api/discovery/radio/compute', undefined, {
+			method: 'POST',
 		});
 	},
 
@@ -708,10 +879,16 @@ export const api = {
 		});
 	},
 
-	setPlaybackAutomix(enabled: boolean, crossfade_ms?: number, discover_new?: boolean) {
+	setPlaybackAutomix(
+		enabled: boolean,
+		crossfade_ms?: number,
+		discover_new?: boolean,
+		use_learning?: boolean,
+		allow_external?: boolean
+	) {
 		return fetchApi<{ state: PlaybackState; queue: QueueItem[] }>('/api/playback/automix', undefined, {
 			method: 'POST',
-			body: JSON.stringify({ enabled, crossfade_ms, discover_new }),
+			body: JSON.stringify({ enabled, crossfade_ms, discover_new, use_learning, allow_external }),
 		});
 	},
 
@@ -778,5 +955,23 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({ genre_id: genreId, track_ids: trackIds }),
 		});
+	},
+
+	// ─── Home Page Discovery ───────────────────────────────────────────────
+
+	getHomeReleases() {
+		return fetchApi<HomeReleasesResponse>('/api/home/releases');
+	},
+
+	getHomePicks() {
+		return fetchApi<HomePicksResponse>('/api/home/picks');
+	},
+
+	getHomeArticles() {
+		return fetchApi<HomeArticlesResponse>('/api/home/articles');
+	},
+
+	getHomeNews() {
+		return fetchApi<HomeNewsResponse>('/api/home/news');
 	},
 };

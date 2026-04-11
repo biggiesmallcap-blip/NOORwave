@@ -8,6 +8,8 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_004,
     MIGRATION_005,
     MIGRATION_006,
+    MIGRATION_007,
+    MIGRATION_008,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -309,6 +311,122 @@ CREATE TABLE IF NOT EXISTS sync_metadata (
 -- Seed TIDAL sync row
 INSERT OR IGNORE INTO sync_metadata (service, last_sync_at, auto_sync_daily)
 VALUES ('tidal', datetime('now'), 0);
+"#;
+
+const MIGRATION_007: &str = r#"
+-- Track similarity: pre-computed co-listen + metadata similarity pairs
+-- Built from: playlist co-occurrence, album co-occurrence, listen session overlap,
+--             shared genre branches, shared artist appearances
+CREATE TABLE IF NOT EXISTS track_similarity (
+    track_a INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_b INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    similarity_score REAL NOT NULL DEFAULT 0,
+    -- Component scores (each 0-1, for debugging/tuning):
+    co_listen_score REAL DEFAULT 0,      -- from shared playlist/session appearance
+    co_album_score REAL DEFAULT 0,       -- from same album (tracks on same album are similar)
+    co_artist_score REAL DEFAULT 0,      -- same artist or frequent collaborator
+    genre_proximity REAL DEFAULT 0,       -- shared genre taxonomy branches
+    duration_proximity REAL DEFAULT 0,   -- similar length
+    era_proximity REAL DEFAULT 0,        -- similar year/era
+    -- Metadata:
+    computed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (track_a, track_b),
+    CHECK (track_a < track_b)  -- canonical ordering, no duplicates
+);
+CREATE INDEX idx_track_similarity_a ON track_similarity(track_a, similarity_score DESC);
+CREATE INDEX idx_track_similarity_b ON track_similarity(track_b, similarity_score DESC);
+CREATE INDEX idx_track_similarity_score ON track_similarity(similarity_score DESC);
+"#;
+
+const MIGRATION_008: &str = r#"
+CREATE TABLE IF NOT EXISTS embedding_models (
+    id INTEGER PRIMARY KEY,
+    model_key TEXT NOT NULL UNIQUE,
+    family TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'idle',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    trained_at TEXT,
+    config_json TEXT,
+    metrics_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS training_runs (
+    id INTEGER PRIMARY KEY,
+    model_id INTEGER REFERENCES embedding_models(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress REAL NOT NULL DEFAULT 0,
+    items_total INTEGER,
+    items_done INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT DEFAULT (datetime('now')),
+    finished_at TEXT,
+    error_text TEXT
+);
+
+CREATE TABLE IF NOT EXISTS track_embeddings (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector_blob BLOB NOT NULL,
+    l2_norm REAL NOT NULL DEFAULT 0,
+    generated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (track_id, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS track_audio_features (
+    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    feature_version TEXT NOT NULL,
+    vector_blob BLOB NOT NULL,
+    clip_start_ms INTEGER NOT NULL DEFAULT 30000,
+    clip_duration_ms INTEGER NOT NULL DEFAULT 20000,
+    computed_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS track_neighbors (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    neighbor_track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    behavioral_score REAL DEFAULT 0,
+    audio_score REAL DEFAULT 0,
+    metadata_score REAL DEFAULT 0,
+    reason_json TEXT,
+    computed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (track_id, neighbor_track_id, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS playback_transitions (
+    id INTEGER PRIMARY KEY,
+    from_track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+    to_track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+    transition_source TEXT NOT NULL,
+    completed_prev INTEGER NOT NULL DEFAULT 0,
+    gap_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS discovery_feedback (
+    id INTEGER PRIMARY KEY,
+    seed_track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    candidate_track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    surface TEXT NOT NULL,
+    context_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_runs_model ON training_runs(model_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_track_embeddings_model ON track_embeddings(model_id);
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_track ON track_neighbors(track_id, model_id, rank);
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_neighbor ON track_neighbors(neighbor_track_id, model_id);
+CREATE INDEX IF NOT EXISTS idx_playback_transitions_from ON playback_transitions(from_track_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_playback_transitions_to ON playback_transitions(to_track_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovery_feedback_seed ON discovery_feedback(seed_track_id, created_at DESC);
+
+ALTER TABLE playback_state ADD COLUMN automix_use_learning INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE playback_state ADD COLUMN automix_allow_external INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const MIGRATION_004: &str = r#"

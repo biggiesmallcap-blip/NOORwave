@@ -3,49 +3,48 @@
 	import {
 		api,
 		getApiBase,
-		type AnalyticsDashboard,
-		type ListenHistoryEntry,
-		type AnalyticsTopArtist
+		type RSSFeedItem,
+		type HomePickTrack
 	} from '$lib/api/client';
+	import { wsConnected } from '$lib/api/ws';
+	import { currentTrack, isPlaying } from '$lib/stores/player';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import MetricPair from '$lib/components/ui/MetricPair.svelte';
-	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, isPlaying, playbackQueue } from '$lib/stores/player';
-	import { formatDuration } from '$lib/stores/library';
 
-	let dashboard = $state<AnalyticsDashboard | null>(null);
-	let runtime = $state<{ available: boolean; device_name: string | null }>({
-		available: false,
-		device_name: null
-	});
+	// Home page data
+	let releases = $state<RSSFeedItem[]>([]);
+	let picks = $state<HomePickTrack[]>([]);
+	let genrePicks = $state<HomePickTrack[]>([]);
+	let articles = $state<RSSFeedItem[]>([]);
+	let news = $state<RSSFeedItem[]>([]);
+
+	// Status data
 	let status = $state<{ name: string; version: string; status: string } | null>(null);
 	let tidalStatus = $state<'connected' | 'disconnected' | 'unknown'>('unknown');
+
+	// Loading states
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let sectionsLoading = $state({
+		releases: true,
+		picks: true,
+		articles: true,
+		news: true
+	});
 
 	onMount(() => {
 		void loadHome();
 	});
 
 	async function loadHome() {
-		loading = true;
+		loading = false; // Show page immediately, sections load independently
 		error = null;
 
 		try {
-			const [statusData, dashboardData, runtimeData] = await Promise.all([
-				api.getStatus(),
-				api.getAnalyticsDashboard(6, 5, 14),
-				api.getPlaybackRuntime()
-			]);
+			// Load status quickly
+			status = await api.getStatus();
 
-			status = statusData;
-			dashboard = dashboardData.dashboard;
-			runtime = {
-				available: runtimeData.available,
-				device_name: runtimeData.runtime?.device_name ?? null
-			};
-
+			// Load TIDAL status
 			try {
 				const tidalResponse = await fetch(`${getApiBase()}/api/tidal/status`);
 				if (!tidalResponse.ok) throw new Error(`Server returned ${tidalResponse.status}`);
@@ -55,171 +54,326 @@
 				tidalStatus = 'unknown';
 			}
 		} catch {
-			error = 'NOOR could not reach the local server on port 3333.';
-		} finally {
+			error = 'NOOR could not reach the local server.';
 			loading = false;
+			return;
+		}
+
+		// Load all sections in parallel (don't await, let them populate as they finish)
+		loadReleases();
+		loadPicks();
+		loadArticles();
+		loadNews();
+	}
+
+	async function loadReleases() {
+		sectionsLoading.releases = true;
+		try {
+			const data = await api.getHomeReleases();
+			releases = data.releases ?? [];
+		} catch (e) {
+			console.error('Failed to load releases:', e);
+			releases = [];
+		} finally {
+			sectionsLoading.releases = false;
 		}
 	}
 
-	function formatListenStamp(value: string) {
-		return new Date(value).toLocaleString(undefined, {
+	async function loadPicks() {
+		sectionsLoading.picks = true;
+		try {
+			const data = await api.getHomePicks();
+			picks = data.top_picks ?? [];
+			genrePicks = data.genre_variety ?? [];
+		} catch (e) {
+			console.error('Failed to load picks:', e);
+			picks = [];
+			genrePicks = [];
+		} finally {
+			sectionsLoading.picks = false;
+		}
+	}
+
+	async function loadArticles() {
+		sectionsLoading.articles = true;
+		try {
+			const data = await api.getHomeArticles();
+			articles = data.articles ?? [];
+		} catch (e) {
+			console.error('Failed to load articles:', e);
+			articles = [];
+		} finally {
+			sectionsLoading.articles = false;
+		}
+	}
+
+	async function loadNews() {
+		sectionsLoading.news = true;
+		try {
+			const data = await api.getHomeNews();
+			news = data.news ?? [];
+		} catch (e) {
+			console.error('Failed to load news:', e);
+			news = [];
+		} finally {
+			sectionsLoading.news = false;
+		}
+	}
+
+	function formatDate(dateStr: string | null): string {
+		if (!dateStr) return '';
+		const date = new Date(dateStr);
+		return date.toLocaleDateString(undefined, {
 			month: 'short',
 			day: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit'
+			year: 'numeric'
 		});
 	}
 
-	let recentListens = $derived<ListenHistoryEntry[]>(dashboard?.recent_listens ?? []);
-	let topArtists = $derived<AnalyticsTopArtist[]>(dashboard?.top_artists ?? []);
-	let genreCoverage = $derived(
-		dashboard && dashboard.overview.tracks > 0
-			? `${Math.round((dashboard.overview.tagged_tracks / dashboard.overview.tracks) * 100)}%`
-			: '0%'
-	);
+	function formatDuration(ms: number | null): string {
+		if (!ms) return '';
+		const minutes = Math.floor(ms / 60000);
+		const seconds = Math.floor((ms % 60000) / 1000);
+		return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+	}
+
+	function getSourceColor(source: string): string {
+		const colors: Record<string, string> = {
+			'AllMusic': 'var(--accent)',
+			'Billboard': '#ff6b6b',
+			'NME': '#4ecdc4',
+			'SPIN': '#ffe66d',
+			'Pitchfork': '#95e1d3',
+			'Rolling Stone': '#f38181',
+			'Consequence': '#aa96da',
+			'The Guardian Music': '#48bfe3'
+		};
+		return colors[source] || 'var(--text-muted)';
+	}
 </script>
 
 <svelte:head>
-	<title>NOOR</title>
+	<title>NOOR — Home</title>
 </svelte:head>
 
 <div class="page-shell home-page animate-in">
-	<section class="page-header">
-		<p class="eyebrow">NOOR</p>
-		<h1>Your music, fully in command.</h1>
-	</section>
-
-	{#if loading}
-		<EmptyState title="Loading dashboard" copy="Pulling listening trends, runtime state, and library totals." />
-	{:else if error}
+	{#if error}
+		<section class="page-header">
+			<p class="eyebrow">NOOR</p>
+			<h1>Your music discovery hub</h1>
+		</section>
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
 				<button class="btn btn-glass" onclick={loadHome}>Try again</button>
 			{/snippet}
 		</EmptyState>
-	{:else if dashboard}
-		<section class="stat-strip">
-			<MetricPair label="Tracks" value={dashboard.overview.tracks.toLocaleString()} />
-			<MetricPair label="Albums" value={dashboard.overview.albums.toLocaleString()} />
-			<MetricPair label="Artists" value={dashboard.overview.artists.toLocaleString()} />
-			<MetricPair label="Genre coverage" value={genreCoverage} />
+	{:else}
+		<section class="page-header">
+			<p class="eyebrow">NOOR</p>
+			<h1>Your music discovery hub</h1>
+			<div class="system-badges">
+				{#if status}
+					<StateBadge label={`Server v${status?.version}`} tone="success" />
+				{:else}
+					<StateBadge label="Loading..." tone="muted" />
+				{/if}
+				<StateBadge
+					label={tidalStatus === 'connected' ? 'TIDAL connected' : tidalStatus === 'disconnected' ? 'TIDAL offline' : 'TIDAL unknown'}
+					tone={tidalStatus === 'connected' ? 'active' : tidalStatus === 'disconnected' ? 'muted' : 'warning'}
+				/>
+				<StateBadge label={$wsConnected ? 'WS live' : 'WS offline'} tone={$wsConnected ? 'success' : 'muted'} />
+			</div>
 		</section>
 
 		{#if $currentTrack}
-			<section class="glass-panel now-panel">
-				<div class="now-left">
+			<section class="glass-panel now-playing-bar">
+				<div class="np-left">
 					{#if $currentTrack.artwork_url}
-						<img class="now-art" src={$currentTrack.artwork_url} alt="" />
+						<img class="np-art" src={$currentTrack.artwork_url} alt="" />
 					{:else}
-						<div class="now-art placeholder">♫</div>
+						<div class="np-art placeholder">♫</div>
 					{/if}
-					<div class="now-meta">
+					<div class="np-meta">
 						<p class="eyebrow">{$isPlaying ? 'Now playing' : 'Paused'}</p>
 						<h3>{$currentTrack.title}</h3>
 						<span>{$currentTrack.artist_name ?? 'Unknown artist'}</span>
 					</div>
 				</div>
-				{#if $playbackQueue.length > 1}
-					{@const upNext = $playbackQueue.filter(q => q.track.id !== $currentTrack?.id).slice(0, 3)}
-					{#if upNext.length > 0}
-						<div class="up-next">
-							<p class="eyebrow">Up next</p>
-							{#each upNext as item (item.id)}
-								<div class="up-next-row">
-									<span class="up-next-title">{item.track.title}</span>
-									<span class="up-next-artist">{item.track.artist_name ?? ''}</span>
-									<span class="up-next-dur">{formatDuration(item.track.duration_ms)}</span>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				{/if}
 			</section>
 		{/if}
 
-		<section class="panel-grid activity-grid">
-			<section class="glass-panel list-panel">
-				<div class="section-head">
-					<p class="eyebrow">Listening now</p>
-					<h2>Recently played</h2>
+		<!-- New Releases Section -->
+		<section class="discovery-section">
+			<div class="section-header">
+				<div class="section-title-group">
+					<p class="eyebrow">Fresh from AllMusic</p>
+					<h2>New Releases</h2>
 				</div>
-
-				{#if recentListens.length > 0}
-					<div class="list-stack">
-						{#each recentListens as entry (entry.id)}
-							<div class="listen-row">
-								{#if entry.artwork_url}
-									<img class="listen-art" src={entry.artwork_url} alt="" />
-								{:else}
-									<div class="listen-art placeholder">♫</div>
-								{/if}
-
-								<div class="listen-meta">
-									<p>{entry.track_title}</p>
-									<span>{entry.artist_name ?? 'Unknown artist'}</span>
-								</div>
-
-								<span class="listen-stamp">{formatListenStamp(entry.started_at)}</span>
-							</div>
-						{/each}
-					</div>
-				{:else}
-					<EmptyState title="No listens yet" copy="Start playback and the recent timeline will populate here." />
+				{#if sectionsLoading.releases}
+					<span class="loading-indicator">Loading...</span>
 				{/if}
-			</section>
-
-			<section class="glass-panel list-panel">
-				<div class="section-head">
-					<p class="eyebrow">Last 14 days</p>
-					<h2>This fortnight</h2>
-				</div>
-
-				{#if topArtists.length > 0}
-					<div class="list-stack">
-						{#each topArtists as artist (artist.artist_id)}
-							<div class="artist-row">
-								<div class="artist-meta">
-									<p>{artist.artist_name}</p>
-									<span>{artist.unique_tracks} unique tracks</span>
-								</div>
-								<strong>{artist.listens} listens</strong>
-							</div>
-						{/each}
-					</div>
-				{:else}
-					<EmptyState title="No artist trends yet" copy="Give NOOR a little listening history and this fortnight view will start to read clearly." />
-				{/if}
-			</section>
-		</section>
-
-		<section class="glass-panel landscape-panel">
-			<div class="section-head">
-				<p class="eyebrow">Listening landscape</p>
-				<h2>Genre landscape</h2>
 			</div>
 
-			{#if dashboard.top_genres.length > 0}
-				<div class="genre-row">
-					{#each dashboard.top_genres as genre}
-						<span class="genre-pill">{genre.genre_name} · {genre.listens}</span>
+			{#if releases.length > 0}
+				<div class="horizontal-scroll">
+					{#each releases.slice(0, 12) as release (release.link)}
+						<a class="release-card glass-tile" href={release.link} target="_blank" rel="noopener">
+							{#if release.image_url}
+								<img class="release-art" src={release.image_url} alt="" />
+							{:else}
+								<div class="release-art placeholder">💿</div>
+							{/if}
+							<div class="release-info">
+								<h3 class="release-title">{release.title}</h3>
+								{#if release.author}
+									<p class="release-artist">{release.author}</p>
+								{/if}
+								<span class="release-source" style="color: {getSourceColor(release.source)}">
+									{release.source}
+								</span>
+							</div>
+						</a>
 					{/each}
 				</div>
 			{:else}
-				<EmptyState title="Genre signals are still thin" copy="Run MusicBrainz enrichment to unlock a richer landscape view." />
+				<EmptyState title="No new releases found" copy="AllMusic feed is currently unavailable." />
 			{/if}
 		</section>
 
-		<section class="system-row">
-			<StateBadge label={status ? `Server v${status.version}` : 'Server unknown'} tone={status ? 'success' : 'muted'} />
-			<StateBadge
-				label={tidalStatus === 'connected' ? 'TIDAL connected' : tidalStatus === 'disconnected' ? 'TIDAL offline' : 'TIDAL unknown'}
-				tone={tidalStatus === 'connected' ? 'active' : tidalStatus === 'disconnected' ? 'muted' : 'warning'}
-			/>
-			<StateBadge label={$wsConnected ? 'WS live' : 'WS offline'} tone={$wsConnected ? 'success' : 'muted'} />
-			<StateBadge
-				label={runtime.available ? (runtime.device_name ?? 'Runtime active') : 'Runtime idle'}
-				tone={runtime.available ? 'active' : 'muted'}
-			/>
+		<!-- Daily Picks Section -->
+		<section class="discovery-section">
+			<div class="section-header">
+				<div class="section-title-group">
+					<p class="eyebrow">Curated for you</p>
+					<h2>Daily Picks</h2>
+				</div>
+				{#if sectionsLoading.picks}
+					<span class="loading-indicator">Loading...</span>
+				{/if}
+			</div>
+
+			{#if picks.length > 0 || genrePicks.length > 0}
+				<div class="picks-grid">
+					{#if picks.length > 0}
+						<div class="picks-subsection">
+							<h3 class="subsection-title">Top Picks</h3>
+							<div class="track-list">
+								{#each picks.slice(0, 8) as pick (pick.id)}
+									<div class="track-row glass-tile">
+										{#if pick.artwork_url}
+											<img class="track-art" src={pick.artwork_url} alt="" />
+										{:else}
+											<div class="track-art placeholder">♫</div>
+										{/if}
+										<div class="track-meta">
+											<p class="track-title">{pick.title}</p>
+											<span class="track-artist">{pick.artist_name ?? 'Unknown artist'}</span>
+										</div>
+										<div class="track-stats">
+											<span class="stat">{pick.play_count} plays</span>
+											{#if pick.duration_ms}
+												<span class="stat">{formatDuration(pick.duration_ms)}</span>
+											{/if}
+										</div>
+									</div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
+					{#if genrePicks.length > 0}
+						<div class="picks-subsection">
+							<h3 class="subsection-title">Genre Variety</h3>
+							<div class="genre-pills">
+								{#each genrePicks as pick (pick.id)}
+									<div class="genre-pill glass-tile">
+										<span class="genre-name">{pick.genre}</span>
+										<span class="genre-track">{pick.title}</span>
+									</div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+				</div>
+			{:else}
+				<EmptyState title="No daily picks yet" copy="Start listening to get personalized recommendations." />
+			{/if}
+		</section>
+
+		<!-- Weekly Articles Section -->
+		<section class="discovery-section">
+			<div class="section-header">
+				<div class="section-title-group">
+					<p class="eyebrow">From AllMusic</p>
+					<h2>Weekly Articles</h2>
+				</div>
+				{#if sectionsLoading.articles}
+					<span class="loading-indicator">Loading...</span>
+				{/if}
+			</div>
+
+			{#if articles.length > 0}
+				<div class="horizontal-scroll">
+					{#each articles.slice(0, 10) as article (article.link)}
+						<a class="article-card glass-tile" href={article.link} target="_blank" rel="noopener">
+							<div class="article-content">
+								<h3 class="article-title">{article.title}</h3>
+								{#if article.description}
+									<p class="article-desc">{article.description}</p>
+								{/if}
+								<div class="article-footer">
+									<span class="article-source" style="color: {getSourceColor(article.source)}">
+										{article.source}
+									</span>
+									{#if article.published_at}
+										<span class="article-date">{formatDate(article.published_at)}</span>
+									{/if}
+								</div>
+							</div>
+						</a>
+					{/each}
+				</div>
+			{:else}
+				<EmptyState title="No articles this week" copy="Check back later for fresh music content." />
+			{/if}
+		</section>
+
+		<!-- Industry News Section -->
+		<section class="discovery-section">
+			<div class="section-header">
+				<div class="section-title-group">
+					<p class="eyebrow">Music industry</p>
+					<h2>Latest News</h2>
+				</div>
+				{#if sectionsLoading.news}
+					<span class="loading-indicator">Loading...</span>
+				{/if}
+			</div>
+
+			{#if news.length > 0}
+				<div class="news-grid">
+					{#each news.slice(0, 15) as item (item.link)}
+						<a class="news-card glass-tile" href={item.link} target="_blank" rel="noopener">
+							<div class="news-content">
+								<h3 class="news-title">{item.title}</h3>
+								{#if item.description}
+									<p class="news-desc">{item.description}</p>
+								{/if}
+								<div class="news-footer">
+									<span class="news-source" style="color: {getSourceColor(item.source)}">
+										{item.source}
+									</span>
+									{#if item.published_at}
+										<span class="news-date">{formatDate(item.published_at)}</span>
+									{/if}
+								</div>
+							</div>
+						</a>
+					{/each}
+				</div>
+			{:else}
+				<EmptyState title="No news available" copy="Music news feeds are currently unavailable." />
+			{/if}
 		</section>
 	{/if}
 </div>
@@ -227,6 +381,7 @@
 <style>
 	.home-page {
 		gap: var(--space-5);
+		padding-bottom: 40px;
 	}
 
 	.page-header {
@@ -237,32 +392,31 @@
 	}
 
 	.page-header h1 {
-		max-width: 12ch;
+		max-width: 16ch;
 	}
 
-	.stat-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: var(--space-3);
+	.system-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		margin-top: 8px;
 	}
 
-	.now-panel {
+	/* Now playing bar */
+	.now-playing-bar {
 		padding: 16px 20px;
 		display: flex;
 		align-items: center;
-		gap: 24px;
-		flex-wrap: wrap;
+		gap: 16px;
 	}
 
-	.now-left {
+	.np-left {
 		display: flex;
 		align-items: center;
 		gap: 14px;
-		flex: 1;
-		min-width: 200px;
 	}
 
-	.now-art {
+	.np-art {
 		width: 52px;
 		height: 52px;
 		border-radius: 8px;
@@ -270,7 +424,7 @@
 		flex-shrink: 0;
 	}
 
-	.now-art.placeholder {
+	.np-art.placeholder {
 		background: var(--accent-soft);
 		display: grid;
 		place-items: center;
@@ -278,14 +432,14 @@
 		font-size: 1.2rem;
 	}
 
-	.now-meta {
+	.np-meta {
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
 		min-width: 0;
 	}
 
-	.now-meta h3 {
+	.np-meta h3 {
 		font-size: 0.95rem;
 		font-weight: 700;
 		white-space: nowrap;
@@ -294,195 +448,406 @@
 		margin: 0;
 	}
 
-	.now-meta span {
+	.np-meta span {
 		font-size: 0.8rem;
 		color: var(--text-muted);
 	}
 
-	.up-next {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		flex: 1;
-		min-width: 180px;
-	}
-
-	.up-next .eyebrow {
-		margin-bottom: 2px;
-	}
-
-	.up-next-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 0.8rem;
-	}
-
-	.up-next-title {
-		flex: 1;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		color: var(--text-primary);
-	}
-
-	.up-next-artist {
-		color: var(--text-muted);
-		flex-shrink: 0;
-		max-width: 120px;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.up-next-dur {
-		color: var(--text-muted);
-		flex-shrink: 0;
-	}
-
-	.activity-grid {
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-	}
-
-	.list-panel,
-	.landscape-panel {
-		padding: 20px;
+	/* Discovery sections */
+	.discovery-section {
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
 	}
 
-	.section-head {
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+	}
+
+	.section-title-group {
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
 	}
 
-	.section-head h2 {
-		font-size: 1.05rem;
+	.section-title-group h2 {
+		font-size: 1.15rem;
+		font-weight: 700;
+		margin: 0;
 	}
 
-	.list-stack {
+	.loading-indicator {
+		font-size: 0.78rem;
+		color: var(--text-muted);
+		font-style: italic;
+	}
+
+	/* Horizontal scroll */
+	.horizontal-scroll {
+		display: flex;
+		gap: 16px;
+		overflow-x: auto;
+		padding-bottom: 8px;
+		scroll-snap-type: x mandatory;
+
+		&::-webkit-scrollbar {
+			height: 6px;
+		}
+
+		&::-webkit-scrollbar-track {
+			background: var(--bg-surface);
+			border-radius: 3px;
+		}
+
+		&::-webkit-scrollbar-thumb {
+			background: var(--border-subtle);
+			border-radius: 3px;
+		}
+
+		&::-webkit-scrollbar-thumb:hover {
+			background: var(--text-muted);
+		}
+	}
+
+	/* Release cards */
+	.release-card {
+		flex: 0 0 200px;
 		display: flex;
 		flex-direction: column;
-	}
-
-	.listen-row,
-	.artist-row {
-		display: flex;
-		align-items: center;
 		gap: 10px;
-		padding: 10px 0;
-		border-bottom: 1px solid var(--border-subtle);
+		padding: 14px;
+		text-decoration: none;
+		color: inherit;
+		transition: transform 0.2s ease, box-shadow 0.2s ease;
+		scroll-snap-align: start;
+
+		&:hover {
+			transform: translateY(-4px);
+			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+		}
 	}
 
-	.listen-row:last-child,
-	.artist-row:last-child {
-		border-bottom: none;
-	}
-
-	.listen-art {
-		width: 32px;
-		height: 32px;
-		border-radius: 9px;
+	.release-art {
+		width: 100%;
+		aspect-ratio: 1;
+		border-radius: 8px;
 		object-fit: cover;
 		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
+	}
+
+	.release-art.placeholder {
+		width: 100%;
+		aspect-ratio: 1;
+		border-radius: 8px;
+		background: var(--accent-soft);
+		display: grid;
+		place-items: center;
+		font-size: 2.5rem;
+	}
+
+	.release-info {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.release-title {
+		font-size: 0.88rem;
+		font-weight: 600;
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.release-artist {
+		font-size: 0.78rem;
+		color: var(--text-muted);
+		margin: 0;
+	}
+
+	.release-source {
+		font-size: 0.72rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+	}
+
+	/* Picks grid */
+	.picks-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 24px;
+	}
+
+	.picks-subsection {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.subsection-title {
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		margin: 0;
+	}
+
+	.track-list {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		gap: 12px;
+	}
+
+	.track-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 12px;
+	}
+
+	.track-art {
+		width: 48px;
+		height: 48px;
+		border-radius: 6px;
+		object-fit: cover;
+		flex-shrink: 0;
+		background: var(--bg-surface);
+	}
+
+	.track-art.placeholder {
+		width: 48px;
+		height: 48px;
+		border-radius: 6px;
+		background: var(--accent-soft);
+		display: grid;
+		place-items: center;
+		color: var(--accent-strong);
+		font-size: 1.2rem;
 		flex-shrink: 0;
 	}
 
-	.listen-art.placeholder {
-		display: grid;
-		place-items: center;
-		color: var(--text-tertiary);
-		font-size: 0.9rem;
-	}
-
-	.listen-meta,
-	.artist-meta {
-		min-width: 0;
+	.track-meta {
 		flex: 1;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
+		gap: 2px;
 	}
 
-	.listen-meta p,
-	.listen-meta span,
-	.artist-meta p,
-	.artist-meta span {
+	.track-title {
+		font-size: 0.88rem;
+		font-weight: 600;
+		margin: 0;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
-	.listen-meta p,
-	.artist-meta p {
-		font-weight: 600;
-	}
-
-	.listen-meta span,
-	.artist-meta span,
-	.listen-stamp {
-		color: var(--text-secondary);
+	.track-artist {
 		font-size: 0.78rem;
+		color: var(--text-muted);
 	}
 
-	.listen-stamp,
-	.artist-row strong {
+	.track-stats {
+		display: flex;
+		gap: 12px;
 		flex-shrink: 0;
 	}
 
-	.artist-row strong {
-		font-size: 0.85rem;
+	.stat {
+		font-size: 0.72rem;
+		color: var(--text-muted);
 		font-weight: 600;
 	}
 
-	.genre-row {
+	.genre-pills {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 10px;
 	}
 
 	.genre-pill {
-		padding: 5px 12px;
-		border-radius: 99px;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		font-size: 0.78rem;
-		color: var(--text-secondary);
-	}
-
-	.system-row {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
+		flex-direction: column;
+		gap: 4px;
+		padding: 10px 14px;
+		border-radius: 8px;
 	}
 
+	.genre-name {
+		font-size: 0.72rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--accent);
+	}
+
+	.genre-track {
+		font-size: 0.82rem;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 200px;
+	}
+
+	/* Article cards */
+	.article-card {
+		flex: 0 0 320px;
+		padding: 18px;
+		text-decoration: none;
+		color: inherit;
+		transition: transform 0.2s ease, box-shadow 0.2s ease;
+		scroll-snap-align: start;
+
+		&:hover {
+			transform: translateY(-4px);
+			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+		}
+	}
+
+	.article-content {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.article-title {
+		font-size: 0.95rem;
+		font-weight: 700;
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.article-desc {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.article-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 8px;
+	}
+
+	.article-source {
+		font-size: 0.72rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+	}
+
+	.article-date {
+		font-size: 0.72rem;
+		color: var(--text-muted);
+	}
+
+	/* News grid */
+	.news-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+		gap: 16px;
+	}
+
+	.news-card {
+		padding: 18px;
+		text-decoration: none;
+		color: inherit;
+		transition: transform 0.2s ease, box-shadow 0.2s ease;
+
+		&:hover {
+			transform: translateY(-4px);
+			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+		}
+	}
+
+	.news-content {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.news-title {
+		font-size: 0.95rem;
+		font-weight: 700;
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.news-desc {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.news-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 8px;
+	}
+
+	.news-source {
+		font-size: 0.72rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+	}
+
+	.news-date {
+		font-size: 0.72rem;
+		color: var(--text-muted);
+	}
+
+	/* Responsive */
 	@media (max-width: 1180px) {
-		.stat-strip,
-		.activity-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+		.track-list {
+			grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+		}
+
+		.news-grid {
+			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 		}
 	}
 
 	@media (max-width: 640px) {
-		.stat-strip,
-		.activity-grid {
+		.track-list {
 			grid-template-columns: 1fr;
 		}
 
-		.listen-row,
-		.artist-row {
-			align-items: flex-start;
+		.news-grid {
+			grid-template-columns: 1fr;
 		}
 
-		.listen-row {
-			flex-wrap: wrap;
+		.release-card {
+			flex: 0 0 160px;
 		}
 
-		.listen-stamp {
-			width: 100%;
-			padding-left: 42px;
+		.article-card {
+			flex: 0 0 280px;
 		}
 	}
 </style>

@@ -3,6 +3,8 @@
 	import {
 		automixEnabled,
 		automixDiscoverNew,
+		automixUseLearning,
+		automixAllowExternal,
 		crossfadeMs,
 		shuffleMode,
 		currentTrack,
@@ -11,6 +13,8 @@
 		setPlayerCrossfadeMs,
 		setPlayerShuffleMode,
 		setPlayerDiscoverNew,
+		setPlayerAutomixUseLearning,
+		setPlayerAutomixAllowExternal,
 		refreshPlaybackState
 	} from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
@@ -47,6 +51,30 @@
 		errorMsg = '';
 		try {
 			await setPlayerDiscoverNew(!$automixDiscoverNew);
+		} catch (e) {
+			errorMsg = String(e);
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function toggleUseLearning() {
+		saving = true;
+		errorMsg = '';
+		try {
+			await setPlayerAutomixUseLearning(!$automixUseLearning);
+		} catch (e) {
+			errorMsg = String(e);
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function toggleAllowExternal() {
+		saving = true;
+		errorMsg = '';
+		try {
+			await setPlayerAutomixAllowExternal(!$automixAllowExternal);
 		} catch (e) {
 			errorMsg = String(e);
 		} finally {
@@ -111,6 +139,22 @@
 					<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
 				</svg>
 				<span>Include New</span>
+			</button>
+			<button
+				class="discover-toggle {$automixUseLearning ? 'active' : ''}"
+				onclick={toggleUseLearning}
+				disabled={saving}
+				aria-pressed={$automixUseLearning}
+			>
+				<span>Use learned radio</span>
+			</button>
+			<button
+				class="discover-toggle {$automixAllowExternal ? 'active' : ''}"
+				onclick={toggleAllowExternal}
+				disabled={saving}
+				aria-pressed={$automixAllowExternal}
+			>
+				<span>Allow external</span>
 			</button>
 			<button
 				class="btn {$automixEnabled ? 'btn-primary' : 'btn-glass'}"

@@ -4,7 +4,7 @@
 		tracks, albums, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
 		loadTracks, loadAlbums,
-		formatDuration, getQualityClass,
+		formatDuration, formatDateShort, getQualityClass,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
@@ -42,6 +42,24 @@
 	let artistTracksById = $state<Record<number, Track[]>>({});
 	let artistTracksLoadingId = $state<number | null>(null);
 
+	// Track detail panel
+	let expandedTrackId = $state<number | null>(null);
+	let detailTrack = $state<Track | null>(null);
+	let detailAlbumTracks = $state<Track[]>([]);
+	let detailLoading = $state(false);
+
+	// Album detail panel
+	let expandedAlbumId = $state<number | null>(null);
+	let detailAlbum = $state<Album | null>(null);
+	let detailAlbumTracksList = $state<Track[]>([]);
+	let detailAlbumLoading = $state(false);
+
+	// Visible track columns
+	let showPlaysColumn = $state(true);
+	let showDateColumn = $state(true);
+	let showQualityColumn = $state(true);
+	let showFavColumn = $state(true);
+
 	onMount(() => {
 		void loadAlbums();
 		void loadTracks();
@@ -78,7 +96,7 @@
 		if ($searchQuery.trim()) return;
 		if (activeTab === 'tracks') {
 			loadTracks($sortBy, $sortDir);
-		} else {
+		} else if (activeTab === 'albums') {
 			loadAlbums($sortBy, $sortDir);
 		}
 		clearSelection();
@@ -86,6 +104,10 @@
 
 	function switchTab(tab: 'tracks' | 'albums' | 'artists') {
 		activeTab = tab;
+		expandedTrackId = null;
+		expandedAlbumId = null;
+		detailTrack = null;
+		detailAlbum = null;
 		if (!$searchQuery.trim()) {
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir);
 			if (tab === 'albums') loadAlbums();
@@ -181,6 +203,52 @@
 			batchError = `Failed to queue album: ${error}`;
 		} finally {
 			albumActionBusyId = null;
+		}
+	}
+
+	async function openTrackDetail(track: Track) {
+		if (expandedTrackId === track.id) {
+			expandedTrackId = null;
+			detailTrack = null;
+			detailAlbumTracks = [];
+			return;
+		}
+		expandedTrackId = track.id;
+		detailTrack = track;
+		detailLoading = false;
+
+		if (track.album_id) {
+			detailLoading = true;
+			try {
+				const data = await api.getAlbumTracks(track.album_id);
+				detailAlbumTracks = data.tracks;
+			} catch (err) {
+				console.error('Failed to load album tracks:', err);
+				detailAlbumTracks = [];
+			} finally {
+				detailLoading = false;
+			}
+		}
+	}
+
+	async function openAlbumDetail(album: Album) {
+		if (expandedAlbumId === album.id) {
+			expandedAlbumId = null;
+			detailAlbum = null;
+			detailAlbumTracksList = [];
+			return;
+		}
+		expandedAlbumId = album.id;
+		detailAlbum = album;
+		detailAlbumLoading = true;
+		try {
+			const data = await api.getAlbumTracks(album.id);
+			detailAlbumTracksList = data.tracks;
+		} catch (err) {
+			console.error('Failed to load album tracks:', err);
+			detailAlbumTracksList = [];
+		} finally {
+			detailAlbumLoading = false;
 		}
 	}
 
@@ -434,10 +502,12 @@
 		`${$selectedTrackIds.size} track${$selectedTrackIds.size === 1 ? '' : 's'}${$selectedAlbumIds.size > 0 ? ` and ${$selectedAlbumIds.size} album${$selectedAlbumIds.size === 1 ? '' : 's'}` : ''} selected`
 	);
 	let selectionCount = $derived($selectedTrackIds.size + $selectedAlbumIds.size);
-	let libraryModeLabel = $derived(activeTab === 'albums' ? 'Album view' : 'Track view');
+	let libraryModeLabel = $derived(activeTab === 'albums' ? 'Album view' : activeTab === 'artists' ? 'Artist view' : 'Track view');
 	let libraryModeCopy = $derived(
 		activeTab === 'albums'
 			? 'Artwork-first browse with quick album actions.'
+			: activeTab === 'artists'
+			? 'Browse your artists and explore their tracks.'
 			: 'Dense track management with direct playback and batch work.'
 	);
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
@@ -445,7 +515,7 @@
 	let visibleAlbums = $derived($searchQuery.trim() ? searchResults.albums : $albums);
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
-		(activeTab === 'tracks' ? $tracks.length < $totalTracks : $albums.length < $totalAlbums)
+		(activeTab === 'tracks' ? $tracks.length < $totalTracks : activeTab === 'albums' ? $albums.length < $totalAlbums : false)
 	);
 	let searchSummary = $derived(
 		activeTab === 'tracks'
@@ -594,7 +664,65 @@
 	{/if}
 
 	{#if $isLoading}
-		<div class="loading">Loading...</div>
+		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
+
+	{:else if activeTab === 'albums' && expandedAlbumId !== null && detailAlbum}
+		<!-- Album Detail Panel -->
+		<div class="detail-panel glass-panel">
+			<div class="detail-header">
+				<button class="detail-back" onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}>← Back</button>
+				<div class="detail-album-hero">
+					{#if detailAlbum.artwork_url}
+						<img class="detail-album-art" src={detailAlbum.artwork_url} alt={detailAlbum.title} />
+					{:else}
+						<div class="detail-album-art placeholder">♫</div>
+					{/if}
+					<div class="detail-album-info">
+						<h2>{detailAlbum.title}</h2>
+						<p class="detail-artist">{detailAlbum.artist_name ?? 'Unknown Artist'}</p>
+						<div class="detail-meta-row">
+							{#if detailAlbum.year}<span class="detail-chip">{detailAlbum.year}</span>{/if}
+							{#if detailAlbum.release_type}<span class="detail-chip">{detailAlbum.release_type}</span>{/if}
+							{#if detailAlbum.track_count}<span class="detail-chip">{detailAlbum.track_count} tracks</span>{/if}
+							<span class="detail-chip">{detailAlbum.source}</span>
+						</div>
+					</div>
+				</div>
+				<div class="detail-actions">
+					<button class="btn btn-primary" onclick={(e) => void playAlbum(detailAlbum!.id, e)}>▶ Play All</button>
+					<button class="btn btn-glass" onclick={(e) => void queueAlbum(detailAlbum!.id, e)}>+ Queue All</button>
+				</div>
+			</div>
+
+			{#if detailAlbumLoading}
+				<div class="detail-loading"><div class="spinner spinner-sm"></div><span>Loading tracks…</span></div>
+			{:else if detailAlbumTracksList.length === 0}
+				<EmptyState title="No tracks synced yet" copy="Run a TIDAL sync to populate this album's tracks." />
+			{:else}
+				<div class="detail-track-list">
+					{#each detailAlbumTracksList as track, i (track.id)}
+						<div
+							class="detail-track-row"
+							class:playing={$currentTrack?.id === track.id}
+							role="button"
+							tabindex="0"
+							onclick={() => void playTrackNow(track.id)}
+							onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+						>
+							<span class="detail-track-num">{i + 1}</span>
+							{#if track.artwork_url}
+								<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
+							{/if}
+							<span class="detail-track-title">{track.title}</span>
+							<span class="detail-track-artist">{track.artist_name ?? ''}</span>
+							<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
+							<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
+
 	{:else if activeTab === 'albums'}
 		<!-- Album Grid -->
 		<div class="album-grid">
@@ -614,20 +742,30 @@
 						{:else}
 							<div class="art-placeholder">♫</div>
 						{/if}
-						<button
-							class="art-play-btn"
-							aria-label="Play {album.title}"
-							onclick={(event) => void playAlbum(album.id, event)}
-						>
-							{albumActionBusyId === album.id ? '…' : '▶'}
-						</button>
+						<div class="album-art-overlay">
+							<button
+								class="art-play-btn"
+								aria-label="Play {album.title}"
+								onclick={(event) => void playAlbum(album.id, event)}
+							>
+								▶
+							</button>
+							<button
+								class="art-info-btn"
+								aria-label="View {album.title} details"
+								onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
+							>
+								ℹ
+							</button>
+						</div>
 					</div>
 					<div class="album-meta">
 						<span class="album-title">{album.title}</span>
 						<span class="album-artist">{album.artist_name ?? 'Unknown'}</span>
-						{#if album.year}
-							<span class="album-year">{album.year}</span>
-						{/if}
+						<div class="album-chips">
+							{#if album.year}<span class="album-chip">{album.year}</span>{/if}
+							{#if album.release_type}<span class="album-chip">{album.release_type}</span>{/if}
+						</div>
 					</div>
 					<div class="album-actions">
 						<button class="menu-trigger" aria-label="Album actions" onclick={(event) => toggleAlbumMenu(album.id, event)}>
@@ -640,6 +778,9 @@
 								</button>
 								<button class="menu-item" onclick={(event) => void queueAlbum(album.id, event)}>
 									Queue Album
+								</button>
+								<button class="menu-item" onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); closeMenus(); }}>
+									View Details
 								</button>
 								<button class="menu-item secondary" onclick={(event) => selectAlbumFromMenu(album.id, event)}>
 									Select Album
@@ -758,7 +899,116 @@
 			{/if}
 		{/if}
 
-	{:else}
+	{:else if activeTab === 'tracks' && expandedTrackId !== null && detailTrack}
+		<!-- Track Detail Panel -->
+		<div class="detail-panel glass-panel">
+			<div class="detail-header">
+				<button class="detail-back" onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}>← Back</button>
+				<div class="detail-track-hero">
+					{#if detailTrack.artwork_url}
+						<img class="detail-track-art-large" src={detailTrack.artwork_url} alt="" />
+					{:else}
+						<div class="detail-track-art-large placeholder">♫</div>
+					{/if}
+					<div class="detail-track-info">
+						<h2>{detailTrack.title}</h2>
+						<p class="detail-artist">{detailTrack.artist_name ?? 'Unknown Artist'}</p>
+						{#if detailTrack.album_title}<p class="detail-album-name">{detailTrack.album_title}</p>{/if}
+						<div class="detail-meta-row">
+							{#if detailTrack.best_quality}
+								<span class="quality-badge {getQualityClass(detailTrack.best_quality)}">{detailTrack.best_quality.replace(/_/g, ' ')}</span>
+							{/if}
+							{#if detailTrack.fidelity_score > 0}<span class="detail-chip">Fidelity: {detailTrack.fidelity_score}</span>{/if}
+							<span class="detail-chip">{detailTrack.source}</span>
+						</div>
+					</div>
+				</div>
+				<div class="detail-actions">
+					<button class="btn btn-primary" onclick={() => void playTrackNow(detailTrack!.id)}>▶ Play</button>
+					<button class="btn btn-glass" onclick={() => void addTrackToQueue(detailTrack!.id)}>+ Queue</button>
+					<button class="btn btn-glass" onclick={() => { selectTrackIds([detailTrack!.id]); }}>Select</button>
+				</div>
+			</div>
+
+			<!-- Track metadata grid -->
+			<div class="detail-meta-grid">
+				{#if detailTrack.isrc}
+					<div class="meta-block">
+						<span class="meta-label">ISRC</span>
+						<span class="meta-value">{detailTrack.isrc}</span>
+					</div>
+				{/if}
+				{#if detailTrack.date_added}
+					<div class="meta-block">
+						<span class="meta-label">Date Added</span>
+						<span class="meta-value">{new Date(detailTrack.date_added).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+					</div>
+				{/if}
+				<div class="meta-block">
+					<span class="meta-label">Duration</span>
+					<span class="meta-value">{formatDuration(detailTrack.duration_ms)}</span>
+				</div>
+				{#if detailTrack.disc_number && detailTrack.disc_number > 1}
+					<div class="meta-block">
+						<span class="meta-label">Disc</span>
+						<span class="meta-value">{detailTrack.disc_number}</span>
+					</div>
+				{/if}
+				{#if detailTrack.track_number}
+					<div class="meta-block">
+						<span class="meta-label">Track No.</span>
+						<span class="meta-value">{detailTrack.track_number}</span>
+					</div>
+				{/if}
+				<div class="meta-block">
+					<span class="meta-label">Play Count</span>
+					<span class="meta-value">{detailTrack.play_count}</span>
+				</div>
+				{#if detailTrack.last_played_at}
+					<div class="meta-block">
+						<span class="meta-label">Last Played</span>
+						<span class="meta-value">{new Date(detailTrack.last_played_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+					</div>
+				{/if}
+				{#if detailTrack.tidal_id}
+					<div class="meta-block">
+						<span class="meta-label">TIDAL ID</span>
+						<span class="meta-value">{detailTrack.tidal_id}</span>
+					</div>
+				{/if}
+			</div>
+
+			<!-- Album track list if available -->
+			{#if detailTrack.album_id && detailAlbumTracks.length > 0}
+				<div class="detail-album-tracks">
+					<h3>From this album</h3>
+					<div class="detail-track-list">
+						{#each detailAlbumTracks as track, i (track.id)}
+							<div
+								class="detail-track-row"
+								class:playing={$currentTrack?.id === track.id}
+								class:active={track.id === detailTrack!.id}
+								role="button"
+								tabindex="0"
+								onclick={() => void playTrackNow(track.id)}
+								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+							>
+								<span class="detail-track-num">{i + 1}</span>
+								{#if track.artwork_url}
+									<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
+								{/if}
+								<span class="detail-track-title">{track.title}</span>
+								<span class="detail-track-artist">{track.artist_name ?? ''}</span>
+								<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
+								<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+	{:else if activeTab === 'tracks'}
 		<!-- Track List -->
 		<div class="track-list">
 			<div class="track-header">
@@ -782,16 +1032,32 @@
 					Artist <span class="sort-arrow">{$sortBy === 'artist' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 				</button>
 				<span class="col-album">Album</span>
-				<span class="col-quality">Quality</span>
-				<button
-					type="button"
-					class="header-sort col-duration"
-					class:sorted={$sortBy === 'duration'}
-					onclick={() => handleSort('duration')}
-					onkeydown={(event) => handleSortKeydown('duration', event)}
-				>
-					Duration <span class="sort-arrow">{$sortBy === 'duration' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
-				</button>
+				{#if showQualityColumn}
+					<span class="col-quality">Quality</span>
+				{/if}
+				{#if showPlaysColumn}
+					<button
+						type="button"
+						class="header-sort col-plays"
+						class:sorted={$sortBy === 'play_count'}
+						onclick={() => handleSort('play_count')}
+						onkeydown={(event) => handleSortKeydown('play_count', event)}
+					>
+						Plays <span class="sort-arrow">{$sortBy === 'play_count' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
+				{#if showDateColumn}
+					<button
+						type="button"
+						class="header-sort col-date"
+						class:sorted={$sortBy === 'date_added'}
+						onclick={() => handleSort('date_added')}
+						onkeydown={(event) => handleSortKeydown('date_added', event)}
+					>
+						Date Added <span class="sort-arrow">{$sortBy === 'date_added' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
+				<span class="col-duration">Duration</span>
 				<span class="col-actions"></span>
 			</div>
 
@@ -803,7 +1069,7 @@
 					role="button"
 					tabindex="0"
 					aria-pressed={$selectedTrackIds.has(track.id)}
-					ondblclick={() => playTrack(track)}
+					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
 				>
@@ -826,15 +1092,28 @@
 					</span>
 					<span class="col-artist">{track.artist_name ?? 'Unknown'}</span>
 					<span class="col-album">{track.album_title ?? ''}</span>
-					<span class="col-quality">
-						{#if track.best_quality}
-							<span class="quality-badge {getQualityClass(track.best_quality)}">
-								{track.best_quality.replace('_', ' ')}
-							</span>
-						{/if}
-					</span>
+					{#if showQualityColumn}
+						<span class="col-quality">
+							{#if track.best_quality}
+								<span class="quality-badge {getQualityClass(track.best_quality)}">
+									{track.best_quality.replace(/_/g, ' ')}
+								</span>
+							{/if}
+						</span>
+					{/if}
+					{#if showPlaysColumn}
+						<span class="col-plays">
+							<span class="plays-count">{track.play_count > 0 ? track.play_count.toLocaleString() : '—'}</span>
+						</span>
+					{/if}
+					{#if showDateColumn}
+						<span class="col-date">
+							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+						</span>
+					{/if}
 					<span class="col-duration">{formatDuration(track.duration_ms)}</span>
 					<span class="col-actions">
+						<button class="detail-btn" title="View details" onclick={(event) => { event.stopPropagation(); void openTrackDetail(track); }}>ℹ</button>
 						<button class="menu-trigger" aria-label="Track actions" onclick={(event) => toggleTrackMenu(track.id, event)}>
 							⋯
 						</button>
@@ -845,6 +1124,9 @@
 								</button>
 								<button class="menu-item" onclick={(event) => void queueTrack(track, event)}>
 									Queue Track
+								</button>
+								<button class="menu-item" onclick={(event) => { event.stopPropagation(); void openTrackDetail(track); closeMenus(); }}>
+									View Details
 								</button>
 								<button class="menu-item secondary" onclick={(event) => selectTrackFromMenu(track.id, event)}>
 									Select Track
@@ -881,6 +1163,39 @@
 	.library {
 		padding-bottom: 8px;
 	}
+
+	/* ─── Loading ───────────────────────── */
+
+	.loading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		padding: 48px 0;
+		color: var(--text-secondary);
+		font-size: 0.9rem;
+	}
+
+	.spinner {
+		width: 24px;
+		height: 24px;
+		border: 2px solid var(--border-subtle);
+		border-top-color: var(--accent);
+		border-radius: 50%;
+		animation: spin 0.6s linear infinite;
+	}
+
+	.spinner-sm {
+		width: 16px;
+		height: 16px;
+		border-width: 2px;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* ─── Hero Section ──────────────────── */
 
 	.library-hero {
 		padding: 18px 20px;
@@ -960,6 +1275,8 @@
 		background: rgba(255, 255, 255, 0.06);
 	}
 
+	/* ─── Toolbar ───────────────────────── */
+
 	.library-toolbar {
 		display: grid;
 		grid-template-columns: minmax(220px, 420px) 1fr;
@@ -1020,7 +1337,7 @@
 		border-color: rgba(124, 128, 255, 0.22);
 	}
 
-	/* ─── Batch Bar ──────────────────────── */
+	/* ─── Batch Bar ─────────────────────── */
 
 	.batch-select {
 		min-width: 180px;
@@ -1045,6 +1362,263 @@
 		color: #ffb0b0;
 	}
 
+	/* ─── Detail Panel ──────────────────── */
+
+	.detail-panel {
+		padding: 24px;
+		display: flex;
+		flex-direction: column;
+		gap: 24px;
+		margin-bottom: var(--gap);
+		animation: panel-slide 200ms ease-out both;
+	}
+
+	@keyframes panel-slide {
+		from { opacity: 0; transform: translateY(8px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.detail-header {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.detail-back {
+		align-self: flex-start;
+		padding: 6px 14px;
+		border-radius: 999px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: all var(--motion-fast);
+	}
+
+	.detail-back:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		border-color: var(--border-strong);
+	}
+
+	.detail-album-hero,
+	.detail-track-hero {
+		display: flex;
+		gap: 20px;
+		align-items: flex-start;
+	}
+
+	.detail-album-art,
+	.detail-track-art-large {
+		width: 140px;
+		height: 140px;
+		border-radius: var(--radius);
+		object-fit: cover;
+		flex-shrink: 0;
+		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+	}
+
+	.detail-track-art-large.placeholder {
+		background: var(--accent-soft);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 2.5rem;
+		color: var(--accent-strong);
+	}
+
+	.detail-album-art.placeholder {
+		background: var(--accent-soft);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 2.5rem;
+		color: var(--accent-strong);
+	}
+
+	.detail-album-info,
+	.detail-track-info {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.detail-album-info h2,
+	.detail-track-info h2 {
+		font-size: 1.5rem;
+		line-height: 1.2;
+	}
+
+	.detail-artist {
+		color: var(--text-secondary);
+		font-size: 0.95rem;
+	}
+
+	.detail-album-name {
+		color: var(--text-tertiary);
+		font-size: 0.85rem;
+	}
+
+	.detail-meta-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 4px;
+	}
+
+	.detail-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 4px 10px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		color: var(--text-secondary);
+		font-size: 0.72rem;
+		font-weight: 600;
+	}
+
+	.detail-actions {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.detail-meta-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+		gap: 12px;
+	}
+
+	.meta-block {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 12px 14px;
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.02);
+		border: 1px solid rgba(255, 255, 255, 0.05);
+	}
+
+	.meta-label {
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+	}
+
+	.meta-value {
+		font-size: 0.88rem;
+		color: var(--text-primary);
+		word-break: break-all;
+	}
+
+	.detail-album-tracks h3 {
+		font-size: 0.9rem;
+		font-weight: 600;
+		margin-bottom: 8px;
+		color: var(--text-secondary);
+	}
+
+	.detail-loading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 10px;
+		padding: 32px 0;
+		color: var(--text-secondary);
+	}
+
+	/* ─── Detail Track List ─────────────── */
+
+	.detail-track-list {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.detail-track-row {
+		display: grid;
+		grid-template-columns: 28px 40px 1fr auto auto 32px;
+		gap: 10px;
+		align-items: center;
+		padding: 8px 10px;
+		border-radius: var(--radius-xs);
+		cursor: pointer;
+		transition: background var(--motion-fast);
+	}
+
+	.detail-track-row:hover {
+		background: rgba(255, 255, 255, 0.04);
+	}
+
+	.detail-track-row.playing {
+		color: var(--accent);
+	}
+
+	.detail-track-row.active {
+		background: var(--accent-soft);
+	}
+
+	.detail-track-num {
+		text-align: center;
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
+	}
+
+	.detail-track-art {
+		width: 40px;
+		height: 40px;
+		border-radius: 6px;
+		object-fit: cover;
+		flex-shrink: 0;
+	}
+
+	.detail-track-title {
+		font-weight: 500;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.detail-track-artist {
+		color: var(--text-secondary);
+		font-size: 0.82rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 180px;
+	}
+
+	.detail-track-duration {
+		color: var(--text-tertiary);
+		font-size: 0.82rem;
+	}
+
+	.detail-track-queue {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		color: var(--text-secondary);
+		font-size: 1rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: all var(--motion-fast);
+	}
+
+	.detail-track-queue:hover {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent);
+	}
+
 	@media (max-width: 1180px) {
 		.library-hero-main {
 			flex-direction: column;
@@ -1056,6 +1630,27 @@
 
 		.toolbar-meta {
 			justify-content: flex-start;
+		}
+
+		.detail-album-hero,
+		.detail-track-hero {
+			flex-direction: column;
+			align-items: center;
+			text-align: center;
+		}
+
+		.detail-album-art,
+		.detail-track-art-large {
+			width: 120px;
+			height: 120px;
+		}
+
+		.detail-meta-row {
+			justify-content: center;
+		}
+
+		.detail-actions {
+			justify-content: center;
 		}
 	}
 
@@ -1099,6 +1694,24 @@
 		.load-more-row {
 			flex-direction: column;
 			align-items: flex-start;
+		}
+
+		.detail-panel {
+			padding: 16px;
+			gap: 16px;
+		}
+
+		.detail-meta-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+
+		.detail-track-row {
+			grid-template-columns: 24px 1fr auto 32px;
+		}
+
+		.detail-track-art,
+		.detail-track-artist {
+			display: none;
 		}
 	}
 
@@ -1187,23 +1800,56 @@
 		color: var(--text-tertiary);
 	}
 
-	.art-play-btn {
+	.album-art-overlay {
 		position: absolute;
 		inset: 0;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 1.5rem;
+		gap: 12px;
+		background: rgba(0, 0, 0, 0);
+		transition: background 200ms ease;
+		pointer-events: none;
+	}
+
+	.album-card:hover .album-art-overlay {
+		background: rgba(0, 0, 0, 0.35);
+	}
+
+	.art-play-btn,
+	.art-info-btn {
+		width: 42px;
+		height: 42px;
+		border-radius: 50%;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 1.1rem;
 		background: rgba(0, 0, 0, 0.45);
 		color: white;
 		opacity: 0;
-		transition: opacity 0.18s ease;
-		border-radius: inherit;
-		backdrop-filter: blur(2px);
+		transform: translateY(6px);
+		transition: opacity 200ms ease, transform 200ms ease, background 150ms ease;
+		backdrop-filter: blur(4px);
+		pointer-events: auto;
+		cursor: pointer;
+		border: none;
 	}
 
-	.album-art:hover .art-play-btn {
+	.art-play-btn:hover {
+		background: var(--accent);
+		transform: translateY(0) scale(1.05);
+	}
+
+	.art-info-btn:hover {
+		background: rgba(255, 255, 255, 0.25);
+		transform: translateY(0) scale(1.05);
+	}
+
+	.album-card:hover .art-play-btn,
+	.album-card:hover .art-info-btn {
 		opacity: 1;
+		transform: translateY(0);
 	}
 
 	.album-meta {
@@ -1243,9 +1889,30 @@
 		color: var(--text-tertiary);
 	}
 
+	.album-chips {
+		display: flex;
+		gap: 4px;
+		flex-wrap: wrap;
+		margin-top: 4px;
+	}
+
+	.album-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 7px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		color: var(--text-muted);
+		font-size: 0.64rem;
+		font-weight: 600;
+	}
+
 	.album-card:hover .album-title {
 		color: var(--text-primary);
 	}
+
+	/* ─── Menus ─────────────────────────── */
 
 	.menu-trigger {
 		width: 32px;
@@ -1262,6 +1929,24 @@
 	.menu-trigger:hover {
 		background: rgba(255, 255, 255, 0.14);
 		border-color: rgba(255, 255, 255, 0.16);
+	}
+
+	.detail-btn {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		color: var(--text-tertiary);
+		font-size: 0.85rem;
+		cursor: pointer;
+		transition: all var(--motion-fast);
+	}
+
+	.detail-btn:hover {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent);
 	}
 
 	.item-menu {
@@ -1325,8 +2010,9 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 2fr 1.5fr 1.5fr 100px 70px 40px;
+		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 40px;
 		gap: var(--gap-sm);
+		align-items: center;
 		padding: 8px var(--gap-sm);
 		border-bottom: 1px solid var(--border-glass);
 		font-size: 0.75rem;
@@ -1371,14 +2057,15 @@
 
 	.track-row {
 		display: grid;
-		grid-template-columns: 40px 2fr 1.5fr 1.5fr 100px 70px 40px;
+		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 40px;
 		gap: var(--gap-sm);
-		padding: 8px var(--gap-sm);
-		border-radius: var(--radius-sm);
+		align-items: center;
+		padding: 6px var(--gap-sm);
+		border-radius: var(--radius-xs);
 		font-size: 0.875rem;
 		text-align: left;
 		width: 100%;
-		transition: background 0.1s ease;
+		transition: background var(--motion-fast);
 	}
 
 	.track-row:hover {
@@ -1393,6 +2080,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
+		gap: 4px;
 		position: relative;
 	}
 
@@ -1413,15 +2101,39 @@
 		text-overflow: ellipsis;
 	}
 
+	.col-quality {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.col-plays {
+		text-align: right;
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
+		min-width: 50px;
+	}
+
+	.plays-count {
+		font-variant-numeric: tabular-nums;
+	}
+
+	.col-date {
+		text-align: right;
+		color: var(--text-tertiary);
+		font-size: 0.75rem;
+		min-width: 70px;
+	}
+
+	.date-added {
+		font-variant-numeric: tabular-nums;
+	}
+
 	.col-duration {
 		text-align: right;
 		color: var(--text-tertiary);
 		font-size: 0.8125rem;
-	}
-
-	.col-quality {
-		display: flex;
-		align-items: center;
+		min-width: 55px;
 	}
 
 	.track-title {
@@ -1479,14 +2191,6 @@
 		color: var(--text-secondary);
 	}
 
-	.loading {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--gap-xl);
-		color: var(--text-secondary);
-	}
-
 	.load-more-row {
 		display: flex;
 		align-items: center;
@@ -1534,12 +2238,13 @@
 			-webkit-line-clamp: 2;
 		}
 
+		/* Mobile track row: multi-line */
 		.track-header {
 			display: none;
 		}
 
 		.track-list {
-			gap: 10px;
+			gap: 6px;
 		}
 
 		.track-row {
@@ -1550,8 +2255,8 @@
 				". album quality";
 			gap: 6px 12px;
 			padding: 12px;
-			border: 1px solid rgba(255, 255, 255, 0.08);
-			background: rgba(255, 255, 255, 0.03);
+			border: 1px solid rgba(255, 255, 255, 0.06);
+			background: rgba(255, 255, 255, 0.02);
 		}
 
 		.col-num { grid-area: num; text-align: left; }
@@ -1559,6 +2264,8 @@
 		.col-artist { grid-area: artist; }
 		.col-album { grid-area: album; }
 		.col-quality { grid-area: quality; justify-content: flex-start; }
+		.col-plays,
+		.col-date { display: none; }
 		.col-duration { grid-area: duration; align-self: center; }
 		.col-actions { grid-area: actions; align-self: flex-start; }
 

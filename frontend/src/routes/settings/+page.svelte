@@ -4,6 +4,7 @@
 	import {
 		api,
 		getApiBase,
+		type DiscoveryStatus,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
 		type PortableMusicBrainzSnapshotStatus
@@ -26,7 +27,7 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 
 	const SERVER_UNREACHABLE_MESSAGE =
-		'NOOR cannot reach the local server on port 3333, so it cannot verify your current TIDAL session.';
+		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
@@ -44,6 +45,7 @@
 	let mbProgressLabel = $state('');
 	let mbStats = $state<MusicBrainzStatus | null>(null);
 	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
+	let discoveryStatus = $state<DiscoveryStatus | null>(null);
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
@@ -88,6 +90,7 @@
 				void loadPlaybackRuntime();
 				void loadMbStatus();
 				void loadPortableSnapshot();
+				void loadDiscoveryStatus();
 			}
 
 			if (latest.type === 'sync_progress' && latest.service === 'musicbrainz') {
@@ -110,6 +113,7 @@
 		void loadPlaybackRuntime();
 		void loadMbStatus();
 		void loadPortableSnapshot();
+		void loadDiscoveryStatus();
 
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
@@ -297,6 +301,32 @@
 		}
 	}
 
+	async function loadDiscoveryStatus() {
+		try {
+			const response = await api.getDiscoveryStatus();
+			discoveryStatus = response.status;
+			markServerOnline();
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+			}
+		}
+	}
+
+	async function startDiscoveryTraining(mode: 'full' | 'incremental') {
+		try {
+			await api.startDiscoveryTraining(mode);
+			await loadDiscoveryStatus();
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				errorMsg = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				errorMsg = `Discovery training failed: ${error}`;
+			}
+		}
+	}
+
 	async function startEnrichment() {
 		mbStatus = 'running';
 		mbProgressLabel = 'Starting the background queue…';
@@ -479,7 +509,7 @@
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
 					<div class="auth-card glass">
 						<p class="page-copy">
-							NOOR cannot reach the backend on port 3333, so it cannot confirm whether your saved
+							NOOR cannot reach the backend on port 3334, so it cannot confirm whether your saved
 							TIDAL session is still active.
 						</p>
 						<div class="action-row">
@@ -581,6 +611,47 @@
 				{#if galaxyRefreshLabel}
 					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
 				{/if}
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Track how much of the library the learned radio engine has covered, and refresh it when listening behavior changes." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
+					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
+				</div>
+
+				<div class="portable-card glass">
+					<div class="info-list">
+						<div class="info-row">
+							<span>Active model</span>
+							<strong>{discoveryStatus?.active_model?.model_key ?? 'Fallback only'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Last trained</span>
+							<strong>{discoveryStatus?.active_model?.trained_at ? new Date(discoveryStatus.active_model.trained_at + 'Z').toLocaleString() : '—'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Clip features</span>
+							<strong>{discoveryStatus?.clip_cache_tracks?.toLocaleString() ?? '0'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Latest run</span>
+							<strong>
+								{#if discoveryStatus?.latest_run}
+									{discoveryStatus.latest_run.status} · {discoveryStatus.latest_run.stage} · {Math.round(discoveryStatus.latest_run.progress * 100)}%
+								{:else}
+									idle
+								{/if}
+							</strong>
+						</div>
+					</div>
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')}>Incremental refresh</button>
+					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')}>Full retrain</button>
+				</div>
 			</section>
 
 			<section class="glass-panel section-panel">

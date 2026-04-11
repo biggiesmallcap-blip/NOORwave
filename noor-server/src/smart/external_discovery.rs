@@ -677,6 +677,7 @@ fn rank_candidates(
                     in_library: false,
                     is_saved: false,
                     is_playable: candidate.is_playable,
+                    embedding_score: None,
                     score: score.round().clamp(0.0, 99.0) as i32,
                     tags,
                 },

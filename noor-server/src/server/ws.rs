@@ -73,6 +73,12 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                     AppEvent::QueueUpdated => json!({"type": "queue_updated"}),
                     AppEvent::ListenHistoryUpdated { track_id } => json!({"type": "listen_history_updated", "track_id": track_id}),
                     AppEvent::PlaybackFailed { message } => json!({"type": "playback_failed", "message": message}),
+                    AppEvent::TrainingProgress { stage, progress, message } => json!({
+                        "type": "training_progress",
+                        "stage": stage,
+                        "progress": progress,
+                        "message": message
+                    }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;

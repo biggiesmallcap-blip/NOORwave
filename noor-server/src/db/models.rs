@@ -88,6 +88,8 @@ pub struct PlaybackState {
     pub automix_enabled: bool,
     pub crossfade_ms: i32,
     pub automix_discover_new: bool,
+    pub automix_use_learning: bool,
+    pub automix_allow_external: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +283,7 @@ pub struct DiscoveryExternalResult {
     pub in_library: bool,
     pub is_saved: bool,
     pub is_playable: bool,
+    pub embedding_score: Option<f64>,
     pub score: i32,
     pub tags: Vec<String>,
 }
@@ -304,4 +307,71 @@ pub struct DiscoveryExternalFeed {
     pub results: Vec<DiscoveryExternalResult>,
     pub capabilities: Vec<DiscoveryProviderCapability>,
     pub trail_item: Option<DiscoveryConnectionTrailItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryNeighborReason {
+    pub key: String,
+    pub label: String,
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryStatus {
+    pub fallback_active: bool,
+    pub active_model: Option<EmbeddingModel>,
+    pub latest_run: Option<DiscoveryTrainingRun>,
+    pub coverage_ratio: f64,
+    pub playable_tracks: i64,
+    pub embedded_tracks: i64,
+    pub neighbor_tracks: i64,
+    pub clip_cache_tracks: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingModel {
+    pub id: i64,
+    pub model_key: String,
+    pub family: String,
+    pub dimension: i32,
+    pub status: String,
+    pub is_active: bool,
+    pub trained_at: Option<String>,
+    pub config_json: Option<String>,
+    pub metrics_json: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryTrainingRun {
+    pub id: i64,
+    pub model_id: Option<i64>,
+    pub stage: String,
+    pub status: String,
+    pub progress: f64,
+    pub items_total: Option<i64>,
+    pub items_done: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub error_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryRadioResult {
+    pub track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub best_quality: Option<String>,
+    pub similarity_score: f64,
+    pub adjusted_score: f64,
+    pub co_listen_score: f64,
+    pub co_album_score: f64,
+    pub co_artist_score: f64,
+    pub genre_proximity: f64,
+    pub reason_tags: Vec<String>,
+    pub model_key: Option<String>,
+    pub source_mode: String,
 }

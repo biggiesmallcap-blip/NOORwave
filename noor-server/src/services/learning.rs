@@ -1,0 +1,633 @@
+use crate::db::{
+    Database,
+    models::{
+        DiscoveryNeighborReason, DiscoveryPreview, DiscoveryPreviewResult,
+        DiscoveryProfilePreview, DiscoveryRadioResult, DiscoveryReason,
+    },
+    queries::{self, EmbeddingTrackRow, TrackSimilarityResult},
+};
+use crate::services::discovery::DiscoveryCandidateTrack;
+use crate::services::discovery_trainer::{
+    TrainerInput, TrainerSequenceGroup,
+    run_discovery_training,
+};
+use crate::AppEvent;
+use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc;
+
+const MODEL_KEY: &str = "discovery-fusion-v1";
+const MODEL_DIMENSION: i32 = 96;
+const MODEL_TOP_K: usize = 64;
+
+#[derive(Debug, Clone)]
+pub struct ActiveLearningModel {
+    pub model_id: i64,
+    pub model_key: String,
+    pub family: String,
+    pub vectors: HashMap<i64, Vec<f64>>,
+}
+
+pub async fn start_training(
+    db: Database,
+    event_tx: Sender<AppEvent>,
+    full_mode: bool,
+    rebuild_audio: bool,
+) -> Result<()> {
+    let (model, run) = db.with_conn(|conn| {
+        let config_json = serde_json::json!({
+            "mode": if full_mode { "full" } else { "incremental" },
+            "rebuild_audio": rebuild_audio,
+            "dimension": MODEL_DIMENSION,
+            "top_k": MODEL_TOP_K,
+            "trainer": "rust",
+        })
+        .to_string();
+        let model = queries::upsert_embedding_model(
+            conn,
+            MODEL_KEY,
+            "fusion",
+            MODEL_DIMENSION,
+            "training",
+            Some(&config_json),
+        )?;
+        let run = queries::create_training_run(conn, Some(model.id), "corpus", "running")?;
+        Ok((model, run))
+    })?;
+
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "corpus", "running", 0.05, None, 0)
+    })?;
+
+    // Build trainer input directly from DB (no JSON round-trip)
+    let input = db.with_conn(build_trainer_input)?;
+
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
+    })?;
+
+    // Progress channel — broadcasts to WebSocket + logs to tracing
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<(String, String, f32)>();
+    let run_id = run.id;
+    let db_clone = db.clone();
+    let log_task = tokio::spawn(async move {
+        while let Some((stage, message, progress)) = progress_rx.recv().await {
+            tracing::info!(target: "noor.discovery.training", run_id, %message, "training progress");
+            
+            // Broadcast to WebSocket
+            let _ = event_tx.send(AppEvent::TrainingProgress {
+                stage: stage.clone(),
+                progress,
+                message: message.clone(),
+            });
+            
+            // Update DB progress
+            let _ = db_clone.with_conn(|conn| {
+                queries::update_training_run_progress(conn, run_id, &stage, "running", progress as f64, None, 0)
+            });
+        }
+    });
+
+    // Run the trainer directly — no subprocess
+    let progress_tx_clone = progress_tx.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        run_discovery_training(input, Some(&progress_tx_clone))
+    })
+    .await
+    .context("discovery trainer panicked")?;
+
+    // Wait for progress logging to finish
+    drop(progress_tx);
+    let _ = log_task.await;
+
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "audio", "running", 0.55, None, 0)
+    })?;
+
+    let audio_features = output
+        .audio_features
+        .iter()
+        .map(|(&track_id, feature)| {
+            (
+                track_id,
+                feature.feature_version.clone(),
+                pack_vector_f64(&feature.vector),
+                feature.clip_start_ms,
+                feature.clip_duration_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))?;
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "fusion", "running", 0.72, None, 0)
+    })?;
+
+    let embeddings = output
+        .fusion_embeddings
+        .iter()
+        .map(|(&track_id, vector)| {
+            let norm = l2_norm(vector);
+            (track_id, pack_vector_f64(vector), norm)
+        })
+        .collect::<Vec<_>>();
+    db.with_conn(|conn| queries::replace_track_embeddings(conn, model.id, &embeddings))?;
+
+    let neighbors = output
+        .neighbors
+        .iter()
+        .map(|neighbor| {
+            let reason_json = serde_json::to_string(
+                &neighbor
+                    .reason_tags
+                    .iter()
+                    .map(|key| DiscoveryNeighborReason {
+                        key: key.clone(),
+                        label: reason_label(key).to_string(),
+                        weight: 1.0,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .ok();
+            (
+                neighbor.track_id,
+                neighbor.neighbor_track_id,
+                neighbor.rank,
+                neighbor.score,
+                neighbor.behavioral_score,
+                neighbor.audio_score,
+                neighbor.metadata_score,
+                reason_json,
+            )
+        })
+        .collect::<Vec<_>>();
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
+        queries::replace_track_neighbors(conn, model.id, &neighbors)
+    })?;
+
+    let metrics_json = serde_json::to_string(&output.metrics)?;
+    let coverage_ok = output
+        .metrics
+        .get("coverage_ratio")
+        .copied()
+        .unwrap_or(0.0)
+        >= 0.85;
+    let recall_ok = output
+        .metrics
+        .get("recall_at_10")
+        .copied()
+        .unwrap_or(0.0)
+        >= 0.15;
+    let should_activate = coverage_ok && recall_ok;
+    db.with_conn(|conn| {
+        queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
+        queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
+        if should_activate {
+            queries::activate_embedding_model(conn, model.id)?;
+        }
+        queries::finish_training_run(conn, run.id, "completed")
+    })?;
+
+    Ok(())
+}
+
+pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearningModel>> {
+    db.with_conn(|conn| {
+        let Some(model) = queries::get_active_embedding_model(conn)? else {
+            return Ok(None);
+        };
+        let vectors = queries::get_model_embeddings(conn, model.id)?
+            .into_iter()
+            .map(|row| (row.track_id, unpack_vector_blob(&row.vector_blob)))
+            .collect::<HashMap<_, _>>();
+        Ok(Some(ActiveLearningModel {
+            model_id: model.id,
+            model_key: model.model_key,
+            family: model.family,
+            vectors,
+        }))
+    })
+}
+
+pub fn radio_from_neighbors(
+    db: &Database,
+    seed_track_id: i64,
+    exclude_ids: &[i64],
+    limit: i64,
+    creativity: f64,
+) -> Result<Option<Vec<DiscoveryRadioResult>>> {
+    let Some(active) = load_active_learning_model(db)? else {
+        return Ok(None);
+    };
+    db.with_conn(|conn| {
+        let neighbors =
+            queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit * 3, exclude_ids)?;
+        if neighbors.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut rows = neighbors
+            .into_iter()
+            .map(|neighbor| {
+                let adjusted = neighbor.score * (1.0 - creativity.clamp(0.0, 1.0) * 0.35);
+                let reasons = parse_reason_tags(neighbor.reason_json.as_deref());
+                DiscoveryRadioResult {
+                    track_id: neighbor.track_id,
+                    title: neighbor.title,
+                    artist_name: neighbor.artist_name,
+                    album_title: neighbor.album_title,
+                    artwork_url: neighbor.artwork_url,
+                    duration_ms: neighbor.duration_ms,
+                    best_quality: neighbor.best_quality,
+                    similarity_score: neighbor.score,
+                    adjusted_score: adjusted,
+                    co_listen_score: neighbor.behavioral_score,
+                    co_album_score: neighbor.metadata_score,
+                    co_artist_score: neighbor.audio_score,
+                    genre_proximity: neighbor.metadata_score,
+                    reason_tags: reasons,
+                    model_key: Some(active.model_key.clone()),
+                    source_mode: "embedding".to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            right
+                .adjusted_score
+                .partial_cmp(&left.adjusted_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rows.truncate(limit.max(1) as usize);
+        Ok(Some(rows))
+    })
+}
+
+pub fn build_prompt_preview(
+    db: &Database,
+    prompt: &str,
+    mode: &str,
+    services: &[String],
+    limit: usize,
+    recent_tracks: &[TrackSimilarityResult],
+) -> Result<Option<DiscoveryPreview>> {
+    let Some(active) = load_active_learning_model(db)? else {
+        return Ok(None);
+    };
+    db.with_conn(|conn| {
+        let candidates = queries::get_discovery_candidate_tracks(conn, 120)?;
+        let tracks = queries::get_embedding_track_rows(conn)?;
+        let track_map = tracks
+            .into_iter()
+            .map(|row| (row.track_id, row))
+            .collect::<HashMap<_, _>>();
+        let anchor_ids = resolve_prompt_anchor_ids(prompt, &candidates, &track_map);
+        if anchor_ids.is_empty() {
+            return Ok(None);
+        }
+        let centroid = centroid_for_ids(&active.vectors, &anchor_ids);
+        let results = rank_preview_candidates(&active, &candidates, &anchor_ids, &centroid, limit);
+        let summary = format!(
+            "Learned {} discovery anchored by {} library seed(s).",
+            mode,
+            anchor_ids.len()
+        );
+        let profile = DiscoveryProfilePreview {
+            prompt: prompt.trim().to_string(),
+            mode: mode.to_string(),
+            services: services.to_vec(),
+            prompt_terms: tokenize(prompt),
+            prompt_genres: Vec::new(),
+            top_artists: anchor_ids.iter().filter_map(|id| track_map.get(id).and_then(|row| row.artist_name.clone())).take(3).collect(),
+            top_genres: Vec::new(),
+            recent_tracks: recent_tracks.iter().take(5).map(|row| row.title.clone()).collect(),
+            favorite_ratio: 0.0,
+            completion_rate: 0.0,
+            summary,
+        };
+        let reasons = vec![
+            DiscoveryReason {
+                label: "Anchor tracks".to_string(),
+                detail: format!("Prompt resolved to {} anchor tracks in your library.", anchor_ids.len()),
+                weight: 82,
+            },
+            DiscoveryReason {
+                label: "Embedding centroid".to_string(),
+                detail: "Results come from the learned neighborhood around those anchors, not raw text hits.".to_string(),
+                weight: 77,
+            },
+        ];
+        Ok(Some(DiscoveryPreview {
+            profile,
+            reasons,
+            results,
+        }))
+    })
+}
+
+pub fn compute_external_embedding_scores(
+    db: &Database,
+    prompt: &str,
+    candidates: &[DiscoveryCandidateTrack],
+) -> Result<HashMap<String, f64>> {
+    let Some(active) = load_active_learning_model(db)? else {
+        return Ok(HashMap::new());
+    };
+    db.with_conn(|conn| {
+        let library_candidates = queries::get_discovery_candidate_tracks(conn, 120)?;
+        let track_rows = queries::get_embedding_track_rows(conn)?;
+        let track_map = track_rows
+            .into_iter()
+            .map(|row| (row.track_id, row))
+            .collect::<HashMap<_, _>>();
+        let anchor_ids = resolve_prompt_anchor_ids(prompt, &library_candidates, &track_map);
+        if anchor_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let centroid = centroid_for_ids(&active.vectors, &anchor_ids);
+        let mut scores = HashMap::new();
+        for candidate in candidates {
+            let proxy = external_candidate_proxy_vector(candidate, MODEL_DIMENSION as usize);
+            scores.insert(
+                candidate.provider_track_id.clone(),
+                cosine_similarity(&centroid, &proxy),
+            );
+        }
+        Ok(scores)
+    })
+}
+
+pub fn inject_query_seeds_from_neighbors(
+    db: &Database,
+    seed_track_id: i64,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let Some(active) = load_active_learning_model(db)? else {
+        return Ok(Vec::new());
+    };
+    db.with_conn(|conn| {
+        let neighbors = queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit as i64, &[])?;
+        let mut queries = Vec::new();
+        for neighbor in neighbors {
+            if let Some(artist) = neighbor.artist_name {
+                queries.push(artist);
+            }
+            queries.push(neighbor.title);
+            if let Some(album) = neighbor.album_title {
+                queries.push(album);
+            }
+        }
+        queries.sort();
+        queries.dedup();
+        Ok(queries)
+    })
+}
+
+fn build_trainer_input(conn: &rusqlite::Connection) -> Result<TrainerInput> {
+    let tracks = queries::get_embedding_track_rows(conn)?;
+    let transition_sequences = queries::get_playback_transition_sequences(conn)?;
+    let listen_sequences = queries::get_listen_history_sequences(conn, 45)?;
+    let playlist_sequences = queries::get_playlist_sequences(conn)?;
+    let album_sequences = queries::get_album_sequences(conn)?;
+    let artist_sequences = queries::get_artist_sequences(conn)?;
+    let genre_sequences = queries::get_genre_sequences(conn)?;
+    let favorite_ids = queries::get_favorite_track_ids(conn)?;
+    let favorite_sequences = favorite_ids
+        .chunks(8)
+        .filter(|chunk| chunk.len() > 1)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+
+    let heldout_pairs = transition_sequences
+        .iter()
+        .chain(playlist_sequences.iter())
+        .enumerate()
+        .filter_map(|(index, sequence)| {
+            if index % 10 == 0 && sequence.len() >= 2 {
+                Some((sequence[0], sequence[1]))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(TrainerInput {
+        seed: 13,
+        dimension: MODEL_DIMENSION as usize,
+        window_size: 8,
+        min_count: 2,
+        top_k: MODEL_TOP_K,
+        tracks,
+        sequences: vec![
+            TrainerSequenceGroup { label: "playback_transitions".to_string(), weight: 1.6, sequences: transition_sequences },
+            TrainerSequenceGroup { label: "listen_history".to_string(), weight: 1.3, sequences: listen_sequences },
+            TrainerSequenceGroup { label: "playlist_tracks".to_string(), weight: 1.1, sequences: playlist_sequences },
+            TrainerSequenceGroup { label: "album_tracks".to_string(), weight: 0.7, sequences: album_sequences },
+            TrainerSequenceGroup { label: "artist_tracks".to_string(), weight: 0.35, sequences: artist_sequences },
+            TrainerSequenceGroup { label: "genre_tracks".to_string(), weight: 0.3, sequences: genre_sequences },
+            TrainerSequenceGroup { label: "favorites".to_string(), weight: 1.2, sequences: favorite_sequences },
+        ],
+        heldout_pairs,
+    })
+}
+
+fn centroid_for_ids(vectors: &HashMap<i64, Vec<f64>>, anchor_ids: &[i64]) -> Vec<f64> {
+    let mut centroid = vec![0.0; MODEL_DIMENSION as usize];
+    let mut count = 0.0;
+    for track_id in anchor_ids {
+        if let Some(vector) = vectors.get(track_id) {
+            for (index, value) in vector.iter().enumerate() {
+                centroid[index] += value;
+            }
+            count += 1.0;
+        }
+    }
+    if count > 0.0 {
+        for value in &mut centroid {
+            *value /= count;
+        }
+    }
+    normalize_vector(&centroid)
+}
+
+fn rank_preview_candidates(
+    active: &ActiveLearningModel,
+    candidates: &[crate::db::models::Track],
+    anchor_ids: &[i64],
+    centroid: &[f64],
+    limit: usize,
+) -> Vec<DiscoveryPreviewResult> {
+    let anchor_set = anchor_ids.iter().copied().collect::<HashSet<_>>();
+    let mut results = candidates
+        .iter()
+        .filter(|track| !anchor_set.contains(&track.id))
+        .filter_map(|track| {
+            active.vectors.get(&track.id).map(|vector| {
+                let score = (cosine_similarity(centroid, vector).max(0.0) * 100.0).round() as i32;
+                DiscoveryPreviewResult {
+                    track_id: track.id,
+                    title: track.title.clone(),
+                    artist_name: track.artist_name.clone(),
+                    album_title: track.album_title.clone(),
+                    artwork_url: track.artwork_url.clone(),
+                    duration_ms: track.duration_ms,
+                    service: track.source.clone(),
+                    service_track_id: track
+                        .tidal_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| track.id.to_string()),
+                    score,
+                    tags: vec!["embedding centroid".to_string()],
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| right.score.cmp(&left.score));
+    results.truncate(limit.max(1));
+    results
+}
+
+fn resolve_prompt_anchor_ids(
+    prompt: &str,
+    candidates: &[crate::db::models::Track],
+    track_map: &HashMap<i64, EmbeddingTrackRow>,
+) -> Vec<i64> {
+    let tokens = tokenize(prompt);
+    let mut scored = candidates
+        .iter()
+        .filter_map(|track| {
+            let mut score = 0_i32;
+            let haystack = format!(
+                "{} {} {}",
+                track.title,
+                track.artist_name.as_deref().unwrap_or_default(),
+                track.album_title.as_deref().unwrap_or_default()
+            )
+            .to_ascii_lowercase();
+            for token in &tokens {
+                if haystack.contains(token) {
+                    score += 4;
+                }
+            }
+            if let Some(row) = track_map.get(&track.id) {
+                for genre in &row.genre_paths {
+                    let genre_lower = genre.to_ascii_lowercase();
+                    for token in &tokens {
+                        if genre_lower.contains(token) {
+                            score += 3;
+                        }
+                    }
+                }
+            }
+            if score > 0 {
+                Some((track.id, score))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| right.1.cmp(&left.1));
+    scored.into_iter().take(3).map(|(track_id, _)| track_id).collect()
+}
+
+fn external_candidate_proxy_vector(candidate: &DiscoveryCandidateTrack, dim: usize) -> Vec<f64> {
+    let mut tokens = tokenize(&candidate.title);
+    if let Some(artist) = candidate.artist_name.as_deref() {
+        tokens.extend(tokenize(artist));
+    }
+    if let Some(album) = candidate.album_title.as_deref() {
+        tokens.extend(tokenize(album));
+    }
+    for tag in candidate
+        .raw_genre_hints
+        .iter()
+        .chain(candidate.lastfm_tags.iter())
+        .chain(candidate.discogs_styles.iter())
+        .chain(candidate.discogs_genres.iter())
+    {
+        tokens.extend(tokenize(tag));
+    }
+    hashed_token_vector(&tokens, dim)
+}
+
+pub fn pack_vector_f64(vector: &[f64]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&(*value as f32).to_le_bytes());
+    }
+    bytes
+}
+
+pub fn unpack_vector_blob(blob: &[u8]) -> Vec<f64> {
+    blob.chunks_exact(4)
+        .map(|chunk| {
+            let bytes: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            f32::from_le_bytes(bytes) as f64
+        })
+        .collect()
+}
+
+fn l2_norm(vector: &[f64]) -> f64 {
+    vector.iter().map(|value| value * value).sum::<f64>().sqrt()
+}
+
+fn normalize_vector(vector: &[f64]) -> Vec<f64> {
+    let norm = l2_norm(vector);
+    if norm <= 1e-12 {
+        return vec![0.0; vector.len()];
+    }
+    vector.iter().map(|value| value / norm).collect()
+}
+
+fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
+    left.iter().zip(right.iter()).map(|(a, b)| a * b).sum::<f64>()
+}
+
+fn tokenize(value: &str) -> Vec<String> {
+    value
+        .to_ascii_lowercase()
+        .split(|char: char| !char.is_ascii_alphanumeric())
+        .filter(|part| !part.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn hashed_token_vector(tokens: &[String], dim: usize) -> Vec<f64> {
+    let mut vector = vec![0.0; dim];
+    for token in tokens {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        token.hash(&mut hasher);
+        let hash = hasher.finish();
+        for offset in 0..4 {
+            let bucket = ((hash >> (offset * 8)) as usize) % dim;
+            let sign = if ((hash >> (offset * 8 + 1)) & 1) == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            vector[bucket] += sign * 0.5;
+        }
+    }
+    normalize_vector(&vector)
+}
+
+fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {
+    serde_json::from_str::<Vec<DiscoveryNeighborReason>>(reason_json.unwrap_or("[]"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|reason| reason.label)
+        .collect()
+}
+
+fn reason_label(key: &str) -> &'static str {
+    match key {
+        "behavioral" => "same pocket",
+        "audio_texture" => "audio texture",
+        "album_context" => "album-adjacent",
+        "artist_affinity" => "session neighbor",
+        "genre_branch" => "genre branch",
+        _ => "learned signal",
+    }
+}

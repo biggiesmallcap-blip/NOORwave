@@ -6,9 +6,11 @@ use crate::playback::{player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
 };
+use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
     auth as tidal_auth, client::TidalClient, mutations as tidal_mutations, stream as tidal_stream,
 };
+use crate::services::spotify;
 use crate::smart::discovery as discovery_engine;
 use crate::smart::external_discovery as external_discovery_engine;
 use crate::smart::playlists::{
@@ -21,10 +23,11 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use rusqlite::params;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -176,6 +179,23 @@ pub struct AutomixRequest {
     enabled: bool,
     crossfade_ms: Option<i32>,
     discover_new: Option<bool>,
+    use_learning: Option<bool>,
+    allow_external: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoveryTrainRequest {
+    mode: Option<String>,
+    rebuild_audio: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoveryFeedbackRequest {
+    seed_track_id: i64,
+    candidate_track_id: i64,
+    action: String,
+    surface: String,
+    context: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,10 +253,17 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/save", post(save_discovery_track))
         .route("/api/discovery/play", post(play_discovery_track))
         .route("/api/discovery/connections", post(discover_connected_music))
+        .route("/api/discovery/status", get(get_discovery_status))
+        .route("/api/discovery/train", post(start_discovery_training))
+        .route("/api/discovery/train/status", get(get_discovery_training_status))
+        .route("/api/discovery/feedback", post(record_discovery_feedback))
         .route(
             "/api/discovery/presets",
             get(get_discovery_presets).post(create_discovery_preset),
         )
+        // Similar Radio
+        .route("/api/discovery/radio", post(get_radio_tracks))
+        .route("/api/discovery/radio/compute", post(compute_radio_similarity))
         .route(
             "/api/library/batch/add-to-playlist",
             post(batch_add_to_playlist),
@@ -302,10 +329,22 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/logout", post(tidal_logout))
+        // Spotify
+        .route("/api/spotify/login", post(spotify_login))
+        .route("/api/spotify/login/poll", post(spotify_poll))
+        .route("/api/spotify/status", get(spotify_status))
+        .route("/api/spotify/logout", post(spotify_logout))
+        .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
+        .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
         .route("/api/sync/info", get(get_sync_info))
         .route("/api/sync/auto", post(set_auto_sync))
         // Status
         .route("/api/status", get(status))
+        // Home page discovery endpoints
+        .route("/api/home/releases", get(get_home_releases))
+        .route("/api/home/picks", get(get_home_picks))
+        .route("/api/home/articles", get(get_home_articles))
+        .route("/api/home/news", get(get_home_news))
         .with_state(state)
 }
 
@@ -807,6 +846,21 @@ async fn preview_discovery(
     let result_limit = payload.limit.unwrap_or(8).clamp(1, 20) as usize;
 
     let state = state.read().await;
+    let recent_similar = state
+        .db
+        .with_conn(|conn| queries::get_similar_tracks(conn, 1, 5, &[]))
+        .unwrap_or_default();
+    if let Ok(Some(preview)) = discovery_learning::build_prompt_preview(
+        &state.db,
+        prompt,
+        &mode,
+        &services,
+        result_limit,
+        &recent_similar,
+    ) {
+        return Ok(Json(json!({ "preview": preview })));
+    }
+
     let preview = state
         .db
         .with_conn(|conn| {
@@ -878,10 +932,19 @@ async fn discover_new_music(
         .await
         .map_err(discovery_upstream_error)?;
     let candidates = enrich_candidates_with_metadata(&state, candidates).await;
+    let embedding_scores = discovery_learning::compute_external_embedding_scores(
+        &{
+            let guard = state.read().await;
+            guard.db.clone()
+        },
+        prompt,
+        &candidates,
+    )
+    .unwrap_or_default();
     let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
         .await
         .map_err(internal_discovery_error)?;
-    let feed = external_discovery_engine::build_external_feed(
+    let mut feed = external_discovery_engine::build_external_feed(
         &request,
         &context,
         &candidates,
@@ -889,6 +952,16 @@ async fn discover_new_music(
         discovery_provider_capabilities(),
         None,
     );
+    for result in &mut feed.results {
+        result.embedding_score = embedding_scores.get(&result.provider_track_id).copied();
+        if let Some(score) = result.embedding_score {
+            result.score = (((result.score as f64) * 0.8) + (score.max(0.0) * 20.0)).round() as i32;
+            if score > 0.2 {
+                result.tags.push("embedding boost".to_string());
+            }
+        }
+    }
+    feed.results.sort_by(|left, right| right.score.cmp(&left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }
@@ -935,6 +1008,7 @@ async fn play_discovery_track(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryExternalResultRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let previous_track_id = current_playback_track_id(&state).await;
     let provider = normalize_external_provider(&payload.provider).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -1026,6 +1100,7 @@ async fn play_discovery_track(
     )
     .await;
     set_external_playback_track(&state, Some(track.clone())).await;
+    record_transition_if_changed(&state, previous_track_id, &snapshot, "discovery", false).await;
 
     let state_guard = state.read().await;
     let _ = state_guard
@@ -1102,11 +1177,20 @@ async fn discover_connected_music(
         .filter(|candidate| candidate.provider_track_id != seed.provider_track_id)
         .collect::<Vec<_>>();
     let candidates = enrich_candidates_with_metadata(&state, candidates).await;
+    let embedding_scores = discovery_learning::compute_external_embedding_scores(
+        &{
+            let guard = state.read().await;
+            guard.db.clone()
+        },
+        prompt,
+        &candidates,
+    )
+    .unwrap_or_default();
     let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
         .await
         .map_err(internal_discovery_error)?;
     let trail_item = Some(discovery_request_to_trail_item(&payload.seed));
-    let feed = external_discovery_engine::build_external_feed(
+    let mut feed = external_discovery_engine::build_external_feed(
         &request,
         &context,
         &candidates,
@@ -1114,6 +1198,16 @@ async fn discover_connected_music(
         discovery_provider_capabilities(),
         trail_item,
     );
+    for result in &mut feed.results {
+        result.embedding_score = embedding_scores.get(&result.provider_track_id).copied();
+        if let Some(score) = result.embedding_score {
+            result.score = (((result.score as f64) * 0.8) + (score.max(0.0) * 20.0)).round() as i32;
+            if score > 0.2 {
+                result.tags.push("embedding boost".to_string());
+            }
+        }
+    }
+    feed.results.sort_by(|left, right| right.score.cmp(&left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }
@@ -1157,6 +1251,319 @@ async fn create_discovery_preset(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "preset": preset })))
+}
+
+async fn get_discovery_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    let status = state
+        .db
+        .with_conn(queries::get_discovery_status)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": status })))
+}
+
+async fn get_discovery_training_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    let run = state
+        .db
+        .with_conn(queries::get_latest_training_run)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Build a synthetic per-stage breakdown so the frontend can render a
+    // pipeline view without needing multi-row stage history in the schema.
+    const STAGE_ORDER: &[&str] = &[
+        "corpus", "behavioral", "audio", "fusion", "neighbors", "evaluate",
+    ];
+    const STAGE_THRESHOLDS: &[f64] = &[0.05, 0.2, 0.55, 0.72, 0.88, 0.96];
+
+    let stages: Vec<Value> = if let Some(ref r) = run {
+        let current_stage_idx = STAGE_ORDER
+            .iter()
+            .position(|&s| s == r.stage)
+            .unwrap_or(0);
+        STAGE_ORDER
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let stage_status = if r.status == "failed" && i == current_stage_idx {
+                    "failed"
+                } else if i < current_stage_idx {
+                    "done"
+                } else if i == current_stage_idx {
+                    r.status.as_str()
+                } else {
+                    "pending"
+                };
+                let progress = if i < current_stage_idx {
+                    1.0_f64
+                } else if i == current_stage_idx {
+                    let lo = if i == 0 { 0.0 } else { STAGE_THRESHOLDS[i - 1] };
+                    let hi = STAGE_THRESHOLDS[i];
+                    ((r.progress - lo) / (hi - lo)).clamp(0.0, 1.0)
+                } else {
+                    0.0_f64
+                };
+                json!({ "stage": name, "status": stage_status, "progress": progress })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(json!({ "run": run, "stages": stages })))
+}
+
+async fn start_discovery_training(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryTrainRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let mode = payload.mode.as_deref().unwrap_or("incremental");
+    let full_mode = mode == "full";
+    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
+    let db = {
+        let guard = state.read().await;
+        guard.db.clone()
+    };
+
+    // Guard: reject if a run is already in progress
+    let already_running = db
+        .with_conn(|conn| queries::get_latest_training_run(conn))
+        .ok()
+        .flatten()
+        .map(|run| run.status == "running")
+        .unwrap_or(false);
+
+    if already_running {
+        return Ok(Json(json!({
+            "status": "already_running",
+            "mode": mode
+        })));
+    }
+
+    tokio::spawn(async move {
+        let event_tx = {
+            let guard = state.read().await;
+            guard.event_tx.clone()
+        };
+        if let Err(error) = discovery_learning::start_training(db, event_tx, full_mode, rebuild_audio).await {
+            tracing::error!(
+                target: "noor.discovery.training",
+                error = %error,
+                "discovery learning pipeline failed"
+            );
+        }
+    });
+    Ok(Json(json!({
+        "status": "training_started",
+        "mode": if full_mode { "full" } else { "incremental" }
+    })))
+}
+
+async fn record_discovery_feedback(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryFeedbackRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let context_json = payload.context.as_ref().map(Value::to_string);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            queries::record_discovery_feedback(
+                conn,
+                payload.seed_track_id,
+                payload.candidate_track_id,
+                &payload.action,
+                &payload.surface,
+                context_json.as_deref(),
+            )
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(json!({ "recorded": true })))
+}
+
+// ─── Similar Radio ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct RadioRequest {
+    seed_track_id: i64,
+    creativity: Option<f64>,    // 0.0 (tight) to 1.0 (adventurous), default 0.3
+    context_window: Option<i64>, // number of recent tracks to influence, default 5
+    limit: Option<i64>,          // results to return, default 20
+    exclude_ids: Option<Vec<i64>>, // already-played track IDs
+}
+
+/// Get similar tracks for the "Similar Radio" feature.
+/// Combines pre-computed similarity scores with creativity/context adjustments.
+async fn get_radio_tracks(
+    State(state): State<SharedState>,
+    Json(payload): Json<RadioRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if payload.seed_track_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "seed_track_id is required"})),
+        ));
+    }
+
+    let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
+    let context_window = payload.context_window.unwrap_or(5).max(0) as usize;
+    let limit = payload.limit.unwrap_or(20).max(1).min(50);
+    let exclude_ids = payload.exclude_ids.unwrap_or_default();
+
+    let state = state.read().await;
+
+    if let Some(rows) = discovery_learning::radio_from_neighbors(
+        &state.db,
+        payload.seed_track_id,
+        &exclude_ids,
+        limit,
+        creativity,
+    )
+    .map_err(|e| {
+        tracing::error!("Failed to load embedding neighbors: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to query learned neighbors"})),
+        )
+    })?
+    {
+        let model = state
+            .db
+            .with_conn(queries::get_active_embedding_model)
+            .ok()
+            .flatten();
+        return Ok(Json(json!({
+            "tracks": rows,
+            "seed_track_id": payload.seed_track_id,
+            "creativity": creativity,
+            "context_window": context_window,
+            "computed_at": model.as_ref().and_then(|m| m.trained_at.clone()),
+            "model_family": model.as_ref().map(|m| m.family.clone()),
+            "model_key": model.as_ref().map(|m| m.model_key.clone()),
+            "reasons": ["learned neighbors", "session feedback", "taste graph"],
+        })));
+    }
+
+    // Get similar tracks from pre-computed similarity table
+    let similar = state
+        .db
+        .with_conn(|conn| {
+            queries::get_similar_tracks(conn, payload.seed_track_id, limit * 3, &exclude_ids)
+        })
+        .map_err(|e| {
+            tracing::error!("Failed to get similar tracks: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to query similar tracks"})),
+            )
+        })?;
+
+    if similar.is_empty() {
+        // Fallback: return random tracks from the same artist/genre
+        return Ok(Json(json!({
+            "tracks": [],
+            "message": "No similar tracks found. Try syncing your library or running similarity computation.",
+            "computed_at": null,
+        })));
+    }
+
+    // Apply creativity filter: higher creativity = pick from further down the list
+    // We use a temperature-based sampling: sort by adjusted score with noise
+    let temperature = creativity * 0.5; // 0.0 = deterministic, 0.5 = max noise
+
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    let mut scored: Vec<_> = similar
+        .into_iter()
+        .map(|track| {
+            // Add noise proportional to creativity
+            let noise = rng.gen_range(0.0..=temperature);
+            let adjusted_score = track.similarity_score * (1.0 - temperature) + noise;
+            (track, adjusted_score)
+        })
+        .collect();
+
+    // Sort by adjusted score
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Take top `limit` results
+    let results: Vec<_> = scored
+        .into_iter()
+        .take(limit as usize)
+        .map(|(track, adjusted_score)| {
+            json!({
+                "track_id": track.track_id,
+                "title": track.title,
+                "artist_name": track.artist_name,
+                "album_title": track.album_title,
+                "artwork_url": track.artwork_url,
+                "duration_ms": track.duration_ms,
+                "best_quality": track.best_quality,
+                "similarity_score": track.similarity_score,
+                "adjusted_score": adjusted_score,
+                "co_listen_score": track.co_listen_score,
+                "co_album_score": track.co_album_score,
+                "co_artist_score": track.co_artist_score,
+                "genre_proximity": track.genre_proximity,
+                "reason_tags": Vec::<String>::new(),
+                "model_key": Value::Null,
+                "source_mode": "legacy",
+            })
+        })
+        .collect();
+
+    // Get computation timestamp
+    let computed_at = state
+        .db
+        .with_conn(|conn| queries::get_similarity_computed_at(conn))
+        .ok()
+        .flatten();
+
+    Ok(Json(json!({
+        "tracks": results,
+        "seed_track_id": payload.seed_track_id,
+        "creativity": creativity,
+        "context_window": context_window,
+        "computed_at": computed_at,
+        "model_family": Value::Null,
+        "model_key": Value::Null,
+        "reasons": ["legacy similarity fallback"],
+    })))
+}
+
+/// Trigger background similarity computation.
+async fn compute_radio_similarity(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    // Clone the DB handle before spawning so we don't hold the RwLock during computation
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    tokio::spawn(async move {
+        tracing::info!(target: "noor.radio", "Starting track similarity computation...");
+        match db.with_conn(|conn| queries::compute_track_similarity(conn)) {
+            Ok(count) => {
+                tracing::info!(
+                    target: "noor.radio",
+                    count = count,
+                    "Track similarity computation complete"
+                );
+            }
+            Err(e) => {
+                tracing::error!(target: "noor.radio", "Similarity computation failed: {}", e);
+            }
+        }
+    });
+
+    Ok(Json(json!({
+        "status": "computation_started",
+        "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+    })))
 }
 
 fn normalize_discovery_mode(mode: Option<&str>) -> String {
@@ -1293,6 +1700,13 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
             queries.push(format!("{genre} {artist}"));
         }
     }
+    if let Ok(mut learned_queries) =
+        discovery_learning::inject_query_seeds_from_neighbors(&db, current_track.id, 6)
+    {
+        queries.append(&mut learned_queries);
+    }
+    queries.sort();
+    queries.dedup();
     if queries.is_empty() {
         return;
     }
@@ -2471,6 +2885,7 @@ async fn play_track(
     State(state): State<SharedState>,
     Json(payload): Json<PlaybackTrackRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let previous_track_id = current_playback_track_id(&state).await;
     let track = {
         let state_guard = state.read().await;
         state_guard
@@ -2578,6 +2993,7 @@ async fn play_track(
             })?
     };
     set_external_playback_track(&state, None).await;
+    record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
         &state,
@@ -2875,6 +3291,7 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
 async fn next_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let previous_track_id = current_playback_track_id(&state).await;
     let snapshot = {
         let state = state.read().await;
         state
@@ -2892,6 +3309,7 @@ async fn next_track(
     };
 
     set_external_playback_track(&state, None).await;
+    record_transition_if_changed(&state, previous_track_id, &snapshot, "queue", true).await;
 
     // When "Include New" is enabled, search TIDAL for genre/artist-matched tracks and
     // inject any that aren't already in the library. Runs as a detached background task
@@ -3003,6 +3421,7 @@ async fn next_track(
 async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let previous_track_id = current_playback_track_id(&state).await;
     let snapshot = {
         let state = state.read().await;
         state
@@ -3020,6 +3439,7 @@ async fn previous_track(
     };
 
     set_external_playback_track(&state, None).await;
+    record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
         &state,
@@ -3180,6 +3600,12 @@ async fn set_playback_automix(
             }
             if let Some(dn) = payload.discover_new {
                 player::set_automix_discover_new(conn, dn)?;
+            }
+            if let Some(use_learning) = payload.use_learning {
+                player::set_automix_use_learning(conn, use_learning)?;
+            }
+            if let Some(allow_external) = payload.allow_external {
+                player::set_automix_allow_external(conn, allow_external)?;
             }
             player::set_automix_enabled(conn, payload.enabled)
         })
@@ -4604,6 +5030,69 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
     }
 }
 
+async fn current_playback_track_id(state: &SharedState) -> Option<i64> {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_track_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(Into::into)
+        })
+        .ok()
+        .flatten()
+}
+
+async fn record_transition_if_changed(
+    state: &SharedState,
+    previous_track_id: Option<i64>,
+    snapshot: &player::PlaybackSnapshot,
+    transition_source: &str,
+    completed_prev: bool,
+) {
+    let Some(from_track_id) = previous_track_id else {
+        return;
+    };
+    let Some(to_track_id) = snapshot.state.current_track.as_ref().map(|track| track.id) else {
+        return;
+    };
+    if from_track_id == to_track_id {
+        return;
+    }
+    // If the caller says "queue", check whether the incoming track was actually
+    // placed there by the automix engine so the corpus gets the right source label.
+    let effective_source = if transition_source == "queue" {
+        snapshot
+            .queue
+            .iter()
+            .find(|item| item.track.id == to_track_id)
+            .map(|item| {
+                if item.source.starts_with("automix") {
+                    "automix"
+                } else {
+                    transition_source
+                }
+            })
+            .unwrap_or(transition_source)
+    } else {
+        transition_source
+    };
+    let guard = state.read().await;
+    let _ = guard.db.with_conn(|conn| {
+        queries::record_playback_transition(
+            conn,
+            from_track_id,
+            to_track_id,
+            effective_source,
+            completed_prev,
+            snapshot.state.crossfade_ms as i64,
+        )
+    });
+}
+
 async fn sync_session_after_snapshot(
     state: &SharedState,
     snapshot: &player::PlaybackSnapshot,
@@ -4871,6 +5360,237 @@ pub struct SyncStats {
     pub playlists: usize,
 }
 
+// ─── Home Page Discovery Endpoints ───────────────────────────────────────────────
+
+/// Get new album releases from AllMusic RSS
+async fn get_home_releases(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let aggregator = state.read().await.rss_aggregator.clone();
+    let releases = aggregator.get_new_releases().await;
+    
+    Ok(Json(json!({
+        "releases": releases,
+        "source": "allmusic_rss"
+    })))
+}
+
+/// Get daily picks curated from user's library using learning model
+async fn get_home_picks(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state_guard = state.read().await;
+    let db = &state_guard.db;
+    
+    // Get top tracks from listening history with variety
+    let picks = db.with_conn(|conn| {
+        // Fetch recent top tracks that aren't played in last 7 days (rediscovery)
+        let tracks = queries::get_tracks(conn, "play_count", "desc", 20, 0, false)?;
+        
+        // Get tracks from different genres for variety
+        let mut genre_tracks = conn.prepare(
+            "SELECT t.*, g.name as genre_name
+             FROM tracks t
+             JOIN track_genres tg ON t.id = tg.track_id
+             JOIN genres g ON tg.genre_id = g.id
+             WHERE t.play_count > 0
+             ORDER BY RANDOM()
+             LIMIT 10"
+        )?;
+        
+        let genre_picks: Vec<serde_json::Value> = genre_tracks.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "artist_name": row.get::<_, Option<String>>(2)?,
+                "album_title": row.get::<_, Option<String>>(3)?,
+                "artwork_url": row.get::<_, Option<String>>(4)?,
+                "duration_ms": row.get::<_, Option<i64>>(5)?,
+                "play_count": row.get::<_, i64>(6)?,
+                "genre": row.get::<_, String>(7)?,
+            }))
+        })?.filter_map(|r| r.ok()).collect();
+        
+        Ok((tracks, genre_picks))
+    }).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    let (top_tracks, genre_picks) = picks;
+    
+    Ok(Json(json!({
+        "top_picks": top_tracks.iter().take(10).map(|t| serde_json::json!({
+            "id": t.id,
+            "title": t.title,
+            "artist_name": t.artist_name,
+            "album_title": t.album_title,
+            "artwork_url": t.artwork_url,
+            "duration_ms": t.duration_ms,
+            "play_count": t.play_count,
+            "reason": "Most played"
+        })).collect::<Vec<_>>(),
+        "genre_variety": genre_picks,
+        "source": "library_curation"
+    })))
+}
+
+/// Get weekly articles from AllMusic RSS
+async fn get_home_articles(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let aggregator = state.read().await.rss_aggregator.clone();
+    let articles = aggregator.get_articles().await;
+    
+    Ok(Json(json!({
+        "articles": articles,
+        "source": "allmusic_rss"
+    })))
+}
+
+/// Get music industry news from multiple RSS sources
+async fn get_home_news(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let aggregator = state.read().await.rss_aggregator.clone();
+    let news = aggregator.get_news().await;
+    
+    Ok(Json(json!({
+        "news": news,
+        "sources": ["billboard", "nme", "spin", "pitchfork", "rolling_stone", "consequence", "the_guardian"],
+        "source": "aggregated_rss"
+    })))
+}
+
+// ── Spotify Auth & Enrichment ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SpotifyLoginRequest {}
+
+async fn spotify_login(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let http = state.read().await.http_client.clone();
+    let result = spotify::auth::start_device_code(&http).await;
+    match result {
+        Ok(data) => Ok(Json(json!({
+            "device_code": data.device_code,
+            "user_code": data.user_code,
+            "verification_uri": data.verification_uri,
+            "expires_in": data.expires_in,
+        }))),
+        Err(e) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Deserialize)]
+struct SpotifyPollRequest {
+    device_code: String,
+}
+
+async fn spotify_poll(
+    State(state): State<SharedState>,
+    Json(payload): Json<SpotifyPollRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let http = state.read().await.http_client.clone();
+    let result = spotify::auth::poll_token(&http, &payload.device_code).await;
+    
+    match result {
+        Ok(Some(tokens)) => {
+            // Save to DB
+            let json_blob = serde_json::to_string(&tokens).unwrap();
+            let bytes = json_blob.into_bytes();
+            let _ = state.read().await.db.with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO service_auth (service, access_token_enc) VALUES ('spotify', ?1)",
+                    params![bytes],
+                )?;
+                Ok(())
+            });
+            
+            // Update AppState
+            {
+                let mut s = state.write().await;
+                s.spotify_tokens = Some(tokens.clone());
+            }
+            
+            Ok(Json(json!({
+                "status": "authenticated",
+                "user_id": tokens.user_id,
+            })))
+        }
+        Ok(None) => Ok(Json(json!({"status": "pending"}))),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    if let Some(tokens) = &s.spotify_tokens {
+        Ok(Json(json!({
+            "connected": true,
+            "user_id": tokens.user_id,
+        })))
+    } else {
+        Ok(Json(json!({"connected": false})))
+    }
+}
+
+async fn spotify_logout(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let _ = state.read().await.db.with_conn(|conn| {
+        conn.execute("DELETE FROM service_auth WHERE service = 'spotify'", [])?;
+        Ok(())
+    });
+    {
+        let mut s = state.write().await;
+        s.spotify_tokens = None;
+    }
+    Ok(Json(json!({"status": "logged_out"})))
+}
+
+async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let http = state.read().await.http_client.clone();
+    let event_tx = state.read().await.event_tx.clone();
+    
+    let total: usize = state.read().await.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')",
+            [], |r| r.get(0)
+        )?)
+    }).unwrap_or(0);
+
+    if total == 0 {
+        return Ok(Json(json!({"status": "already_complete"})));
+    }
+
+    tokio::spawn(async move {
+        let progress_tx = event_tx.clone();
+        let result = crate::services::spotify::enrichment::run_enrichment(
+            state,
+            http,
+            move |current, total| {
+                let _ = progress_tx.send(AppEvent::SyncProgress {
+                    service: "spotify".to_string(),
+                    progress: current as f32 / total.max(1) as f32,
+                });
+            },
+        ).await;
+        
+        if result.is_ok() {
+            let _ = event_tx.send(AppEvent::MusicBrainzEnriched); // Reuse event for "genres updated"
+        }
+    });
+
+    Ok(Json(json!({"status": "started", "total": total})))
+}
+
+async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let enriched: i64 = s.db.with_conn(|conn| {
+        Ok(conn.query_row("SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'spotify'", [], |r| r.get(0))?)
+    }).unwrap_or(0);
+    
+    Ok(Json(json!({
+        "enriched_tracks": enriched,
+    })))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5000,6 +5720,7 @@ mod tests {
             event_tx,
             http_client: reqwest::Client::new(),
             tidal_tokens: None,
+            spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
             active_listen_session: None,

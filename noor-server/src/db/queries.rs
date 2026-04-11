@@ -1771,9 +1771,848 @@ fn aggregate_track_count(node: &Genre) -> i64 {
 }
 
 fn placeholders(count: usize) -> String {
-    std::iter::repeat_n("?", count)
+    std::iter::repeat("?")
+        .take(count)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+// ─── Track Similarity (Similar Radio) ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackSimilarityResult {
+    pub track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub best_quality: Option<String>,
+    pub similarity_score: f64,
+    pub co_listen_score: f64,
+    pub co_album_score: f64,
+    pub co_artist_score: f64,
+    pub genre_proximity: f64,
+}
+
+/// Compute similarity scores for all track pairs in the library.
+/// Build pre-computed similarity pairs for the radio feature.
+/// Fixes: Stage 1 now enumerates ALL pairs per album/artist (not just MIN/MAX).
+///        Stage 2 uses indexed temp tables so scores merge correctly.
+pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM track_similarity", [])?;
+
+    // ── Stage 1: candidate pairs ─────────────────────────────────────────────
+    // Each INSERT must satisfy CHECK (track_a < track_b), ensured by `b.id > a.id`.
+
+    conn.execute_batch("
+        -- 1a: Same-album pairs (all combinations, not just min/max)
+        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        SELECT a.id, b.id
+        FROM tracks a
+        JOIN tracks b ON b.album_id = a.album_id AND b.id > a.id
+        WHERE a.album_id IS NOT NULL;
+
+        -- 1b: Same-artist pairs (cap at artists with <=100 tracks)
+        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        SELECT a.id, b.id
+        FROM tracks a
+        JOIN tracks b ON b.artist_id = a.artist_id AND b.id > a.id
+        WHERE a.artist_id IN (
+            SELECT artist_id FROM tracks GROUP BY artist_id HAVING COUNT(*) <= 100
+        );
+
+        -- 1c: Shared-genre pairs (deduplicated by GROUP BY, limited to avoid explosion)
+        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        SELECT a.track_id, b.track_id
+        FROM track_genres a
+        JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
+        GROUP BY a.track_id, b.track_id
+        LIMIT 300000;
+    ")?;
+
+    // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
+
+    conn.execute_batch("
+        DROP TABLE IF EXISTS _co_listen;
+        CREATE TEMP TABLE _co_listen AS
+        SELECT
+            MIN(a.track_id, b.track_id) AS ta,
+            MAX(a.track_id, b.track_id) AS tb,
+            CAST(COUNT(*) AS REAL) AS n
+        FROM listen_history a
+        JOIN listen_history b
+            ON b.track_id != a.track_id
+            AND b.started_at BETWEEN a.started_at AND datetime(a.started_at, '+30 minutes')
+        WHERE a.started_at >= datetime('now', '-90 days')
+        GROUP BY ta, tb
+        HAVING COUNT(*) >= 2;
+        CREATE INDEX _co_listen_idx ON _co_listen(ta, tb);
+
+        DROP TABLE IF EXISTS _genre_shared;
+        CREATE TEMP TABLE _genre_shared AS
+        SELECT a.track_id AS ta, b.track_id AS tb, COUNT(DISTINCT a.genre_id) AS shared
+        FROM track_genres a
+        JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
+        GROUP BY a.track_id, b.track_id;
+        CREATE INDEX _genre_shared_idx ON _genre_shared(ta, tb);
+    ")?;
+
+    // ── Stage 3: score each component ────────────────────────────────────────
+
+    // co_album: 1.0 if same album
+    conn.execute("
+        UPDATE track_similarity SET co_album_score = 1.0
+        WHERE EXISTS (
+            SELECT 1 FROM tracks a, tracks b
+            WHERE a.id = track_similarity.track_a
+              AND b.id = track_similarity.track_b
+              AND a.album_id IS NOT NULL
+              AND a.album_id = b.album_id
+        )
+    ", [])?;
+
+    // co_artist: 1.0 if same artist
+    conn.execute("
+        UPDATE track_similarity SET co_artist_score = 1.0
+        WHERE EXISTS (
+            SELECT 1 FROM tracks a, tracks b
+            WHERE a.id = track_similarity.track_a
+              AND b.id = track_similarity.track_b
+              AND a.artist_id IS NOT NULL
+              AND a.artist_id = b.artist_id
+        )
+    ", [])?;
+
+    // genre_proximity: shared genres / max genres on any single track
+    conn.execute("
+        UPDATE track_similarity SET genre_proximity = COALESCE((
+            SELECT CAST(gs.shared AS REAL) / NULLIF(
+                (SELECT MAX(c) FROM (SELECT COUNT(DISTINCT genre_id) AS c FROM track_genres GROUP BY track_id)),
+                0)
+            FROM _genre_shared gs
+            WHERE gs.ta = track_similarity.track_a AND gs.tb = track_similarity.track_b
+        ), 0)
+    ", [])?;
+
+    // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
+    conn.execute("
+        UPDATE track_similarity SET duration_proximity = COALESCE((
+            SELECT 1.0 - MIN(CAST(ABS(a.duration_ms - b.duration_ms) AS REAL) / 180000.0, 1.0)
+            FROM tracks a, tracks b
+            WHERE a.id = track_similarity.track_a AND b.id = track_similarity.track_b
+              AND a.duration_ms IS NOT NULL AND b.duration_ms IS NOT NULL
+        ), 0)
+    ", [])?;
+
+    // co_listen: normalized co-occurrence count
+    conn.execute("
+        UPDATE track_similarity SET co_listen_score = COALESCE((
+            SELECT cl.n / NULLIF((SELECT MAX(n) FROM _co_listen), 0)
+            FROM _co_listen cl
+            WHERE cl.ta = track_similarity.track_a AND cl.tb = track_similarity.track_b
+        ), 0)
+    ", [])?;
+
+    // Final weighted score
+    conn.execute("
+        UPDATE track_similarity SET similarity_score =
+            co_listen_score  * 0.35 +
+            co_album_score   * 0.20 +
+            co_artist_score  * 0.20 +
+            genre_proximity  * 0.15 +
+            duration_proximity * 0.10
+    ", [])?;
+
+    conn.execute_batch("
+        DROP TABLE IF EXISTS _co_listen;
+        DROP TABLE IF EXISTS _genre_shared;
+    ")?;
+
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0)
+    )?;
+    Ok(count as usize)
+}
+
+/// Get similar tracks to a given track, ordered by similarity.
+/// Returns up to `limit` tracks with similarity scores.
+pub fn get_similar_tracks(
+    conn: &Connection,
+    track_id: i64,
+    limit: i64,
+    exclude_ids: &[i64],
+) -> Result<Vec<TrackSimilarityResult>> {
+    // For simplicity, handle exclude via post-filtering (limit is small, ~20-50)
+    let sql = "SELECT t.id, t.title, a.name, al.title, al.artwork_url,
+                      t.duration_ms, t.best_quality,
+                      ts.similarity_score, ts.co_listen_score, ts.co_album_score,
+                      ts.co_artist_score, ts.genre_proximity
+               FROM track_similarity ts
+               JOIN tracks t ON t.id = CASE
+                   WHEN ts.track_a = ?1 THEN ts.track_b
+                   ELSE ts.track_a
+               END
+               LEFT JOIN artists a ON a.id = t.artist_id
+               LEFT JOIN albums al ON al.id = t.album_id
+               WHERE (ts.track_a = ?1 OR ts.track_b = ?1)
+                 AND t.id != ?1
+               ORDER BY ts.similarity_score DESC
+               LIMIT ?2";
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![track_id, limit], |row| {
+        Ok(TrackSimilarityResult {
+            track_id: row.get(0)?,
+            title: row.get(1)?,
+            artist_name: row.get(2)?,
+            album_title: row.get(3)?,
+            artwork_url: row.get(4)?,
+            duration_ms: row.get(5)?,
+            best_quality: row.get(6)?,
+            similarity_score: row.get(7)?,
+            co_listen_score: row.get(8)?,
+            co_album_score: row.get(9)?,
+            co_artist_score: row.get(10)?,
+            genre_proximity: row.get(11)?,
+        })
+    })?;
+
+    let mut results: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
+
+    // Post-filter excluded IDs
+    if !exclude_ids.is_empty() {
+        let exclude_set: HashSet<i64> = exclude_ids.iter().copied().collect();
+        results.retain(|r| !exclude_set.contains(&r.track_id));
+    }
+
+    Ok(results)
+}
+
+/// Get similarity computation status
+pub fn get_similarity_computed_at(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT MAX(computed_at) FROM track_similarity",
+        [],
+        |row| row.get(0),
+    ).optional()?)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingTrackRow {
+    pub track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub best_quality: Option<String>,
+    pub source: String,
+    pub play_count: i32,
+    pub is_favorite: bool,
+    pub playlist_memberships: i64,
+    pub genre_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingNeighborRow {
+    pub track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub best_quality: Option<String>,
+    pub score: f64,
+    pub behavioral_score: f64,
+    pub audio_score: f64,
+    pub metadata_score: f64,
+    pub reason_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEmbeddingRow {
+    pub track_id: i64,
+    pub vector_blob: Vec<u8>,
+    pub l2_norm: f64,
+}
+
+pub fn upsert_embedding_model(
+    conn: &Connection,
+    model_key: &str,
+    family: &str,
+    dimension: i32,
+    status: &str,
+    config_json: Option<&str>,
+) -> Result<EmbeddingModel> {
+    conn.execute(
+        "INSERT INTO embedding_models (model_key, family, dimension, status, config_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(model_key) DO UPDATE SET
+             family = excluded.family,
+             dimension = excluded.dimension,
+             status = excluded.status,
+             config_json = excluded.config_json",
+        params![model_key, family, dimension, status, config_json],
+    )?;
+
+    conn.query_row(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models WHERE model_key = ?1",
+        params![model_key],
+        |row| {
+            Ok(EmbeddingModel {
+                id: row.get(0)?,
+                model_key: row.get(1)?,
+                family: row.get(2)?,
+                dimension: row.get(3)?,
+                status: row.get(4)?,
+                is_active: row.get(5)?,
+                trained_at: row.get(6)?,
+                config_json: row.get(7)?,
+                metrics_json: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+pub fn update_embedding_model_metrics(
+    conn: &Connection,
+    model_id: i64,
+    status: &str,
+    metrics_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE embedding_models
+         SET status = ?2, metrics_json = ?3, trained_at = datetime('now')
+         WHERE id = ?1",
+        params![model_id, status, metrics_json],
+    )?;
+    Ok(())
+}
+
+pub fn deactivate_embedding_models(conn: &Connection) -> Result<()> {
+    conn.execute("UPDATE embedding_models SET is_active = 0", [])?;
+    Ok(())
+}
+
+pub fn activate_embedding_model(conn: &Connection, model_id: i64) -> Result<()> {
+    deactivate_embedding_models(conn)?;
+    conn.execute(
+        "UPDATE embedding_models SET is_active = 1, status = 'ready', trained_at = datetime('now')
+         WHERE id = ?1",
+        params![model_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_active_embedding_model(conn: &Connection) -> Result<Option<EmbeddingModel>> {
+    conn.query_row(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models
+         WHERE is_active = 1
+         ORDER BY trained_at DESC, id DESC
+         LIMIT 1",
+        [],
+        |row| {
+            Ok(EmbeddingModel {
+                id: row.get(0)?,
+                model_key: row.get(1)?,
+                family: row.get(2)?,
+                dimension: row.get(3)?,
+                status: row.get(4)?,
+                is_active: row.get(5)?,
+                trained_at: row.get(6)?,
+                config_json: row.get(7)?,
+                metrics_json: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn create_training_run(
+    conn: &Connection,
+    model_id: Option<i64>,
+    stage: &str,
+    status: &str,
+) -> Result<DiscoveryTrainingRun> {
+    conn.execute(
+        "INSERT INTO training_runs (model_id, stage, status)
+         VALUES (?1, ?2, ?3)",
+        params![model_id, stage, status],
+    )?;
+    let id = conn.last_insert_rowid();
+    get_training_run(conn, id)?.ok_or_else(|| anyhow::anyhow!("training run missing after insert"))
+}
+
+pub fn get_training_run(conn: &Connection, run_id: i64) -> Result<Option<DiscoveryTrainingRun>> {
+    conn.query_row(
+        "SELECT id, model_id, stage, status, progress, items_total, items_done, started_at, finished_at, error_text
+         FROM training_runs WHERE id = ?1",
+        params![run_id],
+        |row| {
+            Ok(DiscoveryTrainingRun {
+                id: row.get(0)?,
+                model_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                progress: row.get(4)?,
+                items_total: row.get(5)?,
+                items_done: row.get(6)?,
+                started_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                error_text: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn get_latest_training_run(conn: &Connection) -> Result<Option<DiscoveryTrainingRun>> {
+    conn.query_row(
+        "SELECT id, model_id, stage, status, progress, items_total, items_done, started_at, finished_at, error_text
+         FROM training_runs
+         ORDER BY started_at DESC, id DESC
+         LIMIT 1",
+        [],
+        |row| {
+            Ok(DiscoveryTrainingRun {
+                id: row.get(0)?,
+                model_id: row.get(1)?,
+                stage: row.get(2)?,
+                status: row.get(3)?,
+                progress: row.get(4)?,
+                items_total: row.get(5)?,
+                items_done: row.get(6)?,
+                started_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                error_text: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_training_run_progress(
+    conn: &Connection,
+    run_id: i64,
+    stage: &str,
+    status: &str,
+    progress: f64,
+    items_total: Option<i64>,
+    items_done: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE training_runs
+         SET stage = ?2, status = ?3, progress = ?4, items_total = ?5, items_done = ?6
+         WHERE id = ?1",
+        params![run_id, stage, status, progress, items_total, items_done],
+    )?;
+    Ok(())
+}
+
+pub fn finish_training_run(conn: &Connection, run_id: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE training_runs
+         SET status = ?2, progress = 1.0, finished_at = datetime('now')
+         WHERE id = ?1",
+        params![run_id, status],
+    )?;
+    Ok(())
+}
+
+pub fn fail_training_run(conn: &Connection, run_id: i64, error_text: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE training_runs
+         SET status = 'failed', error_text = ?2, finished_at = datetime('now')
+         WHERE id = ?1",
+        params![run_id, error_text],
+    )?;
+    Ok(())
+}
+
+pub fn replace_track_embeddings(
+    conn: &Connection,
+    model_id: i64,
+    embeddings: &[(i64, Vec<u8>, f64)],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM track_embeddings WHERE model_id = ?1",
+        params![model_id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO track_embeddings (track_id, model_id, vector_blob, l2_norm)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for (track_id, blob, norm) in embeddings {
+        stmt.execute(params![track_id, model_id, blob, norm])?;
+    }
+    Ok(())
+}
+
+pub fn replace_track_audio_features(
+    conn: &Connection,
+    features: &[(i64, String, Vec<u8>, i64, i64)],
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO track_audio_features (track_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(track_id) DO UPDATE SET
+             feature_version = excluded.feature_version,
+             vector_blob = excluded.vector_blob,
+             clip_start_ms = excluded.clip_start_ms,
+             clip_duration_ms = excluded.clip_duration_ms,
+             computed_at = datetime('now')",
+    )?;
+    for (track_id, version, blob, start_ms, duration_ms) in features {
+        stmt.execute(params![track_id, version, blob, start_ms, duration_ms])?;
+    }
+    Ok(())
+}
+
+pub fn replace_track_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    neighbors: &[(i64, i64, i32, f64, f64, f64, f64, Option<String>)],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM track_neighbors WHERE model_id = ?1",
+        params![model_id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO track_neighbors
+         (track_id, neighbor_track_id, model_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    for (track_id, neighbor_track_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json) in neighbors {
+        stmt.execute(params![
+            track_id,
+            neighbor_track_id,
+            model_id,
+            rank,
+            score,
+            behavioral_score,
+            audio_score,
+            metadata_score,
+            reason_json
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn get_track_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    track_id: i64,
+    limit: i64,
+    exclude_ids: &[i64],
+) -> Result<Vec<EmbeddingNeighborRow>> {
+    let sql = "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.best_quality,
+                      n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
+               FROM track_neighbors n
+               JOIN tracks t ON t.id = n.neighbor_track_id
+               LEFT JOIN artists a ON a.id = t.artist_id
+               LEFT JOIN albums al ON al.id = t.album_id
+               WHERE n.model_id = ?1 AND n.track_id = ?2
+               ORDER BY n.rank ASC
+               LIMIT ?3";
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt
+        .query_map(params![model_id, track_id, limit.max(1)], |row| {
+            Ok(EmbeddingNeighborRow {
+                track_id: row.get(0)?,
+                title: row.get(1)?,
+                artist_name: row.get(2)?,
+                album_title: row.get(3)?,
+                artwork_url: row.get(4)?,
+                duration_ms: row.get(5)?,
+                best_quality: row.get(6)?,
+                score: row.get(7)?,
+                behavioral_score: row.get(8)?,
+                audio_score: row.get(9)?,
+                metadata_score: row.get(10)?,
+                reason_json: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !exclude_ids.is_empty() {
+        let exclude = exclude_ids.iter().copied().collect::<HashSet<_>>();
+        rows.retain(|row| !exclude.contains(&row.track_id));
+    }
+    Ok(rows)
+}
+
+pub fn get_model_embeddings(conn: &Connection, model_id: i64) -> Result<Vec<ModelEmbeddingRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, vector_blob, l2_norm
+         FROM track_embeddings
+         WHERE model_id = ?1",
+    )?;
+    stmt.query_map(params![model_id], |row| {
+        Ok(ModelEmbeddingRow {
+            track_id: row.get(0)?,
+            vector_blob: row.get(1)?,
+            l2_norm: row.get(2)?,
+        })
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(Into::into)
+}
+
+pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackRow>> {
+    let genre_paths = get_track_genre_paths(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.title, a.name, al.title, t.duration_ms, t.best_quality, t.source,
+                t.play_count, t.is_favorite,
+                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.track_id = t.id) AS playlist_memberships
+         FROM tracks t
+         LEFT JOIN artists a ON a.id = t.artist_id
+         LEFT JOIN albums al ON al.id = t.album_id
+         WHERE t.tidal_id IS NOT NULL OR t.file_path IS NOT NULL OR t.ytmusic_id IS NOT NULL OR t.soundcloud_id IS NOT NULL",
+    )?;
+    let mut rows = stmt
+        .query_map([], |row| {
+            let track_id = row.get::<_, i64>(0)?;
+            Ok(EmbeddingTrackRow {
+                track_id,
+                title: row.get(1)?,
+                artist_name: row.get(2)?,
+                album_title: row.get(3)?,
+                duration_ms: row.get(4)?,
+                best_quality: row.get(5)?,
+                source: row.get(6)?,
+                play_count: row.get(7)?,
+                is_favorite: row.get(8)?,
+                playlist_memberships: row.get(9)?,
+                genre_paths: genre_paths.get(&track_id).cloned().unwrap_or_default(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.sort_by_key(|row| row.track_id);
+    Ok(rows)
+}
+
+pub fn get_discovery_status(conn: &Connection) -> Result<DiscoveryStatus> {
+    let active_model = get_active_embedding_model(conn)?;
+    let latest_run = get_latest_training_run(conn)?;
+    let playable_tracks: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM tracks
+         WHERE tidal_id IS NOT NULL OR file_path IS NOT NULL OR ytmusic_id IS NOT NULL OR soundcloud_id IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let embedded_tracks: i64 = match active_model.as_ref() {
+        Some(model) => conn.query_row(
+            "SELECT COUNT(*) FROM track_embeddings WHERE model_id = ?1",
+            params![model.id],
+            |row| row.get(0),
+        )?,
+        None => 0,
+    };
+    let neighbor_tracks: i64 = match active_model.as_ref() {
+        Some(model) => conn.query_row(
+            "SELECT COUNT(DISTINCT track_id) FROM track_neighbors WHERE model_id = ?1",
+            params![model.id],
+            |row| row.get(0),
+        )?,
+        None => 0,
+    };
+    let clip_cache_tracks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM track_audio_features",
+        [],
+        |row| row.get(0),
+    )?;
+    let coverage_ratio = if playable_tracks == 0 {
+        0.0
+    } else {
+        neighbor_tracks as f64 / playable_tracks as f64
+    };
+
+    Ok(DiscoveryStatus {
+        fallback_active: active_model.is_none(),
+        active_model,
+        latest_run,
+        coverage_ratio,
+        playable_tracks,
+        embedded_tracks,
+        neighbor_tracks,
+        clip_cache_tracks,
+    })
+}
+
+pub fn record_playback_transition(
+    conn: &Connection,
+    from_track_id: i64,
+    to_track_id: i64,
+    transition_source: &str,
+    completed_prev: bool,
+    gap_ms: i64,
+) -> Result<()> {
+    if from_track_id <= 0 || to_track_id <= 0 || from_track_id == to_track_id {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO playback_transitions
+         (from_track_id, to_track_id, transition_source, completed_prev, gap_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![from_track_id, to_track_id, transition_source, completed_prev, gap_ms],
+    )?;
+    Ok(())
+}
+
+pub fn record_discovery_feedback(
+    conn: &Connection,
+    seed_track_id: i64,
+    candidate_track_id: i64,
+    action: &str,
+    surface: &str,
+    context_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO discovery_feedback
+         (seed_track_id, candidate_track_id, action, surface, context_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![seed_track_id, candidate_track_id, action, surface, context_json],
+    )?;
+    Ok(())
+}
+
+pub fn get_playback_transition_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT from_track_id, to_track_id
+         FROM playback_transitions
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let pairs = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(pairs.into_iter().map(|(a, b)| vec![a, b]).collect())
+}
+
+pub fn get_listen_history_sequences(conn: &Connection, session_window_minutes: i64) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, started_at
+         FROM listen_history
+         ORDER BY started_at ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut sequences = Vec::new();
+    let mut current = Vec::new();
+    let mut previous_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    for (track_id, started_at) in rows {
+        let parsed = chrono::DateTime::parse_from_rfc3339(&format!(
+            "{}{}",
+            started_at,
+            if started_at.ends_with('Z') { "" } else { "Z" }
+        ))
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&started_at, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc()))
+        .ok();
+        if let Some(prev) = previous_at {
+            if let Some(next) = parsed {
+                if (next - prev).num_minutes() > session_window_minutes {
+                    if current.len() > 1 {
+                        sequences.push(current.clone());
+                    }
+                    current.clear();
+                }
+                previous_at = Some(next);
+            }
+        } else if let Some(next) = parsed {
+            previous_at = Some(next);
+        }
+        current.push(track_id);
+    }
+    if current.len() > 1 {
+        sequences.push(current);
+    }
+    Ok(sequences)
+}
+
+pub fn get_playlist_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT playlist_id, track_id
+         FROM playlist_tracks
+         ORDER BY playlist_id ASC, position ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (playlist_id, track_id) in rows {
+        grouped.entry(playlist_id).or_default().push(track_id);
+    }
+    Ok(grouped.into_values().filter(|seq| seq.len() > 1).collect())
+}
+
+pub fn get_album_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT album_id, id
+         FROM tracks
+         WHERE album_id IS NOT NULL
+         ORDER BY album_id ASC, disc_number ASC, track_number ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (album_id, track_id) in rows {
+        grouped.entry(album_id).or_default().push(track_id);
+    }
+    Ok(grouped.into_values().filter(|seq| seq.len() > 1).collect())
+}
+
+pub fn get_artist_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT artist_id, id
+         FROM tracks
+         WHERE artist_id IS NOT NULL
+         ORDER BY artist_id ASC, play_count DESC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (artist_id, track_id) in rows {
+        grouped.entry(artist_id).or_default().push(track_id);
+    }
+    Ok(grouped.into_values().filter(|seq| seq.len() > 1 && seq.len() <= 32).collect())
+}
+
+pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT tg.genre_id, tg.track_id
+         FROM track_genres tg
+         JOIN tracks t ON t.id = tg.track_id
+         ORDER BY tg.genre_id ASC, t.play_count DESC, t.id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (genre_id, track_id) in rows {
+        grouped.entry(genre_id).or_default().push(track_id);
+    }
+    Ok(grouped.into_values().filter(|seq| seq.len() > 1 && seq.len() <= 40).collect())
+}
+
+pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC",
+    )?;
+    stmt.query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

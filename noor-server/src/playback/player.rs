@@ -179,7 +179,7 @@ pub fn load_snapshot(conn: &Connection) -> Result<PlaybackSnapshot> {
 pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
     let row = conn
         .query_row(
-            "SELECT current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms, automix_discover_new
+            "SELECT current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms, automix_discover_new, automix_use_learning, automix_allow_external
              FROM playback_state
              WHERE id = 1",
             [],
@@ -194,6 +194,8 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
                     row.get::<_, bool>(6)?,
                     row.get::<_, i32>(7)?,
                     row.get::<_, bool>(8)?,
+                    row.get::<_, bool>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             },
         )
@@ -215,6 +217,8 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
         automix_enabled: row.6,
         crossfade_ms: row.7,
         automix_discover_new: row.8,
+        automix_use_learning: row.9,
+        automix_allow_external: row.10,
     })
 }
 
@@ -309,6 +313,22 @@ pub fn set_automix_enabled(conn: &Connection, enabled: bool) -> Result<PlaybackS
 pub fn set_automix_discover_new(conn: &Connection, enabled: bool) -> Result<()> {
     conn.execute(
         "UPDATE playback_state SET automix_discover_new = ?1 WHERE id = 1",
+        params![enabled],
+    )?;
+    Ok(())
+}
+
+pub fn set_automix_use_learning(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE playback_state SET automix_use_learning = ?1 WHERE id = 1",
+        params![enabled],
+    )?;
+    Ok(())
+}
+
+pub fn set_automix_allow_external(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE playback_state SET automix_allow_external = ?1 WHERE id = 1",
         params![enabled],
     )?;
     Ok(())
@@ -592,6 +612,7 @@ pub fn ensure_automix_queue_depth(
         &queue_items,
         ShuffleMode::parse(&state.shuffle_mode),
         needed,
+        state.automix_use_learning,
     )?;
 
     if extension.is_empty() {
@@ -608,7 +629,37 @@ fn build_automix_extension(
     queue_items: &[QueueItem],
     mode: ShuffleMode,
     needed: usize,
+    use_learning: bool,
 ) -> Result<Vec<Track>> {
+    if use_learning {
+        if let Some(model) = queries::get_active_embedding_model(conn)? {
+            let excluded = queue_items
+                .iter()
+                .map(|item| item.track.id)
+                .collect::<Vec<_>>();
+            let neighbors = queries::get_track_neighbors(
+                conn,
+                model.id,
+                current_track.id,
+                (needed * 4).max(24) as i64,
+                &excluded,
+            )?;
+            if !neighbors.is_empty() {
+                let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
+                let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
+                let track_map = tracks.into_iter().map(|track| (track.id, track)).collect::<HashMap<_, _>>();
+                let ordered = neighbor_ids
+                    .into_iter()
+                    .filter_map(|track_id| track_map.get(&track_id).cloned())
+                    .take(needed)
+                    .collect::<Vec<_>>();
+                if !ordered.is_empty() {
+                    return Ok(ordered);
+                }
+            }
+        }
+    }
+
     let taste = build_session_taste_profile(conn, current_track)?;
     let mut excluded_track_ids = queue_items
         .iter()
@@ -1040,7 +1091,9 @@ mod tests {
                 repeat_mode TEXT NOT NULL DEFAULT 'off',
                 automix_enabled INTEGER NOT NULL DEFAULT 0,
                 crossfade_ms INTEGER NOT NULL DEFAULT 0,
-                automix_discover_new INTEGER NOT NULL DEFAULT 0
+                automix_discover_new INTEGER NOT NULL DEFAULT 0,
+                automix_use_learning INTEGER NOT NULL DEFAULT 1,
+                automix_allow_external INTEGER NOT NULL DEFAULT 0
             );
             ",
         )
