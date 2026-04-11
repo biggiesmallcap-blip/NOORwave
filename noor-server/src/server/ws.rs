@@ -79,6 +79,27 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "progress": progress,
                         "message": message
                     }),
+                    AppEvent::AudioAnalysisProgress { analyzed, total, mode } => json!({
+                        "type": "audio_analysis_progress",
+                        "analyzed": analyzed,
+                        "total": total,
+                        "mode": mode
+                    }),
+                    AppEvent::AudioAnalysisComplete { analyzed } => json!({
+                        "type": "audio_analysis_complete",
+                        "analyzed": analyzed
+                    }),
+                    AppEvent::AcrCloudScanProgress { scanned, total, matches_found } => json!({
+                        "type": "acrcloud_scan_progress",
+                        "scanned": scanned,
+                        "total": total,
+                        "matches_found": matches_found
+                    }),
+                    AppEvent::AcrCloudScanComplete { scanned, matches_found } => json!({
+                        "type": "acrcloud_scan_complete",
+                        "scanned": scanned,
+                        "matches_found": matches_found
+                    }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;

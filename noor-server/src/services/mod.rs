@@ -1,3 +1,5 @@
+pub mod acrcloud;
+pub mod audio_analysis;
 pub mod discovery;
 pub mod discovery_trainer;
 pub mod learning;

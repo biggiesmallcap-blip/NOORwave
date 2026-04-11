@@ -34,6 +34,12 @@ sha2 = "0.10"
 # Genre fuzzy matching
 strsim = "0.11"
 
+# Audio analysis
+rustfft = "6"
+num-complex = "0.4"
+hmac = "0.12"
+sha1 = "0.10"
+
 # Utilities
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

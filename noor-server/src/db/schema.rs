@@ -10,6 +10,8 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_006,
     MIGRATION_007,
     MIGRATION_008,
+    MIGRATION_009,
+    MIGRATION_010,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -437,6 +439,72 @@ CREATE TABLE IF NOT EXISTS musicbrainz_checked (
 -- Backfill: tracks that already have musicbrainz genre data don't need re-querying.
 INSERT OR IGNORE INTO musicbrainz_checked (track_id)
 SELECT DISTINCT track_id FROM track_genres WHERE source = 'musicbrainz';
+"#;
+
+const MIGRATION_009: &str = r#"
+-- DSP feature store: extracted audio features per track
+CREATE TABLE IF NOT EXISTS audio_dsp_features (
+    track_id          INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    bpm               REAL,
+    key_signature     TEXT,        -- "Am", "Cmaj"
+    camelot_key       TEXT,        -- "8A", "8B"
+    loudness_lufs     REAL,
+    energy            REAL,        -- 0.0 - 1.0
+    danceability      REAL,        -- 0.0 - 1.0
+    beat_strength     REAL,        -- 0.0 - 1.0
+    spectral_centroid REAL,
+    stereo_width      REAL,        -- 0.0 (mono) - 1.0 (wide)
+    is_instrumental   INTEGER DEFAULT 0,
+    analysis_source   TEXT NOT NULL DEFAULT 'noor_dsp',
+    analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+    samples_analyzed  INTEGER,
+    analyzed_at       TEXT DEFAULT (datetime('now')),
+    analysis_version   TEXT NOT NULL DEFAULT '1.0'
+);
+
+CREATE INDEX IF NOT EXISTS idx_dsp_bpm ON audio_dsp_features(bpm);
+CREATE INDEX IF NOT EXISTS idx_dsp_key ON audio_dsp_features(key_signature);
+CREATE INDEX IF NOT EXISTS idx_dsp_energy ON audio_dsp_features(energy);
+
+-- Audio fingerprint storage (for duplicate detection via fingerprint matching)
+CREATE TABLE IF NOT EXISTS audio_fingerprints (
+    track_id    INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    hashes_blob BLOB,          -- compact binary fingerprint
+    peak_count  INTEGER
+);
+
+-- Individual fingerprint hash entries for fast lookup
+CREATE TABLE IF NOT EXISTS fingerprint_hashes (
+    hash         INTEGER NOT NULL,
+    track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    time_offset  INTEGER NOT NULL,
+    PRIMARY KEY (hash, track_id, time_offset)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fingerprint_hash ON fingerprint_hashes(hash);
+
+-- ACRCloud recognition results cache
+CREATE TABLE IF NOT EXISTS acrcloud_results (
+    id                INTEGER PRIMARY KEY,
+    track_id          INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    original_title    TEXT,
+    original_artist   TEXT,
+    original_album    TEXT,
+    original_year     INTEGER,
+    confidence_score  REAL,
+    sample_start_ms   INTEGER,
+    sample_end_ms     INTEGER,
+    isrc              TEXT,
+    matched_at        TEXT DEFAULT (datetime('now')),
+    api_response_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_acrcloud_track ON acrcloud_results(track_id);
+"#;
+
+const MIGRATION_010: &str = r#"
+ALTER TABLE duplicate_groups ADD COLUMN source TEXT;
+ALTER TABLE duplicate_groups ADD COLUMN confidence REAL;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

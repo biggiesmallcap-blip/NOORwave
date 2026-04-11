@@ -43,6 +43,8 @@ pub struct AppState {
     pub tidal_login_cancel: Arc<AtomicBool>,
     /// RSS feed aggregator for music news and articles
     pub rss_aggregator: Arc<services::rss_feeds::FeedAggregator>,
+    /// ACRCloud client for sample recognition (loaded from service_auth if configured)
+    pub acrcloud_client: Option<services::acrcloud::AcrCloudClient>,
 }
 
 /// Events broadcast across the application
@@ -57,6 +59,12 @@ pub enum AppEvent {
     ListenHistoryUpdated { track_id: i64 },
     PlaybackFailed { message: String },
     TrainingProgress { stage: String, progress: f32, message: String },
+    // Audio analysis events
+    AudioAnalysisProgress { analyzed: u32, total: u32, mode: String },
+    AudioAnalysisComplete { analyzed: u32 },
+    // ACRCloud events
+    AcrCloudScanProgress { scanned: u32, total: u32, matches_found: u32 },
+    AcrCloudScanComplete { scanned: u32, matches_found: u32 },
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -153,6 +161,7 @@ async fn main() -> Result<()> {
         external_playback_track: None,
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
         rss_aggregator,
+        acrcloud_client: None,
     }));
 
     // Check for auto-sync daily services and trigger sync if needed

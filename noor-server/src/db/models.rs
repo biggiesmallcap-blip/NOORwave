@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artist {
@@ -374,4 +375,68 @@ pub struct DiscoveryRadioResult {
     pub reason_tags: Vec<String>,
     pub model_key: Option<String>,
     pub source_mode: String,
+}
+
+// ─── Audio DSP Features ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioDspFeatures {
+    pub track_id: i64,
+    pub bpm: Option<f64>,
+    pub key_signature: Option<String>,
+    pub camelot_key: Option<String>,
+    pub loudness_lufs: Option<f64>,
+    pub energy: Option<f64>,
+    pub danceability: Option<f64>,
+    pub beat_strength: Option<f64>,
+    pub spectral_centroid: Option<f64>,
+    pub stereo_width: Option<f64>,
+    pub is_instrumental: bool,
+    pub analysis_source: String,
+    pub analysis_offset_ms: i64,
+    pub samples_analyzed: Option<i64>,
+    pub analyzed_at: String,
+    pub analysis_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFeaturesStats {
+    pub total_analyzed: i64,
+    pub avg_bpm: Option<f64>,
+    pub top_key: Option<String>,
+    pub avg_energy: Option<f64>,
+    pub key_distribution: HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenreAudioMetrics {
+    pub genre_id: i64,
+    pub genre_name: String,
+    pub avg_bpm: Option<f64>,
+    pub avg_energy: Option<f64>,
+    pub avg_danceability: Option<f64>,
+    pub analyzed_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFingerprint {
+    pub track_id: i64,
+    pub hashes_blob: Option<Vec<u8>>,
+    pub peak_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcrCloudResult {
+    pub id: i64,
+    pub track_id: i64,
+    pub original_title: Option<String>,
+    pub original_artist: Option<String>,
+    pub original_album: Option<String>,
+    pub original_year: Option<i32>,
+    pub confidence_score: Option<f64>,
+    pub sample_start_ms: Option<i64>,
+    pub sample_end_ms: Option<i64>,
+    pub isrc: Option<String>,
+    pub matched_at: String,
+    pub api_response_json: Option<String>,
 }

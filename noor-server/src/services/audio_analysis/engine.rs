@@ -1,0 +1,137 @@
+/// Audio analysis orchestrator.
+///
+/// Combines BPM detection, key detection, energy, LUFS, spectral centroid,
+/// instrumental detection, and danceability into a single analysis pass.
+///
+/// ALWAYS use `analyze_clip_safe` (which wraps with panic catching) — never call `analyze_clip` directly.
+
+use crate::db::models::AudioDspFeatures;
+use std::panic::AssertUnwindSafe;
+
+use super::bpm;
+use super::features;
+use super::key;
+
+/// Analyze 30 seconds of mono audio samples.
+/// Returns `AudioDspFeatures` with all computed values.
+///
+/// Individual analysis steps may return `None` if confidence is too low —
+/// those fields will be `None` in the returned struct.
+pub fn analyze_clip(
+    samples: &[f32],
+    sample_rate: u32,
+    source: &str,
+    track_id: i64,
+) -> AudioDspFeatures {
+    // 1. BPM detection
+    let (bpm, beat_strength) = detect_bpm(samples, sample_rate);
+
+    // 2. Key detection
+    let (key_signature, camelot_key) = detect_key(samples, sample_rate);
+
+    // 3. Energy
+    let energy = Some(features::compute_energy(samples));
+
+    // 4. LUFS
+    let loudness_lufs = features::compute_lufs(samples, sample_rate);
+
+    // 5. Spectral centroid
+    let spectral_centroid = features::compute_spectral_centroid(samples, sample_rate);
+
+    // 6. Instrumental detection
+    let is_instrumental = features::detect_instrumental(samples, sample_rate);
+
+    // 7. Stereo width — return 0.5 for mono (simplification)
+    let stereo_width = Some(0.5);
+
+    // 8. Danceability
+    let danceability = features::compute_danceability(samples, sample_rate, bpm, beat_strength);
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    AudioDspFeatures {
+        track_id,
+        bpm,
+        key_signature,
+        camelot_key,
+        loudness_lufs,
+        energy,
+        danceability,
+        beat_strength,
+        spectral_centroid,
+        stereo_width,
+        is_instrumental: is_instrumental.unwrap_or(false),
+        analysis_source: source.to_string(),
+        analysis_offset_ms: 0,
+        samples_analyzed: Some(samples.len() as i64),
+        analyzed_at: now,
+        analysis_version: "v1".to_string(),
+    }
+}
+
+/// Safe wrapper that catches panics.
+///
+/// ALWAYS call this — never `analyze_clip` directly.
+/// Panics are logged at WARN level and return `None`.
+pub fn analyze_clip_safe(
+    samples: &[f32],
+    sample_rate: u32,
+    source: &str,
+    track_id: i64,
+) -> Option<AudioDspFeatures> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        analyze_clip(samples, sample_rate, source, track_id)
+    }))
+    .map_err(|e| {
+        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        tracing::warn!(
+            track_id,
+            "analyze_clip panicked: {}",
+            msg
+        );
+    })
+    .ok()
+}
+
+/// Analyze and save to database.
+///
+/// Calls `analyze_clip_safe`, then upserts into `audio_dsp_features`.
+pub fn analyze_and_save(
+    db: &crate::db::Database,
+    samples: &[f32],
+    sample_rate: u32,
+    source: &str,
+    track_id: i64,
+) -> Option<AudioDspFeatures> {
+    let features = analyze_clip_safe(samples, sample_rate, source, track_id)?;
+
+    db.with_conn(|conn| {
+        crate::db::queries::upsert_audio_dsp_features(conn, &features)
+    })
+    .map_err(|e| {
+        tracing::error!(track_id, "failed to save DSP features: {}", e);
+    })
+    .ok()?;
+
+    Some(features)
+}
+
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+fn detect_bpm(samples: &[f32], sample_rate: u32) -> (Option<f64>, Option<f64>) {
+    bpm::detect_bpm(samples, sample_rate)
+        .map(|(bpm, strength)| (Some(bpm), Some(strength)))
+        .unwrap_or((None, None))
+}
+
+fn detect_key(samples: &[f32], sample_rate: u32) -> (Option<String>, Option<String>) {
+    key::detect_key(samples, sample_rate)
+        .map(|(sig, camelot)| (Some(sig), Some(camelot)))
+        .unwrap_or((None, None))
+}
