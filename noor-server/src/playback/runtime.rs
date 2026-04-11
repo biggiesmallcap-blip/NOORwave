@@ -28,13 +28,21 @@ const NEAR_END_THRESHOLD_MS: i64 = 15_000;
 pub struct PlaybackRuntimeConfig {
     pub http_client: reqwest::Client,
     pub access_token: String,
+    /// Channel to send mono audio samples for passive DSP analysis.
+    /// (track_id, mono_samples, sample_rate)
+    pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
 }
 
 impl PlaybackRuntimeConfig {
-    pub fn new(http_client: reqwest::Client, access_token: impl Into<String>) -> Self {
+    pub fn new(
+        http_client: reqwest::Client,
+        access_token: impl Into<String>,
+        analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
+    ) -> Self {
         Self {
             http_client,
             access_token: access_token.into(),
+            analysis_tx,
         }
     }
 }
@@ -1238,6 +1246,10 @@ fn decode_and_buffer_job(
                 .make(&track.codec_params, &DecoderOptions::default())
                 .context("failed to build Symphonia decoder")?;
 
+            // ── Pre-loop: passive analysis capture ──────────────────────────────────────
+            let mut analysis_sent = false;
+            let mut analysis_buf: Vec<f32> = Vec::new();
+
             loop {
                 if shared.stopped.load(Ordering::SeqCst) {
                     return Ok(()); // track was stopped/skipped — exit cleanly
@@ -1261,6 +1273,18 @@ fn decode_and_buffer_job(
 
                 let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
                 sb.copy_interleaved_ref(decoded);
+
+                // ── Passive analysis tap: capture first 30 seconds as mono ──────────────
+                if !analysis_sent {
+                    let mono = mix_to_mono_slice(sb.samples(), decoded_channels as usize);
+                    analysis_buf.extend_from_slice(&mono);
+                    if analysis_buf.len() >= decoded_sample_rate as usize * 30 {
+                        if let Some(tx) = &config.analysis_tx {
+                            let _ = tx.send((shared.track_id, std::mem::take(&mut analysis_buf), decoded_sample_rate));
+                        }
+                        analysis_sent = true;
+                    }
+                }
 
                 // Channel-adapt and resample this packet's samples, then push to buffer.
                 // Releasing the lock between packets lets the CPAL callback drain freely.
@@ -1308,6 +1332,17 @@ fn decode_and_buffer_job(
     }
 
     Ok(())
+}
+
+/// Mix interleaved multi-channel samples down to mono.
+fn mix_to_mono_slice(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return interleaved.to_vec();
+    }
+    interleaved
+        .chunks(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
+        .collect()
 }
 
 fn adapt_channels(samples: &[f32], input_channels: usize, output_channels: usize) -> Vec<f32> {

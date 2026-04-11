@@ -4656,6 +4656,7 @@ async fn ensure_playback_runtime_for_track(
         let config = playback_runtime::PlaybackRuntimeConfig::new(
             state_guard.http_client.clone(),
             access_token.clone(),
+            state_guard.analysis_tx.clone(),
         );
         let handle = playback_runtime::spawn_runtime(config).map_err(|error| {
             let message = format!("Failed to start host audio runtime: {error}");
