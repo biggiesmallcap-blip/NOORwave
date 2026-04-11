@@ -39,6 +39,13 @@ pub struct ListParams {
     limit: Option<i64>,
     offset: Option<i64>,
     favorite_only: Option<bool>,
+    // DSP filter params
+    bpm_min: Option<f64>,
+    bpm_max: Option<f64>,
+    energy_min: Option<f64>,
+    energy_max: Option<f64>,
+    key_signature: Option<String>,
+    instrumental_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +343,12 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/spotify/logout", post(spotify_logout))
         .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
+        // Audio analysis
+        .route("/api/library/analyze/audio-features", post(start_audio_analysis))
+        .route("/api/library/analyze/status", get(get_audio_analysis_status))
+        .route("/api/tracks/{id}/audio-features", get(get_track_audio_features))
+        .route("/api/library/audio-features/stats", get(get_audio_features_stats))
+        .route("/api/library/analyze/reset", post(reset_audio_analysis))
         .route("/api/sync/info", get(get_sync_info))
         .route("/api/sync/auto", post(set_auto_sync))
         // Status
@@ -359,11 +372,20 @@ async fn get_tracks(
     let offset = params.offset.unwrap_or(0);
     let favorite_only = params.favorite_only.unwrap_or(false);
 
+    let dsp = queries::DspFilters {
+        bpm_min: params.bpm_min,
+        bpm_max: params.bpm_max,
+        energy_min: params.energy_min,
+        energy_max: params.energy_max,
+        key_signature: params.key_signature.clone(),
+        instrumental_only: params.instrumental_only.unwrap_or(false),
+    };
+
     state
         .db
         .with_conn(|conn| {
             let tracks =
-                queries::get_tracks(conn, sort_by, sort_dir, limit, offset, favorite_only)?;
+                queries::get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, &dsp)?;
             let total = queries::get_track_count(conn, favorite_only)?;
             Ok(Json(json!({ "tracks": tracks, "total": total })))
         })
@@ -5589,6 +5611,82 @@ async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Resu
     Ok(Json(json!({
         "enriched_tracks": enriched,
     })))
+}
+
+// ── Audio Analysis Endpoints ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AudioAnalysisRequest {
+    mode: String, // "preview" or "local"
+    local_path: Option<String>,
+}
+
+async fn start_audio_analysis(
+    State(state): State<SharedState>,
+    Json(payload): Json<AudioAnalysisRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::audio_analysis::scanner;
+
+    let mode = payload.mode.clone();
+    let local_path = payload.local_path.clone();
+    let (analysis_tx, cancel) = {
+        let s = state.read().await;
+        (s.analysis_tx.clone(), s.audio_analysis_cancel.clone())
+    };
+
+    let Some(tx) = analysis_tx else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let mode_for_spawn = mode.clone();
+    tokio::spawn(async move {
+        match mode_for_spawn.as_str() {
+            "preview" => {
+                scanner::run_preview_scan(state, tx, cancel).await;
+            }
+            "local" => {
+                if let Some(path) = local_path {
+                    scanner::run_local_scan(state, tx, cancel, std::path::PathBuf::from(path), Default::default()).await;
+                }
+            }
+            _ => {}
+        }
+    });
+
+    Ok(Json(json!({ "status": "started", "mode": mode })))
+}
+
+async fn get_audio_analysis_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let analyzed = s.db.with_conn(|conn| queries::count_audio_dsp_features(conn)).unwrap_or(0);
+    Ok(Json(json!({
+        "running": s.audio_analysis_running.load(std::sync::atomic::Ordering::Relaxed),
+        "analyzed": analyzed,
+    })))
+}
+
+async fn get_track_audio_features(
+    State(state): State<SharedState>,
+    Path(track_id): Path<i64>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let features = s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "features": features })))
+}
+
+async fn get_audio_features_stats(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let stats = s.db.with_conn(|conn| queries::get_audio_features_stats(conn))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "stats": stats })))
+}
+
+async fn reset_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    s.db.with_conn(|conn| queries::delete_all_audio_dsp_features(conn))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": "reset" })))
 }
 
 

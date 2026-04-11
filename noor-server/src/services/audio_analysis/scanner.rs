@@ -192,7 +192,7 @@ fn find_track_by_filename(
 pub fn decode_source_to_mono_f32(
     reader: Box<dyn symphonia::core::io::MediaSource>,
     max_secs: u32,
-) -> Result<(Vec<f32>, u32), Box<dyn std::error::Error>> {
+) -> Result<(Vec<f32>, u32), Box<dyn std::error::Error + Send>> {
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
@@ -217,17 +217,18 @@ pub fn decode_source_to_mono_f32(
     // Find the first audio track
     let track = format
         .default_track()
-        .ok_or("no audio tracks found")?;
+        .ok_or_else(|| anyhow::anyhow!("no audio tracks found"))?;
 
     let codec_params = &track.codec_params;
-    let sample_rate = codec_params.sample_rate.ok_or("unknown sample rate")?;
+    let sample_rate = codec_params.sample_rate
+        .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
     let channels = codec_params.channels.unwrap_or_default();
     let num_channels = channels.count();
     let track_id = track.id;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &DecoderOptions::default())
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
     let max_samples = (sample_rate * max_secs) as usize * num_channels;
     let mut samples: Vec<f32> = Vec::with_capacity(max_samples);
