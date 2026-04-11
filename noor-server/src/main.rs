@@ -9,7 +9,7 @@ mod smart;
 
 use anyhow::Result;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
@@ -45,6 +45,12 @@ pub struct AppState {
     pub rss_aggregator: Arc<services::rss_feeds::FeedAggregator>,
     /// ACRCloud client for sample recognition (loaded from service_auth if configured)
     pub acrcloud_client: Option<services::acrcloud::AcrCloudClient>,
+    // Audio analysis
+    pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<services::audio_analysis::AnalysisJob>>,
+    pub audio_analysis_cancel: Arc<AtomicBool>,
+    pub audio_analysis_running: Arc<AtomicBool>,
+    pub acrcloud_scan_running: Arc<AtomicBool>,
+    pub acrcloud_daily_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Events broadcast across the application
@@ -148,7 +154,17 @@ async fn main() -> Result<()> {
 
     let http_client = reqwest::Client::new();
     let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(http_client.clone()));
-    
+
+    // Spawn audio analysis actor
+    let analysis_cancel = Arc::new(AtomicBool::new(false));
+    let analysis_tx = services::audio_analysis::spawn_actor(
+        db.clone(),
+        event_tx.clone(),
+        analysis_cancel.clone(),
+        services::audio_analysis::AnalysisConfig::default(),
+    );
+    info!("Audio analysis actor spawned");
+
     let state = Arc::new(RwLock::new(AppState {
         db,
         event_tx,
@@ -162,6 +178,11 @@ async fn main() -> Result<()> {
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
         rss_aggregator,
         acrcloud_client: None,
+        analysis_tx: Some(analysis_tx),
+        audio_analysis_cancel: analysis_cancel,
+        audio_analysis_running: Arc::new(AtomicBool::new(false)),
+        acrcloud_scan_running: Arc::new(AtomicBool::new(false)),
+        acrcloud_daily_count: Arc::new(AtomicU32::new(0)),
     }));
 
     // Check for auto-sync daily services and trigger sync if needed
