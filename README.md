@@ -1,6 +1,6 @@
 # NOOR
 
-A power-user music library manager and hi-fi audio player built to fix TIDAL's limitations. NOOR syncs your entire TIDAL library to a local SQLite database and layers on features that TIDAL doesn't offer: bulk operations, smart playlists, advanced analytics, duplicate detection, and gapless playback — all from a browser UI.
+A power-user music library manager and hi-fi audio player built to fix TIDAL's limitations. NOOR syncs your entire TIDAL library to a local SQLite database and layers on features that TIDAL doesn't offer: bulk operations, smart playlists, advanced analytics, duplicate detection, gapless playback, learned radio discovery, and a home page that surfaces new releases and curated picks — all from a browser UI.
 
 ---
 
@@ -10,6 +10,7 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Full library sync (tracks, albums, artists, playlists) with real-time progress
 - Bulk operations: add/remove favorites, playlist management at scale
 - Advanced sorting, filtering, and full-text search (FTS5)
+- Track and album detail panels with full metadata (ISRC, play count, quality badges, date added)
 - Duplicate detection via ISRC matching and title/duration fallback
 
 **Playback**
@@ -20,6 +21,18 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Four shuffle modes: off / true (Fisher-Yates) / weighted / genre-spread
   - Weighted: boosts favorites and never-played tracks, penalizes recent plays
   - Genre-spread: prevents consecutive same-genre tracks
+
+**Discovery & Learning**
+- **Similar Radio**: play outward from any track using learned neighborhoods
+  - Creativity slider controls exploration vs. exploitation
+  - Context memory influences results based on recent listening
+  - Feedback buttons: like, dislike, queue, save — all feed back into the model
+- **Embedding-based learning pipeline**: NOOR trains on your listening behavior
+  - Corpus from transitions, playlists, albums, artists, genres, and listen sessions
+  - Incremental refresh and full retrain modes
+  - Real-time training progress via WebSocket
+- **Prompt Explore**: steer the learned engine outward with language (mood, reference, DJ, word-cloud)
+- **Home Page**: new releases from AllMusic RSS, daily picks from your library, weekly articles, and industry news
 
 **Smart Features**
 - Rule-based smart playlists (genre, artist, date range, quality tier, play count — AND/OR logic)
@@ -33,8 +46,13 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Activity graph over time
 
 **Real-Time UI**
-- WebSocket-driven: playback state, sync progress, queue updates push instantly to the browser
+- WebSocket-driven: playback state, sync progress, queue updates, training progress push instantly to the browser
 - Accessible on LAN — run on a machine, open from any browser
+
+**Multi-Service Integration**
+- TIDAL: full library sync, playback, favorites, playlists
+- Spotify: auth, genre enrichment via Spotify metadata
+- RSS aggregation: AllMusic new releases, Billboard, NME, SPIN, Pitchfork, Rolling Stone, Consequence, The Guardian
 
 ---
 
@@ -42,12 +60,13 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 
 | Layer | Technology |
 |---|---|
-| Backend | Rust 2024, Axum 0.8 |
+| Backend | Rust 2024, Axum 0.8, Rayon |
 | Database | SQLite 3 (rusqlite), FTS5, WAL mode |
 | Frontend | SvelteKit 2 + Svelte 5 runes, TypeScript, Vite |
 | Audio decode | Symphonia 0.5 (packet streaming, no full load) |
 | Audio output | CPAL 0.15 (cross-platform) |
 | Real-time | Tokio broadcast channel → WebSocket |
+| Feed parsing | RSS 2.0 + Atom syndication |
 
 ---
 
@@ -66,12 +85,13 @@ cd noor-server
 cargo run --release
 ```
 
-The server starts on `http://localhost:3333` and auto-creates `noor.db` at the workspace root.
+The server starts on `http://localhost:3334` and auto-creates `noor.db` at the workspace root.
 
 **Environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
+| `NOOR_ADDR` | `0.0.0.0:3334` | Override server bind address |
 | `NOOR_DB` | `<workspace>/noor.db` | Override the database path |
 | `RUST_LOG` | `noor_server=info` | Log level |
 | `TIDAL_CLIENT_ID` | *(built-in)* | Override TIDAL OAuth2 client ID |
@@ -134,7 +154,11 @@ noor-server/src/
 │   └── ws.rs             # WebSocket broadcast
 ├── services/
 │   ├── tidal/            # OAuth2 auth, API client, sync, streaming
-│   └── musicbrainz.rs    # Metadata enrichment
+│   ├── spotify/          # OAuth2 auth, genre enrichment
+│   ├── musicbrainz.rs    # Metadata enrichment
+│   ├── learning.rs       # Embedding training, neighbor computation
+│   ├── discovery_trainer.rs # Training pipeline orchestration
+│   └── rss_feeds.rs      # RSS/Atom feed aggregation
 ├── db/                   # Schema, migrations, models, queries
 ├── playback/
 │   ├── runtime.rs        # StreamPipe: decode loop + CPAL output
@@ -142,13 +166,13 @@ noor-server/src/
 │   ├── queue.rs          # Queue CRUD
 │   └── shuffle.rs        # All four shuffle algorithms
 ├── genre/                # Taxonomy loading, normalization, fuzzy matching
-├── smart/                # Smart playlists, analytics, discovery
+├── smart/                # Smart playlists, analytics, discovery, external discovery
 └── library/              # Duplicate detection, batch ops
 
 frontend/src/
-├── routes/               # Page components (library, genres, playlists, analytics, …)
+├── routes/               # Page components (home, library, genres, playlists, analytics, discover, automix, settings, …)
 ├── lib/api/              # REST client + WebSocket client
-├── lib/stores/           # Player state, library state (Svelte 5 runes)
+├── lib/stores/           # Player state, library state, training state (Svelte 5 runes)
 └── app.css               # Glass-tile design system (dark base #0a0a0f, accent #7c80ff)
 ```
 
@@ -164,9 +188,14 @@ frontend/src/
 
 ## Roadmap
 
+- [x] Discovery engine with embedding-based learning
+- [x] Similar Radio with creativity and context controls
+- [x] Home page with RSS-driven new releases, daily picks, articles, and news
+- [x] Spotify auth and genre enrichment
 - [ ] Gapless crossfade audio blend (pre-buffer swap works; audio-level mixing pending)
 - [ ] Duplicate detection UI (detection logic complete)
-- [ ] Automix / DJ mode
+- [ ] Audio feature extraction (BPM, key, energy, loudness from playback)
+- [ ] Automix / DJ mode with harmonic mixing
 - [ ] WASAPI exclusive mode (Windows hi-fi priority)
 - [ ] Genre Galaxy visualization
 - [ ] YouTube Music integration (Phase 5)
