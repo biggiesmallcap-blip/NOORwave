@@ -764,26 +764,30 @@ fn write_output_buffer<T>(
     // fade-in from position 0 for the incoming track.
     // Both ramps are linear. Together they prevent the volume-doubling that occurs
     // when two full-volume streams are mixed simultaneously.
+    //
+    // IMPORTANT: check fadein_start_samples FIRST. When the next track is fully
+    // pre-decoded before the crossfade window opens, total_samples > 0 for that
+    // engine too. Without this ordering the fade-in branch is silently skipped and
+    // the incoming track jumps in at full volume.
     let xfade = shared.crossfade_samples.load(Ordering::Relaxed);
     let fade_gain = if xfade > 0 {
-        let total = shared.total_samples.load(Ordering::Relaxed);
         let pos = shared.position_samples.load(Ordering::Relaxed);
-        // Fade-out: engine with known total_samples (outgoing track)
-        if total > 0 {
-            let remaining = total.saturating_sub(pos);
-            if remaining < xfade {
-                (remaining as f32 / xfade as f32).max(0.0)
+        let fadein_start = shared.fadein_start_samples.load(Ordering::Relaxed);
+        if fadein_start != u64::MAX {
+            // Incoming crossfade engine — apply fade-in ramp.
+            let elapsed = pos.saturating_sub(fadein_start);
+            if elapsed < xfade {
+                (elapsed as f32 / xfade as f32).min(1.0)
             } else {
                 1.0f32
             }
         } else {
-            // Fade-in: only for engines explicitly marked as crossfade-incoming
-            // (fadein_start_samples != u64::MAX). Regular tracks play at full volume.
-            let fadein_start = shared.fadein_start_samples.load(Ordering::Relaxed);
-            if fadein_start != u64::MAX {
-                let elapsed = pos.saturating_sub(fadein_start);
-                if elapsed < xfade {
-                    (elapsed as f32 / xfade as f32).min(1.0)
+            // Outgoing engine — fade-out once we enter the overlap window.
+            let total = shared.total_samples.load(Ordering::Relaxed);
+            if total > 0 {
+                let remaining = total.saturating_sub(pos);
+                if remaining < xfade {
+                    (remaining as f32 / xfade as f32).max(0.0)
                 } else {
                     1.0f32
                 }

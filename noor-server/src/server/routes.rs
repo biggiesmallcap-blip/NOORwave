@@ -271,6 +271,9 @@ pub fn api_routes(state: SharedState) -> Router {
         // Similar Radio
         .route("/api/discovery/radio", post(get_radio_tracks))
         .route("/api/discovery/radio/compute", post(compute_radio_similarity))
+        // Discovery Sound Space
+        .route("/api/discovery/space", post(get_discovery_space))
+        .route("/api/discovery/artists", get(get_discovery_artists))
         .route(
             "/api/library/batch/add-to-playlist",
             post(batch_add_to_playlist),
@@ -1585,6 +1588,142 @@ async fn compute_radio_similarity(
     Ok(Json(json!({
         "status": "computation_started",
         "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+    })))
+}
+
+// ─── Discovery Sound Space ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct DiscoverySpaceRequest {
+    mode: Option<String>,
+    seed_track_id: Option<i64>,
+    prompt: Option<String>,
+    creativity: Option<f64>,
+    limit: Option<i64>,
+    include_artists: Option<bool>,
+}
+
+async fn get_discovery_space(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoverySpaceRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let _mode = payload.mode.unwrap_or_else(|| "radio".to_string());
+    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let seed_id = payload.seed_track_id.unwrap_or(0);
+
+    let state = state.read().await;
+
+    // Reuse radio/neighbor engine if we have a seed
+    let tracks = if seed_id > 0 {
+        let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
+        let exclude_ids: Vec<i64> = vec![];
+        discovery_learning::radio_from_neighbors(&state.db, seed_id, &exclude_ids, limit, creativity)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    // Map to discovery space response shape with placeholder positions
+    let track_nodes: Vec<Value> = tracks
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let angle = (i as f64 / limit as f64) * std::f64::consts::PI * 2.0;
+            let radius = 100.0 + (i as f64 * 37.0).sin() * 150.0;
+            json!({
+                "track_id": t.get("track_id").and_then(|v| v.as_i64()).unwrap_or(0),
+                "title": t.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                "artist_name": t.get("artist_name").and_then(|v| v.as_str()).unwrap_or(""),
+                "album_title": t.get("album_title").and_then(|v| v.as_str()),
+                "artwork_url": t.get("artwork_url").and_then(|v| v.as_str()),
+                "duration_ms": t.get("duration_ms").and_then(|v| v.as_i64()),
+                "similarity_score": t.get("similarity_score").and_then(|v| v.as_f64()).unwrap_or(0.5),
+                "energy": t.get("energy").and_then(|v| v.as_f64()),
+                "danceability": t.get("danceability").and_then(|v| v.as_f64()),
+                "bpm": t.get("bpm").and_then(|v| v.as_f64()),
+                "key_signature": t.get("key_signature").and_then(|v| v.as_str()),
+                "camelot_key": t.get("camelot_key").and_then(|v| v.as_str()),
+                "is_in_library": true,
+                "source": "tidal",
+                "x": angle.cos() * radius,
+                "y": angle.sin() * radius,
+                "vx": 0.0,
+                "vy": 0.0,
+                "radius": 8.0 + (t.get("similarity_score").and_then(|v| v.as_f64()).unwrap_or(0.5)) * 24.0,
+                "opacity": 0.0,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "tracks": track_nodes,
+        "artists": [],
+        "edges": [],
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveryArtistsQuery {
+    limit: Option<i64>,
+}
+
+async fn get_discovery_artists(
+    State(state): State<SharedState>,
+    Query(query): Query<DiscoveryArtistsQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit = query.limit.unwrap_or(50).max(1).min(200);
+
+    let artists = state.read().await.db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.name, COUNT(th.track_id) as listen_count
+             FROM artists a
+             LEFT JOIN tracks t ON t.artist_id = a.id
+             LEFT JOIN track_history th ON th.track_id = t.id
+             GROUP BY a.id, a.name
+             ORDER BY listen_count DESC
+             LIMIT ?"
+        )?;
+        let rows = stmt.query_map([limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        Ok(result)
+    }).unwrap_or_default();
+
+    let max_count = artists.iter().map(|(_, _, c)| *c).max().unwrap_or(1) as f64;
+
+    let artist_nodes: Vec<Value> = artists
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, name, count))| {
+            let angle = (i as f64 / artists.len().max(1) as f64) * std::f64::consts::PI * 2.0;
+            let radius = 80.0 + (i as f64 * 43.0).sin() * 120.0;
+            let affinity = if max_count > 0.0 { count as f64 / max_count } else { 0.0 };
+            json!({
+                "artist_id": id,
+                "name": name,
+                "top_genre": null,
+                "affinity": affinity,
+                "x": angle.cos() * radius,
+                "y": angle.sin() * radius,
+                "vx": 0.0,
+                "vy": 0.0,
+                "size": 8.0 + affinity * 32.0,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "artists": artist_nodes,
     })))
 }
 
