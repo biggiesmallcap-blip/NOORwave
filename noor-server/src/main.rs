@@ -64,7 +64,15 @@ pub enum AppEvent {
     QueueUpdated,
     ListenHistoryUpdated { track_id: i64 },
     PlaybackFailed { message: String },
-    TrainingProgress { stage: String, progress: f32, message: String },
+    TrainingProgress {
+        stage: String,
+        progress: f32,
+        message: String,
+        current_track_id: Option<i64>,
+        current_track_title: Option<String>,
+        tracks_done: u32,
+        tracks_total: u32,
+    },
     // Audio analysis events
     AudioAnalysisProgress { analyzed: u32, total: u32, mode: String },
     AudioAnalysisComplete { analyzed: u32 },

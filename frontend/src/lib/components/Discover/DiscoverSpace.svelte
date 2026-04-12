@@ -2,6 +2,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import type { DiscoverTrackNode, DiscoverArtistNode, DiscoverEdge, DiscoverViewMode } from './discover.types';
 	import { applyForces } from './discoverBuilder';
+	import { discoverSpace, addVisitedRegion } from '$lib/stores/discover_space';
+	import { training } from '$lib/stores/training';
 
 	let {
 		nodes = [],
@@ -28,6 +30,191 @@
 	let cameraStart = $state({ x: 0, y: 0 });
 	let hoveredNode = $state<DiscoverTrackNode | null>(null);
 
+	// ── Training animation state ─────────────────────────────────────────────
+	let trainingNodes = $state<Set<number>>(new Set());
+	let trainingProgress = $state<{ done: number; total: number; currentTitle: string | null }>({ done: 0, total: 0, currentTitle: null });
+	let isTrainingComplete = $state(false);
+	let pulseNodes = $state<Set<number>>(new Set());
+	let pulseStartTime = $state(0);
+
+	// ── Edge drawing animation state ─────────────────────────────────────────
+	let edgeDrawProgress = $state<Map<string, number>>(new Map()); // "from-to" -> 0..1
+
+	// ── Hyperspace jump animation state ──────────────────────────────────────
+	let hyperspacePhase = $state<'idle' | 'dim' | 'zoom_out' | 'warp' | 'zoom_in' | 'settle'>('idle');
+	let hyperspaceStartTime = $state(0);
+	let hyperspaceResults = $state<any[]>([]);
+	let prevNodes = $state<DiscoverTrackNode[]>([]);
+
+	// ── Visited regions (nebula halos) ───────────────────────────────────────
+	let visitedRegions = $state<Map<string, { x: number; y: number; radius: number }>>(new Map());
+
+	// Sync visitedRegions from store
+	$effect(() => {
+		let unsub = discoverSpace.subscribe((s) => {
+			visitedRegions = new Map(s.visitedRegions);
+		});
+		return unsub;
+	});
+
+	// ── Training progress subscription ───────────────────────────────────────
+	$effect(() => {
+		let unsub = training.subscribe((t) => {
+			if (t.isRunning && t.tracks_total > 0) {
+				trainingProgress = {
+					done: t.tracks_done,
+					total: t.tracks_total,
+					currentTitle: t.current_track_title
+				};
+				if (t.current_track_id != null) {
+					trainingNodes.add(t.current_track_id);
+					trainingNodes = new Set(trainingNodes); // trigger reactivity
+				}
+			}
+			if (t.stage === 'complete' || (t.tracks_done >= t.tracks_total && t.tracks_total > 0)) {
+				isTrainingComplete = true;
+				pulseNodes = new Set(nodes.map(n => n.track_id));
+				pulseStartTime = Date.now();
+				// Camera pull back
+				animateCameraZoom(camera.zoom * 0.7, 500);
+			}
+		});
+		return unsub;
+	});
+
+	// ── Camera animation helper ──────────────────────────────────────────────
+	function animateCameraZoom(targetZoom: number, durationMs: number) {
+		const startZoom = camera.zoom;
+		const startTime = Date.now();
+
+		function step() {
+			const elapsed = Date.now() - startTime;
+			const t = Math.min(1, elapsed / durationMs);
+			const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+			camera.zoom = startZoom + (targetZoom - startZoom) * ease;
+			if (t < 1) requestAnimationFrame(step);
+		}
+		step();
+	}
+
+	// ── Hyperspace search ────────────────────────────────────────────────────
+	async function hyperspaceSearch(query: string) {
+		// Save current nodes
+		prevNodes = [...nodes];
+		hyperspacePhase = 'dim';
+		hyperspaceStartTime = Date.now();
+
+		// T+0: Dim existing nodes
+		for (const node of nodes) {
+			(node as any).targetOpacity = 0.3;
+		}
+
+		// T+100: Start zoom out
+		setTimeout(() => {
+			hyperspacePhase = 'zoom_out';
+			animateCameraZoom(0.3, 200);
+		}, 100);
+
+		// T+300: Warp peak
+		setTimeout(() => {
+			hyperspacePhase = 'warp';
+		}, 300);
+
+		// T+600: Results arrive — snap camera, zoom in
+		try {
+			const apiBase = (await import('$lib/api/client')).getApiBase();
+			const response = await fetch(`${apiBase}/api/discovery/space`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mode: 'explore',
+					prompt: query,
+					limit: 60,
+					include_artists: false,
+				}),
+			});
+			if (response.ok) {
+				const data = await response.json();
+				hyperspaceResults = data.tracks ?? [];
+
+				// Compute centroid
+				let cx = 0, cy = 0, count = 0;
+				for (const track of hyperspaceResults) {
+					cx += track.x ?? 0;
+					cy += track.y ?? 0;
+					count++;
+				}
+				if (count > 0) { cx /= count; cy /= count; }
+
+				camera.x = cx;
+				camera.y = cy;
+				hyperspacePhase = 'zoom_in';
+				animateCameraZoom(1.0, 300);
+
+				// T+700: New nodes materialize staggered
+				setTimeout(() => {
+					hyperspacePhase = 'settle';
+					for (let idx = 0; idx < hyperspaceResults.length; idx++) {
+						const track = hyperspaceResults[idx];
+						const delay = idx * 40;
+						setTimeout(() => {
+							const newNode: DiscoverTrackNode = {
+								track_id: track.track_id,
+								title: track.title,
+								artist_name: track.artist_name,
+								album_title: track.album_title,
+								artwork_url: track.artwork_url,
+								duration_ms: track.duration_ms,
+								similarity_score: track.similarity_score ?? 0.5,
+								energy: track.energy,
+								danceability: track.danceability,
+								bpm: track.bpm,
+								key_signature: track.key_signature,
+								camelot_key: track.camelot_key,
+								is_in_library: track.is_in_library ?? false,
+								source: track.source ?? 'tidal',
+								x: track.x ?? cx + (Math.random() - 0.5) * 200,
+								y: track.y ?? cy + (Math.random() - 0.5) * 200,
+								vx: (cx - (track.x ?? cx)) * 0.1,
+								vy: (cy - (track.y ?? cy)) * 0.1,
+								radius: track.radius ?? 6,
+								opacity: 0,
+							};
+							nodes.push(newNode);
+							// Mark edge as new for progressive drawing
+							for (const edge of (data.edges ?? [])) {
+								if (edge.from_id === newNode.track_id || edge.to_id === newNode.track_id) {
+									const key = `${edge.from_id}-${edge.to_id}`;
+									edgeDrawProgress.set(key, 0);
+								}
+							}
+							edgeDrawProgress = new Map(edgeDrawProgress);
+						}, delay);
+					}
+				}, 100);
+
+				// Store visited region
+				addVisitedRegion(query, { x: cx, y: cy, radius: 300 });
+			}
+		} catch (e) {
+			console.error('Hyperspace search failed:', e);
+		}
+
+		// T+1200: Full opacity restored
+		setTimeout(() => {
+			hyperspacePhase = 'idle';
+			for (const node of nodes) {
+				(node as any).targetOpacity = 1;
+			}
+		}, 1200);
+	}
+
+	// Expose hyperspaceSearch for parent components
+	$effect(() => {
+		// Make available on window for parent to call
+		(window as any).__discoverSpaceHyperspaceSearch = hyperspaceSearch;
+	});
+
 	function energyColor(energy: number | null): string {
 		if (energy == null) return '#666';
 		const hue = 220 - energy * 220;
@@ -44,14 +231,48 @@
 		ctx.scale(camera.zoom, camera.zoom);
 		ctx.translate(-camera.x, -camera.y);
 
-		// Draw edges
+		// ── Draw visited region halos (nebula) ───────────────────────────
+		for (const [prompt, region] of visitedRegions) {
+			const gradient = ctx.createRadialGradient(region.x, region.y, 0, region.x, region.y, region.radius);
+			gradient.addColorStop(0, 'rgba(124,128,255,0.03)');
+			gradient.addColorStop(0.5, 'rgba(124,128,255,0.01)');
+			gradient.addColorStop(1, 'transparent');
+			ctx.beginPath();
+			ctx.arc(region.x, region.y, region.radius, 0, Math.PI * 2);
+			ctx.fillStyle = gradient;
+			ctx.fill();
+
+			// Label
+			ctx.fillStyle = 'rgba(255,255,255,0.1)';
+			ctx.font = '10px sans-serif';
+			ctx.fillText(prompt, region.x - ctx.measureText(prompt).width / 2, region.y + region.radius + 14);
+		}
+
+		// ── Draw edges ───────────────────────────────────────────────────
 		for (const edge of edges) {
 			const from = nodes.find(n => n.track_id === edge.from_id);
 			const to = nodes.find(n => n.track_id === edge.to_id);
 			if (!from || !to) continue;
-			ctx.beginPath();
-			ctx.moveTo(from.x, from.y);
-			ctx.lineTo(to.x, to.y);
+
+			const edgeKey = `${edge.from_id}-${edge.to_id}`;
+			const drawProg = edgeDrawProgress.get(edgeKey);
+
+			// Progressive edge drawing for new edges
+			if (drawProg != null && drawProg < 1) {
+				const newProg = Math.min(1, drawProg + 0.05);
+				edgeDrawProgress.set(edgeKey, newProg);
+
+				const endX = from.x + (to.x - from.x) * newProg;
+				const endY = from.y + (to.y - from.y) * newProg;
+				ctx.beginPath();
+				ctx.moveTo(from.x, from.y);
+				ctx.lineTo(endX, endY);
+			} else {
+				ctx.beginPath();
+				ctx.moveTo(from.x, from.y);
+				ctx.lineTo(to.x, to.y);
+			}
+
 			switch (edge.type) {
 				case 'bpm_match': ctx.strokeStyle = 'rgba(255,200,50,0.3)'; break;
 				case 'harmonic': ctx.strokeStyle = 'rgba(150,100,255,0.3)'; break;
@@ -63,14 +284,32 @@
 			ctx.stroke();
 		}
 
-		// Draw track nodes
+		// ── Draw track nodes ─────────────────────────────────────────────
 		for (const node of nodes) {
 			const color = energyColor(node.energy);
 
+			// ── Training fade-in ─────────────────────────────────────
+			let currentOpacity = node.opacity;
+			let currentRadius = node.radius;
+
+			if (trainingNodes.has(node.track_id)) {
+				currentOpacity = Math.min(1, currentOpacity + 0.03); // fade in over ~600ms
+				node.opacity = currentOpacity;
+				currentRadius = 2 + (currentOpacity * (node.radius - 2)); // grow from 2 to final
+			}
+
+			// Hyperspace dim
+			if (hyperspacePhase === 'dim' || hyperspacePhase === 'zoom_out' || hyperspacePhase === 'warp') {
+				const targetOp = (node as any).targetOpacity ?? 1;
+				if (targetOp < 1) {
+					currentOpacity *= targetOp;
+				}
+			}
+
 			// Glow
 			if (node.danceability != null) {
-				const glowRadius = node.radius * (1 + node.danceability * 0.8);
-				const gradient = ctx.createRadialGradient(node.x, node.y, node.radius * 0.5, node.x, node.y, glowRadius);
+				const glowRadius = currentRadius * (1 + node.danceability * 0.8);
+				const gradient = ctx.createRadialGradient(node.x, node.y, currentRadius * 0.5, node.x, node.y, glowRadius);
 				gradient.addColorStop(0, color + '40');
 				gradient.addColorStop(1, 'transparent');
 				ctx.beginPath();
@@ -79,10 +318,40 @@
 				ctx.fill();
 			}
 
+			// ── Pulse effect for training completion ─────────────────
+			if (pulseNodes.has(node.track_id)) {
+				const elapsed = Date.now() - pulseStartTime;
+				if (elapsed < 1000) {
+					const pulseScale = 1 + 0.15 * Math.sin(elapsed / 200);
+					ctx.save();
+					ctx.translate(node.x, node.y);
+					ctx.scale(pulseScale, pulseScale);
+					ctx.translate(-node.x, -node.y);
+
+					ctx.globalAlpha = currentOpacity;
+					ctx.beginPath();
+					ctx.arc(node.x, node.y, currentRadius, 0, Math.PI * 2);
+					ctx.fillStyle = color;
+					ctx.fill();
+					ctx.strokeStyle = node.source === 'tidal' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)';
+					ctx.lineWidth = node.source === 'tidal' ? 2 : 1;
+					ctx.setLineDash(node.source === 'tidal' ? [] : [3, 3]);
+					ctx.stroke();
+					ctx.setLineDash([]);
+					ctx.globalAlpha = 1;
+
+					ctx.restore();
+					continue; // skip normal draw for pulsed nodes
+				} else {
+					pulseNodes.delete(node.track_id);
+					pulseNodes = new Set(pulseNodes);
+				}
+			}
+
 			// Core circle
-			ctx.globalAlpha = node.opacity;
+			ctx.globalAlpha = currentOpacity;
 			ctx.beginPath();
-			ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+			ctx.arc(node.x, node.y, currentRadius, 0, Math.PI * 2);
 			ctx.fillStyle = color;
 			ctx.fill();
 			ctx.strokeStyle = node.source === 'tidal' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)';
@@ -95,11 +364,44 @@
 			// Hover highlight
 			if (hoveredNode?.track_id === node.track_id) {
 				ctx.beginPath();
-				ctx.arc(node.x, node.y, node.radius + 4, 0, Math.PI * 2);
+				ctx.arc(node.x, node.y, currentRadius + 4, 0, Math.PI * 2);
 				ctx.strokeStyle = 'rgba(255,255,255,0.6)';
 				ctx.lineWidth = 2;
 				ctx.stroke();
 			}
+		}
+
+		// ── Warp streak effect (hyperspace) ──────────────────────────────
+		if (hyperspacePhase === 'warp') {
+			const elapsed = Date.now() - hyperspaceStartTime;
+			const intensity = Math.min(1, elapsed / 200);
+
+			ctx.save();
+			ctx.globalAlpha = intensity * 0.6;
+			ctx.globalCompositeOperation = 'lighter';
+
+			const numStreaks = 60;
+			for (let i = 0; i < numStreaks; i++) {
+				const angle = (i / numStreaks) * Math.PI * 2;
+				const length = 100 + intensity * 400;
+				const x1 = Math.cos(angle) * 20;
+				const y1 = Math.sin(angle) * 20;
+				const x2 = Math.cos(angle) * length;
+				const y2 = Math.sin(angle) * length;
+
+				const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
+				gradient.addColorStop(0, 'rgba(124,128,255,0.8)');
+				gradient.addColorStop(1, 'transparent');
+
+				ctx.beginPath();
+				ctx.moveTo(x1, y1);
+				ctx.lineTo(x2, y2);
+				ctx.strokeStyle = gradient;
+				ctx.lineWidth = 2 + intensity * 3;
+				ctx.stroke();
+			}
+
+			ctx.restore();
 		}
 
 		ctx.restore();
@@ -109,9 +411,11 @@
 		const allNodes = [...nodes, ...artists as (DiscoverTrackNode | DiscoverArtistNode)[]];
 		applyForces(allNodes, edges, mode, 0.5);
 
-		// Fade in
+		// Fade in (non-training nodes)
 		for (const node of nodes) {
-			if (node.opacity < 1) node.opacity = Math.min(1, node.opacity + 0.02);
+			if (!trainingNodes.has(node.track_id) && node.opacity < 1) {
+				node.opacity = Math.min(1, node.opacity + 0.02);
+			}
 		}
 
 		draw();
@@ -198,13 +502,74 @@
 
 <canvas bind:this={canvas} class="discover-canvas"></canvas>
 
+{#if trainingProgress.total > 0}
+  <div class="training-overlay">
+    <div class="training-strip">
+      <span class="track-title">{trainingProgress.currentTitle ?? 'Embedding...'}</span>
+      <div class="progress-bar">
+        <div class="progress-fill" style="width: {(trainingProgress.done / trainingProgress.total) * 100}%"></div>
+      </div>
+      <span class="progress-count">{trainingProgress.done} / {trainingProgress.total}</span>
+    </div>
+  </div>
+{/if}
+
 <style>
 	.discover-canvas {
 		width: 100%;
 		height: 100%;
 		cursor: grab;
+		position: relative;
 	}
 	.discover-canvas:active {
 		cursor: grabbing;
+	}
+
+	.training-overlay {
+		position: absolute;
+		bottom: 24px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 10;
+	}
+	.training-strip {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 10px 20px;
+		border-radius: 12px;
+		backdrop-filter: blur(16px);
+		background: rgba(255,255,255,0.05);
+		border: 1px solid rgba(255,255,255,0.08);
+		min-width: 320px;
+	}
+	.track-title {
+		color: rgba(255,255,255,0.9);
+		font-size: 13px;
+		font-weight: 500;
+		max-width: 180px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.progress-bar {
+		flex: 1;
+		height: 4px;
+		background: rgba(255,255,255,0.1);
+		border-radius: 2px;
+		overflow: hidden;
+	}
+	.progress-fill {
+		height: 100%;
+		background: linear-gradient(90deg, rgba(124,128,255,0.6), rgba(124,128,255,1));
+		border-radius: 2px;
+		transition: width 0.15s ease-out;
+	}
+	.progress-count {
+		color: rgba(255,255,255,0.5);
+		font-size: 12px;
+		font-variant-numeric: tabular-nums;
+		min-width: 60px;
+		text-align: right;
 	}
 </style>

@@ -5,6 +5,10 @@ export interface TrainingState {
 	stage: string;
 	progress: number;
 	message: string;
+	current_track_id: number | null;
+	current_track_title: string | null;
+	tracks_done: number;
+	tracks_total: number;
 	lastCompletedAt: string | null;
 }
 
@@ -13,16 +17,24 @@ export const training = writable<TrainingState>({
 	stage: '',
 	progress: 0,
 	message: '',
+	current_track_id: null,
+	current_track_title: null,
+	tracks_done: 0,
+	tracks_total: 0,
 	lastCompletedAt: null
 });
 
-export function handleTrainingProgress(data: { stage: string; progress: number; message: string }) {
+export function handleTrainingProgress(data: { stage: string; progress: number; message: string; current_track_id: number | null; current_track_title: string | null; tracks_done: number; tracks_total: number }) {
 	training.update((state) => ({
 		...state,
 		isRunning: true,
 		stage: data.stage,
 		progress: data.progress,
-		message: data.message
+		message: data.message,
+		current_track_id: data.current_track_id,
+		current_track_title: data.current_track_title,
+		tracks_done: data.tracks_done,
+		tracks_total: data.tracks_total
 	}));
 }
 
@@ -53,6 +65,10 @@ export function resetTrainingState() {
 		stage: '',
 		progress: 0,
 		message: '',
+		current_track_id: null,
+		current_track_title: null,
+		tracks_done: 0,
+		tracks_total: 0,
 		lastCompletedAt: null
 	});
 }

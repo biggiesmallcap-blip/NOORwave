@@ -15,6 +15,33 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+// ── Progress update struct ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct TrainingProgressUpdate {
+    pub stage: String,
+    pub progress: f32,
+    pub message: String,
+    pub current_track_id: Option<i64>,
+    pub current_track_title: Option<String>,
+    pub tracks_done: u32,
+    pub tracks_total: u32,
+}
+
+impl TrainingProgressUpdate {
+    pub fn stage_only(stage: &str, message: &str, progress: f32) -> Self {
+        Self {
+            stage: stage.to_string(),
+            progress,
+            message: message.to_string(),
+            current_track_id: None,
+            current_track_title: None,
+            tracks_done: 0,
+            tracks_total: 0,
+        }
+    }
+}
+
 // ── Input types (mirror Python's JSON structure) ──────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,7 +303,7 @@ fn similarity_neighbors(
     audio: &HashMap<i64, TrainerAudioFeature>,
     fusion: &HashMap<i64, Vec<f64>>,
     top_k: usize,
-    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(String, String, f32)>>,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
 ) -> Vec<TrainerNeighbor> {
     let total = fusion.len();
     if total == 0 {
@@ -338,11 +365,15 @@ fn similarity_neighbors(
                 if let Some(tx) = progress_tx {
                     let pct = (idx + 1) * 100 / total;
                     let progress = 0.70 + (pct as f32 / 100.0) * 0.25; // 0.70 to 0.95
-                    let _ = tx.send((
-                        "neighbors".to_string(),
-                        format!("{}/{} ({}%)", idx + 1, total, pct),
+                    let _ = tx.send(TrainingProgressUpdate {
+                        stage: "neighbors".to_string(),
                         progress,
-                    ));
+                        message: format!("{}/{} ({}%)", idx + 1, total, pct),
+                        current_track_id: None,
+                        current_track_title: None,
+                        tracks_done: (idx + 1) as u32,
+                        tracks_total: total as u32,
+                    });
                 }
             }
 
@@ -495,19 +526,19 @@ fn evaluate(
 /// Run the full discovery training pipeline in Rust.
 /// Returns the complete trainer output ready for DB persistence.
 ///
-/// `progress_tx` is optional — if provided, sends (stage, message, progress) tuples.
+/// `progress_tx` is optional — if provided, sends TrainingProgressUpdate structs.
 pub fn run_discovery_training(
     input: TrainerInput,
-    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(String, String, f32)>>,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
 ) -> TrainerOutput {
     let dim = input.dimension;
     let top_k = input.top_k;
     let tracks = input.tracks.clone();
 
     if let Some(tx) = progress_tx {
-        let _ = tx.send((
-            "behavioral".to_string(),
-            "Building co-occurrence embeddings".to_string(),
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "behavioral",
+            "Building co-occurrence embeddings",
             0.20,
         ));
     }
@@ -516,9 +547,9 @@ pub fn run_discovery_training(
     let behavioral = build_behavioral_embeddings(&input);
 
     if let Some(tx) = progress_tx {
-        let _ = tx.send((
-            "audio".to_string(),
-            format!("Building proxy features for {} tracks", tracks.len()),
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "audio",
+            &format!("Building proxy features for {} tracks", tracks.len()),
             0.40,
         ));
     }
@@ -527,9 +558,9 @@ pub fn run_discovery_training(
     let audio = build_audio_proxy_features(&tracks, dim);
 
     if let Some(tx) = progress_tx {
-        let _ = tx.send((
-            "fusion".to_string(),
-            "Blending behavioral + audio".to_string(),
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "fusion",
+            "Blending behavioral + audio",
             0.55,
         ));
     }
@@ -538,9 +569,9 @@ pub fn run_discovery_training(
     let fusion = fuse_embeddings(&tracks, &behavioral, &audio);
 
     if let Some(tx) = progress_tx {
-        let _ = tx.send((
-            "neighbors".to_string(),
-            format!("Building similarity graph for {} tracks (O(n²) parallel)", fusion.len()),
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "neighbors",
+            &format!("Building similarity graph for {} tracks (O(n²) parallel)", fusion.len()),
             0.70,
         ));
     }
@@ -573,9 +604,9 @@ pub fn run_discovery_training(
     );
 
     if let Some(tx) = progress_tx {
-        let _ = tx.send((
-            "evaluate".to_string(),
-            format!(
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "evaluate",
+            &format!(
                 "Done: coverage {:.1}%, recall@10 {:.1}%, {} neighbors",
                 metrics["coverage_ratio"] * 100.0,
                 metrics["recall_at_10"] * 100.0,

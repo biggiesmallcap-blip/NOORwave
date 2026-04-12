@@ -8,7 +8,7 @@ use crate::db::{
 };
 use crate::services::discovery::DiscoveryCandidateTrack;
 use crate::services::discovery_trainer::{
-    TrainerInput, TrainerSequenceGroup,
+    TrainerInput, TrainerSequenceGroup, TrainingProgressUpdate,
     run_discovery_training,
 };
 use crate::AppEvent;
@@ -69,23 +69,28 @@ pub async fn start_training(
     })?;
 
     // Progress channel — broadcasts to WebSocket + logs to tracing
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<(String, String, f32)>();
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TrainingProgressUpdate>();
     let run_id = run.id;
     let db_clone = db.clone();
+    let event_tx_clone = event_tx.clone();
     let log_task = tokio::spawn(async move {
-        while let Some((stage, message, progress)) = progress_rx.recv().await {
-            tracing::info!(target: "noor.discovery.training", run_id, %message, "training progress");
-            
+        while let Some(update) = progress_rx.recv().await {
+            tracing::info!(target: "noor.discovery.training", run_id, %update.message, "training progress");
+
             // Broadcast to WebSocket
-            let _ = event_tx.send(AppEvent::TrainingProgress {
-                stage: stage.clone(),
-                progress,
-                message: message.clone(),
+            let _ = event_tx_clone.send(AppEvent::TrainingProgress {
+                stage: update.stage.clone(),
+                progress: update.progress,
+                message: update.message.clone(),
+                current_track_id: update.current_track_id,
+                current_track_title: update.current_track_title,
+                tracks_done: update.tracks_done,
+                tracks_total: update.tracks_total,
             });
-            
+
             // Update DB progress
             let _ = db_clone.with_conn(|conn| {
-                queries::update_training_run_progress(conn, run_id, &stage, "running", progress as f64, None, 0)
+                queries::update_training_run_progress(conn, run_id, &update.stage, "running", update.progress as f64, None, 0)
             });
         }
     });

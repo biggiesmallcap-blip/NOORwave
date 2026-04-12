@@ -18,7 +18,7 @@ export type WsMessage =
 	| { type: 'library_synced' }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }
-	| { type: 'training_progress'; stage: string; progress: number; message: string }
+	| { type: 'training_progress'; stage: string; progress: number; message: string; current_track_id: number | null; current_track_title: string | null; tracks_done: number; tracks_total: number }
 	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
 	| { type: 'audio_analysis_complete'; analyzed: number }
 	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
