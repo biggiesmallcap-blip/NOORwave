@@ -3,6 +3,8 @@
    Design System v2 · Dark default, light optional
    ═══════════════════════════════════════════════════════ */
 
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,500&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 /* ── Dark theme (default) ─────────────────────────────── */
 :root {
 	--bg-base:       #0b0b0f;
@@ -130,6 +132,36 @@
 	--heat-intensity: 0.52;
 }
 
+/* ── Nebula (warm alt scheme — coral + teal) ──────────── */
+[data-scheme="nebula"] {
+	--bg-base:       #0d0a14;
+	--bg-elevated:   #15101e;
+
+	--accent:        #ff7a9c;
+	--accent-soft:   rgba(255, 122, 156, 0.14);
+	--accent-line:   rgba(255, 122, 156, 0.28);
+	--accent-strong: #ffaac0;
+	--accent-glow:   rgba(255, 122, 156, 0.22);
+
+	--atlas-bg: linear-gradient(165deg, #160c1a 0%, #0e0914 52%, #09060c 100%);
+	--atlas-haze-a: rgba(255, 122, 156, 0.14);
+	--atlas-haze-b: rgba(86, 202, 180, 0.10);
+	--atlas-haze-c: rgba(210, 150, 240, 0.07);
+}
+
+/* ── Verdant (cool alt scheme — mint on ink) ──────────── */
+[data-scheme="verdant"] {
+	--accent:        #5dd7a8;
+	--accent-soft:   rgba(93, 215, 168, 0.14);
+	--accent-line:   rgba(93, 215, 168, 0.28);
+	--accent-strong: #8ee6c1;
+	--accent-glow:   rgba(93, 215, 168, 0.22);
+
+	--atlas-haze-a: rgba(93, 215, 168, 0.12);
+	--atlas-haze-b: rgba(64, 130, 200, 0.08);
+	--atlas-haze-c: rgba(200, 180, 120, 0.06);
+}
+
 /* ── Structural tokens (theme-independent) ────────────── */
 :root {
 	--sidebar-width: 228px;
@@ -159,9 +191,9 @@
 	--motion-base: 210ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-slow: 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
 
-	--font-body:    'Avenir Next', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
-	--font-display: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
-	--font-mono:    'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+	--font-body:    'Manrope', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+	--font-display: 'Newsreader', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+	--font-mono:    'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 
 	--content-width: 1280px;
 
