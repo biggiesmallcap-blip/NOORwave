@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use crate::db::queries;
 use crate::db::Database;
 use num_complex::Complex32;
@@ -152,59 +154,85 @@ pub fn should_skip_fingerprint(peak_count: u32) -> bool {
 }
 
 /// Wire high-confidence pairs into duplicate_groups.
-/// Returns count of groups created.
+/// Legacy signature: takes a flat (track_id, score) list and creates one group
+/// for all tracks above `min_confidence`. Returns count of groups created.
 pub fn record_fingerprint_duplicates(
     db: &Database,
     matches: &[(i64, f64)],
     min_confidence: f64,
 ) -> usize {
-    let mut count = 0;
-
-    // Group tracks above confidence threshold
-    let high_conf_tracks: Vec<i64> = matches
+    // Convert to pairwise form against the highest-scoring track so the
+    // pairwise grouping logic handles everything in one code path.
+    let mut filtered: Vec<(i64, f64)> = matches
         .iter()
-        .filter(|(_, score)| *score > min_confidence)
-        .map(|(tid, _)| *tid)
+        .copied()
+        .filter(|(_, s)| *s > min_confidence)
         .collect();
-
-    if high_conf_tracks.len() < 2 {
+    if filtered.len() < 2 {
         return 0;
     }
+    filtered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (anchor, anchor_conf) = filtered[0];
+    let pairs: Vec<(i64, i64, f64)> = filtered
+        .iter()
+        .skip(1)
+        .map(|(tid, score)| (anchor, *tid, score.min(anchor_conf)))
+        .collect();
 
-    // Insert into duplicate_groups
-    let result: Result<usize, anyhow::Error> = db.with_conn(|conn| {
-        // Create one group for the high-confidence cluster
-        conn.execute(
-            "INSERT INTO duplicate_groups (source, confidence)
-             VALUES ('fingerprint', ?1)",
-            rusqlite::params![min_confidence],
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let group_id = conn.last_insert_rowid();
+    record_fingerprint_duplicate_pairs(db, &pairs, min_confidence)
+}
 
-        // Add members
-        for track_id in &high_conf_tracks {
-            conn.execute(
-                "INSERT OR IGNORE INTO duplicate_members (group_id, track_id)
-                 VALUES (?1, ?2)",
-                rusqlite::params![group_id, *track_id],
-            )
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+/// Insert high-confidence `(track_a, track_b, confidence)` fingerprint pairs
+/// into `duplicate_groups` / `duplicate_members` tagged with source="fingerprint".
+///
+/// For each pair above `min_confidence`:
+///   - If a group already contains both tracks → skip.
+///   - Otherwise create a new group, add both tracks, and stamp source+confidence.
+///
+/// Returns the number of groups created.
+pub fn record_fingerprint_duplicate_pairs(
+    db: &Database,
+    pairs: &[(i64, i64, f64)],
+    min_confidence: f64,
+) -> usize {
+    let mut created = 0usize;
+
+    for (a, b, confidence) in pairs.iter().copied() {
+        if a == b || confidence <= min_confidence {
+            continue;
         }
-
-        Ok(high_conf_tracks.len())
-    });
-
-    match result {
-        Ok(n) => {
-            if n > 0 {
-                count = 1; // one group created
+        let result: Result<bool, anyhow::Error> = db.with_conn(|conn| {
+            if queries::find_duplicate_group_for_tracks(conn, a, b)?.is_some() {
+                return Ok(false);
             }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to record fingerprint duplicates: {}", e);
+            let gid = queries::create_duplicate_group(conn)?;
+            queries::add_duplicate_member(conn, gid, a, false)?;
+            queries::add_duplicate_member(conn, gid, b, false)?;
+            queries::set_duplicate_group_source(conn, gid, "fingerprint", confidence)?;
+            Ok(true)
+        });
+
+        match result {
+            Ok(true) => created += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to record fingerprint duplicate pair ({}, {}): {}",
+                    a,
+                    b,
+                    e
+                );
+            }
         }
     }
 
-    count
+    created
+}
+
+/// Run PRAGMA optimize + ANALYZE fingerprint_hashes after a bulk scan to keep
+/// the SQLite query planner healthy. Failures are logged but non-fatal.
+pub fn optimize_after_bulk_scan(db: &Database) {
+    if let Err(e) = db.with_conn(|conn| queries::optimize_fingerprint_hashes(conn)) {
+        tracing::warn!("PRAGMA optimize / ANALYZE fingerprint_hashes failed: {}", e);
+    }
 }

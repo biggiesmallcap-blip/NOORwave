@@ -9,6 +9,7 @@
 		type NumberOp,
 		type QualityTier,
 		type DateField,
+		type SampleDataSource,
 	} from '$lib/api/client';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { addTrackToQueue, playTrackNow } from '$lib/stores/player';
@@ -37,6 +38,15 @@
 		quality_minimum: QualityTier;
 		// not_in_playlist
 		exclude_playlist_ids: number[];
+		// bpm_range / energy_range / danceability_range
+		range_min: number | null;
+		range_max: number | null;
+		// key_signature / camelot_key
+		key_value: string;
+		// instrumental_only
+		is_instrumental: boolean;
+		// has_sample_data
+		sample_source: SampleDataSource | '';
 	};
 
 	let _draftIdCounter = 0;
@@ -58,6 +68,11 @@
 			play_count_max: 20,
 			quality_minimum: 'lossless',
 			exclude_playlist_ids: [],
+			range_min: null,
+			range_max: null,
+			key_value: '',
+			is_instrumental: true,
+			sample_source: '',
 		};
 	}
 
@@ -81,6 +96,19 @@
 			d.quality_minimum = clause.minimum;
 		} else if (clause.type === 'not_in_playlist') {
 			d.exclude_playlist_ids = [...clause.playlist_ids];
+		} else if (
+			clause.type === 'bpm_range' ||
+			clause.type === 'energy_range' ||
+			clause.type === 'danceability_range'
+		) {
+			d.range_min = clause.min;
+			d.range_max = clause.max;
+		} else if (clause.type === 'key_signature' || clause.type === 'camelot_key') {
+			d.key_value = clause.key;
+		} else if (clause.type === 'instrumental_only') {
+			d.is_instrumental = clause.is_instrumental;
+		} else if (clause.type === 'has_sample_data') {
+			d.sample_source = clause.source ?? '';
 		}
 		return d;
 	}
@@ -108,6 +136,23 @@
 				return { type: 'quality', minimum: d.quality_minimum };
 			case 'not_in_playlist':
 				return { type: 'not_in_playlist', playlist_ids: d.exclude_playlist_ids };
+			case 'bpm_range':
+				return { type: 'bpm_range', min: d.range_min, max: d.range_max };
+			case 'energy_range':
+				return { type: 'energy_range', min: d.range_min, max: d.range_max };
+			case 'danceability_range':
+				return { type: 'danceability_range', min: d.range_min, max: d.range_max };
+			case 'key_signature':
+				return { type: 'key_signature', key: d.key_value.trim() };
+			case 'camelot_key':
+				return { type: 'camelot_key', key: d.key_value.trim() };
+			case 'instrumental_only':
+				return { type: 'instrumental_only', is_instrumental: d.is_instrumental };
+			case 'has_sample_data':
+				return {
+					type: 'has_sample_data',
+					source: d.sample_source === '' ? null : d.sample_source,
+				};
 			default:
 				return { type: 'genre', names: [], match_descendants: false };
 		}
@@ -333,7 +378,30 @@
 		try { return JSON.parse(raw); } catch { return null; }
 	}
 
-	function describeClause(clause: { type: string; op?: string; clauses?: unknown[]; names?: string[]; match_descendants?: boolean; field?: string; range?: { start?: string | null; end?: string | null }; value?: number; value_max?: number | null; op_label?: string; minimum?: string; playlist_ids?: number[] }): string[] {
+	function describeClause(clause: {
+		type: string;
+		op?: string;
+		clauses?: unknown[];
+		names?: string[];
+		match_descendants?: boolean;
+		field?: string;
+		range?: { start?: string | null; end?: string | null };
+		value?: number;
+		value_max?: number | null;
+		op_label?: string;
+		minimum?: string;
+		playlist_ids?: number[];
+		min?: number | null;
+		max?: number | null;
+		key?: string;
+		is_instrumental?: boolean;
+		source?: string | null;
+	}): string[] {
+		const fmtRange = (label: string, min: number | null | undefined, max: number | null | undefined, digits = 0) => {
+			const lo = min == null ? 'any' : min.toFixed(digits);
+			const hi = max == null ? 'any' : max.toFixed(digits);
+			return `${label}: ${lo} – ${hi}`;
+		};
 		switch (clause.type) {
 			case 'group': {
 				const label = (clause.op ?? 'AND').toUpperCase() === 'OR' ? 'Any of' : 'All of';
@@ -349,6 +417,13 @@
 			case 'play_count': return [`Play count: ${clause.op ?? '≥'} ${clause.value ?? 0}${clause.value_max != null ? ` – ${clause.value_max}` : ''}`];
 			case 'quality': return [`Min quality: ${clause.minimum ?? '?'}`];
 			case 'not_in_playlist': return [`Exclude from playlists: ${(clause.playlist_ids ?? []).join(', ') || 'none'}`];
+			case 'bpm_range': return [fmtRange('BPM', clause.min, clause.max, 0)];
+			case 'energy_range': return [fmtRange('Energy', clause.min, clause.max, 2)];
+			case 'danceability_range': return [fmtRange('Danceability', clause.min, clause.max, 2)];
+			case 'key_signature': return [`Key: ${clause.key ?? '?'}`];
+			case 'camelot_key': return [`Camelot: ${clause.key ?? '?'}`];
+			case 'instrumental_only': return [clause.is_instrumental ? 'Instrumentals only' : 'Vocals only'];
+			case 'has_sample_data': return [`Sample data: ${clause.source ?? 'any source'}`];
 			default: return [`Unknown rule: ${clause.type}`];
 		}
 	}
@@ -376,7 +451,23 @@
 		play_count: 'Play count',
 		quality: 'Quality',
 		not_in_playlist: 'Not in playlist',
+		bpm_range: 'BPM range',
+		key_signature: 'Key signature',
+		camelot_key: 'Camelot key',
+		energy_range: 'Energy',
+		danceability_range: 'Danceability',
+		instrumental_only: 'Instrumental',
+		has_sample_data: 'Sample data',
 	};
+
+	const CAMELOT_KEYS: string[] = Array.from({ length: 12 }, (_, i) => `${i + 1}A`).concat(
+		Array.from({ length: 12 }, (_, i) => `${i + 1}B`),
+	);
+
+	const KEY_SIGNATURES: string[] = [
+		'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B',
+		'Cm', 'C#m', 'Dm', 'D#m', 'Em', 'Fm', 'F#m', 'Gm', 'G#m', 'Am', 'A#m', 'Bm',
+	];
 
 	const NUMBER_OP_LABELS: Record<string, string> = {
 		eq: '= (exactly)',
@@ -664,6 +755,107 @@
 									{/each}
 								</div>
 							{/if}
+						{/if}
+
+						<!-- BPM range -->
+						{#if clause.type === 'bpm_range'}
+							<div class="num-fields">
+								<div class="field-group">
+									<label class="field-label" for="bpm-min-{clause.id}">Min BPM</label>
+									<input
+										id="bpm-min-{clause.id}"
+										class="field-input num-input"
+										type="number"
+										min="0"
+										step="1"
+										placeholder="any"
+										bind:value={clause.range_min}
+									/>
+								</div>
+								<span class="and-label">to</span>
+								<div class="field-group">
+									<label class="field-label" for="bpm-max-{clause.id}">Max BPM</label>
+									<input
+										id="bpm-max-{clause.id}"
+										class="field-input num-input"
+										type="number"
+										min="0"
+										step="1"
+										placeholder="any"
+										bind:value={clause.range_max}
+									/>
+								</div>
+							</div>
+						{/if}
+
+						<!-- Energy / Danceability (0–1) -->
+						{#if clause.type === 'energy_range' || clause.type === 'danceability_range'}
+							<div class="num-fields">
+								<div class="field-group">
+									<label class="field-label" for="r-min-{clause.id}">Min (0–1)</label>
+									<input
+										id="r-min-{clause.id}"
+										class="field-input num-input"
+										type="number"
+										min="0"
+										max="1"
+										step="0.05"
+										placeholder="any"
+										bind:value={clause.range_min}
+									/>
+								</div>
+								<span class="and-label">to</span>
+								<div class="field-group">
+									<label class="field-label" for="r-max-{clause.id}">Max (0–1)</label>
+									<input
+										id="r-max-{clause.id}"
+										class="field-input num-input"
+										type="number"
+										min="0"
+										max="1"
+										step="0.05"
+										placeholder="any"
+										bind:value={clause.range_max}
+									/>
+								</div>
+							</div>
+						{/if}
+
+						<!-- Key signature (musical letter notation) -->
+						{#if clause.type === 'key_signature'}
+							<select class="field-input" bind:value={clause.key_value}>
+								<option value="">Select key…</option>
+								{#each KEY_SIGNATURES as k}
+									<option value={k}>{k}</option>
+								{/each}
+							</select>
+						{/if}
+
+						<!-- Camelot key -->
+						{#if clause.type === 'camelot_key'}
+							<select class="field-input" bind:value={clause.key_value}>
+								<option value="">Select Camelot key…</option>
+								{#each CAMELOT_KEYS as k}
+									<option value={k}>{k}</option>
+								{/each}
+							</select>
+						{/if}
+
+						<!-- Instrumental only -->
+						{#if clause.type === 'instrumental_only'}
+							<label class="check-row">
+								<input type="checkbox" bind:checked={clause.is_instrumental} />
+								<span>{clause.is_instrumental ? 'Instrumentals only' : 'Vocals only'}</span>
+							</label>
+						{/if}
+
+						<!-- Has sample data -->
+						{#if clause.type === 'has_sample_data'}
+							<select class="field-input" bind:value={clause.sample_source}>
+								<option value="">Any source</option>
+								<option value="acrcloud">ACRCloud</option>
+								<option value="fingerprint">Fingerprint</option>
+							</select>
 						{/if}
 					</div>
 				{/each}

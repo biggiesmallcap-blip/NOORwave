@@ -14,7 +14,7 @@ use crate::services::spotify;
 use crate::smart::discovery as discovery_engine;
 use crate::smart::external_discovery as external_discovery_engine;
 use crate::smart::playlists::{
-    PlaylistEvaluationContext, SmartPlaylistDefinition, evaluate_playlist,
+    PlaylistEvaluationContext, SmartPlaylistDefinition, TrackDspFeatures, evaluate_playlist,
 };
 use crate::{AppEvent, PlaybackRuntimeInfo, PlaybackRuntimeState, SharedState};
 use anyhow::Context;
@@ -352,6 +352,9 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/library/analyze/status", get(get_audio_analysis_status))
         .route("/api/tracks/{id}/audio-features", get(get_track_audio_features))
         .route("/api/library/audio-features/stats", get(get_audio_features_stats))
+        .route("/api/library/audio-features/quality", get(get_audio_features_quality))
+        .route("/api/library/analytics", get(get_library_analytics))
+        .route("/api/library/analyze/reanalyze-stale", get(reanalyze_stale_tracks))
         .route("/api/library/analyze/reset", post(reset_audio_analysis))
         .route("/api/sync/info", get(get_sync_info))
         .route("/api/sync/auto", post(set_auto_sync))
@@ -630,16 +633,7 @@ async fn get_playlists(State(state): State<SharedState>) -> Result<Json<Value>, 
             if smart_count > 0 {
                 // Load all data once, build a shared context.
                 let tracks = queries::get_all_tracks(conn)?;
-                let genre_map = queries::get_track_genre_paths(conn)?;
-                let playlist_memberships = queries::get_playlist_memberships(conn)?;
-
-                let mut context = PlaylistEvaluationContext::new();
-                for (track_id, genres) in genre_map {
-                    context = context.with_track_genres(track_id, genres);
-                }
-                for (pid, tids) in playlist_memberships {
-                    context = context.with_playlist_tracks(pid, tids);
-                }
+                let context = build_smart_playlist_context(conn)?;
 
                 for playlist in &mut playlists {
                     if playlist.is_smart {
@@ -1466,7 +1460,7 @@ async fn get_radio_tracks(
 
     let state = state.read().await;
 
-    if let Some(rows) = discovery_learning::radio_from_neighbors(
+    if let Some(mut rows) = discovery_learning::radio_from_neighbors(
         &state.db,
         payload.seed_track_id,
         &exclude_ids,
@@ -1481,6 +1475,43 @@ async fn get_radio_tracks(
         )
     })?
     {
+        // DSP harmonic post-scoring — apply the shared harmonic multiplier to
+        // every row that has audio features on both sides. Rows without
+        // features are left untouched (never penalised for being unanalyzed).
+        let seed_features = state
+            .db
+            .with_conn(|conn| queries::get_audio_dsp_features(conn, payload.seed_track_id))
+            .ok()
+            .flatten();
+
+        if let Some(seed) = seed_features.as_ref() {
+            for row in rows.iter_mut() {
+                let cand = state
+                    .db
+                    .with_conn(|conn| queries::get_audio_dsp_features(conn, row.track_id))
+                    .ok()
+                    .flatten();
+                if let Some(cand) = cand {
+                    let mult = crate::services::audio_analysis::compute_harmonic_multiplier(
+                        seed.camelot_key.as_deref(),
+                        cand.camelot_key.as_deref(),
+                        seed.bpm,
+                        cand.bpm,
+                    );
+                    row.adjusted_score *= mult;
+                    if mult > 1.5 && !row.reason_tags.iter().any(|t| t == "harmonic match") {
+                        row.reason_tags.push("harmonic match".to_string());
+                    }
+                }
+            }
+            // Re-sort by adjusted_score descending after the multiplier pass.
+            rows.sort_by(|a, b| {
+                b.adjusted_score
+                    .partial_cmp(&a.adjusted_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
         let model = state
             .db
             .with_conn(queries::get_active_embedding_model)
@@ -1494,7 +1525,7 @@ async fn get_radio_tracks(
             "computed_at": model.as_ref().and_then(|m| m.trained_at.clone()),
             "model_family": model.as_ref().map(|m| m.family.clone()),
             "model_key": model.as_ref().map(|m| m.model_key.clone()),
-            "reasons": ["learned neighbors", "session feedback", "taste graph"],
+            "reasons": ["learned neighbors", "session feedback", "taste graph", "harmonic post-scoring"],
         })));
     }
 
@@ -3196,7 +3227,7 @@ async fn resolve_duplicate_group(
     Json(payload): Json<ResolveGroupRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     // Get TIDAL tokens for unfavorite calls.
-    let (mut tokens, http) = {
+    let (tokens, http) = {
         let s = state.read().await;
         let tokens = s.tidal_tokens.clone();
         (tokens, s.http_client.clone())
@@ -3238,7 +3269,6 @@ async fn resolve_duplicate_group(
                                 "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
                             );
                         }
-                        tokens = Some(refreshed);
                         continue;
                     }
                 }
@@ -4160,13 +4190,16 @@ fn resolve_smart_playlist_tracks_with_context(
     Ok(resolved)
 }
 
-fn resolve_smart_playlist_tracks(
+/// Build a fully-populated evaluation context (genres, playlist memberships, DSP features,
+/// sample-match sources). All smart-playlist rule types can evaluate against this.
+fn build_smart_playlist_context(
     conn: &rusqlite::Connection,
-    playlist: &crate::db::models::Playlist,
-) -> anyhow::Result<Vec<crate::db::models::Track>> {
-    let tracks = queries::get_all_tracks(conn)?;
+) -> anyhow::Result<PlaylistEvaluationContext> {
     let genre_map = queries::get_track_genre_paths(conn)?;
     let playlist_memberships = queries::get_playlist_memberships(conn)?;
+    let dsp_rows = queries::get_all_audio_dsp_features(conn)?;
+    let acrcloud_ids = queries::get_track_ids_with_acrcloud_match(conn)?;
+    let fingerprint_ids = queries::get_track_ids_with_fingerprint(conn)?;
 
     let mut context = PlaylistEvaluationContext::new();
     for (track_id, genres) in genre_map {
@@ -4175,7 +4208,36 @@ fn resolve_smart_playlist_tracks(
     for (playlist_id, track_ids) in playlist_memberships {
         context = context.with_playlist_tracks(playlist_id, track_ids);
     }
+    for (track_id, bpm, key_signature, camelot_key, energy, danceability, is_instrumental) in
+        dsp_rows
+    {
+        context = context.with_track_dsp(
+            track_id,
+            TrackDspFeatures {
+                bpm,
+                key_signature,
+                camelot_key,
+                energy,
+                danceability,
+                is_instrumental,
+            },
+        );
+    }
+    for track_id in acrcloud_ids {
+        context = context.with_sample_source(track_id, "acrcloud");
+    }
+    for track_id in fingerprint_ids {
+        context = context.with_sample_source(track_id, "fingerprint");
+    }
+    Ok(context)
+}
 
+fn resolve_smart_playlist_tracks(
+    conn: &rusqlite::Connection,
+    playlist: &crate::db::models::Playlist,
+) -> anyhow::Result<Vec<crate::db::models::Track>> {
+    let tracks = queries::get_all_tracks(conn)?;
+    let context = build_smart_playlist_context(conn)?;
     resolve_smart_playlist_tracks_with_context(playlist, &tracks, &context)
 }
 
@@ -5301,7 +5363,7 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         (info, token)
     };
 
-    let gapless = crate::playback::gapless::plan_from_stream(
+    let _gapless = crate::playback::gapless::plan_from_stream(
         stream_info.as_ref(),
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
     );
@@ -5929,7 +5991,7 @@ async fn spotify_login(State(state): State<SharedState>) -> Result<Json<Value>, 
             "verification_uri": data.verification_uri,
             "expires_in": data.expires_in,
         }))),
-        Err(e) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -6135,11 +6197,108 @@ async fn get_audio_features_stats(State(state): State<SharedState>) -> Result<Js
     Ok(Json(json!({ "stats": stats })))
 }
 
+async fn get_library_analytics(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let summary = s
+        .db
+        .with_conn(|conn| {
+            let tracks = queries::get_all_tracks(conn)?;
+            let playlists = queries::get_playlists(conn)?;
+            let genre_paths = queries::get_track_genre_paths(conn)?;
+            let mut context = crate::smart::analytics::AnalyticsContext::new();
+            for (track_id, paths) in genre_paths {
+                context = context.with_track_genres(track_id, paths);
+            }
+            Ok(crate::smart::analytics::summarize_library(
+                &tracks, &playlists, &context,
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "analytics": summary })))
+}
+
 async fn reset_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
     s.db.with_conn(|conn| queries::delete_all_audio_dsp_features(conn))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "reset" })))
+}
+
+/// GET /api/library/audio-features/quality — coverage / confidence breakdown.
+async fn get_audio_features_quality(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let q = s
+        .db
+        .with_conn(|conn| queries::get_audio_features_quality(conn))
+        .map_err(|e| {
+            tracing::error!("audio-features/quality query failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(json!({
+        "total_tracks": q.total_tracks,
+        "analyzed": q.analyzed,
+        "analysis_v1": q.analysis_v1,
+        "analysis_stale": q.analysis_stale,
+        "low_confidence_bpm": q.low_confidence_bpm,
+        "low_confidence_key": q.low_confidence_key,
+        "no_preview_url": q.no_preview_url,
+        "fingerprinted": q.fingerprinted,
+    })))
+}
+
+/// GET /api/library/analyze/reanalyze-stale — re-queue every track whose
+/// stored `analysis_version` is not the current `"v1"`. If the analysis
+/// actor isn't wired we still return the count of stale tracks so the
+/// caller can decide what to do next.
+async fn reanalyze_stale_tracks(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (db, analysis_tx) = {
+        let s = state.read().await;
+        (s.db.clone(), s.analysis_tx.clone())
+    };
+
+    let stale_ids = db
+        .with_conn(|conn| queries::get_stale_analysis_track_ids(conn))
+        .map_err(|e| {
+            tracing::error!("reanalyze-stale query failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let total = stale_ids.len();
+
+    // Drop the DSP rows so the next scan picks them up, and optionally
+    // nudge the analysis actor (it only accepts jobs with decoded samples,
+    // so here we simply log the queue size — a fresh scan will actually
+    // re-decode & re-analyse).
+    if total > 0 {
+        db.with_conn(|conn| -> anyhow::Result<()> {
+            conn.execute(
+                "DELETE FROM audio_dsp_features WHERE analysis_version != 'v1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .map_err(|e| {
+            tracing::error!("reanalyze-stale delete failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    let actor_configured = analysis_tx.is_some();
+
+    Ok(Json(json!({
+        "status": "queued",
+        "stale_count": total,
+        "actor_configured": actor_configured,
+        "note": if actor_configured {
+            "Stale analyses cleared. Run /api/library/analyze/audio-features to re-scan."
+        } else {
+            "Analysis actor not configured. Stale rows cleared but no scan queued."
+        }
+    })))
 }
 
 

@@ -94,14 +94,39 @@ pub struct AcrCloudExternalMetadata {
     pub isrc: Option<String>,
 }
 
-/// Identify a track sample via ACRCloud API
+/// Outcome of an ACRCloud identify request. Network/HTTP errors never bubble
+/// up as `Err`; instead callers get `NoMatch` (so the scan continues) or
+/// `RateLimited` (so the scan backs off).
+#[derive(Debug)]
+pub enum IdentifyResult {
+    /// A track was matched.
+    Match(AcrCloudTrack),
+    /// Request completed but no match (or a recoverable network/HTTP error).
+    NoMatch,
+    /// ACRCloud returned HTTP 429 — caller should back off.
+    RateLimited,
+}
+
+/// Identify a track sample via ACRCloud API.
+///
+/// This function NEVER returns `Err` for network-layer problems. Timeouts,
+/// connection errors, 5xx responses, and JSON decode errors all map to
+/// `IdentifyResult::NoMatch` with a `warn!` log so the scanner can continue
+/// to the next track. HTTP 429 maps to `IdentifyResult::RateLimited` so the
+/// caller can sleep before trying again.
 pub async fn identify_track(
     client: &AcrCloudClient,
     samples: &[f32],
     sample_rate: u32,
-) -> Option<AcrCloudTrack> {
+) -> IdentifyResult {
     // Rate limit: 1 req/3s
-    let permit = client.rate_limit_semaphore.acquire().await.ok()?;
+    let permit = match client.rate_limit_semaphore.acquire().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("ACRCloud semaphore closed: {}", e);
+            return IdentifyResult::NoMatch;
+        }
+    };
 
     let timestamp = Utc::now().timestamp();
     let wav_data = samples_to_wav(samples, sample_rate);
@@ -173,30 +198,47 @@ pub async fn identify_track(
 
     match response {
         Ok(resp) => {
-            if resp.status() == 429 {
-                tracing::warn!("ACRCloud rate limited, backing off 60s");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                return None;
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                tracing::warn!("ACRCloud rate limited (429) — signalling scanner to back off");
+                return IdentifyResult::RateLimited;
             }
-            if !resp.status().is_success() {
-                tracing::warn!("ACRCloud API error: {}", resp.status());
-                return None;
+            if status.is_server_error() {
+                tracing::warn!("ACRCloud server error ({}) — skipping track", status);
+                return IdentifyResult::NoMatch;
             }
-            let data: AcrCloudResponse = resp.json().await.ok()?;
+            if !status.is_success() {
+                tracing::warn!("ACRCloud API non-success status {} — skipping track", status);
+                return IdentifyResult::NoMatch;
+            }
+            let data: AcrCloudResponse = match resp.json().await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("ACRCloud response decode failed: {} — skipping track", e);
+                    return IdentifyResult::NoMatch;
+                }
+            };
             if data.status.code == 0 {
                 if let Some(meta) = data.metadata {
                     if let Some(tracks) = meta.music {
                         if let Some(track) = tracks.into_iter().next() {
-                            return Some(track);
+                            return IdentifyResult::Match(track);
                         }
                     }
                 }
             }
-            None
+            IdentifyResult::NoMatch
         }
         Err(e) => {
-            tracing::warn!("ACRCloud request failed: {}", e);
-            None
+            // Covers timeouts, connection refused, DNS failures, TLS errors, etc.
+            if e.is_timeout() {
+                tracing::warn!("ACRCloud request timed out — skipping track");
+            } else if e.is_connect() {
+                tracing::warn!("ACRCloud connection failed: {} — skipping track", e);
+            } else {
+                tracing::warn!("ACRCloud request failed: {} — skipping track", e);
+            }
+            IdentifyResult::NoMatch
         }
     }
 }

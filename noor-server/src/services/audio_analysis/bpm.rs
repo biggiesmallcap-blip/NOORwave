@@ -113,12 +113,11 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
         0.0
     };
 
-    // Gate
-    if beat_strength > 0.15 {
-        Some((best_bpm as f64, beat_strength))
-    } else {
-        None
+    // Gate: reject low-confidence BPM (beat_strength < 0.15 → None)
+    if beat_strength < 0.15 {
+        return None;
     }
+    Some((best_bpm as f64, beat_strength))
 }
 
 #[cfg(test)]

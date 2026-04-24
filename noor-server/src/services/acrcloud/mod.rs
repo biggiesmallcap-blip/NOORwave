@@ -1,7 +1,9 @@
+#![allow(unused)]
+
 pub mod identify;
 pub mod scanner;
 
-use hmac::{Hmac, Mac};
+use hmac::Hmac;
 use sha1::Sha1;
 use std::sync::Arc;
 

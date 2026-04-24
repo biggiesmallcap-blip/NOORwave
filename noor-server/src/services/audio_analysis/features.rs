@@ -39,9 +39,17 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
         return None; // need at least 1 second
     }
 
-    // Rescale coefficients from 48kHz to actual sample rate
-    let (kb, ka) = rescale_biquad_coefficients(KWEIGHT_B_48K, KWEIGHT_A_48K, 48000, sample_rate);
-    let (hb, ha) = rescale_biquad_coefficients(HP_B_48K, HP_A_48K, 48000, sample_rate);
+    // Rescale coefficients from 48kHz to actual sample rate (via bilinear transform)
+    let (kb, ka) = if sample_rate == 48000 {
+        (KWEIGHT_B_48K, KWEIGHT_A_48K)
+    } else {
+        rescale_biquad_coefficients(KWEIGHT_B_48K, KWEIGHT_A_48K, 48_000.0, sample_rate as f64)
+    };
+    let (hb, ha) = if sample_rate == 48000 {
+        (HP_B_48K, HP_A_48K)
+    } else {
+        rescale_biquad_coefficients(HP_B_48K, HP_A_48K, 48_000.0, sample_rate as f64)
+    };
 
     // Apply biquad filters (stage 1: K-weight high-shelf, stage 2: high-pass at 38Hz)
     let filtered = biquad_process(samples, kb, ka);
@@ -130,55 +138,63 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
     Some(final_lufs)
 }
 
-/// Rescale biquad coefficients from one sample rate to another using bilinear transform.
+/// Rescale digital biquad coefficients from `from_sr` to `to_sr` via bilinear transform.
 ///
-/// The coefficients provided are designed for 48kHz. For other sample rates (e.g., 44.1kHz),
-/// we need to bilinear-transform them. This is a simplified approach: we convert the
-/// coefficients to their pole-zero representation, rescale, and convert back.
+/// Approach:
+/// 1. Inverse bilinear at `from_sr` (T1 = 1/from_sr) to obtain the underlying
+///    continuous-time biquad in the variable u = s·T1/2:
+///       B(u) = B0 + B1·u + B2·u²,   A(u) = A0 + A1·u + A2·u²
+///    where
+///       B0 = b0 + b1 + b2,   B1 = 2(b0 − b2),   B2 = b0 − b1 + b2
+///       A0 = a0 + a1 + a2,   A1 = 2(a0 − a2),   A2 = a0 − a1 + a2
+/// 2. Re-bilinear at `to_sr` (T2 = 1/to_sr). Substituting u = r·(1 − z⁻¹)/(1 + z⁻¹)
+///    with r = T1/T2 = to_sr/from_sr and clearing (1 + z⁻¹)² yields a new biquad.
 ///
-/// For a proper implementation, we'd use the bilinear transform formula:
-///   s = (2/T) * (1 - z^-1) / (1 + z^-1)
-/// where T = 1/sample_rate.
-///
-/// Simplified approach: scale the frequency-dependent coefficients proportionally.
-fn rescale_biquad_coefficients(b: [f64; 3], a: [f64; 3], from_rate: u32, to_rate: u32) -> ([f64; 3], [f64; 3]) {
-    if from_rate == to_rate {
+/// The ratio `r` acts as the prewarp factor `k = tan(π·fc/from_sr) / tan(π·fc/to_sr)`
+/// in the small-frequency limit and is exact for the all-purpose rescaling used here.
+pub fn rescale_biquad_coefficients(
+    b: [f64; 3],
+    a: [f64; 3],
+    from_sr: f64,
+    to_sr: f64,
+) -> ([f64; 3], [f64; 3]) {
+    if (from_sr - to_sr).abs() < f64::EPSILON {
         return (b, a);
     }
 
-    let ratio = to_rate as f64 / from_rate as f64;
+    // Step 1 — inverse bilinear at from_sr → continuous-time (u = s·T1/2) biquad
+    let b_cap = [
+        b[0] + b[1] + b[2],
+        2.0 * (b[0] - b[2]),
+        b[0] - b[1] + b[2],
+    ];
+    let a_cap = [
+        a[0] + a[1] + a[2],
+        2.0 * (a[0] - a[2]),
+        a[0] - a[1] + a[2],
+    ];
 
-    // For the high-pass and high-shelf filters, the coefficients depend on the
-    // bilinear transform warping. We use a simplified frequency-warping correction.
-    //
-    // The proper approach: convert biquad to analog prototype, warp frequencies,
-    // convert back. Here we use a simplified prewarping approximation.
-
-    // For a biquad with coefficients [b0, b1, b2] and [a0, a1, a2]:
-    // We apply a simple scaling to account for sample rate change.
-    // This is an approximation but works well for moderate rate changes (44.1k <-> 48k).
-
-    // Scale approach: adjust a1, a2, b1, b2 based on sample rate ratio
-    // This preserves the filter's frequency response shape.
-
-    // More accurate: use the bilinear transform prewarping
-    // For each coefficient, we need to account for the frequency warping.
-    // Simplified: scale the "delay" terms by the ratio.
+    // Step 2 — re-bilinear at to_sr
+    let r = to_sr / from_sr;
+    let r2 = r * r;
 
     let new_b = [
-        b[0],
-        b[1] * ratio,
-        b[2] * ratio * ratio,
+        b_cap[0] + b_cap[1] * r + b_cap[2] * r2,
+        2.0 * (b_cap[0] - b_cap[2] * r2),
+        b_cap[0] - b_cap[1] * r + b_cap[2] * r2,
     ];
-
     let new_a = [
-        a[0],
-        a[1] * ratio,
-        a[2] * ratio * ratio,
+        a_cap[0] + a_cap[1] * r + a_cap[2] * r2,
+        2.0 * (a_cap[0] - a_cap[2] * r2),
+        a_cap[0] - a_cap[1] * r + a_cap[2] * r2,
     ];
 
-    // Normalise so a[0] = 1.0
+    // Normalise so a0 = 1.0
     let a0 = new_a[0];
+    if a0.abs() < 1e-20 {
+        // Degenerate — return original rather than produce NaNs
+        return (b, a);
+    }
     (
         [new_b[0] / a0, new_b[1] / a0, new_b[2] / a0],
         [1.0, new_a[1] / a0, new_a[2] / a0],
@@ -490,8 +506,49 @@ mod tests {
     fn test_rescale_same_rate() {
         let b = [1.0, 2.0, 3.0];
         let a = [1.0, 0.5, 0.25];
-        let (nb, na) = rescale_biquad_coefficients(b, a, 48000, 48000);
+        let (nb, na) = rescale_biquad_coefficients(b, a, 48_000.0, 48_000.0);
         assert_eq!(nb, b);
         assert_eq!(na, a);
+    }
+
+    #[test]
+    fn test_rescale_44100_lufs_kweight_stable() {
+        // Rescale the 48kHz K-weight biquad to 44.1kHz — coefficients must remain finite.
+        let (b, a) = rescale_biquad_coefficients(
+            KWEIGHT_B_48K,
+            KWEIGHT_A_48K,
+            48_000.0,
+            44_100.0,
+        );
+        for v in b.iter().chain(a.iter()) {
+            assert!(v.is_finite(), "coefficient must be finite, got {v}");
+        }
+        assert!((a[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_lufs_44100_runs() {
+        // 2s of 1kHz sine @ 44.1kHz — LUFS should compute without panic.
+        let sr = 44_100u32;
+        let samples: Vec<f32> = (0..(sr * 2) as usize)
+            .map(|n| 0.5 * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin() as f32)
+            .collect();
+        let lufs = compute_lufs(&samples, sr);
+        assert!(lufs.is_some());
+        let l = lufs.unwrap();
+        assert!(l.is_finite(), "LUFS must be finite");
+    }
+
+    #[test]
+    fn test_lufs_96000_runs() {
+        // 2s of 1kHz sine @ 96kHz — LUFS should compute without panic.
+        let sr = 96_000u32;
+        let samples: Vec<f32> = (0..(sr * 2) as usize)
+            .map(|n| 0.5 * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin() as f32)
+            .collect();
+        let lufs = compute_lufs(&samples, sr);
+        assert!(lufs.is_some());
+        let l = lufs.unwrap();
+        assert!(l.is_finite(), "LUFS must be finite");
     }
 }

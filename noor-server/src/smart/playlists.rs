@@ -90,6 +90,65 @@ pub enum RuleClause {
     NotInPlaylist {
         playlist_ids: Vec<i64>,
     },
+    BpmRange {
+        #[serde(default)]
+        min: Option<f64>,
+        #[serde(default)]
+        max: Option<f64>,
+    },
+    KeySignature {
+        key: String,
+    },
+    CamelotKey {
+        key: String,
+    },
+    EnergyRange {
+        #[serde(default)]
+        min: Option<f64>,
+        #[serde(default)]
+        max: Option<f64>,
+    },
+    DanceabilityRange {
+        #[serde(default)]
+        min: Option<f64>,
+        #[serde(default)]
+        max: Option<f64>,
+    },
+    InstrumentalOnly {
+        is_instrumental: bool,
+    },
+    HasSampleData {
+        #[serde(default)]
+        source: Option<String>,
+    },
+}
+
+/// DSP feature values for a single track, as stored in `audio_dsp_features`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackDspFeatures {
+    pub bpm: Option<f64>,
+    pub key_signature: Option<String>,
+    pub camelot_key: Option<String>,
+    pub energy: Option<f64>,
+    pub danceability: Option<f64>,
+    pub is_instrumental: bool,
+}
+
+/// Sample-match source for a track (from `acrcloud_results` or fingerprint tables).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SampleDataSource {
+    Acrcloud,
+    Fingerprint,
+}
+
+impl SampleDataSource {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "acrcloud" | "acr_cloud" | "acr" => Some(Self::Acrcloud),
+            "fingerprint" | "fp" => Some(Self::Fingerprint),
+            _ => None,
+        }
+    }
 }
 
 /// Serialized smart playlist definition.
@@ -106,6 +165,8 @@ pub struct SmartPlaylistDefinition {
 pub struct PlaylistEvaluationContext {
     genres_by_track: HashMap<i64, HashSet<String>>,
     tracks_by_playlist: HashMap<i64, HashSet<i64>>,
+    dsp_by_track: HashMap<i64, TrackDspFeatures>,
+    sample_sources_by_track: HashMap<i64, HashSet<SampleDataSource>>,
 }
 
 impl PlaylistEvaluationContext {
@@ -142,6 +203,40 @@ impl PlaylistEvaluationContext {
         self.tracks_by_playlist
             .get(&playlist_id)
             .is_some_and(|track_ids| track_ids.contains(&track_id))
+    }
+
+    /// Attach DSP features (joined from `audio_dsp_features`) for a track.
+    pub fn with_track_dsp(mut self, track_id: i64, dsp: TrackDspFeatures) -> Self {
+        self.dsp_by_track.insert(track_id, dsp);
+        self
+    }
+
+    /// Mark that a track has sample-match data from the given source
+    /// (`"acrcloud"` from `acrcloud_results`, `"fingerprint"` from the fingerprint tables).
+    pub fn with_sample_source<S: AsRef<str>>(mut self, track_id: i64, source: S) -> Self {
+        if let Some(parsed) = SampleDataSource::parse(source.as_ref()) {
+            self.sample_sources_by_track
+                .entry(track_id)
+                .or_default()
+                .insert(parsed);
+        }
+        self
+    }
+
+    pub fn dsp_for_track(&self, track_id: i64) -> Option<&TrackDspFeatures> {
+        self.dsp_by_track.get(&track_id)
+    }
+
+    pub fn has_sample_source(&self, track_id: i64, source: SampleDataSource) -> bool {
+        self.sample_sources_by_track
+            .get(&track_id)
+            .is_some_and(|sources| sources.contains(&source))
+    }
+
+    pub fn has_any_sample_source(&self, track_id: i64) -> bool {
+        self.sample_sources_by_track
+            .get(&track_id)
+            .is_some_and(|sources| !sources.is_empty())
     }
 }
 
@@ -230,6 +325,40 @@ pub fn summarize_clause(clause: &RuleClause) -> String {
         RuleClause::NotInPlaylist { playlist_ids } => {
             format!("exclude tracks already in playlists {:?}", playlist_ids)
         }
+        RuleClause::BpmRange { min, max } => {
+            format!(
+                "bpm between {} and {}",
+                min.map(|v| format!("{:.0}", v)).unwrap_or("any".into()),
+                max.map(|v| format!("{:.0}", v)).unwrap_or("any".into()),
+            )
+        }
+        RuleClause::KeySignature { key } => format!("key is {}", key),
+        RuleClause::CamelotKey { key } => format!("camelot key is {}", key),
+        RuleClause::EnergyRange { min, max } => {
+            format!(
+                "energy between {} and {}",
+                min.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
+                max.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
+            )
+        }
+        RuleClause::DanceabilityRange { min, max } => {
+            format!(
+                "danceability between {} and {}",
+                min.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
+                max.map(|v| format!("{:.2}", v)).unwrap_or("any".into()),
+            )
+        }
+        RuleClause::InstrumentalOnly { is_instrumental } => {
+            if *is_instrumental {
+                "instrumental tracks only".into()
+            } else {
+                "vocal tracks only".into()
+            }
+        }
+        RuleClause::HasSampleData { source } => match source.as_deref() {
+            Some(s) => format!("has sample data ({})", s),
+            None => "has any sample data".into(),
+        },
     }
 }
 
@@ -283,8 +412,159 @@ impl RuleClause {
             Self::NotInPlaylist { playlist_ids } => playlist_ids
                 .iter()
                 .all(|playlist_id| !context.playlist_contains_track(*playlist_id, track.id)),
+            Self::BpmRange { min, max } => context
+                .dsp_for_track(track.id)
+                .and_then(|dsp| dsp.bpm)
+                .is_some_and(|bpm| in_range(bpm, *min, *max)),
+            Self::KeySignature { key } => {
+                let Some(dsp) = context.dsp_for_track(track.id) else {
+                    return false;
+                };
+                key_matches(key, dsp.key_signature.as_deref(), dsp.camelot_key.as_deref())
+            }
+            Self::CamelotKey { key } => {
+                let Some(dsp) = context.dsp_for_track(track.id) else {
+                    return false;
+                };
+                key_matches(key, dsp.key_signature.as_deref(), dsp.camelot_key.as_deref())
+            }
+            Self::EnergyRange { min, max } => context
+                .dsp_for_track(track.id)
+                .and_then(|dsp| dsp.energy)
+                .is_some_and(|v| in_range(v, *min, *max)),
+            Self::DanceabilityRange { min, max } => context
+                .dsp_for_track(track.id)
+                .and_then(|dsp| dsp.danceability)
+                .is_some_and(|v| in_range(v, *min, *max)),
+            Self::InstrumentalOnly { is_instrumental } => context
+                .dsp_for_track(track.id)
+                .is_some_and(|dsp| dsp.is_instrumental == *is_instrumental),
+            Self::HasSampleData { source } => match source
+                .as_deref()
+                .and_then(SampleDataSource::parse)
+            {
+                Some(src) => context.has_sample_source(track.id, src),
+                None => context.has_any_sample_source(track.id),
+            },
         }
     }
+}
+
+fn in_range(value: f64, min: Option<f64>, max: Option<f64>) -> bool {
+    min.is_none_or(|lo| value >= lo) && max.is_none_or(|hi| value <= hi)
+}
+
+// ─── Key normalization ──────────────────────────────────────────────────────
+//
+// Accepts both classic key-signature notation ("Am", "C", "F#m", "Cmaj") and
+// Camelot notation ("8A", "12B"). Returns the canonical Camelot representation
+// so comparisons work regardless of which format the user entered or stored.
+
+// Camelot tables mirror `services::audio_analysis::key` so values stored in
+// `audio_dsp_features.camelot_key` round-trip with user input.
+const MAJOR_CAMELOT_PAIRS: [(&str, &str); 17] = [
+    ("c", "8B"),
+    ("c#", "9B"),
+    ("db", "9B"),
+    ("d", "10B"),
+    ("d#", "11B"),
+    ("eb", "11B"),
+    ("e", "12B"),
+    ("f", "1B"),
+    ("f#", "2B"),
+    ("gb", "2B"),
+    ("g", "3B"),
+    ("g#", "4B"),
+    ("ab", "4B"),
+    ("a", "5B"),
+    ("a#", "6B"),
+    ("bb", "6B"),
+    ("b", "7B"),
+];
+
+const MINOR_CAMELOT_PAIRS: [(&str, &str); 17] = [
+    ("c", "8A"),
+    ("c#", "9A"),
+    ("db", "9A"),
+    ("d", "10A"),
+    ("d#", "11A"),
+    ("eb", "11A"),
+    ("e", "12A"),
+    ("f", "1A"),
+    ("f#", "2A"),
+    ("gb", "2A"),
+    ("g", "3A"),
+    ("g#", "4A"),
+    ("ab", "4A"),
+    ("a", "5A"),
+    ("a#", "6A"),
+    ("bb", "6A"),
+    ("b", "7A"),
+];
+
+/// Normalize either a key signature ("Am", "C#maj", "F#m") or a Camelot key
+/// ("8A", "12B") into canonical Camelot form. Returns `None` for unrecognized
+/// input so callers can fall back gracefully.
+pub fn normalize_to_camelot(key: &str) -> Option<String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Already Camelot? Pattern: 1-2 digits followed by A or B.
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.len() >= 2 && (upper.ends_with('A') || upper.ends_with('B')) {
+        let num_part = &upper[..upper.len() - 1];
+        if let Ok(n) = num_part.parse::<u32>() {
+            if (1..=12).contains(&n) {
+                return Some(upper);
+            }
+        }
+    }
+
+    // Key signature. Strip optional "maj"/"major"/"min"/"minor"/"m".
+    let lower = trimmed.to_ascii_lowercase().replace(' ', "");
+    let (note_part, is_minor) = if let Some(stripped) = lower.strip_suffix("maj") {
+        (stripped.to_string(), false)
+    } else if let Some(stripped) = lower.strip_suffix("major") {
+        (stripped.to_string(), false)
+    } else if let Some(stripped) = lower.strip_suffix("minor") {
+        (stripped.to_string(), true)
+    } else if let Some(stripped) = lower.strip_suffix("min") {
+        (stripped.to_string(), true)
+    } else if let Some(stripped) = lower.strip_suffix('m') {
+        // Guard: "cm" -> C minor, but we must not strip 'm' off something like "bm"
+        // accidentally — the suffix is still the minor marker here.
+        (stripped.to_string(), true)
+    } else {
+        (lower, false)
+    };
+
+    let table: &[(&str, &str)] = if is_minor {
+        &MINOR_CAMELOT_PAIRS[..]
+    } else {
+        &MAJOR_CAMELOT_PAIRS[..]
+    };
+
+    for (note, camelot) in table.iter() {
+        if *note == note_part {
+            return Some((*camelot).to_string());
+        }
+    }
+
+    None
+}
+
+/// True if the requested key matches either the stored key signature or Camelot key,
+/// once both have been normalized to canonical Camelot form.
+fn key_matches(requested: &str, stored_key: Option<&str>, stored_camelot: Option<&str>) -> bool {
+    let Some(target) = normalize_to_camelot(requested) else {
+        return false;
+    };
+    let from_camelot = stored_camelot.and_then(normalize_to_camelot);
+    let from_signature = stored_key.and_then(normalize_to_camelot);
+    from_camelot.as_deref() == Some(target.as_str())
+        || from_signature.as_deref() == Some(target.as_str())
 }
 
 fn genre_matches(
@@ -613,5 +893,202 @@ mod tests {
                 .any(|line| line.contains("genre is Electronic (with descendants)"))
         );
         assert!(lines.iter().any(|line| line.contains("play count >= 10")));
+    }
+
+    #[test]
+    fn normalize_key_accepts_both_styles() {
+        assert_eq!(normalize_to_camelot("Am").as_deref(), Some("5A"));
+        assert_eq!(normalize_to_camelot("a minor").as_deref(), Some("5A"));
+        assert_eq!(normalize_to_camelot("Cm").as_deref(), Some("8A"));
+        assert_eq!(normalize_to_camelot("C").as_deref(), Some("8B"));
+        assert_eq!(normalize_to_camelot("Cmaj").as_deref(), Some("8B"));
+        assert_eq!(normalize_to_camelot("8B").as_deref(), Some("8B"));
+        assert_eq!(normalize_to_camelot("5a").as_deref(), Some("5A"));
+        assert_eq!(normalize_to_camelot("F#m").as_deref(), Some("2A"));
+        assert!(normalize_to_camelot("bogus").is_none());
+    }
+
+    fn dsp_track(id: i64) -> Track {
+        track(id, "T", "A", 0, Some("LOSSLESS"), Some("2025-01-01"), None)
+    }
+
+    #[test]
+    fn dsp_rules_filter_by_bpm_and_energy() {
+        let tracks = vec![dsp_track(1), dsp_track(2), dsp_track(3)];
+        let context = PlaylistEvaluationContext::new()
+            .with_track_dsp(
+                1,
+                TrackDspFeatures {
+                    bpm: Some(128.0),
+                    energy: Some(0.85),
+                    ..Default::default()
+                },
+            )
+            .with_track_dsp(
+                2,
+                TrackDspFeatures {
+                    bpm: Some(90.0),
+                    energy: Some(0.4),
+                    ..Default::default()
+                },
+            );
+
+        let definition = SmartPlaylistDefinition {
+            name: "Peak time".into(),
+            description: None,
+            root: RuleClause::Group {
+                op: LogicOp::And,
+                clauses: vec![
+                    RuleClause::BpmRange {
+                        min: Some(120.0),
+                        max: Some(135.0),
+                    },
+                    RuleClause::EnergyRange {
+                        min: Some(0.7),
+                        max: None,
+                    },
+                ],
+            },
+        };
+
+        let ids: Vec<i64> = evaluate_playlist(&definition, &tracks, &context)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+    }
+
+    #[test]
+    fn key_rule_matches_across_notation_styles() {
+        let tracks = vec![dsp_track(1), dsp_track(2)];
+        let context = PlaylistEvaluationContext::new()
+            .with_track_dsp(
+                1,
+                TrackDspFeatures {
+                    key_signature: Some("Am".into()),
+                    camelot_key: Some("8A".into()),
+                    ..Default::default()
+                },
+            )
+            .with_track_dsp(
+                2,
+                TrackDspFeatures {
+                    key_signature: Some("Cmaj".into()),
+                    camelot_key: Some("8B".into()),
+                    ..Default::default()
+                },
+            );
+
+        // Request matching track 1 by Camelot when track 1 stores "Am"/"5A".
+        let ctx2 = PlaylistEvaluationContext::new().with_track_dsp(
+            1,
+            TrackDspFeatures {
+                key_signature: Some("Am".into()),
+                camelot_key: Some("5A".into()),
+                ..Default::default()
+            },
+        );
+
+        let def = SmartPlaylistDefinition {
+            name: "Am only".into(),
+            description: None,
+            root: RuleClause::KeySignature { key: "5A".into() },
+        };
+        let ids: Vec<i64> = evaluate_playlist(&def, &tracks, &ctx2)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+
+        // Camelot-form request, key-signature storage only — still matches via normalization.
+        let ctx3 = PlaylistEvaluationContext::new().with_track_dsp(
+            1,
+            TrackDspFeatures {
+                key_signature: Some("Am".into()),
+                camelot_key: None,
+                ..Default::default()
+            },
+        );
+        let def2 = SmartPlaylistDefinition {
+            name: "Am only".into(),
+            description: None,
+            root: RuleClause::CamelotKey { key: "5A".into() },
+        };
+        let ids2: Vec<i64> = evaluate_playlist(&def2, &tracks, &ctx3)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids2, vec![1]);
+
+        // Plain-text "Am" request matches track 1 too.
+        let def3 = SmartPlaylistDefinition {
+            name: "Am only".into(),
+            description: None,
+            root: RuleClause::KeySignature { key: "Am".into() },
+        };
+        let ids3: Vec<i64> = evaluate_playlist(&def3, &tracks, &ctx3)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids3, vec![1]);
+    }
+
+    #[test]
+    fn instrumental_and_sample_data_rules() {
+        let tracks = vec![dsp_track(1), dsp_track(2), dsp_track(3)];
+        let context = PlaylistEvaluationContext::new()
+            .with_track_dsp(
+                1,
+                TrackDspFeatures {
+                    is_instrumental: true,
+                    ..Default::default()
+                },
+            )
+            .with_track_dsp(
+                2,
+                TrackDspFeatures {
+                    is_instrumental: false,
+                    ..Default::default()
+                },
+            )
+            .with_sample_source(1, "acrcloud")
+            .with_sample_source(2, "fingerprint");
+
+        let inst_def = SmartPlaylistDefinition {
+            name: "Instrumentals".into(),
+            description: None,
+            root: RuleClause::InstrumentalOnly {
+                is_instrumental: true,
+            },
+        };
+        let ids: Vec<i64> = evaluate_playlist(&inst_def, &tracks, &context)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+
+        let acr_def = SmartPlaylistDefinition {
+            name: "ACR".into(),
+            description: None,
+            root: RuleClause::HasSampleData {
+                source: Some("acrcloud".into()),
+            },
+        };
+        let ids2: Vec<i64> = evaluate_playlist(&acr_def, &tracks, &context)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids2, vec![1]);
+
+        let any_def = SmartPlaylistDefinition {
+            name: "Any sample".into(),
+            description: None,
+            root: RuleClause::HasSampleData { source: None },
+        };
+        let ids3: Vec<i64> = evaluate_playlist(&any_def, &tracks, &context)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids3, vec![1, 2]);
     }
 }

@@ -119,3 +119,45 @@ fn camelot_number_diff(a: &str, b: &str) -> u32 {
     let diff = if na > nb { na - nb } else { nb - na };
     diff.min(12 - diff)
 }
+
+/// Compute a shared harmonic/BPM multiplier used by both automix (`player.rs`)
+/// and radio post-scoring (`server/routes.rs`).
+///
+/// Returns 1.0 when either side is unanalyzed so we never penalise tracks we
+/// simply don't know anything about.
+///
+/// Camelot: compatible → *2.2, adjacent → *1.4, clash → *0.6
+/// BPM: diff <5 → *1.8, <10 → *1.3, <20 → *0.9, else *0.65
+pub fn compute_harmonic_multiplier(
+    seed_camelot: Option<&str>,
+    cand_camelot: Option<&str>,
+    seed_bpm: Option<f64>,
+    cand_bpm: Option<f64>,
+) -> f64 {
+    let mut mult = 1.0_f64;
+
+    if let (Some(a), Some(b)) = (seed_camelot, cand_camelot) {
+        if camelot_compatible(a, b) {
+            mult *= 2.2;
+        } else if camelot_adjacent(a, b) {
+            mult *= 1.4;
+        } else {
+            mult *= 0.6;
+        }
+    }
+
+    if let (Some(a), Some(b)) = (seed_bpm, cand_bpm) {
+        let diff = (a - b).abs();
+        if diff < 5.0 {
+            mult *= 1.8;
+        } else if diff < 10.0 {
+            mult *= 1.3;
+        } else if diff < 20.0 {
+            mult *= 0.9;
+        } else {
+            mult *= 0.65;
+        }
+    }
+
+    mult
+}

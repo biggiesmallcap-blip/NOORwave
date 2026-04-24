@@ -71,12 +71,11 @@ pub fn detect_key(samples: &[f32], sample_rate: u32) -> Option<(String, String)>
     let second_corr = correlations[1].0;
     let margin = best_corr - second_corr;
 
-    // Gate
-    if best_corr > 0.6 && margin > 0.05 {
-        Some((correlations[0].1.clone(), correlations[0].2.clone()))
-    } else {
-        None
+    // Gate: reject if best correlation too low OR margin over 2nd-best too small
+    if best_corr < 0.6 || margin < 0.05 {
+        return None;
     }
+    Some((correlations[0].1.clone(), correlations[0].2.clone()))
 }
 
 /// Compute 12-element pitch-class profile from STFT.

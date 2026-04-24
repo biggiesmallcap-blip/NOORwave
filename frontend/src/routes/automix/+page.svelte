@@ -8,6 +8,7 @@
 		crossfadeMs,
 		shuffleMode,
 		currentTrack,
+		currentTrackFeatures,
 		playbackQueue,
 		setPlayerAutomixEnabled,
 		setPlayerCrossfadeMs,
@@ -17,6 +18,8 @@
 		setPlayerAutomixAllowExternal,
 		refreshPlaybackState
 	} from '$lib/stores/player';
+	import { api, type AudioDspFeatures } from '$lib/api/client';
+	import { harmonicCompat } from '$lib/utils/camelot';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
@@ -115,6 +118,62 @@
 		const currentPos = $playbackQueue.find((q) => q.track.id === currentId)?.position ?? -1;
 		return item.position > currentPos;
 	}));
+
+	// ─── DSP feature cache for queue harmonic indicators ──────────────────────
+	// Queue items don't carry DSP features, so we lazily fetch them for the
+	// visible top-N rows. Cache entries: undefined = not yet requested, null =
+	// fetched but no features available, object = loaded. All reactive via a
+	// bumped version counter to avoid mutating the Map in place losing Svelte's
+	// reactivity.
+	const featureCache = new Map<number, AudioDspFeatures | null>();
+	const inflight = new Set<number>();
+	let featureCacheVersion = $state(0);
+
+	const INDICATOR_WINDOW = 20;
+
+	function requestFeatures(trackId: number): void {
+		if (featureCache.has(trackId) || inflight.has(trackId)) return;
+		inflight.add(trackId);
+		void api
+			.getTrackAudioFeatures(trackId)
+			.then((res) => {
+				featureCache.set(trackId, res.features ?? null);
+				featureCacheVersion++;
+			})
+			.catch(() => {
+				featureCache.set(trackId, null);
+				featureCacheVersion++;
+			})
+			.finally(() => {
+				inflight.delete(trackId);
+			});
+	}
+
+	function featuresFor(trackId: number | null | undefined): AudioDspFeatures | null | undefined {
+		if (trackId == null) return undefined;
+		// Reading the version counter ensures derived/$effect recomputes when cache fills.
+		void featureCacheVersion;
+		const current = $currentTrack;
+		if (current && current.id === trackId) {
+			return $currentTrackFeatures;
+		}
+		return featureCache.get(trackId);
+	}
+
+	// Eagerly kick off fetches for the window we're about to render so indicators
+	// populate without flicker. Re-runs whenever the queue slice changes.
+	$effect(() => {
+		const visible = queueUpcoming.slice(0, INDICATOR_WINDOW);
+		for (const item of visible) {
+			requestFeatures(item.track.id);
+		}
+	});
+
+	function bpmDeltaLabel(delta: number | null): string | null {
+		if (delta === null) return null;
+		const sign = delta > 0 ? '+' : '';
+		return `${sign}${delta.toFixed(1)} BPM`;
+	}
 </script>
 
 <svelte:head>
@@ -245,7 +304,43 @@
 			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
 		{:else}
 			<div class="queue-list">
-				{#each queueUpcoming.slice(0, 20) as item (item.id)}
+				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (item.id)}
+					{#if i > 0}
+						{@const prevTrackId = queueUpcoming[i - 1].track.id}
+						{@const compat = harmonicCompat(featuresFor(prevTrackId), featuresFor(item.track.id))}
+						{#if compat}
+							<div class="compat-indicator compat-{compat.level}" role="presentation">
+								<span class="compat-dot" aria-hidden="true"></span>
+								<span class="compat-labels">
+									{#if compat.keyLabel}
+										<span class="compat-key">{compat.keyLabel}</span>
+									{/if}
+									{#if compat.bpmDelta !== null}
+										<span class="compat-bpm">{bpmDeltaLabel(compat.bpmDelta)}</span>
+									{/if}
+								</span>
+							</div>
+						{/if}
+					{:else}
+						{@const currentId = $currentTrack?.id}
+						{@const compatFromCurrent =
+							currentId != null
+								? harmonicCompat(featuresFor(currentId), featuresFor(item.track.id))
+								: null}
+						{#if compatFromCurrent}
+							<div class="compat-indicator compat-{compatFromCurrent.level}" role="presentation">
+								<span class="compat-dot" aria-hidden="true"></span>
+								<span class="compat-labels">
+									{#if compatFromCurrent.keyLabel}
+										<span class="compat-key">{compatFromCurrent.keyLabel}</span>
+									{/if}
+									{#if compatFromCurrent.bpmDelta !== null}
+										<span class="compat-bpm">{bpmDeltaLabel(compatFromCurrent.bpmDelta)}</span>
+									{/if}
+								</span>
+							</div>
+						{/if}
+					{/if}
 					<div class="queue-row glass-panel">
 						{#if item.track.artwork_url}
 							<img class="queue-art" src={item.track.artwork_url} alt="" />
@@ -261,8 +356,8 @@
 						{/if}
 					</div>
 				{/each}
-				{#if queueUpcoming.length > 20}
-					<p class="queue-overflow">+ {queueUpcoming.length - 20} more tracks</p>
+				{#if queueUpcoming.length > INDICATOR_WINDOW}
+					<p class="queue-overflow">+ {queueUpcoming.length - INDICATOR_WINDOW} more tracks</p>
 				{/if}
 			</div>
 		{/if}
@@ -451,6 +546,68 @@
 		font-size: 0.875rem;
 		text-align: center;
 		padding: 8px;
+	}
+
+	/* Harmonic compatibility indicators between queue rows */
+	.compat-indicator {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 2px 20px;
+		margin: -4px 0;
+		font-size: 0.72rem;
+		line-height: 1;
+		opacity: 0.85;
+	}
+
+	.compat-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		box-shadow: 0 0 6px currentColor;
+	}
+
+	.compat-labels {
+		display: flex;
+		gap: 10px;
+		color: var(--text-secondary);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.compat-key {
+		opacity: 0.95;
+	}
+
+	.compat-bpm {
+		opacity: 0.7;
+	}
+
+	.compat-good .compat-dot {
+		background: #4ade80;
+		color: #4ade80;
+	}
+
+	.compat-good .compat-key {
+		color: #86efac;
+	}
+
+	.compat-okay .compat-dot {
+		background: #fbbf24;
+		color: #fbbf24;
+	}
+
+	.compat-okay .compat-key {
+		color: #fcd34d;
+	}
+
+	.compat-clash .compat-dot {
+		background: #f87171;
+		color: #f87171;
+	}
+
+	.compat-clash .compat-key {
+		color: #fca5a5;
 	}
 
 	.error-banner {

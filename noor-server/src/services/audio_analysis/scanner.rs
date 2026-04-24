@@ -186,6 +186,14 @@ pub async fn run_preview_scan(
         .event_tx
         .send(AppEvent::AudioAnalysisComplete { analyzed });
 
+    // Post-scan: let SQLite reoptimise the fingerprint_hashes index.
+    let db_for_opt = state.read().await.db.clone();
+    tokio::task::spawn_blocking(move || {
+        super::fingerprint::optimize_after_bulk_scan(&db_for_opt)
+    })
+    .await
+    .ok();
+
     info!(
         "Preview scan complete. Analyzed {}/{} tracks ({} skipped).",
         analyzed, total, skipped

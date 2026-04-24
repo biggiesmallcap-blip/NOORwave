@@ -1,7 +1,49 @@
 import { get, writable } from 'svelte/store';
-import { api, type PlaybackSnapshot, type PlaybackState, type QueueItem, type Track } from '$lib/api/client';
+import {
+	api,
+	type AudioDspFeatures,
+	type PlaybackSnapshot,
+	type PlaybackState,
+	type QueueItem,
+	type Track
+} from '$lib/api/client';
 
 export const currentTrack = writable<Track | null>(null);
+export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
+
+// ─── Current-track DSP features fetcher ───────────────────────────────────────
+// Listens for track-id changes on currentTrack and fetches audio features in
+// the background. Errors are swallowed — playback must never block on this.
+let _lastFeaturesTrackId: number | null = null;
+let _featuresFetchSeq = 0;
+
+currentTrack.subscribe((track) => {
+	const nextId = track?.id ?? null;
+	if (nextId === _lastFeaturesTrackId) return;
+	_lastFeaturesTrackId = nextId;
+
+	if (nextId === null) {
+		currentTrackFeatures.set(null);
+		return;
+	}
+
+	const seq = ++_featuresFetchSeq;
+	// Clear stale features immediately so UI doesn't show the previous track's badge.
+	currentTrackFeatures.set(null);
+
+	void api
+		.getTrackAudioFeatures(nextId)
+		.then((res) => {
+			// Guard against out-of-order responses.
+			if (seq !== _featuresFetchSeq) return;
+			currentTrackFeatures.set(res.features ?? null);
+		})
+		.catch(() => {
+			if (seq !== _featuresFetchSeq) return;
+			currentTrackFeatures.set(null);
+		});
+});
+
 export const isPlaying = writable(false);
 export const position = writable(0);
 export const volume = writable(1.0);
@@ -301,5 +343,143 @@ export async function toggleTrackFavorite(trackId: number) {
 	} catch (error) {
 		playerError.set(`Failed to ${nextFavorite ? 'like' : 'unlike'} track: ${error}`);
 		throw error;
+	}
+}
+
+// ─── "Start from here" actions ────────────────────────────────────────────────
+// Shared helper: replace the queue with the given track IDs and begin playback
+// at the first one. Order matters — the first ID in `trackIds` is played first.
+async function loadQueueAndPlay(trackIds: number[]) {
+	if (trackIds.length === 0) return;
+	try {
+		await api.replacePlaybackQueue(trackIds);
+		const snapshot = await api.playTrack(trackIds[0]);
+		hydratePlayback(snapshot);
+		playerError.set(null);
+	} catch (error) {
+		playerError.set(`Failed to start playback: ${error}`);
+	}
+}
+
+function shuffleArray<T>(items: T[]): T[] {
+	const arr = items.slice();
+	for (let i = arr.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[arr[i], arr[j]] = [arr[j], arr[i]];
+	}
+	return arr;
+}
+
+export async function playAlbum(albumId: number, startTrackId?: number) {
+	try {
+		const { tracks } = await api.getAlbumTracks(albumId);
+		if (tracks.length === 0) {
+			playerError.set('Album has no tracks.');
+			return;
+		}
+		const ordered = startTrackId
+			? [
+					...tracks.filter((t) => t.id === startTrackId),
+					...tracks.filter((t) => t.id !== startTrackId)
+				]
+			: tracks;
+		await loadQueueAndPlay(ordered.map((t) => t.id));
+	} catch (error) {
+		playerError.set(`Failed to play album: ${error}`);
+	}
+}
+
+export async function shuffleAlbum(albumId: number) {
+	try {
+		const { tracks } = await api.getAlbumTracks(albumId);
+		if (tracks.length === 0) {
+			playerError.set('Album has no tracks.');
+			return;
+		}
+		const shuffled = shuffleArray(tracks);
+		await loadQueueAndPlay(shuffled.map((t) => t.id));
+	} catch (error) {
+		playerError.set(`Failed to shuffle album: ${error}`);
+	}
+}
+
+export async function playArtist(artistId: number, startTrackId?: number) {
+	try {
+		const { tracks } = await api.getArtistTracks(artistId);
+		if (tracks.length === 0) {
+			playerError.set('Artist has no tracks.');
+			return;
+		}
+		const ordered = startTrackId
+			? [
+					...tracks.filter((t) => t.id === startTrackId),
+					...tracks.filter((t) => t.id !== startTrackId)
+				]
+			: tracks;
+		await loadQueueAndPlay(ordered.map((t) => t.id));
+	} catch (error) {
+		playerError.set(`Failed to play artist: ${error}`);
+	}
+}
+
+export async function shuffleArtist(artistId: number) {
+	try {
+		const { tracks } = await api.getArtistTracks(artistId);
+		if (tracks.length === 0) {
+			playerError.set('Artist has no tracks.');
+			return;
+		}
+		await loadQueueAndPlay(shuffleArray(tracks).map((t) => t.id));
+	} catch (error) {
+		playerError.set(`Failed to shuffle artist: ${error}`);
+	}
+}
+
+export async function startSongRadio(seedTrackId: number) {
+	try {
+		const { tracks } = await api.getRadioTracks({ seed_track_id: seedTrackId, limit: 40 });
+		// Seed first, then radio picks — matches Spotify "Go to Radio" behaviour.
+		const radioIds = tracks.map((t) => t.track_id).filter((id) => id !== seedTrackId);
+		await loadQueueAndPlay([seedTrackId, ...radioIds]);
+	} catch (error) {
+		playerError.set(`Failed to start radio: ${error}`);
+	}
+}
+
+export async function startArtistRadio(artistId: number, seedTrackId?: number) {
+	// Artist radio uses the highest-played track on the artist as the seed, then
+	// routes through startSongRadio so the underlying similarity graph does the
+	// heavy lifting. Backend has the same co-listen + embedding signal regardless
+	// of whether the seed is user-picked or auto-selected.
+	try {
+		let seed = seedTrackId;
+		if (!seed) {
+			const { tracks } = await api.getArtistTracks(artistId);
+			if (tracks.length === 0) {
+				playerError.set('Artist has no tracks to seed radio from.');
+				return;
+			}
+			// Prefer the most-played track; fall back to the first.
+			const topTrack = [...tracks].sort((a, b) => b.play_count - a.play_count)[0];
+			seed = topTrack.id;
+		}
+		await startSongRadio(seed);
+	} catch (error) {
+		playerError.set(`Failed to start artist radio: ${error}`);
+	}
+}
+
+export async function playTrackNext(trackId: number) {
+	// Add to queue, then move next to the currently-playing track.
+	try {
+		const addResult = await api.addQueueTrack(trackId);
+		playbackQueue.set(addResult.queue);
+		const justAdded = addResult.queue.find((item) => item.track.id === trackId);
+		if (justAdded) {
+			await moveQueueTrackNext(justAdded.id);
+		}
+		playerError.set(null);
+	} catch (error) {
+		playerError.set(`Failed to queue track: ${error}`);
 	}
 }

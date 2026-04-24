@@ -1,10 +1,11 @@
 use crate::db::{
-    models::{PlaybackState, QueueItem, Track},
+    models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleMode};
 use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
+use crate::services::audio_analysis::compute_harmonic_multiplier;
 use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -689,7 +690,27 @@ fn build_automix_extension(
     }
 
     let candidate_genres = queue::get_track_genres(conn, &candidates)?;
-    let ordered = order_automix_candidates(mode, candidates, &candidate_genres, &taste, needed);
+
+    // Load DSP features for seed + all candidates (ignore errors — fall back to behavioural score).
+    let seed_features = queries::get_audio_dsp_features(conn, current_track.id)
+        .ok()
+        .flatten();
+    let mut candidate_features: HashMap<i64, AudioDspFeatures> = HashMap::new();
+    for track in &candidates {
+        if let Ok(Some(features)) = queries::get_audio_dsp_features(conn, track.id) {
+            candidate_features.insert(track.id, features);
+        }
+    }
+
+    let ordered = order_automix_candidates(
+        mode,
+        candidates,
+        &candidate_genres,
+        &taste,
+        needed,
+        seed_features.as_ref(),
+        &candidate_features,
+    );
     let ordered = decluster_by_album(ordered);
     Ok(ordered.into_iter().take(needed).collect())
 }
@@ -802,6 +823,8 @@ fn order_automix_candidates(
     candidate_genres: &HashMap<i64, Vec<String>>,
     taste: &SessionTasteProfile,
     needed: usize,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: &HashMap<i64, AudioDspFeatures>,
 ) -> Vec<Track> {
     let mut scored = candidates
         .into_iter()
@@ -813,6 +836,8 @@ fn order_automix_candidates(
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
                 taste,
+                seed_features,
+                candidate_features.get(&track.id),
             );
             ScoredTrack { track, score }
         })
@@ -923,7 +948,13 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     result
 }
 
-fn automix_score(track: &Track, genres: &[String], taste: &SessionTasteProfile) -> f64 {
+fn automix_score(
+    track: &Track,
+    genres: &[String],
+    taste: &SessionTasteProfile,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: Option<&AudioDspFeatures>,
+) -> f64 {
     let mut score = 1.0;
 
     // Hard suppression for recently skipped tracks
@@ -982,6 +1013,26 @@ fn automix_score(track: &Track, genres: &[String], taste: &SessionTasteProfile) 
     }
 
     score += (track.fidelity_score.max(0) as f64) * 0.003;
+
+    // DSP harmonic/BPM/energy scoring — only applied when BOTH tracks have features.
+    // Unanalyzed tracks are never penalised; they simply skip this pass.
+    if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
+        // Camelot + BPM multiplier (shared with radio post-scoring).
+        score *= compute_harmonic_multiplier(
+            seed.camelot_key.as_deref(),
+            cand.camelot_key.as_deref(),
+            seed.bpm,
+            cand.bpm,
+        );
+
+        // Energy whiplash penalty.
+        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy) {
+            if (seed_energy - cand_energy).abs() > 0.5 {
+                score *= 0.7;
+            }
+        }
+    }
+
     score.max(0.05)
 }
 

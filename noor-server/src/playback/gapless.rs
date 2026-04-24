@@ -69,6 +69,45 @@ pub fn plan_from_crossfade(crossfade_ms: i32) -> GaplessPlan {
     plan_from_stream(None, GaplessSettings::new(true, crossfade_ms))
 }
 
+/// Clamp applied to any beat-aligned crossfade value (matches existing UI range).
+const CROSSFADE_MAX_MS: u32 = 12_000;
+
+/// Quantise a crossfade duration to the nearest whole number of beats at the given BPM.
+/// If the BPM is outside a sane range, the original crossfade is returned unchanged.
+pub fn align_crossfade_to_beat(crossfade_ms: u32, bpm: f64) -> u32 {
+    if !(60.0..=220.0).contains(&bpm) {
+        return crossfade_ms;
+    }
+    let beat_ms = 60_000.0 / bpm;
+    let beats = (crossfade_ms as f64 / beat_ms).round().max(1.0);
+    (beats * beat_ms).round() as u32
+}
+
+/// Build a playback transition plan, beat-aligning the crossfade when BPM metadata
+/// is available for both the currently-playing track and the next track.
+///
+/// Fallback behaviour: if either track has no BPM (unanalyzed), the original
+/// `crossfade_ms` is used as-is. The final value is clamped to `0..=CROSSFADE_MAX_MS`.
+pub fn build_gapless_plan(
+    stream: Option<&StreamInfo>,
+    settings: GaplessSettings,
+    current_bpm: Option<f64>,
+    next_bpm: Option<f64>,
+) -> GaplessPlan {
+    let adjusted = match (current_bpm, next_bpm) {
+        (Some(a), Some(b)) if a > 0.0 && b > 0.0 => {
+            // Average the two BPMs so neither track's beat grid "wins" the alignment.
+            let avg_bpm = (a + b) / 2.0;
+            let base = settings.crossfade_ms.max(0) as u32;
+            let aligned = align_crossfade_to_beat(base, avg_bpm).min(CROSSFADE_MAX_MS);
+            GaplessSettings::new(settings.enabled, aligned as i32)
+        }
+        _ => settings,
+    };
+
+    plan_from_stream(stream, adjusted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
