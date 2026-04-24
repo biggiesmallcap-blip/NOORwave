@@ -16,16 +16,24 @@ pub fn ensure_server_token(conn: &Connection) -> Result<String> {
         )
         .optional()?;
 
+    // Keep the existing token only if it matches the current 6-digit PIN format.
+    // Legacy hex/word-phrase tokens are auto-upgraded on next startup.
     if let Some(token) = existing {
-        return Ok(token);
+        if is_valid_pin(&token) {
+            return Ok(token);
+        }
     }
 
     let token = generate_readable_token();
     conn.execute(
-        "INSERT INTO server_config (key, value) VALUES ('server_token', ?1)",
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('server_token', ?1)",
         params![token],
     )?;
     Ok(token)
+}
+
+fn is_valid_pin(s: &str) -> bool {
+    s.len() == 6 && s.chars().all(|c| c.is_ascii_digit())
 }
 
 pub fn regenerate_server_token(conn: &Connection) -> Result<String> {
