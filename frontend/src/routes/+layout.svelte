@@ -33,6 +33,9 @@
 	} from '$lib/stores/player';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
+	import ContextMenu from '$lib/components/ContextMenu.svelte';
+	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
 
 	let { children } = $props();
 
@@ -42,22 +45,40 @@
 	let connectTokenInput = $state('');
 	let connectError = $state('');
 	let connectBusy = $state(false);
+	let pinInputEl = $state<HTMLInputElement | null>(null);
+
+	function handlePinInput(event: Event) {
+		const el = event.target as HTMLInputElement;
+		const digits = el.value.replace(/\D/g, '').slice(0, 6);
+		connectTokenInput = digits;
+		el.value = digits;
+		connectError = '';
+		if (digits.length === 6) void submitConnect();
+	}
+
+	function focusPin() {
+		pinInputEl?.focus();
+	}
 
 	async function submitConnect() {
 		connectError = '';
 		const t = connectTokenInput.trim();
-		if (!t) { connectError = 'Paste your access token first.'; return; }
+		if (!t) { connectError = 'Enter your 6-digit PIN.'; return; }
 		connectBusy = true;
 		try {
-			// Temporarily store so fetchApiResponse uses it
 			setStoredToken(t);
 			const ok = await api.ping();
 			if (!ok) { clearStoredToken(); connectError = 'Could not reach the server. Check the URL / network.'; return; }
-			// Verify the token is accepted
 			const resp = await fetch(`${(await import('$lib/api/client')).getApiBase()}/api/status`, {
 				headers: { authorization: `Bearer ${t}` }
 			});
-			if (resp.status === 401) { clearStoredToken(); connectError = 'Token rejected — check you copied it correctly.'; return; }
+			if (resp.status === 401) {
+				clearStoredToken();
+				connectError = 'PIN rejected — double-check the 6 digits.';
+				connectTokenInput = '';
+				setTimeout(focusPin, 0);
+				return;
+			}
 			showConnect = false;
 			onConnected();
 		} catch {
@@ -143,6 +164,7 @@
 			clearStoredToken();
 			showConnect = true;
 			authReady = false;
+			setTimeout(focusPin, 50);
 		});
 
 		const storedTheme = localStorage.getItem('noor-theme');
@@ -151,7 +173,56 @@
 		}
 
 		applyTheme(theme);
+
+		window.addEventListener('keydown', handleGlobalKeydown);
+		return () => window.removeEventListener('keydown', handleGlobalKeydown);
 	});
+
+	function isTypingTarget(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tag = target.tagName;
+		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+		return target.isContentEditable;
+	}
+
+	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (isTypingTarget(event.target)) return;
+
+		switch (event.key) {
+			case ' ':
+			case 'Spacebar':
+				event.preventDefault();
+				void togglePlayback();
+				break;
+			case 'ArrowRight':
+				event.preventDefault();
+				void playNextTrack();
+				break;
+			case 'ArrowLeft':
+				event.preventDefault();
+				void playPreviousTrack();
+				break;
+			case 'l':
+			case 'L': {
+				const track = $currentTrack;
+				if (!track) return;
+				event.preventDefault();
+				void toggleTrackFavorite(track.id);
+				break;
+			}
+			case 's':
+			case 'S':
+				event.preventDefault();
+				void cyclePlayerShuffleMode();
+				break;
+			case 'r':
+			case 'R':
+				event.preventDefault();
+				void cyclePlayerRepeatMode();
+				break;
+		}
+	}
 
 	// On the local machine, the server exposes the token without auth (loopback-only).
 	async function tryAutoSetup() {
@@ -168,6 +239,7 @@
 			}
 		} catch {}
 		showConnect = true;
+		setTimeout(focusPin, 50);
 	}
 
 	// After a successful connect, boot the WS + playback state
@@ -246,6 +318,55 @@
 		return source || 'Queued';
 	}
 
+	// Source slug drives the `.source-*` CSS class that paints the 4px dot on
+	// queue artwork. Keep in sync with formatQueueSource above.
+	function queueSourceSlug(source: string): string {
+		return formatQueueSource(source).toLowerCase();
+	}
+
+	type QueueItemType = (typeof $playbackQueue)[number];
+
+	function openQueueRowMenu(item: QueueItemType, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		const items = buildTrackMenu(item.track, { queueItemId: item.id });
+		openContextMenu(event, items, item.track.title);
+	}
+
+	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
+		event.stopPropagation();
+		const items = buildTrackMenu(item.track, { queueItemId: item.id });
+		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
+	}
+
+	async function handleQueueRowFavorite(trackId: number, event: MouseEvent) {
+		event.stopPropagation();
+		try {
+			await toggleTrackFavorite(trackId);
+		} catch {
+			// toggleTrackFavorite surfaces its own error in the player store.
+		}
+	}
+
+	function stopPropagation(event: Event) {
+		event.stopPropagation();
+	}
+
+	function openNowPlayingMenu(event: MouseEvent) {
+		const track = $currentTrack;
+		if (!track) return;
+		event.stopPropagation();
+		const items = buildTrackMenu(track);
+		openMenuAtElement(event.currentTarget as HTMLElement, items, track.title);
+	}
+
+	function openNowPlayingContextMenu(event: MouseEvent) {
+		const track = $currentTrack;
+		if (!track) return;
+		const items = buildTrackMenu(track);
+		openContextMenu(event, items, track.title);
+	}
+
 	let upcomingQueue = $derived.by(() => {
 		const currentId = $currentTrack?.id;
 		if (!currentId) return $playbackQueue;
@@ -322,28 +443,48 @@
 				<span class="connect-brand-mark">N</span>
 				<span class="connect-brand-name">NOOR</span>
 			</div>
-			<h2 class="connect-title">Connect to server</h2>
+			<h2 class="connect-title">Enter PIN</h2>
 			<p class="connect-copy">
-				Paste the access token shown in the NOOR terminal or in Settings on your main device.
+				Check the NOOR terminal or Settings on your main device for the 6-digit access PIN.
 			</p>
+
+			<button type="button" class="pin-pad" onclick={focusPin} aria-label="PIN input">
+				{#each [0,1,2,3,4,5] as i}
+					<span
+						class="pin-digit"
+						class:filled={i < connectTokenInput.length}
+						class:active={i === connectTokenInput.length && !connectBusy}
+					>
+						{connectTokenInput[i] ?? ''}
+					</span>
+				{/each}
+			</button>
+
 			<input
-				class="connect-input"
-				type="password"
-				placeholder="Access token"
-				bind:value={connectTokenInput}
-				onkeydown={(e) => e.key === 'Enter' && void submitConnect()}
-				autocomplete="off"
-				spellcheck={false}
+				bind:this={pinInputEl}
+				class="pin-hidden-input"
+				inputmode="numeric"
+				pattern="[0-9]*"
+				maxlength="6"
+				autocomplete="one-time-code"
+				value={connectTokenInput}
+				oninput={handlePinInput}
+				onkeydown={(e) => e.key === 'Enter' && connectTokenInput.length === 6 && void submitConnect()}
+				disabled={connectBusy}
+				aria-label="6-digit PIN"
 			/>
+
 			{#if connectError}
 				<p class="connect-error">{connectError}</p>
 			{/if}
-			<button class="btn btn-primary connect-btn" disabled={connectBusy} onclick={() => void submitConnect()}>
-				{connectBusy ? 'Connecting…' : 'Connect'}
-			</button>
+			{#if connectBusy}
+				<p class="connect-copy">Connecting…</p>
+			{/if}
 		</div>
 	</div>
 {/if}
+
+<ContextMenu />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible}>
 	<header class="mobile-top-bar">
@@ -412,7 +553,7 @@
 		{@render children()}
 	</main>
 
-	<aside class="now-playing-panel">
+	<aside class="now-playing-panel" oncontextmenu={openNowPlayingContextMenu}>
 		<div class="np-top">
 			<div class="np-artwork-wrap">
 				{#key $currentTrack?.artwork_url}
@@ -434,8 +575,20 @@
 				<div class="np-copy">
 					<p class="np-eyebrow">Listening Instrument</p>
 					<h2 class="np-title">{$currentTrack?.title ?? 'Nothing queued'}</h2>
-					<p class="np-artist">{$currentTrack?.artist_name ?? 'Choose a track to begin playback.'}</p>
-					<p class="np-album">{$currentTrack?.album_title ?? 'Playback controls stay docked here.'}</p>
+					{#if $currentTrack?.artist_id}
+						<a class="np-artist np-link" href="/artists/{$currentTrack.artist_id}">
+							{$currentTrack.artist_name ?? 'Unknown artist'}
+						</a>
+					{:else}
+						<p class="np-artist">{$currentTrack?.artist_name ?? 'Choose a track to begin playback.'}</p>
+					{/if}
+					{#if $currentTrack?.album_id}
+						<a class="np-album np-link" href="/albums/{$currentTrack.album_id}">
+							{$currentTrack.album_title ?? 'Unknown album'}
+						</a>
+					{:else}
+						<p class="np-album">{$currentTrack?.album_title ?? 'Playback controls stay docked here.'}</p>
+					{/if}
 				</div>
 
 				<StateBadge label={playerState} tone={$currentTrack ? 'active' : 'muted'} compact={true} />
@@ -498,6 +651,13 @@
 				>
 					{repeatIcons[$repeatMode]}
 				</button>
+				<button
+					class="tp-btn"
+					title="More actions — song radio, play album, shuffle album…"
+					aria-label="More actions"
+					onclick={openNowPlayingMenu}
+					disabled={!$currentTrack}
+				>⋯</button>
 			</div>
 
 			<div class="np-controls">
@@ -566,30 +726,58 @@
 							tabindex="0"
 							onclick={() => void handleQueueTrackPlay(item.track.id)}
 							onkeydown={(event) => handleQueueTrackKeydown(item.track.id, event)}
+							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
-							{#if item.track.artwork_url}
-								<img class="queue-art" src={item.track.artwork_url} alt="" />
-							{:else}
-								<div class="queue-art placeholder">♫</div>
-							{/if}
+							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
+								{#if item.track.artwork_url}
+									<img class="queue-art" src={item.track.artwork_url} alt="" />
+								{:else}
+									<div class="queue-art placeholder">♫</div>
+								{/if}
+								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
+							</div>
 
 							<div class="queue-meta">
-								<p>{item.track.title}</p>
-								<div class="queue-subline">
-									<span>{item.track.artist_name ?? 'Unknown artist'}</span>
-									<span class="queue-origin">{formatQueueSource(item.source)}</span>
-								</div>
+								<p class="queue-title">{item.track.title}</p>
+								{#if item.track.artist_id}
+									<a
+										class="queue-artist"
+										href="/artists/{item.track.artist_id}"
+										onclick={stopPropagation}
+									>{item.track.artist_name ?? 'Unknown artist'}</a>
+								{:else}
+									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
+								{/if}
 							</div>
 
 							<div class="queue-side">
 								<span class="queue-time">{formatDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
-									<button class="queue-action" onclick={(event) => void handleQueueMoveNext(item.id, event)}>
-										Next
-									</button>
-									<button class="queue-action remove" onclick={(event) => void handleQueueRemove(item.id, event)}>
-										×
-									</button>
+									<button
+										class="queue-action icon"
+										class:active={item.track.is_favorite}
+										aria-label={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										title={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										onclick={(event) => void handleQueueRowFavorite(item.track.id, event)}
+									>{item.track.is_favorite ? '♥' : '♡'}</button>
+									<button
+										class="queue-action icon"
+										aria-label="More actions"
+										title="More actions"
+										onclick={(event) => openQueueRowMenuFromButton(item, event)}
+									>⋯</button>
+									<button
+										class="queue-action icon"
+										aria-label="Play next"
+										title="Play next"
+										onclick={(event) => void handleQueueMoveNext(item.id, event)}
+									>↑</button>
+									<button
+										class="queue-action icon remove"
+										aria-label="Remove from queue"
+										title="Remove from queue"
+										onclick={(event) => void handleQueueRemove(item.id, event)}
+									>×</button>
 								</div>
 							</div>
 						</div>
@@ -858,24 +1046,46 @@
 							tabindex="0"
 							onclick={() => void handleQueueTrackPlay(item.track.id)}
 							onkeydown={(event) => handleQueueTrackKeydown(item.track.id, event)}
+							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
-							{#if item.track.artwork_url}
-								<img class="queue-art" src={item.track.artwork_url} alt="" />
-							{:else}
-								<div class="queue-art placeholder">♫</div>
-							{/if}
+							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
+								{#if item.track.artwork_url}
+									<img class="queue-art" src={item.track.artwork_url} alt="" />
+								{:else}
+									<div class="queue-art placeholder">♫</div>
+								{/if}
+								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
+							</div>
 							<div class="queue-meta">
-								<p>{item.track.title}</p>
-								<div class="queue-subline">
-									<span>{item.track.artist_name ?? 'Unknown artist'}</span>
-									<span class="queue-origin">{formatQueueSource(item.source)}</span>
-								</div>
+								<p class="queue-title">{item.track.title}</p>
+								{#if item.track.artist_id}
+									<a
+										class="queue-artist"
+										href="/artists/{item.track.artist_id}"
+										onclick={stopPropagation}
+									>{item.track.artist_name ?? 'Unknown artist'}</a>
+								{:else}
+									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
+								{/if}
 							</div>
 							<div class="queue-side">
 								<span class="queue-time">{formatDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
-									<button class="queue-action" onclick={(e) => void handleQueueMoveNext(item.id, e)}>Next</button>
-									<button class="queue-action remove" onclick={(e) => void handleQueueRemove(item.id, e)}>×</button>
+									<button
+										class="queue-action icon"
+										aria-label="More actions"
+										onclick={(e) => openQueueRowMenuFromButton(item, e)}
+									>⋯</button>
+									<button
+										class="queue-action icon"
+										aria-label="Play next"
+										onclick={(e) => void handleQueueMoveNext(item.id, e)}
+									>↑</button>
+									<button
+										class="queue-action icon remove"
+										aria-label="Remove from queue"
+										onclick={(e) => void handleQueueRemove(item.id, e)}
+									>×</button>
 								</div>
 							</div>
 						</div>
@@ -1210,11 +1420,12 @@
 
 	.np-title,
 	.np-artist,
-	.np-album,
-	.queue-meta p {
+	.np-album {
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		display: block;
+		max-width: 100%;
 	}
 
 	.np-title {
@@ -1232,6 +1443,18 @@
 	.np-album {
 		color: var(--text-secondary);
 		font-size: 0.8rem;
+	}
+
+	a.np-link {
+		color: inherit;
+		text-decoration: none;
+		cursor: pointer;
+		transition: color var(--motion-fast);
+	}
+
+	a.np-link:hover {
+		color: var(--accent-strong, #6366f1);
+		text-decoration: underline;
 	}
 
 	.np-progress {
@@ -1552,8 +1775,14 @@
 		transform: translateY(-1px);
 	}
 
-	.queue-row.active .queue-meta p {
+	.queue-row.active .queue-title {
 		color: var(--accent-strong);
+	}
+
+	.queue-art-wrap {
+		position: relative;
+		flex-shrink: 0;
+		line-height: 0;
 	}
 
 	.queue-art {
@@ -1563,52 +1792,79 @@
 		object-fit: cover;
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
-		flex-shrink: 0;
+		display: block;
 	}
+
+	/* 4px dot in the bottom-right of the artwork encodes where the track came
+	   from. Replaces the old .queue-origin chip that ate horizontal space in
+	   the artist row. Tooltip on .queue-art-wrap names the source. */
+	.queue-source-dot {
+		position: absolute;
+		right: -2px;
+		bottom: -2px;
+		width: 8px;
+		height: 8px;
+		border-radius: 999px;
+		border: 2px solid var(--instrument-surface, #14162a);
+		background: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+	}
+
+	.queue-source-dot.source-automix { background: var(--accent-strong, #6366f1); }
+	.queue-source-dot.source-discover { background: #a855f7; }
+	.queue-source-dot.source-genre { background: #22d3ee; }
+	.queue-source-dot.source-playlist { background: #f59e0b; }
+	.queue-source-dot.source-library { background: #10b981; }
+	.queue-source-dot.source-manual,
+	.queue-source-dot.source-queued { background: var(--text-tertiary, rgba(255, 255, 255, 0.45)); }
 
 	.queue-meta {
 		min-width: 0;
 		flex: 1;
 		display: flex;
 		flex-direction: column;
+		gap: 2px;
 	}
 
-	.queue-meta p {
+	.queue-title {
 		font-weight: 600;
+		font-size: 0.88rem;
+		line-height: 1.25;
+		margin: 0;
+		/* Two-line clamp lets long titles breathe instead of chopping words. */
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+		overflow-wrap: anywhere;
+		word-break: break-word;
 	}
 
-	.queue-subline span,
+	.queue-artist {
+		color: var(--text-secondary);
+		font-size: 0.76rem;
+		line-height: 1.3;
+		text-decoration: none;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 100%;
+	}
+
+	a.queue-artist {
+		cursor: pointer;
+	}
+
+	a.queue-artist:hover {
+		color: var(--text-primary);
+		text-decoration: underline;
+	}
+
 	.queue-time,
 	.queue-empty span,
 	.queue-overflow {
 		color: var(--text-secondary);
 		font-size: 0.76rem;
-	}
-
-	.queue-subline {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		min-width: 0;
-	}
-
-	.queue-subline span:first-child {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.queue-origin {
-		padding: 2px 8px;
-		border-radius: 999px;
-		font-size: 0.64rem;
-		font-weight: 700;
-		letter-spacing: 0.07em;
-		text-transform: uppercase;
-		color: var(--signal-text);
-		background: color-mix(in srgb, var(--instrument-surface-strong) 90%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 42%, transparent);
-		flex-shrink: 0;
 	}
 
 	.queue-side {
@@ -1637,7 +1893,7 @@
 		transform: translateY(-50%);
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 4px;
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity var(--motion-fast);
@@ -1656,11 +1912,33 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 56%, transparent);
 		color: var(--text-primary);
 		font-size: 0.72rem;
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 
-	.queue-action.remove {
+	.queue-action:hover {
+		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 82%, transparent);
+	}
+
+	.queue-action.icon {
 		width: 28px;
-		padding: 5px 0;
+		height: 28px;
+		padding: 0;
+		display: inline-grid;
+		place-items: center;
+		font-size: 0.9rem;
+		line-height: 1;
+	}
+
+	.queue-action.icon.active {
+		color: var(--accent-strong, #6366f1);
+	}
+
+	.queue-action.icon.remove:hover {
+		background: color-mix(in srgb, var(--danger, #f87171) 22%, transparent);
+		border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent);
+		color: var(--danger, #f87171);
 	}
 
 	.queue-empty {
@@ -2359,30 +2637,64 @@
 		line-height: 1.5;
 	}
 
-	.connect-input {
-		width: 100%;
-		padding: 10px 14px;
-		font-size: 0.9rem;
-		font-family: var(--font-mono, monospace);
+	.pin-pad {
+		display: flex;
+		gap: 10px;
+		justify-content: center;
+		margin: 8px 0 4px;
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: text;
+	}
+
+	.pin-digit {
+		flex: 0 0 auto;
+		width: 44px;
+		height: 56px;
 		border-radius: var(--radius-sm, 8px);
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid rgba(255, 255, 255, 0.1);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-family: var(--font-mono, monospace);
+		font-size: 1.6rem;
+		font-weight: 600;
 		color: var(--text-primary);
-		outline: none;
-		transition: border-color 0.15s ease;
+		transition: border-color 0.15s ease, background 0.15s ease;
 	}
 
-	.connect-input:focus {
-		border-color: rgba(124, 128, 255, 0.5);
+	.pin-digit.filled {
+		background: rgba(124, 128, 255, 0.12);
+		border-color: rgba(124, 128, 255, 0.45);
+	}
+
+	.pin-digit.active {
+		border-color: rgba(124, 128, 255, 0.8);
+		box-shadow: 0 0 0 3px rgba(124, 128, 255, 0.15);
+	}
+
+	.pin-hidden-input {
+		position: absolute;
+		opacity: 0;
+		pointer-events: none;
+		width: 1px;
+		height: 1px;
 	}
 
 	.connect-error {
 		font-size: 0.82rem;
 		color: #ffb0b0;
+		text-align: center;
 	}
 
-	.connect-btn {
-		width: 100%;
-		padding: 11px;
+	@media (max-width: 420px) {
+		.pin-digit {
+			width: 40px;
+			height: 52px;
+			font-size: 1.4rem;
+		}
+		.pin-pad { gap: 8px; }
 	}
 </style>

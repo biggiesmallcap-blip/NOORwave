@@ -532,6 +532,20 @@
 			? 'Export here after enrichment, commit `data/musicbrainz`, then pull and import on the other machine.'
 			: 'No portable snapshot is present yet. Export one here first, then commit and push it.'
 	);
+
+	// ─── Category rail ───────────────────────────────────────────────────
+	// Splits the previously stacked panels into focused pages. Each panel
+	// belongs to exactly one category; empty columns are hidden by CSS.
+	type SettingsCategory = 'sources' | 'discovery' | 'audio' | 'data' | 'account';
+	let activeCategory = $state<SettingsCategory>('sources');
+
+	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
+		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'TIDAL, MusicBrainz, ACRCloud' },
+		{ id: 'discovery', label: 'Discovery', icon: '✦', hint: 'Learned radio engine' },
+		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Runtime + DSP analysis' },
+		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
+		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
+	];
 </script>
 
 <svelte:head>
@@ -561,12 +575,31 @@
 		<MetricPair label="Output" value={playbackRuntime?.device_name ?? 'Waiting'} copy="Current playback target." />
 	</section>
 
+	<nav class="settings-rail" aria-label="Settings categories">
+		{#each settingsCategories as cat (cat.id)}
+			<button
+				type="button"
+				class="settings-rail-btn"
+				class:active={activeCategory === cat.id}
+				onclick={() => (activeCategory = cat.id)}
+				aria-pressed={activeCategory === cat.id}
+			>
+				<span class="settings-rail-icon" aria-hidden="true">{cat.icon}</span>
+				<span class="settings-rail-copy">
+					<strong>{cat.label}</strong>
+					<span class="settings-rail-hint">{cat.hint}</span>
+				</span>
+			</button>
+		{/each}
+	</nav>
+
 	<section class="settings-grid">
 		<div class="settings-main">
+			{#if activeCategory === 'account'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Access" title="Server token" subtitle="Every device needs this token to connect. Copy it to your phone or other devices." />
+				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Enter this 6-digit PIN on any new device to connect it to NOOR." />
 				<div class="token-row">
-					<code class="token-value">{tokenVisible ? serverToken : serverToken.slice(0, 8) + '••••••••••••••••••••••••••••••••••••••••••••••••••••••••'}</code>
+					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
 					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
 						{tokenVisible ? 'Hide' : 'Show'}
 					</button>
@@ -584,7 +617,9 @@
 					Regenerating disconnects all other devices — they'll need to re-enter the new token.
 				</p>
 			</section>
+			{/if}
 
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Sign in once, then NOOR can sync favorites, playlists, and playback-ready metadata." />
 
@@ -657,6 +692,9 @@
 				{/if}
 			</section>
 
+			{/if}
+
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Metadata" title="Run MusicBrainz enrichment" subtitle="Fill out genre coverage in the background so browsing, shuffle, and discovery have more signal." />
 
@@ -694,7 +732,9 @@
 					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
 				{/if}
 			</section>
+			{/if}
 
+			{#if activeCategory === 'discovery'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Track how much of the library the learned radio engine has covered, and refresh it when listening behavior changes." />
 
@@ -735,7 +775,9 @@
 					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')}>Full retrain</button>
 				</div>
 			</section>
+			{/if}
 
+			{#if activeCategory === 'data'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Transfer" title="Portable MusicBrainz snapshot" subtitle="Move enrichment between machines through the repo snapshot in `data/musicbrainz`." />
 
@@ -778,9 +820,11 @@
 					</button>
 				</div>
 			</section>
+			{/if}
 		</div>
 
 		<div class="settings-side">
+			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and output format." />
 				<div class="info-list">
@@ -808,7 +852,9 @@
 					<p class="runtime-error">{playbackRuntime.last_error}</p>
 				{/if}
 			</section>
+			{/if}
 
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned expansion beyond the current TIDAL workflow." />
 				<div class="roadmap-list">
@@ -822,7 +868,9 @@
 					</div>
 				</div>
 			</section>
+			{/if}
 
+			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="DSP" title="Audio Analysis" subtitle="Extract BPM, key, energy, and danceability from your library." />
 
@@ -862,7 +910,9 @@
 					</div>
 				</details>
 			</section>
+			{/if}
 
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Recognition" title="Sample Recognition (ACRCloud)" subtitle="Identify samples and covers in your library via ACRCloud." />
 
@@ -898,14 +948,15 @@
 					</div>
 				{/if}
 			</section>
+			{/if}
 		</div>
 	</section>
 </div>
 
 <style>
 	.settings-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr);
+		display: flex;
+		flex-direction: column;
 		gap: var(--space-4);
 	}
 
@@ -914,6 +965,75 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4);
+	}
+
+	.settings-main:empty,
+	.settings-side:empty {
+		display: none;
+	}
+
+	.settings-rail {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 10px;
+	}
+
+	.settings-rail-btn {
+		all: unset;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 12px 14px;
+		border-radius: var(--radius-sm);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: rgba(255, 255, 255, 0.02);
+		cursor: pointer;
+		transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
+	}
+
+	.settings-rail-btn:hover {
+		background: rgba(255, 255, 255, 0.05);
+		border-color: rgba(255, 255, 255, 0.12);
+	}
+
+	.settings-rail-btn.active {
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 14%, transparent);
+		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 45%, transparent);
+	}
+
+	.settings-rail-icon {
+		font-size: 1.25rem;
+		width: 32px;
+		height: 32px;
+		display: grid;
+		place-items: center;
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.04);
+		color: rgba(255, 255, 255, 0.82);
+	}
+
+	.settings-rail-btn.active .settings-rail-icon {
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 25%, transparent);
+		color: var(--text-primary);
+	}
+
+	.settings-rail-copy {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+	}
+
+	.settings-rail-copy strong {
+		font-size: 0.9rem;
+		color: var(--text-primary);
+	}
+
+	.settings-rail-hint {
+		font-size: 0.74rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.section-panel {

@@ -39,35 +39,10 @@ pub fn regenerate_server_token(conn: &Connection) -> Result<String> {
 
 fn generate_readable_token() -> String {
     use rand::RngCore;
-    #[rustfmt::skip]
-    const WORDS: &[&str] = &[
-        "acorn","amber","anchor","anvil","apple","arrow","atlas","alder",
-        "badge","bamboo","beacon","blade","bloom","bolt","bridge","birch",
-        "cedar","chalk","chime","cliff","cloak","cloud","coal","coral",
-        "crane","creek","crest","crown","crystal","dagger","dawn","delta",
-        "dome","dove","dune","eagle","echo","edge","elm","ember",
-        "fable","falcon","fern","field","flare","fleet","flint","flood",
-        "flute","forge","frost","gale","garnet","gate","glade","glass",
-        "globe","glow","gold","grain","grove","gulf","haze","hearth",
-        "heron","hill","holly","horn","hound","inlet","iron","ivory",
-        "jade","jasper","kite","knoll","lake","lance","lark","laurel",
-        "leaf","ledge","light","linen","lion","lotus","lunar","maple",
-        "marble","marsh","mesa","mint","mist","moon","moss","night",
-        "noble","north","oak","opal","orbit","otter","owl","pearl",
-        "pine","plum","pond","pool","quartz","raven","reed","ridge",
-        "river","rock","rose","ruby","rush","sage","sand","scout",
-        "seal","shadow","shore","silver","slate","snow","spark","spear",
-        "spruce","star","steel","stone","storm","stream","surge","swift",
-        "sword","thorn","tide","timber","torch","trail","trout","vault",
-        "vapor","vista","volt","wave","wheat","willow","wind","wolf",
-    ];
-    let mut bytes = [0u8; 5];
+    let mut bytes = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes
-        .iter()
-        .map(|&b| WORDS[b as usize % WORDS.len()])
-        .collect::<Vec<_>>()
-        .join("-")
+    let n = u32::from_le_bytes(bytes) % 1_000_000;
+    format!("{:06}", n)
 }
 
 
@@ -1279,7 +1254,7 @@ pub struct GenreCoOccurrence {
 /// `min_count` co-occurrences, sorted by Jaccard similarity.
 pub fn get_genre_co_occurrence(
     conn: &Connection,
-    days: i64,
+    _days: i64,
     _window_minutes: i64,
     min_count: i64,
 ) -> Result<Vec<GenreCoOccurrence>> {
@@ -2910,6 +2885,49 @@ pub fn get_audio_features_stats(conn: &Connection) -> Result<AudioFeaturesStats>
     })
 }
 
+/// Bulk-load DSP features for every analyzed track. Used by smart playlist evaluation
+/// so a single scan populates the evaluation context for all rules at once.
+pub fn get_all_audio_dsp_features(
+    conn: &Connection,
+) -> Result<Vec<(i64, Option<f64>, Option<String>, Option<String>, Option<f64>, Option<f64>, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, bpm, key_signature, camelot_key, energy, danceability, is_instrumental
+         FROM audio_dsp_features",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<i32>>(6)?.unwrap_or(0) != 0,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Track IDs that have at least one ACRCloud sample match.
+pub fn get_track_ids_with_acrcloud_match(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT track_id FROM acrcloud_results")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Track IDs that have a stored audio fingerprint.
+pub fn get_track_ids_with_fingerprint(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT track_id FROM audio_fingerprints")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub fn count_audio_dsp_features(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM audio_dsp_features", [], |row| row.get(0))
         .map_err(Into::into)
@@ -2962,14 +2980,191 @@ pub fn insert_fingerprint_hashes(conn: &Connection, track_id: i64, hashes: &[(u3
     if hashes.is_empty() {
         return Ok(());
     }
-    let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO fingerprint_hashes (hash, track_id, time_offset)
-         VALUES (?1, ?2, ?3)",
-    )?;
-    for (hash, time_offset) in hashes {
-        stmt.execute(params![*hash as i64, track_id, *time_offset])?;
+
+    // Wrap the whole payload in an explicit transaction; chunk inserts so a
+    // very large hash list doesn't hold a single statement open for too long.
+    const CHUNK: usize = 1000;
+    conn.execute_batch("BEGIN;")?;
+    let insert_result: Result<()> = (|| {
+        let mut stmt = conn.prepare(
+            "INSERT OR IGNORE INTO fingerprint_hashes (hash, track_id, time_offset)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for chunk in hashes.chunks(CHUNK) {
+            for (hash, time_offset) in chunk {
+                stmt.execute(params![*hash as i64, track_id, *time_offset])?;
+            }
+        }
+        Ok(())
+    })();
+
+    match insert_result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
     }
+}
+
+/// Run `PRAGMA optimize; ANALYZE fingerprint_hashes;` after a bulk fingerprint scan.
+/// Failures are logged but not fatal.
+pub fn optimize_fingerprint_hashes(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA optimize; ANALYZE fingerprint_hashes;")?;
     Ok(())
+}
+
+// ── Duplicate group helpers (fingerprint-driven dedup) ───────────────────────
+
+/// Find an existing duplicate_group that already contains BOTH `a` and `b` as members.
+pub fn find_duplicate_group_for_tracks(
+    conn: &Connection,
+    a: i64,
+    b: i64,
+) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT ma.group_id
+         FROM duplicate_members ma
+         JOIN duplicate_members mb ON mb.group_id = ma.group_id
+         WHERE ma.track_id = ?1 AND mb.track_id = ?2
+         LIMIT 1",
+        params![a, b],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Create a new empty duplicate_group and return its id.
+pub fn create_duplicate_group(conn: &Connection) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO duplicate_groups (status) VALUES ('pending')",
+        [],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert a member into a duplicate_group. Idempotent (ON CONFLICT IGNORE).
+pub fn add_duplicate_member(
+    conn: &Connection,
+    gid: i64,
+    tid: i64,
+    preferred: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO duplicate_members (group_id, track_id, is_preferred)
+         VALUES (?1, ?2, ?3)",
+        params![gid, tid, if preferred { 1 } else { 0 }],
+    )?;
+    Ok(())
+}
+
+/// Tag a duplicate_group with its source (e.g. 'fingerprint') and a confidence value.
+pub fn set_duplicate_group_source(
+    conn: &Connection,
+    gid: i64,
+    source: &str,
+    confidence: f64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE duplicate_groups SET source = ?2, confidence = ?3 WHERE id = ?1",
+        params![gid, source, confidence],
+    )?;
+    Ok(())
+}
+
+// ── Analysis quality & stale detection ───────────────────────────────────────
+
+/// Snapshot of DSP-analysis coverage across the library.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AudioFeaturesQuality {
+    pub total_tracks: i64,
+    pub analyzed: i64,
+    pub analysis_v1: i64,
+    pub analysis_stale: i64,
+    pub low_confidence_bpm: i64,
+    pub low_confidence_key: i64,
+    pub no_preview_url: i64,
+    pub fingerprinted: i64,
+}
+
+pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQuality> {
+    let total_tracks: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+        .unwrap_or(0);
+    let analyzed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audio_dsp_features", [], |r| r.get(0))
+        .unwrap_or(0);
+    let analysis_v1: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version = 'v1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let analysis_stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version != 'v1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let low_confidence_bpm: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audio_dsp_features WHERE bpm IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let low_confidence_key: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audio_dsp_features WHERE key_signature IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    // "No preview URL" = tracks we can't currently pull preview audio for.
+    // We treat tracks lacking a tidal_id AND file_path as having no preview source.
+    let no_preview_url: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks
+             WHERE tidal_id IS NULL
+               AND (file_path IS NULL OR file_path = '')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let fingerprinted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audio_fingerprints",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(AudioFeaturesQuality {
+        total_tracks,
+        analyzed,
+        analysis_v1,
+        analysis_stale,
+        low_confidence_bpm,
+        low_confidence_key,
+        no_preview_url,
+        fingerprinted,
+    })
+}
+
+/// Return the ids of all tracks whose stored analysis_version is not 'v1'
+/// (i.e. need to be re-analysed after an analysis-version bump).
+pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id FROM audio_dsp_features WHERE analysis_version != 'v1'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64, u32)>> {
