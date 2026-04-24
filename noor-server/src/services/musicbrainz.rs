@@ -112,8 +112,10 @@ pub fn write_genres(
     // Always mark as checked first so we never re-query this track.
     mark_checked(conn, track_id)?;
 
+    let genre_names = crate::genre::builder::collect_clear_genres(genre_names);
+
     let mut inserted = 0;
-    for name in genre_names {
+    for name in &genre_names {
         let normalized = name.trim().to_ascii_lowercase();
         let genre_id: Option<i64> = conn
             .query_row(

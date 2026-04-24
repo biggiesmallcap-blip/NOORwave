@@ -27,6 +27,7 @@ impl GenreAssignmentBuilder {
         resolution.canonical_name().map(str::to_string)
     }
 
+    #[allow(dead_code)]
     pub fn canonicalize_many<I, S>(&self, values: I) -> Option<Vec<String>>
     where
         I: IntoIterator<Item = S>,
@@ -56,6 +57,7 @@ pub fn embedded_builder() -> &'static GenreAssignmentBuilder {
     BUILDER.get_or_init(GenreAssignmentBuilder::from_embedded)
 }
 
+#[allow(dead_code)]
 pub fn normalize_genres<I, S>(values: I) -> Option<Vec<String>>
 where
     I: IntoIterator<Item = S>,

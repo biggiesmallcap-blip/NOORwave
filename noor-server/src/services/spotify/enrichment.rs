@@ -145,26 +145,25 @@ where
             }
         }
 
-        // Remove duplicates and insert
-        genres.sort();
-        genres.dedup();
+        let genres = crate::genre::builder::collect_clear_genres(genres);
 
         if !genres.is_empty() {
             let _ = state.read().await.db.with_conn(|conn| {
                 for genre in &genres {
-                    let slug = slugify(genre);
-                    let genre_id: i64 = conn.query_row(
-                        "INSERT OR IGNORE INTO genres (name, slug) VALUES (?1, ?2) RETURNING id",
-                        [genre, &slug],
-                        |row| row.get(0),
-                    ).or_else(|_| {
-                        conn.query_row("SELECT id FROM genres WHERE name = ?1", [genre], |row| row.get(0))
-                    })?;
+                    let genre_id: Option<i64> = conn
+                        .query_row(
+                            "SELECT id FROM genres WHERE name = ?1",
+                            [genre],
+                            |row| row.get(0),
+                        )
+                        .ok();
 
-                    conn.execute(
-                        "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence) VALUES (?1, ?2, 'spotify', 1.0)",
-                        [track_id, genre_id],
-                    )?;
+                    if let Some(id) = genre_id {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence) VALUES (?1, ?2, 'spotify', 1.0)",
+                            rusqlite::params![track_id, id],
+                        )?;
+                    }
                 }
                 Ok(())
             });
@@ -177,10 +176,4 @@ where
 
     info!("Spotify enrichment complete. Processed {} tracks.", processed);
     Ok(())
-}
-
-fn slugify(name: &str) -> String {
-    name.to_lowercase()
-        .replace(' ', "-")
-        .replace(&['/', '\\', ':', '*', '?', '"', '<', '>', '|'][..], "")
 }

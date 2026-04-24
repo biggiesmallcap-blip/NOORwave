@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::genre::builder::embedded_builder;
 
 pub struct GenreNormalizer;
