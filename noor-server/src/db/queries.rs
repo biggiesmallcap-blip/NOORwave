@@ -313,6 +313,39 @@ pub fn get_artists(
     Ok(artists)
 }
 
+pub fn get_artist_tidal_id(conn: &Connection, artist_id: i64) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare("SELECT tidal_id FROM artists WHERE id = ?1")?;
+    let tidal_id = stmt
+        .query_row(params![artist_id], |row| row.get::<_, Option<i64>>(0))
+        .optional()?
+        .flatten();
+    Ok(tidal_id)
+}
+
+pub fn get_known_album_tidal_ids(
+    conn: &Connection,
+    tidal_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    if tidal_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = placeholders(tidal_ids.len());
+    let sql = format!(
+        "SELECT tidal_id, id FROM albums WHERE tidal_id IN ({placeholders})"
+    );
+    let params = params_from_iter(tidal_ids.iter().copied());
+    let mut stmt = conn.prepare(&sql)?;
+    let mut map = HashMap::new();
+    let rows = stmt.query_map(params, |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (tidal_id, local_id) = row?;
+        map.insert(tidal_id, local_id);
+    }
+    Ok(map)
+}
+
 pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.artist_id, a.name as artist_name,

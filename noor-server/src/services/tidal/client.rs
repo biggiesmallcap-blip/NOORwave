@@ -291,6 +291,36 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
+    // ─── Artist Discography ────────────────────────────────
+
+    pub async fn get_artist_albums(
+        &self,
+        artist_id: i64,
+        limit: i32,
+        offset: i32,
+        filter: Option<&str>,
+    ) -> Result<TidalPaginatedResponse<TidalAlbum>> {
+        let filter_param = filter.map(|f| format!("&filter={f}")).unwrap_or_default();
+        let url = format!(
+            "{}/artists/{}/albums?countryCode={}&limit={}&offset={}{}",
+            TIDAL_API_URL, artist_id, self.country_code, limit, offset, filter_param
+        );
+        self.get_json(&url).await
+    }
+
+    pub async fn get_artist_top_tracks(
+        &self,
+        artist_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalPaginatedResponse<TidalTrack>> {
+        let url = format!(
+            "{}/artists/{}/toptracks?countryCode={}&limit={}&offset={}",
+            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+        );
+        self.get_json(&url).await
+    }
+
     // ─── Search ────────────────────────────────────────────
 
     pub async fn search_catalog(&self, query: &str, limit: i32) -> Result<TidalSearchCatalog> {

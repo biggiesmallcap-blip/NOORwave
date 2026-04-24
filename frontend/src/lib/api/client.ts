@@ -69,6 +69,31 @@ export interface Track {
 	samples_analyzed?: number | null;
 }
 
+export interface TidalDiscographyAlbum {
+	tidal_id: number;
+	local_id: number | null;
+	title: string;
+	artwork_url: string | null;
+	release_date: string | null;
+	release_type: string | null;
+	number_of_tracks: number | null;
+	artist_name: string;
+	in_library: boolean;
+}
+
+export interface TidalDiscographyTrack {
+	tidal_id: number;
+	title: string;
+	duration_ms: number;
+	artwork_url: string | null;
+	album_title: string | null;
+	album_tidal_id?: number | null;
+	track_number?: number | null;
+	disc_number?: number | null;
+	artist_name?: string | null;
+	artist_tidal_id?: number | null;
+}
+
 export interface Album {
 	id: number;
 	tidal_id: number | null;
@@ -670,6 +695,21 @@ export const api = {
 
 	getArtistTracks(id: number) {
 		return fetchApi<{ tracks: Track[] }>(`/api/artists/${id}/tracks`);
+	},
+
+	getArtistDiscography(id: number) {
+		return fetchApi<{
+			albums: TidalDiscographyAlbum[];
+			top_tracks: TidalDiscographyTrack[];
+			available: boolean;
+			reason?: string;
+		}>(`/api/artists/${id}/discography`);
+	},
+
+	getTidalAlbumTracks(tidalAlbumId: number) {
+		return fetchApi<{ tracks: TidalDiscographyTrack[] }>(
+			`/api/tidal/albums/${tidalAlbumId}/tracks`
+		);
 	},
 
 	getGenres() {

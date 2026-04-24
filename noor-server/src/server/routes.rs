@@ -235,6 +235,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/albums/{id}/tracks", get(get_album_tracks))
         .route("/api/artists", get(get_artists))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
+        .route("/api/artists/{id}/discography", get(get_artist_discography))
+        .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
         .route("/api/genres", get(get_genres))
         .route("/api/genres/heat", get(get_genre_heat))
         .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
@@ -506,6 +508,164 @@ async fn get_album_tracks(
             Ok(Json(json!({ "tracks": tracks })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn get_artist_discography(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tidal_artist_id = {
+        let s = state.read().await;
+        s.db
+            .with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))?
+    };
+
+    let Some(tidal_artist_id) = tidal_artist_id else {
+        return Ok(Json(json!({
+            "albums": [],
+            "top_tracks": [],
+            "available": false,
+            "reason": "artist_not_on_tidal"
+        })));
+    };
+
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+
+    let Some(tokens) = tokens else {
+        return Ok(Json(json!({
+            "albums": [],
+            "top_tracks": [],
+            "available": false,
+            "reason": "tidal_not_connected"
+        })));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+
+    let albums_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS"));
+    let eps_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("EPSANDSINGLES"));
+    let top_fut = client.get_artist_top_tracks(tidal_artist_id, 10, 0);
+
+    let (albums_res, eps_res, top_res) = tokio::join!(albums_fut, eps_fut, top_fut);
+
+    let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
+    if let Ok(r) = albums_res { all_albums.extend(r.items); }
+    if let Ok(r) = eps_res { all_albums.extend(r.items); }
+
+    let tidal_album_ids: Vec<i64> = all_albums.iter().map(|a| a.id).collect();
+    let known_map = {
+        let s = state.read().await;
+        s.db
+            .with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
+            .unwrap_or_default()
+    };
+
+    let albums_payload: Vec<Value> = all_albums
+        .into_iter()
+        .map(|a| {
+            let artwork = crate::services::tidal::client::TidalClient::get_artwork_url(&a.cover, 320);
+            let local_id = known_map.get(&a.id).copied();
+            json!({
+                "tidal_id": a.id,
+                "local_id": local_id,
+                "title": a.title,
+                "artwork_url": artwork,
+                "release_date": a.release_date,
+                "release_type": a.release_type,
+                "number_of_tracks": a.number_of_tracks,
+                "artist_name": a.artist.name,
+                "in_library": local_id.is_some()
+            })
+        })
+        .collect();
+
+    let top_tracks_payload: Vec<Value> = top_res
+        .map(|r| {
+            r.items
+                .into_iter()
+                .map(|t| {
+                    let artwork = t
+                        .album
+                        .as_ref()
+                        .and_then(|al| al.cover.as_ref())
+                        .map(|c| crate::services::tidal::client::TidalClient::get_artwork_url(&Some(c.clone()), 160))
+                        .flatten();
+                    json!({
+                        "tidal_id": t.id,
+                        "title": t.title,
+                        "duration_ms": t.duration * 1000,
+                        "artwork_url": artwork,
+                        "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                        "album_tidal_id": t.album.as_ref().map(|al| al.id),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(json!({
+        "albums": albums_payload,
+        "top_tracks": top_tracks_payload,
+        "available": true
+    })))
+}
+
+async fn get_tidal_album_tracks(
+    State(state): State<SharedState>,
+    Path(tidal_album_id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
+        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
+    })?;
+
+    let tracks: Vec<Value> = result
+        .items
+        .into_iter()
+        .map(|t| {
+            let artwork = t
+                .album
+                .as_ref()
+                .and_then(|al| al.cover.as_ref())
+                .map(|c| crate::services::tidal::client::TidalClient::get_artwork_url(&Some(c.clone()), 160))
+                .flatten();
+            json!({
+                "tidal_id": t.id,
+                "title": t.title,
+                "duration_ms": t.duration * 1000,
+                "track_number": t.track_number,
+                "disc_number": t.volume_number,
+                "artist_name": t.artist.name,
+                "artist_tidal_id": t.artist.id,
+                "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                "artwork_url": artwork,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "tracks": tracks })))
 }
 
 async fn get_genres(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {

@@ -36,6 +36,9 @@
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
+	import { wallpaperById } from '$lib/components/wallpaper/shaders';
+	import { wallpaper } from '$lib/stores/wallpaper';
 
 	let { children } = $props();
 
@@ -484,9 +487,18 @@
 	</div>
 {/if}
 
+{#if $wallpaper !== 'none'}
+	{@const w = wallpaperById($wallpaper)}
+	{#if w.shader}
+		<div class="wallpaper-layer" aria-hidden="true">
+			<ShaderWallpaper shader={w.shader} interactive={false} maxDpr={1.5} />
+		</div>
+	{/if}
+{/if}
+
 <ContextMenu />
 
-<div class="app-shell" class:mobile-player-active={mobilePlayerVisible}>
+<div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">N</span>
@@ -1106,7 +1118,16 @@
 </div>
 
 <style>
+	.wallpaper-layer {
+		position: fixed;
+		inset: 0;
+		z-index: 0;
+		pointer-events: none;
+	}
+
 	.app-shell {
+		position: relative;
+		z-index: 1;
 		height: 100dvh;
 		min-height: 100dvh;
 		width: 100%;
@@ -1119,6 +1140,16 @@
 			radial-gradient(circle at 90% 10%, var(--atlas-haze-b), transparent 28%),
 			radial-gradient(circle at 76% 86%, var(--atlas-haze-c), transparent 30%),
 			var(--atlas-bg);
+	}
+
+	.app-shell.has-wallpaper {
+		background: transparent;
+	}
+
+	.app-shell.has-wallpaper .sidebar,
+	.app-shell.has-wallpaper .now-playing-panel {
+		backdrop-filter: blur(18px) saturate(1.2);
+		-webkit-backdrop-filter: blur(18px) saturate(1.2);
 	}
 
 	.sidebar {

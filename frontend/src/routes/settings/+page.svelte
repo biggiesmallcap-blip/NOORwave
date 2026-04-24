@@ -43,6 +43,9 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
+	import { WALLPAPERS } from '$lib/components/wallpaper/shaders';
+	import { wallpaper, setWallpaper } from '$lib/stores/wallpaper';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -76,7 +79,7 @@
 	let tokenRegenError = $state('');
 
 	async function handleRegenerateToken() {
-		if (!confirm('Regenerating the token will disconnect all other devices until they re-enter the new token. Continue?')) return;
+		if (!confirm('Regenerating the PIN will disconnect all other devices until they re-enter the new PIN. Continue?')) return;
 		tokenRegenerating = true;
 		tokenRegenError = '';
 		try {
@@ -536,10 +539,11 @@
 	// ─── Category rail ───────────────────────────────────────────────────
 	// Splits the previously stacked panels into focused pages. Each panel
 	// belongs to exactly one category; empty columns are hidden by CSS.
-	type SettingsCategory = 'sources' | 'discovery' | 'audio' | 'data' | 'account';
-	let activeCategory = $state<SettingsCategory>('sources');
+	type SettingsCategory = 'appearance' | 'sources' | 'discovery' | 'audio' | 'data' | 'account';
+	let activeCategory = $state<SettingsCategory>('appearance');
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
+		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'TIDAL, MusicBrainz, ACRCloud' },
 		{ id: 'discovery', label: 'Discovery', icon: '✦', hint: 'Learned radio engine' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Runtime + DSP analysis' },
@@ -595,6 +599,38 @@
 
 	<section class="settings-grid">
 		<div class="settings-main">
+			{#if activeCategory === 'appearance'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Pick an animated shader for the app backdrop, or keep the default gradient. Move your cursor over any tile — they're interactive." />
+				<div class="wallpaper-grid">
+					{#each WALLPAPERS as option (option.id)}
+						<button
+							type="button"
+							class="wallpaper-tile"
+							class:active={$wallpaper === option.id}
+							onclick={() => setWallpaper(option.id)}
+							aria-pressed={$wallpaper === option.id}
+						>
+							<div class="wallpaper-preview">
+								{#if option.shader}
+									<ShaderWallpaper shader={option.shader} maxDpr={1} interactive={true} />
+								{:else}
+									<div class="wallpaper-preview-none"></div>
+								{/if}
+								{#if $wallpaper === option.id}
+									<span class="wallpaper-active-badge">Active</span>
+								{/if}
+							</div>
+							<div class="wallpaper-meta">
+								<strong>{option.label}</strong>
+								<span>{option.sublabel}</span>
+							</div>
+						</button>
+					{/each}
+				</div>
+			</section>
+			{/if}
+
 			{#if activeCategory === 'account'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Enter this 6-digit PIN on any new device to connect it to NOOR." />
@@ -609,12 +645,12 @@
 				</div>
 				<div class="action-row">
 					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
-						{tokenRegenerating ? 'Regenerating…' : 'Regenerate token'}
+						{tokenRegenerating ? 'Regenerating…' : 'Regenerate PIN'}
 					</button>
 					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
 				</div>
 				<p class="page-copy" style="font-size:0.8rem">
-					Regenerating disconnects all other devices — they'll need to re-enter the new token.
+					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
 				</p>
 			</section>
 			{/if}
@@ -1034,6 +1070,84 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.wallpaper-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+		gap: 14px;
+	}
+
+	.wallpaper-tile {
+		all: unset;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 6px;
+		border-radius: 14px;
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: rgba(255, 255, 255, 0.02);
+		cursor: pointer;
+		transition: border-color 180ms ease, background 180ms ease;
+	}
+
+	.wallpaper-tile:hover {
+		border-color: rgba(255, 255, 255, 0.16);
+		background: rgba(255, 255, 255, 0.04);
+	}
+
+	.wallpaper-tile.active {
+		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 65%, transparent);
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 10%, transparent);
+	}
+
+	.wallpaper-preview {
+		position: relative;
+		aspect-ratio: 16 / 10;
+		border-radius: 10px;
+		overflow: hidden;
+		background: #0a0a0c;
+	}
+
+	.wallpaper-preview-none {
+		position: absolute;
+		inset: 0;
+		background:
+			radial-gradient(circle at 20% 18%, rgba(151, 126, 255, 0.4), transparent 50%),
+			radial-gradient(circle at 80% 28%, rgba(120, 160, 255, 0.3), transparent 45%),
+			radial-gradient(circle at 60% 80%, rgba(255, 120, 180, 0.25), transparent 55%),
+			#0a0a0c;
+	}
+
+	.wallpaper-active-badge {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		padding: 3px 8px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 90%, transparent);
+		color: white;
+		font-size: 0.68rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.wallpaper-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 4px 6px 6px;
+	}
+
+	.wallpaper-meta strong {
+		font-size: 0.92rem;
+		color: var(--text-primary);
+	}
+
+	.wallpaper-meta span {
+		font-size: 0.76rem;
+		color: var(--text-secondary);
 	}
 
 	.section-panel {
