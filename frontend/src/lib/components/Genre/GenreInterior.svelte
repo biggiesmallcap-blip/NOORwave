@@ -209,7 +209,8 @@
 			await api.replacePlaybackQueue(tracks.map(t => t.id));
 			await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
-			await playTrackNow(tracks[0].id);
+			const startIndex = Math.floor(Math.random() * tracks.length);
+			await playTrackNow(tracks[startIndex].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}

@@ -1,6 +1,7 @@
 use crate::AppEvent;
 use crate::SharedState;
 use crate::db::queries;
+use futures::StreamExt;
 use rusqlite::OptionalExtension;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,37 +11,160 @@ use tracing::info;
 
 use super::AnalysisConfig;
 
-/// Run a preview scan: query tracks missing DSP features, analyze in batches.
+/// Run a preview scan: resolve TIDAL stream URLs at LOW quality, download the
+/// first ~30 s of each track, decode, and run DSP analysis.
 ///
-/// Since TIDAL tracks don't have local audio files, this scan cannot actually
-/// decode audio — it emits progress and marks tracks as scanned.
-/// Real analysis happens via the passive tap during playback.
+/// Uses "LOW" quality (AAC 96 kbps) to minimise bandwidth — ~360 KB per 30 s.
+/// Downloads are capped at 2 MB so we never pull a full lossless album.
 pub async fn run_preview_scan(
     state: SharedState,
     _analysis_tx: mpsc::UnboundedSender<super::AnalysisJob>,
     cancel: Arc<AtomicBool>,
 ) {
-    info!("Starting preview audio analysis scan.");
+    info!("Starting preview audio analysis scan via TIDAL streams (LOW quality).");
+
+    // Grab auth tokens and HTTP client up-front.
+    let (tokens, http_client) = {
+        let s = state.read().await;
+        (s.tidal_tokens.clone(), s.http_client.clone())
+    };
+
+    let Some(tokens) = tokens else {
+        tracing::warn!("No TIDAL tokens available — cannot run preview scan");
+        let _ = state
+            .read()
+            .await
+            .event_tx
+            .send(AppEvent::AudioAnalysisComplete { analyzed: 0 });
+        return;
+    };
 
     let tracks = state
         .read()
         .await
         .db
-        .with_conn(|conn| queries::get_tracks_missing_dsp_features(conn, 1000))
+        .with_conn(|conn| queries::get_tracks_missing_dsp_features(conn, i64::MAX))
         .unwrap_or_default();
 
     let total = tracks.len() as u32;
     let mut analyzed: u32 = 0;
+    let mut skipped: u32 = 0;
 
-    for _track in tracks {
+    info!("Preview scan: {} tracks queued", total);
+
+    for track in tracks {
         if cancel.load(Ordering::Relaxed) {
             info!("Preview scan cancelled at {}/{}", analyzed, total);
             break;
         }
 
-        // We don't have local audio samples for preview scan (TIDAL tracks).
-        // Skip for now — real analysis happens via the passive playback tap.
-        analyzed += 1;
+        // Only TIDAL tracks have a resolvable stream URL.
+        let Some(tidal_id) = track.tidal_id else {
+            skipped += 1;
+            continue;
+        };
+
+        // ── 1. Resolve stream URL ─────────────────────────────────────────────
+        let stream_info = match crate::services::tidal::stream::get_stream_url(
+            &http_client,
+            &tokens.access_token,
+            tidal_id,
+            "LOW", // 96 kbps AAC — sufficient for BPM/key/energy analysis
+        )
+        .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!(
+                    track_id = track.id,
+                    tidal_id,
+                    "Could not resolve stream: {}",
+                    e
+                );
+                if e.is_session_expired() {
+                    tracing::error!("TIDAL session expired — aborting preview scan");
+                    break;
+                }
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // ── 2. Download audio bytes (cap at 2 MB) ────────────────────────────
+        // 2 MB ≈ 166 s of 96 kbps AAC — far more than the 30 s we decode.
+        const MAX_BYTES: usize = 2 * 1024 * 1024;
+
+        let audio_bytes = match http_client.get(&stream_info.url).send().await {
+            Ok(resp) => {
+                let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(c) => {
+                            let remaining = MAX_BYTES.saturating_sub(buf.len());
+                            if c.len() <= remaining {
+                                buf.extend_from_slice(&c);
+                            } else {
+                                buf.extend_from_slice(&c[..remaining]);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(track_id = track.id, "Stream read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                buf
+            }
+            Err(e) => {
+                tracing::warn!(track_id = track.id, "Failed to fetch audio: {}", e);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        if audio_bytes.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        // ── 3. Decode to mono f32 (max 30 s) ─────────────────────────────────
+        let cursor = std::io::Cursor::new(audio_bytes);
+        let decode_result = tokio::task::spawn_blocking(move || {
+            decode_source_to_mono_f32(Box::new(cursor), 30)
+        })
+        .await;
+
+        let (samples, sample_rate) = match decode_result {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                tracing::warn!(track_id = track.id, "Decode failed: {}", e);
+                skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(track_id = track.id, "Decode task panicked: {}", e);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // ── 4. Analyze and save ───────────────────────────────────────────────
+        let db = state.read().await.db.clone();
+        let tid = track.id;
+        let saved = tokio::task::spawn_blocking(move || {
+            super::engine::analyze_and_save(&db, &samples, sample_rate, "preview", tid)
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if saved.is_some() {
+            analyzed += 1;
+        } else {
+            skipped += 1;
+        }
 
         let _ = state
             .read()
@@ -52,7 +176,8 @@ pub async fn run_preview_scan(
                 mode: "preview".to_string(),
             });
 
-        sleep(Duration::from_millis(100)).await;
+        // Rate-limit: avoid hammering TIDAL's API.
+        sleep(Duration::from_millis(200)).await;
     }
 
     let _ = state
@@ -61,7 +186,10 @@ pub async fn run_preview_scan(
         .event_tx
         .send(AppEvent::AudioAnalysisComplete { analyzed });
 
-    info!("Preview scan complete. Analyzed {} tracks.", analyzed);
+    info!(
+        "Preview scan complete. Analyzed {}/{} tracks ({} skipped).",
+        analyzed, total, skipped
+    );
 }
 
 /// Run a local folder scan (for local files).

@@ -62,6 +62,12 @@
 	--signal-text: rgba(224, 230, 255, 0.7);
 	--family-accent: var(--accent);
 	--heat-intensity: 0.58;
+
+	/* Mobile chrome dimensions */
+	--mob-top-bar-h: 50px;
+	--mob-mini-player-h: 68px;
+	--mob-tab-bar-h: 56px;
+	--mob-bottom-chrome: calc(var(--mob-mini-player-h) + var(--mob-tab-bar-h));
 }
 
 /* ── Light theme ──────────────────────────────────────── */

@@ -174,19 +174,18 @@ pub async fn start_training(
     })?;
 
     let metrics_json = serde_json::to_string(&output.metrics)?;
-    let coverage_ok = output
-        .metrics
-        .get("coverage_ratio")
-        .copied()
-        .unwrap_or(0.0)
-        >= 0.85;
-    let recall_ok = output
-        .metrics
-        .get("recall_at_10")
-        .copied()
-        .unwrap_or(0.0)
-        >= 0.15;
-    let should_activate = coverage_ok && recall_ok;
+    let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
+    let recall = output.metrics.get("recall_at_10").copied().unwrap_or(0.0);
+    // Thresholds scale with library maturity:
+    // - Fresh library (no listen history): coverage ≥ 0.5 is enough to activate
+    //   since all signal comes from DSP + metadata, not behavioral co-occurrence.
+    // - Established library: full 85% coverage + 15% recall required.
+    let has_listen_history = output.metrics.get("sequence_count").copied().unwrap_or(0.0) > 0.0;
+    let should_activate = if has_listen_history {
+        coverage >= 0.85 && recall >= 0.15
+    } else {
+        coverage >= 0.5
+    };
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
         queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
@@ -422,7 +421,7 @@ fn build_trainer_input(conn: &rusqlite::Connection) -> Result<TrainerInput> {
         seed: 13,
         dimension: MODEL_DIMENSION as usize,
         window_size: 8,
-        min_count: 2,
+        min_count: 1,
         top_k: MODEL_TOP_K,
         tracks,
         sequences: vec![

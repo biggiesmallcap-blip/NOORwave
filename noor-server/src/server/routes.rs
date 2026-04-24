@@ -348,6 +348,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
         // Audio analysis
         .route("/api/library/analyze/audio-features", post(start_audio_analysis))
+        .route("/api/library/analyze/stop", post(stop_audio_analysis))
         .route("/api/library/analyze/status", get(get_audio_analysis_status))
         .route("/api/tracks/{id}/audio-features", get(get_track_audio_features))
         .route("/api/library/audio-features/stats", get(get_audio_features_stats))
@@ -361,7 +362,32 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/picks", get(get_home_picks))
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
+        // Server auth management
+        .route("/api/server/token", get(get_server_token_handler))
+        .route("/api/server/token/regenerate", post(regenerate_server_token_handler))
         .with_state(state)
+}
+
+async fn get_server_token_handler(
+    State(state): State<SharedState>,
+) -> Json<Value> {
+    let s = state.read().await;
+    Json(json!({ "token": s.server_token }))
+}
+
+async fn regenerate_server_token_handler(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let new_token = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| crate::db::queries::regenerate_server_token(conn))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    {
+        let mut s = state.write().await;
+        s.server_token = new_token.clone();
+    }
+    Ok(Json(json!({ "token": new_token })))
 }
 
 async fn get_tracks(
@@ -1607,51 +1633,317 @@ async fn get_discovery_space(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoverySpaceRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _mode = payload.mode.unwrap_or_else(|| "radio".to_string());
+    let mode = payload.mode.unwrap_or_else(|| "radio".to_string());
     let limit = payload.limit.unwrap_or(60).max(1).min(200);
     let seed_id = payload.seed_track_id.unwrap_or(0);
+    let prompt = payload.prompt.as_deref().unwrap_or("").trim().to_string();
 
     let state = state.read().await;
 
-    // Reuse radio/neighbor engine if we have a seed
-    let tracks = if seed_id > 0 {
+    #[derive(Debug)]
+    struct SpaceTrack {
+        track_id: i64,
+        title: String,
+        artist_name: String,
+        album_title: Option<String>,
+        artwork_url: Option<String>,
+        duration_ms: Option<i64>,
+        similarity_score: f64,
+        source: String,
+        energy: Option<f64>,
+        danceability: Option<f64>,
+        bpm: Option<f64>,
+        key_signature: Option<String>,
+        camelot_key: Option<String>,
+    }
+
+    // ── 1. Decide track set based on inputs ──────────────────────────────────
+    //
+    //   prompt set   → rank_candidates (text/genre/affinity scoring)
+    //   seed_id set  → radio_from_neighbors (embedding graph)
+    //   neither      → most-played fallback
+
+    let mut space_tracks: Vec<SpaceTrack> = if !prompt.is_empty() {
+        // Prompt path: run the full discovery scoring engine against the library
+        let p = prompt.clone();
+        let lim = limit;
+        state.db.with_conn(move |conn| {
+            let request = discovery_engine::DiscoveryPreviewRequest {
+                prompt: p.clone(),
+                mode: "mood".to_string(),
+                services: vec!["tidal".to_string()],
+                limit: lim as usize,
+            };
+            let context = discovery_engine::DiscoveryContext {
+                overview: queries::get_analytics_overview(conn)?,
+                behavior: queries::get_behavior_metrics(conn)?,
+                recent_listens: queries::get_recent_listens(conn, 12)?,
+                top_artists: queries::get_top_artists_by_history(conn, 6)?,
+                top_genres: queries::get_top_genres_by_history(conn, 6)?,
+                track_genres: queries::get_track_genre_paths(conn)?,
+            };
+            let candidates = queries::get_discovery_candidate_tracks(conn, lim * 4)?;
+            let preview = discovery_engine::build_preview(&request, &context, &candidates);
+            Ok(preview.results.into_iter().map(|r| SpaceTrack {
+                track_id: r.track_id,
+                title: r.title,
+                artist_name: r.artist_name.as_deref().unwrap_or("").to_string(),
+                album_title: r.album_title,
+                artwork_url: r.artwork_url,
+                duration_ms: r.duration_ms,
+                similarity_score: (r.score as f64 / 99.0).clamp(0.0, 1.0),
+                source: r.service,
+                energy: None,
+                danceability: None,
+                bpm: None,
+                key_signature: None,
+                camelot_key: None,
+            }).collect::<Vec<_>>())
+        }).unwrap_or_default()
+    } else if seed_id > 0 {
         let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
-        let exclude_ids: Vec<i64> = vec![];
-        discovery_learning::radio_from_neighbors(&state.db, seed_id, &exclude_ids, limit, creativity)
+        discovery_learning::radio_from_neighbors(&state.db, seed_id, &[], limit, creativity)
             .ok()
             .flatten()
             .unwrap_or_default()
+            .into_iter()
+            .map(|t| SpaceTrack {
+                track_id: t.track_id,
+                title: t.title,
+                artist_name: t.artist_name.unwrap_or_default(),
+                album_title: t.album_title,
+                artwork_url: t.artwork_url,
+                duration_ms: t.duration_ms,
+                similarity_score: t.similarity_score,
+                source: "tidal".to_string(),
+                energy: None,
+                danceability: None,
+                bpm: None,
+                key_signature: None,
+                camelot_key: None,
+            })
+            .collect()
     } else {
         vec![]
     };
 
-    // Map to discovery space response shape with placeholder positions
-    let track_nodes: Vec<Value> = tracks
+    // ── 2. Fill remainder from most-played library tracks ────────────────────
+    let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+    let remaining = limit - space_tracks.len() as i64;
+    if remaining > 0 {
+        let fallback = state.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.source
+                 FROM tracks t
+                 LEFT JOIN artists a ON t.artist_id = a.id
+                 LEFT JOIN albums al ON t.album_id = al.id
+                 ORDER BY t.play_count DESC, t.date_added DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            let mut result = Vec::new();
+            for r in rows { result.push(r?); }
+            Ok(result)
+        }).unwrap_or_default();
+
+        for (id, title, artist, album, artwork, dur, src) in fallback {
+            if !seeded_ids.contains(&id) {
+                space_tracks.push(SpaceTrack {
+                    track_id: id,
+                    title,
+                    artist_name: artist.unwrap_or_default(),
+                    album_title: album,
+                    artwork_url: artwork,
+                    duration_ms: dur,
+                    similarity_score: 0.5,
+                    source: src.unwrap_or_else(|| "tidal".to_string()),
+                    energy: None,
+                    danceability: None,
+                    bpm: None,
+                    key_signature: None,
+                    camelot_key: None,
+                });
+            }
+        }
+        space_tracks.truncate(limit as usize);
+    }
+
+    // ── 3. Fetch DSP features for all collected track IDs ────────────────────
+    if !space_tracks.is_empty() {
+        let ids_csv: String = space_tracks
+            .iter()
+            .map(|t| t.track_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let dsp_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>)> =
+            state.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key
+                     FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for r in rows {
+                    let (id, energy, dance, bpm, key, camelot) = r?;
+                    map.insert(id, (energy, dance, bpm, key, camelot));
+                }
+                Ok(map)
+            })
+            .unwrap_or_default();
+
+        for t in &mut space_tracks {
+            if let Some((energy, dance, bpm, key, camelot)) = dsp_map.get(&t.track_id) {
+                t.energy = *energy;
+                t.danceability = *dance;
+                t.bpm = *bpm;
+                t.key_signature = key.clone();
+                t.camelot_key = camelot.clone();
+            }
+        }
+    }
+
+    // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
+    // Only emit edges between nodes that are both present in this response.
+    let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+    let edges: Vec<Value> = if track_id_set.len() > 1 {
+        let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        state.db.with_conn(|conn| {
+            let sql = format!(
+                "SELECT n.track_id, n.neighbor_track_id, n.score,
+                        n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
+                 FROM track_neighbors n
+                 WHERE n.track_id IN ({ids_csv}) AND n.neighbor_track_id IN ({ids_csv})
+                 ORDER BY n.score DESC
+                 LIMIT 300"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            let mut result = Vec::new();
+            for r in rows { result.push(r?); }
+            Ok(result)
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json)| {
+            // Infer edge type from the dominant signal in reason_json tags
+            let tags: Vec<String> = reason_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                .collect();
+
+            let edge_type = if tags.iter().any(|t| t == "genre_branch") && audio > 0.4 {
+                "harmonic"
+            } else if behavioral > 0.4 {
+                "behavioural"
+            } else if tags.iter().any(|t| t == "artist_affinity") {
+                "genre"
+            } else if metadata > 0.3 {
+                "bpm_match"
+            } else {
+                "behavioural"
+            };
+
+            json!({
+                "from_id": from_id,
+                "to_id": to_id,
+                "type": edge_type,
+                "weight": score.clamp(0.0, 1.0),
+            })
+        })
+        .collect()
+    } else {
+        vec![]
+    };
+
+    // ── 5. Build spatial layout ──────────────────────────────────────────────
+    let total = space_tracks.len().max(1);
+    let track_nodes: Vec<Value> = space_tracks
         .into_iter()
         .enumerate()
         .map(|(i, t)| {
-            let angle = (i as f64 / limit as f64) * std::f64::consts::PI * 2.0;
-            let radius = 100.0 + (i as f64 * 37.0).sin() * 150.0;
+            let (x, y) = match mode.as_str() {
+                "energy_arc" => {
+                    let energy = t.energy.unwrap_or(0.5);
+                    let jitter_x = (i as f64 * 17.3).sin() * 60.0;
+                    let jitter_y = (i as f64 * 31.7).cos() * 200.0;
+                    ((energy - 0.5) * 800.0 + jitter_x, jitter_y)
+                }
+                "harmonic" => {
+                    if let Some(ref ck) = t.camelot_key {
+                        let num = ck.chars().take_while(|c| c.is_ascii_digit())
+                            .collect::<String>().parse::<f64>().unwrap_or(1.0);
+                        let is_a = ck.contains('A');
+                        let angle = ((num - 1.0) / 12.0) * std::f64::consts::PI * 2.0
+                            + if is_a { 0.0 } else { 0.26 };
+                        let r = 200.0 + (i as f64 * 23.0).sin() * 80.0;
+                        (angle.cos() * r, angle.sin() * r)
+                    } else {
+                        let angle = (i as f64 / total as f64) * std::f64::consts::PI * 2.0;
+                        (angle.cos() * 350.0, angle.sin() * 350.0)
+                    }
+                }
+                _ => {
+                    let angle = (i as f64 / total as f64) * std::f64::consts::PI * 2.0;
+                    let r = 80.0 + (1.0 - t.similarity_score) * 300.0
+                        + (i as f64 * 37.0).sin() * 50.0;
+                    (angle.cos() * r, angle.sin() * r)
+                }
+            };
+            let node_radius = 5.0 + t.similarity_score * 20.0 + t.energy.unwrap_or(0.5) * 5.0;
             json!({
-                "track_id": t.get("track_id").and_then(|v| v.as_i64()).unwrap_or(0),
-                "title": t.get("title").and_then(|v| v.as_str()).unwrap_or(""),
-                "artist_name": t.get("artist_name").and_then(|v| v.as_str()).unwrap_or(""),
-                "album_title": t.get("album_title").and_then(|v| v.as_str()),
-                "artwork_url": t.get("artwork_url").and_then(|v| v.as_str()),
-                "duration_ms": t.get("duration_ms").and_then(|v| v.as_i64()),
-                "similarity_score": t.get("similarity_score").and_then(|v| v.as_f64()).unwrap_or(0.5),
-                "energy": t.get("energy").and_then(|v| v.as_f64()),
-                "danceability": t.get("danceability").and_then(|v| v.as_f64()),
-                "bpm": t.get("bpm").and_then(|v| v.as_f64()),
-                "key_signature": t.get("key_signature").and_then(|v| v.as_str()),
-                "camelot_key": t.get("camelot_key").and_then(|v| v.as_str()),
+                "track_id": t.track_id,
+                "title": t.title,
+                "artist_name": t.artist_name,
+                "album_title": t.album_title,
+                "artwork_url": t.artwork_url,
+                "duration_ms": t.duration_ms,
+                "similarity_score": t.similarity_score,
+                "energy": t.energy,
+                "danceability": t.danceability,
+                "bpm": t.bpm,
+                "key_signature": t.key_signature,
+                "camelot_key": t.camelot_key,
                 "is_in_library": true,
-                "source": "tidal",
-                "x": angle.cos() * radius,
-                "y": angle.sin() * radius,
+                "source": t.source,
+                "x": x,
+                "y": y,
                 "vx": 0.0,
                 "vy": 0.0,
-                "radius": 8.0 + (t.get("similarity_score").and_then(|v| v.as_f64()).unwrap_or(0.5)) * 24.0,
+                "radius": node_radius,
                 "opacity": 0.0,
             })
         })
@@ -1660,7 +1952,7 @@ async fn get_discovery_space(
     Ok(Json(json!({
         "tracks": track_nodes,
         "artists": [],
-        "edges": [],
+        "edges": edges,
     })))
 }
 
@@ -1700,12 +1992,13 @@ async fn get_discovery_artists(
     }).unwrap_or_default();
 
     let max_count = artists.iter().map(|(_, _, c)| *c).max().unwrap_or(1) as f64;
+    let artist_count = artists.len();
 
     let artist_nodes: Vec<Value> = artists
         .into_iter()
         .enumerate()
         .map(|(i, (id, name, count))| {
-            let angle = (i as f64 / artists.len().max(1) as f64) * std::f64::consts::PI * 2.0;
+            let angle = (i as f64 / artist_count.max(1) as f64) * std::f64::consts::PI * 2.0;
             let radius = 80.0 + (i as f64 * 43.0).sin() * 120.0;
             let affinity = if max_count > 0.0 { count as f64 / max_count } else { 0.0 };
             json!({
@@ -5768,14 +6061,18 @@ async fn start_audio_analysis(
 
     let mode = payload.mode.clone();
     let local_path = payload.local_path.clone();
-    let (analysis_tx, cancel) = {
+    let (analysis_tx, cancel, running) = {
         let s = state.read().await;
-        (s.analysis_tx.clone(), s.audio_analysis_cancel.clone())
+        (s.analysis_tx.clone(), s.audio_analysis_cancel.clone(), s.audio_analysis_running.clone())
     };
 
     let Some(tx) = analysis_tx else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+
+    // Reset cancel flag and mark as running before spawning
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    running.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mode_for_spawn = mode.clone();
     tokio::spawn(async move {
@@ -5784,15 +6081,32 @@ async fn start_audio_analysis(
                 scanner::run_preview_scan(state, tx, cancel).await;
             }
             "local" => {
-                if let Some(path) = local_path {
-                    scanner::run_local_scan(state, tx, cancel, std::path::PathBuf::from(path), Default::default()).await;
+                if let Some(raw) = local_path {
+                    // Reject traversal sequences and resolve to a real absolute path
+                    let candidate = std::path::PathBuf::from(&raw);
+                    let resolved = match std::fs::canonicalize(&candidate) {
+                        Ok(p) if p.is_dir() => p,
+                        _ => {
+                            tracing::warn!("local scan rejected invalid path: {:?}", raw);
+                            return;
+                        }
+                    };
+                    scanner::run_local_scan(state, tx, cancel, resolved, Default::default()).await;
                 }
             }
             _ => {}
         }
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
     });
 
     Ok(Json(json!({ "status": "started", "mode": mode })))
+}
+
+async fn stop_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    s.audio_analysis_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    s.audio_analysis_running.store(false, std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(json!({ "status": "stopped" })))
 }
 
 async fn get_audio_analysis_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {

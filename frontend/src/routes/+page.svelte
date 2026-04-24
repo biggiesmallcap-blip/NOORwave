@@ -185,6 +185,26 @@
 			</div>
 		</section>
 
+		<!-- Mobile quick-nav (hidden on desktop) -->
+		<nav class="mobile-quick-nav" aria-label="Quick navigation">
+			<a href="/library" class="quick-nav-tile">
+				<span class="quick-nav-icon">♫</span>
+				<span class="quick-nav-label">Library</span>
+			</a>
+			<a href="/discover" class="quick-nav-tile">
+				<span class="quick-nav-icon">✦</span>
+				<span class="quick-nav-label">Discover</span>
+			</a>
+			<a href="/genres" class="quick-nav-tile">
+				<span class="quick-nav-icon">◈</span>
+				<span class="quick-nav-label">Genres</span>
+			</a>
+			<a href="/playlists" class="quick-nav-tile">
+				<span class="quick-nav-icon">☰</span>
+				<span class="quick-nav-label">Playlists</span>
+			</a>
+		</nav>
+
 		{#if $currentTrack}
 			<section class="glass-panel now-playing-bar">
 				<div class="np-left">
@@ -822,14 +842,68 @@
 		color: var(--text-muted);
 	}
 
+	/* ── Mobile quick-nav (hidden on desktop) ── */
+	.mobile-quick-nav {
+		display: none;
+	}
+
 	/* Responsive */
 	@media (max-width: 1180px) {
+		.home-page { gap: var(--space-4); }
+		.page-header { padding-top: 0; }
+
+		/* System badges and now-playing bar are shown in mobile chrome */
+		.system-badges { display: none; }
+		.now-playing-bar { display: none; }
+
+		.discovery-section { gap: 12px; }
+		.section-title-group h2 { font-size: 1rem; }
+
 		.track-list {
 			grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
 		}
 
 		.news-grid {
 			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		}
+
+		/* Show quick-nav tiles */
+		.mobile-quick-nav {
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 10px;
+		}
+
+		.quick-nav-tile {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 6px;
+			padding: 14px 8px;
+			border-radius: var(--radius-sm);
+			background: color-mix(in srgb, var(--instrument-surface) 60%, transparent);
+			border: 1px solid var(--border-subtle);
+			text-decoration: none;
+			color: var(--text-secondary);
+			transition: background var(--motion-fast), color var(--motion-fast);
+			-webkit-tap-highlight-color: transparent;
+		}
+
+		.quick-nav-tile:active {
+			background: var(--accent-soft);
+			color: var(--accent-strong);
+		}
+
+		.quick-nav-icon {
+			font-size: 1.3rem;
+			line-height: 1;
+		}
+
+		.quick-nav-label {
+			font-size: 0.72rem;
+			font-weight: 600;
+			letter-spacing: 0.02em;
 		}
 	}
 
@@ -843,11 +917,26 @@
 		}
 
 		.release-card {
-			flex: 0 0 160px;
+			flex: 0 0 150px;
 		}
 
 		.article-card {
-			flex: 0 0 280px;
+			flex: 0 0 260px;
+		}
+
+		.track-art {
+			width: 42px;
+			height: 42px;
+		}
+
+		.genre-pills {
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			padding-bottom: 4px;
+		}
+
+		.genre-pill {
+			flex-shrink: 0;
 		}
 	}
 </style>

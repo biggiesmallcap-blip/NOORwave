@@ -55,7 +55,21 @@ export async function startAnalysis(mode: 'preview' | 'local', localPath?: strin
 }
 
 export async function stopAnalysis() {
+	try {
+		await api.stopAudioAnalysis();
+	} catch (e) {
+		console.error('Failed to stop analysis:', e);
+	}
 	audioAnalysis.update((s) => ({ ...s, isRunning: false }));
+}
+
+export async function syncAnalysisStatus() {
+	try {
+		const { running, analyzed } = await api.getAudioAnalysisStatus();
+		audioAnalysis.update((s) => ({ ...s, isRunning: running, analyzed }));
+	} catch (e) {
+		console.error('Failed to sync analysis status:', e);
+	}
 }
 
 export async function clearAllAnalysis() {

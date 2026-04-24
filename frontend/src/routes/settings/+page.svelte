@@ -4,6 +4,8 @@
 	import {
 		api,
 		getApiBase,
+		getStoredToken,
+		setStoredToken,
 		type DiscoveryStatus,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
@@ -25,7 +27,8 @@
 		startAnalysis,
 		stopAnalysis,
 		clearAllAnalysis,
-		loadAudioStats
+		loadAudioStats,
+		syncAnalysisStatus
 	} from '$lib/stores/audio_analysis';
 	import {
 		acrCloud,
@@ -63,6 +66,35 @@
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
+
+	// Access token — initialised in onMount (localStorage unavailable during SSR)
+	let serverToken = $state('');
+	let tokenVisible = $state(false);
+	let tokenCopied = $state(false);
+	let tokenRegenerating = $state(false);
+	let tokenRegenError = $state('');
+
+	async function handleRegenerateToken() {
+		if (!confirm('Regenerating the token will disconnect all other devices until they re-enter the new token. Continue?')) return;
+		tokenRegenerating = true;
+		tokenRegenError = '';
+		try {
+			const { token } = await api.regenerateServerToken();
+			serverToken = token;
+			setStoredToken(token);
+		} catch {
+			tokenRegenError = 'Failed to regenerate token.';
+		} finally {
+			tokenRegenerating = false;
+		}
+	}
+
+	function copyToken() {
+		navigator.clipboard.writeText(serverToken).then(() => {
+			tokenCopied = true;
+			setTimeout(() => (tokenCopied = false), 2000);
+		});
+	}
 
 	// ACRCloud form state
 	let acrKey = $state('');
@@ -138,7 +170,9 @@
 		void loadPortableSnapshot();
 		void loadDiscoveryStatus();
 		void loadAudioStats();
+		void syncAnalysisStatus();
 		void loadAcrCloudStatus();
+		serverToken = getStoredToken() ?? '';
 
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
@@ -529,6 +563,28 @@
 	<section class="settings-grid">
 		<div class="settings-main">
 			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Access" title="Server token" subtitle="Every device needs this token to connect. Copy it to your phone or other devices." />
+				<div class="token-row">
+					<code class="token-value">{tokenVisible ? serverToken : serverToken.slice(0, 8) + '••••••••••••••••••••••••••••••••••••••••••••••••••••••••'}</code>
+					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
+						{tokenVisible ? 'Hide' : 'Show'}
+					</button>
+					<button class="btn btn-glass btn-sm" onclick={copyToken}>
+						{tokenCopied ? 'Copied!' : 'Copy'}
+					</button>
+				</div>
+				<div class="action-row">
+					<button class="btn btn-glass" disabled={tokenRegenerating} onclick={() => void handleRegenerateToken()}>
+						{tokenRegenerating ? 'Regenerating…' : 'Regenerate token'}
+					</button>
+					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
+				</div>
+				<p class="page-copy" style="font-size:0.8rem">
+					Regenerating disconnects all other devices — they'll need to re-enter the new token.
+				</p>
+			</section>
+
+			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Sign in once, then NOOR can sync favorites, playlists, and playback-ready metadata." />
 
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
@@ -787,7 +843,7 @@
 
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={() => void startAnalysis('preview')} disabled={$audioAnalysis.isRunning}>
-						{$audioAnalysis.isRunning ? 'Analyzing…' : 'Analyze Library (TIDAL)'}
+						{$audioAnalysis.isRunning ? 'Analyzing…' : 'Analyze Library'}
 					</button>
 					<button class="btn btn-glass" onclick={stopAnalysis} disabled={!$audioAnalysis.isRunning}>Stop</button>
 					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
@@ -796,12 +852,12 @@
 				<details class="advanced-details">
 					<summary>Advanced Settings</summary>
 					<div class="setting-row">
-						<label>Max duration per track (seconds)</label>
-						<input type="number" value="30" min="10" max="120" />
+						<label for="dsp-max-duration">Max duration per track (seconds)</label>
+						<input id="dsp-max-duration" type="number" value="30" min="10" max="120" />
 					</div>
 					<div class="setting-row">
-						<label>Re-analyze interval (days)</label>
-						<input type="number" value="30" min="1" max="365" />
+						<label for="dsp-reanalyze-interval">Re-analyze interval (days)</label>
+						<input id="dsp-reanalyze-interval" type="number" value="30" min="1" max="365" />
 					</div>
 				</details>
 			</section>
@@ -1143,5 +1199,31 @@
 	.acrcloud-daily-count {
 		font-size: 0.82rem;
 		color: var(--text-secondary);
+	}
+
+	.token-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.token-value {
+		flex: 1;
+		min-width: 0;
+		padding: 8px 12px;
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		font-family: var(--font-mono);
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+		word-break: break-all;
+		white-space: pre-wrap;
+	}
+
+	.field-error {
+		font-size: 0.82rem;
+		color: #ffb0b0;
 	}
 </style>

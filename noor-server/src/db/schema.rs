@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_008,
     MIGRATION_009,
     MIGRATION_010,
+    MIGRATION_011,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -505,6 +506,13 @@ CREATE INDEX IF NOT EXISTS idx_acrcloud_track ON acrcloud_results(track_id);
 const MIGRATION_010: &str = r#"
 ALTER TABLE duplicate_groups ADD COLUMN source TEXT;
 ALTER TABLE duplicate_groups ADD COLUMN confidence REAL;
+"#;
+
+const MIGRATION_011: &str = r#"
+CREATE TABLE IF NOT EXISTS server_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

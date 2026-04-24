@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { getApiBase } from '$lib/api/client';
+import { getApiBase, getStoredToken } from '$lib/api/client';
 import { refreshPlaybackState } from '$lib/stores/player';
 import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
@@ -33,8 +33,11 @@ function getWebSocketUrl(): string {
 	const apiUrl = new URL(getApiBase());
 	apiUrl.protocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
 	apiUrl.pathname = '/ws';
-	apiUrl.search = '';
 	apiUrl.hash = '';
+	const token = getStoredToken();
+	if (token) {
+		apiUrl.searchParams.set('token', token);
+	}
 	return apiUrl.toString();
 }
 

@@ -51,6 +51,8 @@ pub struct AppState {
     pub audio_analysis_running: Arc<AtomicBool>,
     pub acrcloud_scan_running: Arc<AtomicBool>,
     pub acrcloud_daily_count: Arc<std::sync::atomic::AtomicU32>,
+    /// Shared bearer token for network auth
+    pub server_token: String,
 }
 
 /// Events broadcast across the application
@@ -160,6 +162,14 @@ async fn main() -> Result<()> {
         })
         .unwrap_or(None);
 
+    // Generate or load the server access token
+    let server_token = db
+        .with_conn(|conn| db::queries::ensure_server_token(conn))?;
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("  NOOR access token: {}", server_token);
+    info!("  Copy this into the app on any new device.");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
     let http_client = reqwest::Client::new();
     let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(http_client.clone()));
 
@@ -191,6 +201,7 @@ async fn main() -> Result<()> {
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
         acrcloud_scan_running: Arc::new(AtomicBool::new(false)),
         acrcloud_daily_count: Arc::new(AtomicU32::new(0)),
+        server_token,
     }));
 
     // Check for auto-sync daily services and trigger sync if needed

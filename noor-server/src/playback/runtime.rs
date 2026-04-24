@@ -1057,15 +1057,20 @@ struct StreamPipe {
     read_pos: usize,
     rx: Mutex<std::sync::mpsc::Receiver<Option<Vec<u8>>>>,
     eof: bool,
+    // Content-Length from the HTTP response, if the CDN sent it.
+    // Returned by byte_len() so Symphonia's MSS can translate SeekFrom::End
+    // into SeekFrom::Start without giving up with "stream is not seekable".
+    known_length: Option<u64>,
 }
 
 impl StreamPipe {
-    fn new(rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>) -> Self {
+    fn new(rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>, known_length: Option<u64>) -> Self {
         Self {
             data: Vec::new(),
             read_pos: 0,
             rx: Mutex::new(rx),
             eof: false,
+            known_length,
         }
     }
 
@@ -1147,7 +1152,11 @@ impl symphonia::core::io::MediaSource for StreamPipe {
         true
     }
     fn byte_len(&self) -> Option<u64> {
-        None
+        if self.eof {
+            Some(self.data.len() as u64)
+        } else {
+            self.known_length
+        }
     }
 }
 
@@ -1186,6 +1195,10 @@ fn decode_and_buffer_job(
             // ── Step 2: stream bytes from the CDN in a background thread ─────────────────────
             // Using a bounded channel limits peak memory: at most 32 in-flight chunks of ~64KB
             // each ≈ 2 MB of download head room while the decoder works.
+            // A separate one-shot channel carries the Content-Length from the response headers
+            // so StreamPipe can report byte_len() correctly, allowing Symphonia's MSS to
+            // translate SeekFrom::End into an absolute position rather than failing.
+            let (len_tx, len_rx) = std::sync::mpsc::sync_channel::<Option<u64>>(1);
             let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(32);
             let http = config.http_client.clone();
             let url = stream_info.url.clone();
@@ -1205,6 +1218,9 @@ fn decode_and_buffer_job(
                                 .context("download request failed")?
                                 .error_for_status()
                                 .context("download returned error status")?;
+                            // Send Content-Length before any chunks so the decode thread
+                            // can populate StreamPipe::known_length immediately.
+                            let _ = len_tx.send(response.content_length());
                             let mut stream = response.bytes_stream();
                             while let Some(chunk) = stream.next().await {
                                 let bytes = chunk.context("chunk read error")?;
@@ -1217,16 +1233,45 @@ fn decode_and_buffer_job(
                         .await;
                         if let Err(err) = result {
                             warn!("TIDAL stream download error: {err:?}");
+                            // Ensure len_rx unblocks if the request failed before sending length.
+                            let _ = len_tx.try_send(None);
                         }
                         let _ = chunk_tx.send(None); // signal EOF regardless
                     });
                 })
                 .context("failed to spawn download thread")?;
 
+            // Block briefly until response headers arrive so we know Content-Length.
+            let content_length = len_rx.recv().ok().flatten();
+
             // ── Step 3: probe + decode incrementally, writing to the buffer each packet ──────
-            let pipe = StreamPipe::new(chunk_rx);
+            let pipe = StreamPipe::new(chunk_rx, content_length);
             let mss = MediaSourceStream::new(Box::new(pipe), Default::default());
-            let hint = Hint::new();
+
+            // Give Symphonia a format hint from the Tidal manifest MIME type so it
+            // can skip the seeking probes it uses for format auto-detection.
+            // Without this, the MP4/AAC reader tries SeekFrom::End to locate the
+            // moov atom, which can fail on a live streaming pipe.
+            let mut hint = Hint::new();
+            let codec_lower = stream_info.codec.to_ascii_lowercase();
+            let ext = if codec_lower.contains("flac") {
+                Some("flac")
+            } else if codec_lower.contains("mp3") || codec_lower.contains("mpeg") {
+                Some("mp3")
+            } else if codec_lower.contains("aac")
+                || codec_lower.contains("mp4")
+                || codec_lower.contains("m4a")
+            {
+                Some("m4a")
+            } else if codec_lower.contains("ogg") {
+                Some("ogg")
+            } else {
+                None
+            };
+            if let Some(ext) = ext {
+                hint.with_extension(ext);
+            }
+
             let probed = symphonia::default::get_probe()
                 .format(
                     &hint,

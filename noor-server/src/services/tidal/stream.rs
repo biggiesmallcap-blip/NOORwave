@@ -125,7 +125,6 @@ fn session_expired_body(body: &str) -> bool {
         || lower.contains("user does not have a valid session")
         || lower.contains("session expired")
         || lower.contains("\"substatus\":6001")
-        || lower.contains("unauthorized")
 }
 
 /// Resolve a TIDAL stream using a pre-built request description.
@@ -162,10 +161,7 @@ pub async fn resolve_stream(
     tracing::debug!("TIDAL playback response: {}", raw);
 
     if !status.is_success() {
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-            || session_expired_body(&raw)
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
                 message: format!("TIDAL returned {status}: {raw}"),
             });

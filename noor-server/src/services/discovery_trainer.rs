@@ -149,6 +149,32 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         let normalized = genre.to_lowercase().replace('>', " ");
         tokens.extend(normalized.split_whitespace().map(String::from));
     }
+    // DSP features — bucketed so nearby values share tokens
+    if let Some(bpm) = track.bpm {
+        // 5-BPM buckets (e.g. bpm_140, bpm_145). Also add a coarser 10-BPM token
+        // so tracks at 139 and 141 still share "bpm_140".
+        tokens.push(format!("bpm_{}", ((bpm / 5.0).round() as i64) * 5));
+        tokens.push(format!("bpm10_{}", ((bpm / 10.0).round() as i64) * 10));
+    }
+    if let Some(energy) = track.energy {
+        // 10 buckets: 0.0-0.1 = e0, 0.1-0.2 = e1, …
+        tokens.push(format!("energy_{}", (energy * 10.0).floor() as i64));
+    }
+    if let Some(ref key) = track.camelot_key {
+        tokens.push(format!("key_{}", key.to_lowercase()));
+        // Also add the adjacent keys on the Camelot wheel so harmonically compatible
+        // tracks cluster together (e.g. 8B is compatible with 7B, 9B, 8A).
+        if let Some(num_end) = key.find(|c: char| c.is_alphabetic()) {
+            if let Ok(n) = key[..num_end].parse::<i64>() {
+                let suffix = &key[num_end..].to_lowercase();
+                tokens.push(format!("key_{}{}", ((n - 2).rem_euclid(12) + 1), suffix));
+                tokens.push(format!("key_{}{}", (n % 12) + 1, suffix));
+                // Relative major/minor (same number, opposite A/B)
+                let alt = if suffix == "a" { "b" } else { "a" };
+                tokens.push(format!("key_{}{}", n, alt));
+            }
+        }
+    }
     tokens
 }
 
@@ -263,24 +289,29 @@ fn fuse_embeddings(
     tracks
         .iter()
         .filter_map(|track| {
-            let b = behavioral.get(&track.track_id)?;
+            let b = behavioral.get(&track.track_id);
             let a = audio.get(&track.track_id).map(|f| &f.vector);
             let playlist = track.playlist_memberships;
             let plays = track.play_count;
 
-            let vec = match a {
-                Some(a_vec) => {
+            let vec: Vec<f64> = match (b, a) {
+                (Some(b_vec), Some(a_vec)) => {
                     let (b_weight, a_weight) = if plays < 2 && playlist == 0 {
                         (0.35, 0.65)
                     } else {
                         (0.7, 0.3)
                     };
-                    b.iter()
+                    b_vec
+                        .iter()
                         .zip(a_vec.iter())
                         .map(|(bv, av)| bv * b_weight + av * a_weight)
                         .collect()
                 }
-                None => b.clone(),
+                (Some(b_vec), None) => b_vec.clone(),
+                // No behavioral signal — fall back to pure audio proxy so the
+                // track still appears in the graph instead of being silently dropped.
+                (None, Some(a_vec)) => a_vec.clone(),
+                (None, None) => return None,
             };
             Some((track.track_id, normalize(&vec).0))
         })
@@ -295,6 +326,9 @@ struct TrackMeta {
     artist_lower: Option<String>,
     album: Option<String>,
     genre_tokens: HashSet<String>,
+    bpm: Option<f64>,
+    energy: Option<f64>,
+    camelot_key: Option<String>,
 }
 
 fn similarity_neighbors(
@@ -320,13 +354,16 @@ fn similarity_neighbors(
             let album = t.album_title.clone();
             let genre_tokens: HashSet<String> = metadata_tokens(t)
                 .into_iter()
-                .filter(|tok| !tok.starts_with("dur_"))
+                .filter(|tok| !tok.starts_with("dur_") && !tok.starts_with("bpm") && !tok.starts_with("energy_") && !tok.starts_with("key_"))
                 .collect();
             TrackMeta {
                 track_id: t.track_id,
                 artist_lower,
                 album,
                 genre_tokens,
+                bpm: t.bpm,
+                energy: t.energy,
+                camelot_key: t.camelot_key.clone(),
             }
         })
         .collect();
@@ -429,6 +466,53 @@ fn similarity_neighbors(
                     if cur == oth {
                         metadata_score += 0.12;
                         reason_tags.push("album_context".to_string());
+                    }
+                }
+
+                // BPM proximity — scaled bonus: 0.15 within 3 BPM, 0.08 within 8 BPM
+                if let (Some(a_bpm), Some(b_bpm)) = (meta.bpm, other_meta.bpm) {
+                    let diff = (a_bpm - b_bpm).abs();
+                    if diff <= 3.0 {
+                        metadata_score += 0.15;
+                        reason_tags.push("bpm_match".to_string());
+                    } else if diff <= 8.0 {
+                        metadata_score += 0.08;
+                        reason_tags.push("bpm_match".to_string());
+                    }
+                }
+
+                // Camelot key compatibility
+                if let (Some(a_key), Some(b_key)) = (&meta.camelot_key, &other_meta.camelot_key) {
+                    if a_key == b_key {
+                        metadata_score += 0.14;
+                        reason_tags.push("harmonic_match".to_string());
+                    } else {
+                        // Adjacent keys on the wheel (±1 number, same or relative suffix)
+                        let parse_key = |k: &str| -> Option<(i64, String)> {
+                            let num_end = k.find(|c: char| c.is_alphabetic())?;
+                            let n = k[..num_end].parse::<i64>().ok()?;
+                            Some((n, k[num_end..].to_string()))
+                        };
+                        if let (Some((an, asuf)), Some((bn, bsuf))) = (parse_key(a_key), parse_key(b_key)) {
+                            let num_diff = (an - bn).abs();
+                            let wheel_diff = num_diff.min(12 - num_diff);
+                            if wheel_diff <= 1 && asuf == bsuf {
+                                metadata_score += 0.10;
+                                reason_tags.push("harmonic_match".to_string());
+                            } else if an == bn && asuf != bsuf {
+                                metadata_score += 0.08;
+                                reason_tags.push("harmonic_match".to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Energy proximity
+                if let (Some(ae), Some(be)) = (meta.energy, other_meta.energy) {
+                    let diff = (ae - be).abs();
+                    if diff <= 0.1 {
+                        metadata_score += 0.08;
+                        reason_tags.push("energy_match".to_string());
                     }
                 }
 
@@ -594,6 +678,8 @@ pub fn run_discovery_training(
     );
     metrics.insert("playable_tracks".to_string(), playable);
     metrics.insert("embedded_tracks".to_string(), embedded);
+    let total_sequences: usize = input.sequences.iter().map(|g| g.sequences.len()).sum();
+    metrics.insert("sequence_count".to_string(), total_sequences as f64);
     metrics.insert(
         "neighbor_tracks".to_string(),
         neighbors

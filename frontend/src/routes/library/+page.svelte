@@ -597,7 +597,12 @@
 	});
 </script>
 
-<svelte:window onclick={closeMenus} />
+<svelte:window onclick={closeMenus} onkeydown={(e) => {
+	if (e.key === 'Escape') {
+		if (expandedAlbumId !== null) { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }
+		if (expandedTrackId !== null) { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }
+	}
+}} />
 
 <div class="page-shell library animate-in">
 	<section class="library-hero glass-panel">
@@ -748,66 +753,9 @@
 	{#if $isLoading}
 		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
 
-	{:else if activeTab === 'albums' && expandedAlbumId !== null && detailAlbum}
-		<!-- Album Detail Panel -->
-		<div class="detail-panel glass-panel">
-			<div class="detail-header">
-				<button class="detail-back" onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}>← Back</button>
-				<div class="detail-album-hero">
-					{#if detailAlbum.artwork_url}
-						<img class="detail-album-art" src={detailAlbum.artwork_url} alt={detailAlbum.title} />
-					{:else}
-						<div class="detail-album-art placeholder">♫</div>
-					{/if}
-					<div class="detail-album-info">
-						<h2>{detailAlbum.title}</h2>
-						<p class="detail-artist">{detailAlbum.artist_name ?? 'Unknown Artist'}</p>
-						<div class="detail-meta-row">
-							{#if detailAlbum.year}<span class="detail-chip">{detailAlbum.year}</span>{/if}
-							{#if detailAlbum.release_type}<span class="detail-chip">{detailAlbum.release_type}</span>{/if}
-							{#if detailAlbum.track_count}<span class="detail-chip">{detailAlbum.track_count} tracks</span>{/if}
-							<span class="detail-chip">{detailAlbum.source}</span>
-						</div>
-					</div>
-				</div>
-				<div class="detail-actions">
-					<button class="btn btn-primary" onclick={(e) => void playAlbum(detailAlbum!.id, e)}>▶ Play All</button>
-					<button class="btn btn-glass" onclick={(e) => void queueAlbum(detailAlbum!.id, e)}>+ Queue All</button>
-				</div>
-			</div>
-
-			{#if detailAlbumLoading}
-				<div class="detail-loading"><div class="spinner spinner-sm"></div><span>Loading tracks…</span></div>
-			{:else if detailAlbumTracksList.length === 0}
-				<EmptyState title="No tracks synced yet" copy="Run a TIDAL sync to populate this album's tracks." />
-			{:else}
-				<div class="detail-track-list">
-					{#each detailAlbumTracksList as track, i (track.id)}
-						<div
-							class="detail-track-row"
-							class:playing={$currentTrack?.id === track.id}
-							role="button"
-							tabindex="0"
-							onclick={() => void playTrackNow(track.id)}
-							onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-						>
-							<span class="detail-track-num">{i + 1}</span>
-							{#if track.artwork_url}
-								<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
-							{/if}
-							<span class="detail-track-title">{track.title}</span>
-							<span class="detail-track-artist">{track.artist_name ?? ''}</span>
-							<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
-							<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
-						</div>
-					{/each}
-				</div>
-			{/if}
-		</div>
-
 	{:else if activeTab === 'albums'}
 		<!-- Album Grid -->
-		<div class="album-grid">
+		<div class="album-grid" class:album-list={$viewMode === 'list'}>
 			{#each visibleAlbums as album (album.id)}
 				<div
 					class="album-card"
@@ -980,115 +928,6 @@
 				{/if}
 			{/if}
 		{/if}
-
-	{:else if activeTab === 'tracks' && expandedTrackId !== null && detailTrack}
-		<!-- Track Detail Panel -->
-		<div class="detail-panel glass-panel">
-			<div class="detail-header">
-				<button class="detail-back" onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}>← Back</button>
-				<div class="detail-track-hero">
-					{#if detailTrack.artwork_url}
-						<img class="detail-track-art-large" src={detailTrack.artwork_url} alt="" />
-					{:else}
-						<div class="detail-track-art-large placeholder">♫</div>
-					{/if}
-					<div class="detail-track-info">
-						<h2>{detailTrack.title}</h2>
-						<p class="detail-artist">{detailTrack.artist_name ?? 'Unknown Artist'}</p>
-						{#if detailTrack.album_title}<p class="detail-album-name">{detailTrack.album_title}</p>{/if}
-						<div class="detail-meta-row">
-							{#if detailTrack.best_quality}
-								<span class="quality-badge {getQualityClass(detailTrack.best_quality)}">{detailTrack.best_quality.replace(/_/g, ' ')}</span>
-							{/if}
-							{#if detailTrack.fidelity_score > 0}<span class="detail-chip">Fidelity: {detailTrack.fidelity_score}</span>{/if}
-							<span class="detail-chip">{detailTrack.source}</span>
-						</div>
-					</div>
-				</div>
-				<div class="detail-actions">
-					<button class="btn btn-primary" onclick={() => void playTrackNow(detailTrack!.id)}>▶ Play</button>
-					<button class="btn btn-glass" onclick={() => void addTrackToQueue(detailTrack!.id)}>+ Queue</button>
-					<button class="btn btn-glass" onclick={() => { selectTrackIds([detailTrack!.id]); }}>Select</button>
-				</div>
-			</div>
-
-			<!-- Track metadata grid -->
-			<div class="detail-meta-grid">
-				{#if detailTrack.isrc}
-					<div class="meta-block">
-						<span class="meta-label">ISRC</span>
-						<span class="meta-value">{detailTrack.isrc}</span>
-					</div>
-				{/if}
-				{#if detailTrack.date_added}
-					<div class="meta-block">
-						<span class="meta-label">Date Added</span>
-						<span class="meta-value">{new Date(detailTrack.date_added).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
-					</div>
-				{/if}
-				<div class="meta-block">
-					<span class="meta-label">Duration</span>
-					<span class="meta-value">{formatDuration(detailTrack.duration_ms)}</span>
-				</div>
-				{#if detailTrack.disc_number && detailTrack.disc_number > 1}
-					<div class="meta-block">
-						<span class="meta-label">Disc</span>
-						<span class="meta-value">{detailTrack.disc_number}</span>
-					</div>
-				{/if}
-				{#if detailTrack.track_number}
-					<div class="meta-block">
-						<span class="meta-label">Track No.</span>
-						<span class="meta-value">{detailTrack.track_number}</span>
-					</div>
-				{/if}
-				<div class="meta-block">
-					<span class="meta-label">Play Count</span>
-					<span class="meta-value">{detailTrack.play_count}</span>
-				</div>
-				{#if detailTrack.last_played_at}
-					<div class="meta-block">
-						<span class="meta-label">Last Played</span>
-						<span class="meta-value">{new Date(detailTrack.last_played_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
-					</div>
-				{/if}
-				{#if detailTrack.tidal_id}
-					<div class="meta-block">
-						<span class="meta-label">TIDAL ID</span>
-						<span class="meta-value">{detailTrack.tidal_id}</span>
-					</div>
-				{/if}
-			</div>
-
-			<!-- Album track list if available -->
-			{#if detailTrack.album_id && detailAlbumTracks.length > 0}
-				<div class="detail-album-tracks">
-					<h3>From this album</h3>
-					<div class="detail-track-list">
-						{#each detailAlbumTracks as track, i (track.id)}
-							<div
-								class="detail-track-row"
-								class:playing={$currentTrack?.id === track.id}
-								class:active={track.id === detailTrack!.id}
-								role="button"
-								tabindex="0"
-								onclick={() => void playTrackNow(track.id)}
-								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-							>
-								<span class="detail-track-num">{i + 1}</span>
-								{#if track.artwork_url}
-									<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
-								{/if}
-								<span class="detail-track-title">{track.title}</span>
-								<span class="detail-track-artist">{track.artist_name ?? ''}</span>
-								<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
-								<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-		</div>
 
 	{:else if activeTab === 'tracks'}
 		<!-- Track List -->
@@ -1320,6 +1159,186 @@
 		<div bind:this={infiniteSentinel} class="infinite-sentinel" aria-hidden="true"></div>
 	{/if}
 </div>
+
+<!-- ─── Album Detail Modal ─────────────────────── -->
+{#if expandedAlbumId !== null && detailAlbum}
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div
+		class="modal-backdrop"
+		onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}
+	>
+		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={detailAlbum.title}>
+			<div class="modal-topbar">
+				<button class="modal-close" aria-label="Close" onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}>✕</button>
+			</div>
+
+			<div class="detail-album-hero">
+				{#if detailAlbum.artwork_url}
+					<img class="detail-album-art" src={detailAlbum.artwork_url} alt={detailAlbum.title} />
+				{:else}
+					<div class="detail-album-art placeholder">♫</div>
+				{/if}
+				<div class="detail-album-info">
+					<h2>{detailAlbum.title}</h2>
+					<p class="detail-artist">{detailAlbum.artist_name ?? 'Unknown Artist'}</p>
+					<div class="detail-meta-row">
+						{#if detailAlbum.year}<span class="detail-chip">{detailAlbum.year}</span>{/if}
+						{#if detailAlbum.release_type}<span class="detail-chip">{detailAlbum.release_type}</span>{/if}
+						{#if detailAlbum.track_count}<span class="detail-chip">{detailAlbum.track_count} tracks</span>{/if}
+						<span class="detail-chip">{detailAlbum.source}</span>
+					</div>
+					<div class="detail-actions">
+						<button class="btn btn-primary" onclick={(e) => void playAlbum(detailAlbum!.id, e)}>▶ Play All</button>
+						<button class="btn btn-glass" onclick={(e) => void queueAlbum(detailAlbum!.id, e)}>+ Queue All</button>
+					</div>
+				</div>
+			</div>
+
+			{#if detailAlbumLoading}
+				<div class="detail-loading"><div class="spinner spinner-sm"></div><span>Loading tracks…</span></div>
+			{:else if detailAlbumTracksList.length === 0}
+				<EmptyState title="No tracks synced yet" copy="Run a TIDAL sync to populate this album's tracks." />
+			{:else}
+				<div class="detail-track-list">
+					{#each detailAlbumTracksList as track, i (track.id)}
+						<div
+							class="detail-track-row"
+							class:playing={$currentTrack?.id === track.id}
+							role="button"
+							tabindex="0"
+							onclick={() => void playTrackNow(track.id)}
+							onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+						>
+							<span class="detail-track-num">{i + 1}</span>
+							{#if track.artwork_url}
+								<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
+							{/if}
+							<span class="detail-track-title">{track.title}</span>
+							<span class="detail-track-artist">{track.artist_name ?? ''}</span>
+							<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
+							<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	</div>
+{/if}
+
+<!-- ─── Track Detail Modal ─────────────────────── -->
+{#if expandedTrackId !== null && detailTrack}
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div
+		class="modal-backdrop"
+		onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}
+	>
+		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={detailTrack.title}>
+			<div class="modal-topbar">
+				<button class="modal-close" aria-label="Close" onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}>✕</button>
+			</div>
+
+			<div class="detail-track-hero">
+				{#if detailTrack.artwork_url}
+					<img class="detail-track-art-large" src={detailTrack.artwork_url} alt="" />
+				{:else}
+					<div class="detail-track-art-large placeholder">♫</div>
+				{/if}
+				<div class="detail-track-info">
+					<h2>{detailTrack.title}</h2>
+					<p class="detail-artist">{detailTrack.artist_name ?? 'Unknown Artist'}</p>
+					{#if detailTrack.album_title}<p class="detail-album-name">{detailTrack.album_title}</p>{/if}
+					<div class="detail-meta-row">
+						{#if detailTrack.best_quality}
+							<span class="quality-badge {getQualityClass(detailTrack.best_quality)}">{detailTrack.best_quality.replace(/_/g, ' ')}</span>
+						{/if}
+						{#if detailTrack.fidelity_score > 0}<span class="detail-chip">Fidelity: {detailTrack.fidelity_score}</span>{/if}
+						<span class="detail-chip">{detailTrack.source}</span>
+					</div>
+					<div class="detail-actions">
+						<button class="btn btn-primary" onclick={() => void playTrackNow(detailTrack!.id)}>▶ Play</button>
+						<button class="btn btn-glass" onclick={() => void addTrackToQueue(detailTrack!.id)}>+ Queue</button>
+						<button class="btn btn-glass" onclick={() => { selectTrackIds([detailTrack!.id]); }}>Select</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="detail-meta-grid">
+				{#if detailTrack.isrc}
+					<div class="meta-block">
+						<span class="meta-label">ISRC</span>
+						<span class="meta-value">{detailTrack.isrc}</span>
+					</div>
+				{/if}
+				{#if detailTrack.date_added}
+					<div class="meta-block">
+						<span class="meta-label">Date Added</span>
+						<span class="meta-value">{new Date(detailTrack.date_added).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+					</div>
+				{/if}
+				<div class="meta-block">
+					<span class="meta-label">Duration</span>
+					<span class="meta-value">{formatDuration(detailTrack.duration_ms)}</span>
+				</div>
+				{#if detailTrack.disc_number && detailTrack.disc_number > 1}
+					<div class="meta-block">
+						<span class="meta-label">Disc</span>
+						<span class="meta-value">{detailTrack.disc_number}</span>
+					</div>
+				{/if}
+				{#if detailTrack.track_number}
+					<div class="meta-block">
+						<span class="meta-label">Track No.</span>
+						<span class="meta-value">{detailTrack.track_number}</span>
+					</div>
+				{/if}
+				<div class="meta-block">
+					<span class="meta-label">Play Count</span>
+					<span class="meta-value">{detailTrack.play_count}</span>
+				</div>
+				{#if detailTrack.last_played_at}
+					<div class="meta-block">
+						<span class="meta-label">Last Played</span>
+						<span class="meta-value">{new Date(detailTrack.last_played_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+					</div>
+				{/if}
+				{#if detailTrack.tidal_id}
+					<div class="meta-block">
+						<span class="meta-label">TIDAL ID</span>
+						<span class="meta-value">{detailTrack.tidal_id}</span>
+					</div>
+				{/if}
+			</div>
+
+			{#if detailTrack.album_id && detailAlbumTracks.length > 0}
+				<div class="detail-album-tracks">
+					<h3>From this album</h3>
+					<div class="detail-track-list">
+						{#each detailAlbumTracks as track, i (track.id)}
+							<div
+								class="detail-track-row"
+								class:playing={$currentTrack?.id === track.id}
+								class:active={track.id === detailTrack!.id}
+								role="button"
+								tabindex="0"
+								onclick={() => void playTrackNow(track.id)}
+								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+							>
+								<span class="detail-track-num">{i + 1}</span>
+								{#if track.artwork_url}
+									<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
+								{/if}
+								<span class="detail-track-title">{track.title}</span>
+								<span class="detail-track-artist">{track.artist_name ?? ''}</span>
+								<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
+								<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+	</div>
+{/if}
 
 <style>
 	.library {
@@ -2032,6 +2051,70 @@
 		}
 	}
 
+	/* ─── Modal Overlay ─────────────────── */
+
+	:global(.modal-backdrop) {
+		position: fixed;
+		inset: 0;
+		z-index: 200;
+		background: rgba(0, 0, 0, 0.6);
+		backdrop-filter: blur(6px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 24px;
+		animation: backdrop-in 180ms ease both;
+	}
+
+	@keyframes backdrop-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+
+	:global(.modal-panel) {
+		width: 100%;
+		max-width: 720px;
+		max-height: 86vh;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 20px;
+		padding: 24px;
+		border-radius: var(--radius-lg);
+		animation: modal-pop 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		scrollbar-width: thin;
+	}
+
+	@keyframes modal-pop {
+		from { opacity: 0; transform: scale(0.96) translateY(10px); }
+		to { opacity: 1; transform: scale(1) translateY(0); }
+	}
+
+	:global(.modal-topbar) {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	:global(.modal-close) {
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		color: var(--text-secondary);
+		font-size: 0.9rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: all var(--motion-fast);
+	}
+
+	:global(.modal-close:hover) {
+		background: rgba(255, 255, 255, 0.12);
+		color: var(--text-primary);
+	}
+
 	/* ─── Album Grid ─────────────────────── */
 
 	.album-grid {
@@ -2039,6 +2122,55 @@
 		grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
 		gap: var(--gap);
 		align-items: start;
+	}
+
+	/* ─── Album List Mode ────────────────── */
+
+	.album-grid.album-list {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.album-grid.album-list .album-card {
+		display: grid;
+		grid-template-columns: 56px 1fr auto;
+		gap: 14px;
+		align-items: center;
+		padding: 8px 10px;
+		border-radius: var(--radius-sm);
+	}
+
+	.album-grid.album-list .album-card:hover {
+		transform: none;
+		box-shadow: none;
+	}
+
+	.album-grid.album-list .album-art {
+		width: 56px;
+		height: 56px;
+		aspect-ratio: unset;
+		margin-bottom: 0;
+		border-radius: 6px;
+		flex-shrink: 0;
+	}
+
+	.album-grid.album-list .album-art-overlay {
+		display: none;
+	}
+
+	.album-grid.album-list .album-meta {
+		padding: 0;
+		min-width: 0;
+	}
+
+	.album-grid.album-list .album-chips {
+		margin-top: 3px;
+	}
+
+	.album-grid.album-list .album-actions {
+		margin-top: 0;
+		padding: 0;
 	}
 
 	.album-card {

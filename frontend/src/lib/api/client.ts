@@ -9,6 +9,23 @@ export function getApiBase(): string {
 	return `${protocol}//${hostname}:3334`;
 }
 
+// ─── Token management ────────────────────────────────────────────────────────
+
+const TOKEN_KEY = 'noor_api_token';
+
+export function getStoredToken(): string | null {
+	if (typeof localStorage === 'undefined') return null;
+	return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setStoredToken(token: string): void {
+	localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearStoredToken(): void {
+	localStorage.removeItem(TOKEN_KEY);
+}
+
 export interface Track {
 	id: number;
 	title: string;
@@ -557,13 +574,26 @@ async function fetchApiResponse(
 		Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 	}
 
-	return fetch(url.toString(), {
+	const token = getStoredToken();
+	const authHeader: Record<string, string> = token
+		? { authorization: `Bearer ${token}` }
+		: {};
+
+	const resp = await fetch(url.toString(), {
 		headers: {
 			'content-type': 'application/json',
-			...(options?.headers ?? {}),
+			...authHeader,
+			...(options?.headers as Record<string, string> ?? {}),
 		},
 		...options,
 	});
+
+	if (resp.status === 401) {
+		// Token was rejected — dispatch an event so the UI can show the connect screen
+		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
+	}
+
+	return resp;
 }
 
 async function fetchApi<T>(
@@ -1046,6 +1076,10 @@ export const api = {
 		return fetchApi<{ running: boolean; analyzed: number }>('/api/library/analyze/status');
 	},
 
+	stopAudioAnalysis() {
+		return fetchApi<{ status: string }>('/api/library/analyze/stop', undefined, { method: 'POST' });
+	},
+
 	getTrackAudioFeatures(trackId: number) {
 		return fetchApi<{ features: AudioDspFeatures | null }>(`/api/tracks/${trackId}/audio-features`);
 	},
@@ -1085,6 +1119,20 @@ export const api = {
 
 	startAcrCloudScan() {
 		return fetchApi<{ status: string }>('/api/library/acrcloud/scan', undefined, {
+			method: 'POST',
+		});
+	},
+
+	ping() {
+		return fetch(`${getApiBase()}/api/ping`).then((r) => r.ok).catch(() => false);
+	},
+
+	getServerToken() {
+		return fetchApi<{ token: string }>('/api/server/token');
+	},
+
+	regenerateServerToken() {
+		return fetchApi<{ token: string }>('/api/server/token/regenerate', undefined, {
 			method: 'POST',
 		});
 	},

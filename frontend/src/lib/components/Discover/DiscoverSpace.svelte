@@ -10,15 +10,19 @@
 		artists = [],
 		edges = [],
 		mode = 'radio',
+		currentTrackId = null,
 		onHover = (_node: DiscoverTrackNode | null) => {},
-		onSelect = (_node: DiscoverTrackNode) => {}
+		onSelect = (_node: DiscoverTrackNode) => {},
+		onNewNodes = (_nodes: DiscoverTrackNode[]) => {},
 	}: {
 		nodes?: DiscoverTrackNode[];
 		artists?: DiscoverArtistNode[];
 		edges?: DiscoverEdge[];
 		mode?: DiscoverViewMode;
+		currentTrackId?: number | null;
 		onHover?: (node: DiscoverTrackNode | null) => void;
 		onSelect?: (node: DiscoverTrackNode) => void;
+		onNewNodes?: (nodes: DiscoverTrackNode[]) => void;
 	} = $props();
 
 	let canvas: HTMLCanvasElement | null = null;
@@ -33,7 +37,6 @@
 	// ── Training animation state ─────────────────────────────────────────────
 	let trainingNodes = $state<Set<number>>(new Set());
 	let trainingProgress = $state<{ done: number; total: number; currentTitle: string | null }>({ done: 0, total: 0, currentTitle: null });
-	let isTrainingComplete = $state(false);
 	let pulseNodes = $state<Set<number>>(new Set());
 	let pulseStartTime = $state(0);
 
@@ -44,7 +47,6 @@
 	let hyperspacePhase = $state<'idle' | 'dim' | 'zoom_out' | 'warp' | 'zoom_in' | 'settle'>('idle');
 	let hyperspaceStartTime = $state(0);
 	let hyperspaceResults = $state<any[]>([]);
-	let prevNodes = $state<DiscoverTrackNode[]>([]);
 
 	// ── Visited regions (nebula halos) ───────────────────────────────────────
 	let visitedRegions = $state<Map<string, { x: number; y: number; radius: number }>>(new Map());
@@ -72,7 +74,6 @@
 				}
 			}
 			if (t.stage === 'complete' || (t.tracks_done >= t.tracks_total && t.tracks_total > 0)) {
-				isTrainingComplete = true;
 				pulseNodes = new Set(nodes.map(n => n.track_id));
 				pulseStartTime = Date.now();
 				// Camera pull back
@@ -99,8 +100,6 @@
 
 	// ── Hyperspace search ────────────────────────────────────────────────────
 	async function hyperspaceSearch(query: string) {
-		// Save current nodes
-		prevNodes = [...nodes];
 		hyperspacePhase = 'dim';
 		hyperspaceStartTime = Date.now();
 
@@ -151,46 +150,42 @@
 				hyperspacePhase = 'zoom_in';
 				animateCameraZoom(1.0, 300);
 
-				// T+700: New nodes materialize staggered
+				// T+700: New nodes materialize staggered — notify parent via callback
 				setTimeout(() => {
 					hyperspacePhase = 'settle';
-					for (let idx = 0; idx < hyperspaceResults.length; idx++) {
-						const track = hyperspaceResults[idx];
-						const delay = idx * 40;
-						setTimeout(() => {
-							const newNode: DiscoverTrackNode = {
-								track_id: track.track_id,
-								title: track.title,
-								artist_name: track.artist_name,
-								album_title: track.album_title,
-								artwork_url: track.artwork_url,
-								duration_ms: track.duration_ms,
-								similarity_score: track.similarity_score ?? 0.5,
-								energy: track.energy,
-								danceability: track.danceability,
-								bpm: track.bpm,
-								key_signature: track.key_signature,
-								camelot_key: track.camelot_key,
-								is_in_library: track.is_in_library ?? false,
-								source: track.source ?? 'tidal',
-								x: track.x ?? cx + (Math.random() - 0.5) * 200,
-								y: track.y ?? cy + (Math.random() - 0.5) * 200,
-								vx: (cx - (track.x ?? cx)) * 0.1,
-								vy: (cy - (track.y ?? cy)) * 0.1,
-								radius: track.radius ?? 6,
-								opacity: 0,
-							};
-							nodes.push(newNode);
-							// Mark edge as new for progressive drawing
-							for (const edge of (data.edges ?? [])) {
-								if (edge.from_id === newNode.track_id || edge.to_id === newNode.track_id) {
-									const key = `${edge.from_id}-${edge.to_id}`;
-									edgeDrawProgress.set(key, 0);
-								}
+					const incoming: DiscoverTrackNode[] = hyperspaceResults.map((track) => ({
+						track_id: track.track_id,
+						title: track.title,
+						artist_name: track.artist_name,
+						album_title: track.album_title,
+						artwork_url: track.artwork_url,
+						duration_ms: track.duration_ms,
+						similarity_score: track.similarity_score ?? 0.5,
+						energy: track.energy,
+						danceability: track.danceability,
+						bpm: track.bpm,
+						key_signature: track.key_signature,
+						camelot_key: track.camelot_key,
+						is_in_library: track.is_in_library ?? false,
+						source: track.source ?? 'tidal',
+						x: track.x ?? cx + (Math.random() - 0.5) * 200,
+						y: track.y ?? cy + (Math.random() - 0.5) * 200,
+						vx: (cx - (track.x ?? cx)) * 0.1,
+						vy: (cy - (track.y ?? cy)) * 0.1,
+						radius: track.radius ?? 6,
+						opacity: 0,
+					}));
+					// Mark edges for progressive drawing
+					for (const node of incoming) {
+						for (const edge of (data.edges ?? [])) {
+							if (edge.from_id === node.track_id || edge.to_id === node.track_id) {
+								edgeDrawProgress.set(`${edge.from_id}-${edge.to_id}`, 0);
 							}
-							edgeDrawProgress = new Map(edgeDrawProgress);
-						}, delay);
+						}
 					}
+					edgeDrawProgress = new Map(edgeDrawProgress);
+					// Push to parent store — no prop mutation
+					onNewNodes(incoming);
 				}, 100);
 
 				// Store visited region
@@ -216,7 +211,7 @@
 	});
 
 	function energyColor(energy: number | null): string {
-		if (energy == null) return '#666';
+		if (energy == null) return 'hsl(220,20%,50%)';
 		const hue = 220 - energy * 220;
 		return `hsl(${hue}, 70%, 55%)`;
 	}
@@ -310,8 +305,10 @@
 			if (node.danceability != null) {
 				const glowRadius = currentRadius * (1 + node.danceability * 0.8);
 				const gradient = ctx.createRadialGradient(node.x, node.y, currentRadius * 0.5, node.x, node.y, glowRadius);
-				gradient.addColorStop(0, color + '40');
-				gradient.addColorStop(1, 'transparent');
+				const energy = node.energy ?? 0.5;
+				const hue = 220 - energy * 220;
+				gradient.addColorStop(0, `hsla(${hue},70%,60%,0.25)`);
+				gradient.addColorStop(1, `hsla(${hue},70%,60%,0)`);
 				ctx.beginPath();
 				ctx.arc(node.x, node.y, glowRadius, 0, Math.PI * 2);
 				ctx.fillStyle = gradient;
@@ -367,6 +364,27 @@
 				ctx.arc(node.x, node.y, currentRadius + 4, 0, Math.PI * 2);
 				ctx.strokeStyle = 'rgba(255,255,255,0.6)';
 				ctx.lineWidth = 2;
+				ctx.stroke();
+			}
+		}
+
+		// ── Currently playing node indicator ────────────────────────────
+		if (currentTrackId != null) {
+			const playingNode = nodes.find(n => n.track_id === currentTrackId);
+			if (playingNode) {
+				const t = (Date.now() % 2000) / 2000;
+				const pulseR = playingNode.radius + 6 + Math.sin(t * Math.PI * 2) * 4;
+				ctx.beginPath();
+				ctx.arc(playingNode.x, playingNode.y, pulseR, 0, Math.PI * 2);
+				ctx.strokeStyle = 'rgba(124,128,255,0.9)';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+				// Second outer ring fading out
+				const outerR = playingNode.radius + 14 + Math.sin(t * Math.PI * 2) * 6;
+				ctx.beginPath();
+				ctx.arc(playingNode.x, playingNode.y, outerR, 0, Math.PI * 2);
+				ctx.strokeStyle = `rgba(124,128,255,${0.3 - t * 0.3})`;
+				ctx.lineWidth = 1;
 				ctx.stroke();
 			}
 		}
@@ -478,13 +496,14 @@
 		const el = canvas;
 		const c = ctx;
 
-		const resize = () => {
+		// ResizeObserver fires when the element actually has layout dimensions,
+		// avoiding the race condition where offsetWidth/Height are 0 in onMount.
+		const ro = new ResizeObserver(() => {
 			el.width = el.offsetWidth * devicePixelRatio;
 			el.height = el.offsetHeight * devicePixelRatio;
 			c.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-		};
-		resize();
-		window.addEventListener('resize', resize);
+		});
+		ro.observe(el);
 
 		el.addEventListener('wheel', onWheel, { passive: false });
 		el.addEventListener('mousedown', onMouseDown);
@@ -493,6 +512,10 @@
 		el.addEventListener('click', onClick);
 
 		animId = requestAnimationFrame(tick);
+
+		return () => {
+			ro.disconnect();
+		};
 	});
 
 	onDestroy(() => {
@@ -500,26 +523,36 @@
 	});
 </script>
 
-<canvas bind:this={canvas} class="discover-canvas"></canvas>
+<div class="canvas-wrap">
+	<canvas bind:this={canvas} class="discover-canvas"></canvas>
 
-{#if trainingProgress.total > 0}
-  <div class="training-overlay">
-    <div class="training-strip">
-      <span class="track-title">{trainingProgress.currentTitle ?? 'Embedding...'}</span>
-      <div class="progress-bar">
-        <div class="progress-fill" style="width: {(trainingProgress.done / trainingProgress.total) * 100}%"></div>
-      </div>
-      <span class="progress-count">{trainingProgress.done} / {trainingProgress.total}</span>
-    </div>
-  </div>
-{/if}
+	{#if trainingProgress.total > 0}
+	  <div class="training-overlay">
+	    <div class="training-strip">
+	      <span class="track-title">{trainingProgress.currentTitle ?? 'Embedding...'}</span>
+	      <div class="progress-bar">
+	        <div class="progress-fill" style="width: {(trainingProgress.done / trainingProgress.total) * 100}%"></div>
+	      </div>
+	      <span class="progress-count">{trainingProgress.done} / {trainingProgress.total}</span>
+	    </div>
+	  </div>
+	{/if}
+</div>
 
 <style>
+	.canvas-wrap {
+		position: relative;
+		width: 100%;
+		height: 100%;
+	}
+
 	.discover-canvas {
+		position: absolute;
+		inset: 0;
 		width: 100%;
 		height: 100%;
 		cursor: grab;
-		position: relative;
+		display: block;
 	}
 	.discover-canvas:active {
 		cursor: grabbing;

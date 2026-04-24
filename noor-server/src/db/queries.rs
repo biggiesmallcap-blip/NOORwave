@@ -5,6 +5,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+// ─── Server Config ────────────────────────────────────────
+
+pub fn ensure_server_token(conn: &Connection) -> Result<String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key='server_token'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(token) = existing {
+        return Ok(token);
+    }
+
+    let token = generate_readable_token();
+    conn.execute(
+        "INSERT INTO server_config (key, value) VALUES ('server_token', ?1)",
+        params![token],
+    )?;
+    Ok(token)
+}
+
+pub fn regenerate_server_token(conn: &Connection) -> Result<String> {
+    let token = generate_readable_token();
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('server_token', ?1)",
+        params![token],
+    )?;
+    Ok(token)
+}
+
+fn generate_readable_token() -> String {
+    use rand::RngCore;
+    #[rustfmt::skip]
+    const WORDS: &[&str] = &[
+        "acorn","amber","anchor","anvil","apple","arrow","atlas","alder",
+        "badge","bamboo","beacon","blade","bloom","bolt","bridge","birch",
+        "cedar","chalk","chime","cliff","cloak","cloud","coal","coral",
+        "crane","creek","crest","crown","crystal","dagger","dawn","delta",
+        "dome","dove","dune","eagle","echo","edge","elm","ember",
+        "fable","falcon","fern","field","flare","fleet","flint","flood",
+        "flute","forge","frost","gale","garnet","gate","glade","glass",
+        "globe","glow","gold","grain","grove","gulf","haze","hearth",
+        "heron","hill","holly","horn","hound","inlet","iron","ivory",
+        "jade","jasper","kite","knoll","lake","lance","lark","laurel",
+        "leaf","ledge","light","linen","lion","lotus","lunar","maple",
+        "marble","marsh","mesa","mint","mist","moon","moss","night",
+        "noble","north","oak","opal","orbit","otter","owl","pearl",
+        "pine","plum","pond","pool","quartz","raven","reed","ridge",
+        "river","rock","rose","ruby","rush","sage","sand","scout",
+        "seal","shadow","shore","silver","slate","snow","spark","spear",
+        "spruce","star","steel","stone","storm","stream","surge","swift",
+        "sword","thorn","tide","timber","torch","trail","trout","vault",
+        "vapor","vista","volt","wave","wheat","willow","wind","wolf",
+    ];
+    let mut bytes = [0u8; 5];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes
+        .iter()
+        .map(|&b| WORDS[b as usize % WORDS.len()])
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+
 // ─── Tracks ───────────────────────────────────────────────
 
 /// Optional DSP filters for get_tracks_with_dsp()
@@ -2072,6 +2138,10 @@ pub struct EmbeddingTrackRow {
     pub is_favorite: bool,
     pub playlist_memberships: i64,
     pub genre_paths: Vec<String>,
+    // DSP features (None if not yet analyzed)
+    pub bpm: Option<f64>,
+    pub energy: Option<f64>,
+    pub camelot_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2431,10 +2501,12 @@ pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackR
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, a.name, al.title, t.duration_ms, t.best_quality, t.source,
                 t.play_count, t.is_favorite,
-                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.track_id = t.id) AS playlist_memberships
+                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.track_id = t.id) AS playlist_memberships,
+                d.bpm, d.energy, d.camelot_key
          FROM tracks t
          LEFT JOIN artists a ON a.id = t.artist_id
          LEFT JOIN albums al ON al.id = t.album_id
+         LEFT JOIN audio_dsp_features d ON d.track_id = t.id
          WHERE t.tidal_id IS NOT NULL OR t.file_path IS NOT NULL OR t.ytmusic_id IS NOT NULL OR t.soundcloud_id IS NOT NULL",
     )?;
     let mut rows = stmt
@@ -2452,6 +2524,9 @@ pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackR
                 is_favorite: row.get(8)?,
                 playlist_memberships: row.get(9)?,
                 genre_paths: genre_paths.get(&track_id).cloned().unwrap_or_default(),
+                bpm: row.get(10)?,
+                energy: row.get(11)?,
+                camelot_key: row.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2647,7 +2722,15 @@ pub fn get_artist_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
     for (artist_id, track_id) in rows {
         grouped.entry(artist_id).or_default().push(track_id);
     }
-    Ok(grouped.into_values().filter(|seq| seq.len() > 1 && seq.len() <= 32).collect())
+    // Truncate large artists rather than dropping them — an artist with 200 tracks
+    // should still contribute co-occurrence signal for the tracks it includes.
+    let mut seqs: Vec<Vec<i64>> = grouped.into_values().filter(|seq| seq.len() > 1).collect();
+    for seq in &mut seqs {
+        if seq.len() > 80 {
+            seq.truncate(80); // keep top-80 by play_count (already sorted DESC)
+        }
+    }
+    Ok(seqs)
 }
 
 pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
@@ -2664,7 +2747,13 @@ pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
     for (genre_id, track_id) in rows {
         grouped.entry(genre_id).or_default().push(track_id);
     }
-    Ok(grouped.into_values().filter(|seq| seq.len() > 1 && seq.len() <= 40).collect())
+    let mut seqs: Vec<Vec<i64>> = grouped.into_values().filter(|seq| seq.len() > 1).collect();
+    for seq in &mut seqs {
+        if seq.len() > 80 {
+            seq.truncate(80);
+        }
+    }
+    Ok(seqs)
 }
 
 pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
