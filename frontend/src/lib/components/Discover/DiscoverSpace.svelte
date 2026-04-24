@@ -121,8 +121,9 @@
 
 		// T+600: Results arrive — snap camera, zoom in
 		try {
-			const apiBase = (await import('$lib/api/client')).getApiBase();
-			const response = await fetch(`${apiBase}/api/discovery/space`, {
+			const client = await import('$lib/api/client');
+			const apiBase = client.getApiBase();
+			const response = await client.authFetch(`${apiBase}/api/discovery/space`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
