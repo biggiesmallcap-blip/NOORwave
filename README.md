@@ -1,6 +1,6 @@
 # NOOR
 
-A power-user music library manager and hi-fi audio player built to fix TIDAL's limitations. NOOR syncs your entire TIDAL library to a local SQLite database and layers on features that TIDAL doesn't offer: bulk operations, smart playlists, advanced analytics, duplicate detection, gapless playback, learned radio discovery, and a home page that surfaces new releases and curated picks — all from a browser UI.
+A power-user music library manager and hi-fi audio player built to fix TIDAL's limitations. NOOR syncs your entire TIDAL library to a local SQLite database and layers on features that TIDAL doesn't offer: bulk operations, smart playlists, advanced analytics, duplicate detection, gapless playback, a learned radio discovery engine, audio feature analysis, and a genre visualization galaxy — all from a browser UI served over your LAN.
 
 ---
 
@@ -12,27 +12,51 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Advanced sorting, filtering, and full-text search (FTS5)
 - Track and album detail panels with full metadata (ISRC, play count, quality badges, date added)
 - Duplicate detection via ISRC matching and title/duration fallback
+- Tile and list view toggle with floating popout detail modals
 
 **Playback**
-- Lossless hi-fi streaming via TIDAL
+- Lossless hi-fi streaming via TIDAL with automatic token refresh
 - Gapless playback with pre-buffer engine swap (zero-gap track transitions)
-- Fade-in/fade-out per track
+- Per-track fade-in / fade-out
 - Volume control and seeking
 - Four shuffle modes: off / true (Fisher-Yates) / weighted / genre-spread
-  - Weighted: boosts favorites and never-played tracks, penalizes recent plays
+  - Weighted: boosts favorites and never-played tracks, penalises recent plays
   - Genre-spread: prevents consecutive same-genre tracks
+- Automix: automatic queue continuation with learning-based next-track selection
+
+**Genre Galaxy**
+- Interactive 3D-style force-directed canvas showing your entire genre taxonomy
+- Nodes sized and coloured by listen heat; edges show genre co-occurrence
+- Click any genre to drill into its interior: artist cluster visualization, track list, and audio metrics
+- **▶ Mix this genre**: loads tracks, shuffles the queue, and starts from a random entry point
+- **Seed Mix Builder**: blend multiple genres, interleave their tracks, and play
+- Four view modes: heat, co-occurrence, cohort, evolution
+
+**Discovery Sound Space**
+- Force-directed canvas of tracks positioned by learned audio similarity
+- Hyperspace search: type a mood or reference ("dark ambient", "140bpm drum & bass") and fly to a cluster of matching tracks
+- Nebula halos mark previously explored regions
+- Training animation: watch embeddings materialize as NOOR learns your library
+- Playlist Builder: select nodes from the space and export as a playlist
 
 **Discovery & Learning**
 - **Similar Radio**: play outward from any track using learned neighborhoods
   - Creativity slider controls exploration vs. exploitation
   - Context memory influences results based on recent listening
-  - Feedback buttons: like, dislike, queue, save — all feed back into the model
-- **Embedding-based learning pipeline**: NOOR trains on your listening behavior
+  - Feedback (like, dislike, queue, save) feeds back into the model
+- **Embedding-based learning pipeline**: trains on your listening behavior
   - Corpus from transitions, playlists, albums, artists, genres, and listen sessions
   - Incremental refresh and full retrain modes
-  - Real-time training progress via WebSocket
+  - Real-time training progress streamed via WebSocket
 - **Prompt Explore**: steer the learned engine outward with language (mood, reference, DJ, word-cloud)
 - **Home Page**: new releases from AllMusic RSS, daily picks from your library, weekly articles, and industry news
+
+**Audio Analysis**
+- DSP feature extraction running passively during playback: BPM, key signature, Camelot wheel, loudness (LUFS), energy, danceability, beat strength, spectral centroid, stereo width
+- Instrumental detection
+- Per-genre audio metric summaries (average BPM, energy, danceability)
+- ACRCloud integration: fingerprint-based sample/cover recognition with configurable daily scan limit
+- Analysis status dashboard and manual reset
 
 **Smart Features**
 - Rule-based smart playlists (genre, artist, date range, quality tier, play count — AND/OR logic)
@@ -44,10 +68,13 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Listen history and session tracking
 - Top tracks, top artists, genre heatmap
 - Activity graph over time
+- Completion rate, average listen duration, skip patterns
 
-**Real-Time UI**
+**Access & Real-Time UI**
+- Bearer token auth: human-readable 5-word tokens (e.g. `amber-ridge-wolf-cedar-spark`)
+- Auto-setup: the browser on the server machine connects automatically; remote devices get a connect modal
 - WebSocket-driven: playback state, sync progress, queue updates, training progress push instantly to the browser
-- Accessible on LAN — run on a machine, open from any browser
+- Accessible on LAN — run on one machine, open from any browser on the network
 
 **Multi-Service Integration**
 - TIDAL: full library sync, playback, favorites, playlists
@@ -63,7 +90,7 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 | Backend | Rust 2024, Axum 0.8, Rayon |
 | Database | SQLite 3 (rusqlite), FTS5, WAL mode |
 | Frontend | SvelteKit 2 + Svelte 5 runes, TypeScript, Vite |
-| Audio decode | Symphonia 0.5 (packet streaming, no full load) |
+| Audio decode | Symphonia 0.5 (streaming pipe with Content-Length–aware seeking) |
 | Audio output | CPAL 0.15 (cross-platform) |
 | Real-time | Tokio broadcast channel → WebSocket |
 | Feed parsing | RSS 2.0 + Atom syndication |
@@ -115,32 +142,27 @@ npm run build
 
 ### First Run
 
-1. Go to **Settings** in the UI
-2. Complete TIDAL device code authentication
-3. Trigger a library sync — progress streams live via WebSocket
-4. Start playing
+1. Open `http://localhost:5173` — the browser on the server machine auto-connects via the setup endpoint
+2. For remote devices, enter the access token shown in **Settings → Access Token**
+3. Go to **Settings** and complete TIDAL device code authentication
+4. Trigger a library sync — progress streams live via WebSocket
+5. Start playing
 
 ### Portable MusicBrainz Snapshot
 
-If you want to move MusicBrainz enrichment between machines without copying the full `noor.db`, export just the portable enrichment snapshot:
+Move MusicBrainz enrichment between machines without copying the full `noor.db`:
 
 ```bash
 python3 scripts/export_musicbrainz_enrichment.py --db noor.db --out-dir data/musicbrainz
 ```
 
-That writes:
-
-- `data/musicbrainz/musicbrainz_checked.csv`
-- `data/musicbrainz/musicbrainz_genres.csv`
-- `data/musicbrainz/manifest.json`
-
-On the other machine, sync the library first so the `tracks` table exists, then import the snapshot:
+On the other machine, sync the library first, then:
 
 ```bash
 python3 scripts/import_musicbrainz_enrichment.py --db noor.db --from-dir data/musicbrainz
 ```
 
-The transfer is keyed by stable `tidal_id` values and genre `slug`, so it does not depend on matching local SQLite row IDs. Keep `noor.db` out of Git because it also contains local auth/session data.
+Transfer is keyed by stable `tidal_id` and genre `slug` — no dependency on local row IDs. Keep `noor.db` out of Git (contains auth and session data).
 
 ---
 
@@ -148,41 +170,49 @@ The transfer is keyed by stable `tidal_id` values and genre `slug`, so it does n
 
 ```
 noor-server/src/
-├── main.rs               # AppState, event bus, DB path resolution
+├── main.rs               # AppState, event bus, DB path resolution, token loading
 ├── server/
-│   ├── routes.rs         # All REST handlers + WebSocket setup
+│   ├── routes.rs         # All REST handlers + WebSocket setup + auth middleware
 │   └── ws.rs             # WebSocket broadcast
 ├── services/
-│   ├── tidal/            # OAuth2 auth, API client, sync, streaming
+│   ├── tidal/            # OAuth2 auth, API client, sync, streaming (StreamPipe)
 │   ├── spotify/          # OAuth2 auth, genre enrichment
+│   ├── audio_analysis/   # DSP feature extraction (BPM, key, energy, …)
+│   ├── acrcloud.rs       # Fingerprint-based sample recognition
 │   ├── musicbrainz.rs    # Metadata enrichment
 │   ├── learning.rs       # Embedding training, neighbor computation
 │   ├── discovery_trainer.rs # Training pipeline orchestration
 │   └── rss_feeds.rs      # RSS/Atom feed aggregation
 ├── db/                   # Schema, migrations, models, queries
 ├── playback/
-│   ├── runtime.rs        # StreamPipe: decode loop + CPAL output
+│   ├── runtime.rs        # StreamPipe decode loop + CPAL output
 │   ├── player.rs         # Queue state machine, NearEnd/PrepareNext
 │   ├── queue.rs          # Queue CRUD
+│   ├── gapless.rs        # Gapless plan / crossfade config
 │   └── shuffle.rs        # All four shuffle algorithms
 ├── genre/                # Taxonomy loading, normalization, fuzzy matching
 ├── smart/                # Smart playlists, analytics, discovery, external discovery
 └── library/              # Duplicate detection, batch ops
 
 frontend/src/
-├── routes/               # Page components (home, library, genres, playlists, analytics, discover, automix, settings, …)
-├── lib/api/              # REST client + WebSocket client
-├── lib/stores/           # Player state, library state, training state (Svelte 5 runes)
+├── routes/               # Page components (home, library, genres, playlists, analytics, discover, settings, …)
+├── lib/
+│   ├── api/              # REST client + WebSocket client
+│   ├── components/
+│   │   ├── Genre/        # GenreGalaxy, GenreInterior, GenrePanel (canvas-based)
+│   │   └── Discover/     # DiscoverSpace, DiscoverPanel, PlaylistBuilder (canvas-based)
+│   └── stores/           # Player state, library state, training state (Svelte 5 runes)
 └── app.css               # Glass-tile design system (dark base #0a0a0f, accent #7c80ff)
 ```
 
 **Key design decisions:**
 
 - `Arc<RwLock<AppState>>` shared across all Axum route handlers
-- Symphonia decodes packet-by-packet into a ring buffer — tracks are never fully loaded into memory
-- NearEnd event fires 15s before track end, triggering PrepareNext for zero-gap engine swap
+- StreamPipe buffers CDN bytes as they arrive; `byte_len()` returns `Content-Length` from response headers so Symphonia can seek correctly without downloading the full file first
+- NearEnd event fires 15 s before track end, triggering PrepareNext for zero-gap engine swap
 - Smart playlist rules are evaluated on-demand (recursive AST, no background materialization)
 - Genre taxonomy is loaded from `genre-taxonomy/taxonomy.json` into SQLite on startup
+- TIDAL 403 errors from content restrictions are classified as `StreamRejected`, not session expiry — a content restriction never clears your login session
 
 ---
 
@@ -192,21 +222,25 @@ frontend/src/
 - [x] Similar Radio with creativity and context controls
 - [x] Home page with RSS-driven new releases, daily picks, articles, and news
 - [x] Spotify auth and genre enrichment
+- [x] Audio feature extraction (BPM, key, energy, danceability via DSP)
+- [x] ACRCloud sample recognition
+- [x] Genre Galaxy visualization with heat, co-occurrence, cohort, and evolution views
+- [x] Genre Mix: randomised entry point, seed blend builder
+- [x] Discovery Sound Space with hyperspace search and nebula halos
+- [x] Bearer token auth with auto-setup for local browsers
 - [ ] Gapless crossfade audio blend (pre-buffer swap works; audio-level mixing pending)
 - [ ] Duplicate detection UI (detection logic complete)
-- [ ] Audio feature extraction (BPM, key, energy, loudness from playback)
-- [ ] Automix / DJ mode with harmonic mixing
+- [ ] Automix DJ mode with harmonic mixing
 - [ ] WASAPI exclusive mode (Windows hi-fi priority)
-- [ ] Genre Galaxy visualization
-- [ ] YouTube Music integration (Phase 5)
-- [ ] SoundCloud integration (Phase 5)
+- [ ] YouTube Music integration
+- [ ] SoundCloud integration
 - [ ] Package as Tauri desktop app
 
 ---
 
 ## Notes
 
-NOOR uses TIDAL's unofficial API. Authentication uses a device code OAuth2 flow with a known client ID. This is the same mechanism used by other third-party TIDAL clients. Your credentials are stored locally, encrypted with AES-GCM in the SQLite database.
+NOOR uses TIDAL's unofficial API. Authentication uses a device code OAuth2 flow with a known client ID — the same mechanism used by other third-party TIDAL clients. Credentials are stored locally, encrypted with AES-GCM in the SQLite database.
 
 ---
 
