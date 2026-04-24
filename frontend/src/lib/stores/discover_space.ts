@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { getApiBase } from '$lib/api/client';
+import { getApiBase, authFetch } from '$lib/api/client';
 import type { DiscoverTrackNode, DiscoverEdge, DiscoverViewMode } from '$lib/components/Discover/discover.types';
 
 interface DiscoverSpaceState {
@@ -22,7 +22,7 @@ export async function loadSpace(mode: DiscoverViewMode, seedTrackId?: number, pr
 	discoverSpace.update(s => ({ ...s, loading: true, mode }));
 	try {
 		const apiBase = getApiBase();
-		const response = await fetch(`${apiBase}/api/discovery/space`, {
+		const response = await authFetch(`${apiBase}/api/discovery/space`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

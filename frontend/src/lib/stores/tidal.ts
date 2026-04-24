@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { getApiBase } from '$lib/api/client';
+import { getApiBase, authFetch } from '$lib/api/client';
 
 export const tidalStatus = writable<'disconnected' | 'connecting' | 'connected'>('disconnected');
 export const tidalUserId = writable('');
@@ -18,7 +18,7 @@ export const syncInfo = writable<SyncInfo | null>(null);
 
 export async function loadTidalStatus() {
 	try {
-		const resp = await fetch(`${getApiBase()}/api/tidal/status`);
+		const resp = await authFetch(`${getApiBase()}/api/tidal/status`);
 		if (!resp.ok) return;
 		const data = await resp.json();
 		if (data.connected) {
@@ -33,7 +33,7 @@ export async function loadTidalStatus() {
 
 export async function loadSyncInfo() {
 	try {
-		const resp = await fetch(`${getApiBase()}/api/sync/info?service=tidal`);
+		const resp = await authFetch(`${getApiBase()}/api/sync/info?service=tidal`);
 		if (!resp.ok) return;
 		const data = await resp.json();
 		syncInfo.set(data.sync);
@@ -42,7 +42,7 @@ export async function loadSyncInfo() {
 
 export async function setAutoSyncDaily(enabled: boolean) {
 	try {
-		const resp = await fetch(`${getApiBase()}/api/sync/auto`, {
+		const resp = await authFetch(`${getApiBase()}/api/sync/auto`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ service: 'tidal', enabled })

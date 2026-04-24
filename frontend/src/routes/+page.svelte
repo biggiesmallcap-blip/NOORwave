@@ -3,11 +3,13 @@
 	import {
 		api,
 		getApiBase,
+		authFetch,
 		type RSSFeedItem,
 		type HomePickTrack
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, isPlaying } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying } from '$lib/stores/player';
+	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 
@@ -46,7 +48,7 @@
 
 			// Load TIDAL status
 			try {
-				const tidalResponse = await fetch(`${getApiBase()}/api/tidal/status`);
+				const tidalResponse = await authFetch(`${getApiBase()}/api/tidal/status`);
 				if (!tidalResponse.ok) throw new Error(`Server returned ${tidalResponse.status}`);
 				const tidalData = await tidalResponse.json();
 				tidalStatus = tidalData.connected ? 'connected' : 'disconnected';
@@ -217,6 +219,22 @@
 						<p class="eyebrow">{$isPlaying ? 'Now playing' : 'Paused'}</p>
 						<h3>{$currentTrack.title}</h3>
 						<span>{$currentTrack.artist_name ?? 'Unknown artist'}</span>
+						{#if $currentTrackFeatures}
+							<div class="now-playing-dsp">
+								{#if $currentTrackFeatures.camelot_key}
+									<span
+										class="camelot-badge camelot-{camelotFamily(
+											$currentTrackFeatures.camelot_key
+										)} camelot-letter-{$currentTrackFeatures.camelot_key.slice(-1).toUpperCase()}"
+									>
+										{$currentTrackFeatures.camelot_key}
+									</span>
+								{/if}
+								{#if $currentTrackFeatures.bpm}
+									<span class="bpm-label">{$currentTrackFeatures.bpm.toFixed(1)} BPM</span>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				</div>
 			</section>
@@ -472,6 +490,57 @@
 		font-size: 0.8rem;
 		color: var(--text-muted);
 	}
+
+	/* Now-playing DSP badge row */
+	.now-playing-dsp {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 3px;
+	}
+
+	.camelot-badge {
+		font-size: 10px;
+		font-weight: 700;
+		padding: 2px 6px;
+		border-radius: 4px;
+		letter-spacing: 0.02em;
+		color: #111;
+		background: rgba(255, 255, 255, 0.65);
+		line-height: 1;
+	}
+
+	.bpm-label {
+		font-size: 11px;
+		opacity: 0.55;
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* Camelot wheel colors — B variants are vivid, A variants are desaturated. */
+	.camelot-1.camelot-letter-B  { background: #ff6b6b; color: #fff; }
+	.camelot-1.camelot-letter-A  { background: #d18b8b; color: #201010; }
+	.camelot-2.camelot-letter-B  { background: #ff9f43; color: #fff; }
+	.camelot-2.camelot-letter-A  { background: #c99a6e; color: #201810; }
+	.camelot-3.camelot-letter-B  { background: #ffd43b; color: #201a00; }
+	.camelot-3.camelot-letter-A  { background: #c8b36a; color: #1a1500; }
+	.camelot-4.camelot-letter-B  { background: #ffee58; color: #1c1a00; }
+	.camelot-4.camelot-letter-A  { background: #c7bf7a; color: #1a1800; }
+	.camelot-5.camelot-letter-B  { background: #a8e063; color: #0d1a05; }
+	.camelot-5.camelot-letter-A  { background: #9eb37a; color: #101a0c; }
+	.camelot-6.camelot-letter-B  { background: #4caf50; color: #fff; }
+	.camelot-6.camelot-letter-A  { background: #7fa080; color: #0c1a0d; }
+	.camelot-7.camelot-letter-B  { background: #26a69a; color: #fff; }
+	.camelot-7.camelot-letter-A  { background: #6fa39d; color: #081b19; }
+	.camelot-8.camelot-letter-B  { background: #00bcd4; color: #001e23; }
+	.camelot-8.camelot-letter-A  { background: #6ba8b3; color: #0a1c20; }
+	.camelot-9.camelot-letter-B  { background: #3b82f6; color: #fff; }
+	.camelot-9.camelot-letter-A  { background: #7e97c1; color: #0e162a; }
+	.camelot-10.camelot-letter-B { background: #6366f1; color: #fff; }
+	.camelot-10.camelot-letter-A { background: #8a8bc2; color: #14142a; }
+	.camelot-11.camelot-letter-B { background: #a855f7; color: #fff; }
+	.camelot-11.camelot-letter-A { background: #a58bc0; color: #1a1224; }
+	.camelot-12.camelot-letter-B { background: #ec4899; color: #fff; }
+	.camelot-12.camelot-letter-A { background: #c78aa5; color: #2a0f1d; }
 
 	/* Discovery sections */
 	.discovery-section {

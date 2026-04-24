@@ -26,6 +26,19 @@ export function clearStoredToken(): void {
 	localStorage.removeItem(TOKEN_KEY);
 }
 
+// Drop-in replacement for fetch() that attaches the Bearer token and fires
+// the noor:unauthorized event on 401, matching the behaviour of fetchApiResponse.
+export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
+	const token = getStoredToken();
+	const headers = new Headers(init?.headers);
+	if (token) headers.set('authorization', `Bearer ${token}`);
+	const resp = await fetch(url, { ...init, headers });
+	if (resp.status === 401 && typeof window !== 'undefined') {
+		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
+	}
+	return resp;
+}
+
 export interface Track {
 	id: number;
 	title: string;
@@ -103,6 +116,8 @@ export type NumberOp = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between_inclusive';
 export type QualityTier = 'lossy' | 'lossless' | 'hi_res';
 export type DateField = 'date_added' | 'last_played_at';
 
+export type SampleDataSource = 'acrcloud' | 'fingerprint';
+
 export type RuleClause =
 	| { type: 'group'; op: LogicOp; clauses: RuleClause[] }
 	| { type: 'genre'; names: string[]; match_descendants: boolean }
@@ -110,7 +125,14 @@ export type RuleClause =
 	| { type: 'date_range'; field: DateField; range: { start: string | null; end: string | null } }
 	| { type: 'play_count'; op: NumberOp; value: number; value_max?: number | null }
 	| { type: 'quality'; minimum: QualityTier }
-	| { type: 'not_in_playlist'; playlist_ids: number[] };
+	| { type: 'not_in_playlist'; playlist_ids: number[] }
+	| { type: 'bpm_range'; min: number | null; max: number | null }
+	| { type: 'key_signature'; key: string }
+	| { type: 'camelot_key'; key: string }
+	| { type: 'energy_range'; min: number | null; max: number | null }
+	| { type: 'danceability_range'; min: number | null; max: number | null }
+	| { type: 'instrumental_only'; is_instrumental: boolean }
+	| { type: 'has_sample_data'; source: SampleDataSource | null };
 
 export interface SmartPlaylistDefinition {
 	name: string;

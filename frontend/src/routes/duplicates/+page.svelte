@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getApiBase } from '$lib/api/client';
+	import { getApiBase, authFetch } from '$lib/api/client';
 	import { formatDuration } from '$lib/stores/library';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
@@ -51,7 +51,7 @@
 		scanState = 'scanning';
 		errorMsg = '';
 		try {
-			const resp = await fetch(`${getApiBase()}/api/library/duplicates/scan`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/library/duplicates/scan`, { method: 'POST' });
 			if (!resp.ok) throw new Error(`Scan failed: ${resp.status}`);
 			scanStats = await resp.json();
 			scanState = 'done';
@@ -68,7 +68,7 @@
 		else loadingMore = true;
 		try {
 			const offset = append ? groups.length : 0;
-			const resp = await fetch(`${getApiBase()}/api/library/duplicates?limit=20&offset=${offset}`);
+			const resp = await authFetch(`${getApiBase()}/api/library/duplicates?limit=20&offset=${offset}`);
 			const data = await resp.json();
 			total = data.total;
 			groups = append ? [...groups, ...data.groups] : data.groups;
@@ -84,7 +84,7 @@
 	async function resolveGroup(groupId: number, preferredTrackId: number) {
 		resolving = new Set([...resolving, groupId]);
 		try {
-			const resp = await fetch(`${getApiBase()}/api/library/duplicates/${groupId}/resolve`, {
+			const resp = await authFetch(`${getApiBase()}/api/library/duplicates/${groupId}/resolve`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ preferred_track_id: preferredTrackId })
@@ -102,7 +102,7 @@
 	async function dismissGroup(groupId: number) {
 		resolving = new Set([...resolving, groupId]);
 		try {
-			await fetch(`${getApiBase()}/api/library/duplicates/${groupId}/dismiss`, { method: 'POST' });
+			await authFetch(`${getApiBase()}/api/library/duplicates/${groupId}/dismiss`, { method: 'POST' });
 			groups = groups.filter((group) => group.id !== groupId);
 			total = Math.max(0, total - 1);
 		} finally {

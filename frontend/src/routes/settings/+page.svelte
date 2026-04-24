@@ -4,6 +4,7 @@
 	import {
 		api,
 		getApiBase,
+		authFetch,
 		getStoredToken,
 		setStoredToken,
 		type DiscoveryStatus,
@@ -202,7 +203,7 @@
 		tidalStatus.set('connecting');
 		errorMsg = '';
 		try {
-			const resp = await fetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
 			markServerOnline();
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			const data = await resp.json();
@@ -213,7 +214,7 @@
 
 			pollTimer = setInterval(async () => {
 				try {
-					const pollResp = await fetch(`${getApiBase()}/api/tidal/login/poll`, { method: 'POST' });
+					const pollResp = await authFetch(`${getApiBase()}/api/tidal/login/poll`, { method: 'POST' });
 					markServerOnline();
 					const pollData = await pollResp.json();
 					if (pollData.status === 'authenticated') {
@@ -267,7 +268,7 @@
 		syncProgress.set(0);
 		errorMsg = '';
 		try {
-			const resp = await fetch(`${getApiBase()}/api/tidal/sync`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/tidal/sync`, { method: 'POST' });
 			markServerOnline();
 			const data = await resp.json().catch(() => ({}));
 			if (!resp.ok) throw new Error(data.message ?? `Server returned ${resp.status}`);
@@ -289,7 +290,7 @@
 
 	async function disconnectTidal() {
 		try {
-			const resp = await fetch(`${getApiBase()}/api/tidal/logout`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/tidal/logout`, { method: 'POST' });
 			markServerOnline();
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			tidalStatus.set('disconnected');
@@ -390,7 +391,7 @@
 		mbStatus = 'running';
 		mbProgressLabel = 'Starting the background queue…';
 		try {
-			const resp = await fetch(`${getApiBase()}/api/library/enrich/musicbrainz`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/library/enrich/musicbrainz`, { method: 'POST' });
 			markServerOnline();
 			const data = await resp.json();
 			if (data.status === 'already_complete') {
