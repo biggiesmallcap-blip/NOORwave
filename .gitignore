@@ -8,3 +8,9 @@ noor.db-wal
 noor.db-shm
 *.exe
 .env
+
+# Local agent / design tooling — not shared
+.claude/settings.json
+.claude/skills/
+.design-refresh/
+.superpowers/
