@@ -644,33 +644,8 @@
 					/>
 				</form>
 
-				<select
-					class="family-jump"
-					onchange={(event) => void handleJumpToFamily(Number((event.currentTarget as HTMLSelectElement).value))}
-					aria-label="Jump to family"
-				>
-					<option value="">Jump to family</option>
-					{#each taxonomy as family}
-						<option value={family.id}>{family.name}</option>
-					{/each}
-				</select>
-
-				<button class="dock-btn" onclick={handleBackOut}>Back</button>
-				<button class="dock-btn" onclick={() => (resetViewToken += 1)}>Center map</button>
-				<button class:active={listeningDriven} class="dock-btn" onclick={() => (listeningDriven = !listeningDriven)}>
-					Gravity mode
-				</button>
-				<button class:active={showCohorts} class="dock-btn" onclick={() => (showCohorts = !showCohorts)}>
-					Clusters
-				</button>
-				<button class:active={showCoListening} class="dock-btn" onclick={() => (showCoListening = !showCoListening)}>
-					Bridges
-				</button>
 				<button class:active={labelsEnabled} class="dock-btn" onclick={() => (labelsEnabled = !labelsEnabled)}>
 					Labels
-				</button>
-				<button class:active={heatEnabled} class="dock-btn" onclick={() => (heatEnabled = !heatEnabled)}>
-					Heat
 				</button>
 				<button class:active={autoDrift} class="dock-btn" onclick={() => (autoDrift = !autoDrift)}>
 					Auto drift
