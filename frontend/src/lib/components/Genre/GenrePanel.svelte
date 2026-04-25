@@ -56,10 +56,8 @@
 		return `${minutes}m`;
 	}
 
-	let listenCount = $derived(listenHeat?.listen_count ?? node?.listenCount ?? 0);
 	let listenedTime = $derived(listenHeat?.total_listened_ms ?? node?.totalListenedMs ?? 0);
-	let visibleTracks = $derived(tracks.slice(0, 20));
-	let heatSignal = $derived(Math.round((node?.heatNorm ?? 0) * 100));
+	let showTracks = $state(false);
 </script>
 
 <div class:open class="genre-panel glass-panel">
@@ -71,7 +69,7 @@
 					<span class="family-name">{node.familyName} system</span>
 				</div>
 				<h2>{node.name}</h2>
-				<p>{node.depth === 0 ? 'Primary anchor in the live taxonomy atlas.' : `Depth ${node.depth} branch in the live taxonomy atlas.`}</p>
+				<p class="panel-subtitle">{node.trackCount.toLocaleString()} tracks{listenedTime > 0 ? ` · ${formatListenTime(listenedTime)}` : ''}</p>
 			</div>
 			<button class="close-btn" onclick={onClose} aria-label="Close genre panel">×</button>
 		</div>
@@ -83,57 +81,10 @@
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>
 			</div>
-			<p class="panel-action-copy">Queue replaces with this branch, then genre shuffle + automix take over.</p>
-		</div>
-
-		{#if lineage.length > 0}
-			<div class="breadcrumb-row" aria-label="Lineage">
-				{#each lineage as step, index}
-					<span class="breadcrumb-chip">{step}</span>
-					{#if index < lineage.length - 1}
-						<span class="breadcrumb-sep">/</span>
-					{/if}
-				{/each}
-			</div>
-		{/if}
-
-		<div class="signal-grid">
-			<section class="signal-block">
-				<p class="signal-label">Lineage</p>
-				<div class="signal-row">
-					<span>Family</span>
-					<strong>{node.familyName}</strong>
-				</div>
-				<div class="signal-row">
-					<span>Node level</span>
-					<strong>{node.depth === 0 ? 'Root' : `Depth ${node.depth}`}</strong>
-				</div>
-				<div class="signal-row">
-					<span>Branch size</span>
-					<strong>{node.trackCount.toLocaleString()} tracks</strong>
-				</div>
-			</section>
-
-			<section class="signal-block">
-				<p class="signal-label">Momentum</p>
-				<div class="signal-row">
-					<span>90-day listens</span>
-					<strong>{listenCount.toLocaleString()}</strong>
-				</div>
-				<div class="signal-row">
-					<span>Listened time</span>
-					<strong>{formatListenTime(listenedTime)}</strong>
-				</div>
-				<div class="signal-row">
-					<span>Heat intensity</span>
-					<strong>{heatSignal}%</strong>
-				</div>
-			</section>
 		</div>
 
 		{#if nearbyGenres.length > 0}
 			<div class="nearby-block">
-				<p class="signal-label">Nearby scenes</p>
 				<div class="nearby-chips">
 					{#each nearbyGenres as genreName}
 						<span class="nearby-chip">{genreName}</span>
@@ -143,49 +94,48 @@
 		{/if}
 
 		<div class="track-section">
-			<div class="track-heading">
-				<h3>Listening dossier</h3>
-				<span>{tracks.length > 20 ? 'Showing first 20' : `${tracks.length} loaded`}</span>
-			</div>
-
-			{#if loading}
-				<EmptyState title="Loading tracks" copy={`Pulling ${node.name} tracks for the panel.`} />
-			{:else if error}
-				<EmptyState title="Tracks could not load" copy={error} />
-			{:else if visibleTracks.length === 0}
-				<EmptyState title="No tracks in this branch" copy="This node does not currently resolve to any playable tracks." />
-			{:else}
-				<div class="track-list">
-					{#each visibleTracks as track (track.id)}
-						<div
-							class="track-row"
-							role="button"
-							tabindex="0"
-							onclick={() => void handleTrackPlay(track.id)}
-							onkeydown={(event) => runOnActivation(event, () => void handleTrackPlay(track.id))}
-						>
-							<div class="track-main">
-								<strong>{track.title}</strong>
-								<p>
-									{track.artist_name ?? 'Unknown artist'}
-									{#if track.album_title}
-										<span> · {track.album_title}</span>
+			<button class="tracks-toggle" onclick={() => (showTracks = !showTracks)}>
+				{showTracks ? '▲ Hide tracks' : `See all ${node.trackCount.toLocaleString()} tracks ▼`}
+			</button>
+			{#if showTracks}
+				{#if loading}
+					<EmptyState title="Loading tracks" copy={`Pulling ${node.name} tracks for the panel.`} />
+				{:else if error}
+					<EmptyState title="Tracks could not load" copy={error} />
+				{:else if tracks.length === 0}
+					<EmptyState title="No tracks in this branch" copy="This node does not currently resolve to any playable tracks." />
+				{:else}
+					<div class="track-list">
+						{#each tracks as track (track.id)}
+							<div
+								class="track-row"
+								role="button"
+								tabindex="0"
+								onclick={() => void handleTrackPlay(track.id)}
+								onkeydown={(event) => runOnActivation(event, () => void handleTrackPlay(track.id))}
+							>
+								<div class="track-main">
+									<strong>{track.title}</strong>
+									<p>
+										{track.artist_name ?? 'Unknown artist'}
+										{#if track.album_title}
+											<span> · {track.album_title}</span>
+										{/if}
+									</p>
+								</div>
+								<div class="track-side">
+									{#if track.best_quality}
+										<span class={`quality-badge ${getQualityClass(track.best_quality)}`}>
+											{track.best_quality.replaceAll('_', ' ')}
+										</span>
 									{/if}
-								</p>
+									<span>{formatDuration(track.duration_ms)}</span>
+									<button class="queue-btn" onclick={(event) => void handleQueueTrack(track.id, event)}>+</button>
+								</div>
 							</div>
-
-							<div class="track-side">
-								{#if track.best_quality}
-									<span class={`quality-badge ${getQualityClass(track.best_quality)}`}>
-										{track.best_quality.replaceAll('_', ' ')}
-									</span>
-								{/if}
-								<span>{formatDuration(track.duration_ms)}</span>
-								<button class="queue-btn" onclick={(event) => void handleQueueTrack(track.id, event)}>+</button>
-							</div>
-						</div>
-					{/each}
-				</div>
+						{/each}
+					</div>
+				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -225,8 +175,7 @@
 	}
 
 	.panel-headline,
-	.panel-copy,
-	.track-heading {
+	.panel-copy {
 		display: flex;
 		flex-direction: column;
 	}
@@ -251,8 +200,6 @@
 
 	.panel-copy p,
 	.family-name,
-	.track-heading span,
-	.panel-action-copy,
 	.track-main p,
 	.track-side span {
 		color: var(--signal-text);
@@ -309,19 +256,6 @@
 		box-shadow: 0 0 18px color-mix(in srgb, var(--accent-glow) 45%, transparent);
 	}
 
-	.panel-action-copy {
-		font-size: 0.74rem;
-		line-height: 1.45;
-	}
-
-	.breadcrumb-row {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 6px;
-	}
-
-	.breadcrumb-chip,
 	.nearby-chip {
 		padding: 4px 9px;
 		border-radius: 999px;
@@ -330,16 +264,6 @@
 		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 50%, transparent);
 		color: var(--signal-text);
-	}
-
-	.breadcrumb-sep {
-		color: var(--text-muted);
-		font-size: 0.72rem;
-	}
-
-	.signal-grid {
-		display: grid;
-		gap: 10px;
 	}
 
 	.nearby-block {
@@ -354,59 +278,11 @@
 		gap: 8px;
 	}
 
-	.signal-block {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 10px 12px;
-		border-radius: var(--radius);
-		background: color-mix(in srgb, var(--instrument-surface) 84%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
-	}
-
-	.signal-label {
-		font-size: 0.66rem;
-		font-weight: 700;
-		letter-spacing: 0.11em;
-		text-transform: uppercase;
-		color: var(--signal-text);
-		padding-bottom: 4px;
-	}
-
-	.signal-row {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 10px;
-		font-size: 0.8rem;
-		padding: 4px 0;
-	}
-
-	.signal-row span {
-		color: var(--signal-text);
-	}
-
-	.signal-row strong {
-		font-size: 0.85rem;
-		font-weight: 650;
-		color: var(--text-primary);
-		text-align: right;
-	}
-
 	.track-section {
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
 		min-height: 0;
-	}
-
-	.track-heading {
-		gap: 3px;
-	}
-
-	.track-heading h3 {
-		font-size: 1rem;
-		letter-spacing: 0.01em;
 	}
 
 	.track-list {
