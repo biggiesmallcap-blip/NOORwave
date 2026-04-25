@@ -304,7 +304,7 @@
 			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
 		{:else}
 			<div class="queue-list">
-				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (item.id)}
+				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (`${item.id}-${i}`)}
 					{#if i > 0}
 						{@const prevTrackId = queueUpcoming[i - 1].track.id}
 						{@const compat = harmonicCompat(featuresFor(prevTrackId), featuresFor(item.track.id))}

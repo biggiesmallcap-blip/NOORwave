@@ -564,7 +564,7 @@
 									<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylist(playlist.id, e)}>Play all</button>
 								</div>
 								<div class="track-list">
-									{#each playlistTracksById[playlist.id] as track (track.id)}
+									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
 										<div
 											class="track-row"
 											role="button"

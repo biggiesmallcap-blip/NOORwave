@@ -296,7 +296,7 @@
 						<div class="picks-subsection">
 							<h3 class="subsection-title">Top Picks</h3>
 							<div class="track-list">
-								{#each picks.slice(0, 8) as pick (pick.id)}
+								{#each picks.slice(0, 8) as pick, i (`${pick.id}-${i}`)}
 									<div class="track-row glass-tile">
 										{#if pick.artwork_url}
 											<img class="track-art" src={pick.artwork_url} alt="" />
@@ -323,7 +323,7 @@
 						<div class="picks-subsection">
 							<h3 class="subsection-title">Genre Variety</h3>
 							<div class="genre-pills">
-								{#each genrePicks as pick (pick.id)}
+								{#each genrePicks as pick, i (`${pick.id}-${i}`)}
 									<div class="genre-pill glass-tile">
 										<span class="genre-name">{pick.genre}</span>
 										<span class="genre-track">{pick.title}</span>

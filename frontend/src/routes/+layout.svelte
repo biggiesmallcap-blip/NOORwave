@@ -730,7 +730,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="queue-list">
-					{#each upcomingQueue.slice(0, 40) as item (item.id)}
+					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						<div
 							class:active={$currentTrack?.id === item.track.id}
 							class="queue-row"
@@ -1050,7 +1050,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="mobile-np-queue-list">
-					{#each upcomingQueue.slice(0, 40) as item (item.id)}
+					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						<div
 							class="queue-row"
 							class:active={$currentTrack.id === item.track.id}
