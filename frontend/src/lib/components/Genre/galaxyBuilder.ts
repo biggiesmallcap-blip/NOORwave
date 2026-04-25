@@ -1,4 +1,4 @@
-import type { Genre, GenreHeat, GenreCoOccurrence, GenreCohort, GenreEvolutionPoint, GenreAudioMetrics } from '$lib/api/client';
+import type { Genre, GenreHeat, GenreCohort, GenreEvolutionPoint, GenreAudioMetrics } from '$lib/api/client';
 import {
 	GALAXY_ROOT_RING_RADIUS,
 	ROOT_FAMILY_COLORS,
@@ -173,44 +173,11 @@ function attachEvolution(nodes: GalaxyNode[], evolution: GenreEvolutionPoint[]) 
 	}
 }
 
-/**
- * Build co-listening edges from backend co-occurrence data.
- */
-function buildCoListeningEdges(
-	nodes: GalaxyNode[],
-	coOccurrences: GenreCoOccurrence[]
-): GalaxyEdge[] {
-	const nodeById = new Map(nodes.map(n => [n.id, n]));
-	const edges: GalaxyEdge[] = [];
-
-	for (const pair of coOccurrences) {
-		const nodeA = nodeById.get(pair.genre_a_id);
-		const nodeB = nodeById.get(pair.genre_b_id);
-		if (!nodeA || !nodeB) continue;
-
-		// Skip if already connected by taxonomy
-		const existingTaxonomyEdge = edges.find(
-			e => (e.sourceId === nodeA.id && e.targetId === nodeB.id) ||
-			     (e.sourceId === nodeB.id && e.targetId === nodeA.id)
-		);
-		if (existingTaxonomyEdge) continue;
-
-		edges.push({
-			sourceId: nodeA.id,
-			targetId: nodeB.id,
-			type: 'co-listening',
-			weight: pair.jaccard
-		});
-	}
-
-	return edges;
-}
 
 export function buildGalaxyData(
 	genres: Genre[],
 	heat: GenreHeat[],
 	options: {
-		coOccurrences?: GenreCoOccurrence[];
 		cohorts?: GenreCohort[];
 		evolution?: GenreEvolutionPoint[];
 		metrics?: GenreAudioMetrics[];
@@ -221,7 +188,7 @@ export function buildGalaxyData(
 		return { nodes: [], edges: [] };
 	}
 
-	const { coOccurrences = [], cohorts = [], evolution = [], metrics = [], listeningDriven = false } = options;
+	const { cohorts = [], evolution = [], metrics = [], listeningDriven = false } = options;
 
 	const heatById = new Map(heat.map(entry => [entry.genre_id, entry]));
 	const metricsById = metrics.length > 0 ? new Map(metrics.map(m => [m.genre_id, m])) : undefined;
@@ -331,12 +298,6 @@ export function buildGalaxyData(
 			type: 'sibling',
 			weight: 0
 		});
-	}
-
-	// Phase 2: Add co-listening edges (emergent cross-genre bridges)
-	if (coOccurrences.length > 0) {
-		const coEdges = buildCoListeningEdges(nodes, coOccurrences);
-		edges.push(...coEdges);
 	}
 
 	runSimulation(nodes, edges, 200, { listeningDriven });
