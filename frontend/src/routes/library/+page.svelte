@@ -2585,10 +2585,20 @@
 		min-width: 55px;
 	}
 
+	.col-title {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		overflow: hidden;
+		min-width: 0;
+	}
+
 	.track-title {
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		min-width: 0;
+		flex: 1;
 	}
 
 	.playing-indicator {

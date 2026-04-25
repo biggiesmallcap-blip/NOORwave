@@ -11,18 +11,21 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Bulk operations: add/remove favorites, playlist management at scale
 - Advanced sorting, filtering, and full-text search (FTS5)
 - Track and album detail panels with full metadata (ISRC, play count, quality badges, date added)
-- Duplicate detection via ISRC matching and title/duration fallback
+- Artist pages: blurred-artwork hero, full TIDAL discography (Albums / Singles & EPs), in-library flags, out-of-library cards linking to TIDAL preview
+- Album pages: blurred-artwork hero, track table with hover-reveal actions, equalizer bars on active row, "More by \<artist\>" shelf
+- Duplicate detection via ISRC matching and title/duration fallback; high-confidence fingerprint pairs surfaced as duplicate groups
 - Tile and list view toggle with floating popout detail modals
 
 **Playback**
 - Lossless hi-fi streaming via TIDAL with automatic token refresh
-- Gapless playback with pre-buffer engine swap (zero-gap track transitions)
+- Gapless playback with pre-buffer engine swap (zero-gap track transitions) and BPM-aligned crossfade snap
 - Per-track fade-in / fade-out
 - Volume control and seeking
 - Four shuffle modes: off / true (Fisher-Yates) / weighted / genre-spread
   - Weighted: boosts favorites and never-played tracks, penalises recent plays
   - Genre-spread: prevents consecutive same-genre tracks
-- Automix: automatic queue continuation with learning-based next-track selection
+- Automix: automatic queue continuation with learning-based next-track selection; Camelot + BPM + energy harmonic multipliers; harmonic match indicators on queue rows
+- Now-playing panel shows Camelot wheel key and BPM badge
 
 **Genre Galaxy**
 - Interactive 3D-style force-directed canvas showing your entire genre taxonomy
@@ -53,13 +56,14 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 
 **Audio Analysis**
 - DSP feature extraction running passively during playback: BPM, key signature, Camelot wheel, loudness (LUFS), energy, danceability, beat strength, spectral centroid, stereo width
-- Instrumental detection
+- Instrumental detection; BPM/key confidence gating; LUFS bilinear-transform biquad rescaling for non-48 kHz sources
 - Per-genre audio metric summaries (average BPM, energy, danceability)
-- ACRCloud integration: fingerprint-based sample/cover recognition with configurable daily scan limit
-- Analysis status dashboard and manual reset
+- ACRCloud integration: fingerprint-based sample/cover recognition with configurable daily scan limit; 429 backoff gate; sparse fingerprint skip
+- catch_unwind crash safety around DSP analysis; bulk DB inserts in 1 000-row chunks
+- Analysis status dashboard, manual reset, and reanalyse-stale endpoint
 
 **Smart Features**
-- Rule-based smart playlists (genre, artist, date range, quality tier, play count — AND/OR logic)
+- Rule-based smart playlists with AND/OR logic — genre, artist, date range, quality tier, play count, BPM range, key signature, Camelot key, energy range, danceability range, instrumental-only, has-sample-data
 - Genre taxonomy browser with 291 genres across hierarchy
 - MusicBrainz enrichment (ISRC-first + title fallback, rate-limited)
 - Discovery: prompt → genre inference → cross-service recommendation seeds
@@ -70,10 +74,14 @@ A power-user music library manager and hi-fi audio player built to fix TIDAL's l
 - Activity graph over time
 - Completion rate, average listen duration, skip patterns
 
-**Access & Real-Time UI**
-- Bearer token auth: human-readable 5-word tokens (e.g. `amber-ridge-wolf-cedar-spark`)
-- Auto-setup: the browser on the server machine connects automatically; remote devices get a connect modal
+**UI & Access**
+- 6-digit PIN auth: numeric PIN-pad connect modal (auto-submit, numeric keyboard on mobile); existing tokens remain valid until regenerated
+- Auto-setup: the browser on the server machine connects automatically; remote devices get the PIN modal
 - WebSocket-driven: playback state, sync progress, queue updates, training progress push instantly to the browser
+- Shader wallpapers (Aurora, Chrome, Grid, Nebula, Topo) as a fixed background layer; sidebar and now-playing panel glass over the active wallpaper
+- Shared context menu (right-click or ··· button) with song radio, play/shuffle album, artist radio, go-to artist/album, favourite toggle
+- Global keyboard shortcuts: Space (play/pause), ← / → (seek), ↑ / ↓ (volume), L (like), S (shuffle), R (repeat)
+- Settings organised into left-rail categories: Appearance / Account / Sources / Discovery / Audio / Data
 - Accessible on LAN — run on one machine, open from any browser on the network
 
 **Multi-Service Integration**
@@ -143,7 +151,7 @@ npm run build
 ### First Run
 
 1. Open `http://localhost:5173` — the browser on the server machine auto-connects via the setup endpoint
-2. For remote devices, enter the access token shown in **Settings → Access Token**
+2. For remote devices, enter the 6-digit PIN shown in **Settings → Access Token**
 3. Go to **Settings** and complete TIDAL device code authentication
 4. Trigger a library sync — progress streams live via WebSocket
 5. Start playing
@@ -195,13 +203,21 @@ noor-server/src/
 └── library/              # Duplicate detection, batch ops
 
 frontend/src/
-├── routes/               # Page components (home, library, genres, playlists, analytics, discover, settings, …)
+├── routes/
+│   ├── artists/[id]/     # Artist page: discography, top tracks, hero
+│   ├── albums/[id]/      # Album page: track table, "More by" shelf
+│   ├── tidal/albums/[id]/ # Out-of-library TIDAL album preview
+│   └── …                 # home, library, genres, playlists, analytics, discover, settings, automix
 ├── lib/
 │   ├── api/              # REST client + WebSocket client
 │   ├── components/
+│   │   ├── ContextMenu.svelte   # Shared right-click / ··· context menu
+│   │   ├── wallpaper/    # ShaderWallpaper.svelte + shaders.ts (Aurora, Chrome, Grid, Nebula, Topo)
 │   │   ├── Genre/        # GenreGalaxy, GenreInterior, GenrePanel (canvas-based)
 │   │   └── Discover/     # DiscoverSpace, DiscoverPanel, PlaylistBuilder (canvas-based)
-│   └── stores/           # Player state, library state, training state (Svelte 5 runes)
+│   ├── player/
+│   │   └── track_menu.ts # buildTrackMenu — context menu action builder
+│   └── stores/           # Player state, library state, training state, wallpaper (Svelte 5 runes)
 └── app.css               # Glass-tile design system (dark base #0a0a0f, accent #7c80ff)
 ```
 
@@ -227,10 +243,13 @@ frontend/src/
 - [x] Genre Galaxy visualization with heat, co-occurrence, cohort, and evolution views
 - [x] Genre Mix: randomised entry point, seed blend builder
 - [x] Discovery Sound Space with hyperspace search and nebula halos
-- [x] Bearer token auth with auto-setup for local browsers
+- [x] Bearer token auth with auto-setup for local browsers (now 6-digit PIN)
+- [x] Automix harmonic mixing (Camelot + BPM + energy multipliers)
+- [x] Artist and album pages with TIDAL discography
+- [x] Shader wallpapers with glass UI overlay
+- [x] DSP-powered smart playlist rules (BPM, key, Camelot, energy, danceability, instrumental)
 - [ ] Gapless crossfade audio blend (pre-buffer swap works; audio-level mixing pending)
 - [ ] Duplicate detection UI (detection logic complete)
-- [ ] Automix DJ mode with harmonic mixing
 - [ ] WASAPI exclusive mode (Windows hi-fi priority)
 - [ ] YouTube Music integration
 - [ ] SoundCloud integration

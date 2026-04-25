@@ -662,21 +662,23 @@ async function fetchApi<T>(
 }
 
 export const api = {
-	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0) {
+	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0, favoriteOnly = true) {
 		return fetchApi<{ tracks: Track[]; total: number }>('/api/tracks', {
 			sort_by: sortBy,
 			sort_dir: sortDir,
 			limit: String(limit),
 			offset: String(offset),
+			favorite_only: String(favoriteOnly),
 		});
 	},
 
-	getAlbums(sortBy = 'title', sortDir = 'asc', limit = 50, offset = 0) {
+	getAlbums(sortBy = 'title', sortDir = 'asc', limit = 50, offset = 0, favoriteOnly = true) {
 		return fetchApi<{ albums: Album[]; total: number }>('/api/albums', {
 			sort_by: sortBy,
 			sort_dir: sortDir,
 			limit: String(limit),
 			offset: String(offset),
+			favorite_only: String(favoriteOnly),
 		});
 	},
 

@@ -7,6 +7,9 @@
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { playTrackNow } from '$lib/stores/player';
 
 	let dashboard = $state<AnalyticsDashboard | null>(null);
 	let loading = $state(true);
@@ -123,10 +126,18 @@
 				{#if dashboard.recent_listens.length === 0}
 					<EmptyState title="No listens yet" copy="Start playback and this history will begin to fill in." />
 				{:else}
-					<div class="stack">
+					<div class="stack scroll-list">
 						{#each dashboard.recent_listens as listen}
-							<article class="list-card">
-								<div>
+							<div
+								class="list-card interactive"
+								role="button"
+								tabindex="0"
+								onclick={() => void playTrackNow(listen.track_id)}
+								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(listen.track_id)}
+								oncontextmenu={(e) => openContextMenu(e, buildTrackMenu({ id: listen.track_id, title: listen.track_title, artist_name: listen.artist_name, album_title: listen.album_title }), listen.track_title)}
+							>
+								<div class="list-card-play" aria-hidden="true">▶</div>
+								<div class="list-card-info">
 									<h4>{listen.track_title}</h4>
 									<p>{listen.artist_name ?? 'Unknown artist'}{listen.album_title ? ` · ${listen.album_title}` : ''}</p>
 								</div>
@@ -134,7 +145,7 @@
 									<span>{formatDuration(listen.duration_listened_ms)}</span>
 									<span>{formatListenStamp(listen.started_at)}</span>
 								</div>
-							</article>
+							</div>
 						{/each}
 					</div>
 				{/if}
@@ -226,11 +237,18 @@
 	.stack {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
 	}
 
-	.compact {
-		gap: 6px;
+	.compact .behavior-row {
+		padding: 8px 0;
+	}
+
+	.scroll-list {
+		max-height: 420px;
+		overflow-y: auto;
+		overflow-x: hidden;
+		scrollbar-width: thin;
+		scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 	}
 
 	.list-card,
@@ -238,8 +256,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--space-3);
-		padding: 12px 0;
+		gap: 12px;
+		padding: 11px 0;
 		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 	}
 
@@ -247,6 +265,59 @@
 	.behavior-row:last-child {
 		border-bottom: none;
 		padding-bottom: 0;
+	}
+
+	.list-card.interactive {
+		cursor: pointer;
+		border-radius: 6px;
+		transition: background 80ms ease;
+	}
+
+	.list-card.interactive:hover {
+		background: rgba(255, 255, 255, 0.05);
+	}
+
+	.list-card.interactive:hover .list-card-play {
+		opacity: 1;
+	}
+
+	.list-card-play {
+		opacity: 0;
+		width: 16px;
+		flex-shrink: 0;
+		font-size: 0.65rem;
+		color: var(--accent-strong, #6366f1);
+		transition: opacity 100ms ease;
+		text-align: center;
+	}
+
+	.list-card-info {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.list-card-info h4,
+	.list-card > div:not(.list-card-play):not(.list-card-side) h4 {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 600;
+	}
+
+	.list-card-info p,
+	.list-card > div:not(.list-card-play):not(.list-card-side) p {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--text-secondary);
+	}
+
+	.list-card-side {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 4px;
+		flex-shrink: 0;
 	}
 
 	.list-card h4,
@@ -258,13 +329,6 @@
 	.list-card-side span,
 	.behavior-row span {
 		color: var(--text-secondary);
-	}
-
-	.list-card-side {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 4px;
 	}
 
 	.genre-row {

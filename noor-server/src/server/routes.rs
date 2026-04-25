@@ -8,7 +8,8 @@ use crate::services::discovery::{
 };
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
-    auth as tidal_auth, client::TidalClient, mutations as tidal_mutations, stream as tidal_stream,
+    auth as tidal_auth, client::TidalClient, import as tidal_import,
+    mutations as tidal_mutations, stream as tidal_stream,
 };
 use crate::services::spotify;
 use crate::smart::discovery as discovery_engine;
@@ -237,6 +238,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
         .route("/api/artists/{id}/discography", get(get_artist_discography))
         .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
+        .route("/api/tidal/albums/{id}/import", post(import_tidal_album))
         .route("/api/genres", get(get_genres))
         .route("/api/genres/heat", get(get_genre_heat))
         .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
@@ -666,6 +668,42 @@ async fn get_tidal_album_tracks(
         .collect();
 
     Ok(Json(json!({ "tracks": tracks })))
+}
+
+async fn import_tidal_album(
+    State(state): State<SharedState>,
+    Path(tidal_album_id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (tokens, db) = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        (s.tidal_tokens.clone().or(persisted), s.db.clone())
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let imported = tidal_import::import_album(&db, &client, tidal_album_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))))?;
+
+    let tracks: Vec<Value> = imported
+        .tracks
+        .iter()
+        .map(|t| json!({ "tidal_id": t.tidal_id, "local_id": t.local_id }))
+        .collect();
+
+    Ok(Json(json!({
+        "album_id": imported.album_id,
+        "tracks": tracks,
+    })))
 }
 
 async fn get_genres(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {

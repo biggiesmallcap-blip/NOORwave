@@ -1,26 +1,29 @@
+// Desaturated to ~65% of original hue, blended 35% toward a shared #c6c8e2
+// periwinkle anchor. Preserves family identity while dropping the "rainbow"
+// read the user flagged in the design-refresh chat.
 export const ROOT_FAMILY_COLORS = {
-	electronic: { label: 'Electronic', color: '#7c80ff', glowColor: 'rgba(124, 128, 255, 0.34)' },
-	rock: { label: 'Rock', color: '#ff6b9d', glowColor: 'rgba(255, 107, 157, 0.32)' },
-	pop: { label: 'Pop', color: '#ffd166', glowColor: 'rgba(255, 209, 102, 0.3)' },
-	'hip-hop': { label: 'Hip-Hop', color: '#efb95b', glowColor: 'rgba(239, 185, 91, 0.32)' },
-	'r-b-and-soul': { label: 'R&B and Soul', color: '#c77dff', glowColor: 'rgba(199, 125, 255, 0.34)' },
-	jazz: { label: 'Jazz', color: '#06d6a0', glowColor: 'rgba(6, 214, 160, 0.3)' },
-	classical: { label: 'Classical', color: '#e9c46a', glowColor: 'rgba(233, 196, 106, 0.32)' },
-	'folk-and-country': { label: 'Folk and Country', color: '#90be6d', glowColor: 'rgba(144, 190, 109, 0.3)' },
-	latin: { label: 'Latin', color: '#f72585', glowColor: 'rgba(247, 37, 133, 0.34)' },
-	'reggae-and-caribbean': { label: 'Reggae and Caribbean', color: '#43aa8b', glowColor: 'rgba(67, 170, 139, 0.3)' },
-	blues: { label: 'Blues', color: '#4cc9f0', glowColor: 'rgba(76, 201, 240, 0.3)' },
+	electronic: { label: 'Electronic', color: '#9699f5', glowColor: 'rgba(150, 153, 245, 0.22)' },
+	rock: { label: 'Rock', color: '#eb8bb5', glowColor: 'rgba(235, 139, 181, 0.20)' },
+	pop: { label: 'Pop', color: '#ebce91', glowColor: 'rgba(235, 206, 145, 0.20)' },
+	'hip-hop': { label: 'Hip-Hop', color: '#e0be8a', glowColor: 'rgba(224, 190, 138, 0.20)' },
+	'r-b-and-soul': { label: 'R&B and Soul', color: '#c697f5', glowColor: 'rgba(198, 151, 245, 0.22)' },
+	jazz: { label: 'Jazz', color: '#49d1b7', glowColor: 'rgba(73, 209, 183, 0.20)' },
+	classical: { label: 'Classical', color: '#dcc594', glowColor: 'rgba(220, 197, 148, 0.20)' },
+	'folk-and-country': { label: 'Folk and Country', color: '#a3c196', glowColor: 'rgba(163, 193, 150, 0.20)' },
+	latin: { label: 'Latin', color: '#e65da5', glowColor: 'rgba(230, 93, 165, 0.22)' },
+	'reggae-and-caribbean': { label: 'Reggae and Caribbean', color: '#71b4a9', glowColor: 'rgba(113, 180, 169, 0.20)' },
+	blues: { label: 'Blues', color: '#76c8eb', glowColor: 'rgba(118, 200, 235, 0.20)' },
 	'ambient-and-experimental': {
 		label: 'Ambient and Experimental',
-		color: '#a8dadc',
-		glowColor: 'rgba(168, 218, 220, 0.28)'
+		color: '#b2e0de',
+		glowColor: 'rgba(178, 224, 222, 0.18)'
 	},
 	'soundtrack-and-screen': {
 		label: 'Soundtrack and Screen',
-		color: '#f4a261',
-		glowColor: 'rgba(244, 162, 97, 0.3)'
+		color: '#e3ae8e',
+		glowColor: 'rgba(227, 174, 142, 0.20)'
 	},
-	world: { label: 'World', color: '#e76f51', glowColor: 'rgba(231, 111, 81, 0.3)' }
+	world: { label: 'World', color: '#db8e83', glowColor: 'rgba(219, 141, 131, 0.20)' }
 } as const;
 
 export type RootFamilyKey = keyof typeof ROOT_FAMILY_COLORS;
