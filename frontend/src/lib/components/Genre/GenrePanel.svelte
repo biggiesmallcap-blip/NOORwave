@@ -198,7 +198,7 @@
 		letter-spacing: -0.02em;
 	}
 
-	.panel-copy p,
+	.panel-subtitle,
 	.family-name,
 	.track-main p,
 	.track-side span {
@@ -245,6 +245,26 @@
 		gap: 8px;
 	}
 
+	.tracks-toggle {
+		width: 100%;
+		background: color-mix(in srgb, var(--instrument-surface) 84%, transparent);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
+		border-radius: var(--radius);
+		padding: 8px 12px;
+		font-size: 0.78rem;
+		color: var(--signal-text);
+		text-align: left;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast);
+	}
+
+	.tracks-toggle:hover {
+		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 86%, transparent);
+	}
+
 	.panel-action-row {
 		display: flex;
 		flex-wrap: wrap;
@@ -289,7 +309,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-		overflow: auto;
+		overflow-y: auto;
+		max-height: 50vh;
 		padding-right: 4px;
 	}
 
