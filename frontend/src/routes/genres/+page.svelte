@@ -550,7 +550,6 @@
 					<div><strong>{galaxyData.nodes.length}</strong><span>mapped</span></div>
 					<div><strong>{activeThisMonthCount}</strong><span>active</span></div>
 					<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
-					<div><strong>{hotGenreCount}</strong><span>hot</span></div>
 				</div>
 			</div>
 
