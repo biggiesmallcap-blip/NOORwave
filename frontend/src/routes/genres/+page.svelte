@@ -57,17 +57,9 @@
 	let selectedTracks = $derived(selectedId === null ? [] : panelTracksById[selectedId] ?? []);
 	let selectedTrackLoading = $derived(selectedId === null ? false : panelLoadingById[selectedId] ?? false);
 	let selectedTrackError = $derived(selectedId === null ? null : panelErrorById[selectedId] ?? null);
-	let hotGenreCount = $derived(heat.filter((entry) => entry.listen_count > 0).length);
 	let noGenresLoaded = $derived(!loading && !error && galaxyData.nodes.length === 0);
 	let flatTaxonomy = $derived(flattenGenres(taxonomy));
 	let genreById = $derived(new Map(flatTaxonomy.map((genre) => [genre.id, genre])));
-	let rootStats = $derived(
-		taxonomy.map((root) => ({
-			id: root.id,
-			name: root.name,
-			listens: heatById.get(root.id)?.listen_count ?? 0
-		}))
-	);
 	let activeThisMonthCount = $derived(heat.filter((entry) => entry.listen_count > 0).length);
 	let rediscoveryCount = $derived(
 		flatTaxonomy.filter(
@@ -841,13 +833,8 @@
 		min-width: 180px;
 	}
 
-	.search-shell input,
-	.family-jump {
+	.search-shell input {
 		height: 40px;
-	}
-
-	.family-jump {
-		width: 180px;
 	}
 
 	.seed-builder {
@@ -1005,10 +992,6 @@
 		.search-shell {
 			flex-basis: 100%;
 			min-width: 100%;
-		}
-
-		.family-jump {
-			width: 100%;
 		}
 
 		.seed-builder {
