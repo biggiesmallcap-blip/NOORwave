@@ -1290,7 +1290,8 @@ async fn play_discovery_track(
             )
         })?;
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), 0);
+    let crossfade_ms = current_crossfade_ms(&state).await;
+    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -3637,7 +3638,8 @@ async fn play_track(
     );
 
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), 0);
+    let crossfade_ms = current_crossfade_ms(&state).await;
+    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -5743,6 +5745,29 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
             state.active_listen_session = Some(player::ActiveListenSession::start(track.id, now));
         }
     }
+}
+
+/// Read the user's configured crossfade length from `playback_state`.
+///
+/// Every code path that calls `player::build_playback_preparation` to start a
+/// track on the host audio runtime must source `crossfade_ms` through this
+/// helper (or the equivalent `snapshot.state.crossfade_ms` after a
+/// `next_track`/`previous_track` snapshot). Passing a hardcoded 0 disables the
+/// per-engine fade-out ramp AND prevents `CrossfadeStart` from firing, which
+/// silently breaks both gapless and crossfade transitions.
+async fn current_crossfade_ms(state: &SharedState) -> i32 {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT crossfade_ms FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap_or(0)
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {
