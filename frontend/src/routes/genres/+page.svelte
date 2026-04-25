@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
-	import { api, type Genre, type GenreHeat, type GenreCoOccurrence, type GenreCohort, type GenreEvolutionPoint, type Track } from '$lib/api/client';
+	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type Track } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -13,7 +13,6 @@
 
 	let taxonomy = $state<Genre[]>([]);
 	let heat = $state<GenreHeat[]>([]);
-	let coOccurrences = $state<GenreCoOccurrence[]>([]);
 	let cohorts = $state<GenreCohort[]>([]);
 	let evolution = $state<GenreEvolutionPoint[]>([]);
 	let selectedId = $state<number | null>(null);
@@ -33,11 +32,8 @@
 	let pendingRefreshKind: 'heat' | 'full' | null = null;
 	let viewMode = $state<GalaxyViewMode>('map');
 	let labelsEnabled = $state(true);
-	let heatEnabled = $state(true);
+	let heatEnabled = $state(false);
 	let autoDrift = $state(true);
-	let listeningDriven = $state(false);
-	let showCohorts = $state(true);
-	let showCoListening = $state(true);
 	let searchQuery = $state('');
 	let focusNodeId = $state<number | null>(null);
 	let resetViewToken = $state(0);
@@ -48,10 +44,8 @@
 	let galaxyData = $derived(
 		taxonomy.length > 0
 			? buildGalaxyData(taxonomy, heat, {
-					coOccurrences: showCoListening ? coOccurrences : [],
-					cohorts: showCohorts ? cohorts : [],
-					evolution,
-					listeningDriven
+					cohorts: [],
+					evolution
 				})
 			: { nodes: [], edges: [] }
 	);
@@ -80,43 +74,13 @@
 			(genre) => (genre.track_count ?? 0) > 0 && (heatById.get(genre.id)?.listen_count ?? 0) === 0
 		).length
 	);
-	let liveBridgeCount = $derived(
-		rootStats.filter((root) => root.listens > 0).length > 1
-			? rootStats.filter((root) => root.listens > 0).length - 1
-			: 0
-	);
-	let coListeningBridgeCount = $derived(
-		coOccurrences.filter((p) => p.jaccard > 0.1).length
-	);
-	let activeCohortCount = $derived(
-		cohorts.filter((c) => c.genre_ids.length > 0).length
-	);
 	let activeModeCopy = $derived.by(() => {
-		if (listeningDriven) {
-			switch (viewMode) {
-				case 'constellations':
-					return 'Your personal listening clusters, shaped by when and how you listen.';
-				case 'mood':
-					return 'Emotional field mapped to your taste gravity.';
-				case 'heat':
-					return 'Momentum halos — your current taste orbit.';
-				case 'paths':
-					return 'Co-listening bridges between genres you bridge in real life.';
-				default:
-					return 'Your personal genre cosmos — shaped by what you actually listen to.';
-			}
-		}
 		switch (viewMode) {
-			case 'constellations':
-				return 'Editorial scene clusters and orbit guides.';
-			case 'mood':
-				return 'Emotional field overlay across the taxonomy.';
-			case 'heat':
-				return 'Momentum halos reflecting recent listening.';
-			case 'paths':
-				return 'Lineage routes and bridge emphasis.';
-			default:
-				return 'Canonical galaxy map of your library.';
+			case 'constellations': return 'Editorial scene clusters and orbit guides.';
+			case 'mood': return 'Emotional field overlay across the taxonomy.';
+			case 'heat': return 'Momentum halos reflecting recent listening.';
+			case 'paths': return 'Lineage routes and bridge emphasis.';
+			default: return 'Canonical galaxy map of your library.';
 		}
 	});
 	let selectedLineage = $derived.by(() => {
@@ -172,7 +136,6 @@
 	type GalaxySnapshot = {
 		genres: Genre[];
 		heat: GenreHeat[];
-		coOccurrences: GenreCoOccurrence[];
 		cohorts: GenreCohort[];
 		evolution: GenreEvolutionPoint[];
 	};
@@ -187,9 +150,7 @@
 			throw reason;
 		});
 
-		// Fetch new data in parallel — these are lightweight queries
-		const [coOccurrencesResp, cohortsResp, evolutionResp] = await Promise.allSettled([
-			api.getGenreCoOccurrence(90, 30, 3),
+		const [cohortsResp, evolutionResp] = await Promise.allSettled([
 			api.getGenreCohorts(90),
 			api.getGenreEvolution(90)
 		]);
@@ -197,7 +158,6 @@
 		return {
 			genres: genreResponse.genres,
 			heat: heatResponse.heat,
-			coOccurrences: coOccurrencesResp.status === 'fulfilled' ? coOccurrencesResp.value.pairs : [],
 			cohorts: cohortsResp.status === 'fulfilled' ? cohortsResp.value.cohorts : [],
 			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : []
 		};
@@ -219,7 +179,6 @@
 		const nextIds = new Set(flattenGenres(snapshot.genres).map((genre) => genre.id));
 		taxonomy = snapshot.genres;
 		heat = snapshot.heat;
-		coOccurrences = snapshot.coOccurrences;
 		cohorts = snapshot.cohorts;
 		evolution = snapshot.evolution;
 
@@ -322,15 +281,13 @@
 	async function refreshHeat() {
 		refreshingHeat = true;
 		try {
-			const [heatResp, coResp, cohortResp, evolResp] = await Promise.allSettled([
+			const [heatResp, cohortResp, evolResp] = await Promise.allSettled([
 				api.getGenreHeat(90),
-				api.getGenreCoOccurrence(90, 30, 3),
 				api.getGenreCohorts(90),
 				api.getGenreEvolution(90)
 			]);
 			if (heatResp.status === 'fulfilled') heat = heatResp.value.heat;
 			else if (isNotFoundError(heatResp.reason)) heat = buildZeroHeat(taxonomy);
-			if (coResp.status === 'fulfilled') coOccurrences = coResp.value.pairs;
 			if (cohortResp.status === 'fulfilled') cohorts = cohortResp.value.cohorts;
 			if (evolResp.status === 'fulfilled') evolution = evolResp.value.evolution;
 		} catch (reason) {
@@ -420,20 +377,6 @@
 
 		handleSelect(match.id);
 		await focusNode(match.id);
-	}
-
-	async function handleJumpToFamily(familyId: number) {
-		if (!familyId) return;
-		handleSelect(familyId);
-		await focusNode(familyId);
-	}
-
-	function handleBackOut() {
-		if (selectedId !== null) {
-			handleSelect(null);
-			return;
-		}
-		resetViewToken += 1;
 	}
 
 	async function loadArtistChipsForFamily(familyId: number) {
@@ -606,13 +549,8 @@
 					<div><strong>{taxonomy.length}</strong><span>families</span></div>
 					<div><strong>{galaxyData.nodes.length}</strong><span>mapped</span></div>
 					<div><strong>{activeThisMonthCount}</strong><span>active</span></div>
-					{#if listeningDriven}
-						<div><strong>{activeCohortCount}</strong><span>clusters</span></div>
-						<div><strong>{coListeningBridgeCount}</strong><span>bridges</span></div>
-					{:else}
-						<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
-						<div><strong>{liveBridgeCount}</strong><span>bridges</span></div>
-					{/if}
+					<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
+					<div><strong>{hotGenreCount}</strong><span>hot</span></div>
 				</div>
 			</div>
 
