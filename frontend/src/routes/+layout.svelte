@@ -162,12 +162,14 @@
 			void refreshPlaybackState();
 		}
 
-		// Listen for 401 responses from any API call
+		// Listen for 401 responses from any API call. On loopback the backend
+		// will hand us a fresh token via /api/setup/token, so retry auto-setup
+		// before falling back to the PIN modal — keeps local launches silent
+		// even if the stored token is stale (e.g. server regenerated).
 		window.addEventListener('noor:unauthorized', () => {
 			clearStoredToken();
-			showConnect = true;
 			authReady = false;
-			setTimeout(focusPin, 50);
+			void tryAutoSetup();
 		});
 
 		const storedTheme = localStorage.getItem('noor-theme');
