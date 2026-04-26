@@ -67,6 +67,9 @@ pub struct AppState {
     /// Epoch seconds when the current run started; 0 when idle. Used to
     /// compute an observed throughput rate for the frontend's ETA display.
     pub lastfm_enrich_started_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Discovery training cancel flag — flipped to true by POST /api/discovery/train/stop,
+    /// reset to false at the start of each training run.
+    pub discovery_train_cancel: Arc<AtomicBool>,
     /// Shared bearer token for network auth
     pub server_token: String,
 }
@@ -213,6 +216,7 @@ async fn main() -> Result<()> {
         lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        discovery_train_cancel: Arc::new(AtomicBool::new(false)),
         server_token,
     }));
 

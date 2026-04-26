@@ -7812,6 +7812,7 @@ mod tests {
             lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_token: String::new(),
         })));
 
