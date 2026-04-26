@@ -5,6 +5,44 @@
 	import { discoverSpace, addVisitedRegion } from '$lib/stores/discover_space';
 	import { training } from '$lib/stores/training';
 
+	// ── Edge color palette (Phase 3b) ────────────────────────────────────────
+	// Resolves an edge to a color based on its first reason_tag (Phase 1 wire field),
+	// falling back to edge.type, then a neutral grey.
+	const EDGE_COLORS: Record<string, string> = {
+		// Reason tag keys
+		harmonic: '#a89cff',
+		harmonic_match: '#a89cff',
+		behavioural: '#5fb1ff',
+		behavioral: '#5fb1ff',
+		bpm_match: '#ffc857',
+		artist_affinity: '#ff8866',
+		album_context: '#ff8866',
+		artist: '#ff8866',
+		album: '#ff8866',
+		genre_branch: '#9fcf80',
+		genre: '#9fcf80',
+		energy_match: '#9fcf80',
+		external_match: '#5b4ef8',
+		audio_texture: '#c0c0d8',
+		// Coarse edge.type fallback values (some overlap with above)
+		sample: '#ff8866',
+	};
+
+	function resolveEdgeColor(edge: DiscoverEdge): string {
+		const tags = edge.reason_tags ?? [];
+		for (const tag of tags) {
+			if (EDGE_COLORS[tag]) return EDGE_COLORS[tag];
+		}
+		return EDGE_COLORS[edge.type] ?? '#888888';
+	}
+
+	function hexToRgba(hex: string, alpha: number): string {
+		const r = parseInt(hex.slice(1, 3), 16);
+		const g = parseInt(hex.slice(3, 5), 16);
+		const b = parseInt(hex.slice(5, 7), 16);
+		return `rgba(${r},${g},${b},${alpha})`;
+	}
+
 	let {
 		nodes = [],
 		artists = [],
@@ -275,14 +313,10 @@
 				ctx.lineTo(to.x, to.y);
 			}
 
-			switch (edge.type) {
-				case 'bpm_match': ctx.strokeStyle = 'rgba(255,200,50,0.3)'; break;
-				case 'harmonic': ctx.strokeStyle = 'rgba(150,100,255,0.3)'; break;
-				case 'behavioural': ctx.strokeStyle = 'rgba(80,150,255,0.2)'; break;
-				case 'sample': ctx.strokeStyle = 'rgba(255,100,50,0.4)'; break;
-				default: ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-			}
-			ctx.lineWidth = edge.weight * 3;
+			const edgeBaseColor = resolveEdgeColor(edge);
+			const edgeAlpha = 0.4 + edge.weight * 0.5;
+			ctx.strokeStyle = hexToRgba(edgeBaseColor, edgeAlpha);
+			ctx.lineWidth = 0.8 + edge.weight * 2.5;
 			ctx.stroke();
 		}
 
