@@ -15,6 +15,8 @@ use crate::AppEvent;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
@@ -35,6 +37,7 @@ pub async fn start_training(
     event_tx: Sender<AppEvent>,
     full_mode: bool,
     rebuild_audio: bool,
+    cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let (model, run) = db.with_conn(|conn| {
         let config_json = serde_json::json!({
@@ -56,6 +59,22 @@ pub async fn start_training(
         let run = queries::create_training_run(conn, Some(model.id), "corpus", "running")?;
         Ok((model, run))
     })?;
+
+    // If cancel is requested at any stage boundary, mark the run as cancelled
+    // and skip remaining persistence + model activation.
+    let bail_if_cancelled = |stage: &str| -> Result<bool> {
+        if cancel.load(Ordering::Relaxed) {
+            tracing::info!(
+                target: "noor.discovery.training",
+                run_id = run.id,
+                stage = stage,
+                "discovery training cancelled by user"
+            );
+            db.with_conn(|conn| queries::finish_training_run(conn, run.id, "cancelled"))?;
+            return Ok(true);
+        }
+        Ok(false)
+    };
 
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "corpus", "running", 0.05, None, 0)
@@ -97,8 +116,9 @@ pub async fn start_training(
 
     // Run the trainer directly — no subprocess
     let progress_tx_clone = progress_tx.clone();
+    let cancel_for_trainer = cancel.clone();
     let output = tokio::task::spawn_blocking(move || {
-        run_discovery_training(input, Some(&progress_tx_clone), None)
+        run_discovery_training(input, Some(&progress_tx_clone), Some(&cancel_for_trainer))
     })
     .await
     .context("discovery trainer panicked")?;
@@ -107,6 +127,9 @@ pub async fn start_training(
     drop(progress_tx);
     let _ = log_task.await;
 
+    if bail_if_cancelled("audio")? {
+        return Ok(());
+    }
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "audio", "running", 0.55, None, 0)
     })?;
@@ -125,6 +148,9 @@ pub async fn start_training(
         })
         .collect::<Vec<_>>();
 
+    if bail_if_cancelled("audio")? {
+        return Ok(());
+    }
     db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))?;
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "fusion", "running", 0.72, None, 0)
@@ -138,6 +164,9 @@ pub async fn start_training(
             (track_id, pack_vector_f64(vector), norm)
         })
         .collect::<Vec<_>>();
+    if bail_if_cancelled("fusion")? {
+        return Ok(());
+    }
     db.with_conn(|conn| queries::replace_track_embeddings(conn, model.id, &embeddings))?;
 
     let neighbors = output
@@ -168,6 +197,9 @@ pub async fn start_training(
             )
         })
         .collect::<Vec<_>>();
+    if bail_if_cancelled("neighbors")? {
+        return Ok(());
+    }
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
         queries::replace_track_neighbors(conn, model.id, &neighbors)
@@ -186,6 +218,9 @@ pub async fn start_training(
     } else {
         coverage >= 0.5
     };
+    if bail_if_cancelled("evaluate")? {
+        return Ok(());
+    }
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
         queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;

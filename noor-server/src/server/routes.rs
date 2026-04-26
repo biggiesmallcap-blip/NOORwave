@@ -267,6 +267,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/status", get(get_discovery_status))
         .route("/api/discovery/train", post(start_discovery_training))
         .route("/api/discovery/train/status", get(get_discovery_training_status))
+        .route("/api/discovery/train/stop", post(stop_discovery_training))
         .route("/api/discovery/feedback", post(record_discovery_feedback))
         .route(
             "/api/discovery/presets",
@@ -1575,12 +1576,14 @@ async fn start_discovery_training(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryTrainRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+
     let mode = payload.mode.as_deref().unwrap_or("incremental");
     let full_mode = mode == "full";
     let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
-    let db = {
+    let (db, cancel) = {
         let guard = state.read().await;
-        guard.db.clone()
+        (guard.db.clone(), guard.discovery_train_cancel.clone())
     };
 
     // Guard: reject if a run is already in progress
@@ -1598,12 +1601,18 @@ async fn start_discovery_training(
         })));
     }
 
+    // Reset cancel flag synchronously before spawning so that a Stop request
+    // arriving immediately after this call reaches the spawned task.
+    cancel.store(false, Ordering::SeqCst);
+
     tokio::spawn(async move {
         let event_tx = {
             let guard = state.read().await;
             guard.event_tx.clone()
         };
-        if let Err(error) = discovery_learning::start_training(db, event_tx, full_mode, rebuild_audio).await {
+        if let Err(error) =
+            discovery_learning::start_training(db, event_tx, full_mode, rebuild_audio, cancel).await
+        {
             tracing::error!(
                 target: "noor.discovery.training",
                 error = %error,
@@ -1615,6 +1624,15 @@ async fn start_discovery_training(
         "status": "training_started",
         "mode": if full_mode { "full" } else { "incremental" }
     })))
+}
+
+async fn stop_discovery_training(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    s.discovery_train_cancel.store(true, Ordering::Relaxed);
+    Ok(Json(json!({ "status": "stopping" })))
 }
 
 async fn record_discovery_feedback(
