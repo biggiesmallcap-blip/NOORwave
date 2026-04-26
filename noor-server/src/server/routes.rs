@@ -1868,7 +1868,7 @@ async fn get_discovery_space(
     let seed_id = payload.seed_track_id.unwrap_or(0);
     let prompt = payload.prompt.as_deref().unwrap_or("").trim().to_string();
 
-    let state_guard = state.read().await;
+    let mut state_guard = state.read().await;
 
     #[derive(Debug)]
     struct SpaceTrack {
@@ -1955,40 +1955,101 @@ async fn get_discovery_space(
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
-        let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
-        discovery_learning::radio_from_neighbors(&state_guard.db, seed_id, &[], limit, creativity)
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| SpaceTrack {
-                track_id: t.track_id,
-                title: t.title,
-                artist_name: t.artist_name.unwrap_or_default(),
-                album_title: t.album_title,
-                artwork_url: t.artwork_url,
-                duration_ms: t.duration_ms,
-                similarity_score: t.similarity_score,
-                source: "tidal".to_string(),
-                energy: None,
-                danceability: None,
-                bpm: None,
-                key_signature: None,
-                camelot_key: None,
-                is_instrumental: None,
-                loudness_lufs: None,
-                skip_rate: None,
-                completion_avg: None,
-                cohort_id: None,
-                cohort_label: None,
-                top_genre: None,
-                top_genre_source: None,
-                top_genre_confidence: None,
-                last_played_at: None,
-                play_count: 0,
-                is_in_library: true,
-            })
-            .collect()
+        // Load the seed's metadata from the library so we can build Tidal queries.
+        let seed_opt = state_guard.db.with_conn(|conn| {
+            queries::load_external_seed_from_track(conn, seed_id)
+        }).ok().flatten();
+
+        if let Some(seed_meta) = seed_opt {
+            // Drop the read guard so async helpers can take their own locks.
+            // (We re-acquire later for Phase 1 enrichment passes.)
+            drop(state_guard);
+
+            let request = external_discovery_engine::ExternalDiscoveryRequest {
+                prompt: String::new(),
+                mode: mode.clone(),
+                services: vec!["tidal".to_string()],
+                limit: limit as usize,
+            };
+
+            let context = match load_external_discovery_context(&state).await {
+                Ok(c) => c,
+                Err(_) => {
+                    state_guard = state.read().await;
+                    return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] })));
+                }
+            };
+
+            let queries = external_discovery_engine::build_connection_queries(
+                &request,
+                &context,
+                &seed_meta,
+            );
+            let queries = augment_search_queries_with_lastfm(&state, &request, &context, queries).await;
+
+            let provider = match tidal_discovery_provider(&state).await {
+                Ok(p) => p,
+                Err(_) => {
+                    state_guard = state.read().await;
+                    return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] })));
+                }
+            };
+
+            let raw = provider.search_tracks(&queries, 8).await.unwrap_or_default();
+            let candidates = enrich_candidates_with_metadata(&state, raw).await;
+            let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
+                .await
+                .unwrap_or_default();
+
+            let feed = external_discovery_engine::build_external_feed(
+                &request,
+                &context,
+                &candidates,
+                &library_tidal_ids,
+                discovery_provider_capabilities(),
+                None,
+            );
+
+            // Re-acquire the read guard for the enrichment passes that follow.
+            state_guard = state.read().await;
+
+            feed.results
+                .into_iter()
+                .filter_map(|r| {
+                    let tidal_id = r.provider_track_id.parse::<i64>().ok()?;
+                    Some(SpaceTrack {
+                        track_id: tidal_id,
+                        title: r.title,
+                        artist_name: r.artist_name.unwrap_or_default(),
+                        album_title: r.album_title,
+                        artwork_url: r.artwork_url,
+                        duration_ms: r.duration_ms,
+                        similarity_score: (r.score as f64 / 99.0).clamp(0.0, 1.0),
+                        source: "external".to_string(),
+                        energy: None,
+                        danceability: None,
+                        bpm: None,
+                        key_signature: None,
+                        camelot_key: None,
+                        is_instrumental: None,
+                        loudness_lufs: None,
+                        skip_rate: None,
+                        completion_avg: None,
+                        cohort_id: None,
+                        cohort_label: None,
+                        top_genre: None,
+                        top_genre_source: None,
+                        top_genre_confidence: None,
+                        last_played_at: None,
+                        play_count: 0,
+                        is_in_library: false,
+                    })
+                })
+                .collect()
+        } else {
+            // Seed not found — empty result.
+            vec![]
+        }
     } else {
         vec![]
     };
