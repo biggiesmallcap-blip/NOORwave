@@ -291,30 +291,43 @@ impl GenreCatalog {
             return None;
         }
 
+        let input_tokens: Vec<&str> = normalized.split_whitespace().collect();
+
         let mut scored = self
             .canonical_keys
             .iter()
             .map(|candidate| {
-                let score = strsim::jaro_winkler(normalized, &normalize_key(candidate));
-                (candidate, score)
+                let candidate_norm = normalize_key(candidate);
+                let score = strsim::jaro_winkler(normalized, &candidate_norm);
+                (candidate, candidate_norm, score)
             })
             .collect::<Vec<_>>();
 
-        scored.sort_by(|(left_name, left_score), (right_name, right_score)| {
+        scored.sort_by(|(left_name, _, left_score), (right_name, _, right_score)| {
             right_score
                 .total_cmp(left_score)
                 .then_with(|| left_name.cmp(right_name))
         });
 
-        let Some((best_name, best_score)) = scored.first() else {
+        let Some((best_name, best_norm, best_score)) = scored.first() else {
             return None;
         };
 
-        if *best_score < 0.90 {
+        // Raised from 0.90 to reduce false positives (e.g. "british" → "britpop").
+        if *best_score < 0.92 {
             return None;
         }
 
-        if let Some((second_name, second_score)) = scored.get(1) {
+        // Require at least one shared token to avoid purely character-level matches.
+        let candidate_tokens: Vec<&str> = best_norm.split_whitespace().collect();
+        let shares_token = input_tokens
+            .iter()
+            .any(|t| candidate_tokens.contains(t));
+        if !shares_token {
+            return None;
+        }
+
+        if let Some((second_name, _, second_score)) = scored.get(1) {
             if (best_score - second_score) < 0.05 {
                 return None;
             }

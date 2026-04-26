@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_012,
     MIGRATION_013,
     MIGRATION_014,
+    MIGRATION_015,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -543,6 +544,14 @@ CREATE TABLE IF NOT EXISTS lastfm_artist_cache (
     artist_name TEXT PRIMARY KEY,
     tags_json   TEXT NOT NULL,
     fetched_at  TEXT DEFAULT (datetime('now'))
+);
+"#;
+
+const MIGRATION_015: &str = r#"
+CREATE TABLE IF NOT EXISTS lastfm_unresolved_tags (
+    tag        TEXT PRIMARY KEY,
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    last_seen  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;
 
