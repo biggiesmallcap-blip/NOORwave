@@ -40,6 +40,9 @@
   let debounceTimer: ReturnType<typeof setTimeout>
   let recent = $state<string[]>(loadRecent())
 
+  type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library'
+  let filterMode = $state<FilterMode>('all')
+
   function onInput() {
     clearTimeout(debounceTimer)
     if (!query.trim()) {
@@ -78,14 +81,36 @@
 
   // Library entries float to the top of each section. Stable sort preserves
   // Tidal's order within each group so the user sees expected ranking otherwise.
+  // Filter pills then narrow the visible set without re-querying.
+  function applyFilter<T extends { in_library: boolean }>(items: T[], showType: boolean): T[] {
+    if (!showType) return []
+    if (filterMode === 'library') return items.filter((i) => i.in_library)
+    return items
+  }
   const sortedArtists = $derived(
-    results ? [...results.artists].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : []
+    applyFilter(
+      results ? [...results.artists].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : [],
+      filterMode === 'all' || filterMode === 'artists' || filterMode === 'library'
+    )
   )
   const sortedAlbums = $derived(
-    results ? [...results.albums].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : []
+    applyFilter(
+      results ? [...results.albums].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : [],
+      filterMode === 'all' || filterMode === 'albums' || filterMode === 'library'
+    )
   )
   const sortedTracks = $derived(
-    results ? [...results.tracks].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : []
+    applyFilter(
+      results ? [...results.tracks].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : [],
+      filterMode === 'all' || filterMode === 'tracks' || filterMode === 'library'
+    )
+  )
+  const isFilteredEmpty = $derived(
+    results !== null &&
+    !isEmpty &&
+    sortedTracks.length === 0 &&
+    sortedAlbums.length === 0 &&
+    sortedArtists.length === 0
   )
 
   type TopResult =
@@ -326,6 +351,23 @@
       <kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
       <kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
     </p>
+    {#if results && query.trim()}
+      <div class="filter-pills">
+        {#each [
+          { id: 'all', label: 'All' },
+          { id: 'artists', label: 'Artists' },
+          { id: 'albums', label: 'Albums' },
+          { id: 'tracks', label: 'Tracks' },
+          { id: 'library', label: 'In Library' },
+        ] as pill (pill.id)}
+          <button
+            class="filter-pill"
+            class:active={filterMode === pill.id}
+            onclick={() => { filterMode = pill.id as FilterMode }}
+          >{pill.label}</button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   {#if !query.trim()}
@@ -350,6 +392,8 @@
     <p class="search-hint search-error">{error}</p>
   {:else if isEmpty}
     <p class="search-hint">No results for "{query}"</p>
+  {:else if isFilteredEmpty}
+    <p class="search-hint">No {filterMode === 'library' ? 'library' : filterMode} matches for "{query}"</p>
   {:else if results}
 
     {#if topResult}
@@ -565,6 +609,33 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 2px;
+  }
+  .filter-pills {
+    margin: 14px 0 0;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .filter-pill {
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    border-radius: 14px;
+    padding: 5px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .filter-pill:hover {
+    border-color: var(--accent-line);
+    color: var(--text-primary);
+  }
+  .filter-pill.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
   }
   .kbd-hint kbd {
     display: inline-block;
