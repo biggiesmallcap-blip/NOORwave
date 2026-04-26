@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { goto } from '$app/navigation'
+  import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
@@ -260,6 +260,51 @@
     const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursor}"]`)
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
+
+  // ─── Position memory ────────────────────────────────────────────────────
+  // Save the in-flight query + scroll on navigation away. Restore when the
+  // user returns via browser-back (popstate) so they land where they were.
+  const POS_KEY = 'noor_search_position'
+
+  beforeNavigate(() => {
+    if (typeof sessionStorage === 'undefined') return
+    if (!query.trim()) {
+      sessionStorage.removeItem(POS_KEY)
+      return
+    }
+    sessionStorage.setItem(POS_KEY, JSON.stringify({ query, scrollY: window.scrollY }))
+  })
+
+  let pendingRestoreScroll: number | null = null
+
+  afterNavigate((nav) => {
+    if (typeof sessionStorage === 'undefined') return
+    if (nav.type !== 'popstate') return
+    const raw = sessionStorage.getItem(POS_KEY)
+    if (!raw) return
+    try {
+      const saved = JSON.parse(raw) as { query: string; scrollY: number }
+      if (typeof saved.query === 'string' && saved.query) {
+        query = saved.query
+        pendingRestoreScroll = saved.scrollY
+        // Trigger the search; scroll restore happens once results land.
+        onInput()
+      }
+    } catch {
+      /* ignore corrupted state */
+    }
+  })
+
+  // Restore scroll once results render so the layout has its final height.
+  $effect(() => {
+    if (results !== null && pendingRestoreScroll !== null) {
+      const target = pendingRestoreScroll
+      pendingRestoreScroll = null
+      // Wait one frame for paint.
+      requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
+    }
+  })
+
 </script>
 
 <div class="search-page">
