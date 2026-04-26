@@ -344,10 +344,9 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
-        .route("/api/spotify/login", post(spotify_login))
-        .route("/api/spotify/login/poll", post(spotify_poll))
+        .route("/api/spotify/config", post(spotify_save_config))
+        .route("/api/spotify/config", axum::routing::delete(spotify_clear_config))
         .route("/api/spotify/status", get(spotify_status))
-        .route("/api/spotify/logout", post(spotify_logout))
         .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
         // Audio analysis
@@ -1885,6 +1884,17 @@ async fn get_discovery_space(
         bpm: Option<f64>,
         key_signature: Option<String>,
         camelot_key: Option<String>,
+        is_instrumental: Option<bool>,
+        loudness_lufs: Option<f64>,
+        skip_rate: Option<f64>,
+        completion_avg: Option<f64>,
+        cohort_id: Option<String>,
+        cohort_label: Option<String>,
+        top_genre: Option<String>,
+        top_genre_source: Option<String>,
+        top_genre_confidence: Option<f64>,
+        last_played_at: Option<String>,
+        play_count: i64,
     }
 
     // ── 1. Decide track set based on inputs ──────────────────────────────────
@@ -1928,6 +1938,17 @@ async fn get_discovery_space(
                 bpm: None,
                 key_signature: None,
                 camelot_key: None,
+                is_instrumental: None,
+                loudness_lufs: None,
+                skip_rate: None,
+                completion_avg: None,
+                cohort_id: None,
+                cohort_label: None,
+                top_genre: None,
+                top_genre_source: None,
+                top_genre_confidence: None,
+                last_played_at: None,
+                play_count: 0,
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
@@ -1951,6 +1972,17 @@ async fn get_discovery_space(
                 bpm: None,
                 key_signature: None,
                 camelot_key: None,
+                is_instrumental: None,
+                loudness_lufs: None,
+                skip_rate: None,
+                completion_avg: None,
+                cohort_id: None,
+                cohort_label: None,
+                top_genre: None,
+                top_genre_source: None,
+                top_genre_confidence: None,
+                last_played_at: None,
+                play_count: 0,
             })
             .collect()
     } else {
@@ -2002,6 +2034,17 @@ async fn get_discovery_space(
                     bpm: None,
                     key_signature: None,
                     camelot_key: None,
+                    is_instrumental: None,
+                    loudness_lufs: None,
+                    skip_rate: None,
+                    completion_avg: None,
+                    cohort_id: None,
+                    cohort_label: None,
+                    top_genre: None,
+                    top_genre_source: None,
+                    top_genre_confidence: None,
+                    last_played_at: None,
+                    play_count: 0,
                 });
             }
         }
@@ -2016,39 +2059,51 @@ async fn get_discovery_space(
             .collect::<Vec<_>>()
             .join(",");
 
-        let dsp_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>, Option<f64>, Option<String>, Option<String>)> =
-            state.db.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key
-                     FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                        row.get::<_, Option<f64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })?;
-                let mut map = std::collections::HashMap::new();
-                for r in rows {
-                    let (id, energy, dance, bpm, key, camelot) = r?;
-                    map.insert(id, (energy, dance, bpm, key, camelot));
-                }
-                Ok(map)
-            })
-            .unwrap_or_default();
+        type DspRow = (
+            Option<f64>, // energy
+            Option<f64>, // danceability
+            Option<f64>, // bpm
+            Option<String>, // key_signature
+            Option<String>, // camelot_key
+            Option<i64>, // is_instrumental (0/1)
+            Option<f64>, // loudness_lufs
+        );
+        let dsp_map: std::collections::HashMap<i64, DspRow> = state.db.with_conn(|conn| {
+            let sql = format!(
+                "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
+                        is_instrumental, loudness_lufs
+                 FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<f64>>(7)?,
+                ))
+            })?;
+            let mut map = std::collections::HashMap::new();
+            for r in rows {
+                let (id, energy, dance, bpm, key, camelot, instr, lufs) = r?;
+                map.insert(id, (energy, dance, bpm, key, camelot, instr, lufs));
+            }
+            Ok(map)
+        }).unwrap_or_default();
 
         for t in &mut space_tracks {
-            if let Some((energy, dance, bpm, key, camelot)) = dsp_map.get(&t.track_id) {
+            if let Some((energy, dance, bpm, key, camelot, instr, lufs)) = dsp_map.get(&t.track_id) {
                 t.energy = *energy;
                 t.danceability = *dance;
                 t.bpm = *bpm;
                 t.key_signature = key.clone();
                 t.camelot_key = camelot.clone();
+                t.is_instrumental = instr.map(|v| v != 0);
+                t.loudness_lufs = *lufs;
             }
         }
     }
@@ -2167,6 +2222,17 @@ async fn get_discovery_space(
                 "bpm": t.bpm,
                 "key_signature": t.key_signature,
                 "camelot_key": t.camelot_key,
+                "is_instrumental": t.is_instrumental,
+                "loudness_lufs": t.loudness_lufs,
+                "skip_rate": t.skip_rate,
+                "completion_avg": t.completion_avg,
+                "cohort_id": t.cohort_id,
+                "cohort_label": t.cohort_label,
+                "top_genre": t.top_genre,
+                "top_genre_source": t.top_genre_source,
+                "top_genre_confidence": t.top_genre_confidence,
+                "last_played_at": t.last_played_at,
+                "play_count": t.play_count,
                 "is_in_library": true,
                 "source": t.source,
                 "x": x,
@@ -6199,94 +6265,129 @@ async fn get_home_news(
     })))
 }
 
-// ── Spotify Auth & Enrichment ────────────────────────────────────────────────
+// ── Spotify Config & Enrichment ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct SpotifyLoginRequest {}
-
-async fn spotify_login(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let http = state.read().await.http_client.clone();
-    let result = spotify::auth::start_device_code(&http).await;
-    match result {
-        Ok(data) => Ok(Json(json!({
-            "device_code": data.device_code,
-            "user_code": data.user_code,
-            "verification_uri": data.verification_uri,
-            "expires_in": data.expires_in,
-        }))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
+struct SpotifyConfigRequest {
+    client_id: String,
+    client_secret: String,
 }
 
-#[derive(Deserialize)]
-struct SpotifyPollRequest {
-    device_code: String,
-}
-
-async fn spotify_poll(
+async fn spotify_save_config(
     State(state): State<SharedState>,
-    Json(payload): Json<SpotifyPollRequest>,
+    Json(payload): Json<SpotifyConfigRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     let http = state.read().await.http_client.clone();
-    let result = spotify::auth::poll_token(&http, &payload.device_code).await;
-    
-    match result {
-        Ok(Some(tokens)) => {
-            // Save to DB
-            let json_blob = serde_json::to_string(&tokens).unwrap();
-            let bytes = json_blob.into_bytes();
+    let creds = spotify::auth::SpotifyCredentials {
+        client_id: payload.client_id.trim().to_string(),
+        client_secret: payload.client_secret.trim().to_string(),
+    };
+
+    if creds.client_id.is_empty() || creds.client_secret.is_empty() {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Client ID and Client Secret are both required."
+        })));
+    }
+
+    // Verify the credentials work by fetching a token before saving.
+    match spotify::auth::fetch_app_token(&http, &creds).await {
+        Ok(tokens) => {
             let _ = state.read().await.db.with_conn(|conn| {
-                conn.execute(
-                    "INSERT OR REPLACE INTO service_auth (service, access_token_enc) VALUES ('spotify', ?1)",
-                    params![bytes],
-                )?;
+                spotify::auth::save_credentials(conn, &creds)?;
                 Ok(())
             });
-            
-            // Update AppState
             {
                 let mut s = state.write().await;
-                s.spotify_tokens = Some(tokens.clone());
+                s.spotify_tokens = Some(tokens);
             }
-            
-            Ok(Json(json!({
-                "status": "authenticated",
-                "user_id": tokens.user_id,
-            })))
+            Ok(Json(json!({"status": "ok"})))
         }
-        Ok(None) => Ok(Json(json!({"status": "pending"}))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Spotify rejected the credentials: {}", e)
+        }))),
     }
 }
 
 async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    if let Some(tokens) = &s.spotify_tokens {
-        Ok(Json(json!({
-            "connected": true,
-            "user_id": tokens.user_id,
-        })))
-    } else {
-        Ok(Json(json!({"connected": false})))
-    }
+    let configured = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            Ok(spotify::auth::load_credentials(conn)
+                .ok()
+                .flatten()
+                .is_some())
+        })
+        .unwrap_or(false);
+    Ok(Json(json!({"configured": configured})))
 }
 
-async fn spotify_logout(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn spotify_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let _ = state.read().await.db.with_conn(|conn| {
-        conn.execute("DELETE FROM service_auth WHERE service = 'spotify'", [])?;
+        spotify::auth::clear_credentials(conn)?;
         Ok(())
     });
     {
         let mut s = state.write().await;
         s.spotify_tokens = None;
     }
-    Ok(Json(json!({"status": "logged_out"})))
+    Ok(Json(json!({"status": "cleared"})))
 }
 
 async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let http = state.read().await.http_client.clone();
-    let event_tx = state.read().await.event_tx.clone();
-    
+    use std::sync::atomic::Ordering;
+
+    let (http, event_tx, running, total_atom, processed_atom) = {
+        let s = state.read().await;
+        (
+            s.http_client.clone(),
+            s.event_tx.clone(),
+            s.spotify_enrich_running.clone(),
+            s.spotify_enrich_total.clone(),
+            s.spotify_enrich_processed.clone(),
+        )
+    };
+
+    if running.load(Ordering::SeqCst) {
+        let total = total_atom.load(Ordering::SeqCst);
+        let processed = processed_atom.load(Ordering::SeqCst);
+        return Ok(Json(json!({
+            "status": "already_running",
+            "total": total,
+            "processed": processed
+        })));
+    }
+
+    // Require credentials and prime a fresh token before enqueueing work.
+    let creds = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| Ok(spotify::auth::load_credentials(conn).ok().flatten()))
+        .unwrap_or(None);
+    let Some(creds) = creds else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Spotify credentials not configured."
+        })));
+    };
+
+    match spotify::auth::fetch_app_token(&http, &creds).await {
+        Ok(tokens) => {
+            let mut s = state.write().await;
+            s.spotify_tokens = Some(tokens);
+        }
+        Err(e) => {
+            return Ok(Json(json!({
+                "status": "error",
+                "message": format!("Failed to fetch Spotify token: {}", e)
+            })));
+        }
+    }
+
     let total: usize = state.read().await.db.with_conn(|conn| {
         Ok(conn.query_row(
             "SELECT COUNT(*) FROM tracks WHERE id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')",
@@ -6298,21 +6399,32 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
         return Ok(Json(json!({"status": "already_complete"})));
     }
 
+    running.store(true, Ordering::SeqCst);
+    total_atom.store(total, Ordering::SeqCst);
+    processed_atom.store(0, Ordering::SeqCst);
+
     tokio::spawn(async move {
         let progress_tx = event_tx.clone();
+        let total_atom_cb = total_atom.clone();
+        let processed_atom_cb = processed_atom.clone();
         let result = crate::services::spotify::enrichment::run_enrichment(
             state,
             http,
             move |current, total| {
+                processed_atom_cb.store(current, Ordering::SeqCst);
+                if total > 0 {
+                    total_atom_cb.store(total, Ordering::SeqCst);
+                }
                 let _ = progress_tx.send(AppEvent::SyncProgress {
                     service: "spotify".to_string(),
                     progress: current as f32 / total.max(1) as f32,
                 });
             },
         ).await;
-        
+
+        running.store(false, Ordering::SeqCst);
         if result.is_ok() {
-            let _ = event_tx.send(AppEvent::MusicBrainzEnriched); // Reuse event for "genres updated"
+            let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
         }
     });
 
@@ -6320,13 +6432,28 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
 }
 
 async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
     let s = state.read().await;
     let enriched: i64 = s.db.with_conn(|conn| {
         Ok(conn.query_row("SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'spotify'", [], |r| r.get(0))?)
     }).unwrap_or(0);
-    
+    let remaining: i64 = s.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')",
+            [],
+            |r| r.get(0),
+        )?)
+    }).unwrap_or(0);
+    let is_running = s.spotify_enrich_running.load(Ordering::SeqCst);
+    let run_total = s.spotify_enrich_total.load(Ordering::SeqCst);
+    let run_processed = s.spotify_enrich_processed.load(Ordering::SeqCst);
+
     Ok(Json(json!({
         "enriched_tracks": enriched,
+        "remaining_tracks": remaining,
+        "is_running": is_running,
+        "run_total": run_total,
+        "run_processed": run_processed,
     })))
 }
 
