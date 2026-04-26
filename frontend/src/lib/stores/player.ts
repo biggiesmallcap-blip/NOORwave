@@ -5,6 +5,7 @@ import {
 	type PlaybackSnapshot,
 	type PlaybackState,
 	type QueueItem,
+	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
 
@@ -493,5 +494,83 @@ export async function playTrackNext(trackId: number) {
 		playerError.set(null);
 	} catch (error) {
 		playerError.set(`Failed to queue track: ${error}`);
+	}
+}
+
+export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
+	try {
+		await api.playTidalTrack(track);
+		currentTrack.set({
+			id: -track.tidal_id,
+			title: track.title,
+			artist_id: -1, // no library artist for ephemeral tracks
+			artist_name: track.artist_name,
+			album_id: null,
+			album_title: track.album_title,
+			disc_number: null,
+			track_number: null,
+			duration_ms: track.duration_ms,
+			isrc: null,
+			tidal_id: track.tidal_id,
+			best_quality: 'LOSSLESS', // placeholder — ephemeral tracks don't report fidelity
+			best_source: 'tidal',
+			fidelity_score: 0,
+			is_favorite: false,
+			play_count: 0,
+			last_played_at: null,
+			date_added: null,
+			source: 'tidal_ephemeral',
+			artwork_url: track.artwork_url,
+		});
+		isPlaying.set(true);
+		playerError.set(null);
+	} catch (error) {
+		playerError.set(`Tidal playback failed: ${error}`);
+	}
+}
+
+// TODO(v2): true queue insertion for ephemeral tracks requires backend queue support
+export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
+	await playTidalTrackNow(track);
+}
+
+// TODO(v2): true queue insertion for ephemeral tracks requires backend queue support
+export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> {
+	await playTidalTrackNow(track);
+}
+
+export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
+	try {
+		const { tracks } = await api.getTidalAlbumTracks(tidalAlbumId);
+		if (tracks.length === 0) return;
+		const first = tracks[0];
+		await playTidalTrackNow({
+			tidal_id: first.tidal_id,
+			title: first.title,
+			artist_name: first.artist_name ?? null,
+			album_title: first.album_title ?? null,
+			artwork_url: first.artwork_url,
+			duration_ms: first.duration_ms,
+		});
+	} catch (error) {
+		playerError.set(`Tidal album playback failed: ${error}`);
+	}
+}
+
+export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
+	try {
+		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
+		const radioIds = tracks.map((t) => t.track_id);
+		if (radioIds.length > 0) {
+			// Tidal seed cannot be prepended to the library queue (queue only accepts library track IDs).
+			// Radio plays from the first library neighbour found.
+			await loadQueueAndPlay(radioIds);
+		} else {
+			// No library tracks matched — fall back to playing the seed directly.
+			await playTidalTrackNow(track);
+		}
+		playerError.set(null);
+	} catch (error) {
+		playerError.set(`Tidal radio failed: ${error}`);
 	}
 }
