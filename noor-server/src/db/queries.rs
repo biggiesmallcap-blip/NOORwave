@@ -1,5 +1,6 @@
 use super::models::*;
 use anyhow::Result;
+use crate::services::discovery::DiscoveryCandidateSeed;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3489,4 +3490,61 @@ mod tests {
         assert!(heat.iter().all(|entry| entry.listen_count == 0));
         assert!(heat.iter().all(|entry| entry.total_listened_ms == 0));
     }
+}
+
+/// Load enough metadata about a library track to seed external Tidal discovery.
+/// Returns None if the track id isn't found.
+///
+/// `provider_track_id` is set from `tracks.tidal_id` if available; otherwise the
+/// library `id` is used as a string. `normalized_genres` is the top 5 genres
+/// for the track ordered by descending confidence.
+pub fn load_external_seed_from_track(
+    conn: &Connection,
+    track_id: i64,
+) -> Result<Option<DiscoveryCandidateSeed>> {
+    let row = conn.query_row(
+        "SELECT t.id, t.tidal_id, t.title, ar.name, al.title
+         FROM tracks t
+         LEFT JOIN artists ar ON t.artist_id = ar.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE t.id = ?1",
+        params![track_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        },
+    );
+
+    let (id, tidal_id, title, artist_name, album_title) = match row {
+        Ok(r) => r,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT g.name
+         FROM track_genres tg
+         JOIN genres g ON g.id = tg.genre_id
+         WHERE tg.track_id = ?1
+         ORDER BY COALESCE(tg.confidence, 0) DESC
+         LIMIT 5",
+    )?;
+    let genres: Vec<String> = stmt
+        .query_map(params![track_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(DiscoveryCandidateSeed {
+        provider_track_id: tidal_id
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| id.to_string()),
+        title,
+        artist_name,
+        album_title,
+        normalized_genres: genres,
+    }))
 }
