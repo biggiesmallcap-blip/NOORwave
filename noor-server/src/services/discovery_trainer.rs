@@ -338,6 +338,7 @@ fn similarity_neighbors(
     fusion: &HashMap<i64, Vec<f64>>,
     top_k: usize,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<TrainerNeighbor> {
     let total = fusion.len();
     if total == 0 {
@@ -397,6 +398,13 @@ fn similarity_neighbors(
     let neighbor_chunks: Vec<Vec<TrainerNeighbor>> = (0..track_metas.len())
         .into_par_iter()
         .map(|idx| {
+            // Cancel check — cheap atomic load, runs every iteration so Stop is responsive.
+            if let Some(flag) = cancel {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Vec::<TrainerNeighbor>::new();
+                }
+            }
+
             // Progress every 500 tracks
             if idx % 500 == 0 && total > 0 {
                 if let Some(tx) = progress_tx {
@@ -614,6 +622,7 @@ fn evaluate(
 pub fn run_discovery_training(
     input: TrainerInput,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> TrainerOutput {
     let dim = input.dimension;
     let top_k = input.top_k;
@@ -661,7 +670,7 @@ pub fn run_discovery_training(
     }
 
     // Stage 4 — the bottleneck, now parallelized
-    let neighbors = similarity_neighbors(&tracks, &behavioral, &audio, &fusion, top_k, progress_tx);
+    let neighbors = similarity_neighbors(&tracks, &behavioral, &audio, &fusion, top_k, progress_tx, cancel);
 
     // Stage 5
     let mut metrics = evaluate(&neighbors, &input.heldout_pairs);
@@ -708,5 +717,105 @@ pub fn run_discovery_training(
         fusion_embeddings: fusion,
         neighbors,
         metrics,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn make_test_input(track_count: usize, dim: usize) -> (
+        Vec<EmbeddingTrackRow>,
+        HashMap<i64, Vec<f64>>,
+        HashMap<i64, TrainerAudioFeature>,
+        HashMap<i64, Vec<f64>>,
+    ) {
+        let tracks: Vec<EmbeddingTrackRow> = (0..track_count as i64)
+            .map(|i| EmbeddingTrackRow {
+                track_id: i,
+                title: format!("track_{i}"),
+                artist_name: Some(format!("artist_{}", i / 10)),
+                album_title: None,
+                duration_ms: Some(180_000),
+                best_quality: None,
+                source: "local".to_string(),
+                play_count: 0,
+                is_favorite: false,
+                playlist_memberships: 0,
+                genre_paths: Vec::new(),
+                bpm: None,
+                energy: None,
+                camelot_key: None,
+            })
+            .collect();
+
+        let unit = 1.0_f64 / (dim as f64).sqrt();
+        let behavioral: HashMap<i64, Vec<f64>> = tracks
+            .iter()
+            .map(|t| (t.track_id, vec![unit; dim]))
+            .collect();
+        let audio: HashMap<i64, TrainerAudioFeature> = tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.track_id,
+                    TrainerAudioFeature {
+                        vector: vec![unit; dim],
+                        clip_start_ms: 0,
+                        clip_duration_ms: 20_000,
+                        feature_version: "test".to_string(),
+                    },
+                )
+            })
+            .collect();
+        let fusion: HashMap<i64, Vec<f64>> = tracks
+            .iter()
+            .map(|t| (t.track_id, vec![unit; dim]))
+            .collect();
+
+        (tracks, behavioral, audio, fusion)
+    }
+
+    #[test]
+    fn similarity_neighbors_aborts_when_cancel_flag_set() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(200, 32);
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            10,
+            None,
+            Some(&cancel),
+        );
+
+        assert!(
+            result.is_empty(),
+            "expected zero neighbors when cancel is pre-set, got {}",
+            result.len(),
+        );
+    }
+
+    #[test]
+    fn similarity_neighbors_runs_normally_without_cancel() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(50, 32);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            10,
+            None,
+            Some(&cancel),
+        );
+
+        // 50 tracks × top_k=10, all vectors identical → every track has 10 neighbors
+        assert_eq!(result.len(), 500, "expected 50*10 = 500 neighbor rows");
     }
 }

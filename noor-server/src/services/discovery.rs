@@ -385,6 +385,7 @@ mod tests {
             id: 1,
             title: "Limbus".to_string(),
             duration: 449,
+            artist_id: None,
             artist_name: Some("Nadja Lind".to_string()),
             album_title: Some(
                 "Deep Space Night - Panorama of Dub Techno, Minimal Deep Berlin Underground Club Tech House & Dreamy Chill out Music".to_string(),

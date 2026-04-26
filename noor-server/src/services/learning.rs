@@ -98,7 +98,7 @@ pub async fn start_training(
     // Run the trainer directly — no subprocess
     let progress_tx_clone = progress_tx.clone();
     let output = tokio::task::spawn_blocking(move || {
-        run_discovery_training(input, Some(&progress_tx_clone))
+        run_discovery_training(input, Some(&progress_tx_clone), None)
     })
     .await
     .context("discovery trainer panicked")?;
