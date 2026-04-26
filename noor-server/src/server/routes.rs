@@ -277,6 +277,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/radio/compute", post(compute_radio_similarity))
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
+        .route("/api/discovery/space/meta", get(get_discovery_space_meta))
         .route("/api/discovery/artists", get(get_discovery_artists))
         .route(
             "/api/library/batch/add-to-playlist",
@@ -2402,6 +2403,71 @@ async fn get_discovery_space(
         "tracks": track_nodes,
         "artists": [],
         "edges": edges,
+    })))
+}
+
+async fn get_discovery_space_meta(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+
+    let total_tracks: i64 = state.db.with_conn(|conn| {
+        conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get::<_, i64>(0))
+            .map_err(Into::into)
+    }).unwrap_or(0);
+
+    let model_row: Option<(String, String, Option<String>, i64)> = state.db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT model_key, status, trained_at, dimension
+             FROM embedding_models
+             WHERE is_active = 1
+             ORDER BY trained_at IS NULL, trained_at DESC
+             LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }).ok().flatten();
+
+    let (model_key, model_status, trained_at, vector_dim, embedding_count) = match &model_row {
+        Some((key, status, trained, dim)) => {
+            let count: i64 = state.db.with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM track_embeddings te
+                     JOIN embedding_models em ON em.id = te.model_id
+                     WHERE em.model_key = ?1",
+                    rusqlite::params![key],
+                    |row| row.get::<_, i64>(0),
+                ).map_err(Into::into)
+            }).unwrap_or(0);
+            (Some(key.clone()), Some(status.clone()), trained.clone(), Some(*dim), count)
+        }
+        None => (None, None, None, None, 0),
+    };
+
+    let coverage = if total_tracks > 0 {
+        embedding_count as f64 / total_tracks as f64
+    } else {
+        0.0
+    };
+
+    Ok(Json(json!({
+        "model_key": model_key,
+        "model_status": model_status,
+        "trained_at": trained_at,
+        "vector_dim": vector_dim,
+        "neighbor_coverage": coverage,
+        "track_count_with_embeddings": embedding_count,
+        "track_count_total": total_tracks,
     })))
 }
 
@@ -6543,7 +6609,7 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
 
     let total: usize = state.read().await.db.with_conn(|conn| {
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks WHERE id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')",
+            "SELECT COUNT(*) FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
             [], |r| r.get(0)
         )?)
     }).unwrap_or(0);
@@ -6592,7 +6658,7 @@ async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Resu
     }).unwrap_or(0);
     let remaining: i64 = s.db.with_conn(|conn| {
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks WHERE id NOT IN (SELECT track_id FROM track_genres WHERE source = 'spotify')",
+            "SELECT COUNT(*) FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
             [],
             |r| r.get(0),
         )?)
