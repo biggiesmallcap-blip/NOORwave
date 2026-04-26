@@ -8,6 +8,7 @@
 	import PlaylistBuilder from '$lib/components/Discover/PlaylistBuilder.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import DiscoverHoverCard from '$lib/components/Discover/DiscoverHoverCard.svelte';
+	import DiscoverLegend from '$lib/components/Discover/DiscoverLegend.svelte';
 	import type { DiscoverTrackNode, DiscoverViewMode } from '$lib/components/Discover/discover.types';
 
 	let selectedNodes = $state<DiscoverTrackNode[]>([]);
@@ -198,6 +199,8 @@
 		seedTrackId={$discoverSpace.activeSeedId}
 		isLocked={$discoverSpace.lockedSeedId !== null && $discoverSpace.activeSeedId === $discoverSpace.lockedSeedId}
 	/>
+
+	<DiscoverLegend />
 </div>
 
 <style>
