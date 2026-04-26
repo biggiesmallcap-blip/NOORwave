@@ -1896,6 +1896,7 @@ async fn get_discovery_space(
         top_genre_confidence: Option<f64>,
         last_played_at: Option<String>,
         play_count: i64,
+        is_in_library: bool,
     }
 
     // ── 1. Decide track set based on inputs ──────────────────────────────────
@@ -1950,6 +1951,7 @@ async fn get_discovery_space(
                 top_genre_confidence: None,
                 last_played_at: None,
                 play_count: 0,
+                is_in_library: true,
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
@@ -1984,6 +1986,7 @@ async fn get_discovery_space(
                 top_genre_confidence: None,
                 last_played_at: None,
                 play_count: 0,
+                is_in_library: true,
             })
             .collect()
     } else {
@@ -2046,6 +2049,7 @@ async fn get_discovery_space(
                     top_genre_confidence: None,
                     last_played_at: None,
                     play_count: 0,
+                    is_in_library: true,
                 });
             }
         }
@@ -2388,7 +2392,7 @@ async fn get_discovery_space(
                 "top_genre_confidence": t.top_genre_confidence,
                 "last_played_at": t.last_played_at,
                 "play_count": t.play_count,
-                "is_in_library": true,
+                "is_in_library": t.is_in_library,
                 "source": t.source,
                 "x": x,
                 "y": y,
