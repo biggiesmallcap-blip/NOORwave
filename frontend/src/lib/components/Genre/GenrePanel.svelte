@@ -9,7 +9,6 @@
 		node = null,
 		listenHeat = null,
 		tracks = [],
-		lineage = [],
 		nearbyGenres = [],
 		isSeed = false,
 		loading = false,
@@ -22,7 +21,6 @@
 		node?: GalaxyNode | null;
 		listenHeat?: GenreHeat | null;
 		tracks?: Track[];
-		lineage?: string[];
 		nearbyGenres?: string[];
 		isSeed?: boolean;
 		loading?: boolean;

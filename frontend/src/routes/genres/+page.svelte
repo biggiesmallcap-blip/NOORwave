@@ -44,7 +44,7 @@
 	let galaxyData = $derived(
 		taxonomy.length > 0
 			? buildGalaxyData(taxonomy, heat, {
-					cohorts: [],
+					cohorts: [], // cluster rendering removed; cohorts state still populates selectedNodeCohort for GenreInterior
 					evolution
 				})
 			: { nodes: [], edges: [] }
@@ -74,16 +74,6 @@
 			case 'paths': return 'Lineage routes and bridge emphasis.';
 			default: return 'Canonical galaxy map of your library.';
 		}
-	});
-	let selectedLineage = $derived.by(() => {
-		if (!selectedNode) return [] as string[];
-		const lineage: string[] = [];
-		let current = genreById.get(selectedNode.id) ?? null;
-		while (current) {
-			lineage.unshift(current.name);
-			current = current.parent_id === null ? null : genreById.get(current.parent_id) ?? null;
-		}
-		return lineage;
 	});
 	let selectedNodeCohort = $derived(
 		selectedNode?.cohortId
@@ -605,7 +595,6 @@
 				node={selectedNode}
 				listenHeat={selectedHeat}
 				tracks={selectedTracks}
-				lineage={selectedLineage}
 				nearbyGenres={nearbyGenres}
 				isSeed={selectedNode !== null && selectedSeedIds.includes(selectedNode.id)}
 				loading={selectedTrackLoading}
