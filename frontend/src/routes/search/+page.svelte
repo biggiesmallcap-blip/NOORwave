@@ -6,11 +6,39 @@
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
 
+  const RECENT_KEY = 'noor_recent_searches'
+  const RECENT_MAX = 8
+
+  function loadRecent(): string[] {
+    if (typeof localStorage === 'undefined') return []
+    try {
+      const raw = localStorage.getItem(RECENT_KEY)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string').slice(0, RECENT_MAX) : []
+    } catch {
+      return []
+    }
+  }
+
+  function pushRecent(q: string) {
+    if (!q.trim() || typeof localStorage === 'undefined') return
+    const next = [q, ...recent.filter((r) => r.toLowerCase() !== q.toLowerCase())].slice(0, RECENT_MAX)
+    recent = next
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+  }
+
+  function clearRecent() {
+    recent = []
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(RECENT_KEY)
+  }
+
   let query = $state('')
   let results = $state<TidalSearchResults | null>(null)
   let loading = $state(false)
   let error = $state<string | null>(null)
   let debounceTimer: ReturnType<typeof setTimeout>
+  let recent = $state<string[]>(loadRecent())
 
   function onInput() {
     clearTimeout(debounceTimer)
@@ -22,15 +50,23 @@
     }
     loading = true
     debounceTimer = setTimeout(async () => {
+      const q = query.trim()
       try {
-        results = await api.searchTidal(query.trim())
+        results = await api.searchTidal(q)
         error = null
+        pushRecent(q)
       } catch (e) {
         error = String(e)
       } finally {
         loading = false
       }
     }, 300)
+  }
+
+  function pickRecent(q: string) {
+    query = q
+    onInput()
+    inputEl?.focus()
   }
 
   const isEmpty = $derived(
@@ -248,7 +284,21 @@
   </div>
 
   {#if !query.trim()}
-    <p class="search-hint">Start typing to search Tidal's full catalogue</p>
+    {#if recent.length > 0}
+      <section class="recent-section">
+        <div class="recent-head">
+          <h3 class="section-label">Recent</h3>
+          <button class="recent-clear" onclick={clearRecent}>Clear</button>
+        </div>
+        <div class="recent-chips">
+          {#each recent as q (q)}
+            <button class="recent-chip" onclick={() => pickRecent(q)}>{q}</button>
+          {/each}
+        </div>
+      </section>
+    {:else}
+      <p class="search-hint">Start typing to search Tidal's full catalogue</p>
+    {/if}
   {:else if loading}
     <p class="search-hint">Searching…</p>
   {:else if error}
@@ -496,6 +546,43 @@
   }
   .search-error { color: var(--state-error); }
   .results-section { margin-bottom: 40px; }
+  .recent-section { margin-top: 36px; max-width: 720px; }
+  .recent-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .recent-clear {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .recent-clear:hover { color: var(--text-secondary); background: var(--bg-hover); }
+  .recent-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .recent-chip {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .recent-chip:hover {
+    border-color: var(--accent-line);
+    color: var(--text-primary);
+  }
   .top-result-section { margin-bottom: 32px; }
   .top-result-card {
     display: grid;
