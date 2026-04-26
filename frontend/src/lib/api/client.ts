@@ -106,6 +106,7 @@ export interface TidalSearchTrack {
 	artwork_url: string | null;
 	audio_quality: string | null;
 	stream_ready: boolean | null;
+	in_library: boolean;
 }
 
 export interface TidalSearchAlbum {
@@ -113,12 +114,16 @@ export interface TidalSearchAlbum {
 	title: string;
 	artist_name: string | null;
 	artwork_url: string | null;
+	local_id: number | null;
+	in_library: boolean;
 }
 
 export interface TidalSearchArtist {
 	tidal_id: number;
 	name: string;
 	artwork_url: string | null;
+	local_id: number | null;
+	in_library: boolean;
 }
 
 export interface TidalSearchResults {
@@ -660,6 +665,23 @@ export interface AcrCloudScanStatus {
 	scanned: number;
 	total: number;
 	matches_found: number;
+}
+
+export type AudioQuality = 'LOW' | 'HIGH' | 'LOSSLESS' | 'HI_RES_LOSSLESS';
+
+export interface AudioDevice {
+	id: string;
+	name: string;
+	is_default: boolean;
+	max_channels: number;
+	supported_sample_rates: number[];
+}
+
+export interface AudioSettings {
+	quality: AudioQuality;
+	output_device: string | null;
+	exclusive_mode: boolean;
+	sample_rate_follow: boolean;
 }
 
 async function fetchApiResponse(
@@ -1254,6 +1276,21 @@ export const api = {
 		return fetchApi<RadioResponse>('/api/discovery/radio', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ seed_tidal_id: tidalId }),
+		});
+	},
+
+	listAudioDevices(): Promise<{ devices: AudioDevice[] }> {
+		return fetchApi<{ devices: AudioDevice[] }>('/api/audio/devices');
+	},
+
+	getAudioSettings(): Promise<AudioSettings> {
+		return fetchApi<AudioSettings>('/api/audio/settings');
+	},
+
+	updateAudioSettings(settings: AudioSettings): Promise<AudioSettings> {
+		return fetchApi<AudioSettings>('/api/audio/settings', undefined, {
+			method: 'PUT',
+			body: JSON.stringify(settings),
 		});
 	},
 
