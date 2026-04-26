@@ -8,8 +8,13 @@ import {
 	shuffleAlbum,
 	startArtistRadio,
 	startSongRadio,
-	toggleTrackFavorite
+	toggleTrackFavorite,
+	playTidalTrackNow,
+	playTidalTrackNext,
+	addTidalTrackToQueue,
+	startTidalSongRadio,
 } from '$lib/stores/player';
+import type { TidalPlayable } from '$lib/api/client';
 
 // Narrow shape so the builder can accept a Track, a QueueItem.track, or a
 // DiscoveryRadioResult mapped through `mapRadioToMenuTrack`. We avoid a hard
@@ -128,4 +133,32 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	}
 
 	return items;
+}
+
+export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
+	return [
+		{
+			label: 'Play next',
+			icon: '⤴',
+			onSelect: () => void playTidalTrackNext(track),
+		},
+		{
+			label: 'Add to queue',
+			icon: '＋',
+			onSelect: () => void addTidalTrackToQueue(track),
+		},
+		SEPARATOR,
+		{
+			label: 'Song radio',
+			icon: '◉',
+			hint: 'Start from this song',
+			onSelect: () => void startTidalSongRadio(track),
+		},
+		SEPARATOR,
+		{
+			label: 'Play now',
+			icon: '▶',
+			onSelect: () => void playTidalTrackNow(track),
+		},
+	];
 }

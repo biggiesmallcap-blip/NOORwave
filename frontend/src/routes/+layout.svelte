@@ -111,6 +111,7 @@
 			items: [
 				{ path: '/', label: 'Home', icon: '⌂' },
 				{ path: '/library', label: 'Library', icon: '♫' },
+				{ path: '/search', label: 'Search', icon: '⌕' },
 				{ path: '/genres', label: 'Genre Galaxy', icon: '✦' },
 				{ path: '/playlists', label: 'Playlists', icon: '☰' },
 				{ path: '/discover', label: 'Discover', icon: '✦' }
