@@ -61,7 +61,8 @@ pub async fn start_training(
     })?;
 
     // If cancel is requested at any stage boundary, mark the run as cancelled
-    // and skip remaining persistence + model activation.
+    // and skip remaining persistence + model activation. Callers MUST `return Ok(())`
+    // when this returns `Ok(true)` — otherwise a later stage may double-finish the run.
     let bail_if_cancelled = |stage: &str| -> Result<bool> {
         if cancel.load(Ordering::Relaxed) {
             tracing::info!(
@@ -148,7 +149,7 @@ pub async fn start_training(
         })
         .collect::<Vec<_>>();
 
-    if bail_if_cancelled("audio")? {
+    if bail_if_cancelled("audio_features")? {
         return Ok(());
     }
     db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))?;
