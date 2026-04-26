@@ -1304,7 +1304,13 @@ async fn play_discovery_track(
         })?;
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
+    let user_quality = current_user_audio_quality(&state).await;
+    let job = player::build_playback_preparation(
+        &track,
+        Some(&stream_info),
+        crossfade_ms,
+        user_quality,
+    );
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -4126,7 +4132,8 @@ async fn play_track(
         "playback start requested"
     );
 
-    let stream_request = player::build_tidal_stream_request(&track).ok_or_else(|| {
+    let user_quality = current_user_audio_quality(&state).await;
+    let stream_request = player::build_tidal_stream_request(&track, user_quality.clone()).ok_or_else(|| {
         (
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({
@@ -4154,7 +4161,12 @@ async fn play_track(
 
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
+    let job = player::build_playback_preparation(
+        &track,
+        Some(&stream_info),
+        crossfade_ms,
+        user_quality,
+    );
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -4553,7 +4565,8 @@ async fn next_track(
     sync_session_after_snapshot(&state, &snapshot, end_reason).await;
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let stream_request = player::build_tidal_stream_request(track).ok_or_else(|| {
+        let user_quality = current_user_audio_quality(&state).await;
+        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
@@ -4588,6 +4601,7 @@ async fn next_track(
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
@@ -4652,7 +4666,8 @@ async fn previous_track(
     .await;
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let stream_request = player::build_tidal_stream_request(track).ok_or_else(|| {
+        let user_quality = current_user_audio_quality(&state).await;
+        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
@@ -4687,6 +4702,7 @@ async fn previous_track(
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
@@ -6317,7 +6333,8 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
     };
 
     // Resolve the stream URL for the next track (we need a live access token).
-    let stream_request = match player::build_tidal_stream_request(&next) {
+    let user_quality = current_user_audio_quality(&state).await;
+    let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
         Some(req) => req,
         None => return Ok(()), // local library — skip pre-buffer for now
     };
@@ -6341,7 +6358,12 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         stream_info.as_ref(),
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
     );
-    let job = player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms);
+    let job = player::build_playback_preparation(
+        &next,
+        stream_info.as_ref(),
+        crossfade_ms,
+        user_quality,
+    );
     let _ = access_token; // already embedded in the config held by the runtime
 
     let _ = handle.prepare_next(job);
@@ -6413,7 +6435,9 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
     }
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let Some(stream_request) = player::build_tidal_stream_request(track) else {
+        let user_quality = current_user_audio_quality(&state).await;
+        let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
+        else {
             handle_runtime_error(
                 state.clone(),
                 "Local library playback is not wired into the host audio runtime yet.",
@@ -6438,6 +6462,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job)?;
     }
@@ -6542,6 +6567,17 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
             .map_err(Into::into)
         })
         .unwrap_or(0)
+}
+
+async fn current_user_audio_quality(
+    state: &SharedState,
+) -> Option<crate::db::audio_settings::AudioQuality> {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .ok()
+        .map(|s| s.quality)
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {
