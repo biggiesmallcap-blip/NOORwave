@@ -2108,6 +2108,53 @@ async fn get_discovery_space(
         }
     }
 
+    // ── 3b. Aggregate skip-rate + completion-avg from listen_history ─────────
+    if !space_tracks.is_empty() {
+        let ids_csv: String = space_tracks
+            .iter()
+            .map(|t| t.track_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let listen_map: std::collections::HashMap<i64, (f64, f64)> = state.db.with_conn(|conn| {
+            let sql = format!(
+                "SELECT lh.track_id,
+                        AVG(CASE WHEN lh.completed = 1 THEN 0.0 ELSE 1.0 END) AS skip_rate,
+                        AVG(
+                            CASE
+                                WHEN t.duration_ms IS NULL OR t.duration_ms = 0 THEN NULL
+                                ELSE MIN(1.0, CAST(lh.duration_listened_ms AS REAL) / CAST(t.duration_ms AS REAL))
+                            END
+                        ) AS completion_avg
+                 FROM listen_history lh
+                 JOIN tracks t ON t.id = lh.track_id
+                 WHERE lh.track_id IN ({ids_csv})
+                 GROUP BY lh.track_id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                ))
+            })?;
+            let mut map = std::collections::HashMap::new();
+            for r in rows {
+                let (id, skip, comp) = r?;
+                map.insert(id, (skip, comp));
+            }
+            Ok(map)
+        }).unwrap_or_default();
+
+        for t in &mut space_tracks {
+            if let Some((skip, comp)) = listen_map.get(&t.track_id) {
+                t.skip_rate = Some(*skip);
+                t.completion_avg = Some(*comp);
+            }
+        }
+    }
+
     // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
     // Only emit edges between nodes that are both present in this response.
     let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
