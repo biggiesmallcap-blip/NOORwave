@@ -2182,55 +2182,60 @@ async fn get_discovery_space(
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
+            .filter(|t| t.is_in_library)
             .map(|t| t.track_id.to_string())
             .collect::<Vec<_>>()
             .join(",");
 
-        type DspRow = (
-            Option<f64>, // energy
-            Option<f64>, // danceability
-            Option<f64>, // bpm
-            Option<String>, // key_signature
-            Option<String>, // camelot_key
-            Option<i64>, // is_instrumental (0/1)
-            Option<f64>, // loudness_lufs
-        );
-        let dsp_map: std::collections::HashMap<i64, DspRow> = state_guard.db.with_conn(|conn| {
-            let sql = format!(
-                "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
-                        is_instrumental, loudness_lufs
-                 FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
+        if ids_csv.is_empty() {
+            // No library tracks present (pure external response) — nothing to enrich.
+        } else {
+            type DspRow = (
+                Option<f64>, // energy
+                Option<f64>, // danceability
+                Option<f64>, // bpm
+                Option<String>, // key_signature
+                Option<String>, // camelot_key
+                Option<i64>, // is_instrumental (0/1)
+                Option<f64>, // loudness_lufs
             );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<f64>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, Option<f64>>(7)?,
-                ))
-            })?;
-            let mut map = std::collections::HashMap::new();
-            for r in rows {
-                let (id, energy, dance, bpm, key, camelot, instr, lufs) = r?;
-                map.insert(id, (energy, dance, bpm, key, camelot, instr, lufs));
-            }
-            Ok(map)
-        }).unwrap_or_default();
+            let dsp_map: std::collections::HashMap<i64, DspRow> = state_guard.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
+                            is_instrumental, loudness_lufs
+                     FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<f64>>(7)?,
+                    ))
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for r in rows {
+                    let (id, energy, dance, bpm, key, camelot, instr, lufs) = r?;
+                    map.insert(id, (energy, dance, bpm, key, camelot, instr, lufs));
+                }
+                Ok(map)
+            }).unwrap_or_default();
 
-        for t in &mut space_tracks {
-            if let Some((energy, dance, bpm, key, camelot, instr, lufs)) = dsp_map.get(&t.track_id) {
-                t.energy = *energy;
-                t.danceability = *dance;
-                t.bpm = *bpm;
-                t.key_signature = key.clone();
-                t.camelot_key = camelot.clone();
-                t.is_instrumental = instr.map(|v| v != 0);
-                t.loudness_lufs = *lufs;
+            for t in &mut space_tracks {
+                if let Some((energy, dance, bpm, key, camelot, instr, lufs)) = dsp_map.get(&t.track_id) {
+                    t.energy = *energy;
+                    t.danceability = *dance;
+                    t.bpm = *bpm;
+                    t.key_signature = key.clone();
+                    t.camelot_key = camelot.clone();
+                    t.is_instrumental = instr.map(|v| v != 0);
+                    t.loudness_lufs = *lufs;
+                }
             }
         }
     }
@@ -2239,46 +2244,51 @@ async fn get_discovery_space(
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
+            .filter(|t| t.is_in_library)
             .map(|t| t.track_id.to_string())
             .collect::<Vec<_>>()
             .join(",");
 
-        let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state_guard.db.with_conn(|conn| {
-            let sql = format!(
-                "SELECT lh.track_id,
-                        AVG(CASE WHEN lh.completed = 1 THEN 0.0 ELSE 1.0 END) AS skip_rate,
-                        AVG(
-                            CASE
-                                WHEN t.duration_ms IS NULL OR t.duration_ms = 0 THEN NULL
-                                ELSE MIN(1.0, CAST(lh.duration_listened_ms AS REAL) / CAST(t.duration_ms AS REAL))
-                            END
-                        ) AS completion_avg
-                 FROM listen_history lh
-                 JOIN tracks t ON t.id = lh.track_id
-                 WHERE lh.track_id IN ({ids_csv})
-                 GROUP BY lh.track_id"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<f64>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                ))
-            })?;
-            let mut map = std::collections::HashMap::new();
-            for r in rows {
-                let (id, skip, comp) = r?;
-                map.insert(id, (skip, comp));
-            }
-            Ok(map)
-        }).unwrap_or_default();
+        if ids_csv.is_empty() {
+            // No library tracks present (pure external response) — nothing to enrich.
+        } else {
+            let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state_guard.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT lh.track_id,
+                            AVG(CASE WHEN lh.completed = 1 THEN 0.0 ELSE 1.0 END) AS skip_rate,
+                            AVG(
+                                CASE
+                                    WHEN t.duration_ms IS NULL OR t.duration_ms = 0 THEN NULL
+                                    ELSE MIN(1.0, CAST(lh.duration_listened_ms AS REAL) / CAST(t.duration_ms AS REAL))
+                                END
+                            ) AS completion_avg
+                     FROM listen_history lh
+                     JOIN tracks t ON t.id = lh.track_id
+                     WHERE lh.track_id IN ({ids_csv})
+                     GROUP BY lh.track_id"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                    ))
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for r in rows {
+                    let (id, skip, comp) = r?;
+                    map.insert(id, (skip, comp));
+                }
+                Ok(map)
+            }).unwrap_or_default();
 
-        for t in &mut space_tracks {
-            if let Some((skip, comp)) = listen_map.get(&t.track_id) {
-                // Preserve Option semantics — None means "no listen data" (distinct from 0.0).
-                t.skip_rate = *skip;
-                t.completion_avg = *comp;
+            for t in &mut space_tracks {
+                if let Some((skip, comp)) = listen_map.get(&t.track_id) {
+                    // Preserve Option semantics — None means "no listen data" (distinct from 0.0).
+                    t.skip_rate = *skip;
+                    t.completion_avg = *comp;
+                }
             }
         }
     }
@@ -2287,34 +2297,39 @@ async fn get_discovery_space(
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
+            .filter(|t| t.is_in_library)
             .map(|t| t.track_id.to_string())
             .collect::<Vec<_>>()
             .join(",");
 
-        let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard.db.with_conn(|conn| {
-            let sql = format!(
-                "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                ))
-            })?;
-            let mut map = std::collections::HashMap::new();
-            for r in rows {
-                let (id, last, plays) = r?;
-                map.insert(id, (last, plays));
-            }
-            Ok(map)
-        }).unwrap_or_default();
+        if ids_csv.is_empty() {
+            // No library tracks present (pure external response) — nothing to enrich.
+        } else {
+            let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    ))
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for r in rows {
+                    let (id, last, plays) = r?;
+                    map.insert(id, (last, plays));
+                }
+                Ok(map)
+            }).unwrap_or_default();
 
-        for t in &mut space_tracks {
-            if let Some((last, plays)) = track_meta.get(&t.track_id) {
-                t.last_played_at = last.clone();
-                t.play_count = *plays;
+            for t in &mut space_tracks {
+                if let Some((last, plays)) = track_meta.get(&t.track_id) {
+                    t.last_played_at = last.clone();
+                    t.play_count = *plays;
+                }
             }
         }
     }
@@ -2323,56 +2338,70 @@ async fn get_discovery_space(
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
+            .filter(|t| t.is_in_library)
             .map(|t| t.track_id.to_string())
             .collect::<Vec<_>>()
             .join(",");
 
-        type GenreRow = (String, Option<String>, Option<f64>);
-        let genre_map: std::collections::HashMap<i64, GenreRow> = state_guard.db.with_conn(|conn| {
-            let sql = format!(
-                "SELECT tg.track_id, g.name, tg.source, tg.confidence
-                 FROM track_genres tg
-                 JOIN genres g ON g.id = tg.genre_id
-                 WHERE tg.track_id IN ({ids_csv})
-                 ORDER BY tg.track_id, COALESCE(tg.confidence, 0) DESC"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                ))
-            })?;
-            let mut map = std::collections::HashMap::new();
-            for r in rows {
-                let (id, name, source, conf) = r?;
-                map.entry(id).or_insert((name, source, conf));
-            }
-            Ok(map)
-        }).unwrap_or_default();
+        if ids_csv.is_empty() {
+            // No library tracks present (pure external response) — nothing to enrich.
+        } else {
+            type GenreRow = (String, Option<String>, Option<f64>);
+            let genre_map: std::collections::HashMap<i64, GenreRow> = state_guard.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT tg.track_id, g.name, tg.source, tg.confidence
+                     FROM track_genres tg
+                     JOIN genres g ON g.id = tg.genre_id
+                     WHERE tg.track_id IN ({ids_csv})
+                     ORDER BY tg.track_id, COALESCE(tg.confidence, 0) DESC"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                    ))
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for r in rows {
+                    let (id, name, source, conf) = r?;
+                    map.entry(id).or_insert((name, source, conf));
+                }
+                Ok(map)
+            }).unwrap_or_default();
 
-        for t in &mut space_tracks {
-            if let Some((name, source, conf)) = genre_map.get(&t.track_id) {
-                t.top_genre = Some(name.clone());
-                t.top_genre_source = source.clone();
-                t.top_genre_confidence = *conf;
+            for t in &mut space_tracks {
+                if let Some((name, source, conf)) = genre_map.get(&t.track_id) {
+                    t.top_genre = Some(name.clone());
+                    t.top_genre_source = source.clone();
+                    t.top_genre_confidence = *conf;
+                }
             }
         }
     }
 
     // ── 3e. Cohort assignment per track (90-day window) ──────────────────────
     if !space_tracks.is_empty() {
-        let track_ids: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
-        let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard.db.with_conn(|conn| {
-            queries::get_track_cohort_assignments(conn, &track_ids, 90)
-        }).unwrap_or_default();
+        let track_ids: Vec<i64> = space_tracks
+            .iter()
+            .filter(|t| t.is_in_library)
+            .map(|t| t.track_id)
+            .collect();
 
-        for t in &mut space_tracks {
-            if let Some((id, label)) = cohort_map.get(&t.track_id) {
-                t.cohort_id = Some(id.clone());
-                t.cohort_label = Some(label.clone());
+        if track_ids.is_empty() {
+            // No library tracks — skip cohort assignment.
+        } else {
+            let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard.db.with_conn(|conn| {
+                queries::get_track_cohort_assignments(conn, &track_ids, 90)
+            }).unwrap_or_default();
+
+            for t in &mut space_tracks {
+                if let Some((id, label)) = cohort_map.get(&t.track_id) {
+                    t.cohort_id = Some(id.clone());
+                    t.cohort_label = Some(label.clone());
+                }
             }
         }
     }
