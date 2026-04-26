@@ -343,6 +343,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/login/poll", post(tidal_poll))
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
+        .route("/api/tidal/search", get(tidal_search))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
         .route("/api/spotify/config", post(spotify_save_config))
@@ -356,6 +357,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/lastfm/config", axum::routing::delete(lastfm_clear_config))
         .route("/api/lastfm/status", get(lastfm_status))
         .route("/api/library/enrich/lastfm", post(start_lastfm_enrichment))
+        .route("/api/library/enrich/lastfm/stop", post(stop_lastfm_enrichment))
         .route("/api/library/enrich/lastfm/status", get(get_lastfm_enrichment_status))
         .route("/api/library/enrich/lastfm/reset", post(reset_lastfm_enrichment))
         // Audio analysis
@@ -5080,6 +5082,107 @@ async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({ "status": "logged_out" }))
 }
 
+// ─── TIDAL Search ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TidalSearchParams {
+    q: String,
+    limit: Option<i32>,
+}
+
+#[derive(serde::Serialize)]
+struct TidalSearchTrackResp {
+    tidal_id: i64,
+    title: String,
+    duration_ms: i64,
+    artist_id: Option<i64>,
+    artist_name: Option<String>,
+    album_title: Option<String>,
+    artwork_url: Option<String>,
+    audio_quality: Option<String>,
+    stream_ready: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct TidalSearchAlbumResp {
+    tidal_id: i64,
+    title: String,
+    artist_name: Option<String>,
+    artwork_url: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TidalSearchArtistResp {
+    tidal_id: i64,
+    name: String,
+    artwork_url: Option<String>,
+}
+
+async fn tidal_search(
+    State(state): State<SharedState>,
+    Query(params): Query<TidalSearchParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let limit = params.limit.unwrap_or(20);
+    let results = client.search_catalog(&params.q, limit).await.map_err(|e| {
+        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
+    })?;
+
+    let tracks: Vec<TidalSearchTrackResp> = results
+        .tracks
+        .into_iter()
+        .map(|t| TidalSearchTrackResp {
+            tidal_id: t.id,
+            title: t.title,
+            duration_ms: t.duration * 1000,
+            artist_id: t.artist_id,
+            artist_name: t.artist_name,
+            album_title: t.album_title,
+            artwork_url: t.artwork_url,
+            audio_quality: t.audio_quality,
+            stream_ready: t.stream_ready,
+        })
+        .collect();
+
+    let albums: Vec<TidalSearchAlbumResp> = results
+        .albums
+        .into_iter()
+        .map(|a| TidalSearchAlbumResp {
+            tidal_id: a.id,
+            title: a.title,
+            artist_name: a.artist_name,
+            artwork_url: a.artwork_url,
+        })
+        .collect();
+
+    let artists: Vec<TidalSearchArtistResp> = results
+        .artists
+        .into_iter()
+        .map(|a| TidalSearchArtistResp {
+            tidal_id: a.id,
+            name: a.name,
+            artwork_url: a.artwork_url,
+        })
+        .collect();
+
+    Ok(Json(json!({ "tracks": tracks, "albums": albums, "artists": artists })))
+}
+
 /// Get sync info (last sync time, auto-sync settings).
 async fn get_sync_info(
     State(state): State<SharedState>,
@@ -6980,14 +7083,18 @@ async fn start_lastfm_enrichment(
     use crate::services::lastfm;
     use std::sync::atomic::Ordering;
 
-    let (http, event_tx, running, total_atom, processed_atom) = {
+    let (http, event_tx, running, cancel, total_atom, processed_atom, prefetch_total_atom, prefetch_done_atom, started_at_atom) = {
         let s = state.read().await;
         (
             s.http_client.clone(),
             s.event_tx.clone(),
             s.lastfm_enrich_running.clone(),
+            s.lastfm_enrich_cancel.clone(),
             s.lastfm_enrich_total.clone(),
             s.lastfm_enrich_processed.clone(),
+            s.lastfm_prefetch_total.clone(),
+            s.lastfm_prefetch_done.clone(),
+            s.lastfm_enrich_started_at.clone(),
         )
     };
 
@@ -7027,19 +7134,40 @@ async fn start_lastfm_enrichment(
         return Ok(Json(json!({"status": "already_complete"})));
     }
 
+    cancel.store(false, Ordering::SeqCst);
     running.store(true, Ordering::SeqCst);
     total_atom.store(total, Ordering::SeqCst);
     processed_atom.store(0, Ordering::SeqCst);
+    prefetch_total_atom.store(0, Ordering::SeqCst);
+    prefetch_done_atom.store(0, Ordering::SeqCst);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    started_at_atom.store(now_secs, Ordering::SeqCst);
 
     let api_key = creds.api_key.clone();
+    let started_at_atom_cleanup = started_at_atom.clone();
     tokio::spawn(async move {
         let progress_tx = event_tx.clone();
+        let artist_tx = event_tx.clone();
         let total_atom_cb = total_atom.clone();
         let processed_atom_cb = processed_atom.clone();
+        let prefetch_total_cb = prefetch_total_atom.clone();
+        let prefetch_done_cb = prefetch_done_atom.clone();
         let result = lastfm::enrichment::run_enrichment(
             state,
             http,
             api_key,
+            cancel,
+            move |done, artist_total| {
+                prefetch_total_cb.store(artist_total, Ordering::SeqCst);
+                prefetch_done_cb.store(done, Ordering::SeqCst);
+                let _ = artist_tx.send(AppEvent::SyncProgress {
+                    service: "lastfm".to_string(),
+                    progress: done as f32 / artist_total.max(1) as f32,
+                });
+            },
             move |current, total| {
                 processed_atom_cb.store(current, Ordering::SeqCst);
                 if total > 0 {
@@ -7053,6 +7181,7 @@ async fn start_lastfm_enrichment(
         )
         .await;
         running.store(false, Ordering::SeqCst);
+        started_at_atom_cleanup.store(0, Ordering::SeqCst);
         if result.is_ok() {
             let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
         }
@@ -7091,12 +7220,18 @@ async fn get_lastfm_enrichment_status(
     let is_running = s.lastfm_enrich_running.load(Ordering::SeqCst);
     let run_total = s.lastfm_enrich_total.load(Ordering::SeqCst);
     let run_processed = s.lastfm_enrich_processed.load(Ordering::SeqCst);
+    let prefetch_total = s.lastfm_prefetch_total.load(Ordering::SeqCst);
+    let prefetch_done = s.lastfm_prefetch_done.load(Ordering::SeqCst);
+    let run_started_at = s.lastfm_enrich_started_at.load(Ordering::SeqCst);
     Ok(Json(json!({
         "enriched_tracks": enriched,
         "remaining_tracks": remaining,
         "is_running": is_running,
         "run_total": run_total,
         "run_processed": run_processed,
+        "prefetch_total": prefetch_total,
+        "prefetch_done": prefetch_done,
+        "run_started_at": run_started_at,
     })))
 }
 
@@ -7114,6 +7249,7 @@ async fn reset_lastfm_enrichment(
     let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
         let checks = conn.execute("DELETE FROM lastfm_checked", [])?;
         let tags = conn.execute("DELETE FROM track_genres WHERE source = 'lastfm'", [])?;
+        conn.execute("DELETE FROM lastfm_artist_cache", [])?;
         Ok((checks, tags))
     });
     match result {
@@ -7127,6 +7263,15 @@ async fn reset_lastfm_enrichment(
             "message": format!("Reset failed: {}", e),
         }))),
     }
+}
+
+async fn stop_lastfm_enrichment(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    s.lastfm_enrich_cancel.store(true, Ordering::Relaxed);
+    Ok(Json(json!({ "status": "stopping" })))
 }
 
 // ── Audio Analysis Endpoints ─────────────────────────────────────────────────
