@@ -3,7 +3,7 @@
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
 
   let query = $state('')
@@ -148,18 +148,103 @@
       { label: artist.in_library ? 'Open in library' : 'Open artist', icon: '→', onSelect: () => void goto(href) },
     ]
   }
+
+  // ─── Keyboard navigation ────────────────────────────────────────────────
+  // `/` from anywhere on the page focuses the input (skips when typing
+  // elsewhere). Once in the input, `Enter` plays — modifiers branch to
+  // queue/play-next. Arrow keys move a row cursor through the visible tracks.
+  let inputEl: HTMLInputElement | null = $state(null)
+  let cursor = $state(-1)
+
+  // Reset cursor whenever the result set changes shape so we never point past the end.
+  $effect(() => {
+    if (cursor >= sortedTracks.length) cursor = sortedTracks.length - 1
+  })
+
+  function actOnTrack(track: TidalSearchTrack, mode: 'play' | 'queue' | 'next') {
+    if (mode === 'queue') void addTidalTrackToQueue(track)
+    else if (mode === 'next') void playTidalTrackNext(track)
+    else void playTidalTrackNow(track)
+  }
+
+  function inputKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      if (query) {
+        query = ''
+        results = null
+        cursor = -1
+      } else {
+        inputEl?.blur()
+      }
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      if (sortedTracks.length === 0) return
+      cursor = cursor < 0 ? 0 : Math.min(cursor + 1, sortedTracks.length - 1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (sortedTracks.length === 0) return
+      cursor = cursor <= 0 ? -1 : cursor - 1
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const mode: 'play' | 'queue' | 'next' = e.shiftKey ? 'queue' : (e.metaKey || e.ctrlKey) ? 'next' : 'play'
+      const target = cursor >= 0 ? sortedTracks[cursor] : null
+      if (target) {
+        actOnTrack(target, mode)
+      } else if (topResult) {
+        if (topResult.kind === 'track') actOnTrack(topResult.entry, mode)
+        else topResultPlay(topResult)
+      }
+      return
+    }
+  }
+
+  function globalKeydown(e: KeyboardEvent) {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+    e.preventDefault()
+    inputEl?.focus()
+    inputEl?.select()
+  }
+
+  $effect(() => {
+    window.addEventListener('keydown', globalKeydown)
+    return () => window.removeEventListener('keydown', globalKeydown)
+  })
+
+  // Keep the highlighted track in view as the cursor moves.
+  $effect(() => {
+    if (cursor < 0) return
+    const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursor}"]`)
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
 </script>
 
 <div class="search-page">
   <div class="search-header">
     <input
+      bind:this={inputEl}
       class="search-input"
       type="text"
       placeholder="Search Tidal's full catalogue"
       bind:value={query}
       oninput={onInput}
+      onkeydown={inputKeydown}
       autofocus
     />
+    <p class="kbd-hint">
+      <kbd>/</kbd> focus &nbsp;·&nbsp;
+      <kbd>↑</kbd><kbd>↓</kbd> move &nbsp;·&nbsp;
+      <kbd>Enter</kbd> play &nbsp;·&nbsp;
+      <kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
+      <kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
+    </p>
   </div>
 
   {#if !query.trim()}
@@ -282,15 +367,18 @@
       <section class="results-section">
         <h3 class="section-label">Tracks</h3>
         <ul class="tracks-list">
-          {#each sortedTracks as track (track.tidal_id)}
+          {#each sortedTracks as track, idx (track.tidal_id)}
             <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
             <li
               class="track-row"
+              class:cursor={cursor === idx}
+              data-cursor-idx={idx}
               role="button"
               tabindex="0"
               onclick={() => void playTidalTrackNow(track)}
+              onmouseenter={() => { cursor = idx }}
               onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playTidalTrackNow(track))}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(track)) }}
             >
@@ -353,6 +441,27 @@
     transition: border-color 0.15s, background 0.15s;
   }
   .search-input::placeholder { color: var(--text-tertiary); }
+  .kbd-hint {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+  }
+  .kbd-hint kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 10px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin: 0 1px;
+  }
   .search-input:focus {
     border-color: var(--accent);
     background: var(--bg-elevated);
@@ -601,6 +710,10 @@
     cursor: pointer;
   }
   .track-row:hover { background: var(--bg-hover); }
+  .track-row.cursor {
+    background: var(--bg-hover);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   .track-art {
     width: 36px;
     height: 36px;
