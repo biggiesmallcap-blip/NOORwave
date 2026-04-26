@@ -39,6 +39,7 @@ pub struct AppState {
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
+    pub ephemeral_tidal_track: Option<db::models::Track>,
     /// Cancellation flag for in-flight TIDAL device code login polling.
     pub tidal_login_cancel: Arc<AtomicBool>,
     /// RSS feed aggregator for music news and articles
@@ -192,6 +193,7 @@ async fn main() -> Result<()> {
         playback_runtime_info: None,
         active_listen_session: None,
         external_playback_track: None,
+        ephemeral_tidal_track: None,
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
         rss_aggregator,
         acrcloud_client: None,

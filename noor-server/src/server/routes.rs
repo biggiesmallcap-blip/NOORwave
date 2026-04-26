@@ -344,6 +344,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/search", get(tidal_search))
+        .route("/api/tidal/play", post(play_tidal_ephemeral))
         .route("/api/tidal/artists/:tidal_id", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
@@ -3318,7 +3319,12 @@ async fn overlay_snapshot_with_external_track_and_position(
     if let Some(pos) = live_position_ms {
         snapshot.state.position_ms = pos;
     }
-    if snapshot.state.current_track.is_none() {
+    // Ephemeral Tidal track takes priority: it represents a track playing right
+    // now that has no DB record.
+    if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
+        snapshot.state.current_track = Some(ephemeral.clone());
+        snapshot.state.is_playing = true;
+    } else if snapshot.state.current_track.is_none() {
         if let Some(track) = state_guard.external_playback_track.as_ref() {
             snapshot.state.current_track = Some(track.clone());
         }
@@ -4143,6 +4149,10 @@ async fn play_track(
             })?
     };
     set_external_playback_track(&state, None).await;
+    {
+        let mut state_guard = state.write().await;
+        state_guard.ephemeral_tidal_track = None;
+    }
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
@@ -5182,6 +5192,122 @@ async fn tidal_search(
         .collect();
 
     Ok(Json(json!({ "tracks": tracks, "albums": albums, "artists": artists })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PlayTidalRequest {
+    tidal_track_id: i64,
+    title: String,
+    artist_name: Option<String>,
+    album_title: Option<String>,
+    artwork_url: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+async fn play_tidal_ephemeral(
+    State(state): State<SharedState>,
+    Json(body): Json<PlayTidalRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Resolve TIDAL tokens (same pattern as tidal_search)
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    // Resolve stream URL
+    let http_client = {
+        let s = state.read().await;
+        s.http_client.clone()
+    };
+    let stream_req = tidal_stream::StreamRequest::new(body.tidal_track_id, "LOSSLESS");
+    let stream_info = tidal_stream::resolve_stream(
+        &http_client,
+        &tokens.access_token,
+        &stream_req,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("TIDAL stream resolve failed: {e}") })),
+        )
+    })?;
+
+    // Build a synthetic Track with a negative id to avoid any DB collision
+    let synthetic = crate::db::models::Track {
+        id: -body.tidal_track_id,
+        title: body.title.clone(),
+        artist_id: 0,
+        artist_name: body.artist_name.clone(),
+        album_id: None,
+        album_title: body.album_title.clone(),
+        disc_number: None,
+        track_number: None,
+        duration_ms: body.duration_ms,
+        isrc: None,
+        tidal_id: Some(body.tidal_track_id),
+        ytmusic_id: None,
+        soundcloud_id: None,
+        best_quality: Some("LOSSLESS".to_string()),
+        best_source: Some("tidal".to_string()),
+        fidelity_score: 0,
+        is_favorite: false,
+        play_count: 0,
+        last_played_at: None,
+        date_added: None,
+        source: "tidal_ephemeral".to_string(),
+        artwork_url: body.artwork_url.clone(),
+    };
+
+    // Build the playback job and start it via the runtime
+    let crossfade_ms = current_crossfade_ms(&state).await;
+    let job = player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms);
+    let runtime_handle = ensure_playback_runtime_for_track(&state, &synthetic).await?;
+    runtime_handle.play(job).map_err(|e| {
+        let message = format!("Failed to start host audio playback: {e}");
+        report_playback_failure(&state, &message);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": message })),
+        )
+    })?;
+
+    // Store ephemeral track for state overlay and clear DB current_track_id
+    {
+        let mut state_guard = state.write().await;
+        state_guard.ephemeral_tidal_track = Some(synthetic);
+    }
+    {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE playback_state SET current_track_id = NULL, position_ms = 0, is_playing = 1 WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("DB update failed: {e}") })),
+                )
+            })?;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn tidal_artist_profile(
