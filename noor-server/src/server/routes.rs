@@ -351,6 +351,13 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
         .route("/api/library/enrich/spotify/reset", post(reset_spotify_enrichment))
+        // Last.fm
+        .route("/api/lastfm/config", post(lastfm_save_config))
+        .route("/api/lastfm/config", axum::routing::delete(lastfm_clear_config))
+        .route("/api/lastfm/status", get(lastfm_status))
+        .route("/api/library/enrich/lastfm", post(start_lastfm_enrichment))
+        .route("/api/library/enrich/lastfm/status", get(get_lastfm_enrichment_status))
+        .route("/api/library/enrich/lastfm/reset", post(reset_lastfm_enrichment))
         // Audio analysis
         .route("/api/library/analyze/audio-features", post(start_audio_analysis))
         .route("/api/library/analyze/stop", post(stop_audio_analysis))
@@ -1975,10 +1982,7 @@ async fn get_discovery_space(
 
             let context = match load_external_discovery_context(&state).await {
                 Ok(c) => c,
-                Err(_) => {
-                    state_guard = state.read().await;
-                    return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] })));
-                }
+                Err(_) => return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] }))),
             };
 
             let queries = external_discovery_engine::build_connection_queries(
@@ -1990,10 +1994,7 @@ async fn get_discovery_space(
 
             let provider = match tidal_discovery_provider(&state).await {
                 Ok(p) => p,
-                Err(_) => {
-                    state_guard = state.read().await;
-                    return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] })));
-                }
+                Err(_) => return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] }))),
             };
 
             let raw = provider.search_tracks(&queries, 8).await.unwrap_or_default();
@@ -6874,6 +6875,245 @@ async fn reset_spotify_enrichment(
     let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
         let checks = conn.execute("DELETE FROM spotify_checked", [])?;
         let tags = conn.execute("DELETE FROM track_genres WHERE source = 'spotify'", [])?;
+        Ok((checks, tags))
+    });
+    match result {
+        Ok((checks, tags)) => Ok(Json(json!({
+            "status": "ok",
+            "checks_cleared": checks,
+            "tags_cleared": tags,
+        }))),
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Reset failed: {}", e),
+        }))),
+    }
+}
+
+// ── Last.fm Endpoints ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LastFmConfigRequest {
+    api_key: String,
+}
+
+async fn lastfm_save_config(
+    State(state): State<SharedState>,
+    Json(payload): Json<LastFmConfigRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+    let api_key = payload.api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "API key is required."
+        })));
+    }
+
+    // Verify the key works by hitting a free, parameterless endpoint.
+    let http = state.read().await.http_client.clone();
+    let probe = http
+        .get("https://ws.audioscrobbler.com/2.0/")
+        .query(&[
+            ("method", "tag.getTopTags"),
+            ("api_key", &api_key),
+            ("format", "json"),
+        ])
+        .send()
+        .await;
+    match probe {
+        Ok(resp) if resp.status().is_success() => {
+            let body_text = resp.text().await.unwrap_or_default();
+            if body_text.contains("\"error\"") {
+                return Ok(Json(json!({
+                    "status": "error",
+                    "message": format!("Last.fm rejected the key: {}",
+                        body_text.chars().take(200).collect::<String>())
+                })));
+            }
+            let creds = lastfm::auth::LastFmCredentials { api_key };
+            let _ = state.read().await.db.with_conn(|conn| {
+                lastfm::auth::save_credentials(conn, &creds)?;
+                Ok(())
+            });
+            Ok(Json(json!({"status": "ok"})))
+        }
+        Ok(resp) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Last.fm rejected the key: HTTP {}", resp.status())
+        }))),
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Could not reach Last.fm: {}", e)
+        }))),
+    }
+}
+
+async fn lastfm_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+    let configured = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            Ok(lastfm::auth::load_credentials(conn)
+                .ok()
+                .flatten()
+                .is_some())
+        })
+        .unwrap_or(false);
+    Ok(Json(json!({"configured": configured})))
+}
+
+async fn lastfm_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+    let _ = state.read().await.db.with_conn(|conn| {
+        lastfm::auth::clear_credentials(conn)?;
+        Ok(())
+    });
+    Ok(Json(json!({"status": "cleared"})))
+}
+
+async fn start_lastfm_enrichment(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+    use std::sync::atomic::Ordering;
+
+    let (http, event_tx, running, total_atom, processed_atom) = {
+        let s = state.read().await;
+        (
+            s.http_client.clone(),
+            s.event_tx.clone(),
+            s.lastfm_enrich_running.clone(),
+            s.lastfm_enrich_total.clone(),
+            s.lastfm_enrich_processed.clone(),
+        )
+    };
+
+    if running.load(Ordering::SeqCst) {
+        let total = total_atom.load(Ordering::SeqCst);
+        let processed = processed_atom.load(Ordering::SeqCst);
+        return Ok(Json(json!({
+            "status": "already_running",
+            "total": total,
+            "processed": processed
+        })));
+    }
+
+    let creds = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+        .unwrap_or(None);
+    let Some(creds) = creds else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Last.fm API key not configured."
+        })));
+    };
+
+    let total: usize = state.read().await.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
+            [], |r| r.get(0)
+        )?)
+    }).unwrap_or(0);
+
+    if total == 0 {
+        return Ok(Json(json!({"status": "already_complete"})));
+    }
+
+    running.store(true, Ordering::SeqCst);
+    total_atom.store(total, Ordering::SeqCst);
+    processed_atom.store(0, Ordering::SeqCst);
+
+    let api_key = creds.api_key.clone();
+    tokio::spawn(async move {
+        let progress_tx = event_tx.clone();
+        let total_atom_cb = total_atom.clone();
+        let processed_atom_cb = processed_atom.clone();
+        let result = lastfm::enrichment::run_enrichment(
+            state,
+            http,
+            api_key,
+            move |current, total| {
+                processed_atom_cb.store(current, Ordering::SeqCst);
+                if total > 0 {
+                    total_atom_cb.store(total, Ordering::SeqCst);
+                }
+                let _ = progress_tx.send(AppEvent::SyncProgress {
+                    service: "lastfm".to_string(),
+                    progress: current as f32 / total.max(1) as f32,
+                });
+            },
+        )
+        .await;
+        running.store(false, Ordering::SeqCst);
+        if result.is_ok() {
+            let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
+        }
+    });
+
+    Ok(Json(json!({"status": "started", "total": total})))
+}
+
+async fn get_lastfm_enrichment_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    let enriched: i64 = s
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'lastfm'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap_or(0);
+    let remaining: i64 = s
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap_or(0);
+    let is_running = s.lastfm_enrich_running.load(Ordering::SeqCst);
+    let run_total = s.lastfm_enrich_total.load(Ordering::SeqCst);
+    let run_processed = s.lastfm_enrich_processed.load(Ordering::SeqCst);
+    Ok(Json(json!({
+        "enriched_tracks": enriched,
+        "remaining_tracks": remaining,
+        "is_running": is_running,
+        "run_total": run_total,
+        "run_processed": run_processed,
+    })))
+}
+
+async fn reset_lastfm_enrichment(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    if s.lastfm_enrich_running.load(Ordering::SeqCst) {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Cannot reset while enrichment is running."
+        })));
+    }
+    let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
+        let checks = conn.execute("DELETE FROM lastfm_checked", [])?;
+        let tags = conn.execute("DELETE FROM track_genres WHERE source = 'lastfm'", [])?;
         Ok((checks, tags))
     });
     match result {

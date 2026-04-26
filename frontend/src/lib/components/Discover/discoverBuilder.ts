@@ -111,7 +111,7 @@ export function buildInitialLayout(
       bpm: t.bpm,
       key_signature: t.key_signature,
       camelot_key: t.camelot_key,
-      is_in_library: t.source === 'tidal',
+      is_in_library: t.is_in_library ?? (t.source === 'tidal'),
       source: t.source || 'tidal',
       x: Math.cos(angle) * radius,
       y: Math.sin(angle) * radius,
