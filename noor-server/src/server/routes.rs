@@ -28,7 +28,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -345,7 +345,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/search", get(tidal_search))
         .route("/api/tidal/play", post(play_tidal_ephemeral))
-        .route("/api/tidal/artists/:tidal_id", get(tidal_artist_profile))
+        .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
         .route("/api/spotify/config", post(spotify_save_config))
@@ -1644,7 +1644,8 @@ async fn record_discovery_feedback(
 
 #[derive(Debug, Deserialize)]
 struct RadioRequest {
-    seed_track_id: i64,
+    seed_track_id: Option<i64>,
+    seed_tidal_id: Option<i64>,  // resolve to local library track when seed_track_id <= 0
     creativity: Option<f64>,    // 0.0 (tight) to 1.0 (adventurous), default 0.3
     context_window: Option<i64>, // number of recent tracks to influence, default 5
     limit: Option<i64>,          // results to return, default 20
@@ -1657,13 +1658,6 @@ async fn get_radio_tracks(
     State(state): State<SharedState>,
     Json(payload): Json<RadioRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if payload.seed_track_id <= 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "seed_track_id is required"})),
-        ));
-    }
-
     let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
     let context_window = payload.context_window.unwrap_or(5).max(0) as usize;
     let limit = payload.limit.unwrap_or(20).max(1).min(50);
@@ -1671,9 +1665,40 @@ async fn get_radio_tracks(
 
     let state = state.read().await;
 
+    let seed_track_id: i64 = if let Some(id) = payload.seed_track_id.filter(|&id| id > 0) {
+        id
+    } else if let Some(tidal_id) = payload.seed_tidal_id {
+        state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+                    params![tidal_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?)
+            })
+            .map_err(|e| {
+                tracing::error!("DB error resolving tidal_id {}: {}", tidal_id, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Database error"})),
+                )
+            })?
+            .ok_or_else(|| (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "No local track matches that Tidal ID"})),
+            ))?
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "seed_track_id or seed_tidal_id required"})),
+        ));
+    };
+
     if let Some(mut rows) = discovery_learning::radio_from_neighbors(
         &state.db,
-        payload.seed_track_id,
+        seed_track_id,
         &exclude_ids,
         limit,
         creativity,
@@ -1691,7 +1716,7 @@ async fn get_radio_tracks(
         // features are left untouched (never penalised for being unanalyzed).
         let seed_features = state
             .db
-            .with_conn(|conn| queries::get_audio_dsp_features(conn, payload.seed_track_id))
+            .with_conn(|conn| queries::get_audio_dsp_features(conn, seed_track_id))
             .ok()
             .flatten();
 
@@ -1730,7 +1755,7 @@ async fn get_radio_tracks(
             .flatten();
         return Ok(Json(json!({
             "tracks": rows,
-            "seed_track_id": payload.seed_track_id,
+            "seed_track_id": seed_track_id,
             "creativity": creativity,
             "context_window": context_window,
             "computed_at": model.as_ref().and_then(|m| m.trained_at.clone()),
@@ -1744,7 +1769,7 @@ async fn get_radio_tracks(
     let similar = state
         .db
         .with_conn(|conn| {
-            queries::get_similar_tracks(conn, payload.seed_track_id, limit * 3, &exclude_ids)
+            queries::get_similar_tracks(conn, seed_track_id, limit * 3, &exclude_ids)
         })
         .map_err(|e| {
             tracing::error!("Failed to get similar tracks: {}", e);
@@ -1818,7 +1843,7 @@ async fn get_radio_tracks(
 
     Ok(Json(json!({
         "tracks": results,
-        "seed_track_id": payload.seed_track_id,
+        "seed_track_id": seed_track_id,
         "creativity": creativity,
         "context_window": context_window,
         "computed_at": computed_at,
