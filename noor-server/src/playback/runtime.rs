@@ -193,6 +193,21 @@ impl PlaybackRuntimeHandle {
         self.send(PlaybackRuntimeCommand::Shutdown)
     }
 
+    /// Live-swap the CPAL output device (and exclusive / sample-rate-follow flags)
+    /// across any active engines. Used by the audio settings PUT route.
+    pub fn device_swap(
+        &self,
+        device: OutputDeviceSelection,
+        exclusive: bool,
+        sample_rate_follow: bool,
+    ) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::DeviceSwap {
+            device,
+            exclusive,
+            sample_rate_follow,
+        })
+    }
+
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PlaybackRuntimeEvent> {
         self.event_tx.subscribe()
     }

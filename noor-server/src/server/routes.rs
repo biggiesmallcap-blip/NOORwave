@@ -337,6 +337,12 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/playback/queue/add", post(add_queue_track))
         .route("/api/playback/queue/remove", post(remove_queue_track))
+        // Audio output settings + device enumeration
+        .route("/api/audio/devices", get(get_audio_devices))
+        .route(
+            "/api/audio/settings",
+            get(get_audio_settings).put(put_audio_settings),
+        )
         // Search
         .route("/api/search", get(search))
         // TIDAL
@@ -6578,6 +6584,82 @@ async fn current_user_audio_quality(
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
         .ok()
         .map(|s| s.quality)
+}
+
+// ───── Audio output settings ────────────────────────────────────────────────
+//
+// `GET /api/audio/devices`     — enumerate cpal output devices
+// `GET /api/audio/settings`    — current persisted AudioSettings
+// `PUT /api/audio/settings`    — persist + (if device/exclusive/SR-follow changed) live-swap
+
+async fn get_audio_devices(
+    State(_state): State<SharedState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let devices = crate::playback::runtime::enumerate_output_devices();
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+async fn get_audio_settings(
+    State(state): State<SharedState>,
+) -> Result<Json<crate::db::audio_settings::AudioSettings>, StatusCode> {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// PUT body is the full `AudioSettings` struct. The frontend always knows the
+/// complete current state (the store hydrates on mount), so it sends the whole
+/// thing on every change. This avoids the partial-update / `Option<Option<T>>`
+/// footgun.
+async fn put_audio_settings(
+    State(state): State<SharedState>,
+    Json(new): Json<crate::db::audio_settings::AudioSettings>,
+) -> Result<Json<crate::db::audio_settings::AudioSettings>, (StatusCode, Json<serde_json::Value>)> {
+    // Reject exclusive_mode on non-Windows.
+    if new.exclusive_mode && !cfg!(target_os = "windows") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "exclusive_mode is only supported on Windows"
+            })),
+        ));
+    }
+
+    let guard = state.read().await;
+    let (old, saved) = guard
+        .db
+        .with_conn(|conn| {
+            let old = crate::db::audio_settings::load(conn)?;
+            crate::db::audio_settings::save(conn, &new)?;
+            Ok((old, new.clone()))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+        })?;
+    let new = saved;
+
+    // Live-apply iff anything affecting the output stream changed.
+    let needs_swap = old.output_device != new.output_device
+        || old.exclusive_mode != new.exclusive_mode
+        || old.sample_rate_follow != new.sample_rate_follow;
+
+    if needs_swap {
+        if let Some(runtime) = guard.playback_runtime.as_ref() {
+            let _ = runtime.handle.device_swap(
+                playback_runtime::OutputDeviceSelection::from_pref(new.output_device.as_deref()),
+                new.exclusive_mode,
+                new.sample_rate_follow,
+            );
+        }
+    }
+
+    Ok(Json(new))
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {
