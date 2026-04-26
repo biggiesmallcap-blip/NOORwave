@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum } from '$lib/stores/player'
@@ -51,6 +51,62 @@
   const sortedTracks = $derived(
     results ? [...results.tracks].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : []
   )
+
+  type TopResult =
+    | { kind: 'artist'; entry: TidalSearchArtist }
+    | { kind: 'album'; entry: TidalSearchAlbum }
+    | { kind: 'track'; entry: TidalSearchTrack }
+
+  // Score each candidate, prefer artist > album > track on ties, exact-name match
+  // wins, library entries get a +0.3 boost. The first place across all three
+  // sections is the hero.
+  const topResult = $derived.by<TopResult | null>(() => {
+    if (!results || !query.trim()) return null
+    const q = query.trim().toLowerCase()
+    const score = (name: string, inLibrary: boolean, kindBias: number) => {
+      const n = name.toLowerCase()
+      let s = 0
+      if (n === q) s += 1.0
+      else if (n.startsWith(q)) s += 0.6
+      else if (n.includes(q)) s += 0.3
+      if (inLibrary) s += 0.3
+      return s + kindBias
+    }
+    const candidates: { tr: TopResult; s: number }[] = []
+    if (sortedArtists[0]) candidates.push({ tr: { kind: 'artist', entry: sortedArtists[0] }, s: score(sortedArtists[0].name, sortedArtists[0].in_library, 0.05) })
+    if (sortedAlbums[0]) candidates.push({ tr: { kind: 'album', entry: sortedAlbums[0] }, s: score(sortedAlbums[0].title, sortedAlbums[0].in_library, 0.025) })
+    if (sortedTracks[0]) candidates.push({ tr: { kind: 'track', entry: sortedTracks[0] }, s: score(sortedTracks[0].title, sortedTracks[0].in_library, 0) })
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => b.s - a.s)
+    return candidates[0].tr
+  })
+
+  function topResultHref(top: TopResult): string {
+    switch (top.kind) {
+      case 'artist':
+        return top.entry.in_library && top.entry.local_id != null
+          ? `/artists/${top.entry.local_id}`
+          : `/tidal/artists/${top.entry.tidal_id}`
+      case 'album':
+        return top.entry.in_library && top.entry.local_id != null
+          ? `/albums/${top.entry.local_id}`
+          : `/tidal/albums/${top.entry.tidal_id}`
+      case 'track':
+        return top.entry.album_title
+          ? `/tidal/artists/${top.entry.artist_id ?? 0}`
+          : '#'
+    }
+  }
+
+  function topResultPlay(top: TopResult) {
+    if (top.kind === 'track') {
+      void playTidalTrackNow(top.entry)
+    } else if (top.kind === 'album') {
+      void playTidalAlbum(top.entry.tidal_id)
+    } else {
+      void goto(topResultHref(top))
+    }
+  }
 
   // Stable per-name color so empty-artwork avatars feel intentional, not broken.
   function letterColor(name: string): string {
@@ -115,6 +171,45 @@
   {:else if isEmpty}
     <p class="search-hint">No results for "{query}"</p>
   {:else if results}
+
+    {#if topResult}
+      {@const top = topResult}
+      <section class="top-result-section">
+        <h3 class="section-label">Top Result</h3>
+        <a class="top-result-card" class:in-library={top.entry.in_library} href={topResultHref(top)}>
+          {#if top.kind === 'artist'}
+            {#if top.entry.artwork_url}
+              <div class="top-art top-art--circle" style={`background-image: url('${top.entry.artwork_url}')`}></div>
+            {:else}
+              <div class="top-art top-art--circle fallback" style={`background: ${letterColor(top.entry.name)}`}>
+                <span>{initials(top.entry.name)}</span>
+              </div>
+            {/if}
+          {:else if top.entry.artwork_url}
+            <div class="top-art" style={`background-image: url('${top.entry.artwork_url}')`}></div>
+          {:else}
+            <div class="top-art fallback" style={`background: ${letterColor(top.kind === 'album' ? top.entry.title : top.entry.title)}`}>
+              <span>♫</span>
+            </div>
+          {/if}
+          <div class="top-meta">
+            <span class="top-kind">{top.kind === 'artist' ? 'Artist' : top.kind === 'album' ? 'Album' : 'Track'}{#if top.entry.in_library} · In your library{/if}</span>
+            <h2 class="top-title">
+              {top.kind === 'artist' ? top.entry.name : top.entry.title}
+            </h2>
+            {#if top.kind === 'album' && top.entry.artist_name}
+              <p class="top-sub">{top.entry.artist_name}</p>
+            {:else if top.kind === 'track' && top.entry.artist_name}
+              <p class="top-sub">{top.entry.artist_name}</p>
+            {/if}
+            <button
+              class="top-play-btn"
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); topResultPlay(top) }}
+            >▶ {top.kind === 'artist' ? 'Open' : 'Play'}</button>
+          </div>
+        </a>
+      </section>
+    {/if}
 
     {#if sortedArtists.length > 0}
       <section class="results-section">
@@ -271,6 +366,85 @@
   }
   .search-error { color: var(--state-error); }
   .results-section { margin-bottom: 40px; }
+  .top-result-section { margin-bottom: 32px; }
+  .top-result-card {
+    display: grid;
+    grid-template-columns: 168px 1fr;
+    gap: 24px;
+    padding: 20px;
+    border-radius: 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    text-decoration: none;
+    transition: transform 0.18s ease, border-color 0.18s, background 0.18s;
+    align-items: center;
+  }
+  .top-result-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-line);
+    background: var(--bg-raised);
+  }
+  .top-result-card.in-library { border-color: var(--accent-line); }
+  .top-art {
+    width: 168px;
+    height: 168px;
+    border-radius: 8px;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--bg-raised);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 12px 28px -12px rgba(0,0,0,0.6);
+  }
+  .top-art--circle { border-radius: 50%; }
+  .top-art.fallback span {
+    font-size: 56px;
+    color: rgba(255,255,255,0.55);
+    font-weight: 600;
+  }
+  .top-art--circle.fallback span { font-size: 40px; }
+  .top-meta {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .top-kind {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-tertiary);
+    font-weight: 600;
+  }
+  .top-title {
+    font-family: var(--font-display, inherit);
+    font-size: clamp(28px, 3.6vw, 44px);
+    line-height: 1.05;
+    margin: 0;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .top-sub {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+  .top-play-btn {
+    align-self: flex-start;
+    margin-top: 10px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 22px;
+    padding: 9px 22px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .top-play-btn:hover { opacity: 0.9; transform: scale(1.03); }
   .section-label {
     font-size: 10px;
     font-weight: 600;
