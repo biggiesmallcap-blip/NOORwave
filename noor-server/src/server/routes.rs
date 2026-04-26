@@ -2155,6 +2155,85 @@ async fn get_discovery_space(
         }
     }
 
+    // ── 3c. Backfill last_played_at + play_count from tracks table ───────────
+    if !space_tracks.is_empty() {
+        let ids_csv: String = space_tracks
+            .iter()
+            .map(|t| t.track_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state.db.with_conn(|conn| {
+            let sql = format!(
+                "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            })?;
+            let mut map = std::collections::HashMap::new();
+            for r in rows {
+                let (id, last, plays) = r?;
+                map.insert(id, (last, plays));
+            }
+            Ok(map)
+        }).unwrap_or_default();
+
+        for t in &mut space_tracks {
+            if let Some((last, plays)) = track_meta.get(&t.track_id) {
+                t.last_played_at = last.clone();
+                t.play_count = *plays;
+            }
+        }
+    }
+
+    // ── 3d. Top-genre with source + confidence (highest confidence per track) ─
+    if !space_tracks.is_empty() {
+        let ids_csv: String = space_tracks
+            .iter()
+            .map(|t| t.track_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        type GenreRow = (String, Option<String>, Option<f64>);
+        let genre_map: std::collections::HashMap<i64, GenreRow> = state.db.with_conn(|conn| {
+            let sql = format!(
+                "SELECT tg.track_id, g.name, tg.source, tg.confidence
+                 FROM track_genres tg
+                 JOIN genres g ON g.id = tg.genre_id
+                 WHERE tg.track_id IN ({ids_csv})
+                 ORDER BY tg.track_id, COALESCE(tg.confidence, 0) DESC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                ))
+            })?;
+            let mut map = std::collections::HashMap::new();
+            for r in rows {
+                let (id, name, source, conf) = r?;
+                map.entry(id).or_insert((name, source, conf));
+            }
+            Ok(map)
+        }).unwrap_or_default();
+
+        for t in &mut space_tracks {
+            if let Some((name, source, conf)) = genre_map.get(&t.track_id) {
+                t.top_genre = Some(name.clone());
+                t.top_genre_source = source.clone();
+                t.top_genre_confidence = *conf;
+            }
+        }
+    }
+
     // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
     // Only emit edges between nodes that are both present in this response.
     let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
