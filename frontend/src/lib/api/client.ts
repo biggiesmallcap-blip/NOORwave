@@ -876,6 +876,12 @@ export const api = {
 		});
 	},
 
+	stopDiscoveryTraining() {
+		return fetchApi<{ status: string }>('/api/discovery/train/stop', undefined, {
+			method: 'POST',
+		});
+	},
+
 	recordDiscoveryFeedback(
 		seed_track_id: number,
 		candidate_track_id: number,
