@@ -1868,7 +1868,7 @@ async fn get_discovery_space(
     let seed_id = payload.seed_track_id.unwrap_or(0);
     let prompt = payload.prompt.as_deref().unwrap_or("").trim().to_string();
 
-    let state = state.read().await;
+    let state_guard = state.read().await;
 
     #[derive(Debug)]
     struct SpaceTrack {
@@ -1909,7 +1909,7 @@ async fn get_discovery_space(
         // Prompt path: run the full discovery scoring engine against the library
         let p = prompt.clone();
         let lim = limit;
-        state.db.with_conn(move |conn| {
+        state_guard.db.with_conn(move |conn| {
             let request = discovery_engine::DiscoveryPreviewRequest {
                 prompt: p.clone(),
                 mode: "mood".to_string(),
@@ -1956,7 +1956,7 @@ async fn get_discovery_space(
         }).unwrap_or_default()
     } else if seed_id > 0 {
         let creativity = payload.creativity.unwrap_or(0.3).clamp(0.0, 1.0);
-        discovery_learning::radio_from_neighbors(&state.db, seed_id, &[], limit, creativity)
+        discovery_learning::radio_from_neighbors(&state_guard.db, seed_id, &[], limit, creativity)
             .ok()
             .flatten()
             .unwrap_or_default()
@@ -1997,7 +1997,7 @@ async fn get_discovery_space(
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
     if remaining > 0 {
-        let fallback = state.db.with_conn(|conn| {
+        let fallback = state_guard.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.source
                  FROM tracks t
@@ -2073,7 +2073,7 @@ async fn get_discovery_space(
             Option<i64>, // is_instrumental (0/1)
             Option<f64>, // loudness_lufs
         );
-        let dsp_map: std::collections::HashMap<i64, DspRow> = state.db.with_conn(|conn| {
+        let dsp_map: std::collections::HashMap<i64, DspRow> = state_guard.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
                         is_instrumental, loudness_lufs
@@ -2121,7 +2121,7 @@ async fn get_discovery_space(
             .collect::<Vec<_>>()
             .join(",");
 
-        let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state.db.with_conn(|conn| {
+        let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state_guard.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT lh.track_id,
                         AVG(CASE WHEN lh.completed = 1 THEN 0.0 ELSE 1.0 END) AS skip_rate,
@@ -2169,7 +2169,7 @@ async fn get_discovery_space(
             .collect::<Vec<_>>()
             .join(",");
 
-        let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state.db.with_conn(|conn| {
+        let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
             );
@@ -2206,7 +2206,7 @@ async fn get_discovery_space(
             .join(",");
 
         type GenreRow = (String, Option<String>, Option<f64>);
-        let genre_map: std::collections::HashMap<i64, GenreRow> = state.db.with_conn(|conn| {
+        let genre_map: std::collections::HashMap<i64, GenreRow> = state_guard.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT tg.track_id, g.name, tg.source, tg.confidence
                  FROM track_genres tg
@@ -2243,7 +2243,7 @@ async fn get_discovery_space(
     // ── 3e. Cohort assignment per track (90-day window) ──────────────────────
     if !space_tracks.is_empty() {
         let track_ids: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
-        let cohort_map: std::collections::HashMap<i64, (String, String)> = state.db.with_conn(|conn| {
+        let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard.db.with_conn(|conn| {
             queries::get_track_cohort_assignments(conn, &track_ids, 90)
         }).unwrap_or_default();
 
@@ -2261,7 +2261,7 @@ async fn get_discovery_space(
     let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let edges: Vec<Value> = if track_id_set.len() > 1 {
         let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-        state.db.with_conn(|conn| {
+        state_guard.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT n.track_id, n.neighbor_track_id, n.score,
                         n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
