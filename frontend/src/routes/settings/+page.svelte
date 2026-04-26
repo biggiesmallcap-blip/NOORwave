@@ -7,6 +7,8 @@
 		authFetch,
 		getStoredToken,
 		setStoredToken,
+		type AudioDevice,
+		type AudioQuality,
 		type DiscoveryStatus,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
@@ -48,6 +50,7 @@
 	import { wallpaper, setWallpaper } from '$lib/stores/wallpaper';
 	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
+	import { audioSettings } from '$lib/stores/audio_settings';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -254,6 +257,7 @@
 		void loadDiscoveryStatus();
 		void loadAudioStats();
 		void syncAnalysisStatus();
+		void loadAudioOutput();
 		void loadAcrCloudStatus();
 		void loadSpotifyStatus();
 		void loadLastfmStatus();
@@ -846,6 +850,45 @@
 		}, 1200);
 	}
 
+	// ─── Audio output settings (TIDAL playback runtime) ─────────────────
+	let audioDevices = $state<AudioDevice[]>([]);
+	let isWindows = $derived(typeof navigator !== 'undefined' && /Win/i.test(navigator.platform));
+
+	const AUDIO_QUALITY_OPTIONS: { value: AudioQuality; label: string }[] = [
+		{ value: 'LOW', label: 'Low (96 kbps AAC)' },
+		{ value: 'HIGH', label: 'High (320 kbps AAC)' },
+		{ value: 'LOSSLESS', label: 'Lossless (CD quality FLAC)' },
+		{ value: 'HI_RES_LOSSLESS', label: 'Hi-Res Lossless (up to 24-bit / 192 kHz FLAC)' }
+	];
+
+	async function loadAudioOutput() {
+		await audioSettings.load();
+		try {
+			const resp = await api.listAudioDevices();
+			audioDevices = resp.devices;
+		} catch (err) {
+			console.error('Failed to load audio devices', err);
+		}
+	}
+
+	function onAudioQualityChange(e: Event) {
+		const value = (e.target as HTMLSelectElement).value as AudioQuality;
+		void audioSettings.patch({ quality: value });
+	}
+
+	function onAudioDeviceChange(e: Event) {
+		const value = (e.target as HTMLSelectElement).value;
+		void audioSettings.patch({ output_device: value === '__default__' ? null : value });
+	}
+
+	function onAudioExclusiveToggle(e: Event) {
+		void audioSettings.patch({ exclusive_mode: (e.target as HTMLInputElement).checked });
+	}
+
+	function onAudioSrFollowToggle(e: Event) {
+		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
+	}
+
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'TIDAL, MusicBrainz, ACRCloud' },
@@ -1271,6 +1314,93 @@
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
 					{/if}
 				</div>
+			</section>
+			{/if}
+
+			{#if activeCategory === 'audio'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Streaming quality, output device, and exclusive-mode behaviour for TIDAL playback." />
+				{#if $audioSettings.settings}
+					{@const s = $audioSettings.settings}
+					<div class="info-list">
+						<div class="info-row">
+							<span>Quality</span>
+							<strong>
+								<select
+									class="audio-select"
+									value={s.quality}
+									onchange={onAudioQualityChange}
+								>
+									{#each AUDIO_QUALITY_OPTIONS as opt (opt.value)}
+										<option value={opt.value}>{opt.label}</option>
+									{/each}
+								</select>
+							</strong>
+						</div>
+						<div class="info-row">
+							<span>Output device</span>
+							<strong>
+								<select
+									class="audio-select"
+									value={s.output_device ?? '__default__'}
+									onchange={onAudioDeviceChange}
+								>
+									<option value="__default__">System default</option>
+									{#each audioDevices as d (d.id)}
+										<option value={d.id}>
+											{d.name}{d.is_default ? ' (default)' : ''}
+										</option>
+									{/each}
+								</select>
+							</strong>
+						</div>
+						{#if isWindows}
+							<div class="info-row">
+								<span>Exclusive output (WASAPI)</span>
+								<strong>
+									<label class="toggle-switch">
+										<input
+											type="checkbox"
+											checked={s.exclusive_mode}
+											onchange={onAudioExclusiveToggle}
+										/>
+										<span class="toggle-slider"></span>
+									</label>
+								</strong>
+							</div>
+							<p class="page-copy" style="font-size:0.8rem">
+								When on, no other app can use this device while NOORwave is playing.
+							</p>
+						{/if}
+						<div class="info-row">
+							<span>Sample rate follows source</span>
+							<strong>
+								<label class="toggle-switch">
+									<input
+										type="checkbox"
+										checked={s.sample_rate_follow}
+										onchange={onAudioSrFollowToggle}
+									/>
+									<span class="toggle-slider"></span>
+								</label>
+							</strong>
+						</div>
+						<p class="page-copy" style="font-size:0.8rem">
+							Reconfigures the output device to each track's native rate (44.1 / 48 / 96 / 192 kHz). Recommended with exclusive mode.
+						</p>
+					</div>
+
+					{#if $audioSettings.pendingApply}
+						<p class="page-copy" style="font-size:0.82rem; color: var(--text-secondary)">Output reconfiguring…</p>
+					{/if}
+					{#if $audioSettings.error}
+						<p class="page-copy" style="color: var(--state-error, #f87171)">{$audioSettings.error}</p>
+					{/if}
+				{:else if $audioSettings.loading}
+					<p class="page-copy">Loading audio settings…</p>
+				{:else if $audioSettings.error}
+					<p class="page-copy" style="color: var(--state-error, #f87171)">{$audioSettings.error}</p>
+				{/if}
 			</section>
 			{/if}
 
