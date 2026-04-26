@@ -663,6 +663,19 @@
 		}
 	}
 
+	async function stopDiscoveryTraining() {
+		try {
+			await api.stopDiscoveryTraining();
+			await loadDiscoveryStatus();
+		} catch (err) {
+			console.error('Failed to stop discovery training', err);
+		}
+	}
+
+	let discoveryIsRunning = $derived(
+		discoveryStatus?.latest_run?.status === 'running'
+	);
+
 	async function startEnrichment() {
 		mbStatus = 'running';
 		mbProgressLabel = 'Starting the background queue…';
@@ -1211,6 +1224,13 @@
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Track how much of the library the learned radio engine has covered, and refresh it when listening behavior changes." />
 
+				<div class="discovery-warning glass-panel">
+					<h4>⚠ Heads up — this runs hot.</h4>
+					<p>
+						A retrain pegs every CPU core for 10–30 seconds on a typical library, longer on bigger ones. Your fans will spin up. If you're on a laptop or somewhere thermally constrained, expect heat. Hit <strong>Stop</strong> any time.
+					</p>
+				</div>
+
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
 					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
@@ -1244,8 +1264,11 @@
 				</div>
 
 				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')}>Incremental refresh</button>
-					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')}>Full retrain</button>
+					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning}>Incremental refresh</button>
+					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning}>Full retrain</button>
+					{#if discoveryIsRunning}
+						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
+					{/if}
 				</div>
 			</section>
 			{/if}
@@ -1683,6 +1706,23 @@
 		border-radius: inherit;
 		background: linear-gradient(90deg, rgba(151, 126, 255, 0.85), rgba(120, 160, 255, 0.72));
 		transition: width 200ms ease;
+	}
+
+	.discovery-warning {
+		border-left: 4px solid rgba(220, 70, 70, 0.6);
+		padding: 1rem 1.25rem;
+		margin-bottom: 1.25rem;
+	}
+
+	.discovery-warning h4 {
+		font-size: 1.05rem;
+		font-weight: 600;
+		margin: 0 0 0.4rem;
+	}
+
+	.discovery-warning p {
+		margin: 0;
+		line-height: 1.5;
 	}
 
 	.action-row {
