@@ -589,11 +589,19 @@ fn run_runtime_loop(
             PlaybackRuntimeCommand::DeviceSwap {
                 device: selection,
                 exclusive,
-                sample_rate_follow: _sr,
+                sample_rate_follow,
             } => {
                 // `exclusive` is honored as of Task 5 (Windows-only low-latency
                 // buffer + dedicated code path; full ShareMode::Exclusive is a
-                // follow-up). `_sr` is wired in Task 6.
+                // follow-up). `sample_rate_follow` is wired here in Task 6 by
+                // re-targeting the cpal stream AND the decoder resampler to
+                // the new device's default rate when the toggle is on. The
+                // route layer (Task 7) is the one that flips this toggle and
+                // also re-issues `DeviceSwap` on track transitions when the
+                // next track's native rate differs from the current stream
+                // rate — runtime.rs has no view of the next track's StreamInfo
+                // until decode begins, so it cannot drive that comparison
+                // itself.
                 let new_device = match resolve_device(&selection) {
                     Some(d) => d,
                     None => {
@@ -616,6 +624,17 @@ fn run_runtime_loop(
                     .name()
                     .unwrap_or_else(|_| "default output device".to_string());
 
+                // When sample-rate-follow is on, re-target both the cpal stream
+                // and the decoder to the new device's default rate. When off,
+                // pass `None` so the existing rate carries over (the cpal
+                // stream may resample internally, which is fine for the toggle
+                // being off).
+                let desired_rate = if sample_rate_follow {
+                    Some(new_config.sample_rate.0)
+                } else {
+                    None
+                };
+
                 // Rebuild the stream on every live engine so they all play on
                 // the new device.
                 let mut swap_failed = false;
@@ -634,10 +653,7 @@ fn run_runtime_loop(
                         command_tx.clone(),
                         event_tx.clone(),
                         exclusive,
-                        // Task 6 will populate this from `_sr` and the device's
-                        // supported rates; for now always pass None so the swap
-                        // keeps the runtime's existing sample rate.
-                        None,
+                        desired_rate,
                     ) {
                         warn!(
                             "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
@@ -652,13 +668,18 @@ fn run_runtime_loop(
                 }
 
                 // Update the runtime's "current device" bindings so subsequent
-                // Play / PrepareNext calls use the new device too. We keep the
-                // existing state.device_sample_rate / device_channels so the
-                // decoder threads stay consistent until SR-follow (Task 6).
+                // Play / PrepareNext calls use the new device too. When
+                // sample-rate-follow drove a rate change, also update the
+                // runtime-wide `device_sample_rate` so freshly-cold-started
+                // engines spin up at the new rate (their initial
+                // `target_sample_rate` is seeded from this value).
                 device = new_device;
                 output_config = new_config;
                 output_sample_format = new_format;
                 state.device_name = new_name.clone();
+                if let Some(rate) = desired_rate {
+                    state.device_sample_rate = rate;
+                }
 
                 let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
                     device_name: new_name,
@@ -930,10 +951,15 @@ impl PlaybackEngine {
     /// drains it on the new device. The base `output_config` (built from the
     /// runtime's startup device) is passed through `build_stream_config` which
     /// applies the `exclusive` low-latency buffer (Windows-only) and an optional
-    /// override sample rate (Task 6 will populate that; for now callers pass
-    /// `None`). If the new device's default sample rate differs and SR-follow
-    /// has not provided an explicit rate, audio will play at the wrong pitch
-    /// until Task 6 lands.
+    /// override sample rate.
+    ///
+    /// When `desired_sample_rate` is `Some`, the engine's shared
+    /// `target_sample_rate` is updated so the decoder thread will resample
+    /// subsequent packets to the new rate. Samples that were already buffered
+    /// at the previous rate stay in the buffer and will be played out by the
+    /// new cpal stream at the new rate (a brief pitch glitch across the swap
+    /// boundary is acceptable per the spec). When `None`, both the cpal stream
+    /// and the decoder keep their existing rate.
     #[allow(clippy::too_many_arguments)]
     fn swap_stream(
         &mut self,
@@ -955,6 +981,16 @@ impl PlaybackEngine {
 
         let effective_config =
             build_stream_config(output_config, exclusive, desired_sample_rate);
+
+        // Re-target the decoder's resampler to the new stream rate so the
+        // sample stream stays at the right pitch. We do this AFTER computing
+        // `effective_config` so the value we publish to the decoder matches
+        // exactly what the new cpal stream will play out at.
+        if desired_sample_rate.is_some() {
+            self.shared
+                .target_sample_rate
+                .store(effective_config.sample_rate.0, Ordering::Relaxed);
+        }
 
         #[cfg(target_os = "windows")]
         let new_stream = if exclusive {
@@ -1322,6 +1358,12 @@ struct PlaybackSharedState {
     device_sample_rate: u32,
     /// Device channel count — needed in CPAL callback for `NearEnd` threshold calculation.
     device_channels: u16,
+    /// Live target sample rate for the resampler. The decoder reads this before
+    /// each packet and rebuilds its resampler step if the value changes — that
+    /// way a `DeviceSwap` that changes the cpal stream rate (sample-rate-follow)
+    /// is also reflected in the decoded sample stream so audio plays at the
+    /// correct pitch on the new stream rate.
+    target_sample_rate: AtomicU32,
 }
 
 impl PlaybackSharedState {
@@ -1364,6 +1406,7 @@ impl PlaybackSharedState {
             fadein_start_samples: AtomicU64::new(u64::MAX), // u64::MAX = no fade-in
             device_sample_rate,
             device_channels,
+            target_sample_rate: AtomicU32::new(device_sample_rate),
         }
     }
 
@@ -1759,6 +1802,20 @@ fn decode_and_buffer_job(
 
                 // Channel-adapt and resample this packet's samples, then push to buffer.
                 // Releasing the lock between packets lets the CPAL callback drain freely.
+                //
+                // Read the target sample rate live from shared state so a runtime
+                // `DeviceSwap` with sample-rate-follow can re-target the
+                // resampler without restarting the decoder. The cpal callback's
+                // PlaybackBuffer mixes any old- and new-rate samples that were
+                // already enqueued before the change at the new device's rate;
+                // a brief pitch glitch across the swap boundary is acceptable
+                // (matches the documented "brief silence is OK" behaviour for
+                // sample-rate-follow transitions).
+                let live_target_rate = shared
+                    .target_sample_rate
+                    .load(Ordering::Relaxed)
+                    .max(1);
+                let _ = device_sample_rate; // kept in signature for callers; live rate above is authoritative
                 let channelized = adapt_channels(
                     sb.samples(),
                     decoded_channels as usize,
@@ -1768,7 +1825,7 @@ fn decode_and_buffer_job(
                     &channelized,
                     device_channels as usize,
                     decoded_sample_rate,
-                    device_sample_rate,
+                    live_target_rate,
                 );
 
                 let mut guard = shared
