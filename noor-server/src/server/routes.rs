@@ -344,6 +344,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/search", get(tidal_search))
+        .route("/api/tidal/artists/:tidal_id", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
         .route("/api/spotify/config", post(spotify_save_config))
@@ -5181,6 +5182,44 @@ async fn tidal_search(
         .collect();
 
     Ok(Json(json!({ "tracks": tracks, "albums": albums, "artists": artists })))
+}
+
+async fn tidal_artist_profile(
+    State(state): State<SharedState>,
+    Path(tidal_artist_id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let (top_tracks_page, albums_page) = tokio::try_join!(
+        client.get_artist_top_tracks(tidal_artist_id, 10, 0),
+        client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
+    )
+    .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))))?;
+
+    let artist_name = top_tracks_page
+        .items
+        .first()
+        .map(|t| t.artist.name.clone());
+
+    Ok(Json(json!({
+        "artist_name": artist_name,
+        "top_tracks": top_tracks_page.items,
+        "albums": albums_page.items,
+    })))
 }
 
 /// Get sync info (last sync time, auto-sync settings).
