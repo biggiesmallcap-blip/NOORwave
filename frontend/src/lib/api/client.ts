@@ -96,6 +96,53 @@ export interface TidalDiscographyTrack {
 	artist_tidal_id?: number | null;
 }
 
+export interface TidalSearchTrack {
+	tidal_id: number;
+	title: string;
+	duration_ms: number;
+	artist_id: number | null;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	audio_quality: string | null;
+	stream_ready: boolean | null;
+}
+
+export interface TidalSearchAlbum {
+	tidal_id: number;
+	title: string;
+	artist_name: string | null;
+	artwork_url: string | null;
+}
+
+export interface TidalSearchArtist {
+	tidal_id: number;
+	name: string;
+	artwork_url: string | null;
+}
+
+export interface TidalSearchResults {
+	tracks: TidalSearchTrack[];
+	albums: TidalSearchAlbum[];
+	artists: TidalSearchArtist[];
+}
+
+export interface TidalArtistProfile {
+	artist_name: string | null;
+	top_tracks: TidalDiscographyTrack[];
+	albums: TidalDiscographyAlbum[];
+}
+
+/** Minimal shape accepted by all ephemeral Tidal play functions */
+export interface TidalPlayable {
+	tidal_id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+}
+
 export interface Album {
 	id: number;
 	tidal_id: number | null;
@@ -506,6 +553,17 @@ export interface DiscoveryRadioResult {
 	source_mode: string;
 }
 
+export interface RadioResponse {
+	tracks: DiscoveryRadioResult[];
+	seed_track_id: number;
+	creativity: number;
+	context_window: number;
+	computed_at: string | null;
+	model_family: string | null;
+	model_key: string | null;
+	reasons: string[];
+}
+
 // ─── Home Page Discovery Types ───────────────────────────────────────────────
 
 export interface RSSFeedItem {
@@ -888,22 +946,14 @@ export const api = {
 
 	// Similar Radio
 	getRadioTracks(params: {
-		seed_track_id: number;
+		seed_track_id?: number;
+		seed_tidal_id?: number;
 		creativity?: number;
 		context_window?: number;
 		limit?: number;
 		exclude_ids?: number[];
 	}) {
-		return fetchApi<{
-			tracks: DiscoveryRadioResult[];
-			seed_track_id: number;
-			creativity: number;
-			context_window: number;
-			computed_at: string | null;
-			model_family: string | null;
-			model_key: string | null;
-			reasons: string[];
-		}>('/api/discovery/radio', undefined, {
+		return fetchApi<RadioResponse>('/api/discovery/radio', undefined, {
 			method: 'POST',
 			body: JSON.stringify(params),
 		});
@@ -1169,6 +1219,35 @@ export const api = {
 	startAcrCloudScan() {
 		return fetchApi<{ status: string }>('/api/library/acrcloud/scan', undefined, {
 			method: 'POST',
+		});
+	},
+
+	searchTidal(q: string, limit = 20): Promise<TidalSearchResults> {
+		return fetchApi<TidalSearchResults>('/api/tidal/search', { q, limit: String(limit) });
+	},
+
+	playTidalTrack(track: TidalPlayable): Promise<void> {
+		return fetchApi<void>('/api/tidal/play', undefined, {
+			method: 'POST',
+			body: JSON.stringify({
+				tidal_track_id: track.tidal_id,
+				title: track.title,
+				artist_name: track.artist_name,
+				album_title: track.album_title,
+				artwork_url: track.artwork_url,
+				duration_ms: track.duration_ms,
+			}),
+		});
+	},
+
+	getTidalArtistProfile(tidalArtistId: number): Promise<TidalArtistProfile> {
+		return fetchApi<TidalArtistProfile>(`/api/tidal/artists/${tidalArtistId}`);
+	},
+
+	startSongRadioFromTidal(tidalId: number): Promise<RadioResponse> {
+		return fetchApi<RadioResponse>('/api/discovery/radio', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ seed_tidal_id: tidalId }),
 		});
 	},
 
