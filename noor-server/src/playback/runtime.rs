@@ -588,10 +588,12 @@ fn run_runtime_loop(
             }
             PlaybackRuntimeCommand::DeviceSwap {
                 device: selection,
-                exclusive: _exclusive,
-                sample_rate_follow: _sample_rate_follow,
+                exclusive,
+                sample_rate_follow: _sr,
             } => {
-                // _exclusive and _sample_rate_follow are wired in Tasks 5 + 6.
+                // `exclusive` is honored as of Task 5 (Windows-only low-latency
+                // buffer + dedicated code path; full ShareMode::Exclusive is a
+                // follow-up). `_sr` is wired in Task 6.
                 let new_device = match resolve_device(&selection) {
                     Some(d) => d,
                     None => {
@@ -631,6 +633,11 @@ fn run_runtime_loop(
                         new_format,
                         command_tx.clone(),
                         event_tx.clone(),
+                        exclusive,
+                        // Task 6 will populate this from `_sr` and the device's
+                        // supported rates; for now always pass None so the swap
+                        // keeps the runtime's existing sample rate.
+                        None,
                     ) {
                         warn!(
                             "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
@@ -920,10 +927,14 @@ impl PlaybackEngine {
 
     /// Drop the current CPAL stream and rebuild it on `device`. The decoder
     /// thread keeps running and feeding the same shared buffer; the new stream
-    /// drains it on the new device. Shared mode only — sample-rate-follow is
-    /// handled in Task 6, so the existing `output_config` (built from the
-    /// runtime's startup device) is reused. If the new device's default sample
-    /// rate differs, audio will play at the wrong pitch until SR-follow lands.
+    /// drains it on the new device. The base `output_config` (built from the
+    /// runtime's startup device) is passed through `build_stream_config` which
+    /// applies the `exclusive` low-latency buffer (Windows-only) and an optional
+    /// override sample rate (Task 6 will populate that; for now callers pass
+    /// `None`). If the new device's default sample rate differs and SR-follow
+    /// has not provided an explicit rate, audio will play at the wrong pitch
+    /// until Task 6 lands.
+    #[allow(clippy::too_many_arguments)]
     fn swap_stream(
         &mut self,
         device: &cpal::Device,
@@ -931,6 +942,8 @@ impl PlaybackEngine {
         output_sample_format: SampleFormat,
         command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
         event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+        exclusive: bool,
+        desired_sample_rate: Option<u32>,
     ) -> Result<()> {
         // Pause first so the decoder side doesn't keep filling while the
         // callback is gone, then drop the old stream before building the new
@@ -940,14 +953,42 @@ impl PlaybackEngine {
         self.shared.paused.store(true, Ordering::SeqCst);
         drop(self.stream.take());
 
-        let new_stream = build_output_stream(
-            device,
-            output_config,
-            output_sample_format,
-            Arc::clone(&self.shared),
-            command_tx,
-            event_tx,
-        )?;
+        let effective_config =
+            build_stream_config(output_config, exclusive, desired_sample_rate);
+
+        #[cfg(target_os = "windows")]
+        let new_stream = if exclusive {
+            build_wasapi_exclusive_stream(
+                device,
+                &effective_config,
+                output_sample_format,
+                Arc::clone(&self.shared),
+                command_tx,
+                event_tx,
+            )?
+        } else {
+            build_output_stream(
+                device,
+                &effective_config,
+                output_sample_format,
+                Arc::clone(&self.shared),
+                command_tx,
+                event_tx,
+            )?
+        };
+        #[cfg(not(target_os = "windows"))]
+        let new_stream = {
+            let _ = exclusive;
+            build_output_stream(
+                device,
+                &effective_config,
+                output_sample_format,
+                Arc::clone(&self.shared),
+                command_tx,
+                event_tx,
+            )?
+        };
+
         new_stream
             .play()
             .context("failed to start swapped output stream")?;
@@ -955,6 +996,67 @@ impl PlaybackEngine {
         self.shared.paused.store(was_paused, Ordering::SeqCst);
         Ok(())
     }
+}
+
+/// Build the effective `cpal::StreamConfig` for a swap, starting from the
+/// device's existing config and applying the `exclusive` low-latency buffer
+/// (Windows-only) and an optional sample-rate override.
+///
+/// CPAL 0.15 does not expose `ShareMode::Exclusive` directly through
+/// `StreamConfig`. The user-facing toggle, dedicated code path, and low-latency
+/// buffer are wired here; full `ShareMode::Exclusive` requires a cpal upgrade or
+/// raw `windows-rs` `IAudioClient` and is acknowledged as a follow-up in the
+/// spec.
+fn build_stream_config(
+    base: &StreamConfig,
+    exclusive: bool,
+    desired_sample_rate: Option<u32>,
+) -> StreamConfig {
+    let mut config = base.clone();
+    if let Some(rate) = desired_sample_rate {
+        config.sample_rate = cpal::SampleRate(rate);
+    }
+
+    #[cfg(target_os = "windows")]
+    if exclusive {
+        // ~10 ms at 48 kHz. A small fixed buffer is the one piece of real
+        // latency improvement we can ship today without a cpal upgrade.
+        config.buffer_size = cpal::BufferSize::Fixed(480);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = exclusive;
+
+    config
+}
+
+/// Windows-only dedicated entry point for the WASAPI exclusive code path.
+/// Today this logs and falls back to the standard builder (with the low-latency
+/// buffer already baked into `config` by `build_stream_config`). It exists as a
+/// stable call site so a follow-up (cpal upgrade or raw `windows-rs`
+/// `IAudioClient`) can swap in real `ShareMode::Exclusive` logic without
+/// touching the swap path.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn build_wasapi_exclusive_stream(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    output_sample_format: SampleFormat,
+    shared: Arc<PlaybackSharedState>,
+    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Result<Stream> {
+    info!(
+        target: "playback",
+        "building WASAPI exclusive stream (low-latency buffer; ShareMode::Exclusive pending cpal upgrade)"
+    );
+    build_output_stream(
+        device,
+        config,
+        output_sample_format,
+        shared,
+        command_tx,
+        event_tx,
+    )
 }
 
 fn build_output_stream(
