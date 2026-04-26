@@ -76,7 +76,43 @@ pub enum PlaybackRuntimeCommand {
         track_id: i64,
         outcome: PlaybackTerminalReason,
     },
+    /// Swap the CPAL output device for any active engines. Shared mode only at
+    /// this stage; `exclusive` and `sample_rate_follow` are wired in later tasks
+    /// (5 + 6) and ignored here.
+    DeviceSwap {
+        device: OutputDeviceSelection,
+        exclusive: bool,
+        sample_rate_follow: bool,
+    },
     Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub enum OutputDeviceSelection {
+    Default,
+    Named(String),
+}
+
+impl OutputDeviceSelection {
+    pub fn from_pref(pref: Option<&str>) -> Self {
+        match pref {
+            None => Self::Default,
+            Some("default") => Self::Default,
+            Some(name) => Self::Named(name.to_string()),
+        }
+    }
+}
+
+fn resolve_device(selection: &OutputDeviceSelection) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    match selection {
+        OutputDeviceSelection::Default => host.default_output_device(),
+        OutputDeviceSelection::Named(name) => host
+            .output_devices()
+            .ok()
+            .and_then(|mut iter| iter.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
+            .or_else(|| host.default_output_device()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -324,7 +360,7 @@ fn run_runtime_loop(
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
-    let device = host
+    let mut device = host
         .default_output_device()
         .ok_or_else(|| anyhow!("no default output device available"))?;
     let device_name = device
@@ -333,8 +369,8 @@ fn run_runtime_loop(
     let supported = device
         .default_output_config()
         .context("failed to read default output config")?;
-    let output_config = supported.config();
-    let output_sample_format = supported.sample_format();
+    let mut output_config = supported.config();
+    let mut output_sample_format = supported.sample_format();
 
     let mut state = PlaybackRuntimeLoopState {
         device_name,
@@ -550,6 +586,79 @@ fn run_runtime_loop(
                     }
                 }
             }
+            PlaybackRuntimeCommand::DeviceSwap {
+                device: selection,
+                exclusive: _exclusive,
+                sample_rate_follow: _sample_rate_follow,
+            } => {
+                // _exclusive and _sample_rate_follow are wired in Tasks 5 + 6.
+                let new_device = match resolve_device(&selection) {
+                    Some(d) => d,
+                    None => {
+                        warn!("DeviceSwap: no output device available; keeping current output");
+                        continue;
+                    }
+                };
+                let new_supported = match new_device.default_output_config() {
+                    Ok(s) => s,
+                    Err(err) => {
+                        warn!(
+                            "DeviceSwap: failed to read default config for new device: {err}; keeping current output"
+                        );
+                        continue;
+                    }
+                };
+                let new_config = new_supported.config();
+                let new_format = new_supported.sample_format();
+                let new_name = new_device
+                    .name()
+                    .unwrap_or_else(|_| "default output device".to_string());
+
+                // Rebuild the stream on every live engine so they all play on
+                // the new device.
+                let mut swap_failed = false;
+                for engine_slot in [
+                    state.engine.as_mut(),
+                    state.next_engine.as_mut(),
+                    state.fading_out_engine.as_mut(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Err(err) = engine_slot.swap_stream(
+                        &new_device,
+                        &new_config,
+                        new_format,
+                        command_tx.clone(),
+                        event_tx.clone(),
+                    ) {
+                        warn!(
+                            "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
+                            engine_slot.track_id
+                        );
+                        swap_failed = true;
+                    }
+                }
+
+                if swap_failed {
+                    warn!("DeviceSwap: one or more engines failed to swap; output may be partial");
+                }
+
+                // Update the runtime's "current device" bindings so subsequent
+                // Play / PrepareNext calls use the new device too. We keep the
+                // existing state.device_sample_rate / device_channels so the
+                // decoder threads stay consistent until SR-follow (Task 6).
+                device = new_device;
+                output_config = new_config;
+                output_sample_format = new_format;
+                state.device_name = new_name.clone();
+
+                let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
+                    device_name: new_name,
+                    sample_rate: state.device_sample_rate,
+                    channels: state.device_channels,
+                });
+            }
             PlaybackRuntimeCommand::Shutdown => {
                 stop_all_engines(&mut state);
                 break;
@@ -709,7 +818,9 @@ fn promote_next_to_active(
 struct PlaybackEngine {
     track_id: i64,
     source_kind: PlaybackSourceKind,
-    stream: Stream,
+    /// Active CPAL stream; `None` only briefly during a `DeviceSwap` while we
+    /// rebuild the stream on the new device.
+    stream: Option<Stream>,
     decoder_thread: Option<JoinHandle<()>>,
     shared: Arc<PlaybackSharedState>,
 }
@@ -782,7 +893,7 @@ impl PlaybackEngine {
         Ok(Self {
             track_id,
             source_kind,
-            stream,
+            stream: Some(stream),
             decoder_thread: Some(decoder_thread),
             shared,
         })
@@ -805,6 +916,44 @@ impl PlaybackEngine {
         if let Some(handle) = self.decoder_thread.take() {
             let _ = handle.join();
         }
+    }
+
+    /// Drop the current CPAL stream and rebuild it on `device`. The decoder
+    /// thread keeps running and feeding the same shared buffer; the new stream
+    /// drains it on the new device. Shared mode only — sample-rate-follow is
+    /// handled in Task 6, so the existing `output_config` (built from the
+    /// runtime's startup device) is reused. If the new device's default sample
+    /// rate differs, audio will play at the wrong pitch until SR-follow lands.
+    fn swap_stream(
+        &mut self,
+        device: &cpal::Device,
+        output_config: &StreamConfig,
+        output_sample_format: SampleFormat,
+        command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
+        event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    ) -> Result<()> {
+        // Pause first so the decoder side doesn't keep filling while the
+        // callback is gone, then drop the old stream before building the new
+        // one (some host APIs reject a second exclusive grab while the first
+        // stream is alive).
+        let was_paused = self.shared.paused.load(Ordering::SeqCst);
+        self.shared.paused.store(true, Ordering::SeqCst);
+        drop(self.stream.take());
+
+        let new_stream = build_output_stream(
+            device,
+            output_config,
+            output_sample_format,
+            Arc::clone(&self.shared),
+            command_tx,
+            event_tx,
+        )?;
+        new_stream
+            .play()
+            .context("failed to start swapped output stream")?;
+        self.stream = Some(new_stream);
+        self.shared.paused.store(was_paused, Ordering::SeqCst);
+        Ok(())
     }
 }
 
