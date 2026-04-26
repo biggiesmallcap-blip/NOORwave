@@ -132,6 +132,7 @@ async fn main() -> Result<()> {
     let db = db::Database::open(&db_path)?;
     db.run_migrations()?;
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
+    db.seed_genres_from_taxonomy()?;
     info!("Database initialized");
     info!("Genre taxonomy loaded: {} genres", genre_count);
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use reqwest::Client;
+use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +8,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
 use crate::metadata::lastfm::LastFmClient;
+use crate::services::lastfm::tag_filter::should_keep_tag;
 use crate::SharedState;
 
 // 200ms per API call keeps us at ~5 req/sec (Last.fm's documented limit).
@@ -14,118 +16,131 @@ use crate::SharedState;
 const CALL_DELAY_MS: u64 = 200;
 const MAX_RETRIES: u32 = 3;
 
-// Common Last.fm tags that aren't genres. Filtered before auto-grow so we
-// don't pollute the genre catalog with "seen live" / "favourites" / decade
-// markers. Anything not in this set is still subject to the canonical genre
-// catalog resolution before being stored.
-const NON_GENRE_TAGS: &[&str] = &[
-    "seen live",
-    "seen-live",
-    "favourite",
-    "favourites",
-    "favorite",
-    "favorites",
-    "love",
-    "loved",
-    "owned",
-    "albums i own",
-    "albums-i-own",
-    "to listen to",
-    "to-listen-to",
-    "to check out",
-    "rip",
-    "amazing",
-    "awesome",
-    "cool",
-    "good",
-    "great",
-    "best",
-    "00s",
-    "10s",
-    "20s",
-    "60s",
-    "70s",
-    "80s",
-    "90s",
-    "english",
-    "spanish",
-    "french",
-    "german",
-    "japanese",
-    "male vocalists",
-    "female vocalists",
-    "male vocalist",
-    "female vocalist",
-    "vocalists",
-    "instrumental",
-];
+// Top N tags to consider per track. Tags come from Last.fm sorted by vote
+// count descending, so slicing here keeps only the most-agreed-upon ones.
+const MAX_TAGS_PER_TRACK: usize = 5;
 
-fn slugify(name: &str) -> String {
-    let mut s = String::with_capacity(name.len());
-    let mut prev_dash = true;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            s.extend(ch.to_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            s.push('-');
-            prev_dash = true;
-        }
-    }
-    if s.ends_with('-') {
-        s.pop();
-    }
-    if s.is_empty() {
-        s.push_str("genre");
-    }
-    s
-}
+// Confidence for Last.fm-sourced genres. Lower than MB (0.90) and Tidal
+// (0.85) to reflect the crowd-voted, noisy nature of the source.
+const LASTFM_CONFIDENCE: f64 = 0.40;
 
-fn title_case(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut at_word_start = true;
-    for ch in name.chars() {
-        if ch.is_whitespace() || ch == '-' {
-            out.push(ch);
-            at_word_start = true;
-        } else if at_word_start {
-            out.extend(ch.to_uppercase());
-            at_word_start = false;
-        } else {
-            out.extend(ch.to_lowercase());
-        }
-    }
-    out
-}
-
-fn is_non_genre(tag: &str) -> bool {
-    let lower = tag.trim().to_ascii_lowercase();
-    NON_GENRE_TAGS.iter().any(|&banned| banned == lower)
-}
-
-fn canonicalize_or_passthrough(raw: &str) -> Option<(String, String)> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || is_non_genre(trimmed) {
+/// Resolve a raw Last.fm tag to a pre-existing genre ID in the closed taxonomy.
+///
+/// Returns `None` if the tag fails the pre-filter, has no canonical match, or
+/// doesn't correspond to an already-seeded genre row. The genres table is a
+/// closed set — this function never inserts into it.
+///
+/// When a tag resolves canonically but the genre isn't in the DB (taxonomy
+/// gap), the tag is logged to `lastfm_unresolved_tags` for later curation.
+fn resolve_to_genre_id(tag: &str, conn: &Connection) -> Option<i64> {
+    if !should_keep_tag(tag, conn) {
         return None;
     }
-    let resolution = crate::genre::builder::embedded_builder().resolve(trimmed);
-    let name = resolution
-        .canonical_name()
-        .map(str::to_string)
-        .unwrap_or_else(|| title_case(trimmed));
-    let slug = slugify(&name);
-    Some((name, slug))
+
+    let resolution = crate::genre::builder::embedded_builder().resolve(tag);
+    let canonical = resolution.canonical_name()?;
+
+    match conn.query_row(
+        "SELECT id FROM genres WHERE name = ?1",
+        [canonical],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            // Canonical name found but not in DB — taxonomy has a gap.
+            let _ = conn.execute(
+                "INSERT INTO lastfm_unresolved_tags (tag, seen_count, last_seen)
+                 VALUES (?1, 1, datetime('now'))
+                 ON CONFLICT(tag) DO UPDATE SET
+                     seen_count = seen_count + 1,
+                     last_seen  = datetime('now')",
+                [canonical],
+            );
+            None
+        }
+    }
+}
+
+/// Build the set of genre IDs already associated with a track and a map from
+/// each genre_id to its parent_id for hierarchy comparisons.
+fn existing_genre_ids(
+    track_id: i64,
+    conn: &Connection,
+) -> (HashSet<i64>, HashMap<i64, Option<i64>>) {
+    let rows: Vec<(i64, Option<i64>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT g.id, g.parent_id
+                 FROM track_genres tg
+                 JOIN genres g ON g.id = tg.genre_id
+                 WHERE tg.track_id = ?1",
+            )
+            .ok();
+        stmt.as_mut()
+            .map(|s| {
+                s.query_map([track_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap_or_else(|_| panic!("query failed"))
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let ids: HashSet<i64> = rows.iter().map(|(id, _)| *id).collect();
+    let parents: HashMap<i64, Option<i64>> = rows.into_iter().collect();
+    (ids, parents)
+}
+
+/// Decide whether to insert a new genre association for a track.
+///
+/// Rules (from the Codex review):
+/// - Drop if the candidate is a direct parent of an already-associated genre
+///   (less specific — adds noise).
+/// - Keep if the candidate is a direct child of an already-associated genre
+///   (more specific — valuable refinement, e.g. Tidal says "Electronic",
+///   Last.fm says "Drum and Bass" → keep).
+/// - Keep if completely new (no overlap with existing associations).
+fn should_insert(
+    candidate_id: i64,
+    _candidate_parent_id: Option<i64>,
+    existing_ids: &HashSet<i64>,
+    existing_parents: &HashMap<i64, Option<i64>>,
+) -> bool {
+    if existing_ids.contains(&candidate_id) {
+        return false; // already associated — handled by upsert below
+    }
+
+    // Drop if this candidate is a parent of any already-stored genre.
+    for (_existing_id, existing_parent) in existing_parents {
+        if *existing_parent == Some(candidate_id) {
+            // candidate IS the parent of an existing genre → less specific → drop
+            return false;
+        }
+    }
+
+    // The candidate is either a child of an existing genre or entirely new — keep.
+    true
+}
+
+/// Look up the parent_id of a genre by its id.
+fn genre_parent_id(genre_id: i64, conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT parent_id FROM genres WHERE id = ?1",
+        [genre_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 /// Run Last.fm tag enrichment over the user's favorited tracks.
 ///
-/// For each track: fetch top tags from `track.gettoptags`, then top tags from
-/// `artist.gettoptags`, combine, filter junk, canonicalize through NOOR's
-/// genre catalog (with auto-grow fallback), and persist.
+/// For each track: fetch top tags from `track.gettoptags`, then merge with
+/// cached artist tags, filter via `tag_filter`, resolve through the closed
+/// genre taxonomy, apply hierarchy-aware deduplication, and persist.
 ///
-/// Mirrors the Spotify enrichment design: track only stamped into
-/// `lastfm_checked` when no transient failure occurred, so retries on next
-/// run are possible. Genres we *did* fetch are always persisted.
+/// Genres are never inserted here — the genres table is a closed ontology
+/// seeded from the taxonomy. Only `track_genres` is written to.
 pub async fn run_enrichment<F, G>(
     state: SharedState,
     http: Client,
@@ -170,9 +185,6 @@ where
     }
 
     // ── Phase 1: pre-fetch all unique artist tags ─────────────────────────────
-    // Artist tags are persisted to lastfm_artist_cache so the prefetch phase
-    // survives server restarts. Only artists absent from that table are fetched
-    // over the network; the rest are loaded instantly from DB.
     let unique_artists: Vec<String> = tracks_to_enrich
         .iter()
         .map(|(_, _, a)| a.clone())
@@ -180,7 +192,6 @@ where
         .into_iter()
         .collect();
 
-    // Load whatever was already persisted from a previous run.
     let mut artist_cache: HashMap<String, Option<Vec<String>>> = state
         .read()
         .await
@@ -212,7 +223,7 @@ where
     let fetch_count = to_fetch.len();
 
     info!(
-        "Last.fm artist pre-fetch: {} already cached, {} to fetch (total {} unique artists, {} tracks).",
+        "Last.fm artist pre-fetch: {} already cached, {} to fetch ({} unique artists, {} tracks).",
         already_cached, fetch_count, artist_total, total
     );
 
@@ -229,7 +240,6 @@ where
             Err(()) => vec![],
         };
         let tags_opt: Option<Vec<String>> = if tags.is_empty() { None } else { Some(tags.clone()) };
-        // Persist immediately so a restart can resume.
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
         let _ = state.read().await.db.with_conn(|conn| {
             conn.execute(
@@ -247,7 +257,7 @@ where
         sleep(Duration::from_millis(CALL_DELAY_MS)).await;
     }
     info!(
-        "Artist pre-fetch complete ({} total cached). Starting per-track pass.",
+        "Artist pre-fetch complete ({} cached). Starting per-track pass.",
         artist_cache.len()
     );
 
@@ -257,13 +267,19 @@ where
     let mut transient_skips = 0usize;
 
     for (track_id, title, artist) in tracks_to_enrich {
-        let mut raw_tags: HashSet<String> = HashSet::new();
+        // Collect tags in order (Last.fm returns by vote count desc). Use a
+        // seen set to deduplicate while preserving insertion order.
+        let mut raw_tags: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut transient_failure = false;
 
         match fetch_with_retry(|| client.track_top_tags(&artist, &title)).await {
             Ok(tags) => {
                 for t in tags {
-                    raw_tags.insert(t);
+                    let key = t.to_ascii_lowercase();
+                    if seen.insert(key) {
+                        raw_tags.push(t);
+                    }
                 }
             }
             Err(()) => transient_failure = true,
@@ -271,35 +287,43 @@ where
 
         if let Some(Some(tags)) = artist_cache.get(&artist) {
             for t in tags {
-                raw_tags.insert(t.clone());
+                let key = t.to_ascii_lowercase();
+                if seen.insert(key) {
+                    raw_tags.push(t.clone());
+                }
             }
         }
+
+        // Limit to the top N most popular tags.
+        raw_tags.truncate(MAX_TAGS_PER_TRACK);
 
         let track_tagged = !raw_tags.is_empty();
 
         let _ = state.read().await.db.with_conn(|conn| {
+            let (existing_ids, existing_parents) = existing_genre_ids(track_id, conn);
+
             for raw in &raw_tags {
-                let Some((name, slug)) = canonicalize_or_passthrough(raw) else {
+                let Some(genre_id) = resolve_to_genre_id(raw, conn) else {
                     continue;
                 };
-                conn.execute(
-                    "INSERT OR IGNORE INTO genres (name, slug, parent_id) VALUES (?1, ?2, NULL)",
-                    rusqlite::params![name, slug],
-                )?;
-                let genre_id: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM genres WHERE name = ?1",
-                        [&name],
-                        |row| row.get(0),
-                    )
-                    .ok();
-                if let Some(id) = genre_id {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence) VALUES (?1, ?2, 'lastfm', 0.7)",
-                        rusqlite::params![track_id, id],
-                    )?;
+
+                let candidate_parent = genre_parent_id(genre_id, conn);
+
+                if !should_insert(genre_id, candidate_parent, &existing_ids, &existing_parents) {
+                    continue;
                 }
+
+                // Upsert: if genre already exists from a higher-confidence source,
+                // keep the higher confidence; otherwise insert at Last.fm confidence.
+                conn.execute(
+                    "INSERT INTO track_genres (track_id, genre_id, source, confidence)
+                     VALUES (?1, ?2, 'lastfm', ?3)
+                     ON CONFLICT(track_id, genre_id) DO UPDATE SET
+                         confidence = MAX(confidence, excluded.confidence)",
+                    rusqlite::params![track_id, genre_id, LASTFM_CONFIDENCE],
+                )?;
             }
+
             if !transient_failure {
                 conn.execute(
                     "INSERT OR IGNORE INTO lastfm_checked (track_id) VALUES (?1)",
@@ -341,10 +365,6 @@ where
     Ok(())
 }
 
-// LastFmClient::get_json bails on any non-2xx status. We retry on any error
-// up to MAX_RETRIES with exponential backoff, then give up. Last.fm's 429
-// header behavior is inconsistent so we don't try to read Retry-After here —
-// just back off generously.
 async fn fetch_with_retry<F, Fut>(mut f: F) -> Result<Vec<String>, ()>
 where
     F: FnMut() -> Fut,
@@ -355,9 +375,6 @@ where
             Ok(tags) => return Ok(tags),
             Err(e) => {
                 let msg = format!("{}", e);
-                // Don't retry definitive misses; Last.fm returns these as
-                // status 6 / "track not found" wrapped in 200, so the err
-                // text is the only signal.
                 if msg.contains("not found") || msg.contains("status 6") {
                     return Ok(Vec::new());
                 }
