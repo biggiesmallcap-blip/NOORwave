@@ -2234,6 +2234,21 @@ async fn get_discovery_space(
         }
     }
 
+    // ── 3e. Cohort assignment per track (90-day window) ──────────────────────
+    if !space_tracks.is_empty() {
+        let track_ids: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+        let cohort_map: std::collections::HashMap<i64, (String, String)> = state.db.with_conn(|conn| {
+            queries::get_track_cohort_assignments(conn, &track_ids, 90)
+        }).unwrap_or_default();
+
+        for t in &mut space_tracks {
+            if let Some((id, label)) = cohort_map.get(&t.track_id) {
+                t.cohort_id = Some(id.clone());
+                t.cohort_label = Some(label.clone());
+            }
+        }
+    }
+
     // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
     // Only emit edges between nodes that are both present in this response.
     let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();

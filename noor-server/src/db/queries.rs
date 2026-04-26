@@ -109,7 +109,10 @@ pub fn get_tracks_with_dsp(
 
     let mut conditions = Vec::new();
     if favorite_only {
-        conditions.push("t.is_favorite = 1".to_string());
+        conditions.push(
+            "(t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))"
+                .to_string(),
+        );
     }
 
     let join_clause = if has_dsp {
@@ -170,7 +173,7 @@ pub fn get_tracks_with_dsp(
 
 pub fn get_track_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
     let filter = if favorite_only {
-        " WHERE is_favorite = 1"
+        " WHERE is_favorite = 1 OR album_id IN (SELECT id FROM albums WHERE is_favorite = 1)"
     } else {
         ""
     };
@@ -731,6 +734,10 @@ pub fn get_tracks_by_genre(
         return Ok(Vec::new());
     }
 
+    // Filter rule: if a track has any Spotify tags, Spotify wins (only Spotify
+    // decides genre membership for that track). If a track has no Spotify tags,
+    // any source is accepted. This trusts Spotify over MusicBrainz on conflicts
+    // while still showing tracks that only one source has data on.
     let sql = if include_descendants {
         "WITH RECURSIVE selected_genres(id) AS (
             SELECT id FROM genres WHERE id = ?1
@@ -750,6 +757,18 @@ pub fn get_tracks_by_genre(
          JOIN tracks t ON tg.track_id = t.id
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
+         WHERE (
+             NOT EXISTS (
+                 SELECT 1 FROM track_genres tg_sp
+                 WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
+             )
+             OR EXISTS (
+                 SELECT 1 FROM track_genres tg_sp
+                 WHERE tg_sp.track_id = t.id
+                   AND tg_sp.source = 'spotify'
+                   AND tg_sp.genre_id IN (SELECT id FROM selected_genres)
+             )
+         )
          ORDER BY
             COALESCE(a.name, '') COLLATE NOCASE ASC,
             COALESCE(al.title, '') COLLATE NOCASE ASC,
@@ -768,6 +787,18 @@ pub fn get_tracks_by_genre(
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          WHERE tg.genre_id = ?1
+           AND (
+               NOT EXISTS (
+                   SELECT 1 FROM track_genres tg_sp
+                   WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
+               )
+               OR EXISTS (
+                   SELECT 1 FROM track_genres tg_sp
+                   WHERE tg_sp.track_id = t.id
+                     AND tg_sp.source = 'spotify'
+                     AND tg_sp.genre_id = ?1
+               )
+           )
          ORDER BY
             COALESCE(a.name, '') COLLATE NOCASE ASC,
             COALESCE(al.title, '') COLLATE NOCASE ASC,
@@ -1469,6 +1500,60 @@ pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort
     Ok(cohorts)
 }
 
+/// Map track IDs to their dominant cohort (id, label) using `get_genre_cohorts`.
+/// A track is assigned to the cohort whose `genre_ids` contain at least one of
+/// its tags; if multiple cohorts match, the one with the highest `listen_count`
+/// (already sorted by `get_genre_cohorts`) wins.
+pub fn get_track_cohort_assignments(
+    conn: &Connection,
+    track_ids: &[i64],
+    days: i64,
+) -> Result<std::collections::HashMap<i64, (String, String)>> {
+    if track_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let cohorts = get_genre_cohorts(conn, days)?;
+    if cohorts.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Build genre_id → (cohort_id, cohort_label), preferring earlier (higher-rank) cohorts.
+    let mut genre_to_cohort: std::collections::HashMap<i64, (String, String)> =
+        std::collections::HashMap::new();
+    for cohort in &cohorts {
+        for gid in &cohort.genre_ids {
+            genre_to_cohort
+                .entry(*gid)
+                .or_insert((cohort.id.clone(), cohort.label.clone()));
+        }
+    }
+
+    // Pull all (track_id, genre_id) pairs for the requested tracks.
+    let ids_csv: String = track_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT track_id, genre_id FROM track_genres WHERE track_id IN ({ids_csv})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut assignments: std::collections::HashMap<i64, (String, String)> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let (track_id, genre_id) = r?;
+        if assignments.contains_key(&track_id) {
+            continue;
+        }
+        if let Some(pair) = genre_to_cohort.get(&genre_id) {
+            assignments.insert(track_id, pair.clone());
+        }
+    }
+
+    Ok(assignments)
+}
+
 // ─── Genre Evolution (time-sliced heat for temporal trails) ──────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1943,12 +2028,17 @@ pub struct TrackSimilarityResult {
 /// Fixes: Stage 1 now enumerates ALL pairs per album/artist (not just MIN/MAX).
 ///        Stage 2 uses indexed temp tables so scores merge correctly.
 pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
-    conn.execute("DELETE FROM track_similarity", [])?;
+    // Run all stages inside a single transaction so a kill or error mid-way
+    // can't leave the table in a half-populated state (rows inserted but
+    // component scores never updated). Dropping `tx` without commit rolls back.
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute("DELETE FROM track_similarity", [])?;
 
     // ── Stage 1: candidate pairs ─────────────────────────────────────────────
     // Each INSERT must satisfy CHECK (track_a < track_b), ensured by `b.id > a.id`.
 
-    conn.execute_batch("
+    tx.execute_batch("
         -- 1a: Same-album pairs (all combinations, not just min/max)
         INSERT OR IGNORE INTO track_similarity (track_a, track_b)
         SELECT a.id, b.id
@@ -1976,7 +2066,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
     // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
 
-    conn.execute_batch("
+    tx.execute_batch("
         DROP TABLE IF EXISTS _co_listen;
         CREATE TEMP TABLE _co_listen AS
         SELECT
@@ -1999,12 +2089,21 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
         GROUP BY a.track_id, b.track_id;
         CREATE INDEX _genre_shared_idx ON _genre_shared(ta, tb);
+
+        -- Track → release year, for era_proximity. Albums table holds the year.
+        DROP TABLE IF EXISTS _track_year;
+        CREATE TEMP TABLE _track_year AS
+        SELECT t.id AS track_id, al.year AS year
+        FROM tracks t
+        JOIN albums al ON al.id = t.album_id
+        WHERE al.year IS NOT NULL;
+        CREATE INDEX _track_year_idx ON _track_year(track_id);
     ")?;
 
     // ── Stage 3: score each component ────────────────────────────────────────
 
     // co_album: 1.0 if same album
-    conn.execute("
+    tx.execute("
         UPDATE track_similarity SET co_album_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
@@ -2016,7 +2115,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ", [])?;
 
     // co_artist: 1.0 if same artist
-    conn.execute("
+    tx.execute("
         UPDATE track_similarity SET co_artist_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
@@ -2028,7 +2127,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ", [])?;
 
     // genre_proximity: shared genres / max genres on any single track
-    conn.execute("
+    tx.execute("
         UPDATE track_similarity SET genre_proximity = COALESCE((
             SELECT CAST(gs.shared AS REAL) / NULLIF(
                 (SELECT MAX(c) FROM (SELECT COUNT(DISTINCT genre_id) AS c FROM track_genres GROUP BY track_id)),
@@ -2039,7 +2138,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ", [])?;
 
     // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
-    conn.execute("
+    tx.execute("
         UPDATE track_similarity SET duration_proximity = COALESCE((
             SELECT 1.0 - MIN(CAST(ABS(a.duration_ms - b.duration_ms) AS REAL) / 180000.0, 1.0)
             FROM tracks a, tracks b
@@ -2049,7 +2148,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ", [])?;
 
     // co_listen: normalized co-occurrence count
-    conn.execute("
+    tx.execute("
         UPDATE track_similarity SET co_listen_score = COALESCE((
             SELECT cl.n / NULLIF((SELECT MAX(n) FROM _co_listen), 0)
             FROM _co_listen cl
@@ -2057,24 +2156,39 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         ), 0)
     ", [])?;
 
-    // Final weighted score
-    conn.execute("
-        UPDATE track_similarity SET similarity_score =
-            co_listen_score  * 0.35 +
-            co_album_score   * 0.20 +
-            co_artist_score  * 0.20 +
-            genre_proximity  * 0.15 +
-            duration_proximity * 0.10
+    // era_proximity: 1 - |year_a - year_b| / 25, clamped 0-1. Zero when either year is unknown.
+    tx.execute("
+        UPDATE track_similarity SET era_proximity = COALESCE((
+            SELECT 1.0 - MIN(CAST(ABS(ya.year - yb.year) AS REAL) / 25.0, 1.0)
+            FROM _track_year ya, _track_year yb
+            WHERE ya.track_id = track_similarity.track_a
+              AND yb.track_id = track_similarity.track_b
+        ), 0)
     ", [])?;
 
-    conn.execute_batch("
+    // Final weighted score. era_proximity replaces some duration_proximity weight
+    // because era is a stronger taste signal than song length.
+    tx.execute("
+        UPDATE track_similarity SET similarity_score =
+            co_listen_score    * 0.30 +
+            co_album_score     * 0.20 +
+            co_artist_score    * 0.20 +
+            genre_proximity    * 0.15 +
+            era_proximity      * 0.10 +
+            duration_proximity * 0.05
+    ", [])?;
+
+    tx.execute_batch("
         DROP TABLE IF EXISTS _co_listen;
         DROP TABLE IF EXISTS _genre_shared;
+        DROP TABLE IF EXISTS _track_year;
     ")?;
 
-    let count: i64 = conn.query_row(
+    let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0)
     )?;
+
+    tx.commit()?;
     Ok(count as usize)
 }
 
@@ -2389,17 +2503,21 @@ pub fn replace_track_embeddings(
     model_id: i64,
     embeddings: &[(i64, Vec<u8>, f64)],
 ) -> Result<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM track_embeddings WHERE model_id = ?1",
         params![model_id],
     )?;
-    let mut stmt = conn.prepare(
-        "INSERT INTO track_embeddings (track_id, model_id, vector_blob, l2_norm)
-         VALUES (?1, ?2, ?3, ?4)",
-    )?;
-    for (track_id, blob, norm) in embeddings {
-        stmt.execute(params![track_id, model_id, blob, norm])?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO track_embeddings (track_id, model_id, vector_blob, l2_norm)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (track_id, blob, norm) in embeddings {
+            stmt.execute(params![track_id, model_id, blob, norm])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -2407,19 +2525,23 @@ pub fn replace_track_audio_features(
     conn: &Connection,
     features: &[(i64, String, Vec<u8>, i64, i64)],
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO track_audio_features (track_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(track_id) DO UPDATE SET
-             feature_version = excluded.feature_version,
-             vector_blob = excluded.vector_blob,
-             clip_start_ms = excluded.clip_start_ms,
-             clip_duration_ms = excluded.clip_duration_ms,
-             computed_at = datetime('now')",
-    )?;
-    for (track_id, version, blob, start_ms, duration_ms) in features {
-        stmt.execute(params![track_id, version, blob, start_ms, duration_ms])?;
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO track_audio_features (track_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(track_id) DO UPDATE SET
+                 feature_version = excluded.feature_version,
+                 vector_blob = excluded.vector_blob,
+                 clip_start_ms = excluded.clip_start_ms,
+                 clip_duration_ms = excluded.clip_duration_ms,
+                 computed_at = datetime('now')",
+        )?;
+        for (track_id, version, blob, start_ms, duration_ms) in features {
+            stmt.execute(params![track_id, version, blob, start_ms, duration_ms])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -2428,28 +2550,35 @@ pub fn replace_track_neighbors(
     model_id: i64,
     neighbors: &[(i64, i64, i32, f64, f64, f64, f64, Option<String>)],
 ) -> Result<()> {
-    conn.execute(
+    // Single transaction: ~2M+ INSERTs auto-committing one-by-one is what makes
+    // training appear to hang. Batching also makes the DELETE+INSERT atomic so a
+    // killed process can't leave the table half-populated.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM track_neighbors WHERE model_id = ?1",
         params![model_id],
     )?;
-    let mut stmt = conn.prepare(
-        "INSERT INTO track_neighbors
-         (track_id, neighbor_track_id, model_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )?;
-    for (track_id, neighbor_track_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json) in neighbors {
-        stmt.execute(params![
-            track_id,
-            neighbor_track_id,
-            model_id,
-            rank,
-            score,
-            behavioral_score,
-            audio_score,
-            metadata_score,
-            reason_json
-        ])?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO track_neighbors
+             (track_id, neighbor_track_id, model_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )?;
+        for (track_id, neighbor_track_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json) in neighbors {
+            stmt.execute(params![
+                track_id,
+                neighbor_track_id,
+                model_id,
+                rank,
+                score,
+                behavioral_score,
+                audio_score,
+                metadata_score,
+                reason_json
+            ])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
