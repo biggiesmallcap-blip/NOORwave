@@ -3,7 +3,7 @@
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
 
   let query = $state('')
@@ -352,6 +352,11 @@
                 {#if album.in_library}
                   <span class="lib-badge" title="In your library">✓</span>
                 {/if}
+                <button
+                  class="art-play-overlay"
+                  onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
+                  aria-label="Play {album.title}"
+                >▶</button>
               </div>
               <p class="album-title">{album.title}</p>
               {#if album.artist_name}
@@ -401,16 +406,32 @@
                 </p>
               </div>
               <span class="track-duration">{formatDuration(track.duration_ms)}</span>
-              <button
-                class="row-btn"
-                onclick={(e) => { e.stopPropagation(); void playTidalTrackNow(track) }}
-                aria-label="Play {track.title}"
-              >▶</button>
-              <button
-                class="row-btn"
-                onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(track)) }}
-                aria-label="More options"
-              >⋯</button>
+              <div class="row-actions">
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); void playTidalTrackNow(track) }}
+                  title="Play now"
+                  aria-label="Play {track.title}"
+                >▶</button>
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); void addTidalTrackToQueue(track) }}
+                  title="Add to queue"
+                  aria-label="Queue {track.title}"
+                >＋</button>
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
+                  title="Start song radio"
+                  aria-label="Start radio from {track.title}"
+                >◎</button>
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(track)) }}
+                  title="More options"
+                  aria-label="More options"
+                >⋯</button>
+              </div>
             </li>
           {/each}
         </ul>
@@ -579,7 +600,9 @@
     text-decoration: none;
     flex-shrink: 0;
     width: 84px;
+    transition: transform 0.18s ease;
   }
+  .artist-card:hover { transform: translateY(-3px); }
   .artist-card:hover .artist-avatar {
     opacity: 0.85;
   }
@@ -659,7 +682,35 @@
     text-decoration: none;
     flex-shrink: 0;
     width: 128px;
+    transition: transform 0.18s ease;
   }
+  .album-card:hover { transform: translateY(-3px); }
+  .art-play-overlay {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.15s, transform 0.15s;
+    box-shadow: 0 6px 16px -4px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .art-wrap:hover .art-play-overlay {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .art-play-overlay:hover { transform: scale(1.08); opacity: 1; }
   .album-art {
     width: 128px;
     height: 128px;
@@ -702,12 +753,18 @@
   }
   .track-row {
     display: grid;
-    grid-template-columns: 38px 1fr auto 32px 32px;
+    grid-template-columns: 38px 1fr auto auto;
     align-items: center;
     gap: 12px;
-    padding: 7px 6px;
+    padding: 8px 8px;
     border-radius: 6px;
     cursor: pointer;
+    transition: background 0.12s;
+  }
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
   .track-row:hover { background: var(--bg-hover); }
   .track-row.cursor {
