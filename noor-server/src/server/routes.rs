@@ -350,6 +350,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/spotify/status", get(spotify_status))
         .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
+        .route("/api/library/enrich/spotify/reset", post(reset_spotify_enrichment))
         // Audio analysis
         .route("/api/library/analyze/audio-features", post(start_audio_analysis))
         .route("/api/library/analyze/stop", post(stop_audio_analysis))
@@ -2054,6 +2055,66 @@ async fn get_discovery_space(
         vec![]
     };
 
+    // ── 1b. Prepend the seed track itself when in seed mode (so canvas has center) ──
+    if seed_id > 0 && prompt.is_empty() {
+        // Avoid duplicating if it somehow ended up in the candidate list.
+        let already_present = space_tracks.iter().any(|t| t.track_id == seed_id);
+        if !already_present {
+            let seed_track_opt: Option<(i64, String, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>)> =
+                state_guard.db.with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT t.id, t.title, ar.name, al.title, al.artwork_url, t.duration_ms, t.source
+                         FROM tracks t
+                         LEFT JOIN artists ar ON t.artist_id = ar.id
+                         LEFT JOIN albums al ON t.album_id = al.id
+                         WHERE t.id = ?1",
+                        rusqlite::params![seed_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, Option<i64>>(5)?,
+                                row.get::<_, Option<String>>(6)?,
+                            ))
+                        },
+                    ).ok())
+                }).unwrap_or(None);
+
+            if let Some((id, title, artist, album, artwork, dur, src)) = seed_track_opt {
+                space_tracks.insert(0, SpaceTrack {
+                    track_id: id,
+                    title,
+                    artist_name: artist.unwrap_or_default(),
+                    album_title: album,
+                    artwork_url: artwork,
+                    duration_ms: dur,
+                    similarity_score: 1.0,
+                    source: src.unwrap_or_else(|| "tidal".to_string()),
+                    energy: None,
+                    danceability: None,
+                    bpm: None,
+                    key_signature: None,
+                    camelot_key: None,
+                    is_instrumental: None,
+                    loudness_lufs: None,
+                    skip_rate: None,
+                    completion_avg: None,
+                    cohort_id: None,
+                    cohort_label: None,
+                    top_genre: None,
+                    top_genre_source: None,
+                    top_genre_confidence: None,
+                    last_played_at: None,
+                    play_count: 0,
+                    is_in_library: true,
+                });
+            }
+        }
+    }
+
     // ── 2. Fill remainder from most-played library tracks ────────────────────
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
@@ -2316,82 +2377,103 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
-    // Emit reason_tags + score components alongside the inferred edge type so
-    // the frontend can show why two tracks are connected.
-    let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
-    let edges: Vec<Value> = if track_id_set.len() > 1 {
-        let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-        state_guard.db.with_conn(|conn| {
-            let sql = format!(
-                "SELECT n.track_id, n.neighbor_track_id, n.score,
-                        n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
-                 FROM track_neighbors n
-                 WHERE n.track_id IN ({ids_csv}) AND n.neighbor_track_id IN ({ids_csv})
-                 ORDER BY n.score DESC
-                 LIMIT 300"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, f64>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            })?;
-            let mut result = Vec::new();
-            for r in rows { result.push(r?); }
-            Ok(result)
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json)| {
-            // Parse reason_json into a tag list (each entry has at least a "key" or "label" string).
-            let parsed: Vec<Value> = reason_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-                .unwrap_or_default();
-            let tags: Vec<String> = parsed
-                .iter()
-                .filter_map(|v| {
-                    v.get("key")
-                        .and_then(|k| k.as_str())
-                        .or_else(|| v.get("label").and_then(|l| l.as_str()))
-                        .map(|s| s.to_string())
+    // ── 4. Build edges ───────────────────────────────────────────────────────
+    // Seed-based external mode: radial spokes from seed → each external candidate.
+    // Otherwise: pull from the pre-computed neighbor graph (Phase 1 behavior).
+    let is_external_seed_mode = seed_id > 0
+        && prompt.is_empty()
+        && space_tracks.iter().any(|t| !t.is_in_library);
+
+    let edges: Vec<Value> = if is_external_seed_mode {
+        space_tracks
+            .iter()
+            .filter(|t| !t.is_in_library)
+            .map(|t| {
+                json!({
+                    "from_id": seed_id,
+                    "to_id": t.track_id,
+                    "type": "behavioural",
+                    "weight": t.similarity_score,
+                    "reason_tags": ["external_match"],
+                    "behavioral_score": 0.0,
+                    "audio_score": 0.0,
+                    "metadata_score": t.similarity_score,
                 })
-                .collect();
-
-            // Existing edge-type inference (kept for backward compatibility).
-            let edge_type = if tags.iter().any(|t| t == "genre_branch") && audio > 0.4 {
-                "harmonic"
-            } else if behavioral > 0.4 {
-                "behavioural"
-            } else if tags.iter().any(|t| t == "artist_affinity") {
-                "genre"
-            } else if metadata > 0.3 {
-                "bpm_match"
-            } else {
-                "behavioural"
-            };
-
-            json!({
-                "from_id": from_id,
-                "to_id": to_id,
-                "type": edge_type,
-                "weight": score.clamp(0.0, 1.0),
-                "reason_tags": tags,
-                "behavioral_score": behavioral,
-                "audio_score": audio,
-                "metadata_score": metadata,
             })
-        })
-        .collect()
+            .collect()
     } else {
-        vec![]
+        let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+        if track_id_set.len() > 1 {
+            let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            state_guard.db.with_conn(|conn| {
+                let sql = format!(
+                    "SELECT n.track_id, n.neighbor_track_id, n.score,
+                            n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
+                     FROM track_neighbors n
+                     WHERE n.track_id IN ({ids_csv}) AND n.neighbor_track_id IN ({ids_csv})
+                     ORDER BY n.score DESC
+                     LIMIT 300"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                })?;
+                let mut result = Vec::new();
+                for r in rows { result.push(r?); }
+                Ok(result)
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json)| {
+                let parsed: Vec<Value> = reason_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+                    .unwrap_or_default();
+                let tags: Vec<String> = parsed
+                    .iter()
+                    .filter_map(|v| {
+                        v.get("key")
+                            .and_then(|k| k.as_str())
+                            .or_else(|| v.get("label").and_then(|l| l.as_str()))
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
+
+                let edge_type = if tags.iter().any(|t| t == "genre_branch") && audio > 0.4 {
+                    "harmonic"
+                } else if behavioral > 0.4 {
+                    "behavioural"
+                } else if tags.iter().any(|t| t == "artist_affinity") {
+                    "genre"
+                } else if metadata > 0.3 {
+                    "bpm_match"
+                } else {
+                    "behavioural"
+                };
+
+                json!({
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "type": edge_type,
+                    "weight": score.clamp(0.0, 1.0),
+                    "reason_tags": tags,
+                    "behavioral_score": behavioral,
+                    "audio_score": audio,
+                    "metadata_score": metadata,
+                })
+            })
+            .collect()
+        } else {
+            vec![]
+        }
     };
 
     // ── 5. Build spatial layout ──────────────────────────────────────────────
@@ -6744,6 +6826,38 @@ async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Resu
         "run_total": run_total,
         "run_processed": run_processed,
     })))
+}
+
+// Wipes the spotify_checked table and any track_genres rows from source
+// 'spotify'. Use after fixing rate-limiting bugs that may have wrongly
+// stamped tracks as "checked" with no tags. Refuses while a run is active.
+async fn reset_spotify_enrichment(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    if s.spotify_enrich_running.load(Ordering::SeqCst) {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Cannot reset while enrichment is running."
+        })));
+    }
+    let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
+        let checks = conn.execute("DELETE FROM spotify_checked", [])?;
+        let tags = conn.execute("DELETE FROM track_genres WHERE source = 'spotify'", [])?;
+        Ok((checks, tags))
+    });
+    match result {
+        Ok((checks, tags)) => Ok(Json(json!({
+            "status": "ok",
+            "checks_cleared": checks,
+            "tags_cleared": tags,
+        }))),
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Reset failed: {}", e),
+        }))),
+    }
 }
 
 // ── Audio Analysis Endpoints ─────────────────────────────────────────────────
