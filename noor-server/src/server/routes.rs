@@ -2250,7 +2250,8 @@ async fn get_discovery_space(
     }
 
     // ── 4. Build edges from pre-computed neighbor graph ──────────────────────
-    // Only emit edges between nodes that are both present in this response.
+    // Emit reason_tags + score components alongside the inferred edge type so
+    // the frontend can show why two tracks are connected.
     let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let edges: Vec<Value> = if track_id_set.len() > 1 {
         let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
@@ -2282,15 +2283,22 @@ async fn get_discovery_space(
         .unwrap_or_default()
         .into_iter()
         .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json)| {
-            // Infer edge type from the dominant signal in reason_json tags
-            let tags: Vec<String> = reason_json
+            // Parse reason_json into a tag list (each entry has at least a "key" or "label" string).
+            let parsed: Vec<Value> = reason_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                .unwrap_or_default();
+            let tags: Vec<String> = parsed
+                .iter()
+                .filter_map(|v| {
+                    v.get("key")
+                        .and_then(|k| k.as_str())
+                        .or_else(|| v.get("label").and_then(|l| l.as_str()))
+                        .map(|s| s.to_string())
+                })
                 .collect();
 
+            // Existing edge-type inference (kept for backward compatibility).
             let edge_type = if tags.iter().any(|t| t == "genre_branch") && audio > 0.4 {
                 "harmonic"
             } else if behavioral > 0.4 {
@@ -2308,6 +2316,10 @@ async fn get_discovery_space(
                 "to_id": to_id,
                 "type": edge_type,
                 "weight": score.clamp(0.0, 1.0),
+                "reason_tags": tags,
+                "behavioral_score": behavioral,
+                "audio_score": audio,
+                "metadata_score": metadata,
             })
         })
         .collect()
