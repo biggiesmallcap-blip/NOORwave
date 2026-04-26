@@ -26,7 +26,7 @@ use axum::{
     response::Json,
     routing::{get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use rusqlite::params;
 use std::collections::HashSet;
@@ -5084,13 +5084,13 @@ async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
 
 // ─── TIDAL Search ─────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TidalSearchParams {
     q: String,
     limit: Option<i32>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct TidalSearchTrackResp {
     tidal_id: i64,
     title: String,
@@ -5103,7 +5103,7 @@ struct TidalSearchTrackResp {
     stream_ready: Option<bool>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct TidalSearchAlbumResp {
     tidal_id: i64,
     title: String,
@@ -5111,7 +5111,7 @@ struct TidalSearchAlbumResp {
     artwork_url: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct TidalSearchArtistResp {
     tidal_id: i64,
     name: String,
@@ -5138,7 +5138,7 @@ async fn tidal_search(
     };
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(20).min(50);
     let results = client.search_catalog(&params.q, limit).await.map_err(|e| {
         (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
     })?;
