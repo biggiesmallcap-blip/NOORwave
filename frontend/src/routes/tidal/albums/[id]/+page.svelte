@@ -1,7 +1,21 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { playTidalTrackNow, playTidalAlbum } from '$lib/stores/player';
 	import { formatDuration } from '$lib/stores/library';
+
+	function trackAsPlayable(t: TidalDiscographyTrack) {
+		return {
+			tidal_id: t.tidal_id,
+			title: t.title,
+			artist_name: t.artist_name ?? null,
+			album_title: t.album_title ?? null,
+			artwork_url: t.artwork_url,
+			duration_ms: t.duration_ms,
+		};
+	}
 
 	let tidalAlbumId = $derived(Number(page.params.id));
 
@@ -82,9 +96,10 @@
 						<span class="dot">·</span>
 						<span>{formatTotalDuration(h.total_ms)}</span>
 					</p>
-					<p class="notice">
-						Not in your library yet. Add this album to your TIDAL favourites and sync to import it.
-					</p>
+					<div class="hero-actions">
+						<button class="play-all-btn" onclick={() => playTidalAlbum(tidalAlbumId)}>▶ Play All</button>
+						<span class="not-in-library-badge">Not in your library</span>
+					</div>
 				</div>
 			</div>
 		</header>
@@ -94,16 +109,32 @@
 				<span class="col-num">#</span>
 				<span class="col-title">Title</span>
 				<span class="col-duration"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg></span>
+				<span></span>
+				<span></span>
 			</div>
 			<ol class="track-list">
 				{#each tracks as track, idx (track.tidal_id)}
-					<li class="track-row">
+					<li
+						class="track-row"
+						ondblclick={() => playTidalTrackNow(trackAsPlayable(track))}
+						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
+					>
 						<span class="track-index">{track.track_number ?? idx + 1}</span>
 						<div class="track-meta">
 							<p class="track-title">{track.title}</p>
 							<span class="track-artist">{track.artist_name}</span>
 						</div>
 						<span class="track-duration">{formatDuration(track.duration_ms)}</span>
+						<button
+							class="row-btn"
+							onclick={() => playTidalTrackNow(trackAsPlayable(track))}
+							aria-label="Play {track.title}"
+						>▶</button>
+						<button
+							class="row-btn"
+							onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
+							aria-label="More options"
+						>⋯</button>
 					</li>
 				{/each}
 			</ol>
@@ -221,15 +252,34 @@
 	.hero-link { color: var(--text-primary); font-weight: 700; }
 	.dot { opacity: 0.5; }
 
-	.notice {
-		margin: 10px 0 0;
-		padding: 10px 14px;
-		background: var(--accent-soft);
-		border: 1px solid var(--accent-line);
-		border-radius: 8px;
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		max-width: 540px;
+	.hero-actions {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		margin-top: 10px;
+		flex-wrap: wrap;
+	}
+
+	.play-all-btn {
+		background: var(--accent);
+		color: #fff;
+		border: none;
+		border-radius: 20px;
+		padding: 8px 22px;
+		font-size: 0.88rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: opacity 0.15s;
+	}
+	.play-all-btn:hover { opacity: 0.85; }
+
+	.not-in-library-badge {
+		font-size: 0.75rem;
+		color: var(--text-tertiary);
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: 12px;
+		padding: 3px 10px;
 	}
 
 	.track-table {
@@ -241,7 +291,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 1fr 64px;
+		grid-template-columns: 40px 1fr 64px 32px 32px;
 		align-items: center;
 		gap: 14px;
 		padding: 6px 16px 10px;
@@ -267,7 +317,7 @@
 
 	.track-row {
 		display: grid;
-		grid-template-columns: 40px 1fr 64px;
+		grid-template-columns: 40px 1fr 64px 32px 32px;
 		align-items: center;
 		gap: 14px;
 		padding: 10px 16px;
@@ -307,4 +357,20 @@
 		text-align: right;
 		font-variant-numeric: tabular-nums;
 	}
+
+	.track-row:hover { background: var(--bg-hover); cursor: pointer; }
+
+	.row-btn {
+		background: none;
+		border: none;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		font-size: 13px;
+		padding: 4px;
+		border-radius: 4px;
+		opacity: 0;
+		transition: opacity 0.1s, color 0.1s;
+	}
+	.track-row:hover .row-btn { opacity: 1; }
+	.row-btn:hover { color: var(--text-primary); }
 </style>
