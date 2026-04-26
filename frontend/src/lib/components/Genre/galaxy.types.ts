@@ -62,15 +62,8 @@ export interface GalaxyNode {
 export interface GalaxyEdge {
 	sourceId: number;
 	targetId: number;
-	type: 'parent-child' | 'sibling' | 'co-listening';
+	type: 'parent-child' | 'sibling';
 	weight: number;
-}
-
-export interface CoListeningEdge {
-	genreA: number;
-	genreB: number;
-	coListenCount: number;
-	jaccard: number;
 }
 
 export interface GalaxyCohort {
@@ -86,7 +79,6 @@ export interface GalaxyConfig {
 	listeningDriven: boolean;
 	showCohorts: boolean;
 	showEvolution: boolean;
-	showCoListening: boolean;
 }
 
 export interface Camera {

@@ -467,13 +467,6 @@
 		}
 	}
 
-	// Pre-filter co-listening edges for rendering (only top N by weight)
-	let coListeningRenderEdges = $derived(
-		edges.filter(e => e.type === 'co-listening' && e.weight > 0.04)
-			.sort((a, b) => b.weight - a.weight)
-			.slice(0, 120)
-	);
-
 	function drawConnectionsLayer() {
 		if (!connCanvas || width === 0 || height === 0) return;
 		const ctx = connCanvas.getContext('2d');
@@ -482,58 +475,8 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 
-		// Draw co-listening bridges (limited set, no shadow, solid color, batched)
-		ctx.save();
-		ctx.strokeStyle = 'rgba(180, 190, 240, 1)';
-		ctx.setLineDash([3, 5]);
-		for (const edge of coListeningRenderEdges) {
-			const source = nodeById.get(edge.sourceId);
-			const target = nodeById.get(edge.targetId);
-			if (!source || !target) continue;
-
-			const sourceScreen = worldToScreen(source.x, source.y);
-			const targetScreen = worldToScreen(target.x, target.y);
-			// Early viewport cull
-			if (
-				(sourceScreen.x < -120 && targetScreen.x < -120) ||
-				(sourceScreen.x > width + 120 && targetScreen.x > width + 120) ||
-				(sourceScreen.y < -120 && targetScreen.y < -120) ||
-				(sourceScreen.y > height + 120 && targetScreen.y > height + 120)
-			) continue;
-
-			const activity = edgeActivity(edge);
-			// Vibe mode: fade edges when BPM diff > 60
-			let bpmFade = 1;
-			if (viewMode === 'vibe' && source.avgBpm != null && target.avgBpm != null) {
-				const bpmDiff = Math.abs(source.avgBpm - target.avgBpm);
-				if (bpmDiff > 60) {
-					bpmFade = Math.max(0, 1 - (bpmDiff - 60) / 60);
-				}
-			}
-			const opacity = (0.04 + edge.weight * 0.14) * activity * bpmFade;
-			const lineWidth = (0.4 + edge.weight * 0.8) * (0.6 + activity * 0.3);
-			const dx = targetScreen.x - sourceScreen.x;
-			const dy = targetScreen.y - sourceScreen.y;
-			const distance = Math.max(1, Math.hypot(dx, dy));
-			const normalX = -dy / distance;
-			const normalY = dx / distance;
-			const curve = Math.min(60, distance * 0.14);
-			const curveSign = ((edge.sourceId + edge.targetId) & 1) === 0 ? 1 : -1;
-			const controlX = (sourceScreen.x + targetScreen.x) * 0.5 + normalX * curve * curveSign;
-			const controlY = (sourceScreen.y + targetScreen.y) * 0.5 + normalY * curve * curveSign;
-
-			ctx.globalAlpha = opacity;
-			ctx.lineWidth = lineWidth;
-			ctx.beginPath();
-			ctx.moveTo(sourceScreen.x, sourceScreen.y);
-			ctx.quadraticCurveTo(controlX, controlY, targetScreen.x, targetScreen.y);
-			ctx.stroke();
-		}
-		ctx.restore();
-
 		// Draw taxonomy edges (full set, with gradients)
 		for (const edge of edges) {
-			if (edge.type === 'co-listening') continue;
 			const source = nodeById.get(edge.sourceId);
 			const target = nodeById.get(edge.targetId);
 			if (!source || !target) continue;

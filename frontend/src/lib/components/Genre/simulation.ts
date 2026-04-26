@@ -53,9 +53,6 @@ export function runSimulation(
 		}
 	}
 
-	// Pre-compute co-listening edge list for gravity
-	const coListeningEdges = edges.filter(e => e.type === 'co-listening');
-
 	for (let tick = 0; tick < iterations; tick += 1) {
 		// All-pairs repulsion
 		for (let i = 0; i < nodes.length; i += 1) {
@@ -90,11 +87,7 @@ export function runSimulation(
 			let targetLength: number;
 			let stiffness: number;
 
-			if (edge.type === 'co-listening') {
-				// Co-listening edges: stronger pull for higher jaccard
-				targetLength = 120 - edge.weight * 60; // 60-120px range
-				stiffness = 0.012 * edge.weight; // weighted by co-listening strength
-			} else if (edge.type === 'sibling') {
+			if (edge.type === 'sibling') {
 				targetLength = 220;
 				stiffness = 0.0048;
 			} else {
