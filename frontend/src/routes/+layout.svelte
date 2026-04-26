@@ -465,7 +465,14 @@
 	<div class="connect-backdrop">
 		<div class="connect-panel glass-panel">
 			<div class="connect-brand">
-				<span class="connect-brand-mark">N</span>
+				<span class="connect-brand-mark">
+					<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
+						<circle cx="384" cy="512" r="180"/>
+						<circle cx="384" cy="512" r="74"/>
+						<circle cx="640" cy="512" r="180"/>
+						<circle cx="640" cy="512" r="74"/>
+					</svg>
+				</span>
 				<span class="connect-brand-name">NOOR</span>
 			</div>
 			<h2 class="connect-title">Enter PIN</h2>
@@ -520,7 +527,14 @@
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
-			<span class="mobile-brand-mark">N</span>
+			<span class="mobile-brand-mark">
+				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
+					<circle cx="384" cy="512" r="180"/>
+					<circle cx="384" cy="512" r="74"/>
+					<circle cx="640" cy="512" r="180"/>
+					<circle cx="640" cy="512" r="74"/>
+				</svg>
+			</span>
 			<span class="mobile-brand-name">NOOR</span>
 		</a>
 		<button class="mobile-theme-btn btn btn-glass" onclick={toggleTheme}>
@@ -530,7 +544,14 @@
 
 	<aside class="sidebar">
 		<a href="/" class="brand" aria-label="NOOR home">
-			<span class="brand-mark">N</span>
+			<span class="brand-mark">
+				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
+					<circle cx="384" cy="512" r="180"/>
+					<circle cx="384" cy="512" r="74"/>
+					<circle cx="640" cy="512" r="180"/>
+					<circle cx="640" cy="512" r="74"/>
+				</svg>
+			</span>
 			<div class="brand-text">
 				<span class="brand-name">NOOR</span>
 				<span class="brand-sub">Music command center</span>
@@ -1233,11 +1254,14 @@
 		background: var(--accent-soft);
 		border: 1px solid var(--accent-line);
 		color: var(--accent-strong);
-		font-family: var(--font-display);
-		font-size: 1.1rem;
 		display: grid;
 		place-items: center;
 		flex-shrink: 0;
+	}
+
+	.brand-mark svg {
+		width: 70%;
+		height: 70%;
 	}
 
 	.brand-text {
@@ -2087,11 +2111,14 @@
 			background: var(--accent-soft);
 			border: 1px solid var(--accent-line);
 			color: var(--accent-strong);
-			font-family: var(--font-display);
-			font-size: 0.95rem;
 			display: grid;
 			place-items: center;
 			flex-shrink: 0;
+		}
+
+		.mobile-brand-mark svg {
+			width: 70%;
+			height: 70%;
 		}
 
 		.mobile-brand-name {
@@ -2671,9 +2698,12 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 1.1rem;
-		font-weight: 800;
 		color: white;
+	}
+
+	.connect-brand-mark svg {
+		width: 70%;
+		height: 70%;
 	}
 
 	.connect-brand-name {
