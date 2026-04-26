@@ -661,7 +661,7 @@
     text-align: center;
   }
   .search-error { color: var(--state-error); }
-  .results-section { margin-bottom: 40px; }
+  .results-section { margin-bottom: 32px; }
   .recent-section { margin-top: 36px; max-width: 720px; }
   .recent-head {
     display: flex;
@@ -699,7 +699,7 @@
     border-color: var(--accent-line);
     color: var(--text-primary);
   }
-  .top-result-section { margin-bottom: 32px; }
+  .top-result-section { margin-bottom: 28px; }
   .top-result-card {
     display: grid;
     grid-template-columns: 168px 1fr;
