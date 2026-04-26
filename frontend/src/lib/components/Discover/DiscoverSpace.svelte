@@ -375,6 +375,68 @@
 			}
 		}
 
+		// ── Seed-distinct rendering ──────────────────────────────────────
+		if (seedTrackId != null) {
+			const seedNode = nodes.find(n => n.track_id === seedTrackId);
+			if (seedNode) {
+				const t = (Date.now() % 3000) / 3000;
+				const seedRadius = seedNode.radius * 1.5;
+
+				// Big purple halo
+				const haloR = seedRadius * 2.4;
+				const haloGrad = ctx.createRadialGradient(seedNode.x, seedNode.y, 0, seedNode.x, seedNode.y, haloR);
+				haloGrad.addColorStop(0, 'rgba(91, 78, 248, 0.4)');
+				haloGrad.addColorStop(0.5, 'rgba(91, 78, 248, 0.15)');
+				haloGrad.addColorStop(1, 'transparent');
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, haloR, 0, Math.PI * 2);
+				ctx.fillStyle = haloGrad;
+				ctx.fill();
+
+				// Heartbeat ring (slower than currentTrackId pulse)
+				const heartbeatR = seedRadius + 8 + Math.sin(t * Math.PI * 2) * 3;
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, heartbeatR, 0, Math.PI * 2);
+				ctx.strokeStyle = 'rgba(91, 78, 248, 0.7)';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+
+				// Bright filled core overriding the regular node
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, seedRadius, 0, Math.PI * 2);
+				const coreGrad = ctx.createRadialGradient(seedNode.x, seedNode.y, 0, seedNode.x, seedNode.y, seedRadius);
+				coreGrad.addColorStop(0, '#ffffff');
+				coreGrad.addColorStop(0.4, '#a89cff');
+				coreGrad.addColorStop(1, '#5b4ef8');
+				ctx.fillStyle = coreGrad;
+				ctx.fill();
+				ctx.strokeStyle = '#ffffff';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+
+				// Inline label
+				ctx.save();
+				ctx.fillStyle = '#ffffff';
+				ctx.font = '600 13px system-ui, sans-serif';
+				ctx.textAlign = 'center';
+				ctx.textBaseline = 'top';
+				ctx.fillText(seedNode.title, seedNode.x, seedNode.y + seedRadius + 8);
+				if (seedNode.artist_name) {
+					ctx.fillStyle = 'rgba(160, 160, 192, 0.9)';
+					ctx.font = '11px system-ui, sans-serif';
+					ctx.fillText(seedNode.artist_name, seedNode.x, seedNode.y + seedRadius + 24);
+				}
+				// Lock indicator
+				if (isSeedLocked) {
+					ctx.fillStyle = '#5b4ef8';
+					ctx.font = '14px system-ui, sans-serif';
+					ctx.textAlign = 'left';
+					ctx.fillText('🔒', seedNode.x + seedRadius * 0.7, seedNode.y - seedRadius);
+				}
+				ctx.restore();
+			}
+		}
+
 		// ── Currently playing node indicator ────────────────────────────
 		if (currentTrackId != null) {
 			const playingNode = nodes.find(n => n.track_id === currentTrackId);
