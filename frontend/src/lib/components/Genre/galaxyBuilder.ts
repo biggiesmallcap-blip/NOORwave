@@ -19,7 +19,6 @@ function nodeRadius(depth: number, trackCount: number): number {
 
 function edgeWeight(source: GalaxyNode, target: GalaxyNode, type: GalaxyEdge['type']): number {
 	const averageHeat = (source.heatNorm + target.heatNorm) / 2;
-	if (type === 'co-listening') return 0.08 + averageHeat * 0.52;
 	return type === 'parent-child' ? 0.14 + averageHeat * 0.86 : 0.05 + averageHeat * 0.35;
 }
 
