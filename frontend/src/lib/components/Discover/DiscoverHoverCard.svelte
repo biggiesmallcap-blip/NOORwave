@@ -19,6 +19,13 @@
 	const CARD_OFFSET = 12;
 
 	let cardEl: HTMLDivElement | null = $state(null);
+	let measuredHeight = $state(130);
+
+	$effect(() => {
+		if (cardEl) {
+			measuredHeight = cardEl.offsetHeight;
+		}
+	});
 
 	let isSeed = $derived(node !== null && node.track_id === seedTrackId);
 
@@ -26,7 +33,7 @@
 	// Anchor right edge if too close to viewport right.
 	let placement = $derived.by(() => {
 		if (!node) return { left: 0, top: 0, anchor: 'top-left' as const };
-		const cardHeight = 130; // approx
+		const cardHeight = measuredHeight;
 		const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
 		const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
 
@@ -35,7 +42,9 @@
 
 		if (top < 8) top = mouseY + CARD_OFFSET; // flip below
 		if (left + CARD_WIDTH > vw - 8) left = mouseX - CARD_WIDTH - CARD_OFFSET; // flip left
+		left = Math.max(8, left);
 		if (top + cardHeight > vh - 8) top = vh - cardHeight - 8;
+		top = Math.max(8, top);
 
 		return { left, top, anchor: 'top-left' as const };
 	});

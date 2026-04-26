@@ -99,6 +99,8 @@
 	});
 </script>
 
+<svelte:window onmouseleave={() => { hoveredNode = null; }} />
+
 <div class="discover-page">
 	<div class="discover-header">
 		<div class="header-text">
@@ -175,7 +177,7 @@
 					mode={$discoverSpace.mode}
 					currentTrackId={$currentTrack?.id ?? null}
 					seedTrackId={$discoverSpace.activeSeedId}
-					isSeedLocked={$discoverSpace.lockedSeedId !== null}
+					isSeedLocked={$discoverSpace.lockedSeedId !== null && $discoverSpace.activeSeedId === $discoverSpace.lockedSeedId}
 					onHover={handleHover}
 					onHoverPosition={handleHoverPosition}
 					onSelect={handleSelect}
@@ -194,7 +196,7 @@
 		mouseX={hoverX}
 		mouseY={hoverY}
 		seedTrackId={$discoverSpace.activeSeedId}
-		isLocked={$discoverSpace.lockedSeedId !== null}
+		isLocked={$discoverSpace.lockedSeedId !== null && $discoverSpace.activeSeedId === $discoverSpace.lockedSeedId}
 	/>
 </div>
 
