@@ -5,6 +5,7 @@
 		playArtist,
 		shuffleArtist,
 		startArtistRadio,
+		playTidalAlbum,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -166,6 +167,26 @@
 	let isArtistPlaying = $derived(
 		$isPlaying && tracks.some((t) => t.id === $currentTrack?.id)
 	);
+
+	let filterQuery = $state('');
+
+	const filteredPopular = $derived(
+		filterQuery
+			? popular.filter((t) => t.title.toLowerCase().includes(filterQuery.toLowerCase()))
+			: popular
+	);
+
+	const filteredTidalFullAlbums = $derived(
+		filterQuery
+			? tidalFullAlbums.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
+			: tidalFullAlbums
+	);
+
+	const filteredTidalSinglesEPs = $derived(
+		filterQuery
+			? tidalSinglesEPs.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
+			: tidalSinglesEPs
+	);
 </script>
 
 <div class="artist-page">
@@ -218,11 +239,20 @@
 			</button>
 		</div>
 
-		{#if popular.length > 0}
+		<div class="filter-bar">
+			<input
+				class="filter-input"
+				type="text"
+				placeholder="Filter tracks and albums…"
+				bind:value={filterQuery}
+			/>
+		</div>
+
+		{#if filteredPopular.length > 0}
 			<section class="section">
 				<h2 class="section-title">Popular</h2>
 				<ol class="popular-list">
-					{#each popular as track, idx (track.id)}
+					{#each filteredPopular as track, idx (track.id)}
 						{@const isCurrent = $currentTrack?.id === track.id}
 						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
 						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -267,14 +297,14 @@
 		{/if}
 
 		{#if tidalAvailable}
-			{#if tidalFullAlbums.length > 0}
+			{#if filteredTidalFullAlbums.length > 0}
 				<section class="section">
 					<div class="shelf-head">
 						<h2 class="section-title">Albums</h2>
-						<span class="shelf-count">{tidalFullAlbums.length}</span>
+						<span class="shelf-count">{filteredTidalFullAlbums.length}</span>
 					</div>
 					<div class="card-row">
-						{#each tidalFullAlbums as album (album.tidal_id)}
+						{#each filteredTidalFullAlbums as album (album.tidal_id)}
 							{@const year = releaseYear(album.release_date)}
 							<a
 								class="grid-card"
@@ -289,6 +319,11 @@
 									{/if}
 									{#if !album.in_library}
 										<span class="badge-new">TIDAL</span>
+										<button
+											class="art-play-overlay"
+											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
+											aria-label="Play {album.title}"
+										>▶</button>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -301,14 +336,14 @@
 				</section>
 			{/if}
 
-			{#if tidalSinglesEPs.length > 0}
+			{#if filteredTidalSinglesEPs.length > 0}
 				<section class="section">
 					<div class="shelf-head">
 						<h2 class="section-title">Singles and EPs</h2>
-						<span class="shelf-count">{tidalSinglesEPs.length}</span>
+						<span class="shelf-count">{filteredTidalSinglesEPs.length}</span>
 					</div>
 					<div class="card-row">
-						{#each tidalSinglesEPs as album (album.tidal_id)}
+						{#each filteredTidalSinglesEPs as album (album.tidal_id)}
 							{@const year = releaseYear(album.release_date)}
 							<a
 								class="grid-card"
@@ -323,6 +358,11 @@
 									{/if}
 									{#if !album.in_library}
 										<span class="badge-new">TIDAL</span>
+										<button
+											class="art-play-overlay"
+											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
+											aria-label="Play {album.title}"
+										>▶</button>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -468,6 +508,23 @@
 		margin: 4px 0 0;
 		font-size: 0.88rem;
 	}
+
+	.filter-bar {
+		padding: 8px 32px 0;
+	}
+
+	.filter-input {
+		background: var(--input-bg);
+		border: 1px solid var(--input-border);
+		border-radius: 20px;
+		padding: 7px 16px;
+		font-size: 13px;
+		color: var(--text-primary);
+		outline: none;
+		width: 260px;
+		transition: border-color 0.15s;
+	}
+	.filter-input:focus { border-color: var(--accent); background: var(--input-focus); }
 
 	.actions-bar {
 		display: flex;
@@ -674,6 +731,23 @@
 		background: var(--bg-surface);
 		margin-bottom: 6px;
 	}
+
+	.art-play-overlay {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(0, 0, 0, 0.45);
+		color: #fff;
+		font-size: 22px;
+		border: none;
+		cursor: pointer;
+		border-radius: 6px;
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.grid-art-wrap:hover .art-play-overlay { opacity: 1; }
 
 	.badge-new {
 		position: absolute;
