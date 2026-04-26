@@ -1,3 +1,5 @@
+import type { DiscoverySpaceMeta } from '$lib/components/Discover/discover.types';
+
 const API_BASE = 'http://localhost:3334';
 
 export function getApiBase(): string {
@@ -1185,16 +1187,6 @@ export const api = {
 	},
 
 	getDiscoverySpaceMeta() {
-		return fetchApi<DiscoverySpaceMetaResponse>('/api/discovery/space/meta');
+		return fetchApi<DiscoverySpaceMeta>('/api/discovery/space/meta');
 	},
 };
-
-export interface DiscoverySpaceMetaResponse {
-	model_key: string | null;
-	model_status: string | null;
-	trained_at: string | null;
-	vector_dim: number | null;
-	neighbor_coverage: number;
-	track_count_with_embeddings: number;
-	track_count_total: number;
-}

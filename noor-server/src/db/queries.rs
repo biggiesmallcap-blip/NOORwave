@@ -1501,9 +1501,11 @@ pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort
 }
 
 /// Map track IDs to their dominant cohort (id, label) using `get_genre_cohorts`.
-/// A track is assigned to the cohort whose `genre_ids` contain at least one of
-/// its tags; if multiple cohorts match, the one with the highest `listen_count`
-/// (already sorted by `get_genre_cohorts`) wins.
+/// Each genre belongs to at most one cohort (enforced by `get_genre_cohorts`).
+/// For a track tagged with multiple genres mapped to *different* cohorts, the
+/// helper picks the first matching genre row returned by SQLite (no `ORDER BY`),
+/// which is effectively undefined order. Acceptable for now since cohorts are a
+/// soft signal; revisit if cohort labels need to be deterministic per track.
 pub fn get_track_cohort_assignments(
     conn: &Connection,
     track_ids: &[i64],

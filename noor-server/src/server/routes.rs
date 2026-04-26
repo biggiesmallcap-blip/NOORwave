@@ -2117,7 +2117,7 @@ async fn get_discovery_space(
             .collect::<Vec<_>>()
             .join(",");
 
-        let listen_map: std::collections::HashMap<i64, (f64, f64)> = state.db.with_conn(|conn| {
+        let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state.db.with_conn(|conn| {
             let sql = format!(
                 "SELECT lh.track_id,
                         AVG(CASE WHEN lh.completed = 1 THEN 0.0 ELSE 1.0 END) AS skip_rate,
@@ -2136,8 +2136,8 @@ async fn get_discovery_space(
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
                 ))
             })?;
             let mut map = std::collections::HashMap::new();
@@ -2150,8 +2150,9 @@ async fn get_discovery_space(
 
         for t in &mut space_tracks {
             if let Some((skip, comp)) = listen_map.get(&t.track_id) {
-                t.skip_rate = Some(*skip);
-                t.completion_avg = Some(*comp);
+                // Preserve Option semantics — None means "no listen data" (distinct from 0.0).
+                t.skip_rate = *skip;
+                t.completion_avg = *comp;
             }
         }
     }
@@ -6609,7 +6610,9 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
 
     let total: usize = state.read().await.db.with_conn(|conn| {
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
             [], |r| r.get(0)
         )?)
     }).unwrap_or(0);
@@ -6658,7 +6661,9 @@ async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Resu
     }).unwrap_or(0);
     let remaining: i64 = s.db.with_conn(|conn| {
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
             [],
             |r| r.get(0),
         )?)
