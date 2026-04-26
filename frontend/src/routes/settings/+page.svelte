@@ -666,9 +666,10 @@
 	async function stopDiscoveryTraining() {
 		try {
 			await api.stopDiscoveryTraining();
+			markServerOnline();
 			await loadDiscoveryStatus();
 		} catch (err) {
-			console.error('Failed to stop discovery training', err);
+			if (isFetchConnectionError(err)) markServerOffline();
 		}
 	}
 
