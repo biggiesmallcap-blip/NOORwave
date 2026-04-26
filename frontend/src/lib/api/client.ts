@@ -1183,4 +1183,18 @@ export const api = {
 			method: 'POST',
 		});
 	},
+
+	getDiscoverySpaceMeta() {
+		return fetchApi<DiscoverySpaceMetaResponse>('/api/discovery/space/meta');
+	},
 };
+
+export interface DiscoverySpaceMetaResponse {
+	model_key: string | null;
+	model_status: string | null;
+	trained_at: string | null;
+	vector_dim: number | null;
+	neighbor_coverage: number;
+	track_count_with_embeddings: number;
+	track_count_total: number;
+}

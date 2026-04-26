@@ -39,6 +39,14 @@ export async function loadSpace(mode: DiscoverViewMode, seedTrackId?: number, pr
 		}
 
 		const data = await response.json();
+		if (import.meta.env.DEV) {
+			console.log('[discover/space] payload', {
+				sample_node: data.tracks?.[0],
+				sample_edge: data.edges?.[0],
+				node_count: data.tracks?.length ?? 0,
+				edge_count: data.edges?.length ?? 0,
+			});
+		}
 		discoverSpace.update(s => ({
 			...s,
 			nodes: data.tracks ?? [],
