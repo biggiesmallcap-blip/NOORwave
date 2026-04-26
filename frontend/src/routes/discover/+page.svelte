@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { get } from 'svelte/store';
 	import { currentTrack, automixEnabled, automixDiscoverNew, automixUseLearning } from '$lib/stores/player';
-	import { discoverSpace, loadSpace } from '$lib/stores/discover_space';
+	import { discoverSpace, loadSpace, lockSeed, unlockSeed } from '$lib/stores/discover_space';
 	import DiscoverSpace from '$lib/components/Discover/DiscoverSpace.svelte';
 	import DiscoverFilters from '$lib/components/Discover/DiscoverFilters.svelte';
 	import DiscoverPanel from '$lib/components/Discover/DiscoverPanel.svelte';
@@ -15,13 +14,28 @@
 	let searchQuery = $state('');
 	let isSearching = $state(false);
 
-	// Track what seed was used so we only reload when the track actually changes
-	let loadedSeedId = $state<number | undefined>(undefined);
+	// Resolved seed = locked seed if any, else playing track id, else null.
+	let resolvedSeedId = $derived(
+		$discoverSpace.lockedSeedId ?? $currentTrack?.id ?? null
+	);
+	let resolvedSeedSource = $derived<'locked' | 'playing' | null>(
+		$discoverSpace.lockedSeedId !== null
+			? 'locked'
+			: $currentTrack?.id != null
+				? 'playing'
+				: null
+	);
+
+	// Track what seed was last loaded so we don't refetch on every reactive tick.
+	let lastLoadedSeedId = $state<number | null>(null);
 
 	function handleModeChange(mode: DiscoverViewMode) {
-		const track = get(currentTrack);
-		loadedSeedId = track?.id;
-		loadSpace(mode, track?.id);
+		lastLoadedSeedId = resolvedSeedId;
+		if (resolvedSeedId !== null) {
+			loadSpace(mode, resolvedSeedId, undefined, resolvedSeedSource);
+		} else {
+			discoverSpace.update(s => ({ ...s, mode }));
+		}
 	}
 
 	function handleHover(_node: DiscoverTrackNode | null) {}
@@ -46,20 +60,30 @@
 		searchQuery = '';
 	}
 
-	// Re-seed the space when the playing track changes (only if the space was
-	// already seeded by a different track — avoids reloading on every automix tick)
+	function handleToggleLock() {
+		if ($discoverSpace.lockedSeedId !== null) {
+			unlockSeed();
+		} else {
+			const trackId = $currentTrack?.id;
+			if (trackId != null) lockSeed(trackId);
+		}
+	}
+
+	// Hybrid auto-seed: refetch when the resolved seed changes.
 	$effect(() => {
-		const track = $currentTrack;
-		if (track && track.id !== loadedSeedId && $discoverSpace.nodes.length > 0) {
-			loadedSeedId = track.id;
-			loadSpace($discoverSpace.mode, track.id);
+		const seedId = resolvedSeedId;
+		if (seedId !== null && seedId !== lastLoadedSeedId) {
+			lastLoadedSeedId = seedId;
+			loadSpace($discoverSpace.mode, seedId, undefined, resolvedSeedSource);
 		}
 	});
 
 	onMount(() => {
-		const track = get(currentTrack);
-		loadedSeedId = track?.id;
-		loadSpace('radio', track?.id);
+		const seedId = resolvedSeedId;
+		if (seedId !== null) {
+			lastLoadedSeedId = seedId;
+			loadSpace('radio', seedId, undefined, resolvedSeedSource);
+		}
 	});
 </script>
 
@@ -83,6 +107,24 @@
 		</form>
 	</div>
 
+	{#if $discoverSpace.activeSeedId !== null}
+		<div class="seed-pill">
+			<span class="seed-source">
+				{$discoverSpace.activeSeedSource === 'locked' ? '🔒 Locked seed' : '▶ Auto-seeded from playing'}
+			</span>
+			{#if $currentTrack && $currentTrack.id === $discoverSpace.activeSeedId}
+				<span class="seed-title">{$currentTrack.title}</span>
+			{/if}
+			<button
+				class="seed-toggle"
+				onclick={handleToggleLock}
+				disabled={$currentTrack?.id == null && $discoverSpace.lockedSeedId === null}
+			>
+				{$discoverSpace.lockedSeedId !== null ? 'Unlock' : 'Lock seed'}
+			</button>
+		</div>
+	{/if}
+
 	{#if $automixEnabled}
 		<div class="automix-bar">
 			<span class="automix-dot"></span>
@@ -105,7 +147,12 @@
 		</div>
 
 		<div class="discover-main">
-			{#if $discoverSpace.loading && $discoverSpace.nodes.length === 0}
+			{#if resolvedSeedId === null}
+				<EmptyState
+					title="Play something to start discovering"
+					copy="Discover finds new music similar to whatever you're playing. Hit play, or lock a track as your seed."
+				/>
+			{:else if $discoverSpace.loading && $discoverSpace.nodes.length === 0}
 				<EmptyState title="Mapping your sound space" copy="This takes a moment on first load." />
 			{:else if $discoverSpace.nodes.length === 0}
 				<EmptyState title="No tracks found" copy="Try a different mode or seed track." />
@@ -269,5 +316,45 @@
 		position: relative;
 		min-height: 0;
 		height: 100%;
+	}
+
+	.seed-pill {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 14px;
+		margin: 0 0 14px 0;
+		border-radius: 999px;
+		background: rgba(91, 78, 248, 0.08);
+		border: 1px solid rgba(91, 78, 248, 0.3);
+		font-size: 0.78rem;
+		width: fit-content;
+	}
+	.seed-source {
+		color: var(--text-secondary, #a0a0c0);
+		letter-spacing: 0.04em;
+	}
+	.seed-title {
+		font-weight: 600;
+		color: var(--text-primary, #e8e8f0);
+	}
+	.seed-toggle {
+		margin-left: auto;
+		background: transparent;
+		border: 1px solid rgba(91, 78, 248, 0.5);
+		color: #a0a0e8;
+		border-radius: 999px;
+		padding: 4px 12px;
+		font-size: 0.72rem;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+	}
+	.seed-toggle:hover:not(:disabled) {
+		background: rgba(91, 78, 248, 0.2);
+		color: #fff;
+	}
+	.seed-toggle:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 </style>
