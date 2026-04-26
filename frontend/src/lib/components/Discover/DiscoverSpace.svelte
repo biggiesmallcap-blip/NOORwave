@@ -11,7 +11,10 @@
 		edges = [],
 		mode = 'radio',
 		currentTrackId = null,
+		seedTrackId = null,
+		isSeedLocked = false,
 		onHover = (_node: DiscoverTrackNode | null) => {},
+		onHoverPosition = (_node: DiscoverTrackNode | null, _x: number, _y: number) => {},
 		onSelect = (_node: DiscoverTrackNode) => {},
 		onNewNodes = (_nodes: DiscoverTrackNode[]) => {},
 	}: {
@@ -20,7 +23,10 @@
 		edges?: DiscoverEdge[];
 		mode?: DiscoverViewMode;
 		currentTrackId?: number | null;
+		seedTrackId?: number | null;
+		isSeedLocked?: boolean;
 		onHover?: (node: DiscoverTrackNode | null) => void;
+		onHoverPosition?: (node: DiscoverTrackNode | null, x: number, y: number) => void;
 		onSelect?: (node: DiscoverTrackNode) => void;
 		onNewNodes?: (nodes: DiscoverTrackNode[]) => void;
 	} = $props();
@@ -471,6 +477,7 @@
 		}
 		hoveredNode = found;
 		onHover(found);
+		onHoverPosition(found, e.clientX, e.clientY);
 		if (canvas) canvas.style.cursor = found ? 'pointer' : 'grab';
 
 		if (isDragging) {
