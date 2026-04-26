@@ -88,6 +88,31 @@ const NEWS_FEEDS: &[FeedSource] = &[
         name: "The Guardian Music",
         category: "news",
     },
+    FeedSource {
+        url: "https://ra.co/xml/news.xml",
+        name: "Resident Advisor",
+        category: "news",
+    },
+    FeedSource {
+        url: "https://www.factmag.com/feed/",
+        name: "FACT Magazine",
+        category: "news",
+    },
+    FeedSource {
+        url: "https://daily.bandcamp.com/feed",
+        name: "Bandcamp Daily",
+        category: "news",
+    },
+    FeedSource {
+        url: "https://mixmag.net/feed/",
+        name: "Mixmag",
+        category: "news",
+    },
+    FeedSource {
+        url: "https://www.stereogum.com/feed/",
+        name: "Stereogum",
+        category: "news",
+    },
 ];
 
 impl FeedAggregator {
@@ -146,7 +171,44 @@ impl FeedAggregator {
                 
                 let published_at = item.pub_date;
 
-                let image_url = item.itunes_ext.as_ref().and_then(|ext| ext.image.as_ref()).cloned();
+                let image_url = item.itunes_ext.as_ref().and_then(|ext| ext.image.as_ref()).cloned()
+                    .or_else(|| {
+                        // media:thumbnail url="..."
+                        item.extensions.get("media")
+                            .and_then(|ns| ns.get("thumbnail"))
+                            .and_then(|v| v.first())
+                            .and_then(|ext| ext.attrs.get("url").cloned())
+                    })
+                    .or_else(|| {
+                        // media:content url="..." medium="image"
+                        item.extensions.get("media")
+                            .and_then(|ns| ns.get("content"))
+                            .and_then(|v| v.iter().find(|e| {
+                                e.attrs.get("medium").map(|m| m == "image").unwrap_or(false)
+                                    || e.attrs.get("type").map(|t| t.starts_with("image/")).unwrap_or(false)
+                            }))
+                            .and_then(|ext| ext.attrs.get("url").cloned())
+                    })
+                    .or_else(|| {
+                        // First <img src="..."> in content:encoded HTML
+                        item.extensions.get("content")
+                            .and_then(|ns| ns.get("encoded"))
+                            .and_then(|v| v.first())
+                            .and_then(|ext| ext.value.as_deref())
+                            .and_then(|html| {
+                                let lower = html.to_ascii_lowercase();
+                                let img_pos = lower.find("<img ")?;
+                                let src_pos = lower[img_pos..].find("src=\"")? + img_pos + 5;
+                                let end = lower[src_pos..].find('"')? + src_pos;
+                                Some(html[src_pos..end].to_string())
+                            })
+                    })
+                    .or_else(|| {
+                        // <enclosure> with image mime type
+                        item.enclosure.as_ref()
+                            .filter(|enc| enc.mime_type.starts_with("image/"))
+                            .map(|enc| enc.url.clone())
+                    });
 
                 if link.is_empty() {
                     None

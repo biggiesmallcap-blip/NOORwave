@@ -13,6 +13,9 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_009,
     MIGRATION_010,
     MIGRATION_011,
+    MIGRATION_012,
+    MIGRATION_013,
+    MIGRATION_014,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -512,6 +515,34 @@ const MIGRATION_011: &str = r#"
 CREATE TABLE IF NOT EXISTS server_config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+"#;
+
+const MIGRATION_012: &str = r#"
+CREATE TABLE IF NOT EXISTS spotify_checked (
+    track_id   INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    checked_at TEXT DEFAULT (datetime('now'))
+);
+-- Backfill: tracks already tagged by spotify don't need re-querying.
+INSERT OR IGNORE INTO spotify_checked (track_id)
+SELECT DISTINCT track_id FROM track_genres WHERE source = 'spotify';
+"#;
+
+const MIGRATION_013: &str = r#"
+CREATE TABLE IF NOT EXISTS lastfm_checked (
+    track_id   INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    checked_at TEXT DEFAULT (datetime('now'))
+);
+-- Backfill: tracks already tagged by lastfm don't need re-querying.
+INSERT OR IGNORE INTO lastfm_checked (track_id)
+SELECT DISTINCT track_id FROM track_genres WHERE source = 'lastfm';
+"#;
+
+const MIGRATION_014: &str = r#"
+CREATE TABLE IF NOT EXISTS lastfm_artist_cache (
+    artist_name TEXT PRIMARY KEY,
+    tags_json   TEXT NOT NULL,
+    fetched_at  TEXT DEFAULT (datetime('now'))
 );
 "#;
 

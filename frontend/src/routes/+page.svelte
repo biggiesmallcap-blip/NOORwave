@@ -8,7 +8,7 @@
 		type HomePickTrack
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -297,7 +297,7 @@
 							<h3 class="subsection-title">Top Picks</h3>
 							<div class="track-list">
 								{#each picks.slice(0, 8) as pick, i (`${pick.id}-${i}`)}
-									<div class="track-row glass-tile">
+									<div class="track-row glass-tile" role="button" tabindex="0" onclick={() => startSongRadio(pick.id)} onkeydown={(e) => e.key === 'Enter' && startSongRadio(pick.id)}>
 										{#if pick.artwork_url}
 											<img class="track-art" src={pick.artwork_url} alt="" />
 										{:else}
@@ -697,6 +697,19 @@
 		align-items: center;
 		gap: 12px;
 		padding: 12px;
+		cursor: pointer;
+		transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+
+		&:hover {
+			transform: translateY(-3px);
+			box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+			background: var(--bg-hover);
+		}
+
+		&:active {
+			transform: translateY(-1px);
+			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+		}
 	}
 
 	.track-art {

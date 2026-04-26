@@ -50,11 +50,13 @@ pub fn plan_from_stream(stream: Option<&StreamInfo>, settings: GaplessSettings) 
     let overlap_ms = settings.crossfade_ms;
     let stream_supports_gapless = stream.map_or(false, StreamInfo::supports_gapless);
     let enabled = stream_supports_gapless && overlap_ms > 0;
-    let prebuffer_ms = if enabled {
-        overlap_ms.saturating_add(250)
-    } else {
-        500
-    };
+    // 500 ms of prebuffer is enough to cover decoder jitter for both the cold-
+    // start and the pre-decoded-next paths. The earlier value of `overlap_ms +
+    // 250` was conflating "fade-ramp duration" with "buffer-fill threshold" —
+    // the consequence was that a pre-decoded next engine had to buffer the
+    // entire crossfade window (~5 s) before is_ready() flipped, by which time
+    // the crossfade window had already expired.
+    let prebuffer_ms = 500;
 
     GaplessPlan {
         enabled,
@@ -140,7 +142,7 @@ mod tests {
         );
         assert!(plan.enabled);
         assert_eq!(plan.overlap_ms, 1500);
-        assert_eq!(plan.prebuffer_ms, 1750);
+        assert_eq!(plan.prebuffer_ms, 500);
         assert!(plan.requires_stream_metadata);
     }
 

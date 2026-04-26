@@ -51,6 +51,21 @@ pub struct AppState {
     pub audio_analysis_running: Arc<AtomicBool>,
     pub acrcloud_scan_running: Arc<AtomicBool>,
     pub acrcloud_daily_count: Arc<std::sync::atomic::AtomicU32>,
+    /// Spotify enrichment progress (visible to status endpoint, survives UI navigation).
+    pub spotify_enrich_running: Arc<AtomicBool>,
+    pub spotify_enrich_total: Arc<std::sync::atomic::AtomicUsize>,
+    pub spotify_enrich_processed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Last.fm enrichment progress.
+    pub lastfm_enrich_running: Arc<AtomicBool>,
+    pub lastfm_enrich_cancel: Arc<AtomicBool>,
+    pub lastfm_enrich_total: Arc<std::sync::atomic::AtomicUsize>,
+    pub lastfm_enrich_processed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Pre-fetch phase: unique artist count and how many have been fetched.
+    pub lastfm_prefetch_total: Arc<std::sync::atomic::AtomicUsize>,
+    pub lastfm_prefetch_done: Arc<std::sync::atomic::AtomicUsize>,
+    /// Epoch seconds when the current run started; 0 when idle. Used to
+    /// compute an observed throughput rate for the frontend's ETA display.
+    pub lastfm_enrich_started_at: Arc<std::sync::atomic::AtomicI64>,
     /// Shared bearer token for network auth
     pub server_token: String,
 }
@@ -142,25 +157,9 @@ async fn main() -> Result<()> {
         })
         .unwrap_or(None);
 
-    // Load persisted Spotify tokens if available
-    let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = db
-        .with_conn(|conn| {
-            let result = conn.query_row(
-                "SELECT access_token_enc FROM service_auth WHERE service='spotify'",
-                [],
-                |row| row.get::<_, Vec<u8>>(0),
-            );
-            Ok(match result {
-                Ok(bytes) => String::from_utf8(bytes)
-                    .ok()
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .inspect(|t: &services::spotify::auth::SpotifyTokens| {
-                        info!("Loaded persisted Spotify tokens for user {}", t.user_id);
-                    }),
-                Err(_) => None,
-            })
-        })
-        .unwrap_or(None);
+    // Spotify tokens are fetched on demand via the Client Credentials flow
+    // using the user-supplied client_id/secret stored in service_auth.extra_data.
+    let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = None;
 
     // Generate or load the server access token
     let server_token = db
@@ -201,6 +200,16 @@ async fn main() -> Result<()> {
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
         acrcloud_scan_running: Arc::new(AtomicBool::new(false)),
         acrcloud_daily_count: Arc::new(AtomicU32::new(0)),
+        spotify_enrich_running: Arc::new(AtomicBool::new(false)),
+        spotify_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        lastfm_enrich_running: Arc::new(AtomicBool::new(false)),
+        lastfm_enrich_cancel: Arc::new(AtomicBool::new(false)),
+        lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        lastfm_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         server_token,
     }));
 

@@ -1,15 +1,19 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::info;
 
-// Spotify Client ID — You must register a free app at https://developer.spotify.com/dashboard
-// and replace this with your own Client ID.
-const SPOTIFY_CLIENT_ID: &str = "YOUR_SPOTIFY_CLIENT_ID";
-const SPOTIFY_DEVICE_CODE_URL: &str = "https://accounts.spotify.com/api/device/code";
 const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
-const SPOTIFY_SCOPES: &str = "user-read-private";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotifyCredentials {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// Stored token + expiry. `user_id` retained for schema compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpotifyTokens {
     pub access_token: String,
@@ -18,136 +22,92 @@ pub struct SpotifyTokens {
     pub token_type: String,
     pub scope: String,
     pub user_id: String,
+    #[serde(default)]
+    pub fetched_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: i64,
-    pub interval: i64,
+#[derive(Debug, Deserialize)]
+struct ClientCredentialsResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_in: i64,
-    pub token_type: Option<String>,
-    pub scope: Option<String>,
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct MeResponse {
-    pub id: String,
+pub fn is_expired(tokens: &SpotifyTokens) -> bool {
+    let expiry = tokens.fetched_at.saturating_add(tokens.expires_in);
+    now_secs() + 60 >= expiry
 }
 
-/// Start the Spotify Device Code flow.
-/// Returns the `DeviceCodeResponse` so the frontend can show the URL and User Code.
-pub async fn start_device_code(http: &Client) -> Result<DeviceCodeResponse> {
-    if SPOTIFY_CLIENT_ID == "YOUR_SPOTIFY_CLIENT_ID" {
-        anyhow::bail!("Spotify Client ID not configured. Please update SPOTIFY_CLIENT_ID in auth.rs");
+pub fn load_credentials(conn: &Connection) -> Result<Option<SpotifyCredentials>> {
+    let row: rusqlite::Result<Option<String>> = conn.query_row(
+        "SELECT extra_data FROM service_auth WHERE service = 'spotify'",
+        [],
+        |row| row.get(0),
+    );
+    match row {
+        Ok(Some(json)) => Ok(serde_json::from_str(&json).ok()),
+        _ => Ok(None),
+    }
+}
+
+pub fn save_credentials(conn: &Connection, creds: &SpotifyCredentials) -> Result<()> {
+    let json = serde_json::to_string(creds)?;
+    conn.execute(
+        "INSERT INTO service_auth (service, extra_data, user_id, connected_at)
+         VALUES ('spotify', ?1, 'app', datetime('now'))
+         ON CONFLICT(service) DO UPDATE SET extra_data = excluded.extra_data",
+        params![json],
+    )?;
+    Ok(())
+}
+
+pub fn clear_credentials(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM service_auth WHERE service = 'spotify'", [])?;
+    Ok(())
+}
+
+/// Fetch a fresh app-only access token via the Client Credentials flow.
+pub async fn fetch_app_token(http: &Client, creds: &SpotifyCredentials) -> Result<SpotifyTokens> {
+    if creds.client_id.is_empty() || creds.client_secret.is_empty() {
+        anyhow::bail!("Spotify credentials are empty");
     }
 
-    let params = [
-        ("client_id", SPOTIFY_CLIENT_ID),
-        ("scope", SPOTIFY_SCOPES),
-    ];
-
-    let response = http
-        .post(SPOTIFY_DEVICE_CODE_URL)
-        .form(&params)
-        .send()
-        .await
-        .context("Failed to request Spotify device code")?;
-
-    if !response.status().is_success() {
-        let err_text = response.text().await?;
-        anyhow::bail!("Spotify device code request failed: {}", err_text);
-    }
-
-    let data: DeviceCodeResponse = response
-        .json()
-        .await
-        .context("Failed to parse Spotify device code response")?;
-
-    info!("Spotify device code started. User code: {}", data.user_code);
-    Ok(data)
-}
-
-/// Poll Spotify for the token after user has authorized the device code.
-pub async fn poll_token(
-    http: &Client,
-    device_code: &str,
-) -> Result<Option<SpotifyTokens>> {
-    let params = [
-        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ("device_code", device_code),
-        ("client_id", SPOTIFY_CLIENT_ID),
-    ];
-
+    let params = [("grant_type", "client_credentials")];
     let response = http
         .post(SPOTIFY_TOKEN_URL)
+        .basic_auth(&creds.client_id, Some(&creds.client_secret))
         .form(&params)
         .send()
         .await
-        .context("Failed to poll Spotify token")?;
+        .context("Failed to request Spotify app token")?;
 
-    let status = response.status();
-
-    // 200 OK -> Success
-    if status == reqwest::StatusCode::OK {
-        let token_data: TokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse Spotify token response")?;
-
-        // Fetch user profile to get user_id
-        let user_id = fetch_user_id(http, &token_data.access_token).await?;
-
-        return Ok(Some(SpotifyTokens {
-            access_token: token_data.access_token,
-            refresh_token: token_data.refresh_token.unwrap_or_default(),
-            expires_in: token_data.expires_in,
-            token_type: token_data.token_type.unwrap_or_default(),
-            scope: token_data.scope.unwrap_or_default(),
-            user_id,
-        }));
+    if !response.status().is_success() {
+        let status = response.status();
+        let err_text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Spotify token request failed ({}): {}", status, err_text);
     }
 
-    // 400 Bad Request -> Check error type
-    if status == reqwest::StatusCode::BAD_REQUEST {
-        let error_body: serde_json::Value = response.json().await.unwrap_or_default();
-        let error = error_body["error"].as_str().unwrap_or("unknown");
-
-        return match error {
-            "authorization_pending" => Ok(None),
-            "slow_down" => {
-                warn!("Spotify told us to slow down polling.");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                Ok(None)
-            }
-            "expired_token" => anyhow::bail!("Spotify device code expired"),
-            _ => anyhow::bail!("Spotify poll error: {}", error),
-        };
-    }
-
-    anyhow::bail!("Unexpected Spotify poll status: {}", status)
-}
-
-async fn fetch_user_id(http: &Client, token: &str) -> Result<String> {
-    let response = http
-        .get("https://api.spotify.com/v1/me")
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
+    let data: ClientCredentialsResponse = response
+        .json()
         .await
-        .context("Failed to fetch Spotify user profile")?;
+        .context("Failed to parse Spotify token response")?;
 
-    if response.status().is_success() {
-        let profile: MeResponse = response.json().await?;
-        Ok(profile.id)
-    } else {
-        Ok("unknown".to_string()) // Fallback if profile fetch fails
-    }
+    info!("Fetched Spotify app token (expires in {}s)", data.expires_in);
+
+    Ok(SpotifyTokens {
+        access_token: data.access_token,
+        refresh_token: String::new(),
+        expires_in: data.expires_in,
+        token_type: data.token_type,
+        scope: String::new(),
+        user_id: "app".to_string(),
+        fetched_at: now_secs(),
+    })
 }

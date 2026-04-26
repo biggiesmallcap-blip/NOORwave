@@ -184,6 +184,45 @@
 	let deletingId = $state<number | null>(null);
 	let deleteError = $state('');
 
+	// Drawer focus management
+	let editorTriggerEl: HTMLElement | null = null;
+
+	function trapFocus(node: HTMLElement) {
+		const selector =
+			'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+		function focusable() {
+			return Array.from(node.querySelectorAll<HTMLElement>(selector)).filter(
+				(el) => !el.hasAttribute('disabled') && el.tabIndex !== -1,
+			);
+		}
+		function handleKey(e: KeyboardEvent) {
+			if (e.key !== 'Tab') return;
+			const list = focusable();
+			if (list.length === 0) return;
+			const first = list[0];
+			const last = list[list.length - 1];
+			const active = document.activeElement as HTMLElement | null;
+			if (e.shiftKey && (active === first || !node.contains(active))) {
+				e.preventDefault();
+				last.focus();
+			} else if (!e.shiftKey && (active === last || !node.contains(active))) {
+				e.preventDefault();
+				first.focus();
+			}
+		}
+		node.addEventListener('keydown', handleKey);
+		// Defer initial focus so the input is mounted
+		queueMicrotask(() => {
+			const target = node.querySelector<HTMLInputElement>('#draft-name');
+			target?.focus();
+		});
+		return {
+			destroy() {
+				node.removeEventListener('keydown', handleKey);
+			},
+		};
+	}
+
 	onMount(() => {
 		void loadPlaylists();
 	});
@@ -246,6 +285,7 @@
 
 	// ─── Editor helpers ───────────────────────────────────────────────────────
 	function openNew() {
+		editorTriggerEl = document.activeElement as HTMLElement | null;
 		editingPlaylistId = null;
 		draftName = '';
 		draftDescription = '';
@@ -257,6 +297,7 @@
 	}
 
 	function openEdit(playlist: Playlist) {
+		editorTriggerEl = document.activeElement as HTMLElement | null;
 		editingPlaylistId = playlist.id;
 		draftName = playlist.name;
 		draftDescription = playlist.description ?? '';
@@ -284,6 +325,9 @@
 
 	function closeEditor() {
 		editorOpen = false;
+		const trigger = editorTriggerEl;
+		queueMicrotask(() => trigger?.focus());
+		editorTriggerEl = null;
 	}
 
 	function addClause() {
@@ -534,7 +578,21 @@
 						</div>
 						<div class="playlist-side">
 							<span>{playlist.track_count} tracks</span>
-							<span>{isExpanded(playlist.id) ? '−' : '+'}</span>
+							<svg
+								class="chevron"
+								class:open={isExpanded(playlist.id)}
+								width="16"
+								height="16"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M6 9l6 6 6-6" />
+							</svg>
 						</div>
 					</button>
 
@@ -565,17 +623,17 @@
 								</div>
 								<div class="track-list">
 									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
-										<div
-											class="track-row"
-											role="button"
-											tabindex="0"
-											onclick={() => void playTrack(track.id)}
-											onkeydown={(e) => { if (e.key === 'Enter') void playTrack(track.id); }}
-										>
-											<div class="track-main">
-												<h4>{track.title}</h4>
-												<p>{track.artist_name ?? 'Unknown artist'}</p>
-											</div>
+										<div class="track-row">
+											<button
+												type="button"
+												class="track-row-main"
+												onclick={() => void playTrack(track.id)}
+											>
+												<span class="track-main">
+													<h4>{track.title}</h4>
+													<p>{track.artist_name ?? 'Unknown artist'}</p>
+												</span>
+											</button>
 											<div class="track-side">
 												{#if track.best_quality}
 													<span class={`quality-badge ${getQualityClass(track.best_quality)}`}>
@@ -583,7 +641,16 @@
 													</span>
 												{/if}
 												<span>{formatDuration(track.duration_ms)}</span>
-												<button class="queue-btn" onclick={(e) => void queueTrack(track.id, e)}>+</button>
+												<button
+													type="button"
+													class="queue-btn"
+													aria-label="Add to queue"
+													onclick={(e) => void queueTrack(track.id, e)}
+												>
+													<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+														<path d="M12 5v14M5 12h14" />
+													</svg>
+												</button>
 											</div>
 										</div>
 									{/each}
@@ -603,11 +670,29 @@
 
 <!-- ─── Rule Editor Drawer ──────────────────────────────────────────────────── -->
 {#if editorOpen}
-	<div class="drawer-backdrop" role="presentation" onclick={closeEditor} onkeydown={(e) => e.key === 'Escape' && closeEditor()}></div>
-	<aside class="editor-drawer glass-panel">
+	<button
+		type="button"
+		class="drawer-backdrop"
+		aria-label="Close editor"
+		onclick={closeEditor}
+	></button>
+	<div
+		class="editor-drawer glass-panel"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="editor-title"
+		tabindex="-1"
+		use:trapFocus
+	>
 		<div class="editor-head">
-			<h2>{editingPlaylistId === null ? 'New smart playlist' : 'Edit smart playlist'}</h2>
-			<button class="close-btn" onclick={closeEditor} aria-label="Close editor">×</button>
+			<h2 id="editor-title">
+				{editingPlaylistId === null ? 'New smart playlist' : 'Edit smart playlist'}
+			</h2>
+			<button class="close-btn" onclick={closeEditor} aria-label="Close editor">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M18 6L6 18M6 6l12 12" />
+				</svg>
+			</button>
 		</div>
 
 		<div class="editor-body">
@@ -659,7 +744,11 @@
 									<option {value}>{label}</option>
 								{/each}
 							</select>
-							<button class="remove-btn" onclick={() => removeClause(clause.id)} aria-label="Remove rule">×</button>
+							<button class="remove-btn" onclick={() => removeClause(clause.id)} aria-label="Remove rule">
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<path d="M18 6L6 18M6 6l12 12" />
+								</svg>
+							</button>
 						</div>
 
 						<!-- Genre fields -->
@@ -669,7 +758,11 @@
 									{#each clause.names as tag}
 										<span class="tag">
 											{tag}
-											<button class="tag-remove" onclick={() => removeTag(clause.id, tag)}>×</button>
+											<button class="tag-remove" aria-label="Remove tag" onclick={() => removeTag(clause.id, tag)}>
+												<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+													<path d="M18 6L6 18M6 6l12 12" />
+												</svg>
+											</button>
 										</span>
 									{/each}
 								</div>
@@ -874,7 +967,7 @@
 				{editorSaving ? 'Saving…' : editingPlaylistId === null ? 'Create playlist' : 'Save changes'}
 			</button>
 		</div>
-	</aside>
+	</div>
 {/if}
 
 <style>
@@ -927,7 +1020,7 @@
 
 	.smart-summary p {
 		font-size: 0.8125rem;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		color: var(--text-tertiary);
 	}
 
@@ -941,12 +1034,20 @@
 		font-size: 0.875rem;
 	}
 
+	.chevron {
+		transition: transform 180ms ease;
+	}
+
+	.chevron.open {
+		transform: rotate(180deg);
+	}
+
 	.smart-actions {
 		display: flex;
 		gap: 8px;
 		margin-top: 14px;
 		padding-top: 14px;
-		border-top: 1px solid rgba(255, 255, 255, 0.05);
+		border-top: 1px solid var(--border-subtle);
 	}
 
 	.btn-sm {
@@ -955,19 +1056,19 @@
 	}
 
 	.danger {
-		color: #ff8080;
-		border-color: rgba(255, 80, 80, 0.2);
+		color: var(--state-error);
+		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
 	}
 
-	.danger:hover {
-		background: rgba(255, 60, 60, 0.1);
-		border-color: rgba(255, 80, 80, 0.35);
+	.danger:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--state-error) 14%, transparent);
+		border-color: color-mix(in srgb, var(--state-error) 45%, transparent);
 	}
 
 	.playlist-body {
 		margin-top: 18px;
 		padding-top: 18px;
-		border-top: 1px solid rgba(255, 255, 255, 0.06);
+		border-top: 1px solid var(--border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
@@ -989,28 +1090,63 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-3);
-		padding: 10px 0;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-		cursor: pointer;
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.track-row:last-child { border-bottom: none; padding-bottom: 0; }
+	.track-row:last-child { border-bottom: none; }
 
-	.track-main { min-width: 0; }
+	.track-row-main {
+		flex: 1;
+		min-width: 0;
+		text-align: left;
+		padding: 10px 0;
+		background: transparent;
+		border: none;
+		color: inherit;
+		cursor: pointer;
+		border-radius: var(--radius-xs);
+	}
+
+	.track-row-main:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
+	}
+
+	.track-main {
+		display: block;
+		min-width: 0;
+	}
 
 	.track-side {
 		display: flex;
 		align-items: center;
 		gap: 10px;
 		flex-shrink: 0;
+		padding: 10px 0;
 	}
 
 	.queue-btn {
 		width: 28px;
 		height: 28px;
 		border-radius: 999px;
-		background: rgba(124, 128, 255, 0.12);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--accent-soft);
 		color: var(--accent-strong);
+		border: 1px solid transparent;
+		cursor: pointer;
+		transition: background 150ms ease, border-color 150ms ease;
+	}
+
+	.queue-btn:hover {
+		background: color-mix(in srgb, var(--accent) 22%, transparent);
+		border-color: var(--accent-line);
+	}
+
+	.queue-btn:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
 	}
 
 	.feedback-bar {
@@ -1019,7 +1155,10 @@
 		font-size: 0.875rem;
 	}
 
-	.feedback-bar.error { color: #ff8080; border-color: rgba(255, 80, 80, 0.2); }
+	.feedback-bar.error {
+		color: var(--state-error);
+		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
+	}
 
 	/* ─── Drawer ──────────────────────────────────────────────── */
 
@@ -1029,6 +1168,13 @@
 		background: rgba(0, 0, 0, 0.55);
 		z-index: 300;
 		backdrop-filter: blur(2px);
+		border: none;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.drawer-backdrop:focus-visible {
+		outline: none;
 	}
 
 	.editor-drawer {
@@ -1042,8 +1188,12 @@
 		flex-direction: column;
 		border-radius: var(--radius-lg) 0 0 var(--radius-lg);
 		background: rgba(14, 14, 20, 0.98);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		border: 1px solid var(--border-strong);
 		box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5);
+	}
+
+	:global([data-theme="light"]) .editor-drawer {
+		background: rgba(252, 252, 255, 0.98);
 	}
 
 	.editor-head {
@@ -1051,7 +1201,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 20px 24px 16px;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+		border-bottom: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}
 
@@ -1061,16 +1211,25 @@
 		width: 32px;
 		height: 32px;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.06);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in srgb, currentColor 8%, transparent);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 1.2rem;
-		line-height: 1;
 		cursor: pointer;
-		transition: background 0.12s;
+		transition: background 150ms ease, color 150ms ease;
 	}
 
-	.close-btn:hover { background: rgba(255, 255, 255, 0.12); }
+	.close-btn:hover {
+		background: color-mix(in srgb, currentColor 14%, transparent);
+		color: var(--text-primary);
+	}
+
+	.close-btn:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
+	}
 
 	.editor-body {
 		flex: 1;
@@ -1082,8 +1241,8 @@
 	}
 
 	.editor-foot {
-		padding: 16px 24px 20px;
-		border-top: 1px solid rgba(255, 255, 255, 0.07);
+		padding: 16px 24px max(20px, var(--safe-bottom));
+		border-top: 1px solid var(--border-subtle);
 		display: flex;
 		justify-content: flex-end;
 		gap: 10px;
@@ -1107,19 +1266,20 @@
 	.optional { font-weight: 400; color: var(--text-tertiary); }
 
 	.field-input {
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: color-mix(in srgb, currentColor 6%, transparent);
+		border: 1px solid var(--border-subtle);
 		border-radius: 8px;
 		padding: 9px 12px;
 		font-size: 0.875rem;
 		color: var(--text-primary);
 		width: 100%;
-		transition: border-color 0.12s;
+		transition: border-color 150ms ease, box-shadow 150ms ease;
 	}
 
-	.field-input:focus {
+	.field-input:focus-visible {
 		outline: none;
-		border-color: rgba(124, 128, 255, 0.5);
+		border-color: var(--accent-line);
+		box-shadow: 0 0 0 3px var(--accent-soft);
 	}
 
 	/* ─── Logic toggle ────────────────────────────────────────── */
@@ -1137,8 +1297,8 @@
 		gap: 2px;
 		padding: 2px;
 		border-radius: 8px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: color-mix(in srgb, currentColor 4%, transparent);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.logic-btn {
@@ -1147,12 +1307,19 @@
 		font-size: 0.8125rem;
 		font-weight: 600;
 		color: var(--text-secondary);
-		transition: background 0.12s, color 0.12s;
+		background: transparent;
+		border: none;
+		transition: background 150ms ease, color 150ms ease;
 		cursor: pointer;
 	}
 
+	.logic-btn:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
+	}
+
 	.logic-btn.active {
-		background: rgba(124, 128, 255, 0.2);
+		background: var(--accent-soft);
 		color: var(--text-primary);
 	}
 
@@ -1179,8 +1346,8 @@
 
 	.type-select {
 		flex: 1;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: color-mix(in srgb, currentColor 6%, transparent);
+		border: 1px solid var(--border-subtle);
 		border-radius: 8px;
 		padding: 7px 10px;
 		font-size: 0.875rem;
@@ -1191,17 +1358,27 @@
 		width: 28px;
 		height: 28px;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in srgb, currentColor 6%, transparent);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
-		font-size: 1rem;
-		line-height: 1;
 		cursor: pointer;
 		flex-shrink: 0;
-		transition: background 0.12s, color 0.12s;
+		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
 	}
 
-	.remove-btn:hover { background: rgba(255, 60, 60, 0.12); color: #ff8080; }
+	.remove-btn:hover {
+		background: color-mix(in srgb, var(--state-error) 14%, transparent);
+		border-color: color-mix(in srgb, var(--state-error) 30%, transparent);
+		color: var(--state-error);
+	}
+
+	.remove-btn:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
+	}
 
 	/* ─── Tag input ───────────────────────────────────────────── */
 
@@ -1220,8 +1397,8 @@
 		gap: 4px;
 		padding: 4px 10px 4px 12px;
 		border-radius: 999px;
-		background: rgba(124, 128, 255, 0.14);
-		border: 1px solid rgba(124, 128, 255, 0.3);
+		background: var(--accent-soft);
+		border: 1px solid var(--accent-line);
 		font-size: 0.8125rem;
 		color: var(--accent-strong);
 	}
@@ -1230,15 +1407,24 @@
 		width: 16px;
 		height: 16px;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-		color: var(--text-secondary);
-		font-size: 0.75rem;
-		line-height: 1;
+		background: color-mix(in srgb, currentColor 18%, transparent);
+		border: none;
+		color: inherit;
 		cursor: pointer;
 		flex-shrink: 0;
-		display: flex;
+		display: inline-flex;
 		align-items: center;
 		justify-content: center;
+		transition: background 150ms ease;
+	}
+
+	.tag-remove:hover {
+		background: color-mix(in srgb, currentColor 32%, transparent);
+	}
+
+	.tag-remove:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
 	}
 
 	.tag-input-row { display: flex; gap: 8px; }
@@ -1277,7 +1463,7 @@
 
 	.add-rule-btn { align-self: flex-start; }
 
-	.editor-error { font-size: 0.875rem; color: #ff8080; }
+	.editor-error { font-size: 0.875rem; color: var(--state-error); }
 
 	/* ─── Responsive ──────────────────────────────────────────── */
 

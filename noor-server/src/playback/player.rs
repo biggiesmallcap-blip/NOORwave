@@ -674,8 +674,22 @@ fn build_automix_extension(
     // providing enough diversity for scoring and genre shuffling.
     const MAX_CANDIDATES: usize = 500;
 
-    let mut candidates =
-        queries::get_tracks_excluding_with_limit(conn, &excluded_track_ids, MAX_CANDIDATES)?;
+    // Preferred recall: precomputed track_similarity (co-album/artist/genre/duration).
+    // Floor at `needed` so we always have at least the batch size to score and decluster;
+    // below that, widen to the random pool. Library coverage is ~78% of seeds at this floor.
+    let similar = queries::get_similar_tracks(
+        conn,
+        current_track.id,
+        MAX_CANDIDATES as i64,
+        &excluded_track_ids,
+    )
+    .unwrap_or_default();
+    let mut candidates: Vec<Track> = if similar.len() >= needed {
+        let similar_ids = similar.iter().map(|r| r.track_id).collect::<Vec<_>>();
+        queue::get_tracks_by_ids(conn, &similar_ids)?
+    } else {
+        queries::get_tracks_excluding_with_limit(conn, &excluded_track_ids, MAX_CANDIDATES)?
+    };
     if candidates.is_empty() {
         let queue_track_ids = queue_items
             .iter()

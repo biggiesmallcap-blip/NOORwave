@@ -622,9 +622,36 @@
 					<button class="tab" class:active={activeTab === 'tracks'} onclick={() => switchTab('tracks')}>Tracks</button>
 					<button class="tab" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
 				</div>
-				<div class="view-toggle">
-					<button class="btn btn-glass" class:active={$viewMode === 'grid'} onclick={() => viewMode.set('grid')}>▦</button>
-					<button class="btn btn-glass" class:active={$viewMode === 'list'} onclick={() => viewMode.set('list')}>☰</button>
+				<div class="view-toggle" role="group" aria-label="Album view layout">
+					<button
+						class="view-toggle-btn"
+						class:active={$viewMode === 'grid'}
+						onclick={() => viewMode.set('grid')}
+						aria-pressed={$viewMode === 'grid'}
+						aria-label="Grid view"
+						title="Grid view"
+					>
+						<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<rect x="2" y="2" width="5" height="5" rx="1"/>
+							<rect x="9" y="2" width="5" height="5" rx="1"/>
+							<rect x="2" y="9" width="5" height="5" rx="1"/>
+							<rect x="9" y="9" width="5" height="5" rx="1"/>
+						</svg>
+					</button>
+					<button
+						class="view-toggle-btn"
+						class:active={$viewMode === 'list'}
+						onclick={() => viewMode.set('list')}
+						aria-pressed={$viewMode === 'list'}
+						aria-label="List view"
+						title="List view"
+					>
+						<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<line x1="3" y1="4" x2="13" y2="4"/>
+							<line x1="3" y1="8" x2="13" y2="8"/>
+							<line x1="3" y1="12" x2="13" y2="12"/>
+						</svg>
+					</button>
 				</div>
 				<button class="btn btn-glass" onclick={() => void playRandomLibrary()}>
 					Random play
@@ -1659,18 +1686,37 @@
 	}
 
 	.view-toggle {
-		display: flex;
-		gap: 6px;
+		display: inline-flex;
+		gap: 2px;
+		padding: 2px;
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.06);
 	}
 
-	.view-toggle :global(.btn) {
-		min-width: 42px;
-		font-size: 1rem;
+	.view-toggle-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		padding: 0;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		transition: background 140ms ease, color 140ms ease;
 	}
 
-	.view-toggle .active {
-		background: rgba(124, 128, 255, 0.14);
-		border-color: rgba(124, 128, 255, 0.22);
+	.view-toggle-btn:hover {
+		color: var(--text-primary);
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.view-toggle-btn.active {
+		background: rgba(124, 128, 255, 0.22);
+		color: var(--text-primary);
 	}
 
 	/* ─── Batch Bar ─────────────────────── */
@@ -2119,9 +2165,15 @@
 
 	.album-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
 		gap: var(--gap);
 		align-items: start;
+	}
+
+	@media (min-width: 1600px) {
+		.album-grid {
+			grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+		}
 	}
 
 	/* ─── Album List Mode ────────────────── */
@@ -2129,30 +2181,53 @@
 	.album-grid.album-list {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
+		gap: 0;
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		border: 1px solid rgba(255, 255, 255, 0.05);
+		background: rgba(255, 255, 255, 0.015);
 	}
 
 	.album-grid.album-list .album-card {
 		display: grid;
-		grid-template-columns: 56px 1fr auto;
-		gap: 14px;
+		grid-template-columns: 40px 1fr auto;
+		gap: 12px;
 		align-items: center;
-		padding: 8px 10px;
-		border-radius: var(--radius-sm);
+		padding: 6px 12px;
+		border-radius: 0;
+		background: transparent;
+		border: 0;
+		border-top: 1px solid rgba(255, 255, 255, 0.04);
+		box-shadow: none;
+	}
+
+	.album-grid.album-list .album-card:first-child {
+		border-top: 0;
 	}
 
 	.album-grid.album-list .album-card:hover {
 		transform: none;
 		box-shadow: none;
+		background: rgba(255, 255, 255, 0.04);
+		border-color: rgba(255, 255, 255, 0.04);
+	}
+
+	.album-grid.album-list .album-card:hover .album-art {
+		filter: none;
 	}
 
 	.album-grid.album-list .album-art {
-		width: 56px;
-		height: 56px;
+		width: 40px;
+		height: 40px;
 		aspect-ratio: unset;
 		margin-bottom: 0;
-		border-radius: 6px;
+		border-radius: 4px;
 		flex-shrink: 0;
+		box-shadow: none;
+	}
+
+	.album-grid.album-list .album-art::after {
+		display: none;
 	}
 
 	.album-grid.album-list .album-art-overlay {
@@ -2306,6 +2381,7 @@
 		flex-direction: column;
 		gap: 2px;
 		padding: 0 4px 4px;
+		min-width: 0;
 	}
 
 	.album-actions {
@@ -2341,8 +2417,9 @@
 	.album-chips {
 		display: flex;
 		gap: 4px;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		margin-top: 4px;
+		overflow: hidden;
 	}
 
 	.album-chip {

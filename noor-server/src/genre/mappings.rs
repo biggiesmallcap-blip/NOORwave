@@ -250,20 +250,22 @@ impl GenreCatalog {
         }
 
         if let Some(canonical) = self.exact_lookup.get(&normalized) {
-            return Some(self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0));
+            if let Some(m) = self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0) {
+                return Some(m);
+            }
         }
 
         if let Some(canonical) = self.alias_lookup.get(&normalized) {
-            return Some(self.match_for_name(canonical, MatchKind::ExactAlias, 1.0));
+            if let Some(m) = self.match_for_name(canonical, MatchKind::ExactAlias, 1.0) {
+                return Some(m);
+            }
         }
 
         self.best_fuzzy_match(&normalized)
     }
 
-    fn match_for_name(&self, canonical_name: &str, kind: MatchKind, score: f64) -> GenreMatch {
-        let entry = self
-            .entry(canonical_name)
-            .expect("canonical name must exist in catalog");
+    fn match_for_name(&self, canonical_name: &str, kind: MatchKind, score: f64) -> Option<GenreMatch> {
+        let entry = self.entry(canonical_name)?;
         let primary_path = entry
             .paths
             .iter()
@@ -275,13 +277,13 @@ impl GenreCatalog {
             .cloned()
             .unwrap_or_default();
 
-        GenreMatch {
+        Some(GenreMatch {
             canonical_name: entry.name.clone(),
             kind,
             score,
             primary_path,
             paths: entry.paths.clone(),
-        }
+        })
     }
 
     fn best_fuzzy_match(&self, normalized: &str) -> Option<GenreMatch> {
@@ -322,7 +324,7 @@ impl GenreCatalog {
             }
         }
 
-        Some(self.match_for_name(best_name, MatchKind::Fuzzy, *best_score))
+        self.match_for_name(best_name, MatchKind::Fuzzy, *best_score)
     }
 }
 

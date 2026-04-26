@@ -44,8 +44,10 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
-	import { WALLPAPERS } from '$lib/components/wallpaper/shaders';
+	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import { wallpaper, setWallpaper } from '$lib/stores/wallpaper';
+	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
+	import { palette, setPalette } from '$lib/stores/palette';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -70,6 +72,34 @@
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
+
+	let spotifyConfigured = $state(false);
+	let spotifyClientId = $state('');
+	let spotifyClientSecret = $state('');
+	let spotifySaving = $state(false);
+	let spotifyError = $state('');
+	let spotifyEnrichedCount = $state(0);
+	let spotifyRemaining = $state(0);
+	let spotifyIsRunning = $state(false);
+	let spotifyRunTotal = $state(0);
+	let spotifyRunProcessed = $state(0);
+	const SPOTIFY_BATCH_SIZE = 2000;
+
+	let lastfmConfigured = $state(false);
+	let lastfmApiKey = $state('');
+	let lastfmSaving = $state(false);
+	let lastfmError = $state('');
+	let lastfmEnrichedCount = $state(0);
+	let lastfmRemaining = $state(0);
+	let lastfmIsRunning = $state(false);
+	let lastfmRunTotal = $state(0);
+	let lastfmRunProcessed = $state(0);
+	let lastfmPrefetchTotal = $state(0);
+	let lastfmPrefetchDone = $state(0);
+	let lastfmRunStartedAt = $state(0);
+	// Tick a "now" reference every second so the ETA derivation re-evaluates
+	// while a run is in progress without needing extra status fetches.
+	let nowEpochSeconds = $state(Math.floor(Date.now() / 1000));
 
 	// Access token — initialised in onMount (localStorage unavailable during SSR)
 	let serverToken = $state('');
@@ -137,7 +167,41 @@
 		return count;
 	}
 
+	function formatDuration(seconds: number): string {
+		if (!isFinite(seconds) || seconds <= 0) return '—';
+		const total = Math.round(seconds);
+		const h = Math.floor(total / 3600);
+		const m = Math.floor((total % 3600) / 60);
+		const s = total % 60;
+		if (h > 0) return `${h}h ${m}m`;
+		if (m > 0) return `${m}m ${s}s`;
+		return `${s}s`;
+	}
+
+	// Constant fall-back rate when a run hasn't produced enough samples yet.
+	// Mirrors PER_TRACK_DELAY_MS in services/lastfm/enrichment.rs.
+	const LASTFM_FALLBACK_SECONDS_PER_TRACK = 0.5;
+
+	let lastfmEtaSeconds = $derived.by(() => {
+		const remainingInRun = Math.max(0, lastfmRunTotal - lastfmRunProcessed);
+		if (remainingInRun === 0) return 0;
+		// While running, compute observed rate from elapsed wall time.
+		if (lastfmIsRunning && lastfmRunStartedAt > 0 && lastfmRunProcessed > 0) {
+			const elapsed = Math.max(1, nowEpochSeconds - lastfmRunStartedAt);
+			const secondsPerTrack = elapsed / lastfmRunProcessed;
+			return remainingInRun * secondsPerTrack;
+		}
+		// Pre-run estimate (or post-stop, before fresh status load): use the
+		// total queue (`lastfmRemaining`) and the constant rate.
+		const queue = lastfmIsRunning ? remainingInRun : lastfmRemaining;
+		return queue * LASTFM_FALLBACK_SECONDS_PER_TRACK;
+	});
+	let lastfmEtaLabel = $derived(formatDuration(lastfmEtaSeconds));
+
 	onMount(() => {
+		const tick = setInterval(() => {
+			nowEpochSeconds = Math.floor(Date.now() / 1000);
+		}, 1000);
 		wsUnsubscribe = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
@@ -150,12 +214,27 @@
 				void loadMbStatus();
 				void loadPortableSnapshot();
 				void loadDiscoveryStatus();
+				void loadSpotifyStatus();
+				void loadLastfmStatus();
 			}
 
 			if (latest.type === 'sync_progress' && latest.service === 'musicbrainz') {
 				mbStatus = 'running';
 				mbLiveProgress = typeof latest.progress === 'number' ? latest.progress : mbLiveProgress;
 				void loadMbStatus();
+			}
+
+			if (latest.type === 'sync_progress' && latest.service === 'spotify') {
+				void loadSpotifyStatus();
+			}
+
+			if (latest.type === 'sync_progress' && latest.service === 'lastfm') {
+				void loadLastfmStatus();
+			}
+
+			if (latest.type === 'musicbrainz_enriched' && (spotifyIsRunning || lastfmIsRunning)) {
+				void loadSpotifyStatus();
+				void loadLastfmStatus();
 			}
 
 			if (
@@ -176,11 +255,14 @@
 		void loadAudioStats();
 		void syncAnalysisStatus();
 		void loadAcrCloudStatus();
+		void loadSpotifyStatus();
+		void loadLastfmStatus();
 		serverToken = getStoredToken() ?? '';
 
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
 			if (mbPollTimer) clearInterval(mbPollTimer);
+			clearInterval(tick);
 			wsUnsubscribe?.();
 		};
 	});
@@ -310,6 +392,197 @@
 			}
 			markServerOnline();
 			errorMsg = `Failed to disconnect: ${error}`;
+		}
+	}
+
+	async function loadSpotifyStatus() {
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/spotify/status`);
+			markServerOnline();
+			const data = await resp.json();
+			spotifyConfigured = data.configured === true;
+		} catch (e) {
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+		try {
+			const resp2 = await authFetch(`${getApiBase()}/api/library/enrich/spotify/status`);
+			const data2 = await resp2.json();
+			spotifyEnrichedCount = data2.enriched_tracks ?? 0;
+			spotifyRemaining = data2.remaining_tracks ?? 0;
+			spotifyIsRunning = data2.is_running === true;
+			spotifyRunTotal = data2.run_total ?? 0;
+			spotifyRunProcessed = data2.run_processed ?? 0;
+		} catch {}
+	}
+
+	async function saveSpotifyConfig() {
+		spotifySaving = true;
+		spotifyError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/spotify/config`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					client_id: spotifyClientId,
+					client_secret: spotifyClientSecret
+				})
+			});
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'ok') {
+				spotifyConfigured = true;
+				spotifyClientId = '';
+				spotifyClientSecret = '';
+			} else {
+				spotifyError = data.message ?? 'Failed to save Spotify credentials.';
+			}
+		} catch (e) {
+			spotifyError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		} finally {
+			spotifySaving = false;
+		}
+	}
+
+	async function clearSpotifyConfig() {
+		try {
+			await authFetch(`${getApiBase()}/api/spotify/config`, { method: 'DELETE' });
+			markServerOnline();
+		} catch {}
+		spotifyConfigured = false;
+		spotifyError = '';
+	}
+
+	async function startSpotifyEnrichment() {
+		spotifyError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify`, { method: 'POST' });
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'error') {
+				spotifyError = data.message ?? 'Spotify enrichment failed.';
+			}
+			await loadSpotifyStatus();
+		} catch (e) {
+			spotifyError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+	}
+
+	async function resetSpotifyEnrichment() {
+		if (!confirm('Clear all Spotify check markers and tags? Tracks will be re-queried on the next run.')) return;
+		spotifyError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/library/enrich/spotify/reset`, { method: 'POST' });
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'error') {
+				spotifyError = data.message ?? 'Reset failed.';
+			}
+			await loadSpotifyStatus();
+		} catch (e) {
+			spotifyError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+	}
+
+	async function loadLastfmStatus() {
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/lastfm/status`);
+			markServerOnline();
+			const data = await resp.json();
+			lastfmConfigured = data.configured === true;
+		} catch (e) {
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+		try {
+			const resp2 = await authFetch(`${getApiBase()}/api/library/enrich/lastfm/status`);
+			const data2 = await resp2.json();
+			lastfmEnrichedCount = data2.enriched_tracks ?? 0;
+			lastfmRemaining = data2.remaining_tracks ?? 0;
+			lastfmIsRunning = data2.is_running === true;
+			lastfmRunTotal = data2.run_total ?? 0;
+			lastfmRunProcessed = data2.run_processed ?? 0;
+			lastfmPrefetchTotal = data2.prefetch_total ?? 0;
+			lastfmPrefetchDone = data2.prefetch_done ?? 0;
+			lastfmRunStartedAt = data2.run_started_at ?? 0;
+		} catch {}
+	}
+
+	async function saveLastfmConfig() {
+		lastfmSaving = true;
+		lastfmError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/lastfm/config`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ api_key: lastfmApiKey })
+			});
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'ok') {
+				lastfmConfigured = true;
+				lastfmApiKey = '';
+			} else {
+				lastfmError = data.message ?? 'Failed to save Last.fm API key.';
+			}
+		} catch (e) {
+			lastfmError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		} finally {
+			lastfmSaving = false;
+		}
+	}
+
+	async function clearLastfmConfig() {
+		try {
+			await authFetch(`${getApiBase()}/api/lastfm/config`, { method: 'DELETE' });
+			markServerOnline();
+		} catch {}
+		lastfmConfigured = false;
+		lastfmError = '';
+	}
+
+	async function startLastfmEnrichment() {
+		lastfmError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/library/enrich/lastfm`, { method: 'POST' });
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'error') {
+				lastfmError = data.message ?? 'Last.fm enrichment failed.';
+			}
+			await loadLastfmStatus();
+		} catch (e) {
+			lastfmError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+	}
+
+	async function stopLastfmEnrichment() {
+		try {
+			await authFetch(`${getApiBase()}/api/library/enrich/lastfm/stop`, { method: 'POST' });
+			markServerOnline();
+			await loadLastfmStatus();
+		} catch (e) {
+			if (isFetchConnectionError(e)) markServerOffline();
+		}
+	}
+
+	async function resetLastfmEnrichment() {
+		if (!confirm('Clear all Last.fm check markers and tags? Tracks will be re-queried on the next run.')) return;
+		lastfmError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/library/enrich/lastfm/reset`, { method: 'POST' });
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'error') {
+				lastfmError = data.message ?? 'Reset failed.';
+			}
+			await loadLastfmStatus();
+		} catch (e) {
+			lastfmError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
 		}
 	}
 
@@ -541,6 +814,23 @@
 	// belongs to exactly one category; empty columns are hidden by CSS.
 	type SettingsCategory = 'appearance' | 'sources' | 'discovery' | 'audio' | 'data' | 'account';
 	let activeCategory = $state<SettingsCategory>('appearance');
+	// Single shared preview — shader prop changes reuse the same GL context,
+	// avoiding WebGL context churn from per-tile mount/unmount cycles.
+	let previewShader = $state<string | null>(null);
+	let previewTileId = $state<string | null>(null);
+	let previewUnmountTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function onTileEnter(option: WallpaperOption) {
+		if (previewUnmountTimer) { clearTimeout(previewUnmountTimer); previewUnmountTimer = null; }
+		previewShader = option.shader;
+		previewTileId = option.id;
+	}
+	function onTileLeave() {
+		previewUnmountTimer = setTimeout(() => {
+			previewShader = null;
+			previewTileId = null;
+		}, 1200);
+	}
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
@@ -550,6 +840,18 @@
 		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
 	];
+
+	function rgbCss(c: [number, number, number]): string {
+		return `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`;
+	}
+
+	let activePalette = $derived(PALETTES.find((p) => p.id === $palette) ?? PALETTES[0]);
+	let activeSwatches = $derived([
+		activePalette.shader.c1,
+		activePalette.shader.c2,
+		activePalette.shader.c3,
+		activePalette.shader.c4
+	]);
 </script>
 
 <svelte:head>
@@ -601,29 +903,64 @@
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Pick an animated shader for the app backdrop, or keep the default gradient. Move your cursor over any tile — they're interactive." />
+				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="Coordinated palette — drives both the UI accent and the wallpaper colours." />
+				<div class="palette-row">
+					<select
+						class="palette-select"
+						value={$palette}
+						onchange={(e) => setPalette((e.currentTarget as HTMLSelectElement).value as PaletteId)}
+					>
+						{#each PALETTES as p (p.id)}
+							<option value={p.id}>{p.label} — {p.sublabel}</option>
+						{/each}
+					</select>
+					<div class="palette-swatches" aria-hidden="true">
+						{#each activeSwatches as c, i (i)}
+							<span class="palette-swatch" style={`background: ${rgbCss(c)}`}></span>
+						{/each}
+					</div>
+				</div>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Hover a tile to preview the shader, then click to apply." />
+
+				<div class="wallpaper-big-preview">
+					{#if previewShader}
+						<ShaderWallpaper shader={previewShader} maxDpr={1} interactive={true} />
+					{:else if !previewShader && $wallpaper !== 'none'}
+						<div class="wallpaper-big-preview-hint">
+							<span>Hover a tile to preview</span>
+						</div>
+					{:else}
+						<div class="wallpaper-big-preview-hint">
+							<span>Hover a tile to preview</span>
+						</div>
+					{/if}
+				</div>
+
 				<div class="wallpaper-grid">
 					{#each WALLPAPERS as option (option.id)}
 						<button
 							type="button"
 							class="wallpaper-tile"
 							class:active={$wallpaper === option.id}
+							class:previewing={previewTileId === option.id}
 							onclick={() => setWallpaper(option.id)}
 							aria-pressed={$wallpaper === option.id}
+							onpointerenter={() => onTileEnter(option)}
+							onpointerleave={onTileLeave}
 						>
-							<div class="wallpaper-preview">
-								{#if option.shader}
-									<ShaderWallpaper shader={option.shader} maxDpr={1} interactive={true} />
-								{:else}
-									<div class="wallpaper-preview-none"></div>
-								{/if}
+							{#if !option.shader}
+								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-none"></div>
+							{:else}
+								<div class="wallpaper-tile-swatch"></div>
+							{/if}
+							<div class="wallpaper-tile-label">
+								<strong>{option.label}</strong>
 								{#if $wallpaper === option.id}
 									<span class="wallpaper-active-badge">Active</span>
 								{/if}
-							</div>
-							<div class="wallpaper-meta">
-								<strong>{option.label}</strong>
-								<span>{option.sublabel}</span>
 							</div>
 						</button>
 					{/each}
@@ -766,6 +1103,106 @@
 				</div>
 				{#if galaxyRefreshLabel}
 					<p class="galaxy-refresh-label">{galaxyRefreshLabel}</p>
+				{/if}
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Metadata" title="Spotify genre enrichment" subtitle="Spotify locked their Web API behind a Premium subscription in late 2024. Free Developer accounts now get 403 Forbidden on every request, so this source is unavailable until the policy changes." />
+				<p class="page-copy">
+					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
+				</p>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Metadata" title="Last.fm tag enrichment" subtitle="Pull crowd-sourced genre tags from Last.fm. Register at last.fm/api/account/create for a free API key, paste it below — stored only on this machine." />
+
+				{#if lastfmError}
+					<p class="page-copy" style="color: var(--color-error, #f87171)">{lastfmError}</p>
+				{/if}
+
+				{#if !lastfmConfigured}
+					<div class="info-list">
+						<div class="info-row">
+							<span>API Key</span>
+							<input
+								type="password"
+								class="text-input"
+								bind:value={lastfmApiKey}
+								placeholder="32-character hex string"
+								autocomplete="off"
+							/>
+						</div>
+					</div>
+					<div class="action-row">
+						<button
+							class="btn btn-primary"
+							onclick={saveLastfmConfig}
+							disabled={lastfmSaving || !lastfmApiKey}
+						>
+							{lastfmSaving ? 'Verifying…' : 'Save API key'}
+						</button>
+					</div>
+				{:else}
+					<div class="stat-grid inner-metrics">
+						<MetricPair label="Tagged" value={lastfmEnrichedCount.toLocaleString()} copy="Tracks with Last.fm tag coverage." />
+						<MetricPair
+							label="Remaining"
+							value={lastfmRemaining.toLocaleString()}
+							copy="Favorited tracks still pending Last.fm lookup. Last.fm allows ~5 req/sec — full pass takes ~30 min per 10k tracks."
+						/>
+					</div>
+
+					<div class="enrichment-progress">
+						<div class="enrichment-progress-copy">
+							<p>
+								{#if lastfmIsRunning && lastfmPrefetchTotal > 0 && lastfmPrefetchDone < lastfmPrefetchTotal}
+									Pre-fetching artist tags… {lastfmPrefetchDone.toLocaleString()} / {lastfmPrefetchTotal.toLocaleString()} artists. Track pass starts after.
+								{:else if lastfmIsRunning && lastfmRunTotal > 0}
+									Querying Last.fm… {lastfmRemaining.toLocaleString()} tracks remaining (~{lastfmEtaLabel} left).
+								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmEnrichedCount > 0}
+									Enrichment finished. {lastfmEnrichedCount.toLocaleString()} tracks tagged.
+								{:else if !lastfmIsRunning && lastfmRemaining > 0}
+									{lastfmRemaining.toLocaleString()} favorited tracks pending — full pass ~{lastfmEtaLabel}. Click Enrich to start; runs in the background even if you close this tab.
+								{:else}
+									No tracks pending Last.fm enrichment.
+								{/if}
+							</p>
+							<span>
+								{#if lastfmIsRunning && lastfmPrefetchTotal > 0 && lastfmPrefetchDone < lastfmPrefetchTotal}
+									{Math.round((lastfmPrefetchDone / lastfmPrefetchTotal) * 100)}% artists cached
+								{:else if lastfmIsRunning && lastfmRunTotal > 0}
+									{lastfmRunProcessed.toLocaleString()} / {lastfmRunTotal.toLocaleString()} this run
+								{/if}
+							</span>
+						</div>
+						<div class="enrichment-progress-rail" aria-hidden="true">
+							<div
+								class="enrichment-progress-fill"
+								style={`width: ${
+									lastfmIsRunning && lastfmPrefetchTotal > 0 && lastfmPrefetchDone < lastfmPrefetchTotal
+										? Math.round((lastfmPrefetchDone / lastfmPrefetchTotal) * 100)
+										: lastfmRunTotal > 0
+											? Math.round((lastfmRunProcessed / lastfmRunTotal) * 100)
+											: 0
+								}%`}
+							></div>
+						</div>
+					</div>
+
+					<div class="action-row">
+						<button
+							class="btn btn-primary"
+							onclick={startLastfmEnrichment}
+							disabled={lastfmIsRunning || lastfmRemaining === 0}
+						>
+							{lastfmIsRunning ? 'Running…' : lastfmRemaining === 0 ? 'All enriched' : 'Enrich genres'}
+						</button>
+						{#if lastfmIsRunning}
+							<button class="btn btn-glass" onclick={stopLastfmEnrichment}>Stop</button>
+						{/if}
+						<button class="btn btn-glass" onclick={resetLastfmEnrichment} disabled={lastfmIsRunning}>Reset checked state</button>
+						<button class="btn btn-glass" onclick={clearLastfmConfig} disabled={lastfmIsRunning}>Clear API key</button>
+					</div>
 				{/if}
 			</section>
 			{/if}
@@ -1072,82 +1509,132 @@
 		text-overflow: ellipsis;
 	}
 
+	.palette-row {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		flex-wrap: wrap;
+	}
+
+	.palette-select {
+		flex: 1;
+		min-width: 220px;
+	}
+
+	.palette-swatches {
+		display: flex;
+		gap: 6px;
+	}
+
+	.palette-swatch {
+		width: 22px;
+		height: 22px;
+		border-radius: 999px;
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3) inset;
+	}
+
+	/* ── Shared preview panel ── */
+	.wallpaper-big-preview {
+		position: relative;
+		aspect-ratio: 16 / 7;
+		border-radius: 14px;
+		overflow: hidden;
+		background: #08080c;
+		border: 1px solid rgba(255, 255, 255, 0.07);
+	}
+
+	.wallpaper-big-preview-hint {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.wallpaper-big-preview-hint span {
+		font-size: 0.72rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: rgba(255, 255, 255, 0.20);
+	}
+
+	/* ── Tile grid ── */
 	.wallpaper-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-		gap: 14px;
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+		gap: 8px;
 	}
 
 	.wallpaper-tile {
 		all: unset;
 		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 6px;
-		border-radius: 14px;
+		align-items: center;
+		gap: 10px;
+		padding: 9px 10px;
+		border-radius: 10px;
 		border: 1px solid rgba(255, 255, 255, 0.06);
 		background: rgba(255, 255, 255, 0.02);
 		cursor: pointer;
-		transition: border-color 180ms ease, background 180ms ease;
+		transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 	}
 
-	.wallpaper-tile:hover {
-		border-color: rgba(255, 255, 255, 0.16);
-		background: rgba(255, 255, 255, 0.04);
+	.wallpaper-tile:hover,
+	.wallpaper-tile.previewing {
+		border-color: rgba(255, 255, 255, 0.18);
+		background: rgba(255, 255, 255, 0.05);
 	}
 
 	.wallpaper-tile.active {
-		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 65%, transparent);
-		background: color-mix(in srgb, var(--accent-strong, #6366f1) 10%, transparent);
+		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 70%, transparent);
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 12%, transparent);
+		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #6366f1) 30%, transparent) inset;
 	}
 
-	.wallpaper-preview {
-		position: relative;
-		aspect-ratio: 16 / 10;
-		border-radius: 10px;
-		overflow: hidden;
-		background: #0a0a0c;
+	.wallpaper-tile-swatch {
+		flex-shrink: 0;
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		background: linear-gradient(135deg,
+			color-mix(in srgb, var(--accent, #7c80ff) 60%, #0a0a14),
+			color-mix(in srgb, var(--accent, #7c80ff) 20%, #050508));
+		border: 1px solid rgba(255, 255, 255, 0.08);
 	}
 
-	.wallpaper-preview-none {
-		position: absolute;
-		inset: 0;
+	.wallpaper-tile-swatch-none {
 		background:
-			radial-gradient(circle at 20% 18%, rgba(151, 126, 255, 0.4), transparent 50%),
-			radial-gradient(circle at 80% 28%, rgba(120, 160, 255, 0.3), transparent 45%),
-			radial-gradient(circle at 60% 80%, rgba(255, 120, 180, 0.25), transparent 55%),
-			#0a0a0c;
+			radial-gradient(circle at 30% 30%, rgba(151, 126, 255, 0.35), transparent 60%),
+			radial-gradient(circle at 70% 70%, rgba(120, 160, 255, 0.25), transparent 60%),
+			#0a0a0e;
+	}
+
+	.wallpaper-tile-label {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.wallpaper-tile-label strong {
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.wallpaper-active-badge {
-		position: absolute;
-		top: 8px;
-		right: 8px;
-		padding: 3px 8px;
+		display: inline-block;
+		padding: 1px 6px;
 		border-radius: 999px;
 		background: color-mix(in srgb, var(--accent-strong, #6366f1) 90%, transparent);
 		color: white;
-		font-size: 0.68rem;
-		font-weight: 600;
-		letter-spacing: 0.04em;
+		font-size: 0.60rem;
+		font-weight: 700;
+		letter-spacing: 0.05em;
 		text-transform: uppercase;
-	}
-
-	.wallpaper-meta {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		padding: 4px 6px 6px;
-	}
-
-	.wallpaper-meta strong {
-		font-size: 0.92rem;
-		color: var(--text-primary);
-	}
-
-	.wallpaper-meta span {
-		font-size: 0.76rem;
-		color: var(--text-secondary);
+		width: fit-content;
 	}
 
 	.section-panel {

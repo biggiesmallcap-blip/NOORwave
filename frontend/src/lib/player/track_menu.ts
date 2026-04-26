@@ -112,7 +112,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	items.push({
 		label: track.is_favorite ? 'Remove from favourites' : 'Add to favourites',
 		icon: track.is_favorite ? '♥' : '♡',
-		onSelect: () => void toggleTrackFavorite(track.id)
+		onSelect: () => void toggleTrackFavorite(track.id, track.is_favorite ?? false)
 	});
 
 	if (options.queueItemId != null) {

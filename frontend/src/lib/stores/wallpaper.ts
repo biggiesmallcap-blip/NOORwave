@@ -2,7 +2,9 @@ import { writable } from 'svelte/store';
 import type { WallpaperId } from '$lib/components/wallpaper/shaders';
 
 const STORAGE_KEY = 'noor-wallpaper';
-const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo'];
+const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
+                               'topo-noir', 'aurora-deep', 'chrome-brushed',
+                               'zen', 'galaxy'];
 
 function readInitial(): WallpaperId {
 	if (typeof localStorage === 'undefined') return 'none';

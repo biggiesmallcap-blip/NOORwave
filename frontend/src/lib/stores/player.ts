@@ -53,20 +53,27 @@ export const automixUseLearning = writable(true);
 export const automixAllowExternal = writable(false);
 
 // ─── Client-side position ticker ──────────────────────────────────────────────
-// Increments position every second while playing so the progress bar moves
-// without polling the server. Position is re-synced from the server on every
-// WebSocket playback event.
+// Uses performance.now() timestamps instead of counting ticks so that browsers
+// throttling setInterval in hidden tabs doesn't cause drift — the position is
+// always computed as (last-synced value) + (actual elapsed wall-clock time).
 let _positionTicker: ReturnType<typeof setInterval> | null = null;
+let _tickerBasePosition = 0;   // position_ms at the last server sync or start
+let _tickerBaseTime = 0;       // performance.now() at that sync point
+
+export function anchorPositionTicker(positionMs: number) {
+	_tickerBasePosition = positionMs;
+	_tickerBaseTime = performance.now();
+}
 
 function startPositionTicker() {
 	if (_positionTicker !== null) return;
+	_tickerBaseTime = performance.now();
 	_positionTicker = setInterval(() => {
-		position.update((p) => {
-			const track = get(currentTrack);
-			if (!track?.duration_ms) return p;
-			return Math.min(p + 1000, track.duration_ms);
-		});
-	}, 1000);
+		const track = get(currentTrack);
+		if (!track?.duration_ms) return;
+		const elapsed = performance.now() - _tickerBaseTime;
+		position.set(Math.min(_tickerBasePosition + elapsed, track.duration_ms));
+	}, 250);
 }
 
 function stopPositionTicker() {
@@ -97,6 +104,7 @@ function applyState(state: PlaybackState) {
 	currentTrack.set(state.current_track);
 	isPlaying.set(state.is_playing);
 	position.set(state.position_ms);
+	anchorPositionTicker(state.position_ms);
 	volume.set(state.volume);
 	shuffleMode.set(state.shuffle_mode);
 	repeatMode.set(state.repeat_mode);
@@ -328,13 +336,17 @@ export function setTrackFavoriteStatus(trackId: number, favorite: boolean) {
 	);
 }
 
-export async function toggleTrackFavorite(trackId: number) {
-	const current = get(currentTrack);
-	const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
-	const activeTrack = current?.id === trackId ? current : queued;
-	if (!activeTrack) return;
-
-	const nextFavorite = !activeTrack.is_favorite;
+export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: boolean) {
+	let nextFavorite: boolean;
+	if (currentIsFavorite !== undefined) {
+		nextFavorite = !currentIsFavorite;
+	} else {
+		const current = get(currentTrack);
+		const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
+		const activeTrack = current?.id === trackId ? current : queued;
+		if (!activeTrack) return;
+		nextFavorite = !activeTrack.is_favorite;
+	}
 
 	try {
 		await api.setTrackFavorite(trackId, nextFavorite);

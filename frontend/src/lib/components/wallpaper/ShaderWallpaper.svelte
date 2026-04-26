@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { palette } from '$lib/stores/palette';
+	import { DEFAULT_PALETTE, paletteById, type PaletteId } from '$lib/components/wallpaper/palettes';
 
 	type Props = {
 		shader: string;
@@ -25,6 +27,10 @@ uniform float u_clickTime;
 uniform vec2 u_clickPos;
 uniform vec3 u_clicks[8];
 uniform int u_clickCount;
+uniform vec3 u_color1;
+uniform vec3 u_color2;
+uniform vec3 u_color3;
+uniform vec3 u_color4;
 `;
 
 	function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -40,9 +46,29 @@ uniform int u_clickCount;
 	}
 
 	onMount(() => {
+		console.log('[ShaderWallpaper] mount, interactive=', interactive);
 		const gl = canvas.getContext('webgl', { premultipliedAlpha: false, antialias: true });
 		if (!gl) return;
 		gl.getExtension('OES_standard_derivatives');
+
+		const onContextLost = (e: Event) => {
+			e.preventDefault();
+			console.warn('[ShaderWallpaper] WebGL context LOST');
+		};
+		const onContextRestored = () => {
+			console.log('[ShaderWallpaper] WebGL context restored — re-setting up program');
+			gl!.getExtension('OES_standard_derivatives');
+			prog = null;
+			buf = null;
+			setupProgram(shader);
+		};
+		canvas.addEventListener('webglcontextlost', onContextLost);
+		canvas.addEventListener('webglcontextrestored', onContextRestored);
+
+		let currentPalette: PaletteId = DEFAULT_PALETTE;
+		const unsubPalette = palette.subscribe((v) => {
+			currentPalette = v;
+		});
 
 		let prog: WebGLProgram | null = null;
 		let buf: WebGLBuffer | null = null;
@@ -54,6 +80,10 @@ uniform int u_clickCount;
 		let uClickPos: WebGLUniformLocation | null = null;
 		let uClicks: WebGLUniformLocation | null = null;
 		let uClickCount: WebGLUniformLocation | null = null;
+		let uColor1: WebGLUniformLocation | null = null;
+		let uColor2: WebGLUniformLocation | null = null;
+		let uColor3: WebGLUniformLocation | null = null;
+		let uColor4: WebGLUniformLocation | null = null;
 
 		function setupProgram(fragSrc: string) {
 			if (prog) gl!.deleteProgram(prog);
@@ -92,6 +122,10 @@ uniform int u_clickCount;
 			uClickPos = gl!.getUniformLocation(prog, 'u_clickPos');
 			uClicks = gl!.getUniformLocation(prog, 'u_clicks');
 			uClickCount = gl!.getUniformLocation(prog, 'u_clickCount');
+			uColor1 = gl!.getUniformLocation(prog, 'u_color1');
+			uColor2 = gl!.getUniformLocation(prog, 'u_color2');
+			uColor3 = gl!.getUniformLocation(prog, 'u_color3');
+			uColor4 = gl!.getUniformLocation(prog, 'u_color4');
 		}
 
 		setupProgram(shader);
@@ -192,6 +226,12 @@ uniform int u_clickCount;
 			gl!.uniform3fv(uClicks!, flat);
 			gl!.uniform1i(uClickCount!, ccount);
 
+			const pal = paletteById(currentPalette).shader;
+			gl!.uniform3f(uColor1!, pal.c1[0], pal.c1[1], pal.c1[2]);
+			gl!.uniform3f(uColor2!, pal.c2[0], pal.c2[1], pal.c2[2]);
+			gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
+			gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
+
 			gl!.drawArrays(gl!.TRIANGLES, 0, 6);
 		};
 		loop();
@@ -216,9 +256,13 @@ uniform int u_clickCount;
 		});
 
 		return () => {
+			console.log('[ShaderWallpaper] unmount, interactive=', interactive);
 			running = false;
 			cancelAnimationFrame(raf);
 			ro.disconnect();
+			unsubPalette();
+			canvas.removeEventListener('webglcontextlost', onContextLost);
+			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);
 			if (interactive) {
 				host.removeEventListener('pointermove', onMove);

@@ -23,10 +23,19 @@ impl LastFmClient {
         if api_key.is_empty() {
             return None;
         }
-        Some(Self {
-            http,
-            api_key: api_key.to_string(),
-        })
+        Some(Self::new(http, api_key.to_string()))
+    }
+
+    pub fn new(http: reqwest::Client, api_key: String) -> Self {
+        Self { http, api_key }
+    }
+
+    pub async fn artist_top_tags(&self, artist: &str) -> anyhow::Result<Vec<String>> {
+        self.artist_tags(artist).await
+    }
+
+    pub async fn track_top_tags(&self, artist: &str, track: &str) -> anyhow::Result<Vec<String>> {
+        self.track_tags(artist, track).await
     }
 
     pub async fn connection_queries(&self, seed: &DiscoveryCandidateSeed) -> Result<Vec<String>> {

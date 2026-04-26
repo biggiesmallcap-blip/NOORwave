@@ -52,7 +52,11 @@ pub enum StreamCodec {
 impl StreamInfo {
     pub fn codec_kind(&self) -> StreamCodec {
         match self.codec.to_ascii_lowercase().as_str() {
-            "audio/flac" | "flac" => StreamCodec::Flac,
+            // TIDAL's "Broadcast Transport Stream" is a manifest wrapper around
+            // FLAC for LOSSLESS / HI_RES_LOSSLESS quality. Symphonia decodes the
+            // inner FLAC, and the underlying audio supports gapless seeks the
+            // same way raw FLAC does — so treat it as FLAC for gapless gating.
+            "audio/flac" | "flac" | "application/vnd.tidal.bts" => StreamCodec::Flac,
             "audio/aac" | "aac" | "audio/mp4" | "audio/m4a" => StreamCodec::Aac,
             "audio/mpeg" | "audio/mp3" | "mp3" => StreamCodec::Mp3,
             "audio/ogg" | "ogg" => StreamCodec::Ogg,

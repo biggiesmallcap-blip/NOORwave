@@ -21,8 +21,12 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tracing::{error, info, warn};
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
-/// How many milliseconds before track end we emit `NearEnd` and start pre-decoding the next track.
-const NEAR_END_THRESHOLD_MS: i64 = 15_000;
+/// How many milliseconds before track end we emit `NearEnd` and start pre-decoding
+/// the next track. Must be comfortably larger than the worst-case decoder setup
+/// latency (TIDAL stream resolve + HTTP connect + Symphonia probe), which can be
+/// 5-10 s on a cold connection. 30 s gives the next track time to produce audible
+/// samples before the crossfade window opens, even on a slow link.
+const NEAR_END_THRESHOLD_MS: i64 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct PlaybackRuntimeConfig {
@@ -122,9 +126,10 @@ pub struct PlaybackRuntimeHandle {
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     /// f32 volume (0.0–1.0) stored as its bit-pattern in a u32.
     volume_ctl: Arc<AtomicU32>,
-    /// Number of interleaved samples drained by the CPAL callback for the current track.
-    /// Reset to 0 whenever a new engine starts.
-    position_samples: Arc<AtomicU64>,
+    /// Redirectable position reader. Normally points to the active engine's
+    /// position counter. Swapped at crossfade promotion so the handle always
+    /// reads from the engine that's audibly current, not the fading-out one.
+    position_source: Arc<Mutex<Arc<AtomicU64>>>,
 }
 
 impl PlaybackRuntimeHandle {
@@ -177,7 +182,11 @@ impl PlaybackRuntimeHandle {
         if device_sample_rate == 0 || device_channels == 0 {
             return 0;
         }
-        let samples = self.position_samples.load(Ordering::Relaxed);
+        let samples = self
+            .position_source
+            .lock()
+            .unwrap()
+            .load(Ordering::Relaxed);
         (samples * 1000 / (device_sample_rate as u64 * device_channels as u64)) as i64
     }
 
@@ -195,10 +204,15 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let worker_command_tx = command_tx.clone();
 
     let volume_ctl = Arc::new(AtomicU32::new(1.0f32.to_bits())); // default: full volume
-    let position_samples = Arc::new(AtomicU64::new(0));
+    // `initial_position` is the counter cold-start engines write into.
+    // `position_source` wraps it in a Mutex so promote_next_to_active can
+    // redirect the handle to the promoted engine's private counter instead.
+    let initial_position = Arc::new(AtomicU64::new(0));
+    let position_source = Arc::new(Mutex::new(Arc::clone(&initial_position)));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
-    let worker_position_samples = Arc::clone(&position_samples);
+    let worker_initial_position = Arc::clone(&initial_position);
+    let worker_position_source = Arc::clone(&position_source);
 
     thread::Builder::new()
         .name("noor-playback-runtime".into())
@@ -209,7 +223,8 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_command_tx,
                 worker_event_tx.clone(),
                 worker_volume_ctl,
-                worker_position_samples,
+                worker_initial_position,
+                worker_position_source,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
                     message: err.to_string(),
@@ -223,7 +238,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         command_tx,
         event_tx,
         volume_ctl,
-        position_samples,
+        position_source,
     })
 }
 
@@ -231,9 +246,18 @@ struct PlaybackRuntimeLoopState {
     device_name: String,
     device_sample_rate: u32,
     device_channels: u16,
+    /// Currently-audible "primary" engine. After a crossfade swap this is the
+    /// incoming track; before any swap it's whatever was last started.
     engine: Option<PlaybackEngine>,
-    /// Pre-decoded engine for the next track. Swapped in at `Finished` for zero-gap playback.
+    /// Pre-decoded engine for the next track, paused until the crossfade
+    /// window opens. Once unpaused it gets promoted to `engine` and the old
+    /// `engine` slides into `fading_out_engine`.
     next_engine: Option<PlaybackEngine>,
+    /// Engine that's still audible during the crossfade fade-out window. It
+    /// keeps producing audio (with a fade-out gain ramp) until its buffer
+    /// drains, at which point it self-terminates and we drop it silently —
+    /// the queue advance has already happened at swap time.
+    fading_out_engine: Option<PlaybackEngine>,
 }
 
 fn run_runtime_loop(
@@ -243,6 +267,7 @@ fn run_runtime_loop(
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     volume_ctl: Arc<AtomicU32>,
     position_samples: Arc<AtomicU64>,
+    position_source: Arc<Mutex<Arc<AtomicU64>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let device = host
@@ -263,6 +288,7 @@ fn run_runtime_loop(
         device_channels: output_config.channels,
         engine: None,
         next_engine: None,
+        fading_out_engine: None,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -290,6 +316,7 @@ fn run_runtime_loop(
                     job,
                     &volume_ctl,
                     &position_samples,
+                    &position_source,
                 )?;
             }
             PlaybackRuntimeCommand::Switch(job) => {
@@ -304,6 +331,7 @@ fn run_runtime_loop(
                     job,
                     &volume_ctl,
                     &position_samples,
+                    &position_source,
                 )?;
             }
             PlaybackRuntimeCommand::Seek(position_ms) => {
@@ -317,14 +345,14 @@ fn run_runtime_loop(
                         .shared
                         .seek_target_samples
                         .store(target_samples, Ordering::Relaxed);
-                    // Immediately mirror the position in both the engine's counter and the
-                    // handle's counter so get_position_ms() is correct before the CPAL
-                    // callback runs (which may be up to one buffer period later).
+                    // Mirror into the engine's counter immediately so get_position_ms()
+                    // is correct before the CPAL callback runs (up to one buffer period later).
+                    // position_source always points to this engine's counter, so no
+                    // separate handle-counter write is needed.
                     engine
                         .shared
                         .position_samples
                         .store(target_samples, Ordering::Relaxed);
-                    position_samples.store(target_samples, Ordering::Relaxed);
                     // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
                     // if the user seeks backward past those thresholds.
                     engine
@@ -376,50 +404,52 @@ fn run_runtime_loop(
                 }
             }
             PlaybackRuntimeCommand::CrossfadeStart { track_id } => {
-                // Only act if this event belongs to the currently playing engine.
+                // The OUTGOING engine just entered its fade-out window and is asking
+                // us to start the pre-decoded next engine, if one is ready.
                 if state.engine.as_ref().map(|e| e.track_id) == Some(track_id) {
-                    if let Some(ref next) = state.next_engine {
-                        let is_decoded = next
-                            .shared
-                            .buffer
-                            .lock()
-                            .map(|g| g.finished)
-                            .unwrap_or(false);
-                        if is_decoded {
-                            // Unpause the next engine so it plays independently.
-                            // Both streams will mix naturally via the OS mixer.
-                            next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
-                            next.shared.paused.store(false, Ordering::SeqCst);
-                        }
-                        // If not decoded yet, NextDecodeComplete will start it.
+                    let next_ready = state
+                        .next_engine
+                        .as_ref()
+                        .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
+                        .unwrap_or(false);
+                    if next_ready {
+                        promote_next_to_active(&mut state, &event_tx, &position_source);
                     }
+                    // If not ready yet, NextDecodeComplete handles the late path.
                 }
             }
             PlaybackRuntimeCommand::NextDecodeComplete { track_id } => {
-                // If the crossfade window is already open for the current engine, start the
-                // next engine now that it has finished decoding.
-                if let Some(ref next) = state.next_engine {
-                    if next.track_id == track_id {
-                        let crossfade_started = state
-                            .engine
-                            .as_ref()
-                            .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
-                            .unwrap_or(false);
-                        if crossfade_started {
-                            // Unpause the next engine so it plays independently.
-                            // Both streams will mix naturally via the OS mixer.
-                            next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
-                            next.shared.paused.store(false, Ordering::SeqCst);
-                        }
+                // Decode for the pre-decoded next engine completed. If the outgoing
+                // engine has already entered the crossfade window, promote now —
+                // the user will hear a clipped fade-in, but it's better than silence.
+                let pending_match = state
+                    .next_engine
+                    .as_ref()
+                    .map(|e| e.track_id == track_id)
+                    .unwrap_or(false);
+                if pending_match {
+                    let crossfade_started = state
+                        .engine
+                        .as_ref()
+                        .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
+                        .unwrap_or(false);
+                    if crossfade_started {
+                        promote_next_to_active(&mut state, &event_tx, &position_source);
                     }
                 }
             }
             PlaybackRuntimeCommand::Pause => {
+                // Pause the active engine AND the fading-out engine (if any), so
+                // pressing pause during a crossfade actually stops all audio. The
+                // pre-decoded next engine is already paused so we don't touch it.
                 if let Some(engine) = state.engine.as_mut() {
                     engine.pause()?;
                     let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
                         track_id: Some(engine.track_id),
                     });
+                }
+                if let Some(engine) = state.fading_out_engine.as_mut() {
+                    engine.pause()?;
                 }
             }
             PlaybackRuntimeCommand::Resume => {
@@ -429,29 +459,45 @@ fn run_runtime_loop(
                         track_id: Some(engine.track_id),
                     });
                 }
+                if let Some(engine) = state.fading_out_engine.as_mut() {
+                    engine.resume()?;
+                }
             }
             PlaybackRuntimeCommand::Stop => {
                 stop_all_engines(&mut state);
                 let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
             }
             PlaybackRuntimeCommand::TrackTerminal { track_id, outcome } => {
-                if handle_terminal_event(
-                    state.engine.as_ref().map(|engine| engine.track_id),
-                    track_id,
-                ) {
-                    stop_current_engine(&mut state);
-                    match outcome {
-                        PlaybackTerminalReason::Finished => {
-                            let _ = event_tx.send(PlaybackRuntimeEvent::Finished { track_id });
-                        }
-                        PlaybackTerminalReason::Error(message) => {
-                            let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+                // The fading-out engine reaching its terminal state is the
+                // expected end of a crossfade — drop it silently. The queue
+                // advance already happened at promotion time via Finished.
+                let fading = state
+                    .fading_out_engine
+                    .as_ref()
+                    .map(|e| e.track_id);
+                if fading == Some(track_id) {
+                    if let Some(mut engine) = state.fading_out_engine.take() {
+                        engine.stop();
+                    }
+                } else {
+                    let active = state.engine.as_ref().map(|engine| engine.track_id);
+                    if handle_terminal_event(active, track_id) {
+                        stop_current_engine(&mut state);
+                        match outcome {
+                            PlaybackTerminalReason::Finished => {
+                                let _ = event_tx
+                                    .send(PlaybackRuntimeEvent::Finished { track_id });
+                            }
+                            PlaybackTerminalReason::Error(message) => {
+                                let _ = event_tx
+                                    .send(PlaybackRuntimeEvent::Error { message });
+                            }
                         }
                     }
                 }
             }
             PlaybackRuntimeCommand::Shutdown => {
-                stop_current_engine(&mut state);
+                stop_all_engines(&mut state);
                 break;
             }
         }
@@ -471,8 +517,26 @@ fn transition_to_job(
     job: PreparedPlaybackJob,
     volume_ctl: &Arc<AtomicU32>,
     position_samples: &Arc<AtomicU64>,
+    position_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) -> Result<()> {
+    // No-op when state.engine is already playing the requested track. This
+    // happens after a crossfade swap: promote_next_to_active emitted Finished
+    // for the OUTGOING track, which caused routes to call switch_to(NEW track)
+    // — but we already promoted that engine. Re-doing the swap would tear down
+    // a perfectly good audio stream and cold-start a duplicate.
+    // position_source was already redirected to the promoted engine at promotion
+    // time, so the handle reads the correct counter without any extra work here.
+    if state.engine.as_ref().map(|e| e.track_id) == Some(job.track.id) {
+        return Ok(());
+    }
+
     stop_current_engine(state);
+    // A user-initiated track change (skip / new play) abandons any in-flight
+    // crossfade — kill the fading-out engine so it doesn't keep producing audio
+    // underneath the new track.
+    if let Some(mut prior) = state.fading_out_engine.take() {
+        prior.stop();
+    }
 
     // Reset position counter for the new track (safe: old engine is fully stopped above).
     position_samples.store(0, Ordering::SeqCst);
@@ -491,10 +555,8 @@ fn transition_to_job(
 
     let engine = if pre_decoded_match {
         let pre = state.next_engine.take().unwrap();
-        // Hand over the shared position counter from the handle so external callers stay in sync.
-        // We can't swap the Arc inside, but we reset the counter to 0 and point the engine's
-        // existing shared counter — position will read from the engine's own AtomicU64 which
-        // starts at 0 and is already counting as the CPAL callback drains it.
+        // position_source was already redirected to this engine's counter at
+        // promote_next_to_active time, so the handle reads the right value.
         // Restart the stream (it was paused during pre-decode).
         pre.shared.paused.store(false, Ordering::SeqCst);
         pre
@@ -503,7 +565,7 @@ fn transition_to_job(
         if let Some(mut stale) = state.next_engine.take() {
             stale.stop();
         }
-        PlaybackEngine::start(
+        let eng = PlaybackEngine::start(
             config,
             command_tx,
             device,
@@ -515,7 +577,11 @@ fn transition_to_job(
             state.device_channels,
             Arc::clone(volume_ctl),
             Arc::clone(position_samples),
-        )?
+        )?;
+        // Redirect the handle's reader to this engine's counter (which IS
+        // position_samples for cold starts, but re-pointing is always correct).
+        *position_source.lock().unwrap() = Arc::clone(position_samples);
+        eng
     };
 
     state.engine = Some(engine);
@@ -532,6 +598,57 @@ fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
     stop_current_engine(state);
     if let Some(mut engine) = state.next_engine.take() {
         engine.stop();
+    }
+    if let Some(mut engine) = state.fading_out_engine.take() {
+        engine.stop();
+    }
+}
+
+/// Promote the pre-decoded `next_engine` to be the new active engine. The
+/// previously-active engine is moved to `fading_out_engine` where it keeps
+/// producing audio with a fade-out gain ramp until its buffer drains; the new
+/// engine starts immediately with a fade-in ramp.
+///
+/// We also broadcast a `Finished` event for the OUTGOING track so that the
+/// routes layer advances the queue (updates `playback_state.current_track_id`
+/// and fires the WebSocket `TrackChanged` event) at the audible-swap moment,
+/// not when the fade-out finally drains. The corresponding `Switch` command
+/// that comes back through the runtime is intentionally a no-op now, because
+/// `transition_to_job` short-circuits when `state.engine` is already playing
+/// the requested track.
+fn promote_next_to_active(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+) {
+    let Some(next) = state.next_engine.take() else {
+        return;
+    };
+    next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
+    next.shared.paused.store(false, Ordering::SeqCst);
+
+    // Redirect the handle's position reader to the incoming engine's counter
+    // BEFORE sliding it into state.engine so get_position_ms() immediately
+    // reflects the new track starting from 0 instead of the fading-out track's
+    // frozen end position.
+    *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
+
+    let outgoing = state.engine.take();
+    state.engine = Some(next);
+
+    // Drop any prior fading-out engine first so we never accumulate more than
+    // one (the previous one would have been audibly silent by now anyway).
+    if let Some(mut prior) = state.fading_out_engine.take() {
+        prior.stop();
+    }
+    if let Some(outgoing) = outgoing {
+        let outgoing_id = outgoing.track_id;
+        state.fading_out_engine = Some(outgoing);
+        // Tell the routes layer that the audible "current" track has flipped.
+        // Reusing Finished keeps the existing queue-advance path.
+        let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
+            track_id: outgoing_id,
+        });
     }
 }
 

@@ -39,8 +39,12 @@
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
 	import { wallpaper } from '$lib/stores/wallpaper';
+	import { palette } from '$lib/stores/palette';
+	import { paletteById } from '$lib/components/wallpaper/palettes';
 
 	let { children } = $props();
+
+	let activeWallpaper = $derived(wallpaperById($wallpaper));
 
 	// ─── Auth gate ───────────────────────────────────────────────
 	let authReady = $state(false);
@@ -179,8 +183,13 @@
 
 		applyTheme(theme);
 
+		const unsubPalette = palette.subscribe((id) => applyPalette(id));
+
 		window.addEventListener('keydown', handleGlobalKeydown);
-		return () => window.removeEventListener('keydown', handleGlobalKeydown);
+		return () => {
+			window.removeEventListener('keydown', handleGlobalKeydown);
+			unsubPalette();
+		};
 	});
 
 	function isTypingTarget(target: EventTarget | null): boolean {
@@ -258,6 +267,16 @@
 		theme = t;
 		document.documentElement.setAttribute('data-theme', t);
 		localStorage.setItem('noor-theme', t);
+	}
+
+	function applyPalette(id: import('$lib/components/wallpaper/palettes').PaletteId) {
+		const p = paletteById(id);
+		const root = document.documentElement.style;
+		root.setProperty('--accent', p.ui.accent);
+		root.setProperty('--accent-strong', p.ui.accentStrong);
+		root.setProperty('--accent-soft', p.ui.accentSoft);
+		root.setProperty('--accent-line', p.ui.accentLine);
+		root.setProperty('--accent-glow', p.ui.accentGlow);
 	}
 
 	function toggleTheme() {
@@ -489,14 +508,11 @@
 	</div>
 {/if}
 
-{#if $wallpaper !== 'none'}
-	{@const w = wallpaperById($wallpaper)}
-	{#if w.shader}
-		<div class="wallpaper-layer" aria-hidden="true">
-			<ShaderWallpaper shader={w.shader} interactive={false} maxDpr={1.5} />
-		</div>
+<div class="wallpaper-layer" aria-hidden="true">
+	{#if activeWallpaper.shader}
+		<ShaderWallpaper shader={activeWallpaper.shader} interactive={false} maxDpr={1.5} />
 	{/if}
-{/if}
+</div>
 
 <ContextMenu />
 
@@ -1152,6 +1168,14 @@
 	.app-shell.has-wallpaper .now-playing-panel {
 		backdrop-filter: blur(18px) saturate(1.2);
 		-webkit-backdrop-filter: blur(18px) saturate(1.2);
+	}
+
+	/* Content pane frost: subtle dark tint + mild blur so all page content
+	   remains readable over any wallpaper, without fully hiding the animation. */
+	.app-shell.has-wallpaper .workspace {
+		background: rgba(9, 9, 14, 0.44);
+		backdrop-filter: blur(10px) saturate(1.05);
+		-webkit-backdrop-filter: blur(10px) saturate(1.05);
 	}
 
 	.sidebar {

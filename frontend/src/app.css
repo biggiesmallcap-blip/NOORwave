@@ -132,36 +132,6 @@
 	--heat-intensity: 0.52;
 }
 
-/* ── Nebula (warm alt scheme — coral + teal) ──────────── */
-[data-scheme="nebula"] {
-	--bg-base:       #0d0a14;
-	--bg-elevated:   #15101e;
-
-	--accent:        #ff7a9c;
-	--accent-soft:   rgba(255, 122, 156, 0.14);
-	--accent-line:   rgba(255, 122, 156, 0.28);
-	--accent-strong: #ffaac0;
-	--accent-glow:   rgba(255, 122, 156, 0.22);
-
-	--atlas-bg: linear-gradient(165deg, #160c1a 0%, #0e0914 52%, #09060c 100%);
-	--atlas-haze-a: rgba(255, 122, 156, 0.14);
-	--atlas-haze-b: rgba(86, 202, 180, 0.10);
-	--atlas-haze-c: rgba(210, 150, 240, 0.07);
-}
-
-/* ── Verdant (cool alt scheme — mint on ink) ──────────── */
-[data-scheme="verdant"] {
-	--accent:        #5dd7a8;
-	--accent-soft:   rgba(93, 215, 168, 0.14);
-	--accent-line:   rgba(93, 215, 168, 0.28);
-	--accent-strong: #8ee6c1;
-	--accent-glow:   rgba(93, 215, 168, 0.22);
-
-	--atlas-haze-a: rgba(93, 215, 168, 0.12);
-	--atlas-haze-b: rgba(64, 130, 200, 0.08);
-	--atlas-haze-c: rgba(200, 180, 120, 0.06);
-}
-
 /* ── Structural tokens (theme-independent) ────────────── */
 :root {
 	--sidebar-width: 228px;
@@ -442,6 +412,11 @@ textarea {
 	padding: 10px 13px;
 	outline: none;
 	transition: border-color var(--motion-fast), background var(--motion-fast);
+}
+
+select option {
+	background: var(--bg-elevated);
+	color: var(--text-primary);
 }
 
 textarea {
