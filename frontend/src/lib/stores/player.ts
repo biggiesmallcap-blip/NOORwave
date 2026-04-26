@@ -8,6 +8,14 @@ import {
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
+import { showToast } from '$lib/stores/toast';
+
+function trackLabel(track: { title?: string | null; artist_name?: string | null }): string {
+	const t = (track.title ?? '').trim();
+	const a = (track.artist_name ?? '').trim();
+	if (t && a) return `${t} — ${a}`;
+	return t || a || 'track';
+}
 
 export const currentTrack = writable<Track | null>(null);
 export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
@@ -524,8 +532,10 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 		});
 		isPlaying.set(true);
 		playerError.set(null);
+		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
 		playerError.set(`Tidal playback failed: ${error}`);
+		showToast(`Playback failed`, 'error');
 	}
 }
 
@@ -542,7 +552,10 @@ export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> 
 export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	try {
 		const { tracks } = await api.getTidalAlbumTracks(tidalAlbumId);
-		if (tracks.length === 0) return;
+		if (tracks.length === 0) {
+			showToast('Album has no tracks', 'error');
+			return;
+		}
 		const first = tracks[0];
 		await playTidalTrackNow({
 			tidal_id: first.tidal_id,
@@ -554,6 +567,7 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 		});
 	} catch (error) {
 		playerError.set(`Tidal album playback failed: ${error}`);
+		showToast(`Album playback failed`, 'error');
 	}
 }
 
@@ -565,6 +579,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			// Tidal seed cannot be prepended to the library queue (queue only accepts library track IDs).
 			// Radio plays from the first library neighbour found.
 			await loadQueueAndPlay(radioIds);
+			showToast(`Radio from ${trackLabel(track)}`, 'success');
 		} else {
 			// No library tracks matched — fall back to playing the seed directly.
 			await playTidalTrackNow(track);
@@ -572,5 +587,6 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		playerError.set(null);
 	} catch (error) {
 		playerError.set(`Tidal radio failed: ${error}`);
+		showToast(`Radio failed`, 'error');
 	}
 }

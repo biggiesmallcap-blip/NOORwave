@@ -34,6 +34,7 @@
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
+	import Toast from '$lib/components/Toast.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -523,6 +524,7 @@
 </div>
 
 <ContextMenu />
+<Toast />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
