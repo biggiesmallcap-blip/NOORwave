@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import {
-		tracks, albums, isLoading, isLoadingMore, totalTracks, totalAlbums,
+		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
 		loadTracks, loadAlbums,
 		formatDuration, formatDateShort, getQualityClass,
@@ -14,11 +14,14 @@
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import LibraryHero from '$lib/components/LibraryHero.svelte';
+	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
+	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 
 	const PAGE_SIZE = 100;
 	const SEARCH_LIMIT = 200;
 
-	let activeTab = $state<'tracks' | 'albums' | 'artists'>('albums');
+	let activeTab = $state<'all' | 'tracks' | 'albums' | 'artists'>('all');
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
 	let selectedPlaylistId = $state('');
@@ -65,24 +68,11 @@
 	let showEnergyColumn = $state(true);
 	let showDanceColumn = $state(true);
 
-	// DSP filter panel
-	let showDspFilters = $state(false);
-	let filterBpmMin = $state<number | null>(null);
-	let filterBpmMax = $state<number | null>(null);
-	let filterEnergyMin = $state(0);
-	let filterEnergyMax = $state(1);
-	let filterKey = $state('');
-	let filterInstrumental = $state(false);
-
-	// Camelot keys for dropdown
-	const CAMELOT_KEYS = [
-		'', '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
-		'1B', '2B', '3B', '4B', '5B', '6B', '7B', '8B', '9B', '10B', '11B', '12B'
-	];
 
 	onMount(() => {
 		void loadAlbums();
 		void loadTracks();
+		void loadArtists();
 		void loadBatchMeta();
 		return () => {
 			if (searchTimer) clearTimeout(searchTimer);
@@ -122,24 +112,7 @@
 		clearSelection();
 	}
 
-	async function applyDspFilters() {
-		// Reload tracks with DSP filters applied via API params
-		// For now, just toggle the filter state — actual API filter integration
-		// requires backend endpoint support for bpm_min, bpm_max, etc.
-		batchMessage = 'DSP filters applied (backend support required for full filtering).';
-	}
-
-	async function clearDspFilters() {
-		filterBpmMin = null;
-		filterBpmMax = null;
-		filterEnergyMin = 0;
-		filterEnergyMax = 1;
-		filterKey = '';
-		filterInstrumental = false;
-		batchMessage = 'DSP filters cleared.';
-	}
-
-	function switchTab(tab: 'tracks' | 'albums' | 'artists') {
+	function switchTab(tab: 'all' | 'tracks' | 'albums' | 'artists') {
 		activeTab = tab;
 		expandedTrackId = null;
 		expandedAlbumId = null;
@@ -148,7 +121,7 @@
 		if (!$searchQuery.trim()) {
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir);
 			if (tab === 'albums') loadAlbums();
-			if (tab === 'artists' && artists.length === 0) void loadArtists();
+			// 'artists' and 'all' need no fetch — already loaded on mount
 		}
 		clearSelection();
 	}
@@ -565,6 +538,170 @@
 			: `${$tracks.length} of ${$totalTracks} tracks loaded`
 	);
 
+	// ── Home view derived data ──────────────────────────────────────────────
+
+	interface HomeArtist {
+		id: number;
+		name: string;
+		photo_url: string | null;
+		playCount: number;
+		trackCount: number;
+		albumCount: number;
+	}
+
+	let topArtist = $derived.by<HomeArtist | null>(() => {
+		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
+		const countMap = new Map<number, HomeArtist>();
+		const albumsByArtist = new Map<number, Set<number>>();
+
+		for (const track of $tracks) {
+			if (!track.artist_id) continue;
+			const storeArtist = artistMap.get(track.artist_id);
+			const info = countMap.get(track.artist_id);
+			if (info) {
+				info.playCount += track.play_count ?? 0;
+				info.trackCount++;
+			} else {
+				countMap.set(track.artist_id, {
+					id: track.artist_id,
+					name: track.artist_name ?? 'Unknown Artist',
+					photo_url: storeArtist?.photo_url ?? null,
+					playCount: track.play_count ?? 0,
+					trackCount: 1,
+					albumCount: 0,
+				});
+			}
+			if (track.album_id) {
+				if (!albumsByArtist.has(track.artist_id)) albumsByArtist.set(track.artist_id, new Set());
+				albumsByArtist.get(track.artist_id)!.add(track.album_id);
+			}
+		}
+		for (const [id, data] of countMap) {
+			data.albumCount = albumsByArtist.get(id)?.size ?? 0;
+		}
+		if (countMap.size === 0) return null;
+		return [...countMap.values()].reduce((best, cur) => cur.playCount > best.playCount ? cur : best);
+	});
+
+	interface HomeArtistCard {
+		id: number;
+		name: string;
+		photo_url: string | null;
+	}
+
+	let recentArtists = $derived.by<HomeArtistCard[]>(() => {
+		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
+		const seen = new Set<number>();
+		const result: HomeArtistCard[] = [];
+
+		const sorted = [...$tracks].sort((a, b) => {
+			if (!a.last_played_at && !b.last_played_at) return 0;
+			if (!a.last_played_at) return 1;
+			if (!b.last_played_at) return -1;
+			return b.last_played_at.localeCompare(a.last_played_at);
+		});
+
+		for (const track of sorted) {
+			if (!track.artist_id || seen.has(track.artist_id)) continue;
+			seen.add(track.artist_id);
+			const storeArtist = artistMap.get(track.artist_id);
+			result.push({
+				id: track.artist_id,
+				name: track.artist_name ?? 'Unknown',
+				photo_url: storeArtist?.photo_url ?? null,
+			});
+			if (result.length >= 20) break;
+		}
+		return result;
+	});
+
+	interface HomeAlbumCard {
+		id: number;
+		title: string;
+		artist_name: string | null;
+		artwork_url: string | null;
+	}
+
+	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
+		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
+
+		for (const track of $tracks) {
+			if (!track.album_id || !track.date_added) continue;
+			const existing = albumDateMap.get(track.album_id);
+			if (!existing || track.date_added > existing.date) {
+				albumDateMap.set(track.album_id, {
+					card: {
+						id: track.album_id,
+						title: track.album_title ?? 'Unknown Album',
+						artist_name: track.artist_name,
+						artwork_url: track.artwork_url,
+					},
+					date: track.date_added,
+				});
+			}
+		}
+
+		return [...albumDateMap.values()]
+			.sort((a, b) => b.date.localeCompare(a.date))
+			.slice(0, 20)
+			.map(({ card }) => card);
+	});
+
+	let recentTracks = $derived.by(() =>
+		[...$tracks]
+			.filter(t => t.last_played_at)
+			.sort((a, b) => b.last_played_at!.localeCompare(a.last_played_at!))
+			.slice(0, 10)
+	);
+
+	// ── Home view handlers ─────────────────────────────────────────────────
+
+	function playAllFromTopArtist() {
+		if (!topArtist) return;
+		const artistTracks = $tracks.filter(t => t.artist_id === topArtist!.id);
+		if (!artistTracks.length) return;
+		void playTrackNow(artistTracks[0].id);
+		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+	}
+
+	function shuffleTopArtist() {
+		if (!topArtist) return;
+		const artistTracks = [...$tracks.filter(t => t.artist_id === topArtist!.id)];
+		artistTracks.sort(() => Math.random() - 0.5);
+		if (!artistTracks.length) return;
+		void playTrackNow(artistTracks[0].id);
+		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+	}
+
+	function handleHomeArtistClick(artistId: number) {
+		switchTab('artists');
+		expandedArtistId = artistId;
+	}
+
+	function handleHomeAlbumClick(albumId: number) {
+		const found = $albums.find(a => a.id === albumId);
+		if (found) {
+			void openAlbumDetail(found);
+		} else {
+			// Album not in current loaded page — build a stub from recentAlbums card
+			const card = recentAlbums.find(a => a.id === albumId);
+			if (!card) return;
+			const stub: import('$lib/api/client').Album = {
+				id: card.id,
+				tidal_id: null,
+				title: card.title,
+				artist_id: 0,
+				artist_name: card.artist_name,
+				year: null,
+				artwork_url: card.artwork_url,
+				release_type: null,
+				track_count: null,
+				source: 'tidal',
+			};
+			void openAlbumDetail(stub);
+		}
+	}
+
 	$effect(() => {
 		const nextQuery = $searchQuery;
 		if (searchTimer) clearTimeout(searchTimer);
@@ -623,8 +760,10 @@
 		if (!raw) return
 		try {
 			const saved = JSON.parse(raw) as { activeTab: string; expandedArtistId: number | null; scrollY: number }
-			if (typeof saved.activeTab === 'string' && (saved.activeTab === 'tracks' || saved.activeTab === 'albums' || saved.activeTab === 'artists')) {
-				activeTab = saved.activeTab
+			const validTabs = ['all', 'tracks', 'albums', 'artists'] as const
+			const savedTab = saved.activeTab
+			if (typeof savedTab === 'string' && (validTabs as readonly string[]).includes(savedTab)) {
+				activeTab = savedTab as typeof activeTab
 				expandedArtistId = saved.expandedArtistId
 				pendingRestoreScroll = saved.scrollY
 			}
@@ -661,11 +800,13 @@
 			</div>
 
 			<div class="library-hero-actions">
-				<div class="tab-bar">
-					<button class="tab" class:active={activeTab === 'albums'} onclick={() => switchTab('albums')}>Albums</button>
-					<button class="tab" class:active={activeTab === 'tracks'} onclick={() => switchTab('tracks')}>Tracks</button>
-					<button class="tab" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+				<div class="filter-pills">
+					<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
+					<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
+					<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
+					<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
 				</div>
+				{#if activeTab === 'albums'}
 				<div class="view-toggle" role="group" aria-label="Album view layout">
 					<button
 						class="view-toggle-btn"
@@ -697,6 +838,7 @@
 						</svg>
 					</button>
 				</div>
+				{/if}
 				<button class="btn btn-glass" onclick={() => void playRandomLibrary()}>
 					Random play
 				</button>
@@ -717,6 +859,14 @@
 			type="search"
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
 		/>
+		<div class="kbd-hint">
+			<kbd>/</kbd> focus &nbsp;·&nbsp;
+			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
+			<kbd>Enter</kbd> play &nbsp;·&nbsp;
+			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
+			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next &nbsp;·&nbsp;
+			<span class="hint-filters">bpm:138 &nbsp;·&nbsp; key:Am &nbsp;·&nbsp; energy:&gt;0.7 &nbsp;·&nbsp; genre:dnb &nbsp;·&nbsp; instrumental:true</span>
+		</div>
 		<div class="toolbar-meta">
 			{#if searchBusy}
 				<span class="toolbar-note">Searching…</span>
@@ -729,51 +879,6 @@
 		</div>
 	</div>
 
-	{#if activeTab === 'tracks'}
-		<div class="dsp-filter-bar glass">
-			<button class="btn btn-glass btn-sm" onclick={() => showDspFilters = !showDspFilters}>
-				{showDspFilters ? 'Hide DSP Filters' : 'DSP Filters'}
-			</button>
-			{#if showDspFilters}
-				<div class="dsp-filter-grid">
-					<div class="filter-group">
-						<label>BPM Range</label>
-						<div class="filter-inputs">
-							<input type="number" placeholder="Min" bind:value={filterBpmMin} min="40" max="300" />
-							<span>–</span>
-							<input type="number" placeholder="Max" bind:value={filterBpmMax} min="40" max="300" />
-						</div>
-					</div>
-					<div class="filter-group">
-						<label>Energy</label>
-						<div class="filter-inputs">
-							<input type="range" bind:value={filterEnergyMin} min="0" max="1" step="0.05" />
-							<input type="range" bind:value={filterEnergyMax} min="0" max="1" step="0.05" />
-						</div>
-					</div>
-					<div class="filter-group">
-						<label>Key</label>
-						<select bind:value={filterKey}>
-							{#each CAMELOT_KEYS as key}
-								<option value={key}>{key || 'All Keys'}</option>
-							{/each}
-						</select>
-					</div>
-					<div class="filter-group">
-						<label>Instrumental</label>
-						<label class="toggle-switch-small">
-							<input type="checkbox" bind:checked={filterInstrumental} />
-							<span>Only</span>
-						</label>
-					</div>
-					<div class="filter-actions">
-						<button class="btn btn-primary btn-sm" onclick={applyDspFilters}>Apply</button>
-						<button class="btn btn-glass btn-sm" onclick={clearDspFilters}>Clear</button>
-					</div>
-				</div>
-			{/if}
-		</div>
-	{/if}
 
 	{#if searchError}
 		<div class="batch-feedback error glass">{searchError}</div>
@@ -823,6 +928,88 @@
 
 	{#if $isLoading}
 		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
+
+	{:else if activeTab === 'all'}
+		<div class="library-home">
+			{#if topArtist}
+				<LibraryHero
+					artist={topArtist}
+					onPlayAll={playAllFromTopArtist}
+					onShuffle={shuffleTopArtist}
+				/>
+			{:else if $isLoading}
+				<div class="home-loading">Loading your library…</div>
+			{/if}
+
+			{#if recentArtists.length > 0}
+				<section class="home-section">
+					<h3 class="section-label">Recently Played Artists</h3>
+					<ArtistCarousel
+						artists={recentArtists}
+						onArtistClick={handleHomeArtistClick}
+					/>
+				</section>
+			{/if}
+
+			{#if recentAlbums.length > 0}
+				<section class="home-section">
+					<h3 class="section-label">Recently Added</h3>
+					<AlbumCarousel
+						albums={recentAlbums}
+						onAlbumClick={handleHomeAlbumClick}
+					/>
+				</section>
+			{/if}
+
+			{#if recentTracks.length > 0}
+				<section class="home-section">
+					<div class="section-header-row">
+						<h3 class="section-label">Recent Tracks</h3>
+						<button class="view-all-link" onclick={() => switchTab('tracks')}>View all →</button>
+					</div>
+					<div class="home-track-list">
+						{#each recentTracks as track (track.id)}
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+							<div
+								class="home-track-row"
+								class:playing={$currentTrack?.id === track.id && $isPlaying}
+								onclick={() => void playTrackNow(track.id)}
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+							>
+								{#if track.artwork_url}
+									<div class="ht-art" style="background-image: url('{track.artwork_url}')"></div>
+								{:else}
+									<div class="ht-art ht-art--fallback"></div>
+								{/if}
+								<div class="ht-meta">
+									<span class="ht-title">{track.title}</span>
+									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` — ${track.album_title}` : ''}</span>
+								</div>
+								<span class="ht-duration">{formatDuration(track.duration_ms)}</span>
+								<div class="ht-actions">
+									<button
+										class="btn-icon"
+										title="Add to queue"
+										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
+										aria-label="Add to queue"
+									>
+										<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+											<line x1="2" y1="4" x2="14" y2="4"/>
+											<line x1="2" y1="8" x2="14" y2="8"/>
+											<line x1="2" y1="12" x2="10" y2="12"/>
+											<line x1="13" y1="10" x2="13" y2="16"/>
+											<line x1="10" y1="13" x2="16" y2="13"/>
+										</svg>
+									</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				</section>
+			{/if}
+		</div>
 
 	{:else if activeTab === 'albums'}
 		<!-- Album Grid -->
@@ -1416,6 +1603,141 @@
 		padding-bottom: 8px;
 	}
 
+	/* ─── All / Home view ───────────────── */
+
+	.library-home {
+		display: flex;
+		flex-direction: column;
+		gap: 32px;
+		padding: 8px 0 40px;
+	}
+
+	.home-section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.section-label {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 1.5px;
+		text-transform: uppercase;
+		color: var(--accent, #9b6fff);
+		margin: 0;
+	}
+
+	.section-header-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.view-all-link {
+		font-size: 12px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		background: none;
+		border: none;
+		cursor: pointer;
+		padding: 0;
+		transition: color 0.15s;
+	}
+
+	.view-all-link:hover { color: var(--text-primary, #fff); }
+
+	.home-track-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.home-track-row {
+		display: grid;
+		grid-template-columns: 38px 1fr auto auto;
+		gap: 12px;
+		align-items: center;
+		padding: 6px 8px;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: background 0.1s;
+	}
+
+	.home-track-row:hover { background: var(--bg-glass-hover, rgba(255,255,255,0.06)); }
+
+	.home-track-row.playing .ht-title { color: var(--accent, #9b6fff); }
+
+	.ht-art {
+		width: 36px;
+		height: 36px;
+		border-radius: 4px;
+		background-size: cover;
+		background-position: center;
+	}
+
+	.ht-art--fallback {
+		background: var(--bg-glass, rgba(255,255,255,0.08));
+	}
+
+	.ht-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.ht-title {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--text-primary, #fff);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ht-sub {
+		font-size: 11px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ht-duration {
+		font-size: 12px;
+		color: var(--text-muted, rgba(255,255,255,0.4));
+		font-variant-numeric: tabular-nums;
+	}
+
+	.ht-actions {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+
+	.home-track-row:hover .ht-actions { opacity: 1; }
+
+	.btn-icon {
+		background: none;
+		border: none;
+		cursor: pointer;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		padding: 4px;
+		border-radius: 4px;
+		display: flex;
+		align-items: center;
+		transition: color 0.15s;
+	}
+
+	.btn-icon:hover { color: var(--text-primary, #fff); }
+
+	.home-loading {
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		font-size: 14px;
+		padding: 40px;
+		text-align: center;
+	}
+
 	/* ─── Loading ───────────────────────── */
 
 	.loading {
@@ -1551,79 +1873,32 @@
 		font-size: 0.84rem;
 	}
 
-	/* ─── DSP Filter Bar ───────────────────────── */
-
-	.dsp-filter-bar {
-		padding: 10px 14px;
-		margin-bottom: var(--gap);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.dsp-filter-grid {
+	.kbd-hint {
 		display: flex;
 		flex-wrap: wrap;
-		gap: var(--space-3);
-		align-items: flex-end;
-	}
-
-	.filter-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		min-width: 140px;
-		flex: 1;
-	}
-
-	.filter-group label {
-		font-size: 0.72rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-tertiary);
-	}
-
-	.filter-inputs {
-		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 2px;
+		font-size: 11px;
+		color: var(--text-muted, rgba(255,255,255,0.35));
+		padding: 4px 0 0 2px;
+		user-select: none;
 	}
 
-	.filter-inputs input[type="number"] {
-		width: 70px;
-		padding: 5px 8px;
-		font-size: 0.82rem;
+	.kbd-hint kbd {
+		display: inline-block;
+		padding: 1px 5px;
+		border: 1px solid var(--border-subtle, rgba(255,255,255,0.15));
+		border-radius: 4px;
+		font-family: inherit;
+		font-size: 10px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		background: var(--bg-glass, rgba(255,255,255,0.05));
 	}
 
-	.filter-inputs input[type="range"] {
-		flex: 1;
-	}
-
-	.filter-inputs span {
-		color: var(--text-muted);
-		font-size: 0.82rem;
-	}
-
-	.filter-actions {
-		display: flex;
-		gap: 6px;
-		align-items: flex-end;
-	}
-
-	.toggle-switch-small {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 0.82rem;
-		color: var(--text-secondary);
-		cursor: pointer;
-	}
-
-	.toggle-switch-small input {
-		width: 16px;
-		height: 16px;
-		accent-color: var(--accent);
+	.hint-filters {
+		opacity: 0.7;
+		font-family: monospace;
+		letter-spacing: 0.02em;
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
@@ -1706,27 +1981,34 @@
 		vertical-align: middle;
 	}
 
-	.tab-bar {
+	.filter-pills {
 		display: flex;
-		gap: 4px;
-		padding: 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		gap: 6px;
+		align-items: center;
 	}
 
-	.tab {
-		padding: 8px 14px;
-		border-radius: 999px;
-		font-size: 0.82rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-		transition: background var(--motion-fast), color var(--motion-fast);
+	.filter-pill {
+		padding: 5px 14px;
+		border-radius: 20px;
+		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
+		background: transparent;
+		color: var(--text-secondary, rgba(255,255,255,0.6));
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s, border-color 0.15s;
+		white-space: nowrap;
 	}
 
-	.tab.active {
-		background: rgba(124, 128, 255, 0.14);
-		color: var(--text-primary);
+	.filter-pill:hover {
+		background: var(--bg-glass-hover, rgba(255,255,255,0.08));
+		color: var(--text-primary, #fff);
+	}
+
+	.filter-pill.active {
+		background: var(--accent, #9b6fff);
+		border-color: var(--accent, #9b6fff);
+		color: #fff;
 	}
 
 	.view-toggle {
@@ -2097,12 +2379,12 @@
 			justify-content: flex-start;
 		}
 
-		.tab-bar,
+		.filter-pills,
 		.view-toggle {
 			width: 100%;
 		}
 
-		.tab {
+		.filter-pill {
 			flex: 1;
 			text-align: center;
 		}

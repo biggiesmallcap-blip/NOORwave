@@ -8,6 +8,7 @@
   import { formatDuration } from '$lib/stores/library'
   import { parseQuery, filtersToChips, type ParsedQuery, type FilterValue } from '$lib/search/query_parser'
   import { parseIntent } from '$lib/search/intent'
+  import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -346,17 +347,6 @@
   function initials(name: string): string {
     const parts = name.trim().split(/\s+/).slice(0, 2)
     return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
-  }
-
-  // Translate vertical wheel into horizontal scroll for the artist/album rows.
-  function wheelToHorizontal(node: HTMLElement) {
-    const onWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
-      e.preventDefault()
-      node.scrollLeft += e.deltaY
-    }
-    node.addEventListener('wheel', onWheel, { passive: false })
-    return { destroy: () => node.removeEventListener('wheel', onWheel) }
   }
 
   function buildAlbumMenu(album: TidalSearchAlbum): MenuItem[] {
