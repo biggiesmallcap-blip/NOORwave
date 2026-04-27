@@ -176,9 +176,9 @@
 		cursor: pointer;
 		transition: background 0.15s;
 	}
-	.action-btn:hover { background: rgba(255,255,255,0.12); }
+	.action-btn:not(:disabled):hover { background: rgba(255,255,255,0.12); }
 	.action-btn.primary { background: rgba(124,128,255,0.25); color: rgba(255,255,255,0.95); }
-	.action-btn.primary:hover { background: rgba(124,128,255,0.4); }
+	.action-btn.primary:not(:disabled):hover { background: rgba(124,128,255,0.4); }
 	.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 	.metric { display: flex; flex-direction: column; gap: 4px; }
 	.metric span { color: var(--text-secondary); font-size: 0.75rem; }
