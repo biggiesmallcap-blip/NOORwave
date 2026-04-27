@@ -76,3 +76,41 @@ bpm:120-140 genre:house energy:>0.7
 Recent searches auto-save as clickable chips.
 
 ---
+
+### Playback
+
+- Lossless hi-fi streaming via TIDAL with automatic token refresh
+- Gapless playback: NearEnd event fires 15 s before track end, triggering pre-buffer engine swap for zero-gap transitions
+- BPM-aligned crossfade snap and per-track fade-in / fade-out
+- Four shuffle modes: off, true (Fisher-Yates), weighted (boosts favorites + never-played), genre-spread (prevents consecutive same-genre runs)
+- Automix: automatic queue continuation with Camelot + BPM + energy harmonic multipliers; harmonic match indicators on every queue row
+- Now-playing panel shows Camelot wheel key, BPM badge, and full queue
+
+---
+
+### Genre Galaxy
+
+> ⚠️ Live but needs polish — several interaction and rendering issues under active work.
+
+- Interactive force-directed canvas of your entire genre taxonomy — 285 genres across 14 families
+- Nodes sized and coloured by listen heat; edges drawn by genre co-occurrence
+- Drill into any genre: artist cluster view, full track list, per-genre audio metric summary
+- **Mix this genre**: loads tracks, shuffles queue, drops you at a random entry point
+- **Seed Mix Builder**: blend multiple genres, interleave their tracks, and play
+- Four view modes: Heat, Co-occurrence, Cohort, Evolution. Auto-drift pans the canvas
+
+---
+
+### Discover / Sound Space
+
+> ⚠️ Work in progress — functional but incomplete. UI and model quality still evolving.
+
+- Force-directed canvas of your library positioned by learned audio similarity
+- Hyperspace search: type a mood or reference and fly to the matching cluster
+- Nebula halos mark previously explored regions
+- **Song Radio**: plays outward from any track using learned neighbor embeddings; creativity slider controls exploration vs. exploitation
+- Feedback (like, dislike, queue, save) feeds back into the model
+- **Prompt Explore**: steer the engine with natural language — mood, reference artist, DJ style
+- Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress and cancel button
+
+---
