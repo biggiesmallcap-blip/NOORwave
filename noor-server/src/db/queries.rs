@@ -104,6 +104,7 @@ pub fn get_tracks_with_dsp(
         "bpm" => "COALESCE(a.bpm, 0)",
         "energy" => "COALESCE(a.energy, 0)",
         "danceability" => "COALESCE(a.danceability, 0)",
+        "last_played_at" => "t.last_played_at",
         _ => "t.date_added",
     };
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };

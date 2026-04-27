@@ -1005,6 +1005,17 @@
 						Date Added <span class="sort-arrow">{$sortBy === 'date_added' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
+				{#if showDateColumn}
+					<button
+						type="button"
+						class="header-sort col-date"
+						class:sorted={$sortBy === 'last_played_at'}
+						onclick={() => handleSort('last_played_at')}
+						onkeydown={(event) => handleSortKeydown('last_played_at', event)}
+					>
+						Last Played <span class="sort-arrow">{$sortBy === 'last_played_at' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
 				{#if showBpmColumn}
 					<button
 						type="button"
