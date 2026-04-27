@@ -204,6 +204,8 @@ pub struct DiscoveryFeedbackRequest {
     action: String,
     surface: String,
     context: Option<Value>,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1675,6 +1677,7 @@ async fn record_discovery_feedback(
                 &payload.action,
                 &payload.surface,
                 context_json.as_deref(),
+                payload.session_id.as_deref(),
             )
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

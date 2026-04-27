@@ -2907,12 +2907,13 @@ pub fn record_discovery_feedback(
     action: &str,
     surface: &str,
     context_json: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO discovery_feedback
-         (seed_track_id, candidate_track_id, action, surface, context_json)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![seed_track_id, candidate_track_id, action, surface, context_json],
+         (seed_track_id, candidate_track_id, action, surface, context_json, session_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![seed_track_id, candidate_track_id, action, surface, context_json, session_id],
     )?;
     Ok(())
 }

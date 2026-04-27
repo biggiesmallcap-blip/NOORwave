@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_013,
     MIGRATION_014,
     MIGRATION_015,
+    MIGRATION_016,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -553,6 +554,10 @@ CREATE TABLE IF NOT EXISTS lastfm_unresolved_tags (
     seen_count INTEGER NOT NULL DEFAULT 1,
     last_seen  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+"#;
+
+const MIGRATION_016: &str = r#"
+ALTER TABLE discovery_feedback ADD COLUMN session_id TEXT;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
