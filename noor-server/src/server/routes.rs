@@ -280,6 +280,9 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/radio/compute", post(compute_radio_similarity))
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
+        .route("/api/radio/song", post(radio_song))
+        .route("/api/radio/album", post(radio_album))
+        .route("/api/radio/artist", post(radio_artist))
         .route("/api/discovery/space/meta", get(get_discovery_space_meta))
         .route("/api/discovery/artists", get(get_discovery_artists))
         .route(
@@ -2037,93 +2040,59 @@ async fn get_discovery_space(
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
-        // Load the seed's metadata from the library so we can build Tidal queries.
-        let seed_opt = state_guard.db.with_conn(|conn| {
-            queries::load_external_seed_from_track(conn, seed_id)
-        }).ok().flatten();
+        let db = state_guard.db.clone();
+        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(state_guard.http_client.clone());
+        drop(state_guard);
 
-        if let Some(seed_meta) = seed_opt {
-            // Drop the read guard so async helpers can take their own locks.
-            // (We re-acquire later for Phase 1 enrichment passes.)
-            drop(state_guard);
+        let queue = crate::services::radio::orchestrate_song(
+            &db,
+            lastfm.as_ref(),
+            seed_id,
+            crate::services::radio::RadioBlend::Mixed,
+            limit as usize,
+            &[],
+        )
+        .await
+        .ok();
 
-            let request = external_discovery_engine::ExternalDiscoveryRequest {
-                prompt: String::new(),
-                mode: mode.clone(),
-                services: vec!["tidal".to_string()],
-                limit: limit as usize,
-            };
+        state_guard = state.read().await;
 
-            let context = match load_external_discovery_context(&state).await {
-                Ok(c) => c,
-                Err(_) => return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] }))),
-            };
-
-            let queries = external_discovery_engine::build_connection_queries(
-                &request,
-                &context,
-                &seed_meta,
-            );
-            let queries = augment_search_queries_with_lastfm(&state, &request, &context, queries).await;
-
-            let provider = match tidal_discovery_provider(&state).await {
-                Ok(p) => p,
-                Err(_) => return Ok(Json(json!({ "tracks": [], "artists": [], "edges": [] }))),
-            };
-
-            let raw = provider.search_tracks(&queries, 8).await.unwrap_or_default();
-            let candidates = enrich_candidates_with_metadata(&state, raw).await;
-            let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
-                .await
-                .unwrap_or_default();
-
-            let feed = external_discovery_engine::build_external_feed(
-                &request,
-                &context,
-                &candidates,
-                &library_tidal_ids,
-                discovery_provider_capabilities(),
-                None,
-            );
-
-            // Re-acquire the read guard for the enrichment passes that follow.
-            state_guard = state.read().await;
-
-            feed.results
+        if let Some(queue) = queue {
+            queue
+                .tracks
                 .into_iter()
-                .filter_map(|r| {
-                    let tidal_id = r.provider_track_id.parse::<i64>().ok()?;
-                    Some(SpaceTrack {
-                        track_id: tidal_id,
-                        title: r.title,
-                        artist_name: r.artist_name.unwrap_or_default(),
-                        album_title: r.album_title,
-                        artwork_url: r.artwork_url,
-                        duration_ms: r.duration_ms,
-                        similarity_score: (r.score as f64 / 99.0).clamp(0.0, 1.0),
-                        source: "external".to_string(),
-                        energy: None,
-                        danceability: None,
-                        bpm: None,
-                        key_signature: None,
-                        camelot_key: None,
-                        is_instrumental: None,
-                        loudness_lufs: None,
-                        skip_rate: None,
-                        completion_avg: None,
-                        cohort_id: None,
-                        cohort_label: None,
-                        top_genre: None,
-                        top_genre_source: None,
-                        top_genre_confidence: None,
-                        last_played_at: None,
-                        play_count: 0,
-                        is_in_library: false,
-                    })
+                .map(|c| SpaceTrack {
+                    track_id: if c.is_in_library { c.track_id } else { c.tidal_track_id.unwrap_or(c.track_id) },
+                    title: c.title,
+                    artist_name: c.artist_name,
+                    album_title: c.album_title,
+                    artwork_url: c.artwork_url,
+                    duration_ms: c.duration_ms,
+                    similarity_score: c.similarity_score,
+                    source: match c.source {
+                        crate::services::radio::RadioSource::Library => "tidal".to_string(),
+                        _ => "external".to_string(),
+                    },
+                    energy: None,
+                    danceability: None,
+                    bpm: None,
+                    key_signature: None,
+                    camelot_key: None,
+                    is_instrumental: None,
+                    loudness_lufs: None,
+                    skip_rate: None,
+                    completion_avg: None,
+                    cohort_id: None,
+                    cohort_label: None,
+                    top_genre: None,
+                    top_genre_source: None,
+                    top_genre_confidence: None,
+                    last_played_at: None,
+                    play_count: 0,
+                    is_in_library: c.is_in_library,
                 })
                 .collect()
         } else {
-            // Seed not found — empty result.
             vec![]
         }
     } else {
@@ -2656,6 +2625,132 @@ async fn get_discovery_space(
         "artists": [],
         "edges": edges,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RadioSongRequest {
+    seed_track_id: i64,
+    #[serde(default)]
+    blend: Option<crate::services::radio::RadioBlend>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    exclude_track_ids: Option<Vec<i64>>,
+}
+
+async fn radio_song(
+    State(state): State<SharedState>,
+    Json(payload): Json<RadioSongRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let blend = payload.blend.unwrap_or_default();
+    let limit = payload.limit.unwrap_or(60).clamp(8, 200);
+    let exclude = payload.exclude_track_ids.unwrap_or_default();
+
+    let (db, lastfm) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        (g.db.clone(), lastfm)
+    };
+
+    let queue = crate::services::radio::orchestrate_song(
+        &db,
+        lastfm.as_ref(),
+        payload.seed_track_id,
+        blend,
+        limit,
+        &exclude,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("radio_song failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
+}
+
+#[derive(Debug, Deserialize)]
+struct RadioAlbumRequest {
+    seed_album_id: i64,
+    #[serde(default)]
+    blend: Option<crate::services::radio::RadioBlend>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    exclude_track_ids: Option<Vec<i64>>,
+}
+
+async fn radio_album(
+    State(state): State<SharedState>,
+    Json(payload): Json<RadioAlbumRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let blend = payload.blend.unwrap_or_default();
+    let limit = payload.limit.unwrap_or(60).clamp(8, 200);
+    let exclude = payload.exclude_track_ids.unwrap_or_default();
+
+    let (db, lastfm) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        (g.db.clone(), lastfm)
+    };
+
+    let queue = crate::services::radio::orchestrate_album(
+        &db,
+        lastfm.as_ref(),
+        payload.seed_album_id,
+        blend,
+        limit,
+        &exclude,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("radio_album failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
+}
+
+#[derive(Debug, Deserialize)]
+struct RadioArtistRequest {
+    seed_artist_id: i64,
+    #[serde(default)]
+    blend: Option<crate::services::radio::RadioBlend>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    exclude_track_ids: Option<Vec<i64>>,
+}
+
+async fn radio_artist(
+    State(state): State<SharedState>,
+    Json(payload): Json<RadioArtistRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let blend = payload.blend.unwrap_or_default();
+    let limit = payload.limit.unwrap_or(60).clamp(8, 200);
+    let exclude = payload.exclude_track_ids.unwrap_or_default();
+
+    let (db, lastfm) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        (g.db.clone(), lastfm)
+    };
+
+    let queue = crate::services::radio::orchestrate_artist(
+        &db,
+        lastfm.as_ref(),
+        payload.seed_artist_id,
+        blend,
+        limit,
+        &exclude,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("radio_artist failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
 }
 
 async fn get_discovery_space_meta(
