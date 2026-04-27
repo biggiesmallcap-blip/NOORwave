@@ -5,13 +5,54 @@
 	import { discoverSpace, addVisitedRegion } from '$lib/stores/discover_space';
 	import { training } from '$lib/stores/training';
 
+	// ── Edge color palette (Phase 3b) ────────────────────────────────────────
+	// Resolves an edge to a color based on its first reason_tag (Phase 1 wire field),
+	// falling back to edge.type, then a neutral grey.
+	const EDGE_COLORS: Record<string, string> = {
+		// Reason tag keys
+		harmonic: '#a89cff',
+		harmonic_match: '#a89cff',
+		behavioural: '#5fb1ff',
+		behavioral: '#5fb1ff',
+		bpm_match: '#ffc857',
+		artist_affinity: '#ff8866',
+		album_context: '#ff8866',
+		artist: '#ff8866',
+		album: '#ff8866',
+		genre_branch: '#9fcf80',
+		genre: '#9fcf80',
+		energy_match: '#9fcf80',
+		external_match: '#5b4ef8',
+		audio_texture: '#c0c0d8',
+		// Coarse edge.type fallback values (some overlap with above)
+		sample: '#ff8866',
+	};
+
+	function resolveEdgeColor(edge: DiscoverEdge): string {
+		const tags = edge.reason_tags ?? [];
+		for (const tag of tags) {
+			if (EDGE_COLORS[tag]) return EDGE_COLORS[tag];
+		}
+		return EDGE_COLORS[edge.type] ?? '#888888';
+	}
+
+	function hexToRgba(hex: string, alpha: number): string {
+		const r = parseInt(hex.slice(1, 3), 16);
+		const g = parseInt(hex.slice(3, 5), 16);
+		const b = parseInt(hex.slice(5, 7), 16);
+		return `rgba(${r},${g},${b},${alpha})`;
+	}
+
 	let {
 		nodes = [],
 		artists = [],
 		edges = [],
 		mode = 'radio',
 		currentTrackId = null,
+		seedTrackId = null,
+		isSeedLocked = false,
 		onHover = (_node: DiscoverTrackNode | null) => {},
+		onHoverPosition = (_node: DiscoverTrackNode | null, _x: number, _y: number) => {},
 		onSelect = (_node: DiscoverTrackNode) => {},
 		onNewNodes = (_nodes: DiscoverTrackNode[]) => {},
 	}: {
@@ -20,7 +61,10 @@
 		edges?: DiscoverEdge[];
 		mode?: DiscoverViewMode;
 		currentTrackId?: number | null;
+		seedTrackId?: number | null;
+		isSeedLocked?: boolean;
 		onHover?: (node: DiscoverTrackNode | null) => void;
+		onHoverPosition?: (node: DiscoverTrackNode | null, x: number, y: number) => void;
 		onSelect?: (node: DiscoverTrackNode) => void;
 		onNewNodes?: (nodes: DiscoverTrackNode[]) => void;
 	} = $props();
@@ -269,14 +313,10 @@
 				ctx.lineTo(to.x, to.y);
 			}
 
-			switch (edge.type) {
-				case 'bpm_match': ctx.strokeStyle = 'rgba(255,200,50,0.3)'; break;
-				case 'harmonic': ctx.strokeStyle = 'rgba(150,100,255,0.3)'; break;
-				case 'behavioural': ctx.strokeStyle = 'rgba(80,150,255,0.2)'; break;
-				case 'sample': ctx.strokeStyle = 'rgba(255,100,50,0.4)'; break;
-				default: ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-			}
-			ctx.lineWidth = edge.weight * 3;
+			const edgeBaseColor = resolveEdgeColor(edge);
+			const edgeAlpha = 0.4 + edge.weight * 0.5;
+			ctx.strokeStyle = hexToRgba(edgeBaseColor, edgeAlpha);
+			ctx.lineWidth = 0.8 + edge.weight * 2.5;
 			ctx.stroke();
 		}
 
@@ -366,6 +406,68 @@
 				ctx.strokeStyle = 'rgba(255,255,255,0.6)';
 				ctx.lineWidth = 2;
 				ctx.stroke();
+			}
+		}
+
+		// ── Seed-distinct rendering ──────────────────────────────────────
+		if (seedTrackId != null) {
+			const seedNode = nodes.find(n => n.track_id === seedTrackId);
+			if (seedNode) {
+				const t = (Date.now() % 3000) / 3000;
+				const seedRadius = seedNode.radius * 1.5;
+
+				// Big purple halo
+				const haloR = seedRadius * 2.4;
+				const haloGrad = ctx.createRadialGradient(seedNode.x, seedNode.y, 0, seedNode.x, seedNode.y, haloR);
+				haloGrad.addColorStop(0, 'rgba(91, 78, 248, 0.4)');
+				haloGrad.addColorStop(0.5, 'rgba(91, 78, 248, 0.15)');
+				haloGrad.addColorStop(1, 'transparent');
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, haloR, 0, Math.PI * 2);
+				ctx.fillStyle = haloGrad;
+				ctx.fill();
+
+				// Heartbeat ring (slower than currentTrackId pulse)
+				const heartbeatR = seedRadius + 8 + Math.sin(t * Math.PI * 2) * 3;
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, heartbeatR, 0, Math.PI * 2);
+				ctx.strokeStyle = 'rgba(91, 78, 248, 0.7)';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+
+				// Bright filled core overriding the regular node
+				ctx.beginPath();
+				ctx.arc(seedNode.x, seedNode.y, seedRadius, 0, Math.PI * 2);
+				const coreGrad = ctx.createRadialGradient(seedNode.x, seedNode.y, 0, seedNode.x, seedNode.y, seedRadius);
+				coreGrad.addColorStop(0, '#ffffff');
+				coreGrad.addColorStop(0.4, '#a89cff');
+				coreGrad.addColorStop(1, '#5b4ef8');
+				ctx.fillStyle = coreGrad;
+				ctx.fill();
+				ctx.strokeStyle = '#ffffff';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+
+				// Inline label
+				ctx.save();
+				ctx.fillStyle = '#ffffff';
+				ctx.font = '600 13px system-ui, sans-serif';
+				ctx.textAlign = 'center';
+				ctx.textBaseline = 'top';
+				ctx.fillText(seedNode.title, seedNode.x, seedNode.y + seedRadius + 8);
+				if (seedNode.artist_name) {
+					ctx.fillStyle = 'rgba(160, 160, 192, 0.9)';
+					ctx.font = '11px system-ui, sans-serif';
+					ctx.fillText(seedNode.artist_name, seedNode.x, seedNode.y + seedRadius + 24);
+				}
+				// Lock indicator
+				if (isSeedLocked) {
+					ctx.fillStyle = '#5b4ef8';
+					ctx.font = '14px system-ui, sans-serif';
+					ctx.textAlign = 'left';
+					ctx.fillText('🔒', seedNode.x + seedRadius * 0.7, seedNode.y - seedRadius);
+				}
+				ctx.restore();
 			}
 		}
 
@@ -471,6 +573,7 @@
 		}
 		hoveredNode = found;
 		onHover(found);
+		onHoverPosition(found, e.clientX, e.clientY);
 		if (canvas) canvas.style.cursor = found ? 'pointer' : 'grab';
 
 		if (isDragging) {

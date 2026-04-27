@@ -1,3 +1,4 @@
+use crate::db::audio_settings::AudioQuality;
 use crate::db::{
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
@@ -531,25 +532,35 @@ pub fn queue_tracks(snapshot: &PlaybackSnapshot) -> Vec<Track> {
         .collect()
 }
 
-pub fn preferred_tidal_quality(track: &Track) -> &str {
+pub(crate) fn preferred_tidal_quality(
+    track: &Track,
+    user_pref: Option<AudioQuality>,
+) -> String {
+    if let Some(q) = user_pref {
+        return q.as_tidal_str().to_string();
+    }
     track
         .best_quality
-        .as_deref()
-        .unwrap_or(stream::DEFAULT_AUDIO_QUALITY)
+        .clone()
+        .unwrap_or_else(|| stream::DEFAULT_AUDIO_QUALITY.to_string())
 }
 
-pub fn build_tidal_stream_request(track: &Track) -> Option<StreamRequest> {
+pub fn build_tidal_stream_request(
+    track: &Track,
+    user_pref: Option<AudioQuality>,
+) -> Option<StreamRequest> {
     track
         .tidal_id
-        .map(|track_id| StreamRequest::new(track_id, preferred_tidal_quality(track)))
+        .map(|track_id| StreamRequest::new(track_id, preferred_tidal_quality(track, user_pref)))
 }
 
 pub fn build_playback_preparation(
     track: &Track,
     stream_info: Option<&StreamInfo>,
     crossfade_ms: i32,
+    user_pref: Option<AudioQuality>,
 ) -> PlaybackPreparation {
-    let source = build_tidal_stream_request(track)
+    let source = build_tidal_stream_request(track, user_pref)
         .map(PlaybackSourceRequest::TidalStream)
         .unwrap_or(PlaybackSourceRequest::LocalLibrary);
     let gapless = gapless::plan_from_stream(stream_info, GaplessSettings::new(true, crossfade_ms));
@@ -1311,7 +1322,7 @@ mod tests {
     fn build_tidal_stream_request_uses_track_quality_or_defaults() {
         let track = track_with_tidal_id(42, Some(88), Some("HI_RES_LOSSLESS"));
 
-        let request = build_tidal_stream_request(&track).unwrap();
+        let request = build_tidal_stream_request(&track, None).unwrap();
 
         assert_eq!(request.track_id, 88);
         assert_eq!(request.audio_quality, "HI_RES_LOSSLESS");
@@ -1323,7 +1334,7 @@ mod tests {
     fn build_playback_preparation_marks_local_tracks_as_local_library() {
         let track = track_with_tidal_id(7, None, None);
 
-        let prep = build_playback_preparation(&track, None, 1500);
+        let prep = build_playback_preparation(&track, None, 1500, None);
 
         assert!(prep.is_local());
         assert_eq!(prep.source_kind(), PlaybackSourceKind::LocalLibrary);
@@ -1344,7 +1355,7 @@ mod tests {
             bit_depth: Some(16),
         };
 
-        let prep = build_playback_preparation(&track, Some(&stream), 1500);
+        let prep = build_playback_preparation(&track, Some(&stream), 1500, None);
 
         assert!(prep.is_tidal());
         assert_eq!(prep.source_kind(), PlaybackSourceKind::TidalStream);
@@ -1409,5 +1420,59 @@ mod tests {
         assert_eq!(next.id, 3);
         let queue_items = queue::load_queue(&conn).unwrap();
         assert!(queue_items.len() > 2);
+    }
+}
+
+#[cfg(test)]
+mod quality_precedence_tests {
+    use super::*;
+    use crate::db::audio_settings::AudioQuality;
+
+    fn track_with_best(best: Option<&str>) -> Track {
+        Track {
+            id: 1,
+            title: "T".to_string(),
+            artist_id: 1,
+            artist_name: None,
+            album_id: None,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: None,
+            isrc: None,
+            tidal_id: Some(1),
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: best.map(String::from),
+            best_source: None,
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "tidal".to_string(),
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn user_pref_overrides_track_best_quality() {
+        let t = track_with_best(Some("HI_RES_LOSSLESS"));
+        let got = preferred_tidal_quality(&t, Some(AudioQuality::Lossless));
+        assert_eq!(got, "LOSSLESS");
+    }
+
+    #[test]
+    fn falls_back_to_track_when_no_user_pref() {
+        let t = track_with_best(Some("HI_RES_LOSSLESS"));
+        let got = preferred_tidal_quality(&t, None);
+        assert_eq!(got, "HI_RES_LOSSLESS");
+    }
+
+    #[test]
+    fn falls_back_to_default_when_neither_set() {
+        let t = track_with_best(None);
+        let got = preferred_tidal_quality(&t, None);
+        assert_eq!(got, crate::services::tidal::stream::DEFAULT_AUDIO_QUALITY);
     }
 }

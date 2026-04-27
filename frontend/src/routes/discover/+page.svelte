@@ -7,10 +7,15 @@
 	import DiscoverPanel from '$lib/components/Discover/DiscoverPanel.svelte';
 	import PlaylistBuilder from '$lib/components/Discover/PlaylistBuilder.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import DiscoverHoverCard from '$lib/components/Discover/DiscoverHoverCard.svelte';
+	import DiscoverLegend from '$lib/components/Discover/DiscoverLegend.svelte';
 	import type { DiscoverTrackNode, DiscoverViewMode } from '$lib/components/Discover/discover.types';
 
 	let selectedNodes = $state<DiscoverTrackNode[]>([]);
 	let panelNode = $state<DiscoverTrackNode | null>(null);
+	let hoveredNode = $state<DiscoverTrackNode | null>(null);
+	let hoverX = $state(0);
+	let hoverY = $state(0);
 	let searchQuery = $state('');
 	let isSearching = $state(false);
 
@@ -38,7 +43,15 @@
 		}
 	}
 
-	function handleHover(_node: DiscoverTrackNode | null) {}
+	function handleHover(node: DiscoverTrackNode | null) {
+		hoveredNode = node;
+	}
+
+	function handleHoverPosition(node: DiscoverTrackNode | null, x: number, y: number) {
+		hoveredNode = node;
+		hoverX = x;
+		hoverY = y;
+	}
 
 	function handleSelect(node: DiscoverTrackNode) {
 		selectedNodes = [...selectedNodes, node];
@@ -86,6 +99,8 @@
 		}
 	});
 </script>
+
+<svelte:window onmouseleave={() => { hoveredNode = null; }} />
 
 <div class="discover-page">
 	<div class="discover-header">
@@ -162,7 +177,10 @@
 					edges={$discoverSpace.edges}
 					mode={$discoverSpace.mode}
 					currentTrackId={$currentTrack?.id ?? null}
+					seedTrackId={$discoverSpace.activeSeedId}
+					isSeedLocked={$discoverSpace.lockedSeedId !== null && $discoverSpace.activeSeedId === $discoverSpace.lockedSeedId}
 					onHover={handleHover}
+					onHoverPosition={handleHoverPosition}
 					onSelect={handleSelect}
 					onNewNodes={handleNewNodes}
 				/>
@@ -173,6 +191,16 @@
 			<DiscoverPanel node={panelNode} />
 		</div>
 	</div>
+
+	<DiscoverHoverCard
+		node={hoveredNode}
+		mouseX={hoverX}
+		mouseY={hoverY}
+		seedTrackId={$discoverSpace.activeSeedId}
+		isLocked={$discoverSpace.lockedSeedId !== null && $discoverSpace.activeSeedId === $discoverSpace.lockedSeedId}
+	/>
+
+	<DiscoverLegend />
 </div>
 
 <style>

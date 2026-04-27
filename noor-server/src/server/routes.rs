@@ -337,6 +337,12 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/playback/queue/add", post(add_queue_track))
         .route("/api/playback/queue/remove", post(remove_queue_track))
+        // Audio output settings + device enumeration
+        .route("/api/audio/devices", get(get_audio_devices))
+        .route(
+            "/api/audio/settings",
+            get(get_audio_settings).put(put_audio_settings),
+        )
         // Search
         .route("/api/search", get(search))
         .route("/api/search/audio", post(search_audio))
@@ -1305,7 +1311,13 @@ async fn play_discovery_track(
         })?;
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
+    let user_quality = current_user_audio_quality(&state).await;
+    let job = player::build_playback_preparation(
+        &track,
+        Some(&stream_info),
+        crossfade_ms,
+        user_quality,
+    );
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -4178,7 +4190,8 @@ async fn play_track(
         "playback start requested"
     );
 
-    let stream_request = player::build_tidal_stream_request(&track).ok_or_else(|| {
+    let user_quality = current_user_audio_quality(&state).await;
+    let stream_request = player::build_tidal_stream_request(&track, user_quality.clone()).ok_or_else(|| {
         (
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({
@@ -4206,7 +4219,12 @@ async fn play_track(
 
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms);
+    let job = player::build_playback_preparation(
+        &track,
+        Some(&stream_info),
+        crossfade_ms,
+        user_quality,
+    );
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -4605,7 +4623,8 @@ async fn next_track(
     sync_session_after_snapshot(&state, &snapshot, end_reason).await;
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let stream_request = player::build_tidal_stream_request(track).ok_or_else(|| {
+        let user_quality = current_user_audio_quality(&state).await;
+        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
@@ -4640,6 +4659,7 @@ async fn next_track(
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
@@ -4704,7 +4724,8 @@ async fn previous_track(
     .await;
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let stream_request = player::build_tidal_stream_request(track).ok_or_else(|| {
+        let user_quality = current_user_audio_quality(&state).await;
+        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
@@ -4739,6 +4760,7 @@ async fn previous_track(
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
@@ -5207,6 +5229,7 @@ struct TidalSearchTrackResp {
     artwork_url: Option<String>,
     audio_quality: Option<String>,
     stream_ready: Option<bool>,
+    in_library: bool,
 }
 
 #[derive(Serialize)]
@@ -5215,6 +5238,8 @@ struct TidalSearchAlbumResp {
     title: String,
     artist_name: Option<String>,
     artwork_url: Option<String>,
+    local_id: Option<i64>,
+    in_library: bool,
 }
 
 #[derive(Serialize)]
@@ -5222,6 +5247,8 @@ struct TidalSearchArtistResp {
     tidal_id: i64,
     name: String,
     artwork_url: Option<String>,
+    local_id: Option<i64>,
+    in_library: bool,
 }
 
 async fn tidal_search(
@@ -5243,16 +5270,55 @@ async fn tidal_search(
         ));
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
     let limit = params.limit.unwrap_or(20).min(50);
-    let results = client.search_catalog(&params.q, limit).await.map_err(|e| {
-        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
-    })?;
+    let http_client = state.read().await.http_client.clone();
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let results = match client.search_catalog(&params.q, limit).await {
+        Ok(r) => r,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                ))?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client.search_catalog(&params.q, limit).await.map_err(|e2| {
+                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
+            })?
+        }
+        Err(e) => return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )),
+    };
+
+    // Batch-lookup which Tidal IDs are in the local library so the frontend can
+    // route to local pages and badge entries as in-library.
+    let track_tidal_ids: Vec<i64> = results.tracks.iter().map(|t| t.id).collect();
+    let album_tidal_ids: Vec<i64> = results.albums.iter().map(|a| a.id).collect();
+    let artist_tidal_ids: Vec<i64> = results.artists.iter().map(|a| a.id).collect();
+    let (known_tracks, known_albums, known_artists) = {
+        let s = state.read().await;
+        s.db
+            .with_conn(|conn| {
+                let tracks = queries::get_existing_tidal_track_ids(conn, &track_tidal_ids)?;
+                let albums = queries::get_known_album_tidal_ids(conn, &album_tidal_ids)?;
+                let artists = queries::get_known_artist_tidal_ids(conn, &artist_tidal_ids)?;
+                Ok((tracks, albums, artists))
+            })
+            .unwrap_or_default()
+    };
 
     let tracks: Vec<TidalSearchTrackResp> = results
         .tracks
         .into_iter()
         .map(|t| TidalSearchTrackResp {
+            in_library: known_tracks.contains(&t.id),
             tidal_id: t.id,
             title: t.title,
             duration_ms: t.duration * 1000,
@@ -5268,21 +5334,31 @@ async fn tidal_search(
     let albums: Vec<TidalSearchAlbumResp> = results
         .albums
         .into_iter()
-        .map(|a| TidalSearchAlbumResp {
-            tidal_id: a.id,
-            title: a.title,
-            artist_name: a.artist_name,
-            artwork_url: a.artwork_url,
+        .map(|a| {
+            let local_id = known_albums.get(&a.id).copied();
+            TidalSearchAlbumResp {
+                tidal_id: a.id,
+                title: a.title,
+                artist_name: a.artist_name,
+                artwork_url: a.artwork_url,
+                in_library: local_id.is_some(),
+                local_id,
+            }
         })
         .collect();
 
     let artists: Vec<TidalSearchArtistResp> = results
         .artists
         .into_iter()
-        .map(|a| TidalSearchArtistResp {
-            tidal_id: a.id,
-            name: a.name,
-            artwork_url: a.artwork_url,
+        .map(|a| {
+            let local_id = known_artists.get(&a.id).copied();
+            TidalSearchArtistResp {
+                tidal_id: a.id,
+                name: a.name,
+                artwork_url: a.artwork_url,
+                in_library: local_id.is_some(),
+                local_id,
+            }
         })
         .collect();
 
@@ -5325,18 +5401,37 @@ async fn play_tidal_ephemeral(
         s.http_client.clone()
     };
     let stream_req = tidal_stream::StreamRequest::new(body.tidal_track_id, "LOSSLESS");
-    let stream_info = tidal_stream::resolve_stream(
+    let stream_info = match tidal_stream::resolve_stream(
         &http_client,
         &tokens.access_token,
         &stream_req,
     )
     .await
-    .map_err(|e| {
-        (
+    {
+        Ok(info) => info,
+        Err(e) if e.is_session_expired() => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                ))?;
+            tidal_stream::resolve_stream(
+                &http_client,
+                &refreshed.access_token,
+                &stream_req,
+            )
+            .await
+            .map_err(|e2| (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("TIDAL stream resolve failed: {e2}") })),
+            ))?
+        }
+        Err(e) => return Err((
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": format!("TIDAL stream resolve failed: {e}") })),
-        )
-    })?;
+        )),
+    };
 
     // Build a synthetic Track with a negative id to avoid any DB collision
     let synthetic = crate::db::models::Track {
@@ -5366,7 +5461,7 @@ async fn play_tidal_ephemeral(
 
     // Build the playback job and start it via the runtime
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms);
+    let job = player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None);
     let runtime_handle = ensure_playback_runtime_for_track(&state, &synthetic).await?;
     runtime_handle.play(job).map_err(|e| {
         let message = format!("Failed to start host audio playback: {e}");
@@ -5424,12 +5519,35 @@ async fn tidal_artist_profile(
         ));
     };
 
+    let http_client = state.read().await.http_client.clone();
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let (top_tracks_page, albums_page) = tokio::try_join!(
+    let (top_tracks_page, albums_page) = match tokio::try_join!(
         client.get_artist_top_tracks(tidal_artist_id, 10, 0),
         client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
-    )
-    .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))))?;
+    ) {
+        Ok(pair) => pair,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                ))?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            tokio::try_join!(
+                retry_client.get_artist_top_tracks(tidal_artist_id, 10, 0),
+                retry_client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
+            )
+            .map_err(|e2| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() }))))?
+        }
+        Err(e) => return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )),
+    };
 
     let artist_name = top_tracks_page
         .items
@@ -6369,7 +6487,8 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
     };
 
     // Resolve the stream URL for the next track (we need a live access token).
-    let stream_request = match player::build_tidal_stream_request(&next) {
+    let user_quality = current_user_audio_quality(&state).await;
+    let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
         Some(req) => req,
         None => return Ok(()), // local library — skip pre-buffer for now
     };
@@ -6389,11 +6508,55 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         (info, token)
     };
 
+    // If sample_rate_follow is enabled and the next track's rate differs from current,
+    // rebuild the output device at the new rate before PrepareNext.
+    {
+        let state_guard = state.read().await;
+        if let (Some(stream), Some(info)) = (stream_info.as_ref(), &state_guard.playback_runtime_info) {
+            let audio_settings = state_guard
+                .db
+                .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+                .ok();
+            if let Some(settings) = audio_settings {
+                if settings.sample_rate_follow {
+                    if let Some(next_rate) = stream.sample_rate {
+                        let current_rate = info.sample_rate;
+                        if next_rate as u32 != current_rate {
+                            let device_sel = match settings.output_device {
+                                Some(device_id) => {
+                                    playback_runtime::OutputDeviceSelection::Named(device_id)
+                                }
+                                None => playback_runtime::OutputDeviceSelection::Default,
+                            };
+                            // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
+                            if let Err(e) = handle.device_swap(
+                                device_sel,
+                                settings.exclusive_mode,
+                                settings.sample_rate_follow,
+                                Some(next_rate as u32),
+                            ) {
+                                warn!(
+                                    "Failed to rebuild stream for next track {} at {} Hz: {e}",
+                                    next.id, next_rate
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let _gapless = crate::playback::gapless::plan_from_stream(
         stream_info.as_ref(),
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
     );
-    let job = player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms);
+    let job = player::build_playback_preparation(
+        &next,
+        stream_info.as_ref(),
+        crossfade_ms,
+        user_quality,
+    );
     let _ = access_token; // already embedded in the config held by the runtime
 
     let _ = handle.prepare_next(job);
@@ -6465,7 +6628,9 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
     }
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
-        let Some(stream_request) = player::build_tidal_stream_request(track) else {
+        let user_quality = current_user_audio_quality(&state).await;
+        let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
+        else {
             handle_runtime_error(
                 state.clone(),
                 "Local library playback is not wired into the host audio runtime yet.",
@@ -6490,6 +6655,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             track,
             Some(&stream_info),
             snapshot.state.crossfade_ms,
+            user_quality,
         );
         runtime_handle.switch_to(job)?;
     }
@@ -6594,6 +6760,96 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
             .map_err(Into::into)
         })
         .unwrap_or(0)
+}
+
+async fn current_user_audio_quality(
+    state: &SharedState,
+) -> Option<crate::db::audio_settings::AudioQuality> {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .ok()
+        .map(|s| s.quality)
+}
+
+// ───── Audio output settings ────────────────────────────────────────────────
+//
+// `GET /api/audio/devices`     — enumerate cpal output devices
+// `GET /api/audio/settings`    — current persisted AudioSettings
+// `PUT /api/audio/settings`    — persist + (if device/exclusive/SR-follow changed) live-swap
+
+async fn get_audio_devices(
+    State(_state): State<SharedState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let devices = crate::playback::runtime::enumerate_output_devices();
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+async fn get_audio_settings(
+    State(state): State<SharedState>,
+) -> Result<Json<crate::db::audio_settings::AudioSettings>, StatusCode> {
+    let guard = state.read().await;
+    guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// PUT body is the full `AudioSettings` struct. The frontend always knows the
+/// complete current state (the store hydrates on mount), so it sends the whole
+/// thing on every change. This avoids the partial-update / `Option<Option<T>>`
+/// footgun.
+async fn put_audio_settings(
+    State(state): State<SharedState>,
+    Json(new): Json<crate::db::audio_settings::AudioSettings>,
+) -> Result<Json<crate::db::audio_settings::AudioSettings>, (StatusCode, Json<serde_json::Value>)> {
+    // Reject exclusive_mode on non-Windows.
+    if new.exclusive_mode && !cfg!(target_os = "windows") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "exclusive_mode is only supported on Windows"
+            })),
+        ));
+    }
+
+    let guard = state.read().await;
+    let (old, saved) = guard
+        .db
+        .with_conn(|conn| {
+            let old = crate::db::audio_settings::load(conn)?;
+            crate::db::audio_settings::save(conn, &new)?;
+            Ok((old, new.clone()))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+        })?;
+    let new = saved;
+
+    // Live-apply iff anything affecting the output stream changed.
+    let needs_swap = old.output_device != new.output_device
+        || old.exclusive_mode != new.exclusive_mode
+        || old.sample_rate_follow != new.sample_rate_follow;
+
+    if needs_swap {
+        if let Some(runtime) = guard.playback_runtime.as_ref() {
+            if let Err(e) = runtime.handle.device_swap(
+                playback_runtime::OutputDeviceSelection::from_pref(new.output_device.as_deref()),
+                new.exclusive_mode,
+                new.sample_rate_follow,
+                None,
+            ) {
+                warn!("Audio settings update: live device_swap failed: {e}");
+            }
+        }
+    }
+
+    Ok(Json(new))
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {

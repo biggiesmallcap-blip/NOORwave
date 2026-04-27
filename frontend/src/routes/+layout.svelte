@@ -34,6 +34,7 @@
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
+	import Toast from '$lib/components/Toast.svelte';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -523,6 +524,7 @@
 </div>
 
 <ContextMenu />
+<Toast />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
@@ -627,8 +629,12 @@
 				<div class="np-copy">
 					<p class="np-eyebrow">Listening Instrument</p>
 					<h2 class="np-title">{$currentTrack?.title ?? 'Nothing queued'}</h2>
-					{#if $currentTrack?.artist_id}
+					{#if $currentTrack?.artist_id && $currentTrack.artist_id > 0}
 						<a class="np-artist np-link" href="/artists/{$currentTrack.artist_id}">
+							{$currentTrack.artist_name ?? 'Unknown artist'}
+						</a>
+					{:else if $currentTrack?.artist_tidal_id}
+						<a class="np-artist np-link" href="/tidal/artists/{$currentTrack.artist_tidal_id}">
 							{$currentTrack.artist_name ?? 'Unknown artist'}
 						</a>
 					{:else}

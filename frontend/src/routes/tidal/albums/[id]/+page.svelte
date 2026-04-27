@@ -14,6 +14,7 @@
 			album_title: t.album_title ?? null,
 			artwork_url: t.artwork_url,
 			duration_ms: t.duration_ms,
+			artist_tidal_id: t.artist_tidal_id ?? null,
 		};
 	}
 
