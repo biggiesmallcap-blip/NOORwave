@@ -2045,7 +2045,7 @@ async fn get_discovery_space(
         }).unwrap_or_default()
     } else if seed_id > 0 {
         let db = state_guard.db.clone();
-        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(state_guard.http_client.clone());
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(state_guard.http_client.clone(), &state_guard.db);
         drop(state_guard);
 
         let queue = crate::services::radio::orchestrate_song(
@@ -2664,7 +2664,7 @@ async fn radio_song(
 
     let (db, lastfm) = {
         let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
 
@@ -2706,7 +2706,7 @@ async fn radio_album(
 
     let (db, lastfm) = {
         let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
 
@@ -2748,7 +2748,7 @@ async fn radio_artist(
 
     let (db, lastfm) = {
         let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::from_env(g.http_client.clone());
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
 
@@ -3261,11 +3261,11 @@ async fn augment_connection_queries_with_lastfm(
     seed: &DiscoveryCandidateSeed,
     base_queries: Vec<String>,
 ) -> Vec<String> {
-    let http_client = {
+    let (http_client, db) = {
         let state_guard = state.read().await;
-        state_guard.http_client.clone()
+        (state_guard.http_client.clone(), state_guard.db.clone())
     };
-    let Some(lastfm) = LastFmClient::from_env(http_client) else {
+    let Some(lastfm) = LastFmClient::load(http_client, &db) else {
         return base_queries;
     };
 
@@ -3290,11 +3290,11 @@ async fn augment_search_queries_with_lastfm(
     context: &external_discovery_engine::ExternalDiscoveryContext,
     base_queries: Vec<String>,
 ) -> Vec<String> {
-    let http_client = {
+    let (http_client, db) = {
         let state_guard = state.read().await;
-        state_guard.http_client.clone()
+        (state_guard.http_client.clone(), state_guard.db.clone())
     };
-    let Some(lastfm) = LastFmClient::from_env(http_client) else {
+    let Some(lastfm) = LastFmClient::load(http_client, &db) else {
         return base_queries;
     };
 
@@ -3328,11 +3328,11 @@ async fn enrich_candidates_with_metadata(
     state: &SharedState,
     mut candidates: Vec<crate::services::discovery::DiscoveryCandidateTrack>,
 ) -> Vec<crate::services::discovery::DiscoveryCandidateTrack> {
-    let http_client = {
+    let (http_client, db) = {
         let state_guard = state.read().await;
-        state_guard.http_client.clone()
+        (state_guard.http_client.clone(), state_guard.db.clone())
     };
-    let lastfm = LastFmClient::from_env(http_client.clone());
+    let lastfm = LastFmClient::load(http_client.clone(), &db);
     let discogs = DiscogsClient::new(http_client);
 
     for candidate in candidates.iter_mut().take(16) {

@@ -35,6 +35,29 @@ impl LastFmClient {
         Some(Self::new(http, api_key.to_string()))
     }
 
+    /// Construct a client preferring a user-configured key from the DB
+    /// (saved via `POST /api/lastfm/config`), falling back to the
+    /// `LASTFM_API_KEY` env var. Returns `None` if neither is available.
+    ///
+    /// Use this from request handlers where the user-configured key should
+    /// take precedence. `from_env` stays for tests and bootstrap paths.
+    pub fn load(http: reqwest::Client, db: &crate::db::Database) -> Option<Self> {
+        // 1. Try DB-stored credentials.
+        let from_db = db
+            .with_conn(|conn| crate::services::lastfm::auth::load_credentials(conn))
+            .ok()
+            .flatten()
+            .map(|c| c.api_key.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(api_key) = from_db {
+            return Some(Self::new(http, api_key));
+        }
+
+        // 2. Fall back to env var.
+        Self::from_env(http)
+    }
+
     pub fn new(http: reqwest::Client, api_key: String) -> Self {
         Self { http, api_key }
     }
