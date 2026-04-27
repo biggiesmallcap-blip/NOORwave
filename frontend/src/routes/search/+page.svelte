@@ -319,8 +319,8 @@
           ? `/albums/${top.entry.local_id}`
           : `/tidal/albums/${top.entry.tidal_id}`
       case 'track':
-        return top.entry.album_title
-          ? `/tidal/artists/${top.entry.artist_id ?? 0}`
+        return top.entry.artist_id != null
+          ? `/tidal/artists/${top.entry.artist_id}`
           : '#'
     }
   }

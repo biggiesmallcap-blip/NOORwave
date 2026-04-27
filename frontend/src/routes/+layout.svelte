@@ -825,10 +825,11 @@
 
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if item.track.artist_id}
+								{@const aid = item.track.artist_id}
+								{#if aid && aid > 0}
 									<a
 										class="queue-artist"
-										href="/artists/{item.track.artist_id}"
+										href="/artists/{aid}"
 										onclick={stopPropagation}
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
@@ -1148,10 +1149,11 @@
 							</div>
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if item.track.artist_id}
+								{@const aid = item.track.artist_id}
+								{#if aid && aid > 0}
 									<a
 										class="queue-artist"
-										href="/artists/{item.track.artist_id}"
+										href="/artists/{aid}"
 										onclick={stopPropagation}
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
