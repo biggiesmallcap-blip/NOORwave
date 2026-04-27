@@ -107,6 +107,7 @@ export interface TidalSearchTrack {
 	artwork_url: string | null;
 	audio_quality: string | null;
 	stream_ready: boolean | null;
+	local_id?: number | null;
 	in_library: boolean;
 }
 

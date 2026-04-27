@@ -2,9 +2,9 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack } from '$lib/api/client'
-  import { buildTidalTrackMenu } from '$lib/player/track_menu'
+  import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
   import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
@@ -292,20 +292,47 @@
   }
 
   function buildAlbumMenu(album: TidalSearchAlbum): MenuItem[] {
-    return [
+    const items: MenuItem[] = [
       { label: 'Play album', icon: '▶', onSelect: () => void playTidalAlbum(album.tidal_id) },
-      { separator: true, label: '' },
-      { label: 'Open album', icon: '→', onSelect: () => void goto(`/tidal/albums/${album.tidal_id}`) },
     ]
+    if (album.in_library && album.local_id != null) {
+      items.push({ label: 'Shuffle album', icon: '⤮', onSelect: () => void shuffleAlbum(album.local_id!) })
+      items.push({ label: 'Album radio', icon: '◉', onSelect: () => void startAlbumRadio(album.local_id!) })
+      items.push({ separator: true, label: '' })
+      items.push({ label: 'Open in library', icon: '→', onSelect: () => void goto(`/albums/${album.local_id}`) })
+    } else {
+      items.push({ separator: true, label: '' })
+      items.push({ label: 'Open on Tidal', icon: '→', onSelect: () => void goto(`/tidal/albums/${album.tidal_id}`) })
+    }
+    return items
   }
 
   function buildArtistMenu(artist: TidalSearchArtist): MenuItem[] {
     const href = artist.in_library && artist.local_id != null
       ? `/artists/${artist.local_id}`
       : `/tidal/artists/${artist.tidal_id}`
-    return [
+    const items: MenuItem[] = [
       { label: artist.in_library ? 'Open in library' : 'Open artist', icon: '→', onSelect: () => void goto(href) },
     ]
+    if (artist.in_library && artist.local_id != null) {
+      items.push({ separator: true, label: '' })
+      items.push({ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artist.local_id!) })
+    }
+    return items
+  }
+
+  function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
+    if (track.in_library && track.local_id != null) {
+      return buildTrackMenu({
+        id: track.local_id,
+        title: track.title,
+        artist_id: null,
+        artist_name: track.artist_name ?? null,
+        album_id: null,
+        album_title: track.album_title ?? null,
+      })
+    }
+    return buildTidalTrackMenu(track)
   }
 
   // ─── Keyboard navigation ────────────────────────────────────────────────
@@ -576,6 +603,9 @@
 
     {#if topResult}
       {@const top = topResult}
+      {@const artistBg = top.kind === 'artist'
+        ? (top.entry.artwork_url ?? sortedAlbums.find(a => a.artist_name === top.entry.name)?.artwork_url ?? null)
+        : null}
       <section class="top-result-section">
         <h3 class="section-label">Top Result</h3>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -583,8 +613,10 @@
         <div
           class="top-result-card"
           class:in-library={top.entry.in_library}
+          class:artist-hero={top.kind === 'artist'}
           role="button"
           tabindex="0"
+          style={top.kind === 'artist' && artistBg ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
         >
@@ -599,7 +631,7 @@
           {:else if top.entry.artwork_url}
             <div class="top-art" style={`background-image: url('${top.entry.artwork_url}')`}></div>
           {:else}
-            <div class="top-art fallback" style={`background: ${letterColor(top.kind === 'album' ? top.entry.title : top.entry.title)}`}>
+            <div class="top-art fallback" style={`background: ${letterColor(top.entry.title)}`}>
               <span>♫</span>
             </div>
           {/if}
@@ -644,7 +676,7 @@
                   </div>
                 {/if}
                 {#if artist.in_library}
-                  <span class="lib-badge" title="In your library">✓</span>
+                  <span class="lib-badge" aria-label="In your library"></span>
                 {/if}
               </div>
               <span class="artist-name">{artist.name}</span>
@@ -676,7 +708,7 @@
                   </div>
                 {/if}
                 {#if album.in_library}
-                  <span class="lib-badge" title="In your library">✓</span>
+                  <span class="lib-badge" aria-label="In your library"></span>
                 {/if}
                 <button
                   class="art-play-overlay"
@@ -711,7 +743,7 @@
               onclick={() => void playTidalTrackNow(toPlayable(track))}
               onmouseenter={() => { cursor = idx }}
               onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playTidalTrackNow(toPlayable(track)))}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(track)) }}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
@@ -723,7 +755,7 @@
               <div class="track-meta">
                 <p class="track-title">
                   {track.title}
-                  {#if track.in_library}<span class="lib-dot" title="In your library">✓</span>{/if}
+                  {#if track.in_library}<span class="lib-dot" aria-label="In your library"></span>{/if}
                 </p>
                 <p class="track-subtitle">
                   {#if track.artist_name}{track.artist_name}{/if}
@@ -753,7 +785,7 @@
                 >◎</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(track)) }}
+                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
                   title="More options"
                   aria-label="More options"
                 >⋯</button>
@@ -1101,26 +1133,23 @@
   }
   .lib-badge {
     position: absolute;
-    top: -2px;
-    right: -2px;
-    width: 18px;
-    height: 18px;
+    bottom: 3px;
+    right: 3px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
-    font-size: 11px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 0 0 2px var(--bg-base);
-    line-height: 1;
+    border: 2px solid var(--bg-base);
   }
   .lib-dot {
-    color: var(--accent);
-    font-size: 10px;
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
     margin-left: 6px;
     vertical-align: middle;
+    flex-shrink: 0;
   }
   .artist-card.in-library .artist-name {
     color: var(--text-primary);
@@ -1312,4 +1341,25 @@
   .row-btn:hover { color: var(--text-primary); }
   .discovery-section { opacity: 0.9; }
   .discovery-section .section-label { color: var(--text-muted); }
+  .top-result-card.artist-hero {
+    position: relative;
+    overflow: hidden;
+    min-height: 200px;
+  }
+  .top-result-card.artist-hero::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to right, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.5) 55%, rgba(0,0,0,0.1) 100%);
+    pointer-events: none;
+  }
+  .top-result-card.artist-hero .top-art,
+  .top-result-card.artist-hero .top-meta {
+    position: relative;
+    z-index: 1;
+  }
+  .top-result-card.artist-hero .top-art--circle {
+    width: 100px;
+    height: 100px;
+  }
 </style>

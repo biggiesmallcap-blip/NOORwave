@@ -1721,6 +1721,42 @@ pub fn get_existing_tidal_track_ids(conn: &Connection, tidal_ids: &[i64]) -> Res
     Ok(ids)
 }
 
+pub fn get_tidal_track_local_ids(
+    conn: &Connection,
+    tidal_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    if tidal_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = placeholders(tidal_ids.len());
+    let sql = format!("SELECT tidal_id, id FROM tracks WHERE tidal_id IN ({placeholders})");
+    let params = params_from_iter(tidal_ids.iter().copied());
+    let mut stmt = conn.prepare(&sql)?;
+    let mut map = HashMap::new();
+    let rows = stmt.query_map(params, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    for row in rows { let (tid, lid) = row?; map.insert(tid, lid); }
+    Ok(map)
+}
+
+pub fn get_artist_photos_by_tidal_ids(
+    conn: &Connection,
+    tidal_ids: &[i64],
+) -> Result<HashMap<i64, String>> {
+    if tidal_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = placeholders(tidal_ids.len());
+    let sql = format!(
+        "SELECT tidal_id, photo_url FROM artists WHERE tidal_id IN ({placeholders}) AND photo_url IS NOT NULL"
+    );
+    let params = params_from_iter(tidal_ids.iter().copied());
+    let mut stmt = conn.prepare(&sql)?;
+    let mut map = HashMap::new();
+    let rows = stmt.query_map(params, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    for row in rows { let (tid, photo) = row?; map.insert(tid, photo); }
+    Ok(map)
+}
+
 pub fn list_discovery_presets(conn: &Connection) -> Result<Vec<DiscoveryPreset>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, words, mode, services, created_at

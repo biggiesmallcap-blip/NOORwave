@@ -5485,6 +5485,7 @@ struct TidalSearchTrackResp {
     artwork_url: Option<String>,
     audio_quality: Option<String>,
     stream_ready: Option<bool>,
+    local_id: Option<i64>,
     in_library: bool,
 }
 
@@ -5558,14 +5559,15 @@ async fn tidal_search(
     let track_tidal_ids: Vec<i64> = results.tracks.iter().map(|t| t.id).collect();
     let album_tidal_ids: Vec<i64> = results.albums.iter().map(|a| a.id).collect();
     let artist_tidal_ids: Vec<i64> = results.artists.iter().map(|a| a.id).collect();
-    let (known_tracks, known_albums, known_artists) = {
+    let (track_map, known_albums, known_artists, artist_photos) = {
         let s = state.read().await;
         s.db
             .with_conn(|conn| {
-                let tracks = queries::get_existing_tidal_track_ids(conn, &track_tidal_ids)?;
+                let tracks = queries::get_tidal_track_local_ids(conn, &track_tidal_ids)?;
                 let albums = queries::get_known_album_tidal_ids(conn, &album_tidal_ids)?;
                 let artists = queries::get_known_artist_tidal_ids(conn, &artist_tidal_ids)?;
-                Ok((tracks, albums, artists))
+                let photos = queries::get_artist_photos_by_tidal_ids(conn, &artist_tidal_ids)?;
+                Ok((tracks, albums, artists, photos))
             })
             .unwrap_or_default()
     };
@@ -5574,7 +5576,8 @@ async fn tidal_search(
         .tracks
         .into_iter()
         .map(|t| TidalSearchTrackResp {
-            in_library: known_tracks.contains(&t.id),
+            local_id: track_map.get(&t.id).copied(),
+            in_library: track_map.contains_key(&t.id),
             tidal_id: t.id,
             title: t.title,
             duration_ms: t.duration * 1000,
@@ -5611,7 +5614,7 @@ async fn tidal_search(
             TidalSearchArtistResp {
                 tidal_id: a.id,
                 name: a.name,
-                artwork_url: a.artwork_url,
+                artwork_url: a.artwork_url.or_else(|| artist_photos.get(&a.id).cloned()),
                 in_library: local_id.is_some(),
                 local_id,
             }
