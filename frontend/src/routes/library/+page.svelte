@@ -46,6 +46,9 @@
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
 
+	// Decade filter for albums tab
+	let activeDecade = $state<number | null>(null);
+
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
 	let detailTrack = $state<Track | null>(null);
@@ -582,7 +585,18 @@
 	);
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
 	let visibleTracks = $derived($searchQuery.trim() ? searchResults.tracks : $tracks);
-	let visibleAlbums = $derived($searchQuery.trim() ? searchResults.albums : $albums);
+	let decadeBuckets = $derived.by(() => {
+		const seen = new Set<number>();
+		for (const a of $albums) {
+			if (a.year != null) seen.add(Math.floor(a.year / 10) * 10);
+		}
+		return [...seen].sort((a, b) => a - b);
+	});
+	let visibleAlbums = $derived.by(() => {
+		const base = $searchQuery.trim() ? searchResults.albums : $albums;
+		if (!activeDecade) return base;
+		return base.filter(a => a.year != null && Math.floor(a.year / 10) * 10 === activeDecade);
+	});
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
 		(activeTab === 'tracks' ? $tracks.length < $totalTracks : activeTab === 'albums' ? $albums.length < $totalAlbums : false)
@@ -679,6 +693,11 @@
 		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
 		activeTab; $searchQuery;
 		cursorIndex = -1;
+	})
+
+	// Reset decade filter when leaving albums tab.
+	$effect(() => {
+		if (activeTab !== 'albums') activeDecade = null;
 	})
 
 	// Keep the highlighted track in view as the cursor moves.
@@ -873,6 +892,18 @@
 		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
 
 	{:else if activeTab === 'albums'}
+		{#if decadeBuckets.length > 1}
+			<div class="decade-strip">
+				<button class="decade-chip" class:active={activeDecade === null} onclick={() => activeDecade = null}>All</button>
+				{#each decadeBuckets as decade}
+					<button
+						class="decade-chip"
+						class:active={activeDecade === decade}
+						onclick={() => activeDecade = activeDecade === decade ? null : decade}
+					>{decade}s</button>
+				{/each}
+			</div>
+		{/if}
 		<!-- Album Grid -->
 		<div class="album-grid" class:album-list={$viewMode === 'list'}>
 			{#each visibleAlbums as album (album.id)}
@@ -1565,6 +1596,34 @@
 		color: var(--text-primary);
 		background: rgba(124, 128, 255, 0.12);
 		border-color: rgba(124, 128, 255, 0.22);
+	}
+
+	.decade-strip {
+		display: flex;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-bottom: 16px;
+	}
+	.decade-chip {
+		padding: 4px 13px;
+		border-radius: 14px;
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+		border: 1px solid rgba(255,255,255,0.08);
+		background: transparent;
+		color: var(--text-secondary);
+		font-family: inherit;
+		transition: border-color 0.15s, background 0.15s, color 0.15s;
+	}
+	.decade-chip:hover {
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+	}
+	.decade-chip.active {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
 	}
 
 	.library-hero-subtitle {
