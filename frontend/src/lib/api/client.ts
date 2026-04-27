@@ -597,6 +597,38 @@ export interface RadioResponse {
 	reasons: string[];
 }
 
+export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
+export type RadioSource = 'library' | 'lastfm' | 'engine';
+
+export interface RadioCandidate {
+	track_id: number;
+	tidal_track_id: number | null;
+	title: string;
+	artist_name: string;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	isrc: string | null;
+	is_in_library: boolean;
+	source: RadioSource;
+	reason: string;
+	similarity_score: number;
+}
+
+export interface RadioQueue {
+	session_id: string;
+	blend_used: RadioBlend;
+	seed: {
+		kind: 'track' | 'album' | 'artist';
+		track_id: number | null;
+		album_id: number | null;
+		artist_id: number | null;
+		title: string;
+		artist_name: string | null;
+	};
+	tracks: RadioCandidate[];
+}
+
 // ─── Home Page Discovery Types ───────────────────────────────────────────────
 
 export interface RSSFeedItem {
@@ -1044,6 +1076,42 @@ export const api = {
 		exclude_ids?: number[];
 	}) {
 		return fetchApi<RadioResponse>('/api/discovery/radio', undefined, {
+			method: 'POST',
+			body: JSON.stringify(params),
+		});
+	},
+
+	startRadioSong(params: {
+		seed_track_id: number;
+		blend?: RadioBlend;
+		limit?: number;
+		exclude_track_ids?: number[];
+	}): Promise<RadioQueue> {
+		return fetchApi<RadioQueue>('/api/radio/song', undefined, {
+			method: 'POST',
+			body: JSON.stringify(params),
+		});
+	},
+
+	startRadioAlbum(params: {
+		seed_album_id: number;
+		blend?: RadioBlend;
+		limit?: number;
+		exclude_track_ids?: number[];
+	}): Promise<RadioQueue> {
+		return fetchApi<RadioQueue>('/api/radio/album', undefined, {
+			method: 'POST',
+			body: JSON.stringify(params),
+		});
+	},
+
+	startRadioArtist(params: {
+		seed_artist_id: number;
+		blend?: RadioBlend;
+		limit?: number;
+		exclude_track_ids?: number[];
+	}): Promise<RadioQueue> {
+		return fetchApi<RadioQueue>('/api/radio/artist', undefined, {
 			method: 'POST',
 			body: JSON.stringify(params),
 		});

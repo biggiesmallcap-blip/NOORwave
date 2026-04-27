@@ -469,35 +469,49 @@ export async function shuffleArtist(artistId: number) {
 
 export async function startSongRadio(seedTrackId: number) {
 	try {
-		const { tracks } = await api.getRadioTracks({ seed_track_id: seedTrackId, limit: 40 });
-		// Seed first, then radio picks — matches Spotify "Go to Radio" behaviour.
-		const radioIds = tracks.map((t) => t.track_id).filter((id) => id !== seedTrackId);
+		const queue = await api.startRadioSong({ seed_track_id: seedTrackId, limit: 60 });
+		const radioIds = queue.tracks
+			.filter((t) => t.is_in_library && t.track_id > 0)
+			.map((t) => t.track_id)
+			.filter((id) => id !== seedTrackId);
 		await loadQueueAndPlay([seedTrackId, ...radioIds]);
+		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		playerError.set(`Failed to start radio: ${error}`);
 	}
 }
 
-export async function startArtistRadio(artistId: number, seedTrackId?: number) {
-	// Artist radio uses the highest-played track on the artist as the seed, then
-	// routes through startSongRadio so the underlying similarity graph does the
-	// heavy lifting. Backend has the same co-listen + embedding signal regardless
-	// of whether the seed is user-picked or auto-selected.
+export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
 	try {
-		let seed = seedTrackId;
-		if (!seed) {
-			const { tracks } = await api.getArtistTracks(artistId);
-			if (tracks.length === 0) {
-				playerError.set('Artist has no tracks to seed radio from.');
-				return;
-			}
-			// Prefer the most-played track; fall back to the first.
-			const topTrack = [...tracks].sort((a, b) => b.play_count - a.play_count)[0];
-			seed = topTrack.id;
+		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
+		const radioIds = queue.tracks
+			.filter((t) => t.is_in_library && t.track_id > 0)
+			.map((t) => t.track_id);
+		if (radioIds.length === 0) {
+			playerError.set('No library tracks found for radio.');
+			return;
 		}
-		await startSongRadio(seed);
+		await loadQueueAndPlay(radioIds);
+		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		playerError.set(`Failed to start artist radio: ${error}`);
+	}
+}
+
+export async function startAlbumRadio(albumId: number) {
+	try {
+		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
+		const radioIds = queue.tracks
+			.filter((t) => t.is_in_library && t.track_id > 0)
+			.map((t) => t.track_id);
+		if (radioIds.length === 0) {
+			playerError.set('No library tracks found for radio.');
+			return;
+		}
+		await loadQueueAndPlay(radioIds);
+		showToast(`Radio from ${queue.seed.title}`, 'success');
+	} catch (error) {
+		playerError.set(`Failed to start album radio: ${error}`);
 	}
 }
 
