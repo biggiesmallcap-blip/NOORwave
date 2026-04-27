@@ -400,7 +400,16 @@
       {@const top = topResult}
       <section class="top-result-section">
         <h3 class="section-label">Top Result</h3>
-        <a class="top-result-card" class:in-library={top.entry.in_library} href={topResultHref(top)}>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="top-result-card"
+          class:in-library={top.entry.in_library}
+          role="button"
+          tabindex="0"
+          onclick={() => void goto(topResultHref(top))}
+          onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
+        >
           {#if top.kind === 'artist'}
             {#if top.entry.artwork_url}
               <div class="top-art top-art--circle" style={`background-image: url('${top.entry.artwork_url}')`}></div>
@@ -428,10 +437,10 @@
             {/if}
             <button
               class="top-play-btn"
-              onclick={(e) => { e.preventDefault(); e.stopPropagation(); topResultPlay(top) }}
+              onclick={(e) => { e.stopPropagation(); topResultPlay(top) }}
             >▶ {top.kind === 'artist' ? 'Open' : 'Play'}</button>
           </div>
-        </a>
+        </div>
       </section>
     {/if}
 
