@@ -6476,12 +6476,18 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
                                 }
                                 None => playback_runtime::OutputDeviceSelection::Default,
                             };
-                            let _ = handle.device_swap(
+                            // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
+                            if let Err(e) = handle.device_swap(
                                 device_sel,
                                 settings.exclusive_mode,
                                 settings.sample_rate_follow,
                                 Some(next_rate as u32),
-                            );
+                            ) {
+                                warn!(
+                                    "Failed to rebuild stream for next track {} at {} Hz: {e}",
+                                    next.id, next_rate
+                                );
+                            }
                         }
                     }
                 }
@@ -6780,12 +6786,14 @@ async fn put_audio_settings(
 
     if needs_swap {
         if let Some(runtime) = guard.playback_runtime.as_ref() {
-            let _ = runtime.handle.device_swap(
+            if let Err(e) = runtime.handle.device_swap(
                 playback_runtime::OutputDeviceSelection::from_pref(new.output_device.as_deref()),
                 new.exclusive_mode,
                 new.sample_rate_follow,
                 None,
-            );
+            ) {
+                warn!("Audio settings update: live device_swap failed: {e}");
+            }
         }
     }
 
