@@ -22,11 +22,34 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Public — no auth required
-    let public = Router::new()
+    // Resolve www/ before building the router so the fallback can go on the
+    // public router (no auth). If it were on the outer merged router, axum's
+    // Router::layer would run require_token even for unmatched routes,
+    // causing static file requests to return 401.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let www_dir = exe_dir.and_then(|d| {
+        let p = d.join("www");
+        if p.is_dir() { Some(p) } else { None }
+    });
+
+    // Public — no auth required. Static file serving lives here so it is
+    // never touched by the require_token middleware.
+    let public_base = Router::new()
         .route("/api/ping", get(ping_handler))
         .route("/api/setup/token", get(setup_token_handler))
         .with_state(state.clone());
+
+    let public = match www_dir {
+        Some(www) => {
+            let index_html = www.join("index.html");
+            public_base.fallback_service(
+                ServeDir::new(&www).not_found_service(ServeFile::new(index_html)),
+            )
+        }
+        None => public_base,
+    };
 
     // Protected — all routes require a valid Bearer token (or ?token= for WS)
     let protected = Router::new()
@@ -38,27 +61,6 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         ));
 
     let app = public.merge(protected).layer(cors);
-
-    // Resolve www/ relative to the running binary. In the portable build,
-    // noor-server.exe sits next to www/. In dev, www/ won't exist, which
-    // is fine — the fallback is simply not added.
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let www_dir = exe_dir.and_then(|d| {
-        let p = d.join("www");
-        if p.is_dir() { Some(p) } else { None }
-    });
-
-    let app = match www_dir {
-        Some(www) => {
-            let index_html = www.join("index.html");
-            app.fallback_service(
-                ServeDir::new(&www).not_found_service(ServeFile::new(index_html)),
-            )
-        }
-        None => app,
-    };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
