@@ -6,6 +6,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import {
 		currentTrack,
+		currentStreamDisplay,
 		isPlaying,
 		position,
 		volume,
@@ -35,6 +36,8 @@
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
+	import CommandPalette from '$lib/components/CommandPalette.svelte';
+	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -202,6 +205,12 @@
 	}
 
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		// Cmd/Ctrl+K → open command palette
+		if ((event.ctrlKey || event.metaKey) && event.key === 'k') {
+			event.preventDefault();
+			commandPaletteOpen.update(v => !v);
+			return;
+		}
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (isTypingTarget(event.target)) return;
 
@@ -331,6 +340,17 @@
 		if (q === 'HIGH') return 'High';
 		if (q === 'LOW') return 'Low';
 		return q.replaceAll('_', ' ');
+	}
+
+	function formatStreamDetail(stream: { sample_rate: number | null; bit_depth: number | null } | null): string {
+		if (!stream) return '';
+		const parts: string[] = [];
+		if (stream.sample_rate) {
+			const khz = stream.sample_rate / 1000;
+			parts.push(Number.isInteger(khz) ? `${khz} kHz` : `${khz.toFixed(1)} kHz`);
+		}
+		if (stream.bit_depth) parts.push(`${stream.bit_depth}-bit`);
+		return parts.join(' · ');
 	}
 
 	function formatQueueSource(source: string): string {
@@ -525,6 +545,7 @@
 
 <ContextMenu />
 <Toast />
+<CommandPalette />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
@@ -618,7 +639,11 @@
 					{/if}
 				{/key}
 
-				{#if $currentTrack?.best_quality}
+				{#if $currentStreamDisplay}
+					<span class={`quality-badge np-quality ${getQualityClass($currentStreamDisplay.audio_quality)}`}>
+						{formatQuality($currentStreamDisplay.audio_quality)}
+					</span>
+				{:else if $currentTrack?.best_quality}
 					<span class={`quality-badge np-quality ${getQualityClass($currentTrack.best_quality)}`}>
 						{formatQuality($currentTrack.best_quality)}
 					</span>
@@ -646,6 +671,9 @@
 						</a>
 					{:else}
 						<p class="np-album">{$currentTrack?.album_title ?? 'Playback controls stay docked here.'}</p>
+					{/if}
+					{#if formatStreamDetail($currentStreamDisplay)}
+						<p class="np-stream-detail">{formatStreamDetail($currentStreamDisplay)}</p>
 					{/if}
 				</div>
 
@@ -1002,7 +1030,11 @@
 						<div class="mobile-np-art placeholder">♫</div>
 					{/if}
 				{/key}
-				{#if $currentTrack.best_quality}
+				{#if $currentStreamDisplay}
+					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentStreamDisplay.audio_quality)}`}>
+						{formatQuality($currentStreamDisplay.audio_quality)}
+					</span>
+				{:else if $currentTrack.best_quality}
 					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentTrack.best_quality)}`}>
 						{formatQuality($currentTrack.best_quality)}
 					</span>
@@ -1531,6 +1563,15 @@
 	.np-album {
 		color: var(--text-secondary);
 		font-size: 0.8rem;
+	}
+
+	.np-stream-detail {
+		font-size: 0.7rem;
+		color: var(--text-secondary);
+		opacity: 0.6;
+		font-variant-numeric: tabular-nums;
+		letter-spacing: 0.02em;
+		margin-top: 0.1rem;
 	}
 
 	a.np-link {
