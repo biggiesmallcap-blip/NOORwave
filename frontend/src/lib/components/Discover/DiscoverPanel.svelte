@@ -59,6 +59,7 @@
 					album_title: resolvedTrack.album_title,
 					artwork_url: resolvedTrack.artwork_url,
 					duration_ms: resolvedTrack.duration_ms,
+					artist_tidal_id: resolvedTrack.artist_id ?? null,
 				});
 			}
 			return;
@@ -77,6 +78,7 @@
 					album_title: resolvedTrack.album_title,
 					artwork_url: resolvedTrack.artwork_url,
 					duration_ms: resolvedTrack.duration_ms,
+					artist_tidal_id: resolvedTrack.artist_id ?? null,
 				});
 			}
 			return;
