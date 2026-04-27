@@ -18,7 +18,7 @@
 	const PAGE_SIZE = 100;
 	const SEARCH_LIMIT = 200;
 
-	let activeTab = $state<'tracks' | 'albums' | 'artists'>('albums');
+	let activeTab = $state<'all' | 'tracks' | 'albums' | 'artists'>('all');
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
 	let selectedPlaylistId = $state('');
@@ -83,6 +83,7 @@
 	onMount(() => {
 		void loadAlbums();
 		void loadTracks();
+		void loadArtists();
 		void loadBatchMeta();
 		return () => {
 			if (searchTimer) clearTimeout(searchTimer);
@@ -139,7 +140,7 @@
 		batchMessage = 'DSP filters cleared.';
 	}
 
-	function switchTab(tab: 'tracks' | 'albums' | 'artists') {
+	function switchTab(tab: 'all' | 'tracks' | 'albums' | 'artists') {
 		activeTab = tab;
 		expandedTrackId = null;
 		expandedAlbumId = null;
@@ -148,7 +149,7 @@
 		if (!$searchQuery.trim()) {
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir);
 			if (tab === 'albums') loadAlbums();
-			if (tab === 'artists' && artists.length === 0) void loadArtists();
+			// 'artists' and 'all' need no fetch — already loaded on mount
 		}
 		clearSelection();
 	}
@@ -623,8 +624,10 @@
 		if (!raw) return
 		try {
 			const saved = JSON.parse(raw) as { activeTab: string; expandedArtistId: number | null; scrollY: number }
-			if (typeof saved.activeTab === 'string' && (saved.activeTab === 'tracks' || saved.activeTab === 'albums' || saved.activeTab === 'artists')) {
-				activeTab = saved.activeTab
+			const validTabs = ['all', 'tracks', 'albums', 'artists'] as const
+			const savedTab = saved.activeTab
+			if (typeof savedTab === 'string' && (validTabs as readonly string[]).includes(savedTab)) {
+				activeTab = savedTab as typeof activeTab
 				expandedArtistId = saved.expandedArtistId
 				pendingRestoreScroll = saved.scrollY
 			}
@@ -661,11 +664,13 @@
 			</div>
 
 			<div class="library-hero-actions">
-				<div class="tab-bar">
-					<button class="tab" class:active={activeTab === 'albums'} onclick={() => switchTab('albums')}>Albums</button>
-					<button class="tab" class:active={activeTab === 'tracks'} onclick={() => switchTab('tracks')}>Tracks</button>
-					<button class="tab" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+				<div class="filter-pills">
+					<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
+					<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
+					<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
+					<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
 				</div>
+				{#if activeTab === 'albums'}
 				<div class="view-toggle" role="group" aria-label="Album view layout">
 					<button
 						class="view-toggle-btn"
@@ -697,6 +702,7 @@
 						</svg>
 					</button>
 				</div>
+				{/if}
 				<button class="btn btn-glass" onclick={() => void playRandomLibrary()}>
 					Random play
 				</button>
@@ -1706,27 +1712,34 @@
 		vertical-align: middle;
 	}
 
-	.tab-bar {
+	.filter-pills {
 		display: flex;
-		gap: 4px;
-		padding: 2px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		gap: 6px;
+		align-items: center;
 	}
 
-	.tab {
-		padding: 8px 14px;
-		border-radius: 999px;
-		font-size: 0.82rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-		transition: background var(--motion-fast), color var(--motion-fast);
+	.filter-pill {
+		padding: 5px 14px;
+		border-radius: 20px;
+		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
+		background: transparent;
+		color: var(--text-secondary, rgba(255,255,255,0.6));
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s, border-color 0.15s;
+		white-space: nowrap;
 	}
 
-	.tab.active {
-		background: rgba(124, 128, 255, 0.14);
-		color: var(--text-primary);
+	.filter-pill:hover {
+		background: var(--bg-glass-hover, rgba(255,255,255,0.08));
+		color: var(--text-primary, #fff);
+	}
+
+	.filter-pill.active {
+		background: var(--accent, #9b6fff);
+		border-color: var(--accent, #9b6fff);
+		color: #fff;
 	}
 
 	.view-toggle {
@@ -2097,12 +2110,12 @@
 			justify-content: flex-start;
 		}
 
-		.tab-bar,
+		.filter-pills,
 		.view-toggle {
 			width: 100%;
 		}
 
-		.tab {
+		.filter-pill {
 			flex: 1;
 			text-align: center;
 		}
