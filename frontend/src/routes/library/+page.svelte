@@ -17,6 +17,21 @@
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
+	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { playAlbum as playAlbumStore, shuffleAlbum, startAlbumRadio } from '$lib/stores/player';
+	import { goto } from '$app/navigation';
+
+	function buildLocalAlbumMenu(album: { id: number; title: string }): MenuItem[] {
+		return [
+			{ label: 'Play album', icon: '▶', onSelect: () => void playAlbumStore(album.id) },
+			{ label: 'Shuffle album', icon: '⤮', onSelect: () => void shuffleAlbum(album.id) },
+			{ separator: true, label: '' },
+			{ label: 'Album radio', icon: '◉', onSelect: () => void startAlbumRadio(album.id) },
+			{ separator: true, label: '' },
+			{ label: 'Open album', icon: '↗', onSelect: () => void goto(`/albums/${album.id}`) },
+		];
+	}
 
 	const PAGE_SIZE = 100;
 	const SEARCH_LIMIT = 200;
@@ -645,11 +660,13 @@
 			if (info) {
 				info.playCount += track.play_count ?? 0;
 				info.trackCount++;
+				// Take the first non-null artwork we see for this artist
+				if (!info.photo_url && track.artwork_url) info.photo_url = track.artwork_url;
 			} else {
 				countMap.set(track.artist_id, {
 					id: track.artist_id,
 					name: track.artist_name ?? 'Unknown Artist',
-					photo_url: storeArtist?.photo_url ?? null,
+					photo_url: storeArtist?.photo_url ?? track.artwork_url ?? null,
 					playCount: track.play_count ?? 0,
 					trackCount: 1,
 					albumCount: 0,
@@ -663,8 +680,10 @@
 		for (const [id, data] of countMap) {
 			data.albumCount = albumsByArtist.get(id)?.size ?? 0;
 		}
-		if (countMap.size === 0) return null;
-		return [...countMap.values()].reduce((best, cur) => cur.playCount > best.playCount ? cur : best);
+		// Only show real listening data — skip artists with no plays at all.
+		const played = [...countMap.values()].filter(a => a.playCount > 0);
+		if (played.length === 0) return null;
+		return played.reduce((best, cur) => cur.playCount > best.playCount ? cur : best);
 	});
 
 	interface HomeArtistCard {
@@ -692,7 +711,7 @@
 			result.push({
 				id: track.artist_id,
 				name: track.artist_name ?? 'Unknown',
-				photo_url: storeArtist?.photo_url ?? null,
+				photo_url: storeArtist?.photo_url ?? track.artwork_url ?? null,
 			});
 			if (result.length >= 20) break;
 		}
@@ -1079,6 +1098,7 @@
 								class="home-track-row"
 								class:playing={$currentTrack?.id === track.id && $isPlaying}
 								onclick={() => void playTrackNow(track.id)}
+								oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu(track)); }}
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
 							>
@@ -1138,6 +1158,7 @@
 					tabindex="0"
 					aria-pressed={$selectedAlbumIds.has(album.id)}
 					onclick={(event) => handleAlbumCardClick(album.id, event)}
+					oncontextmenu={(event) => { event.preventDefault(); openContextMenu(event, buildLocalAlbumMenu(album)); }}
 					onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
 				>
 					<div class="album-art">
@@ -1218,8 +1239,10 @@
 		{:else if artists.length === 0}
 			<EmptyState title="No artists yet" copy="Sync your TIDAL library in Settings to populate artists." />
 		{:else}
+			{@const q = $searchQuery.trim().toLowerCase()}
+			{@const filteredArtists = q ? artists.filter(a => a.name.toLowerCase().includes(q)) : artists}
 			<div class="artist-grid">
-				{#each artists as artist (artist.id)}
+				{#each filteredArtists as artist (artist.id)}
 					<button
 						class="artist-card"
 						class:expanded={expandedArtistId === artist.id}
@@ -1237,6 +1260,10 @@
 					</button>
 				{/each}
 			</div>
+
+			{#if filteredArtists.length === 0}
+				<EmptyState title="No artists match" copy={`Nothing in your library matches "${q}". Try a different search.`} />
+			{/if}
 
 			{#if expandedArtistId !== null}
 				{@const expandedArtist = artists.find(a => a.id === expandedArtistId)}
@@ -1442,6 +1469,7 @@
 					data-cursor-idx={i}
 					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
+					oncontextmenu={(event) => { event.preventDefault(); openContextMenu(event, buildTrackMenu(track)); }}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
 				>
 					<span class="col-num">
