@@ -269,3 +269,37 @@ Open `http://localhost:5173`.
 - [ ] Tauri auto-updater
 
 ---
+
+## Reporting a Bug
+
+Open an issue on [GitHub Issues](../../issues) and include:
+
+1. Steps to reproduce
+2. Expected behaviour vs what actually happened
+3. OS, browser or app version
+4. Approximate library size (track count) — helps diagnose sync issues
+
+---
+
+## Future Plans
+
+Beyond the current roadmap:
+
+- Full YouTube Music and SoundCloud integration
+- Playlist collaboration and export (M3U, JSON)
+- Mobile-optimised LAN UI
+- Beatport / Bandcamp integration
+- Public read-only library sharing link
+- Offline mode: cached metadata + local file playback
+
+---
+
+## Disclaimer
+
+NOOR uses TIDAL's unofficial API via a device-code OAuth2 flow — the same mechanism used by other third-party TIDAL clients. This project is not affiliated with, endorsed by, or associated with TIDAL Music AS or MQA Ltd. Use is at your own discretion and risk. Credentials are stored locally, AES-GCM encrypted in the SQLite database. NOOR is intended for personal use only.
+
+---
+
+## License
+
+[MIT](LICENSE)
