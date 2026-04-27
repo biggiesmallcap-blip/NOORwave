@@ -347,6 +347,7 @@
 
 	function handleTrackRowKeydown(trackId: number, event: KeyboardEvent) {
 		runOnActivation(event, () => updateTrackSelection(trackId));
+		if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
 	}
 
 	function handleTrackListKeydown(event: KeyboardEvent) {
@@ -2712,8 +2713,8 @@
 	}
 
 	.track-row.cursor {
-		outline: 2px solid rgba(155, 111, 255, 0.7);
-		outline-offset: -2px;
+		background: var(--bg-glass-hover);
+		box-shadow: inset 2px 0 0 var(--accent);
 	}
 
 	.col-actions {
