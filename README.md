@@ -28,3 +28,51 @@
 </table>
 
 ---
+
+## Features
+
+### Library
+
+Your entire TIDAL library, synced locally and always fast.
+
+- Full library sync (tracks, albums, artists, playlists) with real-time WebSocket progress
+- Home view: top artist hero card, recently played artist carousel, recently added album shelf, recent tracks
+- Artist pages: blurred-artwork hero, full TIDAL discography (Albums / Singles & EPs), in-library flags, out-of-library cards linking to TIDAL preview
+- Album pages: track table, hover-reveal actions, equalizer bar on active row, "More by" shelf
+- Bulk operations: add/remove favorites, manage playlists at scale
+- Decade strip filter, tile/list toggle, scroll position memory across back-navigation
+
+---
+
+### Search & Command
+
+Search understands plain text, power filters, and intent in the same bar.
+
+**Power filter syntax** — combine freely:
+
+```
+bpm:>130          energy:>0.8       genre:techno
+key:6A            instrumental:true  year:1994
+bpm:120-140 genre:house energy:>0.7
+```
+
+**Intent parsing:**
+
+```
+"play tool"      → plays top match immediately
+"radio burial"   → opens Song Radio seeded from Burial
+"1994"           → filters library to that year
+```
+
+**Special searches:**
+
+```
+/vibe         → mood-based cluster search
+/underrated   → surfaces buried gems in your library
+```
+
+**`Ctrl+K`** — global command palette. Slash commands, quick-nav, and actions without leaving the keyboard.
+
+Recent searches auto-save as clickable chips.
+
+---
