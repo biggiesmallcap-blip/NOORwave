@@ -1,10 +1,3 @@
-/**
- * Query Parser for NOORwave Search
- *
- * Parses free-text search strings into structured tokens, separating human-readable
- * text from special filter tokens. Supports a power filter syntax for precise queries.
- */
-
 export type FilterValue =
   | { type: 'exact'; value: string }
   | { type: 'range'; min: number; max: number }
@@ -16,7 +9,6 @@ export interface ParsedQuery {
   filters: Record<string, FilterValue>;
 }
 
-// Supported filter keys for power search
 const SUPPORTED_KEYS = new Set([
   'bpm',
   'key',
@@ -33,17 +25,6 @@ const SUPPORTED_KEYS = new Set([
   'vocal'
 ]);
 
-/**
- * Parse a free-text search string into filters and remaining text
- *
- * Syntax rules:
- * - key:value → exact filter
- * - key:min-max → range filter (if both sides are numeric)
- * - key>value / key<value / key>=value / key<=value → comparison filters
- * - key:a|b|c → multi-value filter
- *
- * Unrecognized tokens are kept as free_text.
- */
 export function parseQuery(input: string): ParsedQuery {
   const tokens = input.trim().split(/\s+/).filter(t => t.length > 0);
   const filters: Record<string, FilterValue> = {};
@@ -65,10 +46,6 @@ export function parseQuery(input: string): ParsedQuery {
   };
 }
 
-/**
- * Attempt to parse a single token as a filter
- * Returns { key, value } if successful, null otherwise
- */
 function parseToken(
   token: string
 ): { key: string; value: FilterValue } | null {
@@ -133,10 +110,6 @@ function parseToken(
   return null;
 }
 
-/**
- * Convert filters to display chips for UI
- * Each filter becomes a readable string representation
- */
 export function filtersToChips(
   filters: Record<string, FilterValue>
 ): Array<{ key: string; display: string }> {

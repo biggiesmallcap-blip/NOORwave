@@ -639,6 +639,40 @@ export interface AudioDspFeatures {
 	analysis_version: string;
 }
 
+export interface AudioSearchResult {
+	id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	bpm: number | null;
+	energy: number | null;
+	danceability: number | null;
+	key_signature: string | null;
+	camelot_key: string | null;
+	play_count: number;
+	is_favorite: boolean;
+	tidal_id: number | null;
+	source: string;
+}
+
+export interface AudioSearchParams {
+	free_text?: string;
+	bpm_min?: number | null;
+	bpm_max?: number | null;
+	energy_min?: number | null;
+	energy_max?: number | null;
+	danceability_min?: number | null;
+	danceability_max?: number | null;
+	key_signature?: string | null;
+	camelot_key?: string | null;
+	year_min?: number | null;
+	year_max?: number | null;
+	genre_ids?: number[];
+	is_instrumental?: boolean | null;
+}
+
 export interface AudioFeaturesStats {
 	total_analyzed: number;
 	avg_bpm: number | null;
@@ -997,6 +1031,18 @@ export const api = {
 
 	search(query: string, limit = 20) {
 		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) });
+	},
+
+	searchAudio(params: AudioSearchParams) {
+		// Strip null/undefined fields before sending
+		const body: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(params)) {
+			if (v !== null && v !== undefined) body[k] = v;
+		}
+		return fetchApi<{ tracks: AudioSearchResult[] }>('/api/search/audio', undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
 	},
 
 	getStatus() {

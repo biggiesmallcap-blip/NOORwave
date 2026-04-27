@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
+  import { parseQuery, filtersToChips, type ParsedQuery, type FilterValue } from '$lib/search/query_parser'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -35,18 +37,109 @@
 
   let query = $state('')
   let results = $state<TidalSearchResults | null>(null)
+  let audioResults = $state<AudioSearchResult[] | null>(null)
   let loading = $state(false)
   let error = $state<string | null>(null)
   let debounceTimer: ReturnType<typeof setTimeout>
   let recent = $state<string[]>(loadRecent())
+  let genreList = $state<Genre[]>([])
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library'
   let filterMode = $state<FilterMode>('all')
+
+  const parsedQuery = $derived(parseQuery(query))
+  const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
+
+  onMount(async () => {
+    try {
+      const res = await api.getGenres()
+      genreList = res.genres
+    } catch { /* ignore */ }
+  })
+
+  function resolveGenreIds(filter: FilterValue, genres: Genre[]): number[] {
+    const slugs = filter.type === 'multi' ? filter.values
+      : filter.type === 'exact' ? [filter.value]
+      : []
+    const found: number[] = []
+    for (const slug of slugs) {
+      const match = genres.find(g => g.slug === slug || g.name.toLowerCase() === slug.toLowerCase())
+      if (match) {
+        found.push(match.id)
+        for (const child of (match.children ?? [])) found.push(child.id)
+      }
+    }
+    return found
+  }
+
+  function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
+    const f = pq.filters
+    const params: AudioSearchParams = {}
+    if (pq.free_text) params.free_text = pq.free_text
+
+    const bpm = f['bpm']
+    if (bpm?.type === 'range') { params.bpm_min = bpm.min; params.bpm_max = bpm.max }
+    if (bpm?.type === 'comparison') {
+      if (bpm.op === '>') params.bpm_min = bpm.value
+      if (bpm.op === '<') params.bpm_max = bpm.value
+      if (bpm.op === '>=') params.bpm_min = bpm.value
+      if (bpm.op === '<=') params.bpm_max = bpm.value
+    }
+    const energy = f['energy']
+    if (energy?.type === 'range') { params.energy_min = energy.min; params.energy_max = energy.max }
+    if (energy?.type === 'comparison') {
+      if (energy.op === '>') params.energy_min = energy.value
+      if (energy.op === '<') params.energy_max = energy.value
+      if (energy.op === '>=') params.energy_min = energy.value
+      if (energy.op === '<=') params.energy_max = energy.value
+    }
+    const dance = f['danceability']
+    if (dance?.type === 'range') { params.danceability_min = dance.min; params.danceability_max = dance.max }
+    if (dance?.type === 'comparison') {
+      if (dance.op === '>') params.danceability_min = dance.value
+      if (dance.op === '<') params.danceability_max = dance.value
+      if (dance.op === '>=') params.danceability_min = dance.value
+      if (dance.op === '<=') params.danceability_max = dance.value
+    }
+    const key = f['key']
+    if (key?.type === 'exact') params.key_signature = key.value
+    const camelot = f['camelot']
+    if (camelot?.type === 'exact') params.camelot_key = camelot.value
+    const year = f['year']
+    if (year?.type === 'range') { params.year_min = year.min; params.year_max = year.max }
+    if (year?.type === 'exact') { params.year_min = parseInt(year.value); params.year_max = parseInt(year.value) }
+    const vocal = f['vocal']
+    if (vocal?.type === 'exact') params.is_instrumental = vocal.value === 'false'
+
+    const genreFilter = f['genre']
+    if (genreFilter) {
+      const ids = resolveGenreIds(genreFilter, genreList)
+      if (ids.length > 0) params.genre_ids = ids
+    }
+
+    return params
+  }
+
+  function removeFilter(key: string) {
+    // Rebuild query string by stripping tokens that start with key: or key>/</>=/<=
+    const tokens = query.trim().split(/\s+/).filter(t => t.length > 0)
+    const filtered = tokens.filter(t => {
+      // match key: or key>/</>=/<= prefix
+      return !t.match(new RegExp(`^${key}(:|>=|<=|>|<)`))
+    })
+    query = filtered.join(' ')
+    onInput()
+  }
+
+  async function playLibraryTrack(track: AudioSearchResult) {
+    await playTrackNow(track.id)
+  }
 
   function onInput() {
     clearTimeout(debounceTimer)
     if (!query.trim()) {
       results = null
+      audioResults = null
       loading = false
       error = null
       return
@@ -55,7 +148,14 @@
     debounceTimer = setTimeout(async () => {
       const q = query.trim()
       try {
-        results = await api.searchTidal(q)
+        if (hasFilters) {
+          const res = await api.searchAudio(buildAudioParams(parsedQuery))
+          audioResults = res.tracks
+          results = null
+        } else {
+          audioResults = null
+          results = await api.searchTidal(q)
+        }
         error = null
         pushRecent(q)
       } catch (e) {
@@ -355,6 +455,17 @@
       <kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
       <kbd>Ctrl</kbd>+<kbd>Enter</kbd> next
     </p>
+    {#if hasFilters}
+      <div class="filter-chips">
+        {#each filtersToChips(parsedQuery.filters) as chip (chip.key)}
+          <button
+            class="filter-chip"
+            onclick={() => removeFilter(chip.key)}
+            title="Remove filter"
+          >{chip.display} <span class="chip-x">×</span></button>
+        {/each}
+      </div>
+    {/if}
     {#if results && query.trim()}
       <div class="filter-pills">
         {#each [
@@ -398,6 +509,54 @@
     <p class="search-hint">No results for "{query}"</p>
   {:else if isFilteredEmpty}
     <p class="search-hint">No {filterMode === 'library' ? 'library' : filterMode} matches for "{query}"</p>
+  {:else if audioResults !== null}
+    <section class="results-section">
+      <h3 class="section-label">Library matches</h3>
+      {#if audioResults.length === 0}
+        <p class="no-audio-results">No library tracks match these filters.</p>
+      {:else}
+        <ul class="tracks-list">
+          {#each audioResults as track (track.id)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <li
+              class="track-row"
+              role="button"
+              tabindex="0"
+              onclick={() => void playLibraryTrack(track)}
+              onkeydown={(e) => e.key === 'Enter' && void playLibraryTrack(track)}
+            >
+              {#if track.artwork_url}
+                <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
+              {:else}
+                <div class="track-art fallback" style={`background: ${letterColor(track.title)}`}>
+                  <span>♫</span>
+                </div>
+              {/if}
+              <div class="track-meta">
+                <p class="track-title">{track.title}</p>
+                <p class="track-subtitle">
+                  {#if track.artist_name}{track.artist_name}{/if}
+                  {#if track.artist_name && track.album_title} — {/if}
+                  {#if track.album_title}{track.album_title}{/if}
+                </p>
+              </div>
+              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <div class="row-actions">
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); void playLibraryTrack(track) }}
+                  title="Play now"
+                  aria-label="Play {track.title}"
+                >▶</button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+
   {:else if results}
 
     {#if topResult}
@@ -622,6 +781,43 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 2px;
+  }
+  .filter-chips {
+    margin: 10px 0 0;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-line);
+    color: var(--text-secondary);
+    border-radius: 14px;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .filter-chip:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+  .chip-x {
+    font-size: 14px;
+    line-height: 1;
+    color: var(--text-tertiary);
+    margin-left: 2px;
+  }
+  .filter-chip:hover .chip-x { color: var(--text-primary); }
+  .no-audio-results {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin: 0;
   }
   .filter-pills {
     margin: 14px 0 0;
