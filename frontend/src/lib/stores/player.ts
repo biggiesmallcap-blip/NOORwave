@@ -513,6 +513,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 			title: track.title,
 			artist_id: -1, // no library artist for ephemeral tracks
 			artist_name: track.artist_name,
+			artist_tidal_id: track.artist_tidal_id ?? null,
 			album_id: null,
 			album_title: track.album_title,
 			disc_number: null,

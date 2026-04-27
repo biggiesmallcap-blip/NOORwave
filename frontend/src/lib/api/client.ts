@@ -46,6 +46,7 @@ export interface Track {
 	title: string;
 	artist_id: number;
 	artist_name: string | null;
+	artist_tidal_id?: number | null;
 	album_id: number | null;
 	album_title: string | null;
 	disc_number: number | null;
@@ -146,6 +147,7 @@ export interface TidalPlayable {
 	album_title: string | null;
 	artwork_url: string | null;
 	duration_ms: number | null;
+	artist_tidal_id?: number | null;
 }
 
 export interface Album {

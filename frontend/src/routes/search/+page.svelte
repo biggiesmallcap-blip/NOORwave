@@ -161,7 +161,7 @@
 
   function topResultPlay(top: TopResult) {
     if (top.kind === 'track') {
-      void playTidalTrackNow(top.entry)
+      void playTidalTrackNow(toPlayable(top.entry))
     } else if (top.kind === 'album') {
       void playTidalAlbum(top.entry.tidal_id)
     } else {
@@ -222,10 +222,14 @@
     if (cursor >= sortedTracks.length) cursor = sortedTracks.length - 1
   })
 
+  function toPlayable(track: TidalSearchTrack) {
+    return { ...track, artist_tidal_id: track.artist_id ?? null }
+  }
+
   function actOnTrack(track: TidalSearchTrack, mode: 'play' | 'queue' | 'next') {
-    if (mode === 'queue') void addTidalTrackToQueue(track)
-    else if (mode === 'next') void playTidalTrackNext(track)
-    else void playTidalTrackNow(track)
+    if (mode === 'queue') void addTidalTrackToQueue(toPlayable(track))
+    else if (mode === 'next') void playTidalTrackNext(toPlayable(track))
+    else void playTidalTrackNow(toPlayable(track))
   }
 
   function inputKeydown(e: KeyboardEvent) {
@@ -530,9 +534,9 @@
               data-cursor-idx={idx}
               role="button"
               tabindex="0"
-              onclick={() => void playTidalTrackNow(track)}
+              onclick={() => void playTidalTrackNow(toPlayable(track))}
               onmouseenter={() => { cursor = idx }}
-              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playTidalTrackNow(track))}
+              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playTidalTrackNow(toPlayable(track)))}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(track)) }}
             >
               {#if track.artwork_url}
@@ -557,13 +561,13 @@
               <div class="row-actions">
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void playTidalTrackNow(track) }}
+                  onclick={(e) => { e.stopPropagation(); void playTidalTrackNow(toPlayable(track)) }}
                   title="Play now"
                   aria-label="Play {track.title}"
                 >▶</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void addTidalTrackToQueue(track) }}
+                  onclick={(e) => { e.stopPropagation(); void addTidalTrackToQueue(toPlayable(track)) }}
                   title="Add to queue"
                   aria-label="Queue {track.title}"
                 >＋</button>
