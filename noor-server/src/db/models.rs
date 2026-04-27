@@ -66,6 +66,7 @@ pub struct Playlist {
     pub smart_rules: Option<String>,
     pub is_synced: bool,
     pub track_count: i32,
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

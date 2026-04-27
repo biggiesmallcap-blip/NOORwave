@@ -24,7 +24,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -249,6 +249,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/genres/{id}/tracks", get(get_genre_tracks))
         .route("/api/playlists", get(get_playlists))
         .route("/api/playlists/{id}/tracks", get(get_playlist_tracks))
+        .route("/api/playlists/{id}/favorite", patch(toggle_playlist_favorite_route))
         .route("/api/smart/playlists", post(create_smart_playlist_route))
         .route(
             "/api/smart/playlists/{id}",
@@ -947,6 +948,25 @@ async fn get_playlist_tracks(
             Ok(Json(json!({ "tracks": tracks })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn toggle_playlist_favorite_route(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let playlist = queries::toggle_playlist_favorite(conn, id)?;
+            Ok(Json(json!({ "playlist": playlist })))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })
 }
 
 async fn evaluate_smart_playlist(

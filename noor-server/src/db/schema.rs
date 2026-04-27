@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_014,
     MIGRATION_015,
     MIGRATION_016,
+    MIGRATION_017,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -558,6 +559,11 @@ CREATE TABLE IF NOT EXISTS lastfm_unresolved_tags (
 
 const MIGRATION_016: &str = r#"
 ALTER TABLE discovery_feedback ADD COLUMN session_id TEXT;
+"#;
+
+const MIGRATION_017: &str = r#"
+ALTER TABLE playlists ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_playlists_favorite ON playlists(is_favorite);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

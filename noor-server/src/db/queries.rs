@@ -415,9 +415,9 @@ pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>
 pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count
+                smart_rules, is_synced, track_count, is_favorite
          FROM playlists
-         ORDER BY name ASC",
+         ORDER BY is_favorite DESC, name ASC",
     )?;
 
     let playlists = stmt
@@ -427,10 +427,11 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
                 tidal_uuid: row.get(1)?,
                 name: row.get(2)?,
                 description: row.get(3)?,
-                is_smart: row.get(4)?,
+                is_smart: row.get::<_, i32>(4)? != 0,
                 smart_rules: row.get(5)?,
-                is_synced: row.get(6)?,
+                is_synced: row.get::<_, i32>(6)? != 0,
                 track_count: row.get(7)?,
+                is_favorite: row.get::<_, i32>(8)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -441,7 +442,7 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count
+                smart_rules, is_synced, track_count, is_favorite
          FROM playlists
          WHERE id = ?1",
     )?;
@@ -453,14 +454,24 @@ pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playli
             tidal_uuid: row.get(1)?,
             name: row.get(2)?,
             description: row.get(3)?,
-            is_smart: row.get(4)?,
+            is_smart: row.get::<_, i32>(4)? != 0,
             smart_rules: row.get(5)?,
-            is_synced: row.get(6)?,
+            is_synced: row.get::<_, i32>(6)? != 0,
             track_count: row.get(7)?,
+            is_favorite: row.get::<_, i32>(8)? != 0,
         }))
     } else {
         Ok(None)
     }
+}
+
+pub fn toggle_playlist_favorite(conn: &Connection, playlist_id: i64) -> Result<Playlist> {
+    conn.execute(
+        "UPDATE playlists SET is_favorite = NOT is_favorite WHERE id = ?1",
+        params![playlist_id],
+    )?;
+    get_playlist(conn, playlist_id)?
+        .ok_or_else(|| anyhow::anyhow!("playlist not found"))
 }
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
