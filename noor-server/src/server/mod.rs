@@ -51,11 +51,15 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         None => public_base,
     };
 
-    // Protected — all routes require a valid Bearer token (or ?token= for WS)
+    // Protected — all routes require a valid Bearer token (or ?token= for WS).
+    // Use route_layer, NOT layer: Router::layer also wraps the fallback, which
+    // means the auth middleware would intercept every unmatched path (including
+    // static file requests) after merge and return 401. route_layer only runs
+    // for paths that actually match a protected route.
     let protected = Router::new()
         .merge(routes::api_routes(state.clone()))
         .merge(ws::ws_routes(state.clone()))
-        .layer(axum::middleware::from_fn_with_state(
+        .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
         ));

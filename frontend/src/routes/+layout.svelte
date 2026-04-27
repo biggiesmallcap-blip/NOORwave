@@ -805,6 +805,7 @@
 			{#if upcomingQueue.length > 0}
 				<div class="queue-list">
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+						{@const aid = item.track.artist_id}
 						<div
 							class:active={$currentTrack?.id === item.track.id}
 							class="queue-row"
@@ -825,7 +826,6 @@
 
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{@const aid = item.track.artist_id}
 								{#if aid && aid > 0}
 									<a
 										class="queue-artist"
@@ -1130,6 +1130,7 @@
 			{#if upcomingQueue.length > 0}
 				<div class="mobile-np-queue-list">
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+						{@const aid = item.track.artist_id}
 						<div
 							class="queue-row"
 							class:active={$currentTrack.id === item.track.id}
@@ -1149,7 +1150,6 @@
 							</div>
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{@const aid = item.track.artist_id}
 								{#if aid && aid > 0}
 									<a
 										class="queue-artist"
