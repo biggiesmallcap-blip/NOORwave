@@ -604,7 +604,7 @@
     {#if topResult}
       {@const top = topResult}
       {@const artistBg = top.kind === 'artist'
-        ? (top.entry.artwork_url ?? sortedAlbums.find(a => a.artist_name === top.entry.name)?.artwork_url ?? null)
+        ? (top.entry.artwork_url ?? sortedAlbums.find(a => a.artist_name?.toLowerCase() === top.entry.name?.toLowerCase())?.artwork_url ?? null)
         : null}
       <section class="top-result-section">
         <h3 class="section-label">Top Result</h3>
@@ -621,8 +621,8 @@
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
         >
           {#if top.kind === 'artist'}
-            {#if top.entry.artwork_url}
-              <div class="top-art top-art--circle" style={`background-image: url('${top.entry.artwork_url}')`}></div>
+            {#if artistBg}
+              <div class="top-art top-art--circle" style={`background-image: url('${artistBg}')`}></div>
             {:else}
               <div class="top-art top-art--circle fallback" style={`background: ${letterColor(top.entry.name)}`}>
                 <span>{initials(top.entry.name)}</span>
@@ -863,15 +863,20 @@
 
 <style>
   .search-page {
-    padding: 40px 48px 80px;
-    max-width: 1180px;
+    width: min(100%, 1280px);
+    margin: 0 auto;
+    padding: 16px 4px 80px;
   }
   .search-header {
-    margin-bottom: 40px;
+    max-width: 1200px;
+    margin: 0 auto 40px;
+    padding: 0 4px;
   }
   .search-input {
+    display: block;
     width: 100%;
     max-width: 640px;
+    margin: 0 auto;
     background: var(--bg-raised);
     border: 1px solid var(--border-strong);
     border-radius: 24px;
@@ -979,8 +984,8 @@
     text-align: center;
   }
   .search-error { color: var(--state-error); }
-  .results-section { margin-bottom: 32px; }
-  .recent-section { margin-top: 36px; max-width: 720px; }
+  .results-section { margin-bottom: 32px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .recent-section { margin-top: 36px; max-width: 720px; margin-left: auto; margin-right: auto; }
   .recent-head {
     display: flex;
     align-items: center;
@@ -1017,7 +1022,7 @@
     border-color: var(--accent-line);
     color: var(--text-primary);
   }
-  .top-result-section { margin-bottom: 28px; }
+  .top-result-section { margin-bottom: 28px; max-width: 1200px; margin-left: auto; margin-right: auto; }
   .top-result-card {
     display: grid;
     grid-template-columns: 168px 1fr;
