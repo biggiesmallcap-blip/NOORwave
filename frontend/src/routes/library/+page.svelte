@@ -14,6 +14,9 @@
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import LibraryHero from '$lib/components/LibraryHero.svelte';
+	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
+	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 
 	const PAGE_SIZE = 100;
 	const SEARCH_LIMIT = 200;
@@ -651,6 +654,54 @@
 			.slice(0, 10)
 	);
 
+	// ── Home view handlers ─────────────────────────────────────────────────
+
+	function playAllFromTopArtist() {
+		if (!topArtist) return;
+		const artistTracks = $tracks.filter(t => t.artist_id === topArtist!.id);
+		if (!artistTracks.length) return;
+		void playTrackNow(artistTracks[0].id);
+		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+	}
+
+	function shuffleTopArtist() {
+		if (!topArtist) return;
+		const artistTracks = [...$tracks.filter(t => t.artist_id === topArtist!.id)];
+		artistTracks.sort(() => Math.random() - 0.5);
+		if (!artistTracks.length) return;
+		void playTrackNow(artistTracks[0].id);
+		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+	}
+
+	function handleHomeArtistClick(artistId: number) {
+		switchTab('artists');
+		expandedArtistId = artistId;
+	}
+
+	function handleHomeAlbumClick(albumId: number) {
+		const found = $albums.find(a => a.id === albumId);
+		if (found) {
+			void openAlbumDetail(found);
+		} else {
+			// Album not in current loaded page — build a stub from recentAlbums card
+			const card = recentAlbums.find(a => a.id === albumId);
+			if (!card) return;
+			const stub: import('$lib/api/client').Album = {
+				id: card.id,
+				tidal_id: null,
+				title: card.title,
+				artist_id: 0,
+				artist_name: card.artist_name,
+				year: null,
+				artwork_url: card.artwork_url,
+				release_type: null,
+				track_count: null,
+				source: 'tidal',
+			};
+			void openAlbumDetail(stub);
+		}
+	}
+
 	$effect(() => {
 		const nextQuery = $searchQuery;
 		if (searchTimer) clearTimeout(searchTimer);
@@ -877,6 +928,89 @@
 
 	{#if $isLoading}
 		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
+
+	{:else if activeTab === 'all'}
+		<div class="library-home">
+			{#if topArtist}
+				<LibraryHero
+					artist={topArtist}
+					onPlayAll={playAllFromTopArtist}
+					onShuffle={shuffleTopArtist}
+				/>
+			{:else if $isLoading}
+				<div class="home-loading">Loading your library…</div>
+			{/if}
+
+			{#if recentArtists.length > 0}
+				<section class="home-section">
+					<h3 class="section-label">Recently Played Artists</h3>
+					<ArtistCarousel
+						artists={recentArtists}
+						onArtistClick={handleHomeArtistClick}
+					/>
+				</section>
+			{/if}
+
+			{#if recentAlbums.length > 0}
+				<section class="home-section">
+					<h3 class="section-label">Recently Added</h3>
+					<AlbumCarousel
+						albums={recentAlbums}
+						onAlbumClick={handleHomeAlbumClick}
+					/>
+				</section>
+			{/if}
+
+			{#if recentTracks.length > 0}
+				<section class="home-section">
+					<div class="section-header-row">
+						<h3 class="section-label">Recent Tracks</h3>
+						<button class="view-all-link" onclick={() => switchTab('tracks')}>View all →</button>
+					</div>
+					<ul class="home-track-list">
+						{#each recentTracks as track (track.id)}
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+							<li
+								class="home-track-row"
+								class:playing={$currentTrack?.id === track.id && $isPlaying}
+								onclick={() => void playTrackNow(track.id)}
+								role="button"
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+							>
+								{#if track.artwork_url}
+									<div class="ht-art" style="background-image: url('{track.artwork_url}')"></div>
+								{:else}
+									<div class="ht-art ht-art--fallback"></div>
+								{/if}
+								<div class="ht-meta">
+									<span class="ht-title">{track.title}</span>
+									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` — ${track.album_title}` : ''}</span>
+								</div>
+								<span class="ht-duration">{formatDuration(track.duration_ms)}</span>
+								<div class="ht-actions">
+									<button
+										class="btn-icon"
+										title="Add to queue"
+										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
+										aria-label="Add to queue"
+									>
+										<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+											<line x1="2" y1="4" x2="14" y2="4"/>
+											<line x1="2" y1="8" x2="14" y2="8"/>
+											<line x1="2" y1="12" x2="10" y2="12"/>
+											<line x1="13" y1="10" x2="13" y2="16"/>
+											<line x1="10" y1="13" x2="16" y2="13"/>
+										</svg>
+									</button>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
+		</div>
 
 	{:else if activeTab === 'albums'}
 		<!-- Album Grid -->
@@ -1468,6 +1602,141 @@
 <style>
 	.library {
 		padding-bottom: 8px;
+	}
+
+	/* ─── All / Home view ───────────────── */
+
+	.library-home {
+		display: flex;
+		flex-direction: column;
+		gap: 32px;
+		padding: 8px 0 40px;
+	}
+
+	.home-section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.section-label {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 1.5px;
+		text-transform: uppercase;
+		color: var(--accent, #9b6fff);
+		margin: 0;
+	}
+
+	.section-header-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.view-all-link {
+		font-size: 12px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		background: none;
+		border: none;
+		cursor: pointer;
+		padding: 0;
+		transition: color 0.15s;
+	}
+
+	.view-all-link:hover { color: var(--text-primary, #fff); }
+
+	.home-track-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.home-track-row {
+		display: grid;
+		grid-template-columns: 38px 1fr auto auto;
+		gap: 12px;
+		align-items: center;
+		padding: 6px 8px;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: background 0.1s;
+	}
+
+	.home-track-row:hover { background: var(--bg-glass-hover, rgba(255,255,255,0.06)); }
+
+	.home-track-row.playing .ht-title { color: var(--accent, #9b6fff); }
+
+	.ht-art {
+		width: 36px;
+		height: 36px;
+		border-radius: 4px;
+		background-size: cover;
+		background-position: center;
+	}
+
+	.ht-art--fallback {
+		background: var(--bg-glass, rgba(255,255,255,0.08));
+	}
+
+	.ht-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.ht-title {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--text-primary, #fff);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ht-sub {
+		font-size: 11px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ht-duration {
+		font-size: 12px;
+		color: var(--text-muted, rgba(255,255,255,0.4));
+		font-variant-numeric: tabular-nums;
+	}
+
+	.ht-actions {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+
+	.home-track-row:hover .ht-actions { opacity: 1; }
+
+	.btn-icon {
+		background: none;
+		border: none;
+		cursor: pointer;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		padding: 4px;
+		border-radius: 4px;
+		display: flex;
+		align-items: center;
+		transition: color 0.15s;
+	}
+
+	.btn-icon:hover { color: var(--text-primary, #fff); }
+
+	.home-loading {
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		font-size: 14px;
+		padding: 40px;
+		text-align: center;
 	}
 
 	/* ─── Loading ───────────────────────── */
