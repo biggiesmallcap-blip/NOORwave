@@ -138,3 +138,71 @@ Recent searches auto-save as clickable chips.
 - Audio device enumeration and switching; sample rate follows source on track transition
 
 ---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Rust 2024 edition, Axum 0.8, Rayon |
+| Database | SQLite 3 (rusqlite), FTS5, WAL mode |
+| Frontend | SvelteKit 2 + Svelte 5 runes, TypeScript, Vite |
+| Desktop shell | Tauri 2 |
+| Audio decode | Symphonia 0.5 |
+| Audio output | CPAL 0.15 (cross-platform) |
+| Real-time | Tokio broadcast channel → WebSocket |
+| Feed parsing | RSS 2.0 + Atom syndication |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) stable toolchain
+- Node.js 18+ and npm
+- A TIDAL account
+
+### Desktop App (Tauri)
+
+```bash
+cd noor-app
+cargo tauri dev          # development
+cargo tauri build        # release bundle
+```
+
+Or use `build-portable.ps1` at the workspace root for a self-contained Windows build.
+
+### Dev Mode (Rust + Node)
+
+```bash
+# Terminal 1
+cd noor-server
+cargo run --release
+
+# Terminal 2
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+### First Run
+
+1. Open the app — the browser on the server machine auto-connects
+2. Remote devices: enter the 6-digit PIN shown in **Settings → Access Token**
+3. Complete TIDAL device-code auth in **Settings**
+4. Trigger a library sync — progress streams live via WebSocket
+5. Start playing
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOOR_ADDR` | `0.0.0.0:3334` | Override server bind address |
+| `NOOR_DB` | `<workspace>/noor.db` | Override database path |
+| `RUST_LOG` | `noor_server=info` | Log level |
+| `TIDAL_CLIENT_ID` | *(built-in)* | Override TIDAL OAuth2 client ID |
+| `TIDAL_CLIENT_SECRET` | *(built-in)* | Override TIDAL OAuth2 client secret |
+
+---
