@@ -365,6 +365,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
         .route("/api/tidal/search", get(tidal_search))
+        .route("/api/tidal/playlists/search", get(tidal_playlist_search))
+        .route("/api/tidal/playlists/{uuid}/tracks", get(tidal_playlist_tracks))
         .route("/api/tidal/play", post(play_tidal_ephemeral))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
@@ -5667,6 +5669,113 @@ async fn tidal_search(
         .collect();
 
     Ok(Json(json!({ "tracks": tracks, "albums": albums, "artists": artists })))
+}
+
+// ─── TIDAL Playlist Search + Tracks ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct TidalPlaylistSearchParams {
+    q: String,
+    #[serde(default)]
+    limit: Option<i32>,
+}
+
+async fn tidal_playlist_search(
+    State(state): State<SharedState>,
+    Query(params): Query<TidalPlaylistSearchParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+    let Some(tokens) = tokens else {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "TIDAL not connected" }))));
+    };
+
+    let limit = params.limit.unwrap_or(20).min(50);
+    let http_client = state.read().await.http_client.clone();
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let playlists = match client.search_playlists(&params.q, limit).await {
+        Ok(r) => r,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                ))?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client.search_playlists(&params.q, limit).await.map_err(|e2| {
+                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
+            })?
+        }
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))),
+    };
+
+    Ok(Json(json!({ "playlists": playlists })))
+}
+
+async fn tidal_playlist_tracks(
+    State(state): State<SharedState>,
+    Path(uuid): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+        })?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+    let Some(tokens) = tokens else {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "TIDAL not connected" }))));
+    };
+
+    let http_client = state.read().await.http_client.clone();
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let resp = match client.get_playlist_tracks(&uuid, 100, 0).await {
+        Ok(r) => r,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                ))?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client.get_playlist_tracks(&uuid, 100, 0).await.map_err(|e2| {
+                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
+            })?
+        }
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))),
+    };
+
+    // TidalTrack: id (i64), title (String), duration (i64), artist (TidalArtist, not Option),
+    // album: Option<TidalAlbumRef> with cover: Option<String>
+    let playable: Vec<serde_json::Value> = resp.items.iter().map(|t| {
+        json!({
+            "tidal_id": t.id,
+            "title": t.title,
+            "artist_name": t.artist.name,
+            "album_title": t.album.as_ref().map(|a| &a.title),
+            "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).map(|c| {
+                format!("https://resources.tidal.com/images/{}/320x320.jpg", c.replace('-', "/"))
+            }),
+            "duration_ms": t.duration * 1000,
+            "track_id": 0,
+            "is_in_library": false,
+        })
+    }).collect();
+
+    Ok(Json(json!({ "tracks": playable })))
 }
 
 #[derive(Debug, serde::Deserialize)]
