@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import {
-		tracks, albums, isLoading, isLoadingMore, totalTracks, totalAlbums,
+		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
 		loadTracks, loadAlbums,
 		formatDuration, formatDateShort, getQualityClass,
@@ -533,6 +533,122 @@
 		activeTab === 'albums'
 			? `${$albums.length} of ${$totalAlbums} albums loaded`
 			: `${$tracks.length} of ${$totalTracks} tracks loaded`
+	);
+
+	// ── Home view derived data ──────────────────────────────────────────────
+
+	interface HomeArtist {
+		id: number;
+		name: string;
+		photo_url: string | null;
+		playCount: number;
+		trackCount: number;
+		albumCount: number;
+	}
+
+	let topArtist = $derived.by<HomeArtist | null>(() => {
+		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
+		const countMap = new Map<number, HomeArtist>();
+		const albumsByArtist = new Map<number, Set<number>>();
+
+		for (const track of $tracks) {
+			if (!track.artist_id) continue;
+			const storeArtist = artistMap.get(track.artist_id);
+			const info = countMap.get(track.artist_id);
+			if (info) {
+				info.playCount += track.play_count ?? 0;
+				info.trackCount++;
+			} else {
+				countMap.set(track.artist_id, {
+					id: track.artist_id,
+					name: track.artist_name ?? 'Unknown Artist',
+					photo_url: storeArtist?.photo_url ?? null,
+					playCount: track.play_count ?? 0,
+					trackCount: 1,
+					albumCount: 0,
+				});
+			}
+			if (track.album_id) {
+				if (!albumsByArtist.has(track.artist_id)) albumsByArtist.set(track.artist_id, new Set());
+				albumsByArtist.get(track.artist_id)!.add(track.album_id);
+			}
+		}
+		for (const [id, data] of countMap) {
+			data.albumCount = albumsByArtist.get(id)?.size ?? 0;
+		}
+		if (countMap.size === 0) return null;
+		return [...countMap.values()].reduce((best, cur) => cur.playCount > best.playCount ? cur : best);
+	});
+
+	interface HomeArtistCard {
+		id: number;
+		name: string;
+		photo_url: string | null;
+	}
+
+	let recentArtists = $derived.by<HomeArtistCard[]>(() => {
+		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
+		const seen = new Set<number>();
+		const result: HomeArtistCard[] = [];
+
+		const sorted = [...$tracks].sort((a, b) => {
+			if (!a.last_played_at && !b.last_played_at) return 0;
+			if (!a.last_played_at) return 1;
+			if (!b.last_played_at) return -1;
+			return b.last_played_at.localeCompare(a.last_played_at);
+		});
+
+		for (const track of sorted) {
+			if (!track.artist_id || seen.has(track.artist_id)) continue;
+			seen.add(track.artist_id);
+			const storeArtist = artistMap.get(track.artist_id);
+			result.push({
+				id: track.artist_id,
+				name: track.artist_name ?? 'Unknown',
+				photo_url: storeArtist?.photo_url ?? null,
+			});
+			if (result.length >= 20) break;
+		}
+		return result;
+	});
+
+	interface HomeAlbumCard {
+		id: number;
+		title: string;
+		artist_name: string | null;
+		artwork_url: string | null;
+	}
+
+	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
+		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
+
+		for (const track of $tracks) {
+			if (!track.album_id || !track.date_added) continue;
+			const existing = albumDateMap.get(track.album_id);
+			if (!existing || track.date_added > existing.date) {
+				albumDateMap.set(track.album_id, {
+					card: {
+						id: track.album_id,
+						title: track.album_title ?? 'Unknown Album',
+						artist_name: track.artist_name,
+						artwork_url: track.artwork_url,
+					},
+					date: track.date_added,
+				});
+			}
+		}
+
+		return [...albumDateMap.values()]
+			.sort((a, b) => b.date.localeCompare(a.date))
+			.slice(0, 20)
+			.map(({ card }) => card);
+	});
+
+	let recentTracks = $derived.by(() =>
+		[...$tracks]
+			.filter(t => t.last_played_at)
+			.sort((a, b) => b.last_played_at!.localeCompare(a.last_played_at!))
+			.slice(0, 10)
 	);
 
 	$effect(() => {
