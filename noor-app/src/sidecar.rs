@@ -20,7 +20,7 @@ impl SidecarState {
 }
 
 fn server_exe_path() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
+    let mut path = std::env::current_exe().expect("cannot determine current exe path");
     path.set_file_name(if cfg!(windows) {
         "noor-server.exe"
     } else {
@@ -31,9 +31,9 @@ fn server_exe_path() -> PathBuf {
 
 fn log_path() -> PathBuf {
     std::env::current_exe()
-        .unwrap()
+        .expect("cannot determine current exe path")
         .parent()
-        .unwrap()
+        .expect("exe has no parent directory")
         .join("noor-server.log")
 }
 

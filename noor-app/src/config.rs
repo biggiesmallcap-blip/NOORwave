@@ -14,9 +14,9 @@ impl Default for AppConfig {
 
 fn config_path() -> PathBuf {
     std::env::current_exe()
-        .unwrap()
+        .expect("cannot determine current exe path")
         .parent()
-        .unwrap()
+        .expect("exe has no parent directory")
         .join("noor-config.json")
 }
 
