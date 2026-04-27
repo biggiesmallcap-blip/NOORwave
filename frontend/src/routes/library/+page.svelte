@@ -967,15 +967,14 @@
 						<h3 class="section-label">Recent Tracks</h3>
 						<button class="view-all-link" onclick={() => switchTab('tracks')}>View all →</button>
 					</div>
-					<ul class="home-track-list">
+					<div class="home-track-list">
 						{#each recentTracks as track (track.id)}
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-							<li
+							<div
 								class="home-track-row"
 								class:playing={$currentTrack?.id === track.id && $isPlaying}
 								onclick={() => void playTrackNow(track.id)}
-								role="button"
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
 							>
@@ -1005,9 +1004,9 @@
 										</svg>
 									</button>
 								</div>
-							</li>
+							</div>
 						{/each}
-					</ul>
+					</div>
 				</section>
 			{/if}
 		</div>
