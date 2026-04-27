@@ -7,9 +7,10 @@
     photo_url: string | null;
   }
 
-  let { artists, onArtistClick }: {
+  let { artists, onArtistClick, onContextMenu }: {
     artists: ArtistCard[];
     onArtistClick?: (id: number) => void;
+    onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
   function letterColor(name: string): string {
@@ -30,6 +31,7 @@
       <button
         class="artist-card"
         onclick={() => onArtistClick?.(artist.id)}
+        oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, artist.id); } }}
         title={artist.name}
       >
         <div class="avatar-wrap">

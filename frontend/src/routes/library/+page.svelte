@@ -19,7 +19,9 @@
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
 	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { playAlbum as playAlbumStore, shuffleAlbum, startAlbumRadio } from '$lib/stores/player';
+	import { parseQuery } from '$lib/search/query_parser';
+	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
+	import { playAlbum as playAlbumStore, shuffleAlbum, startAlbumRadio, startArtistRadio } from '$lib/stores/player';
 	import { goto } from '$app/navigation';
 
 	function buildLocalAlbumMenu(album: { id: number; title: string }): MenuItem[] {
@@ -31,6 +33,23 @@
 			{ separator: true, label: '' },
 			{ label: 'Open album', icon: '↗', onSelect: () => void goto(`/albums/${album.id}`) },
 		];
+	}
+
+	function buildLocalArtistMenu(artistId: number): MenuItem[] {
+		return [
+			{ label: 'Open artist', icon: '↗', onSelect: () => void goto(`/artists/${artistId}`) },
+			{ separator: true, label: '' },
+			{ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artistId) },
+		];
+	}
+
+	function handleHomeArtistContextMenu(e: MouseEvent, artistId: number) {
+		openContextMenu(e, buildLocalArtistMenu(artistId));
+	}
+
+	function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number) {
+		const card = recentAlbums.find(a => a.id === albumId);
+		openContextMenu(e, buildLocalAlbumMenu({ id: albumId, title: card?.title ?? '' }));
 	}
 
 	const PAGE_SIZE = 100;
@@ -87,10 +106,26 @@
 	let showDateColumn = $state(true);
 	let showQualityColumn = $state(true);
 	let showFavColumn = $state(true);
-	let showBpmColumn = $state(true);
-	let showKeyColumn = $state(true);
-	let showEnergyColumn = $state(true);
-	let showDanceColumn = $state(true);
+	let showBpmColumn = $state(false);
+	let showKeyColumn = $state(false);
+	let showEnergyColumn = $state(false);
+	let showDanceColumn = $state(false);
+
+	// Reactive grid template — must match the order of cells in .track-header and .track-row.
+	// Cells that get conditionally removed via {#if showXColumn} drop their column track here too,
+	// so header and row stay aligned.
+	let trackGridColumns = $derived.by(() => {
+		const cols: string[] = ['40px', 'minmax(0, 2fr)', 'minmax(0, 1.5fr)', 'minmax(0, 1.5fr)']; // # title artist album
+		if (showQualityColumn) cols.push('auto');
+		if (showPlaysColumn) cols.push('auto');
+		if (showDateColumn) cols.push('auto', 'auto'); // date_added + last_played share the flag
+		if (showBpmColumn) cols.push('60px');
+		if (showKeyColumn) cols.push('50px');
+		if (showEnergyColumn) cols.push('55px');
+		if (showDanceColumn) cols.push('55px');
+		cols.push('auto', '40px'); // duration, actions
+		return cols.join(' ');
+	});
 
 
 	onMount(() => {
@@ -153,7 +188,7 @@
 	async function loadArtists() {
 		artistsLoading = true;
 		try {
-			const data = await api.getArtists('name', 'asc', 500);
+			const data = await api.getArtists('name', 'asc', 10000);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
@@ -537,11 +572,49 @@
 		searchBusy = true;
 		searchError = null;
 		try {
-			const results = await api.search(trimmed, SEARCH_LIMIT);
-			searchResults = {
-				tracks: results.tracks,
-				albums: results.albums
-			};
+			const parsed = parseQuery(trimmed);
+			if (hasAnyFilter(parsed)) {
+				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) — route to audio search.
+				const params = buildAudioParams(parsed, genres);
+				const audio = await api.searchAudio(params);
+				// Adapt AudioSearchResult → Track shape minimally so existing rendering works.
+				// artist_id / album_id are not returned by the audio endpoint, so menu actions that need
+				// them will gracefully skip (buildTrackMenu guards on null).
+				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
+					id: r.id,
+					title: r.title,
+					artist_id: 0,
+					artist_name: r.artist_name,
+					album_id: null,
+					album_title: r.album_title,
+					disc_number: null,
+					track_number: null,
+					duration_ms: r.duration_ms,
+					isrc: null,
+					tidal_id: r.tidal_id,
+					best_quality: null,
+					best_source: null,
+					fidelity_score: 0,
+					is_favorite: r.is_favorite,
+					play_count: r.play_count,
+					last_played_at: null,
+					date_added: null,
+					source: r.source,
+					artwork_url: r.artwork_url,
+					bpm: r.bpm,
+					key_signature: r.key_signature,
+					camelot_key: r.camelot_key,
+					energy: r.energy,
+					danceability: r.danceability,
+				}));
+				searchResults = { tracks: adaptedTracks, albums: [] };
+			} else {
+				const results = await api.search(trimmed, SEARCH_LIMIT);
+				searchResults = {
+					tracks: results.tracks,
+					albums: results.albums
+				};
+			}
 			clearSelection();
 		} catch (error) {
 			searchError = `Search failed: ${error}`;
@@ -756,6 +829,17 @@
 			.sort((a, b) => b.last_played_at!.localeCompare(a.last_played_at!))
 			.slice(0, 10)
 	);
+
+	// First non-null track artwork keyed by artist_id — used as a fallback when
+	// the artist row has no photo_url (most do not, since Tidal sync doesn't populate it).
+	let artistArtworkById = $derived.by(() => {
+		const map = new Map<number, string>();
+		for (const t of $tracks) {
+			if (!t.artist_id || !t.artwork_url) continue;
+			if (!map.has(t.artist_id)) map.set(t.artist_id, t.artwork_url);
+		}
+		return map;
+	});
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
@@ -1050,6 +1134,7 @@
 					<ArtistCarousel
 						artists={recentArtists}
 						onArtistClick={handleHomeArtistClick}
+						onContextMenu={handleHomeArtistContextMenu}
 					/>
 				</section>
 			{/if}
@@ -1060,6 +1145,7 @@
 					<AlbumCarousel
 						albums={recentAlbums}
 						onAlbumClick={handleHomeAlbumClick}
+						onContextMenu={handleHomeAlbumContextMenu}
 					/>
 				</section>
 			{/if}
@@ -1078,7 +1164,7 @@
 								class="home-track-row"
 								class:playing={$currentTrack?.id === track.id && $isPlaying}
 								onclick={() => void playTrackNow(track.id)}
-								oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu(track)); }}
+								oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildTrackMenu(track)); }}
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
 							>
@@ -1138,7 +1224,7 @@
 					tabindex="0"
 					aria-pressed={$selectedAlbumIds.has(album.id)}
 					onclick={(event) => handleAlbumCardClick(album.id, event)}
-					oncontextmenu={(event) => { event.preventDefault(); openContextMenu(event, buildLocalAlbumMenu(album)); }}
+					oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(event, buildLocalAlbumMenu(album)); }}
 					onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
 				>
 					<div class="album-art">
@@ -1223,6 +1309,7 @@
 			{@const filteredArtists = q ? artists.filter(a => a.name.toLowerCase().includes(q)) : artists}
 			<div class="artist-grid">
 				{#each filteredArtists as artist (artist.id)}
+					{@const artistImg = artist.photo_url ?? artistArtworkById.get(artist.id) ?? null}
 					<button
 						class="artist-card"
 						class:expanded={expandedArtistId === artist.id}
@@ -1230,8 +1317,8 @@
 						title="Expand {artist.name}"
 					>
 						<div class="artist-photo">
-							{#if artist.photo_url}
-								<img src={artist.photo_url} alt={artist.name} loading="lazy" />
+							{#if artistImg}
+								<img src={artistImg} alt={artist.name} loading="lazy" />
 							{:else}
 								<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
 							{/if}
@@ -1340,7 +1427,7 @@
 		<!-- Track List -->
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<div class="track-list" role="list" onkeydown={handleTrackListKeydown}>
-			<div class="track-header">
+			<div class="track-header" style="grid-template-columns: {trackGridColumns}">
 				<span class="col-num">#</span>
 				<button
 					type="button"
@@ -1360,7 +1447,15 @@
 				>
 					Artist <span class="sort-arrow">{$sortBy === 'artist' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 				</button>
-				<span class="col-album">Album</span>
+				<button
+					type="button"
+					class="header-sort col-album"
+					class:sorted={$sortBy === 'album'}
+					onclick={() => handleSort('album')}
+					onkeydown={(event) => handleSortKeydown('album', event)}
+				>
+					Album <span class="sort-arrow">{$sortBy === 'album' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+				</button>
 				{#if showQualityColumn}
 					<span class="col-quality">Quality</span>
 				{/if}
@@ -1447,9 +1542,10 @@
 					tabindex="0"
 					aria-pressed={$selectedTrackIds.has(track.id)}
 					data-cursor-idx={i}
+					style="grid-template-columns: {trackGridColumns}"
 					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
-					oncontextmenu={(event) => { event.preventDefault(); openContextMenu(event, buildTrackMenu(track)); }}
+					oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(event, buildTrackMenu(track)); }}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
 				>
 					<span class="col-num">
@@ -3100,7 +3196,6 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 60px 50px 55px 55px auto 40px;
 		gap: var(--gap-sm);
 		align-items: center;
 		padding: 8px var(--gap-sm);
@@ -3147,7 +3242,6 @@
 
 	.track-row {
 		display: grid;
-		grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto auto auto auto 60px 50px 55px 55px auto 40px;
 		gap: var(--gap-sm);
 		align-items: center;
 		padding: 6px var(--gap-sm);

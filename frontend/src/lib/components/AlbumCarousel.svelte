@@ -8,9 +8,10 @@
     artwork_url: string | null;
   }
 
-  let { albums, onAlbumClick }: {
+  let { albums, onAlbumClick, onContextMenu }: {
     albums: AlbumCard[];
     onAlbumClick?: (id: number) => void;
+    onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
   function letterColor(name: string): string {
@@ -27,6 +28,7 @@
       <button
         class="album-card"
         onclick={() => onAlbumClick?.(album.id)}
+        oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, album.id); } }}
         title={album.title}
       >
         <div class="art-wrap">
