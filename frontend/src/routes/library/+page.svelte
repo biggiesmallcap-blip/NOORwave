@@ -10,7 +10,7 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { api, type Album, type Artist, type Genre, type Playlist, type Track, type TidalDiscographyAlbum } from '$lib/api/client';
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -42,6 +42,9 @@
 	let expandedArtistId = $state<number | null>(null);
 	let artistTracksById = $state<Record<number, Track[]>>({});
 	let artistTracksLoadingId = $state<number | null>(null);
+	let artistDiscographyById = $state<Record<number, TidalDiscographyAlbum[]>>({});
+	let artistDiscographyLoadingId = $state<number | null>(null);
+	let importingAlbumTidalId = $state<number | null>(null);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -177,16 +180,50 @@
 			return;
 		}
 		expandedArtistId = artist.id;
-		if (artistTracksById[artist.id]) return;
-		artistTracksLoadingId = artist.id;
+		if (!artistTracksById[artist.id]) {
+			artistTracksLoadingId = artist.id;
+			try {
+				const data = await api.getArtistTracks(artist.id);
+				artistTracksById = { ...artistTracksById, [artist.id]: data.tracks };
+			} catch (err) {
+				console.error('Failed to load artist tracks:', err);
+				artistTracksById = { ...artistTracksById, [artist.id]: [] };
+			} finally {
+				artistTracksLoadingId = null;
+			}
+		}
+		if (!artistDiscographyById[artist.id] && artist.tidal_id) {
+			artistDiscographyLoadingId = artist.id;
+			try {
+				const data = await api.getArtistDiscography(artist.id);
+				if (data.available) {
+					artistDiscographyById = { ...artistDiscographyById, [artist.id]: data.albums };
+				}
+			} catch {
+				// Discography is best-effort; don't show an error
+			} finally {
+				artistDiscographyLoadingId = null;
+			}
+		}
+	}
+
+	async function importAlbum(tidalAlbumId: number, artistId: number) {
+		if (importingAlbumTidalId !== null) return;
+		importingAlbumTidalId = tidalAlbumId;
 		try {
-			const data = await api.getArtistTracks(artist.id);
-			artistTracksById = { ...artistTracksById, [artist.id]: data.tracks };
+			await api.importTidalAlbum(tidalAlbumId);
+			// Mark album as in-library in local discography state
+			const albums = artistDiscographyById[artistId];
+			if (albums) {
+				artistDiscographyById = {
+					...artistDiscographyById,
+					[artistId]: albums.map(a => a.tidal_id === tidalAlbumId ? { ...a, in_library: true } : a),
+				};
+			}
 		} catch (err) {
-			console.error('Failed to load artist tracks:', err);
-			artistTracksById = { ...artistTracksById, [artist.id]: [] };
+			console.error('Failed to import album:', err);
 		} finally {
-			artistTracksLoadingId = null;
+			importingAlbumTidalId = null;
 		}
 	}
 
@@ -1039,6 +1076,32 @@
 								<button class="btn btn-glass btn-sm" onclick={() => expandedArtistId = null}>Close</button>
 							</div>
 						</div>
+
+						{#if (artistDiscographyById[expandedArtist.id]?.filter(a => !a.in_library).length ?? 0) > 0}
+							<div class="artist-discography-section">
+								<p class="artist-discography-label">Also on Tidal</p>
+								<div class="artist-discography-row">
+									{#each artistDiscographyById[expandedArtist.id].filter(a => !a.in_library) as album (album.tidal_id)}
+										<div class="discography-card">
+											{#if album.artwork_url}
+												<img class="discography-art" src={album.artwork_url} alt={album.title} loading="lazy" />
+											{:else}
+												<div class="discography-art placeholder">♫</div>
+											{/if}
+											<p class="discography-title">{album.title}</p>
+											{#if album.release_date}
+												<p class="discography-year">{album.release_date.slice(0, 4)}</p>
+											{/if}
+											<button
+												class="btn btn-glass btn-xs"
+												disabled={importingAlbumTidalId === album.tidal_id}
+												onclick={() => void importAlbum(album.tidal_id, expandedArtist.id)}
+											>{importingAlbumTidalId === album.tidal_id ? 'Adding…' : '+ Add'}</button>
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
 
 						{#if artistTracksLoadingId === expandedArtist.id}
 							<p class="artist-panel-loading">Loading tracks…</p>
@@ -3134,6 +3197,63 @@
 		color: var(--text-muted);
 		font-size: 0.85rem;
 		padding: 8px 0;
+	}
+
+	.artist-discography-section {
+		margin-bottom: 16px;
+	}
+	.artist-discography-label {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 1.4px;
+		color: var(--accent);
+		margin-bottom: 10px;
+	}
+	.artist-discography-row {
+		display: flex;
+		gap: 12px;
+		overflow-x: auto;
+		padding-bottom: 4px;
+		scrollbar-width: none;
+	}
+	.artist-discography-row::-webkit-scrollbar { display: none; }
+	.discography-card {
+		flex-shrink: 0;
+		width: 96px;
+		text-align: center;
+	}
+	.discography-art {
+		width: 96px;
+		height: 96px;
+		border-radius: 6px;
+		object-fit: cover;
+		margin-bottom: 5px;
+		background: var(--bg-raised);
+	}
+	.discography-art.placeholder {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 28px;
+		color: rgba(255,255,255,0.3);
+	}
+	.discography-title {
+		font-size: 10px;
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		margin-bottom: 2px;
+	}
+	.discography-year {
+		font-size: 9px;
+		color: var(--text-muted);
+		margin-bottom: 5px;
+	}
+	.btn-xs {
+		padding: 3px 9px;
+		font-size: 10px;
 	}
 
 	.artist-track-list {

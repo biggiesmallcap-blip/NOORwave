@@ -823,6 +823,14 @@ export const api = {
 		);
 	},
 
+	importTidalAlbum(tidalAlbumId: number) {
+		return fetchApi<{ album_id: number; tracks: { tidal_id: number; local_id: number }[] }>(
+			`/api/tidal/albums/${tidalAlbumId}/import`,
+			undefined,
+			{ method: 'POST' }
+		);
+	},
+
 	getGenres() {
 		return fetchApi<{ genres: Genre[] }>('/api/genres');
 	},
