@@ -261,6 +261,22 @@
 		return `hsl(${hue}, 70%, 55%)`;
 	}
 
+	// Pick a node fill: prefer energy-driven hue when audio data exists,
+	// fall back to a source-tinted color so Last.fm/engine tracks have a
+	// distinct intentional identity instead of looking broken/grey.
+	function nodeColor(node: DiscoverTrackNode): string {
+		if (node.energy != null) {
+			return energyColor(node.energy);
+		}
+		const src = (node as any).radio_source ?? node.source;
+		switch (src) {
+			case 'lastfm': return 'hsl(265, 55%, 62%)';   // soft purple
+			case 'engine': return 'hsl(210, 55%, 62%)';   // soft blue
+			case 'library': return 'hsl(180, 30%, 55%)';  // desaturated teal (no-DSP library)
+			default: return 'hsl(220, 20%, 50%)';         // legacy fallback
+		}
+	}
+
 	function draw() {
 		if (!ctx || !canvas) return;
 		const w = canvas.width / devicePixelRatio;
@@ -322,7 +338,7 @@
 
 		// ── Draw track nodes ─────────────────────────────────────────────
 		for (const node of nodes) {
-			const color = energyColor(node.energy);
+			const color = nodeColor(node);
 
 			// ── Training fade-in ─────────────────────────────────────
 			let currentOpacity = node.opacity;
@@ -371,11 +387,9 @@
 					ctx.arc(node.x, node.y, currentRadius, 0, Math.PI * 2);
 					ctx.fillStyle = color;
 					ctx.fill();
-					ctx.strokeStyle = node.source === 'tidal' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)';
-					ctx.lineWidth = node.source === 'tidal' ? 2 : 1;
-					ctx.setLineDash(node.source === 'tidal' ? [] : [3, 3]);
+					ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+					ctx.lineWidth = 1.5;
 					ctx.stroke();
-					ctx.setLineDash([]);
 					ctx.globalAlpha = 1;
 
 					ctx.restore();
@@ -392,28 +406,10 @@
 			ctx.arc(node.x, node.y, currentRadius, 0, Math.PI * 2);
 			ctx.fillStyle = color;
 			ctx.fill();
-			ctx.strokeStyle = node.source === 'tidal' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)';
-			ctx.lineWidth = node.source === 'tidal' ? 2 : 1;
-			ctx.setLineDash(node.source === 'tidal' ? [] : [3, 3]);
+			ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+			ctx.lineWidth = 1.5;
 			ctx.stroke();
-			ctx.setLineDash([]);
 			ctx.globalAlpha = 1;
-
-			// Source dot (4px) — top-right of node
-			if (node.radio_source) {
-				const dotX = node.x + currentRadius * 0.707;
-				const dotY = node.y - currentRadius * 0.707;
-				ctx.globalAlpha = currentOpacity * 0.9;
-				ctx.beginPath();
-				ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
-				ctx.fillStyle = node.radio_source === 'library'
-					? '#4caf88'
-					: node.radio_source === 'lastfm'
-						? '#9b59b6'
-						: '#5b9af8';
-				ctx.fill();
-				ctx.globalAlpha = 1;
-			}
 
 			// Hover highlight
 			if (hoveredNode?.track_id === node.track_id) {
