@@ -6456,6 +6456,39 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         (info, token)
     };
 
+    // If sample_rate_follow is enabled and the next track's rate differs from current,
+    // rebuild the output device at the new rate before PrepareNext.
+    {
+        let state_guard = state.read().await;
+        if let (Some(stream), Some(info)) = (stream_info.as_ref(), &state_guard.playback_runtime_info) {
+            let audio_settings = state_guard
+                .db
+                .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+                .ok();
+            if let Some(settings) = audio_settings {
+                if settings.sample_rate_follow {
+                    if let Some(next_rate) = stream.sample_rate {
+                        let current_rate = info.sample_rate;
+                        if next_rate as u32 != current_rate {
+                            let device_sel = match settings.output_device {
+                                Some(device_id) => {
+                                    playback_runtime::OutputDeviceSelection::Named(device_id)
+                                }
+                                None => playback_runtime::OutputDeviceSelection::Default,
+                            };
+                            let _ = handle.device_swap(
+                                device_sel,
+                                settings.exclusive_mode,
+                                settings.sample_rate_follow,
+                                Some(next_rate as u32),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let _gapless = crate::playback::gapless::plan_from_stream(
         stream_info.as_ref(),
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
@@ -6751,6 +6784,7 @@ async fn put_audio_settings(
                 playback_runtime::OutputDeviceSelection::from_pref(new.output_device.as_deref()),
                 new.exclusive_mode,
                 new.sample_rate_follow,
+                None,
             );
         }
     }

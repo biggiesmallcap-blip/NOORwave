@@ -78,11 +78,13 @@ pub enum PlaybackRuntimeCommand {
     },
     /// Swap the CPAL output device for any active engines. Shared mode only at
     /// this stage; `exclusive` and `sample_rate_follow` are wired in later tasks
-    /// (5 + 6) and ignored here.
+    /// (5 + 6) and ignored here. Optional `desired_sample_rate` allows the route
+    /// layer to specify an exact target rate (e.g. per-track transitions).
     DeviceSwap {
         device: OutputDeviceSelection,
         exclusive: bool,
         sample_rate_follow: bool,
+        desired_sample_rate: Option<u32>,
     },
     Shutdown,
 }
@@ -194,17 +196,21 @@ impl PlaybackRuntimeHandle {
     }
 
     /// Live-swap the CPAL output device (and exclusive / sample-rate-follow flags)
-    /// across any active engines. Used by the audio settings PUT route.
+    /// across any active engines. Used by the audio settings PUT route and track
+    /// transitions when sample_rate_follow is enabled. Optional desired_sample_rate
+    /// allows specifying an exact target (e.g. next track's native rate).
     pub fn device_swap(
         &self,
         device: OutputDeviceSelection,
         exclusive: bool,
         sample_rate_follow: bool,
+        desired_sample_rate: Option<u32>,
     ) -> Result<()> {
         self.send(PlaybackRuntimeCommand::DeviceSwap {
             device,
             exclusive,
             sample_rate_follow,
+            desired_sample_rate,
         })
     }
 
@@ -605,6 +611,7 @@ fn run_runtime_loop(
                 device: selection,
                 exclusive,
                 sample_rate_follow,
+                desired_sample_rate,
             } => {
                 // `exclusive` is honored as of Task 5 (Windows-only low-latency
                 // buffer + dedicated code path; full ShareMode::Exclusive is a
@@ -616,7 +623,8 @@ fn run_runtime_loop(
                 // next track's native rate differs from the current stream
                 // rate — runtime.rs has no view of the next track's StreamInfo
                 // until decode begins, so it cannot drive that comparison
-                // itself.
+                // itself. Optional `desired_sample_rate` allows the route layer
+                // to specify an exact target (e.g. next track's native rate).
                 let new_device = match resolve_device(&selection) {
                     Some(d) => d,
                     None => {
@@ -640,14 +648,15 @@ fn run_runtime_loop(
                     .unwrap_or_else(|_| "default output device".to_string());
 
                 // When sample-rate-follow is on, re-target both the cpal stream
-                // and the decoder to the new device's default rate. When off,
-                // pass `None` so the existing rate carries over (the cpal
+                // and the decoder. Use the explicitly-provided rate if given (e.g.
+                // per-track transition), otherwise use the new device's default.
+                // When off, pass `None` so the existing rate carries over (the cpal
                 // stream may resample internally, which is fine for the toggle
                 // being off).
-                let desired_rate = if sample_rate_follow {
-                    Some(new_config.sample_rate.0)
-                } else {
-                    None
+                let desired_rate = match desired_sample_rate {
+                    Some(rate) => Some(rate),
+                    None if sample_rate_follow => Some(new_config.sample_rate.0),
+                    _ => None,
                 };
 
                 // Rebuild the stream on every live engine so they all play on
