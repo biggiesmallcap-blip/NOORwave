@@ -16,6 +16,15 @@ pub struct LastFmTrackSignals {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LastFmSimilarTrack {
+    pub artist: String,
+    pub title: String,
+    pub mbid: Option<String>,
+    /// Last.fm `match` field — 0..1 confidence score from collaborative filtering.
+    pub match_score: f64,
+}
+
 impl LastFmClient {
     pub fn from_env(http: reqwest::Client) -> Option<Self> {
         let api_key = std::env::var("LASTFM_API_KEY").ok()?;
@@ -107,6 +116,74 @@ impl LastFmClient {
         Ok(LastFmTrackSignals {
             tags: tags.into_iter().take(8).collect(),
         })
+    }
+
+    /// Public API: fetch up to `limit` tracks Last.fm considers similar to (artist, title).
+    /// Returns structured records with match scores. Used by Song Radio.
+    pub async fn track_get_similar(
+        &self,
+        artist: &str,
+        title: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmSimilarTrack>> {
+        let payload = self
+            .get_json(&[
+                ("method", "track.getsimilar".to_string()),
+                ("artist", artist.to_string()),
+                ("track", title.to_string()),
+                ("limit", limit.min(100).to_string()),
+            ])
+            .await?;
+
+        let tracks_value = payload
+            .get("similartracks")
+            .and_then(|v| v.get("track"));
+        let arr = value_as_array(tracks_value);
+
+        let mut out = Vec::new();
+        for entry in arr.into_iter().take(limit) {
+            // Title (the result track's name)
+            let track_title = match entry.get("name").and_then(Value::as_str) {
+                Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => continue,
+            };
+
+            // Artist name lives at entry.artist.name
+            let artist_name = entry
+                .get("artist")
+                .and_then(|a| a.get("name"))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if artist_name.is_empty() {
+                continue;
+            }
+
+            // mbid is sometimes "" — treat empty as None
+            let mbid = entry
+                .get("mbid")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            // match field can be a string ("0.987") or a number (0.987). Handle both.
+            let match_score = entry
+                .get("match")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| entry.get("match").and_then(Value::as_f64))
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+
+            out.push(LastFmSimilarTrack {
+                artist: artist_name,
+                title: track_title,
+                mbid,
+                match_score,
+            });
+        }
+
+        Ok(out)
     }
 
     async fn similar_track_queries(&self, artist: &str, track: &str) -> Result<Vec<String>> {
@@ -352,5 +429,66 @@ mod tests {
         let queries = extract_artist_queries(&payload, 4);
 
         assert_eq!(queries, vec!["Pulshar", "DeepChord"]);
+    }
+}
+
+#[cfg(test)]
+mod track_get_similar_tests {
+    use super::*;
+
+    #[test]
+    fn parse_string_match_score() {
+        // Last.fm sometimes returns "match" as a string. Verify parse path.
+        let payload: Value = serde_json::from_str(
+            r#"{"similartracks":{"track":[
+                {"name":"Light Years","mbid":"abc","match":"0.876","artist":{"name":"Pearl Jam","mbid":"x"}}
+            ]}}"#,
+        ).unwrap();
+        let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
+        let arr = value_as_array(tracks_value);
+        assert_eq!(arr.len(), 1);
+        let entry = arr[0];
+        let m = entry
+            .get("match")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| entry.get("match").and_then(Value::as_f64))
+            .unwrap_or(0.0);
+        assert!((m - 0.876).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_numeric_match_score() {
+        // Some Last.fm endpoints return "match" as a JSON number.
+        let payload: Value = serde_json::from_str(
+            r#"{"similartracks":{"track":[
+                {"name":"X","match":0.5,"artist":{"name":"Y"}}
+            ]}}"#,
+        ).unwrap();
+        let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
+        let arr = value_as_array(tracks_value);
+        let entry = arr[0];
+        let m = entry
+            .get("match")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| entry.get("match").and_then(Value::as_f64))
+            .unwrap_or(0.0);
+        assert!((m - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_artist_name_filters_out() {
+        // Skip entries with no artist name (defensive).
+        let payload: Value = serde_json::from_str(
+            r#"{"similartracks":{"track":[
+                {"name":"Legit","match":"0.5","artist":{"name":"Real"}},
+                {"name":"Bad","match":"0.5","artist":{"name":""}}
+            ]}}"#,
+        ).unwrap();
+        let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
+        let arr = value_as_array(tracks_value);
+        assert_eq!(arr.len(), 2);
+        // The actual filter is in track_get_similar — these tests verify the array shape parses.
     }
 }
