@@ -89,32 +89,72 @@
 
 {#if node}
 	<div class="discover-panel glass-panel">
-		{#if node.artwork_url}
-			<img src={node.artwork_url} alt="" class="panel-artwork" />
+
+		{#if node.source !== 'external'}
+			<!-- ── Library / Tidal node (existing behaviour) ── -->
+			{#if node.artwork_url}
+				<img src={node.artwork_url} alt="" class="panel-artwork" />
+			{/if}
+			<h3>{node.title}</h3>
+			<p>{node.artist_name}</p>
+			{#if node.album_title}<p class="album">{node.album_title}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" onclick={play}>▶ Play</button>
+				<button class="action-btn" onclick={queue}>+ Queue</button>
+			</div>
+
+			<div class="metrics">
+				{#if node.bpm}<div class="metric"><span>BPM</span><strong>{Math.round(node.bpm)}</strong></div>{/if}
+				{#if node.camelot_key}<div class="metric"><span>Key</span><span class="key-badge">{node.camelot_key}</span></div>{/if}
+				{#if node.energy != null}
+					<div class="metric"><span>Energy</span>
+						<div class="bar"><div class="bar-fill" style="width:{node.energy * 100}%"></div></div>
+					</div>
+				{/if}
+				{#if node.danceability != null}
+					<div class="metric"><span>Dance</span>
+						<div class="bar"><div class="bar-fill" style="width:{node.danceability * 100}%"></div></div>
+					</div>
+				{/if}
+			</div>
+
+		{:else if resolutionState === 'resolving'}
+			<!-- ── Resolving: shimmer placeholder ── -->
+			<div class="shimmer panel-artwork-shimmer"></div>
+			<div class="shimmer title-shimmer"></div>
+			<div class="shimmer artist-shimmer"></div>
+			<div class="panel-actions">
+				<button class="action-btn primary" disabled>▶ Play</button>
+				<button class="action-btn" disabled>+ Queue</button>
+			</div>
+
+		{:else if resolutionState === 'resolved' && resolvedTrack}
+			<!-- ── Resolved: full Tidal panel ── -->
+			{#if resolvedTrack.artwork_url}
+				<img src={resolvedTrack.artwork_url} alt="" class="panel-artwork" />
+			{/if}
+			<h3>{resolvedTrack.title}</h3>
+			<p>{resolvedTrack.artist_name}</p>
+			{#if resolvedTrack.album_title}<p class="album">{resolvedTrack.album_title}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" onclick={play}>▶ Play</button>
+				<button class="action-btn" onclick={queue}>+ Queue</button>
+			</div>
+
+		{:else if resolutionState === 'unavailable'}
+			<!-- ── Unavailable: Last.fm info + disabled Play ── -->
+			<h3>{node.title}</h3>
+			<p>{node.artist_name}</p>
+			{#if node.radio_reason}<p class="match-score">{node.radio_reason}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" disabled>▶ Play</button>
+				<span class="not-on-tidal">Not on Tidal</span>
+			</div>
 		{/if}
-		<h3>{node.title}</h3>
-		<p>{node.artist_name}</p>
-		{#if node.album_title}<p class="album">{node.album_title}</p>{/if}
 
-		<div class="panel-actions">
-			<button class="action-btn primary" onclick={play}>▶ Play</button>
-			<button class="action-btn" onclick={queue}>+ Queue</button>
-		</div>
-
-		<div class="metrics">
-			{#if node.bpm}<div class="metric"><span>BPM</span><strong>{Math.round(node.bpm)}</strong></div>{/if}
-			{#if node.camelot_key}<div class="metric"><span>Key</span><span class="key-badge">{node.camelot_key}</span></div>{/if}
-			{#if node.energy != null}
-				<div class="metric"><span>Energy</span>
-					<div class="bar"><div class="bar-fill" style="width:{node.energy * 100}%"></div></div>
-				</div>
-			{/if}
-			{#if node.danceability != null}
-				<div class="metric"><span>Dance</span>
-					<div class="bar"><div class="bar-fill" style="width:{node.danceability * 100}%"></div></div>
-				</div>
-			{/if}
-		</div>
 	</div>
 {/if}
 
@@ -146,4 +186,28 @@
 	.key-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); font-size: 0.8rem; color: var(--text-primary); }
 	.bar { height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
 	.bar-fill { height: 100%; background: var(--accent, #7c80ff); border-radius: 2px; }
+
+	.action-btn:disabled { opacity: 0.35; cursor: default; }
+	.not-on-tidal {
+		align-self: center;
+		font-size: 0.72rem;
+		color: rgba(255,255,255,0.35);
+		letter-spacing: 0.03em;
+	}
+	.match-score { font-size: 0.72rem; color: rgba(255,255,255,0.3); font-style: italic; }
+
+	/* Shimmer animation */
+	@keyframes shimmer {
+		0%   { background-position: -200% 0; }
+		100% { background-position:  200% 0; }
+	}
+	.shimmer {
+		border-radius: 6px;
+		background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.09) 50%, rgba(255,255,255,0.04) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.4s infinite;
+	}
+	.panel-artwork-shimmer { width: 100%; aspect-ratio: 1; border-radius: var(--radius); margin-bottom: 10px; }
+	.title-shimmer  { height: 14px; width: 70%; margin-bottom: 8px; }
+	.artist-shimmer { height: 11px; width: 50%; margin-bottom: 10px; }
 </style>
