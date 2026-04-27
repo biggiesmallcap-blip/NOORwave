@@ -1,16 +1,86 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
 	import type { DiscoverTrackNode } from './discover.types';
+	import type { TidalSearchTrack } from '$lib/api/client';
+	import { playTidalTrackNow, addTidalTrackToQueue } from '$lib/stores/player';
 
 	let { node = null }: { node?: DiscoverTrackNode | null } = $props();
 
+	type ResolutionState = 'idle' | 'resolving' | 'resolved' | 'unavailable';
+
+	// Persists across node selections within this page session.
+	const resolutionCache = new Map<number, TidalSearchTrack | null>();
+
+	let resolutionState = $state<ResolutionState>('idle');
+	let resolvedTrack = $state<TidalSearchTrack | null>(null);
+
+	$effect(() => {
+		const n = node;
+		if (!n || n.source !== 'external') {
+			resolutionState = 'idle';
+			resolvedTrack = null;
+			return;
+		}
+
+		if (resolutionCache.has(n.track_id)) {
+			const cached = resolutionCache.get(n.track_id) as TidalSearchTrack | null;
+			resolvedTrack = cached;
+			resolutionState = cached !== null ? 'resolved' : 'unavailable';
+			return;
+		}
+
+		resolutionState = 'resolving';
+		resolvedTrack = null;
+		const capturedId = n.track_id;
+
+		api.searchTidal(`${n.title} ${n.artist_name}`, 1)
+			.then(results => {
+				if (node?.track_id !== capturedId) return;
+				const first = results.tracks[0] ?? null;
+				resolutionCache.set(capturedId, first);
+				resolvedTrack = first;
+				resolutionState = first !== null ? 'resolved' : 'unavailable';
+			})
+			.catch(() => {
+				if (node?.track_id !== capturedId) return;
+				resolutionCache.set(capturedId, null);
+				resolutionState = 'unavailable';
+			});
+	});
+
 	async function play() {
 		if (!node) return;
+		if (node.source === 'external') {
+			if (resolvedTrack) {
+				await playTidalTrackNow({
+					tidal_id: resolvedTrack.tidal_id,
+					title: resolvedTrack.title,
+					artist_name: resolvedTrack.artist_name,
+					album_title: resolvedTrack.album_title,
+					artwork_url: resolvedTrack.artwork_url,
+					duration_ms: resolvedTrack.duration_ms,
+				});
+			}
+			return;
+		}
 		await api.playTrack(node.track_id);
 	}
 
 	async function queue() {
 		if (!node) return;
+		if (node.source === 'external') {
+			if (resolvedTrack) {
+				await addTidalTrackToQueue({
+					tidal_id: resolvedTrack.tidal_id,
+					title: resolvedTrack.title,
+					artist_name: resolvedTrack.artist_name,
+					album_title: resolvedTrack.album_title,
+					artwork_url: resolvedTrack.artwork_url,
+					duration_ms: resolvedTrack.duration_ms,
+				});
+			}
+			return;
+		}
 		await api.addQueueTrack(node.track_id);
 	}
 </script>
