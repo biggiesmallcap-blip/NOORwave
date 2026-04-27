@@ -10,8 +10,8 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
-	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue } from '$lib/stores/player';
+	import { api, type Album, type Artist, type Genre, type Playlist, type Track, type TidalDiscographyAlbum } from '$lib/api/client';
+	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
@@ -45,6 +45,15 @@
 	let expandedArtistId = $state<number | null>(null);
 	let artistTracksById = $state<Record<number, Track[]>>({});
 	let artistTracksLoadingId = $state<number | null>(null);
+	let artistDiscographyById = $state<Record<number, TidalDiscographyAlbum[]>>({});
+	let artistDiscographyLoadingId = $state<number | null>(null);
+	let importingAlbumTidalId = $state<number | null>(null);
+
+	// Keyboard cursor for track list
+	let cursorIndex = $state(-1);
+
+	// Decade filter for albums tab
+	let activeDecade = $state<number | null>(null);
 
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
@@ -144,16 +153,50 @@
 			return;
 		}
 		expandedArtistId = artist.id;
-		if (artistTracksById[artist.id]) return;
-		artistTracksLoadingId = artist.id;
+		if (!artistTracksById[artist.id]) {
+			artistTracksLoadingId = artist.id;
+			try {
+				const data = await api.getArtistTracks(artist.id);
+				artistTracksById = { ...artistTracksById, [artist.id]: data.tracks };
+			} catch (err) {
+				console.error('Failed to load artist tracks:', err);
+				artistTracksById = { ...artistTracksById, [artist.id]: [] };
+			} finally {
+				artistTracksLoadingId = null;
+			}
+		}
+		if (!artistDiscographyById[artist.id] && artist.tidal_id) {
+			artistDiscographyLoadingId = artist.id;
+			try {
+				const data = await api.getArtistDiscography(artist.id);
+				if (data.available) {
+					artistDiscographyById = { ...artistDiscographyById, [artist.id]: data.albums };
+				}
+			} catch {
+				// Discography is best-effort; don't show an error
+			} finally {
+				artistDiscographyLoadingId = null;
+			}
+		}
+	}
+
+	async function importAlbum(tidalAlbumId: number, artistId: number) {
+		if (importingAlbumTidalId !== null) return;
+		importingAlbumTidalId = tidalAlbumId;
 		try {
-			const data = await api.getArtistTracks(artist.id);
-			artistTracksById = { ...artistTracksById, [artist.id]: data.tracks };
+			await api.importTidalAlbum(tidalAlbumId);
+			// Mark album as in-library in local discography state
+			const albums = artistDiscographyById[artistId];
+			if (albums) {
+				artistDiscographyById = {
+					...artistDiscographyById,
+					[artistId]: albums.map(a => a.tidal_id === tidalAlbumId ? { ...a, in_library: true } : a),
+				};
+			}
 		} catch (err) {
-			console.error('Failed to load artist tracks:', err);
-			artistTracksById = { ...artistTracksById, [artist.id]: [] };
+			console.error('Failed to import album:', err);
 		} finally {
-			artistTracksLoadingId = null;
+			importingAlbumTidalId = null;
 		}
 	}
 
@@ -317,6 +360,36 @@
 
 	function handleTrackRowKeydown(trackId: number, event: KeyboardEvent) {
 		runOnActivation(event, () => updateTrackSelection(trackId));
+		if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+	}
+
+	function handleTrackListKeydown(event: KeyboardEvent) {
+		if (activeTab !== 'tracks') return;
+		if (event.key === 'ArrowDown') {
+			event.preventDefault();
+			if (visibleTracks.length === 0) return;
+			cursorIndex = cursorIndex < 0 ? 0 : Math.min(cursorIndex + 1, visibleTracks.length - 1);
+			return;
+		}
+		if (event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (visibleTracks.length === 0) return;
+			cursorIndex = cursorIndex <= 0 ? -1 : cursorIndex - 1;
+			return;
+		}
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			const track = cursorIndex >= 0 ? visibleTracks[cursorIndex] : null;
+			if (!track) return;
+			if (event.shiftKey) {
+				void addTrackToQueue(track.id);
+			} else if (event.metaKey || event.ctrlKey) {
+				void playTrackNext(track.id);
+			} else {
+				void playTrackNow(track.id);
+			}
+			return;
+		}
 	}
 
 	function handleAlbumCardKeydown(albumId: number, event: KeyboardEvent) {
@@ -522,7 +595,18 @@
 	);
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
 	let visibleTracks = $derived($searchQuery.trim() ? searchResults.tracks : $tracks);
-	let visibleAlbums = $derived($searchQuery.trim() ? searchResults.albums : $albums);
+	let decadeBuckets = $derived.by(() => {
+		const seen = new Set<number>();
+		for (const a of $albums) {
+			if (a.year != null) seen.add(Math.floor(a.year / 10) * 10);
+		}
+		return [...seen].sort((a, b) => a - b);
+	});
+	let visibleAlbums = $derived.by(() => {
+		const base = $searchQuery.trim() ? searchResults.albums : $albums;
+		if (!activeDecade) return base;
+		return base.filter(a => a.year != null && Math.floor(a.year / 10) * 10 === activeDecade);
+	});
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
 		(activeTab === 'tracks' ? $tracks.length < $totalTracks : activeTab === 'albums' ? $albums.length < $totalAlbums : false)
@@ -751,7 +835,7 @@
 		)
 	})
 
-	let pendingRestoreScroll: number | null = null
+	let pendingRestoreScroll = $state<number | null>(null)
 
 	afterNavigate((nav) => {
 		if (typeof sessionStorage === 'undefined') return
@@ -765,18 +849,38 @@
 			if (typeof savedTab === 'string' && (validTabs as readonly string[]).includes(savedTab)) {
 				activeTab = savedTab as typeof activeTab
 				expandedArtistId = saved.expandedArtistId
-				pendingRestoreScroll = saved.scrollY
+				if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
 			}
 		} catch {
 			/* ignore corrupted state */
 		}
 	})
 
-	$effect.pre(() => {
+	$effect(() => {
 		if (pendingRestoreScroll !== null) {
-			window.scrollTo(0, pendingRestoreScroll)
+			const target = pendingRestoreScroll
 			pendingRestoreScroll = null
+			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
 		}
+	})
+
+	// Reset cursor when switching tabs or changing the search query.
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		activeTab; $searchQuery;
+		cursorIndex = -1;
+	})
+
+	// Reset decade filter when leaving albums tab.
+	$effect(() => {
+		if (activeTab !== 'albums') activeDecade = null;
+	})
+
+	// Keep the highlighted track in view as the cursor moves.
+	$effect(() => {
+		if (cursorIndex < 0) return;
+		const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursorIndex}"]`);
+		el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 	})
 </script>
 
@@ -1012,6 +1116,18 @@
 		</div>
 
 	{:else if activeTab === 'albums'}
+		{#if decadeBuckets.length > 1}
+			<div class="decade-strip">
+				<button class="decade-chip" class:active={activeDecade === null} onclick={() => activeDecade = null}>All</button>
+				{#each decadeBuckets as decade}
+					<button
+						class="decade-chip"
+						class:active={activeDecade === decade}
+						onclick={() => activeDecade = activeDecade === decade ? null : decade}
+					>{decade}s</button>
+				{/each}
+			</div>
+		{/if}
 		<!-- Album Grid -->
 		<div class="album-grid" class:album-list={$viewMode === 'list'}>
 			{#each visibleAlbums as album (album.id)}
@@ -1148,6 +1264,32 @@
 							</div>
 						</div>
 
+						{#if (artistDiscographyById[expandedArtist.id]?.filter(a => !a.in_library).length ?? 0) > 0}
+							<div class="artist-discography-section">
+								<p class="artist-discography-label">Also on Tidal</p>
+								<div class="artist-discography-row">
+									{#each artistDiscographyById[expandedArtist.id].filter(a => !a.in_library) as album (album.tidal_id)}
+										<div class="discography-card">
+											{#if album.artwork_url}
+												<img class="discography-art" src={album.artwork_url} alt={album.title} loading="lazy" />
+											{:else}
+												<div class="discography-art placeholder">♫</div>
+											{/if}
+											<p class="discography-title">{album.title}</p>
+											{#if album.release_date}
+												<p class="discography-year">{album.release_date.slice(0, 4)}</p>
+											{/if}
+											<button
+												class="btn btn-glass btn-xs"
+												disabled={importingAlbumTidalId === album.tidal_id}
+												onclick={() => void importAlbum(album.tidal_id, expandedArtist.id)}
+											>{importingAlbumTidalId === album.tidal_id ? 'Adding…' : '+ Add'}</button>
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
 						{#if artistTracksLoadingId === expandedArtist.id}
 							<p class="artist-panel-loading">Loading tracks…</p>
 						{:else if (artistTracksById[expandedArtist.id]?.length ?? 0) === 0}
@@ -1189,7 +1331,8 @@
 
 	{:else if activeTab === 'tracks'}
 		<!-- Track List -->
-		<div class="track-list">
+		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+		<div class="track-list" role="list" onkeydown={handleTrackListKeydown}>
 			<div class="track-header">
 				<span class="col-num">#</span>
 				<button
@@ -1234,6 +1377,17 @@
 						onkeydown={(event) => handleSortKeydown('date_added', event)}
 					>
 						Date Added <span class="sort-arrow">{$sortBy === 'date_added' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
+					</button>
+				{/if}
+				{#if showDateColumn}
+					<button
+						type="button"
+						class="header-sort col-date"
+						class:sorted={$sortBy === 'last_played_at'}
+						onclick={() => handleSort('last_played_at')}
+						onkeydown={(event) => handleSortKeydown('last_played_at', event)}
+					>
+						Last Played <span class="sort-arrow">{$sortBy === 'last_played_at' ? ($sortDir === 'asc' ? '↑' : '↓') : '⇅'}</span>
 					</button>
 				{/if}
 				{#if showBpmColumn}
@@ -1281,9 +1435,11 @@
 					class="track-row"
 					class:selected={$selectedTrackIds.has(track.id)}
 					class:playing={$currentTrack?.id === track.id}
+					class:cursor={cursorIndex === i}
 					role="button"
 					tabindex="0"
 					aria-pressed={$selectedTrackIds.has(track.id)}
+					data-cursor-idx={i}
 					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
@@ -1329,7 +1485,11 @@
 					{/if}
 					{#if showDateColumn}
 						<span class="col-date">
-							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+							{#if $sortBy === 'last_played_at'}
+								<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '—'}</span>
+							{:else}
+								<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+							{/if}
 						</span>
 					{/if}
 					{#if showBpmColumn}
@@ -1821,6 +1981,34 @@
 		color: var(--text-primary);
 		background: rgba(124, 128, 255, 0.12);
 		border-color: rgba(124, 128, 255, 0.22);
+	}
+
+	.decade-strip {
+		display: flex;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-bottom: 16px;
+	}
+	.decade-chip {
+		padding: 4px 13px;
+		border-radius: 14px;
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+		border: 1px solid rgba(255,255,255,0.08);
+		background: transparent;
+		color: var(--text-secondary);
+		font-family: inherit;
+		transition: border-color 0.15s, background 0.15s, color 0.15s;
+	}
+	.decade-chip:hover {
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+	}
+	.decade-chip.active {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
 	}
 
 	.library-hero-subtitle {
@@ -2928,6 +3116,11 @@
 		background: var(--accent-soft);
 	}
 
+	.track-row.cursor {
+		background: var(--bg-glass-hover);
+		box-shadow: inset 2px 0 0 var(--accent);
+	}
+
 	.col-actions {
 		display: flex;
 		align-items: center;
@@ -3286,6 +3479,63 @@
 		color: var(--text-muted);
 		font-size: 0.85rem;
 		padding: 8px 0;
+	}
+
+	.artist-discography-section {
+		margin-bottom: 16px;
+	}
+	.artist-discography-label {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 1.4px;
+		color: var(--accent);
+		margin-bottom: 10px;
+	}
+	.artist-discography-row {
+		display: flex;
+		gap: 12px;
+		overflow-x: auto;
+		padding-bottom: 4px;
+		scrollbar-width: none;
+	}
+	.artist-discography-row::-webkit-scrollbar { display: none; }
+	.discography-card {
+		flex-shrink: 0;
+		width: 96px;
+		text-align: center;
+	}
+	.discography-art {
+		width: 96px;
+		height: 96px;
+		border-radius: 6px;
+		object-fit: cover;
+		margin-bottom: 5px;
+		background: var(--bg-raised);
+	}
+	.discography-art.placeholder {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 28px;
+		color: rgba(255,255,255,0.3);
+	}
+	.discography-title {
+		font-size: 10px;
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		margin-bottom: 2px;
+	}
+	.discography-year {
+		font-size: 9px;
+		color: var(--text-muted);
+		margin-bottom: 5px;
+	}
+	.btn-xs {
+		padding: 3px 9px;
+		font-size: 10px;
 	}
 
 	.artist-track-list {
