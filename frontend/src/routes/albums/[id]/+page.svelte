@@ -4,7 +4,7 @@
 	import {
 		playAlbum,
 		shuffleAlbum,
-		startSongRadio,
+		startAlbumRadio,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -198,8 +198,8 @@
 
 			<button
 				class="ghost-btn"
-				aria-label="Song radio"
-				onclick={() => tracks[0] && void startSongRadio(tracks[0].id)}
+				aria-label="Album radio"
+				onclick={() => void startAlbumRadio(albumId)}
 			>
 				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
 			</button>
