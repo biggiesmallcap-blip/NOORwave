@@ -65,20 +65,6 @@
 	let showEnergyColumn = $state(true);
 	let showDanceColumn = $state(true);
 
-	// DSP filter panel
-	let showDspFilters = $state(false);
-	let filterBpmMin = $state<number | null>(null);
-	let filterBpmMax = $state<number | null>(null);
-	let filterEnergyMin = $state(0);
-	let filterEnergyMax = $state(1);
-	let filterKey = $state('');
-	let filterInstrumental = $state(false);
-
-	// Camelot keys for dropdown
-	const CAMELOT_KEYS = [
-		'', '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
-		'1B', '2B', '3B', '4B', '5B', '6B', '7B', '8B', '9B', '10B', '11B', '12B'
-	];
 
 	onMount(() => {
 		void loadAlbums();
@@ -121,23 +107,6 @@
 			loadAlbums($sortBy, $sortDir);
 		}
 		clearSelection();
-	}
-
-	async function applyDspFilters() {
-		// Reload tracks with DSP filters applied via API params
-		// For now, just toggle the filter state — actual API filter integration
-		// requires backend endpoint support for bpm_min, bpm_max, etc.
-		batchMessage = 'DSP filters applied (backend support required for full filtering).';
-	}
-
-	async function clearDspFilters() {
-		filterBpmMin = null;
-		filterBpmMax = null;
-		filterEnergyMin = 0;
-		filterEnergyMax = 1;
-		filterKey = '';
-		filterInstrumental = false;
-		batchMessage = 'DSP filters cleared.';
 	}
 
 	function switchTab(tab: 'all' | 'tracks' | 'albums' | 'artists') {
@@ -723,6 +692,14 @@
 			type="search"
 			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
 		/>
+		<div class="kbd-hint">
+			<kbd>/</kbd> focus &nbsp;·&nbsp;
+			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
+			<kbd>Enter</kbd> play &nbsp;·&nbsp;
+			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
+			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next &nbsp;·&nbsp;
+			<span class="hint-filters">bpm:138 &nbsp;·&nbsp; key:Am &nbsp;·&nbsp; energy:&gt;0.7 &nbsp;·&nbsp; genre:dnb &nbsp;·&nbsp; instrumental:true</span>
+		</div>
 		<div class="toolbar-meta">
 			{#if searchBusy}
 				<span class="toolbar-note">Searching…</span>
@@ -735,51 +712,6 @@
 		</div>
 	</div>
 
-	{#if activeTab === 'tracks'}
-		<div class="dsp-filter-bar glass">
-			<button class="btn btn-glass btn-sm" onclick={() => showDspFilters = !showDspFilters}>
-				{showDspFilters ? 'Hide DSP Filters' : 'DSP Filters'}
-			</button>
-			{#if showDspFilters}
-				<div class="dsp-filter-grid">
-					<div class="filter-group">
-						<label>BPM Range</label>
-						<div class="filter-inputs">
-							<input type="number" placeholder="Min" bind:value={filterBpmMin} min="40" max="300" />
-							<span>–</span>
-							<input type="number" placeholder="Max" bind:value={filterBpmMax} min="40" max="300" />
-						</div>
-					</div>
-					<div class="filter-group">
-						<label>Energy</label>
-						<div class="filter-inputs">
-							<input type="range" bind:value={filterEnergyMin} min="0" max="1" step="0.05" />
-							<input type="range" bind:value={filterEnergyMax} min="0" max="1" step="0.05" />
-						</div>
-					</div>
-					<div class="filter-group">
-						<label>Key</label>
-						<select bind:value={filterKey}>
-							{#each CAMELOT_KEYS as key}
-								<option value={key}>{key || 'All Keys'}</option>
-							{/each}
-						</select>
-					</div>
-					<div class="filter-group">
-						<label>Instrumental</label>
-						<label class="toggle-switch-small">
-							<input type="checkbox" bind:checked={filterInstrumental} />
-							<span>Only</span>
-						</label>
-					</div>
-					<div class="filter-actions">
-						<button class="btn btn-primary btn-sm" onclick={applyDspFilters}>Apply</button>
-						<button class="btn btn-glass btn-sm" onclick={clearDspFilters}>Clear</button>
-					</div>
-				</div>
-			{/if}
-		</div>
-	{/if}
 
 	{#if searchError}
 		<div class="batch-feedback error glass">{searchError}</div>
@@ -1557,79 +1489,32 @@
 		font-size: 0.84rem;
 	}
 
-	/* ─── DSP Filter Bar ───────────────────────── */
-
-	.dsp-filter-bar {
-		padding: 10px 14px;
-		margin-bottom: var(--gap);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.dsp-filter-grid {
+	.kbd-hint {
 		display: flex;
 		flex-wrap: wrap;
-		gap: var(--space-3);
-		align-items: flex-end;
-	}
-
-	.filter-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		min-width: 140px;
-		flex: 1;
-	}
-
-	.filter-group label {
-		font-size: 0.72rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-tertiary);
-	}
-
-	.filter-inputs {
-		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 2px;
+		font-size: 11px;
+		color: var(--text-muted, rgba(255,255,255,0.35));
+		padding: 4px 0 0 2px;
+		user-select: none;
 	}
 
-	.filter-inputs input[type="number"] {
-		width: 70px;
-		padding: 5px 8px;
-		font-size: 0.82rem;
+	.kbd-hint kbd {
+		display: inline-block;
+		padding: 1px 5px;
+		border: 1px solid var(--border-subtle, rgba(255,255,255,0.15));
+		border-radius: 4px;
+		font-family: inherit;
+		font-size: 10px;
+		color: var(--text-secondary, rgba(255,255,255,0.5));
+		background: var(--bg-glass, rgba(255,255,255,0.05));
 	}
 
-	.filter-inputs input[type="range"] {
-		flex: 1;
-	}
-
-	.filter-inputs span {
-		color: var(--text-muted);
-		font-size: 0.82rem;
-	}
-
-	.filter-actions {
-		display: flex;
-		gap: 6px;
-		align-items: flex-end;
-	}
-
-	.toggle-switch-small {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 0.82rem;
-		color: var(--text-secondary);
-		cursor: pointer;
-	}
-
-	.toggle-switch-small input {
-		width: 16px;
-		height: 16px;
-		accent-color: var(--accent);
+	.hint-filters {
+		opacity: 0.7;
+		font-family: monospace;
+		letter-spacing: 0.02em;
 	}
 
 	/* ─── New DSP Columns ───────────────────────── */
