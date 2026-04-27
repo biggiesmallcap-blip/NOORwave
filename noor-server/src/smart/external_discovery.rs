@@ -154,9 +154,13 @@ pub fn build_connection_queries(
         ));
     }
 
-    let mut blended = build_search_queries(request, context);
-    blended.extend(queries);
-    dedupe_queries(blended)
+    if request.prompt.trim().is_empty() {
+        dedupe_queries(queries)
+    } else {
+        let mut blended = build_search_queries(request, context);
+        blended.extend(queries);
+        dedupe_queries(blended)
+    }
 }
 
 pub fn build_external_feed(
