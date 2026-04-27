@@ -14,6 +14,7 @@ use axum::{
 use serde_json::json;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 
 pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let cors = CorsLayer::new()
@@ -37,6 +38,27 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         ));
 
     let app = public.merge(protected).layer(cors);
+
+    // Resolve www/ relative to the running binary. In the portable build,
+    // noor-server.exe sits next to www/. In dev, www/ won't exist, which
+    // is fine — the fallback is simply not added.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let www_dir = exe_dir.and_then(|d| {
+        let p = d.join("www");
+        if p.is_dir() { Some(p) } else { None }
+    });
+
+    let app = match www_dir {
+        Some(www) => {
+            let index_html = www.join("index.html");
+            app.fallback_service(
+                ServeDir::new(&www).not_found_service(ServeFile::new(index_html)),
+            )
+        }
+        None => app,
+    };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;

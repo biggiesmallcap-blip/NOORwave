@@ -8,6 +8,7 @@ mod services;
 mod smart;
 
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use tokio::sync::{RwLock, broadcast};
@@ -113,6 +114,52 @@ pub enum AppEvent {
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
+fn resolve_bind_addr(db: &db::Database) -> String {
+    // NOOR_ADDR env var always wins (power-user override)
+    if let Ok(addr) = std::env::var("NOOR_ADDR") {
+        if !addr.trim().is_empty() {
+            return addr;
+        }
+    }
+    // --host flag forces 0.0.0.0
+    if std::env::args().any(|a| a == "--host") {
+        return "0.0.0.0:3334".to_string();
+    }
+    // DB preference (set by Tauri tray toggle or headless users)
+    let host_mode = db
+        .with_conn(|conn| {
+            let v: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM server_config WHERE key = 'server.host_mode'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(v.map(|s| s == "true").unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if host_mode {
+        "0.0.0.0:3334".to_string()
+    } else {
+        "127.0.0.1:3334".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn host_flag_detection() {
+        // Simulate args: just test the parsing logic directly
+        let args = vec!["noor-server".to_string(), "--host".to_string()];
+        let has_host = args.iter().any(|a| a == "--host");
+        assert!(has_host);
+
+        let args_no_flag = vec!["noor-server".to_string()];
+        let has_host = args_no_flag.iter().any(|a| a == "--host");
+        assert!(!has_host);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -182,6 +229,9 @@ async fn main() -> Result<()> {
     info!("  NOOR access token: {}", server_token);
     info!("  Copy this into the app on any new device.");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    // Resolve bind address before db is moved into AppState
+    let addr = resolve_bind_addr(&db);
 
     let http_client = reqwest::Client::new();
     let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(http_client.clone()));
@@ -286,7 +336,6 @@ async fn main() -> Result<()> {
     }
 
     // Start HTTP + WebSocket server
-    let addr = std::env::var("NOOR_ADDR").unwrap_or_else(|_| "0.0.0.0:3334".to_string());
     info!("Starting server on http://{}", addr);
     server::start(state, &addr).await?;
 

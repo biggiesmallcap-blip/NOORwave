@@ -399,6 +399,9 @@ pub fn api_routes(state: SharedState) -> Router {
         // Server auth management
         .route("/api/server/token", get(get_server_token_handler))
         .route("/api/server/token/regenerate", post(regenerate_server_token_handler))
+        // Server configuration
+        .route("/api/server/info", get(get_server_info))
+        .route("/api/server/host_mode", put(put_server_host_mode))
         .with_state(state)
 }
 
@@ -422,6 +425,57 @@ async fn regenerate_server_token_handler(
         s.server_token = new_token.clone();
     }
     Ok(Json(json!({ "token": new_token })))
+}
+
+async fn get_server_info(State(state): State<SharedState>) -> Json<Value> {
+    let host_mode = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            let v: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM server_config WHERE key = 'server.host_mode'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(v.map(|s| s == "true").unwrap_or(false))
+        })
+        .unwrap_or(false);
+
+    let bind_address = if host_mode { "0.0.0.0:3334" } else { "127.0.0.1:3334" };
+    Json(json!({
+        "host_mode": host_mode,
+        "bind_address": bind_address,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+async fn put_server_host_mode(
+    State(state): State<SharedState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let host_mode = body
+        .get("host_mode")
+        .and_then(|v| v.as_bool())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO server_config (key, value) VALUES ('server.host_mode', ?1)",
+                rusqlite::params![if host_mode { "true" } else { "false" }],
+            )?;
+            Ok(())
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let bind_address = if host_mode { "0.0.0.0:3334" } else { "127.0.0.1:3334" };
+    Ok(Json(json!({ "host_mode": host_mode, "bind_address": bind_address })))
 }
 
 async fn get_tracks(
@@ -8401,5 +8455,106 @@ mod tests {
         assert_eq!(electronic["total_listened_ms"], 180000);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    /// Build a minimal test app backed by a fresh in-memory database.
+    async fn build_test_app() -> Router {
+        let db_path =
+            std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&db_path).expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn)).expect("schema migrations");
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        api_routes(Arc::new(tokio::sync::RwLock::new(crate::AppState {
+            db,
+            event_tx,
+            http_client: reqwest::Client::new(),
+            tidal_tokens: None,
+            spotify_tokens: None,
+            playback_runtime: None,
+            playback_runtime_info: None,
+            current_stream_display: None,
+            pending_stream_display: None,
+            active_listen_session: None,
+            external_playback_track: None,
+            ephemeral_tidal_track: None,
+            tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(reqwest::Client::new())),
+            acrcloud_client: None,
+            analysis_tx: None,
+            audio_analysis_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audio_analysis_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            acrcloud_scan_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            acrcloud_daily_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            spotify_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            spotify_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lastfm_enrich_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            server_token: String::new(),
+        })))
+    }
+
+    #[tokio::test]
+    async fn server_info_returns_defaults() {
+        let app = build_test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/server/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["host_mode"], false);
+        assert!(body["bind_address"].as_str().unwrap().contains("3334"));
+        assert!(body["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn put_host_mode_persists() {
+        let app = build_test_app().await;
+
+        // Enable host mode
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/server/host_mode")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"host_mode":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Reading info should now reflect host_mode = true
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/server/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp2.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["host_mode"], true);
+        assert!(body["bind_address"].as_str().unwrap().starts_with("0.0.0.0"));
     }
 }
