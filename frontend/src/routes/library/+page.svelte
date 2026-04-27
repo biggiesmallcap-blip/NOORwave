@@ -614,7 +614,7 @@
 		)
 	})
 
-	let pendingRestoreScroll: number | null = null
+	let pendingRestoreScroll = $state<number | null>(null)
 
 	afterNavigate((nav) => {
 		if (typeof sessionStorage === 'undefined') return
@@ -626,17 +626,18 @@
 			if (typeof saved.activeTab === 'string' && (saved.activeTab === 'tracks' || saved.activeTab === 'albums' || saved.activeTab === 'artists')) {
 				activeTab = saved.activeTab
 				expandedArtistId = saved.expandedArtistId
-				pendingRestoreScroll = saved.scrollY
+				if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
 			}
 		} catch {
 			/* ignore corrupted state */
 		}
 	})
 
-	$effect.pre(() => {
+	$effect(() => {
 		if (pendingRestoreScroll !== null) {
-			window.scrollTo(0, pendingRestoreScroll)
+			const target = pendingRestoreScroll
 			pendingRestoreScroll = null
+			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
 		}
 	})
 </script>
