@@ -117,7 +117,9 @@ pub type SharedState = Arc<RwLock<AppState>>;
 fn resolve_bind_addr(db: &db::Database) -> String {
     // NOOR_ADDR env var always wins (power-user override)
     if let Ok(addr) = std::env::var("NOOR_ADDR") {
-        return addr;
+        if !addr.trim().is_empty() {
+            return addr;
+        }
     }
     // --host flag forces 0.0.0.0
     if std::env::args().any(|a| a == "--host") {
