@@ -5,6 +5,7 @@ pub mod discovery_trainer;
 pub mod lastfm;
 pub mod learning;
 pub mod musicbrainz;
+pub mod radio;
 pub mod rss_feeds;
 pub mod spotify;
 pub mod tidal;
