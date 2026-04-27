@@ -7,6 +7,7 @@
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
   import { parseQuery, filtersToChips, type ParsedQuery, type FilterValue } from '$lib/search/query_parser'
+  import { parseIntent } from '$lib/search/intent'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -41,6 +42,9 @@
   let loading = $state(false)
   let error = $state<string | null>(null)
   let debounceTimer: ReturnType<typeof setTimeout>
+
+  // D5 — in-memory result cache (last 5 queries, keyed by normalised query string)
+  const resultCache = new Map<string, TidalSearchResults>()
   let recent = $state<string[]>(loadRecent())
   let genreList = $state<Genre[]>([])
 
@@ -161,14 +165,53 @@
     loading = true
     debounceTimer = setTimeout(async () => {
       const q = query.trim()
+      const intent = parseIntent(q)
+
+      // "play <query>" → fire immediately and clear input
+      if (intent.intent.type === 'play') {
+        loading = false
+        const r = await api.searchTidal(intent.free_text).catch(() => null)
+        const first = r?.tracks[0]
+        if (first) void playTidalTrackNow(toPlayable(first))
+        query = ''
+        results = null
+        return
+      }
+
+      // "similar to <query>" → start radio from first result
+      if (intent.intent.type === 'radio') {
+        loading = false
+        const r = await api.searchTidal(intent.free_text).catch(() => null)
+        const first = r?.tracks[0]
+        if (first) void startTidalSongRadio(toPlayable(first))
+        query = ''
+        results = null
+        return
+      }
+
+      // "<title/artist> <year>" → merge year into filters and run audio search
+      const effectiveParsed: ParsedQuery = intent.intent.type === 'year_filter'
+        ? { free_text: intent.free_text, filters: intent.extra_filters }
+        : parsedQuery
+      const effectiveHasFilters = Object.keys(effectiveParsed.filters).length > 0
+
       try {
-        if (hasFilters) {
-          const res = await api.searchAudio(buildAudioParams(parsedQuery))
+        if (effectiveHasFilters) {
+          const res = await api.searchAudio(buildAudioParams(effectiveParsed))
           audioResults = res.tracks
           results = null
         } else {
           audioResults = null
-          results = await api.searchTidal(q)
+          const cacheKey = q.toLowerCase()
+          const cached = resultCache.get(cacheKey)
+          if (cached) {
+            results = cached
+          } else {
+            const fresh = await api.searchTidal(q)
+            results = fresh
+            resultCache.set(cacheKey, fresh)
+            if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
+          }
         }
         error = null
         pushRecent(q)

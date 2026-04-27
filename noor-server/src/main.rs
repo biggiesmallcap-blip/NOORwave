@@ -28,6 +28,13 @@ pub struct PlaybackRuntimeInfo {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StreamDisplayInfo {
+    pub audio_quality: String,
+    pub sample_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
+}
+
 /// Shared application state accessible by all modules
 pub struct AppState {
     pub db: db::Database,
@@ -37,6 +44,8 @@ pub struct AppState {
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
+    pub current_stream_display: Option<StreamDisplayInfo>,
+    pub pending_stream_display: Option<StreamDisplayInfo>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
     pub ephemeral_tidal_track: Option<db::models::Track>,
@@ -195,6 +204,8 @@ async fn main() -> Result<()> {
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,
+        current_stream_display: None,
+        pending_stream_display: None,
         active_listen_session: None,
         external_playback_track: None,
         ephemeral_tidal_track: None,

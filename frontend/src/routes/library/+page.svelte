@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import {
 		tracks, albums, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
@@ -595,6 +596,49 @@
 			infiniteObserver = null;
 		};
 	});
+
+	// ─── Position memory ────────────────────────────────────────────────────
+	// Save the active tab + scroll position on navigation away. Restore when the
+	// user returns via browser-back (popstate) so they land where they were.
+	const POS_KEY = 'noor-library-scroll'
+
+	beforeNavigate(() => {
+		if (typeof sessionStorage === 'undefined') return
+		sessionStorage.setItem(
+			POS_KEY,
+			JSON.stringify({
+				activeTab,
+				expandedArtistId,
+				scrollY: window.scrollY
+			})
+		)
+	})
+
+	let pendingRestoreScroll: number | null = null
+
+	afterNavigate((nav) => {
+		if (typeof sessionStorage === 'undefined') return
+		if (nav.type !== 'popstate') return
+		const raw = sessionStorage.getItem(POS_KEY)
+		if (!raw) return
+		try {
+			const saved = JSON.parse(raw) as { activeTab: string; expandedArtistId: number | null; scrollY: number }
+			if (typeof saved.activeTab === 'string' && (saved.activeTab === 'tracks' || saved.activeTab === 'albums' || saved.activeTab === 'artists')) {
+				activeTab = saved.activeTab
+				expandedArtistId = saved.expandedArtistId
+				pendingRestoreScroll = saved.scrollY
+			}
+		} catch {
+			/* ignore corrupted state */
+		}
+	})
+
+	$effect.pre(() => {
+		if (pendingRestoreScroll !== null) {
+			window.scrollTo(0, pendingRestoreScroll)
+			pendingRestoreScroll = null
+		}
+	})
 </script>
 
 <svelte:window onclick={closeMenus} onkeydown={(e) => {

@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import { getApiBase, getStoredToken } from '$lib/api/client';
-import { refreshPlaybackState } from '$lib/stores/player';
+import { refreshPlaybackState, refreshPlaybackRuntime } from '$lib/stores/player';
 import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
 import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
@@ -64,6 +64,9 @@ export function connectWebSocket() {
 				data?.type === 'playback_failed'
 			) {
 				void refreshPlaybackState();
+			}
+			if (data?.type === 'track_changed' || data?.type === 'playback_changed') {
+				void refreshPlaybackRuntime();
 			}
 			if (data?.type === 'connected') {
 				void loadTidalStatus();

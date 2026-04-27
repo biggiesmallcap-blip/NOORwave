@@ -1815,23 +1815,64 @@ fn parse_discovery_services(raw: &str) -> Vec<String> {
         .unwrap_or_else(|| vec!["tidal".to_string()])
 }
 
-// ─── Search (FTS5) ────────────────────────────────────────
+// ─── Search (FTS5 + LIKE fallback) ────────────────────────────────────────
 
-pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<SearchResults> {
-    let normalized = query.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Ok(SearchResults {
-            tracks: Vec::new(),
-            albums: Vec::new(),
-            artists: Vec::new(),
-        });
-    }
+/// Strip FTS5 special chars and append `*` to each token for prefix matching.
+fn to_fts_query(input: &str) -> String {
+    let clean: String = input
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '\'' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    clean
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("{}*", t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
+fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<Vec<Track>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
+                t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                t.best_quality, t.best_source, t.fidelity_score,
+                t.is_favorite, t.play_count, t.last_played_at,
+                t.date_added, t.source, al.artwork_url
+         FROM tracks t
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         JOIN tracks_fts ON tracks_fts.rowid = t.id
+         WHERE tracks_fts MATCH ?1
+         UNION
+         SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
+                t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                t.best_quality, t.best_source, t.fidelity_score,
+                t.is_favorite, t.play_count, t.last_played_at,
+                t.date_added, t.source, al.artwork_url
+         FROM tracks t
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         JOIN artists_fts ON artists_fts.rowid = t.artist_id
+         WHERE artists_fts MATCH ?1
+         ORDER BY is_favorite DESC, play_count DESC, fidelity_score DESC, title ASC
+         LIMIT ?2",
+    )?;
+    stmt.query_map(params![fts_query, limit], track_from_row)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn search_tracks_like(conn: &Connection, normalized: &str, limit: i64) -> Result<Vec<Track>> {
     let contains_pattern = format!("%{normalized}%");
     let prefix_pattern = format!("{normalized}%");
-    let limit = limit.max(1);
-
-    // Search tracks across track title, artist name, and album title.
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
@@ -1861,15 +1902,43 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<SearchResult
             t.title ASC
          LIMIT ?4",
     )?;
+    stmt.query_map(
+        params![contains_pattern, normalized, prefix_pattern, limit],
+        track_from_row,
+    )?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
 
-    let tracks = stmt
-        .query_map(
-            params![contains_pattern, normalized, prefix_pattern, limit],
-            track_from_row,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+fn search_artists_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<Vec<Artist>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.tidal_id, a.ytmusic_id, a.soundcloud_id,
+                a.name, a.name_sort, a.biography, a.photo_url
+         FROM artists a
+         JOIN artists_fts ON artists_fts.rowid = a.id
+         WHERE artists_fts MATCH ?1
+         ORDER BY a.name ASC
+         LIMIT ?2",
+    )?;
+    stmt.query_map(params![fts_query, limit], |row| {
+        Ok(Artist {
+            id: row.get(0)?,
+            tidal_id: row.get(1)?,
+            ytmusic_id: row.get(2)?,
+            soundcloud_id: row.get(3)?,
+            name: row.get(4)?,
+            name_sort: row.get(5)?,
+            biography: row.get(6)?,
+            photo_url: row.get(7)?,
+        })
+    })?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
 
-    // Search artists.
+fn search_artists_like(conn: &Connection, normalized: &str, limit: i64) -> Result<Vec<Artist>> {
+    let contains_pattern = format!("%{normalized}%");
+    let prefix_pattern = format!("{normalized}%");
     let mut stmt = conn.prepare(
         "SELECT a.id, a.tidal_id, a.ytmusic_id, a.soundcloud_id,
                 a.name, a.name_sort, a.biography, a.photo_url
@@ -1884,26 +1953,61 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<SearchResult
             a.name ASC
          LIMIT ?4",
     )?;
+    stmt.query_map(
+        params![contains_pattern, normalized, prefix_pattern, limit],
+        |row| {
+            Ok(Artist {
+                id: row.get(0)?,
+                tidal_id: row.get(1)?,
+                ytmusic_id: row.get(2)?,
+                soundcloud_id: row.get(3)?,
+                name: row.get(4)?,
+                name_sort: row.get(5)?,
+                biography: row.get(6)?,
+                photo_url: row.get(7)?,
+            })
+        },
+    )?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
 
-    let artists = stmt
-        .query_map(
-            params![contains_pattern, normalized, prefix_pattern, limit],
-            |row| {
-                Ok(Artist {
-                    id: row.get(0)?,
-                    tidal_id: row.get(1)?,
-                    ytmusic_id: row.get(2)?,
-                    soundcloud_id: row.get(3)?,
-                    name: row.get(4)?,
-                    name_sort: row.get(5)?,
-                    biography: row.get(6)?,
-                    photo_url: row.get(7)?,
-                })
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+fn search_albums_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<Vec<Album>> {
+    let mut stmt = conn.prepare(
+        "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
+                a.name, al.year, al.artwork_url,
+                al.release_type, al.label, al.track_count, al.is_favorite, al.source
+         FROM albums al
+         LEFT JOIN artists a ON a.id = al.artist_id
+         JOIN albums_fts ON albums_fts.rowid = al.id
+         WHERE albums_fts MATCH ?1
+         ORDER BY al.title ASC
+         LIMIT ?2",
+    )?;
+    stmt.query_map(params![fts_query, limit], |row| {
+        Ok(Album {
+            id: row.get(0)?,
+            tidal_id: row.get(1)?,
+            ytmusic_id: row.get(2)?,
+            title: row.get(3)?,
+            artist_id: row.get(4)?,
+            artist_name: row.get(5)?,
+            year: row.get(6)?,
+            artwork_url: row.get(7)?,
+            release_type: row.get(8)?,
+            label: row.get(9)?,
+            track_count: row.get(10)?,
+            is_favorite: row.get::<_, i32>(11)? != 0,
+            source: row.get(12)?,
+        })
+    })?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
 
-    // Search albums across album title and artist name.
+fn search_albums_like(conn: &Connection, normalized: &str, limit: i64) -> Result<Vec<Album>> {
+    let contains_pattern = format!("%{normalized}%");
+    let prefix_pattern = format!("{normalized}%");
     let mut stmt = conn.prepare(
         "SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
                 a.name, al.year, al.artwork_url,
@@ -1925,34 +2029,55 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<SearchResult
             al.title ASC
          LIMIT ?4",
     )?;
+    stmt.query_map(
+        params![contains_pattern, normalized, prefix_pattern, limit],
+        |row| {
+            Ok(Album {
+                id: row.get(0)?,
+                tidal_id: row.get(1)?,
+                ytmusic_id: row.get(2)?,
+                title: row.get(3)?,
+                artist_id: row.get(4)?,
+                artist_name: row.get(5)?,
+                year: row.get(6)?,
+                artwork_url: row.get(7)?,
+                release_type: row.get(8)?,
+                label: row.get(9)?,
+                track_count: row.get(10)?,
+                is_favorite: row.get::<_, i32>(11)? != 0,
+                source: row.get(12)?,
+            })
+        },
+    )?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
 
-    let albums = stmt
-        .query_map(
-            params![contains_pattern, normalized, prefix_pattern, limit],
-            |row| {
-                Ok(Album {
-                    id: row.get(0)?,
-                    tidal_id: row.get(1)?,
-                    ytmusic_id: row.get(2)?,
-                    title: row.get(3)?,
-                    artist_id: row.get(4)?,
-                    artist_name: row.get(5)?,
-                    year: row.get(6)?,
-                    artwork_url: row.get(7)?,
-                    release_type: row.get(8)?,
-                    label: row.get(9)?,
-                    track_count: row.get(10)?,
-                    is_favorite: row.get::<_, i32>(11)? != 0,
-                    source: row.get(12)?,
-                })
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<SearchResults> {
+    let normalized = query.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(SearchResults {
+            tracks: Vec::new(),
+            albums: Vec::new(),
+            artists: Vec::new(),
+        });
+    }
+
+    let limit = limit.max(1);
+    let fts_query = to_fts_query(&normalized);
+
+    // Try FTS first; fall back to LIKE on any error.
+    let tracks = search_tracks_fts(conn, &fts_query, limit)
+        .unwrap_or_else(|_| search_tracks_like(conn, &normalized, limit).unwrap_or_default());
+    let artists = search_artists_fts(conn, &fts_query, limit)
+        .unwrap_or_else(|_| search_artists_like(conn, &normalized, limit).unwrap_or_default());
+    let albums = search_albums_fts(conn, &fts_query, limit)
+        .unwrap_or_else(|_| search_albums_like(conn, &normalized, limit).unwrap_or_default());
 
     Ok(SearchResults {
         tracks,
-        albums,
         artists,
+        albums,
     })
 }
 

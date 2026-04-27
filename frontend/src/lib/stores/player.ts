@@ -5,6 +5,7 @@ import {
 	type PlaybackSnapshot,
 	type PlaybackState,
 	type QueueItem,
+	type StreamDisplayInfo,
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
@@ -19,6 +20,16 @@ function trackLabel(track: { title?: string | null; artist_name?: string | null 
 
 export const currentTrack = writable<Track | null>(null);
 export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
+export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
+
+export async function refreshPlaybackRuntime() {
+	try {
+		const result = await api.getPlaybackRuntime();
+		currentStreamDisplay.set(result.stream ?? null);
+	} catch {
+		// non-critical — playback still works without live stream info
+	}
+}
 
 // ─── Current-track DSP features fetcher ───────────────────────────────────────
 // Listens for track-id changes on currentTrack and fetches audio features in
