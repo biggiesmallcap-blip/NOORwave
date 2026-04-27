@@ -2,6 +2,11 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct SidecarState {
     pub child: Mutex<Option<Child>>,
@@ -60,6 +65,9 @@ pub fn spawn_server(state: &Arc<SidecarState>) {
     } else {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 
     match cmd.spawn() {
         Ok(child) => {
