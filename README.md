@@ -114,3 +114,27 @@ Recent searches auto-save as clickable chips.
 - Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress and cancel button
 
 ---
+
+### Smart Features
+
+- Rule-based smart playlists with AND/OR logic: genre, artist, date range, quality tier, play count, BPM, key, Camelot, energy, danceability, instrumental-only, sample-data presence
+- DSP audio analysis runs passively during playback: BPM, key, Camelot, LUFS, energy, danceability, beat strength, spectral centroid, stereo width
+- Duplicate detection via ISRC matching with title/duration fallback
+- MusicBrainz enrichment (ISRC-first + title fallback, rate-limited)
+- Last.fm genre pipeline: closed taxonomy + hierarchy-aware merge
+- ACRCloud fingerprint sample recognition *(placeholder — not fully functional)*
+- Analytics: listen history, top tracks/artists, genre heatmap, activity graph, completion rate, skip patterns
+
+---
+
+### UI & Access
+
+- Five GLSL shader wallpapers: Aurora, Chrome, Grid, Nebula, Topo — sidebar and now-playing panel float as glass tiles over them
+- 6-digit PIN auth: auto-submits on the sixth digit, numeric keyboard on mobile; local browser auto-connects
+- LAN access: run on one machine, open from any browser on the network
+- WebSocket-driven: playback state, sync progress, queue, training progress push instantly without polling
+- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat
+- **Tauri desktop app**: system tray menu (network toggle, restart, exit), global media key shortcuts, native window management
+- Audio device enumeration and switching; sample rate follows source on track transition
+
+---
