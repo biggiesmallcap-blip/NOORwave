@@ -3548,3 +3548,188 @@ pub fn load_external_seed_from_track(
         normalized_genres: genres,
     }))
 }
+
+// ─── Audio Feature Search ─────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct AudioFilters {
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub energy_min: Option<f64>,
+    pub energy_max: Option<f64>,
+    pub danceability_min: Option<f64>,
+    pub danceability_max: Option<f64>,
+    pub key_signature: Option<String>,   // exact match
+    pub camelot_key: Option<String>,     // exact match
+    pub year_min: Option<i64>,
+    pub year_max: Option<i64>,
+    pub genre_ids: Vec<i64>,             // track must belong to at least one
+    pub track_type: Option<String>,      // placeholder, always "track"
+    pub is_instrumental: Option<bool>,   // true → vocal:false filter
+}
+
+#[derive(Debug, Serialize)]
+pub struct AudioSearchResult {
+    pub id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub bpm: Option<f64>,
+    pub energy: Option<f64>,
+    pub danceability: Option<f64>,
+    pub key_signature: Option<String>,
+    pub camelot_key: Option<String>,
+    pub play_count: i64,
+    pub is_favorite: bool,
+    pub tidal_id: Option<i64>,
+    pub source: String,
+}
+
+pub fn search_with_audio_filters(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    limit: usize,
+) -> Result<Vec<AudioSearchResult>> {
+    let normalized = free_text.trim().to_ascii_lowercase();
+
+    // Base SELECT — always JOIN audio_dsp_features so filter columns are available
+    let mut sql = String::from(
+        "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, \
+         d.bpm, d.energy, d.danceability, d.key_signature, d.camelot_key, \
+         t.play_count, t.is_favorite, t.tidal_id, t.source \
+         FROM tracks t \
+         LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
+         LEFT JOIN artists a ON a.id = t.artist_id \
+         LEFT JOIN albums al ON al.id = t.album_id \
+         WHERE 1=1",
+    );
+
+    // Dynamic params: start with positional index 1
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut param_idx: usize = 1;
+
+    // Free-text filter
+    if !normalized.is_empty() {
+        let pattern = format!("%{normalized}%");
+        sql.push_str(&format!(
+            " AND (LOWER(t.title) LIKE ?{0} \
+               OR LOWER(COALESCE(a.name, '')) LIKE ?{0} \
+               OR LOWER(COALESCE(al.title, '')) LIKE ?{0})",
+            param_idx
+        ));
+        params.push(Box::new(pattern));
+        param_idx += 1;
+    }
+
+    // BPM range
+    if let Some(v) = filters.bpm_min {
+        sql.push_str(&format!(" AND d.bpm >= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = filters.bpm_max {
+        sql.push_str(&format!(" AND d.bpm <= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+
+    // Energy range
+    if let Some(v) = filters.energy_min {
+        sql.push_str(&format!(" AND d.energy >= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = filters.energy_max {
+        sql.push_str(&format!(" AND d.energy <= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+
+    // Danceability range
+    if let Some(v) = filters.danceability_min {
+        sql.push_str(&format!(" AND d.danceability >= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = filters.danceability_max {
+        sql.push_str(&format!(" AND d.danceability <= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+
+    // Key signature (exact)
+    if let Some(ref v) = filters.key_signature {
+        sql.push_str(&format!(" AND d.key_signature = ?{param_idx}"));
+        params.push(Box::new(v.clone()));
+        param_idx += 1;
+    }
+
+    // Camelot key (exact)
+    if let Some(ref v) = filters.camelot_key {
+        sql.push_str(&format!(" AND d.camelot_key = ?{param_idx}"));
+        params.push(Box::new(v.clone()));
+        param_idx += 1;
+    }
+
+    // Year range (via album)
+    if let Some(v) = filters.year_min {
+        sql.push_str(&format!(" AND al.year >= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = filters.year_max {
+        sql.push_str(&format!(" AND al.year <= ?{param_idx}"));
+        params.push(Box::new(v));
+        param_idx += 1;
+    }
+
+    // Genre filter — inline i64 IDs (safe, not user strings)
+    if !filters.genre_ids.is_empty() {
+        let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
+        sql.push_str(&format!(
+            " AND t.id IN (SELECT track_id FROM track_genres WHERE genre_id IN ({}))",
+            id_list.join(", ")
+        ));
+    }
+
+    // Instrumental filter
+    if let Some(instrumental) = filters.is_instrumental {
+        sql.push_str(&format!(" AND d.is_instrumental = ?{param_idx}"));
+        params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
+        param_idx += 1;
+    }
+
+    // Ordering and limit
+    sql.push_str(&format!(
+        " ORDER BY t.play_count DESC, t.last_played_at DESC LIMIT ?{param_idx}"
+    ));
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let results = stmt
+        .query_map(params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            Ok(AudioSearchResult {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist_name: row.get(2)?,
+                album_title: row.get(3)?,
+                artwork_url: row.get(4)?,
+                duration_ms: row.get(5)?,
+                bpm: row.get(6)?,
+                energy: row.get(7)?,
+                danceability: row.get(8)?,
+                key_signature: row.get(9)?,
+                camelot_key: row.get(10)?,
+                play_count: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
+                is_favorite: row.get::<_, i64>(12)? != 0,
+                tidal_id: row.get(13)?,
+                source: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}

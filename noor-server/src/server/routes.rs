@@ -339,6 +339,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/queue/remove", post(remove_queue_track))
         // Search
         .route("/api/search", get(search))
+        .route("/api/search/audio", post(search_audio))
         // TIDAL
         .route("/api/tidal/login", post(tidal_login))
         .route("/api/tidal/login/poll", post(tidal_poll))
@@ -4020,6 +4021,57 @@ async fn search(
         .with_conn(|conn| {
             let results = queries::search(conn, &params.q, limit)?;
             Ok(Json(json!(results)))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioSearchRequest {
+    free_text: Option<String>,
+    bpm_min: Option<f64>,
+    bpm_max: Option<f64>,
+    energy_min: Option<f64>,
+    energy_max: Option<f64>,
+    danceability_min: Option<f64>,
+    danceability_max: Option<f64>,
+    key_signature: Option<String>,
+    camelot_key: Option<String>,
+    year_min: Option<i64>,
+    year_max: Option<i64>,
+    genre_ids: Option<Vec<i64>>,
+    track_type: Option<String>,
+    is_instrumental: Option<bool>,
+    limit: Option<usize>,
+}
+
+async fn search_audio(
+    State(state): State<SharedState>,
+    Json(body): Json<AudioSearchRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let filters = queries::AudioFilters {
+        bpm_min: body.bpm_min,
+        bpm_max: body.bpm_max,
+        energy_min: body.energy_min,
+        energy_max: body.energy_max,
+        danceability_min: body.danceability_min,
+        danceability_max: body.danceability_max,
+        key_signature: body.key_signature,
+        camelot_key: body.camelot_key,
+        year_min: body.year_min,
+        year_max: body.year_max,
+        genre_ids: body.genre_ids.unwrap_or_default(),
+        track_type: body.track_type,
+        is_instrumental: body.is_instrumental,
+    };
+    let free_text = body.free_text.unwrap_or_default();
+    let limit = body.limit.unwrap_or(50);
+
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let tracks = queries::search_with_audio_filters(conn, &free_text, &filters, limit)?;
+            Ok(Json(json!({ "tracks": tracks })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
