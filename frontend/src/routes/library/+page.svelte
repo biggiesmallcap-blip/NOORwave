@@ -11,7 +11,7 @@
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
 	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
-	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue } from '$lib/stores/player';
+	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 
@@ -42,6 +42,9 @@
 	let expandedArtistId = $state<number | null>(null);
 	let artistTracksById = $state<Record<number, Track[]>>({});
 	let artistTracksLoadingId = $state<number | null>(null);
+
+	// Keyboard cursor for track list
+	let cursorIndex = $state(-1);
 
 	// Track detail panel
 	let expandedTrackId = $state<number | null>(null);
@@ -346,6 +349,35 @@
 		runOnActivation(event, () => updateTrackSelection(trackId));
 	}
 
+	function handleTrackListKeydown(event: KeyboardEvent) {
+		if (activeTab !== 'tracks') return;
+		if (event.key === 'ArrowDown') {
+			event.preventDefault();
+			if (visibleTracks.length === 0) return;
+			cursorIndex = cursorIndex < 0 ? 0 : Math.min(cursorIndex + 1, visibleTracks.length - 1);
+			return;
+		}
+		if (event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (visibleTracks.length === 0) return;
+			cursorIndex = cursorIndex <= 0 ? -1 : cursorIndex - 1;
+			return;
+		}
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			const track = cursorIndex >= 0 ? visibleTracks[cursorIndex] : null;
+			if (!track) return;
+			if (event.shiftKey) {
+				void addTrackToQueue(track.id);
+			} else if (event.metaKey || event.ctrlKey) {
+				void playTrackNext(track.id);
+			} else {
+				void playTrackNow(track.id);
+			}
+			return;
+		}
+	}
+
 	function handleAlbumCardKeydown(albumId: number, event: KeyboardEvent) {
 		runOnActivation(event, () => updateAlbumSelection(albumId));
 	}
@@ -639,6 +671,20 @@
 			pendingRestoreScroll = null
 			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
 		}
+	})
+
+	// Reset cursor when switching tabs or changing the search query.
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		activeTab; $searchQuery;
+		cursorIndex = -1;
+	})
+
+	// Keep the highlighted track in view as the cursor moves.
+	$effect(() => {
+		if (cursorIndex < 0) return;
+		const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursorIndex}"]`);
+		el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 	})
 </script>
 
@@ -1003,7 +1049,8 @@
 
 	{:else if activeTab === 'tracks'}
 		<!-- Track List -->
-		<div class="track-list">
+		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+		<div class="track-list" role="list" onkeydown={handleTrackListKeydown}>
 			<div class="track-header">
 				<span class="col-num">#</span>
 				<button
@@ -1106,9 +1153,11 @@
 					class="track-row"
 					class:selected={$selectedTrackIds.has(track.id)}
 					class:playing={$currentTrack?.id === track.id}
+					class:cursor={cursorIndex === i}
 					role="button"
 					tabindex="0"
 					aria-pressed={$selectedTrackIds.has(track.id)}
+					data-cursor-idx={i}
 					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
@@ -2660,6 +2709,11 @@
 
 	.track-row.selected {
 		background: var(--accent-soft);
+	}
+
+	.track-row.cursor {
+		outline: 2px solid rgba(155, 111, 255, 0.7);
+		outline-offset: -2px;
 	}
 
 	.col-actions {
