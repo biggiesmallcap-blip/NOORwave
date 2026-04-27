@@ -214,6 +214,11 @@ pub struct ResolveGroupRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct AddTracksToPlaylistRequest {
+    track_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateSmartPlaylistRequest {
     name: String,
     description: Option<String>,
@@ -248,7 +253,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/genres/evolution", get(get_genre_evolution))
         .route("/api/genres/{id}/tracks", get(get_genre_tracks))
         .route("/api/playlists", get(get_playlists))
-        .route("/api/playlists/{id}/tracks", get(get_playlist_tracks))
+        .route("/api/playlists/{id}/tracks", get(get_playlist_tracks).post(add_tracks_to_playlist_route))
         .route("/api/playlists/{id}/favorite", patch(toggle_playlist_favorite_route))
         .route("/api/smart/playlists", post(create_smart_playlist_route))
         .route(
@@ -960,6 +965,26 @@ async fn toggle_playlist_favorite_route(
         .with_conn(|conn| {
             let playlist = queries::toggle_playlist_favorite(conn, id)?;
             Ok(Json(json!({ "playlist": playlist })))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })
+}
+
+async fn add_tracks_to_playlist_route(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<AddTracksToPlaylistRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let added = queries::add_tracks_to_playlist(conn, id, &payload.track_ids)?;
+            Ok(Json(json!({ "added": added })))
         })
         .map_err(|e| {
             (

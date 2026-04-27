@@ -311,6 +311,7 @@ mod tests {
                 smart_rules: None,
                 is_synced: true,
                 track_count: 3,
+                is_favorite: false,
             },
             Playlist {
                 id: 2,
@@ -321,6 +322,7 @@ mod tests {
                 smart_rules: None,
                 is_synced: true,
                 track_count: 2,
+                is_favorite: false,
             },
         ];
         let context = AnalyticsContext::new()
