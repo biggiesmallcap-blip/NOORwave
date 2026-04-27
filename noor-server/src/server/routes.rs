@@ -1982,6 +1982,8 @@ async fn get_discovery_space(
         last_played_at: Option<String>,
         play_count: i64,
         is_in_library: bool,
+        radio_source: Option<String>,  // "library" | "lastfm" | "engine"
+        radio_reason: Option<String>,
     }
 
     // ── 1. Decide track set based on inputs ──────────────────────────────────
@@ -2037,6 +2039,8 @@ async fn get_discovery_space(
                 last_played_at: None,
                 play_count: 0,
                 is_in_library: true,
+                radio_source: None,
+                radio_reason: None,
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
@@ -2090,6 +2094,12 @@ async fn get_discovery_space(
                     last_played_at: None,
                     play_count: 0,
                     is_in_library: c.is_in_library,
+                    radio_source: Some(match c.source {
+                        crate::services::radio::RadioSource::Library => "library".to_string(),
+                        crate::services::radio::RadioSource::Lastfm => "lastfm".to_string(),
+                        crate::services::radio::RadioSource::Engine => "engine".to_string(),
+                    }),
+                    radio_reason: Some(c.reason),
                 })
                 .collect()
         } else {
@@ -2154,6 +2164,8 @@ async fn get_discovery_space(
                     last_played_at: None,
                     play_count: 0,
                     is_in_library: true,
+                    radio_source: None,
+                    radio_reason: None,
                 });
             }
         }
@@ -2216,6 +2228,8 @@ async fn get_discovery_space(
                     last_played_at: None,
                     play_count: 0,
                     is_in_library: true,
+                    radio_source: None,
+                    radio_reason: None,
                 });
             }
         }
@@ -2610,6 +2624,8 @@ async fn get_discovery_space(
                 "play_count": t.play_count,
                 "is_in_library": t.is_in_library,
                 "source": t.source,
+                "radio_source": t.radio_source,
+                "radio_reason": t.radio_reason,
                 "x": x,
                 "y": y,
                 "vx": 0.0,
