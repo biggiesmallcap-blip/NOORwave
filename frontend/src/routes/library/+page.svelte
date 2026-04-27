@@ -1109,7 +1109,11 @@
 					{/if}
 					{#if showDateColumn}
 						<span class="col-date">
-							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+							{#if $sortBy === 'last_played_at'}
+								<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '—'}</span>
+							{:else}
+								<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+							{/if}
 						</span>
 					{/if}
 					{#if showBpmColumn}
