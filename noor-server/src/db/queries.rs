@@ -3611,6 +3611,114 @@ pub struct AudioSearchResult {
     pub source: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct VibeTrack {
+    pub id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub bpm: Option<f64>,
+    pub camelot_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BasicTrack {
+    pub id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+pub fn get_same_vibe_tracks(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<VibeTrack>> {
+    let src = conn.query_row(
+        "SELECT d.bpm, d.camelot_key FROM audio_dsp_features d WHERE d.track_id = ?1",
+        params![track_id],
+        |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<String>>(1)?)),
+    );
+    let (bpm, camelot_key) = match src {
+        Ok(v) => v,
+        Err(_) => return Ok(vec![]),
+    };
+    let (Some(bpm), Some(camelot_key)) = (bpm, camelot_key) else {
+        return Ok(vec![]);
+    };
+
+    let camelot_num: i64 = camelot_key
+        .trim_end_matches(|c: char| c.is_alphabetic())
+        .parse()
+        .unwrap_or(0);
+    let camelot_letter = camelot_key.chars().last().unwrap_or('A');
+
+    let adjacent_nums: Vec<i64> = vec![
+        if camelot_num == 1 { 12 } else { camelot_num - 1 },
+        camelot_num,
+        if camelot_num == 12 { 1 } else { camelot_num + 1 },
+    ];
+    let camelot_patterns: Vec<String> = adjacent_nums
+        .iter()
+        .map(|n| format!("{}{}%", n, camelot_letter))
+        .collect();
+    let camelot_clause = camelot_patterns
+        .iter()
+        .map(|p| format!("d.camelot_key LIKE '{}'", p.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let sql = format!(
+        "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, d.bpm, d.camelot_key
+         FROM tracks t
+         LEFT JOIN artists a ON a.id = t.artist_id
+         LEFT JOIN albums al ON al.id = t.album_id
+         JOIN audio_dsp_features d ON d.track_id = t.id
+         WHERE t.id != ?1
+           AND d.bpm BETWEEN ?2 AND ?3
+           AND ({camelot_clause})
+         ORDER BY t.play_count DESC
+         LIMIT ?4"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![track_id, bpm - 10.0, bpm + 10.0, limit], |row| {
+        Ok(VibeTrack {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            artist_name: row.get(2)?,
+            album_title: row.get(3)?,
+            artwork_url: row.get(4)?,
+            duration_ms: row.get(5)?,
+            bpm: row.get(6)?,
+            camelot_key: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn get_underrated_tracks(conn: &Connection, artist_id: i64, limit: i64) -> Result<Vec<BasicTrack>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms
+         FROM tracks t
+         LEFT JOIN artists a ON a.id = t.artist_id
+         LEFT JOIN albums al ON al.id = t.album_id
+         WHERE t.artist_id = ?1 AND t.play_count = 0
+         ORDER BY RANDOM()
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![artist_id, limit], |row| {
+        Ok(BasicTrack {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            artist_name: row.get(2)?,
+            album_title: row.get(3)?,
+            artwork_url: row.get(4)?,
+            duration_ms: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn search_with_audio_filters(
     conn: &Connection,
     free_text: &str,

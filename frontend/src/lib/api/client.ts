@@ -261,6 +261,12 @@ export interface PlaybackRuntimeInfo {
 	last_error: string | null;
 }
 
+export interface StreamDisplayInfo {
+	audio_quality: string;
+	sample_rate: number | null;
+	bit_depth: number | null;
+}
+
 export interface MusicBrainzStatus {
 	total_tracks: number;
 	checked_tracks: number;
@@ -393,6 +399,26 @@ export interface AnalyticsDashboard {
 	top_genres: AnalyticsGenreShare[];
 	activity: AnalyticsActivityPoint[];
 	behavior: AnalyticsBehavior;
+}
+
+export interface VibeTrack {
+	id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
+	bpm: number | null;
+	camelot_key: string | null;
+}
+
+export interface BasicTrack {
+	id: number;
+	title: string;
+	artist_name: string | null;
+	album_title: string | null;
+	artwork_url: string | null;
+	duration_ms: number | null;
 }
 
 export interface DiscoveryPreset {
@@ -1054,7 +1080,7 @@ export const api = {
 	},
 
 	getPlaybackRuntime() {
-		return fetchApi<{ available: boolean; runtime: PlaybackRuntimeInfo | null }>(
+		return fetchApi<{ available: boolean; runtime: PlaybackRuntimeInfo | null; stream: StreamDisplayInfo | null }>(
 			'/api/playback/runtime'
 		);
 	},
@@ -1358,5 +1384,13 @@ export const api = {
 
 	getDiscoverySpaceMeta() {
 		return fetchApi<DiscoverySpaceMeta>('/api/discovery/space/meta');
+	},
+
+	getVibeTracksForTrack(trackId: number) {
+		return fetchApi<{ tracks: VibeTrack[] }>(`/api/search/vibe?track_id=${trackId}`);
+	},
+
+	getUnderratedTracksForArtist(artistId: number) {
+		return fetchApi<{ tracks: BasicTrack[] }>(`/api/search/underrated?artist_id=${artistId}`);
 	},
 };

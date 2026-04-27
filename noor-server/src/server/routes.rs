@@ -346,6 +346,8 @@ pub fn api_routes(state: SharedState) -> Router {
         // Search
         .route("/api/search", get(search))
         .route("/api/search/audio", post(search_audio))
+        .route("/api/search/vibe", get(search_vibe))
+        .route("/api/search/underrated", get(search_underrated))
         // TIDAL
         .route("/api/tidal/login", post(tidal_login))
         .route("/api/tidal/login/poll", post(tidal_poll))
@@ -1330,6 +1332,15 @@ async fn play_discovery_track(
             })),
         )
     })?;
+    {
+        let mut state_guard = state.write().await;
+        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: stream_info.audio_quality.clone(),
+            sample_rate: stream_info.sample_rate,
+            bit_depth: stream_info.bit_depth,
+        });
+        state_guard.pending_stream_display = None;
+    }
 
     let snapshot = {
         let state_guard = state.read().await;
@@ -4088,6 +4099,48 @@ async fn search_audio(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+#[derive(Deserialize)]
+struct VibeParams {
+    track_id: i64,
+    limit: Option<usize>,
+}
+
+async fn search_vibe(
+    State(state): State<SharedState>,
+    Query(params): Query<VibeParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit = params.limit.unwrap_or(6);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let results = queries::get_same_vibe_tracks(conn, params.track_id, limit as i64)?;
+            Ok(Json(json!({ "tracks": results })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Deserialize)]
+struct UnderratedParams {
+    artist_id: i64,
+    limit: Option<usize>,
+}
+
+async fn search_underrated(
+    State(state): State<SharedState>,
+    Query(params): Query<UnderratedParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit = params.limit.unwrap_or(5);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let results = queries::get_underrated_tracks(conn, params.artist_id, limit as i64)?;
+            Ok(Json(json!({ "tracks": results })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let live_position_ms = {
         let state_guard = state.read().await;
@@ -4125,10 +4178,18 @@ async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<V
             "last_error": info.last_error,
         })
     });
+    let stream = state.current_stream_display.as_ref().map(|d| {
+        json!({
+            "audio_quality": d.audio_quality,
+            "sample_rate": d.sample_rate,
+            "bit_depth": d.bit_depth,
+        })
+    });
 
     Ok(Json(json!({
         "available": runtime.is_some(),
         "runtime": runtime,
+        "stream": stream,
     })))
 }
 
@@ -4237,6 +4298,15 @@ async fn play_track(
             })),
         )
     })?;
+    {
+        let mut state_guard = state.write().await;
+        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: stream_info.audio_quality.clone(),
+            sample_rate: stream_info.sample_rate,
+            bit_depth: stream_info.bit_depth,
+        });
+        state_guard.pending_stream_display = None;
+    }
 
     let snapshot = {
         let state_guard = state.read().await;
@@ -4673,6 +4743,15 @@ async fn next_track(
                 })),
             )
         })?;
+        {
+            let mut state_guard = state.write().await;
+            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: stream_info.audio_quality.clone(),
+                sample_rate: stream_info.sample_rate,
+                bit_depth: stream_info.bit_depth,
+            });
+            state_guard.pending_stream_display = None;
+        }
     } else if let Some(runtime_handle) = current_playback_runtime(&state).await {
         let _ = runtime_handle.stop();
     }
@@ -4774,6 +4853,15 @@ async fn previous_track(
                 })),
             )
         })?;
+        {
+            let mut state_guard = state.write().await;
+            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: stream_info.audio_quality.clone(),
+                sample_rate: stream_info.sample_rate,
+                bit_depth: stream_info.bit_depth,
+            });
+            state_guard.pending_stream_display = None;
+        }
     }
 
     let state_guard = state.read().await;
@@ -5476,17 +5564,23 @@ async fn play_tidal_ephemeral(
     {
         let mut state_guard = state.write().await;
         state_guard.ephemeral_tidal_track = Some(synthetic);
+        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: stream_info.audio_quality.clone(),
+            sample_rate: stream_info.sample_rate,
+            bit_depth: stream_info.bit_depth,
+        });
+        state_guard.pending_stream_display = None;
     }
-    {
+    let snapshot = {
         let state_guard = state.read().await;
-        state_guard
+        let snapshot = state_guard
             .db
             .with_conn(|conn| {
                 conn.execute(
                     "UPDATE playback_state SET current_track_id = NULL, position_ms = 0, is_playing = 1 WHERE id = 1",
                     [],
                 )?;
-                Ok(())
+                player::load_snapshot(conn)
             })
             .map_err(|e| {
                 (
@@ -5495,7 +5589,9 @@ async fn play_tidal_ephemeral(
                 )
             })?;
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    }
+        snapshot
+    };
+    sync_session_after_snapshot(&state, &snapshot, Some(player::ListenSessionEndReason::Replaced)).await;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -6418,6 +6514,9 @@ fn spawn_playback_runtime_listener(
                         info.active_track_id = Some(track_id);
                         info.last_error = None;
                     }
+                    if let Some(pending) = state_guard.pending_stream_display.take() {
+                        state_guard.current_stream_display = Some(pending);
+                    }
                     drop(state_guard);
                     let state_guard = state.read().await;
                     let _ = state_guard
@@ -6434,6 +6533,8 @@ fn spawn_playback_runtime_listener(
                         info.active_track_id = None;
                     }
                     state_guard.external_playback_track = None;
+                    state_guard.current_stream_display = None;
+                    state_guard.pending_stream_display = None;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::NearEnd { track_id }) => {
                     // Pre-decode the next track so the transition is gapless.
@@ -6560,6 +6661,14 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
     let _ = access_token; // already embedded in the config held by the runtime
 
     let _ = handle.prepare_next(job);
+    if let Some(ref si) = stream_info {
+        let mut state_guard = state.write().await;
+        state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: si.audio_quality.clone(),
+            sample_rate: si.sample_rate,
+            bit_depth: si.bit_depth,
+        });
+    }
     info!("Pre-buffering next track: {} (id {})", next.title, next.id);
     Ok(())
 }
@@ -6658,6 +6767,15 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             user_quality,
         );
         runtime_handle.switch_to(job)?;
+        {
+            let mut state_guard = state.write().await;
+            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: stream_info.audio_quality.clone(),
+                sample_rate: stream_info.sample_rate,
+                bit_depth: stream_info.bit_depth,
+            });
+            state_guard.pending_stream_display = None;
+        }
     }
 
     let state_guard = state.read().await;
@@ -8117,6 +8235,8 @@ mod tests {
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
+            current_stream_display: None,
+            pending_stream_display: None,
             active_listen_session: None,
             external_playback_track: None,
             ephemeral_tidal_track: None,

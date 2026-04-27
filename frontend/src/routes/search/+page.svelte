@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow } from '$lib/stores/player'
@@ -44,6 +44,13 @@
   let recent = $state<string[]>(loadRecent())
   let genreList = $state<Genre[]>([])
 
+  // C3 — session-aware ranking
+  let recentArtistNames = $state<Set<string>>(new Set())
+
+  // C4 — discovery injectables
+  let vibeTrack = $state<VibeTrack[] | null>(null)
+  let underratedTracks = $state<BasicTrack[] | null>(null)
+
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library'
   let filterMode = $state<FilterMode>('all')
 
@@ -54,6 +61,13 @@
     try {
       const res = await api.getGenres()
       genreList = res.genres
+    } catch { /* ignore */ }
+    try {
+      const listens = await api.getRecentListens(20)
+      const names = listens.listens
+        .map(e => e.artist_name)
+        .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      recentArtistNames = new Set(names)
     } catch { /* ignore */ }
   })
 
@@ -201,7 +215,16 @@
   )
   const sortedTracks = $derived(
     applyFilter(
-      results ? [...results.tracks].sort((a, b) => Number(b.in_library) - Number(a.in_library)) : [],
+      results
+        ? [...results.tracks].sort((a, b) => {
+            const libDiff = Number(b.in_library) - Number(a.in_library)
+            if (libDiff !== 0) return libDiff
+            // C3: within the in_library group, boost tracks from recently played artists
+            const aRecent = a.in_library && a.artist_name != null && recentArtistNames.has(a.artist_name) ? 1 : 0
+            const bRecent = b.in_library && b.artist_name != null && recentArtistNames.has(b.artist_name) ? 1 : 0
+            return bRecent - aRecent
+          })
+        : [],
       filterMode === 'all' || filterMode === 'tracks' || filterMode === 'library'
     )
   )
@@ -431,6 +454,23 @@
       pendingRestoreScroll = null
       // Wait one frame for paint.
       requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
+    }
+  })
+
+  // C4 — load discovery sections whenever the top result changes
+  $effect(() => {
+    const top = topResult
+    vibeTrack = null
+    underratedTracks = null
+    if (!top) return
+    // "Same vibe" — only when top result is a library track with a local id
+    if (top.kind === 'track' && top.entry.in_library && (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id != null) {
+      const id = (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id!
+      void api.getVibeTracksForTrack(id).then(r => { vibeTrack = r.tracks }).catch(() => {})
+    }
+    // "Unplayed in your library" — only when top result is a library artist with a local id
+    if (top.kind === 'artist' && top.entry.in_library && top.entry.local_id != null) {
+      void api.getUnderratedTracksForArtist(top.entry.local_id).then(r => { underratedTracks = r.tracks }).catch(() => {})
     }
   })
 
@@ -743,6 +783,68 @@
                   aria-label="More options"
                 >⋯</button>
               </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    {#if vibeTrack && vibeTrack.length > 0}
+      <section class="results-section discovery-section">
+        <h3 class="section-label">Same vibe</h3>
+        <ul class="tracks-list">
+          {#each vibeTrack as track (track.id)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <li
+              class="track-row"
+              role="button"
+              tabindex="0"
+              onclick={() => void playTrackNow(track.id)}
+              onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+            >
+              {#if track.artwork_url}
+                <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
+              {:else}
+                <div class="track-art fallback" style="background:{letterColor(track.title)}"><span>♫</span></div>
+              {/if}
+              <div class="track-meta">
+                <p class="track-title">{track.title}</p>
+                <p class="track-subtitle">{track.artist_name ?? ''}{track.bpm ? ` · ${Math.round(track.bpm)} bpm` : ''}{track.camelot_key ? ` · ${track.camelot_key}` : ''}</p>
+              </div>
+              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    {#if underratedTracks && underratedTracks.length > 0}
+      <section class="results-section discovery-section">
+        <h3 class="section-label">Unplayed in your library</h3>
+        <ul class="tracks-list">
+          {#each underratedTracks as track (track.id)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <li
+              class="track-row"
+              role="button"
+              tabindex="0"
+              onclick={() => void playTrackNow(track.id)}
+              onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+            >
+              {#if track.artwork_url}
+                <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
+              {:else}
+                <div class="track-art fallback" style="background:{letterColor(track.title)}"><span>♫</span></div>
+              {/if}
+              <div class="track-meta">
+                <p class="track-title">{track.title}</p>
+                <p class="track-subtitle">{track.artist_name ?? ''}{track.album_title ? ` · ${track.album_title}` : ''}</p>
+              </div>
+              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
             </li>
           {/each}
         </ul>
@@ -1233,4 +1335,6 @@
   }
   .track-row:hover .row-btn { opacity: 1; }
   .row-btn:hover { color: var(--text-primary); }
+  .discovery-section { opacity: 0.9; }
+  .discovery-section .section-label { color: var(--text-muted); }
 </style>
