@@ -206,3 +206,66 @@ Open `http://localhost:5173`.
 | `TIDAL_CLIENT_SECRET` | *(built-in)* | Override TIDAL OAuth2 client secret |
 
 ---
+
+## Known Bugs
+
+### In Progress
+
+| Bug | Status |
+|---|---|
+| Gapless audio blend — pre-buffer engine swap works; audio-level crossfade mixing pending | In progress |
+| Discover / Sound Space — functional but incomplete; UI and model quality still evolving | In progress |
+| Song Radio — working but needs tuning; recommendation quality varies | In progress |
+| Genre Galaxy — live but several interaction and rendering issues under active work | In progress |
+
+### Reported / Queued
+
+| Bug | Notes |
+|---|---|
+| Duplicate detection UI missing | Backend detection logic complete; UI not yet wired |
+| WASAPI exclusive mode | Code path scaffolded; low-latency buffer pending cpal upgrade |
+| ACRCloud sample recognition | Mostly placeholder; not reliably functional |
+| Playlist save failing under certain conditions | Edge case — reproducing intermittently |
+| Shuffle genre-spread not always respected | Algorithm issue under investigation |
+| Context menus disappear on scroll | Known UI bug |
+| Library sync stalls on very large libraries | Likely a pagination or timeout issue |
+
+---
+
+## Roadmap
+
+<details>
+<summary>What's already shipped ✓</summary>
+
+- [x] Discovery engine with embedding-based learning
+- [x] Similar Radio with creativity and context controls
+- [x] Home page with RSS-driven new releases, daily picks, articles, and news
+- [x] Spotify auth and genre enrichment
+- [x] Audio feature extraction (BPM, key, energy, danceability via DSP)
+- [x] Genre Galaxy visualization with heat, co-occurrence, cohort, and evolution views
+- [x] Genre Mix: randomised entry point, seed blend builder
+- [x] Discovery Sound Space with hyperspace search and nebula halos
+- [x] 6-digit PIN auth with auto-setup for local browsers
+- [x] Automix harmonic mixing (Camelot + BPM + energy multipliers)
+- [x] Artist and album pages with TIDAL discography
+- [x] Shader wallpapers with glass UI overlay
+- [x] DSP-powered smart playlist rules
+- [x] Ctrl+K command palette with slash commands
+- [x] Power filter syntax in search
+- [x] Tauri desktop app with tray menu and media keys
+- [x] Last.fm genre pipeline (closed taxonomy + hierarchy-aware merge)
+
+</details>
+
+**Up next:**
+
+- [ ] Gapless crossfade audio blend (audio-level mixing)
+- [ ] Duplicate detection UI
+- [ ] WASAPI exclusive mode
+- [ ] Song Radio tuning
+- [ ] Genre Galaxy polish
+- [ ] YouTube Music integration
+- [ ] SoundCloud integration
+- [ ] Tauri auto-updater
+
+---
