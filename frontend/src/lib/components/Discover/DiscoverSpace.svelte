@@ -399,6 +399,22 @@
 			ctx.setLineDash([]);
 			ctx.globalAlpha = 1;
 
+			// Source dot (4px) — top-right of node
+			if (node.radio_source) {
+				const dotX = node.x + currentRadius * 0.707;
+				const dotY = node.y - currentRadius * 0.707;
+				ctx.globalAlpha = currentOpacity * 0.9;
+				ctx.beginPath();
+				ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
+				ctx.fillStyle = node.radio_source === 'library'
+					? '#4caf88'
+					: node.radio_source === 'lastfm'
+						? '#9b59b6'
+						: '#5b9af8';
+				ctx.fill();
+				ctx.globalAlpha = 1;
+			}
+
 			// Hover highlight
 			if (hoveredNode?.track_id === node.track_id) {
 				ctx.beginPath();

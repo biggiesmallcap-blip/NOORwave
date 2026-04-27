@@ -15,6 +15,8 @@ export interface DiscoverTrackNode {
   camelot_key: string | null;
   is_in_library: boolean;
   source: 'tidal' | 'external';
+  radio_source?: 'library' | 'lastfm' | 'engine' | null;
+  radio_reason?: string | null;
   x: number;
   y: number;
   vx: number;

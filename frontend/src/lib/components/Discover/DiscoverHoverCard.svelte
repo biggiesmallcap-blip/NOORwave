@@ -71,6 +71,11 @@
 			<div class="seed-pill">
 				{isLocked ? '🔒 Locked seed' : '▶ Playing'}
 			</div>
+		{:else if node.radio_source}
+			<div class="source-tag source-tag--{node.radio_source}">
+				{node.radio_source === 'library' ? '📚' : node.radio_source === 'lastfm' ? '🌐' : '🔍'}
+				{node.radio_source.toUpperCase()}
+			</div>
 		{:else if node.source === 'external'}
 			<div class="source-tag">EXTERNAL · TIDAL</div>
 		{/if}
@@ -84,6 +89,9 @@
 					<span class="chip">{chip}</span>
 				{/each}
 			</div>
+		{/if}
+		{#if node.radio_reason && !isSeed}
+			<div class="provenance">{node.radio_reason}</div>
 		{/if}
 	</div>
 {/if}
@@ -160,5 +168,18 @@
 		padding: 3px 9px;
 		font-size: 10px;
 		color: #c0c0d8;
+	}
+
+	.source-tag--library { color: #4caf88; }
+	.source-tag--lastfm  { color: #9b59b6; }
+	.source-tag--engine  { color: #5b9af8; }
+
+	.provenance {
+		font-size: 10px;
+		color: #7070a0;
+		margin-top: 8px;
+		padding-top: 6px;
+		border-top: 1px solid #2a2a45;
+		line-height: 1.4;
 	}
 </style>
