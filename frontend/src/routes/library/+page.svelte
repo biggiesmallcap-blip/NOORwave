@@ -911,25 +911,31 @@
 }} />
 
 <div class="page-shell library animate-in">
-	<section class="library-hero glass-panel">
-		<div class="library-hero-main">
-			<div class="library-hero-copy">
-				<p class="eyebrow">Library</p>
-				<div class="library-hero-heading">
-					<h1>Library</h1>
-					<span class="library-mode-pill">{libraryModeLabel}</span>
-				</div>
-				<p class="library-hero-subtitle">{libraryModeCopy}</p>
-			</div>
+	<div class="library-search-shell">
+		<input
+			class="library-search-input"
+			bind:value={$searchQuery}
+			type="search"
+			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
+		/>
+		<div class="kbd-hint">
+			<kbd>/</kbd> focus &nbsp;·&nbsp;
+			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
+			<kbd>Enter</kbd> play &nbsp;·&nbsp;
+			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
+			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next &nbsp;·&nbsp;
+			<span class="hint-filters">bpm:138 &nbsp;·&nbsp; key:Am &nbsp;·&nbsp; energy:&gt;0.7 &nbsp;·&nbsp; genre:dnb &nbsp;·&nbsp; instrumental:true</span>
+		</div>
 
-			<div class="library-hero-actions">
-				<div class="filter-pills">
-					<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
-					<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
-					<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
-					<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
-				</div>
-				{#if activeTab === 'albums'}
+		<div class="filter-pills">
+			<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
+			<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
+			<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
+			<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+
+			<div class="filter-pills-spacer"></div>
+
+			{#if activeTab === 'albums'}
 				<div class="view-toggle" role="group" aria-label="Album view layout">
 					<button
 						class="view-toggle-btn"
@@ -961,43 +967,17 @@
 						</svg>
 					</button>
 				</div>
-				{/if}
-				<button class="btn btn-glass" onclick={() => void playRandomLibrary()}>
-					Random play
-				</button>
-			</div>
-		</div>
+			{/if}
 
-		<div class="library-hero-stats">
-			<span class="library-stat-chip">{$totalAlbums.toLocaleString()} albums</span>
-			<span class="library-stat-chip">{$totalTracks.toLocaleString()} tracks</span>
-			<span class="library-stat-chip">{selectionCount.toLocaleString()} selected</span>
-			<span class="library-stat-chip emphasis">{isSearchMode ? searchSummary : loadedSummary}</span>
-		</div>
-	</section>
+			<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
+				⤮ Random
+			</button>
 
-	<div class="library-toolbar glass">
-		<input
-			bind:value={$searchQuery}
-			type="search"
-			placeholder={activeTab === 'albums' ? 'Search albums or artists' : 'Search tracks, albums, or artists'}
-		/>
-		<div class="kbd-hint">
-			<kbd>/</kbd> focus &nbsp;·&nbsp;
-			<kbd>↑↓</kbd> move &nbsp;·&nbsp;
-			<kbd>Enter</kbd> play &nbsp;·&nbsp;
-			<kbd>Shift</kbd>+<kbd>Enter</kbd> queue &nbsp;·&nbsp;
-			<kbd>Ctrl</kbd>+<kbd>Enter</kbd> next &nbsp;·&nbsp;
-			<span class="hint-filters">bpm:138 &nbsp;·&nbsp; key:Am &nbsp;·&nbsp; energy:&gt;0.7 &nbsp;·&nbsp; genre:dnb &nbsp;·&nbsp; instrumental:true</span>
-		</div>
-		<div class="toolbar-meta">
 			{#if searchBusy}
-				<span class="toolbar-note">Searching…</span>
+				<span class="library-status">Searching…</span>
 			{:else if isSearchMode}
-				<span class="toolbar-note">{searchSummary}</span>
-				<button class="btn btn-glass" onclick={() => (searchQuery.set(''))}>Clear search</button>
-			{:else}
-				<span class="toolbar-note">{loadedSummary}</span>
+				<span class="library-status">{searchSummary}</span>
+				<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
 			{/if}
 		</div>
 	</div>
@@ -2197,10 +2177,52 @@
 		vertical-align: middle;
 	}
 
+	.library-search-shell {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		max-width: 1200px;
+		margin: 0 auto 24px;
+		padding: 0 4px;
+	}
+
+	.library-search-input {
+		width: 100%;
+		max-width: 640px;
+		margin: 0 auto;
+		padding: 14px 22px;
+		border-radius: 24px;
+		border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+		background: var(--bg-glass, rgba(255,255,255,0.04));
+		color: var(--text-primary, #fff);
+		font-size: 15px;
+		outline: none;
+		transition: border-color 0.15s;
+	}
+
+	.library-search-input:focus {
+		border-color: var(--accent, #9b6fff);
+	}
+
+	.library-status {
+		font-size: 12px;
+		color: var(--text-muted, rgba(255,255,255,0.4));
+		margin-left: 4px;
+	}
+
 	.filter-pills {
 		display: flex;
 		gap: 6px;
 		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.filter-pills-spacer {
+		flex: 1;
+	}
+
+	.filter-pill--ghost {
+		opacity: 0.75;
 	}
 
 	.filter-pill {
