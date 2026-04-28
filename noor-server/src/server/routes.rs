@@ -246,6 +246,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists/{id}/discography", get(get_artist_discography))
         .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
         .route("/api/tidal/albums/{id}/import", post(import_tidal_album))
+        .route("/api/tidal/tracks/import", post(import_tidal_track_for_radio))
         .route("/api/genres", get(get_genres))
         .route("/api/genres/heat", get(get_genre_heat))
         .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
@@ -792,6 +793,46 @@ async fn import_tidal_album(
     Ok(Json(json!({
         "album_id": imported.album_id,
         "tracks": tracks,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportTidalTrackBody {
+    tidal_id: i64,
+    title: String,
+    artist_name: String,
+    artist_tidal_id: Option<i64>,
+    album_title: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+async fn import_tidal_track_for_radio(
+    State(state): State<SharedState>,
+    Json(body): Json<ImportTidalTrackBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let imported = tidal_import::import_track_from_metadata(
+        &db,
+        body.tidal_id,
+        body.title,
+        body.artist_name,
+        body.artist_tidal_id,
+        body.album_title,
+        body.duration_ms,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({
+        "tidal_id": imported.tidal_id,
+        "local_id": imported.local_id,
     })))
 }
 

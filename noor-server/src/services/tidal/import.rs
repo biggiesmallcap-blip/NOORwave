@@ -156,6 +156,75 @@ fn upsert_album_tx(
     Ok(tx.last_insert_rowid())
 }
 
+pub async fn import_track_from_metadata(
+    conn_pool: &crate::db::Database,
+    tidal_id: i64,
+    title: String,
+    artist_name: String,
+    artist_tidal_id: Option<i64>,
+    album_title: Option<String>,
+    duration_ms: Option<i64>,
+) -> Result<ImportedTrack> {
+    conn_pool.with_conn(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let artist_id = upsert_artist_tx(&tx, artist_tidal_id.unwrap_or(0), &artist_name)?;
+
+        let album_id: Option<i64> = if let Some(ref atitle) = album_title {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2 LIMIT 1",
+                    params![artist_id, atitle],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing {
+                Some(id)
+            } else {
+                tx.execute(
+                    "INSERT INTO albums (title, artist_id, source) VALUES (?1, ?2, ?3)",
+                    params![atitle, artist_id, TIDAL_STREAM_SOURCE],
+                )?;
+                Some(tx.last_insert_rowid())
+            }
+        } else {
+            None
+        };
+
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM tracks WHERE tidal_id = ?1",
+                params![tidal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let local_id = if let Some(id) = existing {
+            id
+        } else {
+            tx.execute(
+                "INSERT INTO tracks (
+                    tidal_id, title, artist_id, album_id,
+                    duration_ms, best_quality, best_source, fidelity_score,
+                    is_favorite, source
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'LOSSLESS', 'tidal', 700, 0, ?6)",
+                params![
+                    tidal_id,
+                    title,
+                    artist_id,
+                    album_id,
+                    duration_ms.unwrap_or(0),
+                    TIDAL_STREAM_SOURCE,
+                ],
+            )?;
+            tx.last_insert_rowid()
+        };
+
+        tx.commit()?;
+        Ok(ImportedTrack { tidal_id, local_id })
+    })
+}
+
 fn upsert_track_tx(
     tx: &rusqlite::Transaction<'_>,
     t: &TidalTrack,

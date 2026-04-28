@@ -901,6 +901,20 @@ export const api = {
 		);
 	},
 
+	importTidalTrackForRadio(track: TidalPlayable) {
+		return fetchApi<{ tidal_id: number; local_id: number }>('/api/tidal/tracks/import', undefined, {
+			method: 'POST',
+			body: JSON.stringify({
+				tidal_id: track.tidal_id,
+				title: track.title,
+				artist_name: track.artist_name,
+				artist_tidal_id: track.artist_tidal_id ?? null,
+				album_title: track.album_title,
+				duration_ms: track.duration_ms,
+			}),
+		});
+	},
+
 	getGenres() {
 		return fetchApi<{ genres: Genre[] }>('/api/genres');
 	},
