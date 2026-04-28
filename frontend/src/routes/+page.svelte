@@ -369,7 +369,7 @@
 			{#if trending.length > 0}
 				<div class="picks-grid">
 					<div class="picks-subsection">
-						<div class="track-list">
+						<ol class="trending-list">
 							{#each trending.slice(0, 12) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
 								{#if entry.local_track}
 									{@const t = entry.local_track}
@@ -393,7 +393,7 @@
 									/>
 								{/if}
 							{/each}
-						</div>
+						</ol>
 					</div>
 
 					{#if genrePicks.length > 0}
@@ -804,6 +804,15 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 		gap: 12px;
+	}
+
+	.trending-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
 	}
 
 	.track-row {

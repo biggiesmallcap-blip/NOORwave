@@ -1370,7 +1370,21 @@
 			<EmptyState title="No artists yet" copy="Sync your TIDAL library in Settings to populate artists." />
 		{:else}
 			{@const q = $searchQuery.trim().toLowerCase()}
-			{@const filteredArtists = q ? artists.filter(a => a.name.toLowerCase().includes(q)) : artists}
+			{@const filteredArtists = q
+				? artists
+					.map(a => {
+						const n = a.name.toLowerCase();
+						let score = 0;
+						if (n === q) score = 100;
+						else if (n.startsWith(q)) score = 80;
+						else if (n.split(/\s+/).some(w => w.startsWith(q))) score = 60;
+						else if (n.includes(q)) score = 40;
+						return { artist: a, score };
+					})
+					.filter(x => x.score > 0)
+					.sort((a, b) => b.score - a.score || a.artist.name.localeCompare(b.artist.name))
+					.map(x => x.artist)
+				: artists}
 			<div class="artist-grid">
 				{#each filteredArtists as artist (artist.id)}
 					{@const artistImg = !failedArtistImages.has(artist.id) ? (artist.photo_url ?? artistArtworkById.get(artist.id) ?? null) : null}
@@ -1378,6 +1392,13 @@
 						class="artist-card"
 						class:expanded={expandedArtistId === artist.id}
 						onclick={() => void toggleArtist(artist)}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							openContextMenu(e, [
+								{ label: 'Open artist page', icon: '→', onSelect: () => void goto(`/artists/${artist.id}`) },
+								{ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artist.id) },
+							], artist.name);
+						}}
 						title="Expand {artist.name}"
 					>
 						<div class="artist-photo">
