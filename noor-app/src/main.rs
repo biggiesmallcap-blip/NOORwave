@@ -27,13 +27,7 @@ fn main() {
             let state2 = state_for_setup.clone();
             std::thread::spawn(move || {
                 sidecar::wait_for_ready(&state2);
-                // Navigate only after the server is confirmed ready — avoids
-                // the blank-page bug where WebView2 caches a connection-refused
-                // error from the initial about:blank → server URL load.
                 if let Some(win) = handle.get_webview_window("main") {
-                    if let Ok(url) = "http://127.0.0.1:3334".parse() {
-                        let _ = win.navigate(url);
-                    }
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
