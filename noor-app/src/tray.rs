@@ -1,17 +1,27 @@
 use crate::{config, sidecar::SidecarState};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{
+    Wry,
     image::Image,
-    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+
+// Holds clones of tray menu items so the menu can be rebuilt when an update
+// is found, without losing checkbox state or event handler references.
+pub struct TrayMenuItems {
+    pub show_item: MenuItem<Wry>,
+    pub network_item: CheckMenuItem<Wry>,
+    pub restart_item: MenuItem<Wry>,
+    pub exit_item: MenuItem<Wry>,
+    pub update_url: Mutex<Option<String>>,
+}
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let state: Arc<SidecarState> = app.state::<Arc<SidecarState>>().inner().clone();
     let host_mode = *state.host_mode.lock().unwrap();
 
-    // Menu items
     let show_item = MenuItemBuilder::with_id("show", "Show NOORwave").build(app)?;
     let network_item = CheckMenuItemBuilder::with_id("network", "Network access")
         .checked(host_mode)
@@ -29,23 +39,26 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&exit_item)
         .build()?;
 
-    // Icon embedded at compile time
+    // Store clones so notify_update can rebuild the menu reusing the same items.
+    app.manage(TrayMenuItems {
+        show_item: show_item.clone(),
+        network_item: network_item.clone(),
+        restart_item: restart_item.clone(),
+        exit_item: exit_item.clone(),
+        update_url: Mutex::new(None),
+    });
+
     let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
     let network_item_clone = network_item.clone();
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id("noorwave-tray")
         .icon(icon)
         .menu(&menu)
         .tooltip("NOORwave")
-        // Left-click shows the window
         .on_tray_icon_event({
             let handle = app.handle().clone();
             move |_tray, event| {
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    ..
-                } = event
-                {
+                if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
@@ -53,15 +66,25 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         })
-        // Right-click menu events
         .on_menu_event({
             let handle = app.handle().clone();
             let state = state.clone();
-            move |_app, event| match event.id().as_ref() {
+            move |app_handle, event| match event.id().as_ref() {
                 "show" => {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
+                    }
+                }
+                "update" => {
+                    let url = app_handle
+                        .state::<TrayMenuItems>()
+                        .update_url
+                        .lock()
+                        .unwrap()
+                        .clone();
+                    if let Some(url) = url {
+                        let _ = open::that(url);
                     }
                 }
                 "network" => {
@@ -70,12 +93,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = network_item_clone.set_checked(new_mode);
                     *state.host_mode.lock().unwrap() = new_mode;
 
-                    // Persist to noor-config.json
                     let mut cfg = config::load();
                     cfg.host_mode = new_mode;
                     config::save(&cfg);
 
-                    // Also tell noor-server so headless users see the change
                     if let Some(token) = state.server_token.lock().unwrap().clone() {
                         let body = serde_json::json!({ "host_mode": new_mode });
                         let _ = reqwest::blocking::Client::new()
@@ -85,7 +106,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             .send();
                     }
 
-                    // Restart server with new flag
                     let state2 = state.clone();
                     let handle2 = handle.clone();
                     std::thread::spawn(move || {
@@ -117,4 +137,37 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     Ok(())
+}
+
+// Called from a background thread when a newer release is found.
+// Rebuilds the tray menu with an update item at the top and updates the tooltip.
+pub fn notify_update(handle: &tauri::AppHandle, version: &str, url: String) {
+    let items = handle.state::<TrayMenuItems>();
+    *items.update_url.lock().unwrap() = Some(url);
+
+    let label = format!("↑ v{version} available — click to download");
+    let Ok(update_item) = MenuItemBuilder::with_id("update", &label).build(handle) else {
+        return;
+    };
+
+    let sep = |h: &tauri::AppHandle| PredefinedMenuItem::separator(h).unwrap();
+
+    let Ok(menu) = MenuBuilder::new(handle)
+        .item(&update_item)
+        .item(&sep(handle))
+        .item(&items.show_item)
+        .item(&sep(handle))
+        .item(&items.network_item)
+        .item(&items.restart_item)
+        .item(&sep(handle))
+        .item(&items.exit_item)
+        .build()
+    else {
+        return;
+    };
+
+    if let Some(tray) = handle.tray_by_id("noorwave-tray") {
+        let _ = tray.set_menu(Some(menu));
+        let _ = tray.set_tooltip(Some(format!("NOORwave — v{version} update available")));
+    }
 }
