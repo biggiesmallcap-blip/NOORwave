@@ -7,7 +7,8 @@
 		startAlbumRadio,
 		currentTrack,
 		isPlaying,
-		togglePlayback
+		togglePlayback,
+		toggleTrackFavorite
 	} from '$lib/stores/player';
 	import { formatDuration } from '$lib/stores/library';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
@@ -265,7 +266,11 @@
 								class="row-btn heart"
 								class:on={track.is_favorite}
 								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-								onclick={(e) => { e.stopPropagation(); }}
+								onclick={(e) => {
+									e.stopPropagation();
+									void toggleTrackFavorite(track.id, track.is_favorite ?? false);
+									track.is_favorite = !track.is_favorite;
+								}}
 							>{track.is_favorite ? '♥' : '♡'}</button>
 							<button
 								class="row-btn"

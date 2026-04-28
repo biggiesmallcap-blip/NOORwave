@@ -160,6 +160,7 @@ impl TidalDiscoveryProvider {
                         .map(|artist| artist.name.clone())
                         .or_else(|| Some(track.artist.name.clone())),
                     album_title: track.album.as_ref().map(|album| album.title.clone()),
+                    album_id: track.album.as_ref().map(|album| album.id),
                     artwork_url: TidalClient::get_artwork_url(
                         &track.album.as_ref().and_then(|album| album.cover.clone()),
                         640,
@@ -390,6 +391,7 @@ mod tests {
             album_title: Some(
                 "Deep Space Night - Panorama of Dub Techno, Minimal Deep Berlin Underground Club Tech House & Dreamy Chill out Music".to_string(),
             ),
+            album_id: None,
             artwork_url: None,
             audio_quality: Some("LOSSLESS".to_string()),
             stream_ready: Some(true),

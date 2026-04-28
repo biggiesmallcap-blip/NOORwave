@@ -48,6 +48,7 @@
       artwork_url: t.artwork_url,
       duration_ms: t.duration_ms,
       artist_tidal_id: tidalArtistId,
+      album_tidal_id: t.album_tidal_id ?? null,
     }
   }
 </script>
@@ -88,7 +89,15 @@
               <div class="track-meta">
                 <p class="track-title">{track.title}</p>
                 {#if track.album_title}
-                  <p class="track-album">{track.album_title}</p>
+                  {#if track.album_tidal_id != null}
+                    <a
+                      class="track-album"
+                      href={`/tidal/albums/${track.album_tidal_id}`}
+                      onclick={(e) => e.stopPropagation()}
+                    >{track.album_title}</a>
+                  {:else}
+                    <p class="track-album">{track.album_title}</p>
+                  {/if}
                 {/if}
               </div>
               <span class="track-duration">{formatDuration(track.duration_ms)}</span>
@@ -182,7 +191,8 @@
     background-size: cover; background-position: center;
   }
   .track-title { font-size: 13px; color: var(--text-primary); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .track-album { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track-album { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; display: block; }
+  a.track-album:hover { color: var(--text-primary); text-decoration: underline; }
   .track-duration { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   .row-btn {
     background: none; border: none;

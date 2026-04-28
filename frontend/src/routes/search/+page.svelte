@@ -384,7 +384,11 @@
   })
 
   function toPlayable(track: TidalSearchTrack) {
-    return { ...track, artist_tidal_id: track.artist_id ?? null }
+    return {
+      ...track,
+      artist_tidal_id: track.artist_id ?? null,
+      album_tidal_id: track.album_tidal_id ?? null,
+    }
   }
 
   function actOnTrack(track: TidalSearchTrack, mode: 'play' | 'queue' | 'next') {
@@ -868,9 +872,29 @@
                   {#if track.in_library}<span class="lib-dot" aria-label="In your library"></span>{/if}
                 </p>
                 <p class="track-subtitle">
-                  {#if track.artist_name}{track.artist_name}{/if}
+                  {#if track.artist_name}
+                    {#if track.artist_id != null}
+                      <a
+                        href={`/tidal/artists/${track.artist_id}`}
+                        class="subtitle-link"
+                        onclick={(e) => e.stopPropagation()}
+                      >{track.artist_name}</a>
+                    {:else}
+                      <span>{track.artist_name}</span>
+                    {/if}
+                  {/if}
                   {#if track.artist_name && track.album_title} — {/if}
-                  {#if track.album_title}{track.album_title}{/if}
+                  {#if track.album_title}
+                    {#if track.album_tidal_id != null}
+                      <a
+                        href={`/tidal/albums/${track.album_tidal_id}`}
+                        class="subtitle-link"
+                        onclick={(e) => e.stopPropagation()}
+                      >{track.album_title}</a>
+                    {:else}
+                      <span>{track.album_title}</span>
+                    {/if}
+                  {/if}
                 </p>
               </div>
               <span class="track-duration">{formatDuration(track.duration_ms)}</span>
@@ -1444,6 +1468,8 @@
     white-space: nowrap;
     margin: 2px 0 0;
   }
+  .subtitle-link { color: inherit; text-decoration: none; }
+  .subtitle-link:hover { color: var(--text-primary); text-decoration: underline; }
   .track-duration {
     font-size: 12px;
     color: var(--text-muted);

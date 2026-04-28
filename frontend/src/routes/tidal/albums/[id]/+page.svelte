@@ -6,6 +6,8 @@
 	import { playTidalTrackNow, playTidalAlbum } from '$lib/stores/player';
 	import { formatDuration } from '$lib/stores/library';
 
+	let tidalAlbumId = $derived(Number(page.params.id));
+
 	function trackAsPlayable(t: TidalDiscographyTrack) {
 		return {
 			tidal_id: t.tidal_id,
@@ -15,10 +17,9 @@
 			artwork_url: t.artwork_url,
 			duration_ms: t.duration_ms,
 			artist_tidal_id: t.artist_tidal_id ?? null,
+			album_tidal_id: t.album_tidal_id ?? tidalAlbumId,
 		};
 	}
-
-	let tidalAlbumId = $derived(Number(page.params.id));
 
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
@@ -49,6 +50,7 @@
 		return {
 			title: first.album_title ?? 'Album',
 			artist_name: first.artist_name ?? 'Unknown artist',
+			artist_tidal_id: first.artist_tidal_id ?? null,
 			artwork_url: first.artwork_url,
 			track_count: tracks.length,
 			total_ms: totalMs
@@ -91,7 +93,11 @@
 					<p class="eyebrow">Album · TIDAL preview</p>
 					<h1 class="hero-title">{h.title}</h1>
 					<p class="hero-sub">
-						<span class="hero-link">{h.artist_name}</span>
+						{#if h.artist_tidal_id != null}
+							<a class="hero-link" href={`/tidal/artists/${h.artist_tidal_id}`}>{h.artist_name}</a>
+						{:else}
+							<span class="hero-link">{h.artist_name}</span>
+						{/if}
 						<span class="dot">·</span>
 						<span>{h.track_count} songs</span>
 						<span class="dot">·</span>
@@ -123,7 +129,15 @@
 						<span class="track-index">{track.track_number ?? idx + 1}</span>
 						<div class="track-meta">
 							<p class="track-title">{track.title}</p>
-							<span class="track-artist">{track.artist_name}</span>
+							{#if track.artist_tidal_id != null}
+								<a
+									class="track-artist"
+									href={`/tidal/artists/${track.artist_tidal_id}`}
+									onclick={(e) => e.stopPropagation()}
+								>{track.artist_name}</a>
+							{:else}
+								<span class="track-artist">{track.artist_name}</span>
+							{/if}
 						</div>
 						<span class="track-duration">{formatDuration(track.duration_ms)}</span>
 						<button
@@ -350,7 +364,11 @@
 	.track-artist {
 		color: var(--text-secondary);
 		font-size: 0.82rem;
+		text-decoration: none;
 	}
+	a.track-artist:hover { color: var(--text-primary); text-decoration: underline; }
+	a.hero-link { text-decoration: none; }
+	a.hero-link:hover { text-decoration: underline; }
 
 	.track-duration {
 		color: var(--text-secondary);
