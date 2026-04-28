@@ -108,7 +108,7 @@
 	let activeTrackMenuId = $state<number | null>(null);
 	let searchBusy = $state(false);
 	let searchError = $state<string | null>(null);
-	let searchResults = $state<{ tracks: Track[]; albums: Album[] }>({ tracks: [], albums: [] });
+	let searchResults = $state<{ tracks: Track[]; albums: Album[]; artists: Artist[] }>({ tracks: [], albums: [], artists: [] });
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	let infiniteSentinel = $state<HTMLDivElement | null>(null);
 	let infiniteObserver: IntersectionObserver | null = null;
@@ -229,11 +229,10 @@
 	async function loadArtists() {
 		artistsLoading = true;
 		try {
-			// 10k is well past today's library size (~6.5k artists). Loading all of
-			// them up front keeps the in-page filter working — paginating would
-			// hide artists past the cutoff (e.g. "Mac Miller" beyond an alpha-500
-			// window) when the user types a search.
-			const data = await api.getArtists('name', 'asc', 10000);
+			// Default browse view — top 200 alphabetically. When the user types
+			// a query, the search effect calls api.search() server-side and
+			// shows searchResults.artists (FTS). No more upfront 10k load.
+			const data = await api.getArtists('name', 'asc', 200);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
@@ -540,7 +539,8 @@
 		albums.update((list) => list.filter((album) => !$selectedAlbumIds.has(album.id)));
 		searchResults = {
 			tracks: searchResults.tracks.filter((track) => !deletedTrackIds.includes(track.id)),
-			albums: searchResults.albums.filter((album) => !$selectedAlbumIds.has(album.id))
+			albums: searchResults.albums.filter((album) => !$selectedAlbumIds.has(album.id)),
+			artists: searchResults.artists
 		};
 
 		try {
@@ -605,21 +605,10 @@
 		updateAlbumSelection(albumId);
 	}
 
-	async function preloadAllTracks() {
-		if ($totalTracks > 0 && $tracks.length >= $totalTracks) return;
-		await loadTracks($sortBy, $sortDir, 99999, 0);
-	}
-
-	async function preloadAllAlbums() {
-		if ($totalAlbums > 0 && $albums.length >= $totalAlbums) return;
-		await loadAlbums($sortBy, $sortDir, 99999, 0);
-	}
-
-
 	async function runLibrarySearch(query: string) {
 		const trimmed = query.trim();
 		if (!trimmed) {
-			searchResults = { tracks: [], albums: [] };
+			searchResults = { tracks: [], albums: [], artists: [] };
 			searchBusy = false;
 			searchError = null;
 			return;
@@ -660,27 +649,20 @@
 					energy: r.energy,
 					danceability: r.danceability,
 				}));
-				searchResults = { tracks: adaptedTracks, albums: [] };
+				searchResults = { tracks: adaptedTracks, albums: [], artists: [] };
 			} else {
-				// Plain text — filter the full library locally (always library-scoped, no network).
-				await Promise.all([preloadAllTracks(), preloadAllAlbums()]);
-				const q = trimmed.toLowerCase();
+				// Plain text — server-side FTS. No more preloading the full library.
+				const r = await api.search(trimmed, 100);
 				searchResults = {
-					tracks: $tracks.filter(t =>
-						t.title.toLowerCase().includes(q) ||
-						(t.artist_name ?? '').toLowerCase().includes(q) ||
-						(t.album_title ?? '').toLowerCase().includes(q)
-					),
-					albums: $albums.filter(a =>
-						a.title.toLowerCase().includes(q) ||
-						(a.artist_name ?? '').toLowerCase().includes(q)
-					),
+					tracks: r.tracks,
+					albums: r.albums,
+					artists: r.artists,
 				};
 			}
 			clearSelection();
 		} catch (error) {
 			searchError = `Search failed: ${error}`;
-			searchResults = { tracks: [], albums: [] };
+			searchResults = { tracks: [], albums: [], artists: [] };
 		} finally {
 			searchBusy = false;
 		}
@@ -1370,8 +1352,9 @@
 			<EmptyState title="No artists yet" copy="Sync your TIDAL library in Settings to populate artists." />
 		{:else}
 			{@const q = $searchQuery.trim().toLowerCase()}
+			{@const ftsArtists = q ? searchResults.artists : []}
 			{@const filteredArtists = q
-				? artists
+				? ftsArtists
 					.map(a => {
 						const n = a.name.toLowerCase();
 						let score = 0;
