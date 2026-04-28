@@ -27,10 +27,12 @@ fn main() {
             let state2 = state_for_setup.clone();
             std::thread::spawn(move || {
                 sidecar::wait_for_ready(&state2);
-                // Show the main window once the server is ready.
+                // The window may have tried (and failed) to load before the
+                // server was ready, so reload now that it's up.
                 if let Some(win) = handle.get_webview_window("main") {
-                    let _ = win.show().ok();
-                    let _ = win.set_focus().ok();
+                    let _ = win.eval("window.location.reload()");
+                    let _ = win.show();
+                    let _ = win.set_focus();
                 }
             });
 
