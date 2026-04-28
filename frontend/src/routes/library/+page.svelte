@@ -23,6 +23,27 @@
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
 	import { playAlbum as playAlbumStore, shuffleAlbum, startAlbumRadio, startArtistRadio } from '$lib/stores/player';
 	import { goto } from '$app/navigation';
+	import { showToast } from '$lib/stores/toast';
+
+	function buildAddToPlaylistSubmenu(
+		getTrackIds: () => Promise<number[]>,
+	): MenuItem[] {
+		return [...playlists]
+			.sort((a, b) => {
+				if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
+				return a.name.localeCompare(b.name);
+			})
+			.map((playlist) => ({
+				label: playlist.name,
+				icon: playlist.is_favorite ? '♥' : '♩',
+				onSelect: async () => {
+					const trackIds = await getTrackIds();
+					if (!trackIds.length) return;
+					const { added } = await api.addTracksToPlaylist(playlist.id, trackIds);
+					showToast(`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}`, 'success');
+				},
+			}));
+	}
 
 	function buildLocalAlbumMenu(album: { id: number; title: string }): MenuItem[] {
 		return [
@@ -32,6 +53,15 @@
 			{ label: 'Album radio', icon: '◉', onSelect: () => void startAlbumRadio(album.id) },
 			{ separator: true, label: '' },
 			{ label: 'Open album', icon: '↗', onSelect: () => void goto(`/albums/${album.id}`) },
+			{ separator: true, label: '' },
+			{
+				label: 'Add to playlist',
+				icon: '＋',
+				submenu: buildAddToPlaylistSubmenu(async () => {
+					const { tracks: t } = await api.getAlbumTracks(album.id);
+					return t.map(tr => tr.id);
+				}),
+			},
 		];
 	}
 
@@ -40,6 +70,15 @@
 			{ label: 'Open artist', icon: '↗', onSelect: () => void goto(`/artists/${artistId}`) },
 			{ separator: true, label: '' },
 			{ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artistId) },
+			{ separator: true, label: '' },
+			{
+				label: 'Add to playlist',
+				icon: '＋',
+				submenu: buildAddToPlaylistSubmenu(async () => {
+					const { tracks: t } = await api.getArtistTracks(artistId);
+					return t.map(tr => tr.id);
+				}),
+			},
 		];
 	}
 
