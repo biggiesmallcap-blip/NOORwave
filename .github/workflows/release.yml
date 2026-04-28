@@ -11,6 +11,9 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,9 +32,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm run build
 
       - name: Build portable
         shell: pwsh

@@ -14,26 +14,18 @@ Set-Location $Root
 
 Write-Host "=== NOORwave Portable Build ===" -ForegroundColor Cyan
 
-# 1. Build frontend
-Write-Host "1/4 Building frontend..." -ForegroundColor Yellow
-Push-Location frontend
-pnpm install --frozen-lockfile
-pnpm run build
-Pop-Location
-Write-Host "    Frontend built -> frontend/build/" -ForegroundColor Green
-
-# 2. Build noor-server
-Write-Host "2/4 Building noor-server..." -ForegroundColor Yellow
+# 1. Build noor-server
+Write-Host "1/3 Building noor-server..." -ForegroundColor Yellow
 cargo build --release -p noor-server
 Write-Host "    noor-server built" -ForegroundColor Green
 
-# 3. Build noor-app (Tauri shell)
-Write-Host "3/4 Building noor-app..." -ForegroundColor Yellow
+# 2. Build noor-app (Tauri shell)
+Write-Host "2/3 Building noor-app..." -ForegroundColor Yellow
 cargo build --release -p noor-app
 Write-Host "    noor-app built" -ForegroundColor Green
 
-# 4. Assemble portable folder
-Write-Host "4/4 Assembling portable folder..." -ForegroundColor Yellow
+# 3. Assemble portable folder
+Write-Host "3/3 Assembling portable folder..." -ForegroundColor Yellow
 $Dist = Join-Path $Root "dist\NOORwave"
 if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force }
 New-Item -ItemType Directory -Force $Dist | Out-Null
@@ -52,4 +44,4 @@ Write-Host ""
 Write-Host "Build complete!" -ForegroundColor Green
 Write-Host "Output: dist\NOORwave-portable.zip ($Size MB)"
 Write-Host ""
-Write-Host "To test: Expand-Archive dist\NOORwave-portable.zip dist\test-run && dist\test-run\NOORwave\NOORwave.exe"
+Write-Host "NOTE: Frontend must be built first: cd frontend && pnpm install && pnpm run build"
