@@ -285,15 +285,6 @@
       filterMode === 'all' || filterMode === 'tracks' || filterMode === 'library'
     )
   )
-  const isFilteredEmpty = $derived(
-    results !== null &&
-    !isEmpty &&
-    sortedTracks.length === 0 &&
-    sortedAlbums.length === 0 &&
-    sortedArtists.length === 0 &&
-    !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0))
-  )
-
   const showPlaylists = $derived(filterMode === 'all' || filterMode === 'playlists')
 
   const filteredPlaylists = $derived.by(() => {
@@ -304,6 +295,15 @@
     const tidalOnly = tidalPlaylistResults.filter(tp => !localNames.has(tp.title.toLowerCase()))
     return { local: matched, tidal: tidalOnly }
   })
+
+  const isFilteredEmpty = $derived(
+    results !== null &&
+    !isEmpty &&
+    sortedTracks.length === 0 &&
+    sortedAlbums.length === 0 &&
+    sortedArtists.length === 0 &&
+    !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0))
+  )
 
   type TopResult =
     | { kind: 'artist'; entry: TidalSearchArtist }
