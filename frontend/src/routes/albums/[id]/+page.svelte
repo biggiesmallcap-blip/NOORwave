@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import type { Snapshot } from './$types';
 	import { api, type Track } from '$lib/api/client';
 	import {
 		playAlbum,
@@ -20,6 +21,14 @@
 	let artistTracks = $state<Track[]>([]);
 	let moreLoading = $state(false);
 	let moreLoaded = $state(false);
+
+	// Phase 5B — back/forward state via SvelteKit snapshot.
+	export const snapshot: Snapshot<{ scrollY: number }> = {
+		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		restore: (saved) => {
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 
 	async function load() {
 		loading = true;

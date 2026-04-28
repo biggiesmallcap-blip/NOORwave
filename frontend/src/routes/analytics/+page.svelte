@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
+	import type { Snapshot } from './$types';
 	import { api, type AnalyticsDashboard } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
@@ -13,6 +14,14 @@
 
 	let dashboard = $state<AnalyticsDashboard | null>(null);
 	let loading = $state(true);
+
+	// Phase 5B — back/forward state via SvelteKit snapshot.
+	export const snapshot: Snapshot<{ scrollY: number }> = {
+		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		restore: (saved) => {
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 	let refreshing = $state(false);
 	let error = $state<string | null>(null);
 	let refreshedAt = $state<string | null>(null);

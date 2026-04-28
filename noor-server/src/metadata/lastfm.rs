@@ -25,6 +25,18 @@ pub struct LastFmSimilarTrack {
     pub match_score: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct LastFmChartTrack {
+    pub artist: String,
+    pub title: String,
+    pub mbid: Option<String>,
+    /// Image URL (largest available) when present. Last.fm sometimes returns
+    /// blank images for chart tracks — None when missing/empty.
+    pub image_url: Option<String>,
+    pub listeners: Option<u64>,
+    pub playcount: Option<u64>,
+}
+
 impl LastFmClient {
     pub fn from_env(http: reqwest::Client) -> Option<Self> {
         let api_key = std::env::var("LASTFM_API_KEY").ok()?;
@@ -203,6 +215,103 @@ impl LastFmClient {
                 title: track_title,
                 mbid,
                 match_score,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Fetch top global or geo chart tracks from Last.fm.
+    ///
+    /// When `country` is `Some`, calls `geo.getTopTracks` with that country
+    /// (full English name, e.g. "United States"). When `None`, calls the
+    /// global `chart.getTopTracks` endpoint.
+    pub async fn get_top_chart(
+        &self,
+        limit: u32,
+        country: Option<&str>,
+    ) -> Result<Vec<LastFmChartTrack>> {
+        let limit = limit.clamp(1, 100);
+        let mut params = vec![("limit", limit.to_string())];
+        let method = match country {
+            Some(c) if !c.trim().is_empty() => {
+                params.push(("country", c.to_string()));
+                "geo.gettoptracks"
+            }
+            _ => "chart.gettoptracks",
+        };
+        let mut all_params = vec![("method", method.to_string())];
+        all_params.extend(params.into_iter().map(|(k, v)| (k, v)));
+
+        let payload = self.get_json(&all_params).await?;
+        let tracks_value = payload
+            .get("tracks")
+            .and_then(|v| v.get("track"));
+        let arr = value_as_array(tracks_value);
+
+        let mut out = Vec::new();
+        for entry in arr.into_iter().take(limit as usize) {
+            let title = match entry.get("name").and_then(Value::as_str) {
+                Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => continue,
+            };
+            let artist_name = entry
+                .get("artist")
+                .and_then(|a| a.get("name").or_else(|| a.get("#text")))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if artist_name.is_empty() {
+                continue;
+            }
+            let mbid = entry
+                .get("mbid")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            // Pick the largest non-empty image. Last.fm returns an array of
+            // {size, #text} objects; sizes go small → extralarge.
+            let image_url = entry
+                .get("image")
+                .and_then(Value::as_array)
+                .and_then(|images| {
+                    let mut candidate: Option<&str> = None;
+                    let priority = ["mega", "extralarge", "large", "medium", "small"];
+                    for size in priority {
+                        for img in images {
+                            let s = img.get("size").and_then(Value::as_str);
+                            let url = img.get("#text").and_then(Value::as_str);
+                            if s == Some(size) {
+                                if let Some(u) = url {
+                                    if !u.trim().is_empty() {
+                                        candidate = Some(u);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if candidate.is_some() {
+                            break;
+                        }
+                    }
+                    candidate.map(|s| s.to_string())
+                });
+
+            let listeners = entry
+                .get("listeners")
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+            let playcount = entry
+                .get("playcount")
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+
+            out.push(LastFmChartTrack {
+                artist: artist_name,
+                title,
+                mbid,
+                image_url,
+                listeners,
+                playcount,
             });
         }
 

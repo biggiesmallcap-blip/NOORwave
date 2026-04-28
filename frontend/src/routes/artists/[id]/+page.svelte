@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import type { Snapshot } from './$types';
 	import { api, type Track, type TidalDiscographyAlbum } from '$lib/api/client';
 	import {
 		playArtist,
@@ -21,6 +22,14 @@
 	let tidalAlbums = $state<TidalDiscographyAlbum[]>([]);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
+
+	// Phase 5B — back/forward state via SvelteKit snapshot.
+	export const snapshot: Snapshot<{ scrollY: number }> = {
+		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		restore: (saved) => {
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 
 	async function load() {
 		loading = true;
