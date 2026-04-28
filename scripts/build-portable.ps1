@@ -17,8 +17,8 @@ Write-Host "=== NOORwave Portable Build ===" -ForegroundColor Cyan
 # 1. Build frontend
 Write-Host "1/4 Building frontend..." -ForegroundColor Yellow
 Push-Location frontend
-npm ci --silent
-npm run build
+pnpm install --frozen-lockfile
+pnpm run build
 Pop-Location
 Write-Host "    Frontend built -> frontend/build/" -ForegroundColor Green
 
