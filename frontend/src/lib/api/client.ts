@@ -1361,6 +1361,31 @@ export const api = {
 		});
 	},
 
+	moveQueueTrack(itemId: number, newPos: number) {
+		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/move', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ item_id: itemId, new_pos: newPos }),
+		});
+	},
+
+	clearQueue() {
+		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/clear', undefined, {
+			method: 'POST',
+			body: JSON.stringify({}),
+		});
+	},
+
+	createPlaylistFromQueue(name: string, includeTidalOnly: boolean = true) {
+		return fetchApi<{ playlist: { id: number; name: string }; added: number }>(
+			'/api/playlists/from-queue',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify({ name, include_tidal_only: includeTidalOnly }),
+			}
+		);
+	},
+
 	setTrackFavorite(trackId: number, favorite: boolean) {
 		return fetchApi<TrackFavoriteResponse>('/api/library/tracks/favorite', undefined, {
 			method: 'POST',

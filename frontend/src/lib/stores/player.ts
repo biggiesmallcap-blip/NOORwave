@@ -136,6 +136,7 @@ currentTrack.subscribe((track) => {
 export const isPlaying = writable(false);
 export const position = writable(0);
 export const volume = writable(1.0);
+export const volumeBeforeMute = writable<number | null>(null);
 export const automixEnabled = writable(false);
 export const automixDiscoverNew = writable(false);
 export const automixUseLearning = writable(true);
@@ -305,13 +306,26 @@ export async function playNextTrack() {
 export async function setPlayerVolume(nextVolume: number) {
 	playerError.set(null);
 	try {
-		const result = await api.setPlaybackVolume(nextVolume);
+		const clamped = Math.max(0, Math.min(1, nextVolume));
+		const result = await api.setPlaybackVolume(clamped);
 		// Only sync volume — applying full state would overwrite the local position
 		// ticker with a slightly stale server value, causing the displayed time to jump.
 		volume.set(result.state.volume);
 		noteSuccess();
 	} catch (error) {
 		setError('set volume', error);
+	}
+}
+
+export async function toggleMute() {
+	const current = get(volume);
+	if (current > 0) {
+		volumeBeforeMute.set(current);
+		await setPlayerVolume(0);
+	} else {
+		const restore = get(volumeBeforeMute) ?? 0.5;
+		volumeBeforeMute.set(null);
+		await setPlayerVolume(restore);
 	}
 }
 
@@ -469,6 +483,92 @@ export async function removeTrackFromQueue(queueItemId: number) {
 		noteSuccess();
 	} catch (error) {
 		setError('remove from queue', error, () => removeTrackFromQueue(queueItemId));
+	}
+}
+
+/// Optimistically reorder a queue item to a new index, then reconcile with the
+/// server. If the server returns a different ordering (e.g. another tab moved
+/// rows in between), the server response wins.
+export async function moveQueueItem(itemId: number, newPos: number) {
+	const before = get(playbackQueue);
+	const fromIdx = before.findIndex((item) => item.id === itemId);
+	if (fromIdx === -1) return;
+	const optimistic = before.slice();
+	const [moved] = optimistic.splice(fromIdx, 1);
+	const target = Math.max(0, Math.min(newPos, optimistic.length));
+	optimistic.splice(target, 0, moved);
+	playbackQueue.set(optimistic);
+
+	try {
+		const result = await api.moveQueueTrack(itemId, target);
+		playbackQueue.set(result.queue);
+		playerError.set(null);
+	} catch (error) {
+		// Roll back on failure.
+		playbackQueue.set(before);
+		playerError.set(`Failed to reorder queue: ${error}`);
+	}
+}
+
+export async function clearQueue(): Promise<QueueItem[]> {
+	const before = get(playbackQueue);
+	try {
+		const result = await api.clearQueue();
+		playbackQueue.set(result.queue);
+		playerError.set(null);
+		// Offer undo via toast.
+		const restorable = before.filter(
+			(item) => !result.queue.some((q) => q.id === item.id)
+		);
+		if (restorable.length > 0) {
+			showToast(`Queue cleared — Undo (${restorable.length})`, 'info', 6000);
+			// We register the undo handler externally — caller (layout) wires the toast click.
+		}
+		return restorable;
+	} catch (error) {
+		playerError.set(`Failed to clear queue: ${error}`);
+		return [];
+	}
+}
+
+export async function restoreQueueItems(items: QueueItem[]): Promise<void> {
+	if (!items.length) return;
+	try {
+		// Re-add each track in order. addQueueTrack appends to the end.
+		for (const item of items) {
+			if (item.track.id > 0) {
+				await api.addQueueTrack(item.track.id);
+			}
+		}
+		const snapshot = await api.getPlaybackState();
+		playbackQueue.set(snapshot.queue);
+		playerError.set(null);
+	} catch (error) {
+		playerError.set(`Failed to restore queue: ${error}`);
+	}
+}
+
+export async function saveQueueAsPlaylist(
+	name: string,
+	options?: { includeTidalOnly?: boolean }
+): Promise<{ id: number; name: string } | null> {
+	const trimmed = name.trim();
+	if (!trimmed) {
+		showToast('Playlist name cannot be empty', 'error');
+		return null;
+	}
+	try {
+		const result = await api.createPlaylistFromQueue(
+			trimmed,
+			options?.includeTidalOnly ?? true
+		);
+		showToast(`Saved "${result.playlist.name}" — ${result.added} tracks`, 'success');
+		playerError.set(null);
+		return result.playlist;
+	} catch (error) {
+		playerError.set(`Failed to save queue as playlist: ${error}`);
+		showToast('Failed to save playlist', 'error');
+		return null;
 	}
 }
 

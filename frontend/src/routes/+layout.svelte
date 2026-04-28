@@ -17,7 +17,6 @@
 		playbackQueue,
 		playerReady,
 		playerError,
-		radioReasons,
 		refreshPlaybackState,
 		playTrackNow,
 		togglePlayback,
@@ -31,8 +30,16 @@
 		setPlayerDiscoverNew,
 		moveQueueTrackNext,
 		removeTrackFromQueue,
-		toggleTrackFavorite
+		toggleTrackFavorite,
+		toggleMute,
+		moveQueueItem,
+		clearQueue as clearQueueAction,
+		restoreQueueItems,
+		saveQueueAsPlaylist
 	} from '$lib/stores/player';
+	import { get } from 'svelte/store';
+	import type { QueueItem } from '$lib/api/client';
+	import { showToast } from '$lib/stores/toast';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
@@ -110,40 +117,6 @@
 	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
 
-	// Auto-dismiss the player error toast 6 s after it's set, cancelling on
-	// every change (incl. set-null) so a fresh error doesn't inherit the prior
-	// timer and a manual dismiss isn't second-guessed.
-	let _playerErrorDismissTimer: ReturnType<typeof setTimeout> | null = null;
-	$effect(() => {
-		const current = $playerError;
-		if (_playerErrorDismissTimer !== null) {
-			clearTimeout(_playerErrorDismissTimer);
-			_playerErrorDismissTimer = null;
-		}
-		if (current) {
-			_playerErrorDismissTimer = setTimeout(() => {
-				playerError.set(null);
-				_playerErrorDismissTimer = null;
-			}, 6000);
-		}
-	});
-
-	function dismissPlayerError() {
-		playerError.set(null);
-	}
-
-	async function retryPlayerError() {
-		const current = $playerError;
-		if (!current?.retry) return;
-		const retry = current.retry;
-		playerError.set(null);
-		try {
-			await retry();
-		} catch {
-			// retry handlers manage their own error state via setError
-		}
-	}
-
 	const navZones = [
 		{
 			label: 'Atlas',
@@ -184,16 +157,6 @@
 		true: '⤮'
 	};
 
-	// Short, user-facing names for each active shuffle mode. Rendered next to
-	// the transport icon when shuffle ≠ off so people can tell at a glance
-	// which strategy is steering "next track" picks.
-	const shuffleModeNames: Record<string, string> = {
-		off: '',
-		genre: 'genre',
-		weighted: 'weighted',
-		true: 'all'
-	};
-
 	const repeatLabels: Record<string, string> = {
 		off: 'Repeat off',
 		all: 'Repeat all',
@@ -204,6 +167,19 @@
 		off: '↻',
 		all: '↺',
 		one: '⊙'
+	};
+
+	const shuffleModeNames: Record<string, string> = {
+		off: 'off',
+		genre: 'genre',
+		weighted: 'smart',
+		true: 'true'
+	};
+
+	const repeatModeNames: Record<string, string> = {
+		off: 'off',
+		all: 'all',
+		one: 'one'
 	};
 
 	onMount(() => {
@@ -267,11 +243,32 @@
 				break;
 			case 'ArrowRight':
 				event.preventDefault();
-				void playNextTrack();
+				if (event.shiftKey) {
+					void playNextTrack();
+				} else {
+					void setPlayerPosition(get(position) + 5000);
+				}
 				break;
 			case 'ArrowLeft':
 				event.preventDefault();
-				void playPreviousTrack();
+				if (event.shiftKey) {
+					void playPreviousTrack();
+				} else {
+					void setPlayerPosition(Math.max(0, get(position) - 5000));
+				}
+				break;
+			case 'ArrowUp':
+				event.preventDefault();
+				void setPlayerVolume(get(volume) + 0.05);
+				break;
+			case 'ArrowDown':
+				event.preventDefault();
+				void setPlayerVolume(get(volume) - 0.05);
+				break;
+			case 'm':
+			case 'M':
+				event.preventDefault();
+				void toggleMute();
 				break;
 			case 'l':
 			case 'L': {
@@ -439,6 +436,137 @@
 		}
 	}
 
+	// ─── Queue drag-to-reorder ────────────────────────────────────────────────
+	let dragItemId = $state<number | null>(null);
+	let dragOverItemId = $state<number | null>(null);
+
+	function handleQueueDragStart(event: DragEvent, item: QueueItemType) {
+		dragItemId = item.id;
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = 'move';
+			// Required for Firefox to actually start a drag.
+			event.dataTransfer.setData('text/plain', String(item.id));
+		}
+	}
+
+	function handleQueueDragOver(event: DragEvent, item: QueueItemType) {
+		if (dragItemId === null) return;
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+		dragOverItemId = item.id;
+	}
+
+	function handleQueueDragLeave(item: QueueItemType) {
+		if (dragOverItemId === item.id) dragOverItemId = null;
+	}
+
+	async function handleQueueDrop(event: DragEvent, target: QueueItemType) {
+		event.preventDefault();
+		const sourceId = dragItemId;
+		dragItemId = null;
+		dragOverItemId = null;
+		if (sourceId === null || sourceId === target.id) return;
+		const fullQueue = $playbackQueue;
+		const targetIndex = fullQueue.findIndex((q) => q.id === target.id);
+		if (targetIndex === -1) return;
+		await moveQueueItem(sourceId, targetIndex);
+	}
+
+	function handleQueueDragEnd() {
+		dragItemId = null;
+		dragOverItemId = null;
+	}
+
+	// ─── Scroll active queue row into view ───────────────────────────────────
+	let lastUserScrollAt = $state(0);
+	let queueListEl: HTMLElement | null = $state(null);
+
+	function handleQueueScroll() {
+		lastUserScrollAt = Date.now();
+	}
+
+	$effect(() => {
+		const id = $currentTrack?.id;
+		if (!id || !queueListEl) return;
+		// Bail if the user scrolled recently — don't yank focus from their browse.
+		if (Date.now() - lastUserScrollAt < 5000) return;
+		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		if (!row) return;
+		const rect = row.getBoundingClientRect();
+		const containerRect = queueListEl.getBoundingClientRect();
+		const offscreen = rect.bottom < containerRect.top || rect.top > containerRect.bottom;
+		if (offscreen) {
+			row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		}
+	});
+
+	// ─── Source attribution for now-playing card ─────────────────────────────
+	function attributionFor(track: { id: number } | null): string | null {
+		if (!track) return null;
+		const item = $playbackQueue.find((q) => q.track.id === track.id);
+		if (!item) return null;
+		const friendly = formatQueueSource(item.source);
+		// "Manual" / generic queue isn't worth surfacing.
+		if (friendly === 'Manual' || friendly === 'Queued') return null;
+		return friendly;
+	}
+	let nowPlayingAttribution = $derived(attributionFor($currentTrack));
+
+	// ─── Clear / Save queue UI state ─────────────────────────────────────────
+	let saveQueueOpen = $state(false);
+	let saveQueueName = $state('');
+	let savePending = $state(false);
+
+	function focusOnMount(node: HTMLElement) {
+		queueMicrotask(() => node.focus());
+	}
+
+	function defaultSaveName(): string {
+		const attr = nowPlayingAttribution;
+		if (attr && $currentTrack) {
+			return `${attr} · ${$currentTrack.title}`;
+		}
+		const now = new Date();
+		return `Saved queue · ${now.toLocaleDateString()}`;
+	}
+
+	function openSaveQueue() {
+		saveQueueName = defaultSaveName();
+		saveQueueOpen = true;
+	}
+
+	async function commitSaveQueue() {
+		const name = saveQueueName.trim();
+		if (!name || savePending) return;
+		savePending = true;
+		try {
+			await saveQueueAsPlaylist(name);
+			saveQueueOpen = false;
+		} finally {
+			savePending = false;
+		}
+	}
+
+	async function handleClearQueue() {
+		const restorable = await clearQueueAction();
+		if (restorable.length > 0) {
+			// Replace the auto-toast with a richer one that has a real undo button.
+			// We can't bind a click handler to the simple text toast, so expose
+			// undo via the keyboard shortcut Z within 6s.
+			const onKey = (event: KeyboardEvent) => {
+				if (isTypingTarget(event.target)) return;
+				if (event.key === 'z' || event.key === 'Z') {
+					event.preventDefault();
+					window.removeEventListener('keydown', onKey);
+					void restoreQueueItems(restorable);
+					showToast(`Restored ${restorable.length} tracks`, 'success');
+				}
+			};
+			window.addEventListener('keydown', onKey);
+			setTimeout(() => window.removeEventListener('keydown', onKey), 6000);
+		}
+	}
+
 	function stopPropagation(event: Event) {
 		event.stopPropagation();
 	}
@@ -592,32 +720,6 @@
 <Toast />
 <CommandPalette />
 
-{#if $playerError}
-	<div class="player-error player-error-toast" role="alert" aria-live="assertive">
-		<span class="player-error-icon" aria-hidden="true">
-			<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
-				<circle cx="8" cy="8" r="6.5" />
-				<path d="M8 4.5v4" stroke-linecap="round" />
-				<circle cx="8" cy="11" r="0.6" fill="currentColor" stroke="none" />
-			</svg>
-		</span>
-		<span class="player-error-message">{$playerError.message}</span>
-		{#if $playerError.retry}
-			<button type="button" class="player-error-retry" onclick={() => void retryPlayerError()}>
-				Retry
-			</button>
-		{/if}
-		<button
-			type="button"
-			class="player-error-close"
-			aria-label="Dismiss"
-			onclick={dismissPlayerError}
-		>
-			×
-		</button>
-	</div>
-{/if}
-
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
@@ -743,12 +845,15 @@
 					{:else}
 						<p class="np-album">{$currentTrack?.album_title ?? 'Playback controls stay docked here.'}</p>
 					{/if}
+					{#if nowPlayingAttribution}
+						<p class="np-source">{nowPlayingAttribution}</p>
+					{/if}
 					{#if formatStreamDetail($currentStreamDisplay)}
 						<p class="np-stream-detail">{formatStreamDetail($currentStreamDisplay)}</p>
 					{/if}
 				</div>
 
-				<StateBadge label={playerState} tone={$currentTrack ? 'active' : 'muted'} compact={true} />
+				<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={$currentTrack ? 'active' : 'muted'} compact={true} />
 			</div>
 
 			<div class="np-progress">
@@ -768,7 +873,7 @@
 					/>
 				</div>
 
-				<div class="np-times">
+				<div class="np-times" class:scrubbing={isScrubbing}>
 					<span>{formatDuration(scrubPosition)}</span>
 					<span>{formatDuration($currentTrack?.duration_ms ?? 0)}</span>
 				</div>
@@ -787,14 +892,14 @@
 				</button>
 				<button
 					class:active={$shuffleMode !== 'off'}
-					class="tp-btn tp-shuffle-btn"
+					class="tp-btn tp-mode-btn"
 					title={shuffleLabels[$shuffleMode]}
 					aria-label={shuffleLabels[$shuffleMode]}
 					onclick={() => void cyclePlayerShuffleMode()}
 				>
-					<span class="tp-shuffle-icon">{shuffleIcons[$shuffleMode]}</span>
+					{shuffleIcons[$shuffleMode]}
 					{#if $shuffleMode !== 'off'}
-						<span class="tp-shuffle-mode">{shuffleModeNames[$shuffleMode]}</span>
+						<span class="tp-shuffle-mode tp-mode-label">{shuffleModeNames[$shuffleMode]}</span>
 					{/if}
 				</button>
 				<button class="tp-btn" onclick={() => void playPreviousTrack()} aria-label="Previous">⏮</button>
@@ -804,12 +909,15 @@
 				<button class="tp-btn" onclick={() => void playNextTrack()} aria-label="Next">⏭</button>
 				<button
 					class:active={$repeatMode !== 'off'}
-					class="tp-btn"
+					class="tp-btn tp-mode-btn"
 					title={repeatLabels[$repeatMode]}
 					aria-label={repeatLabels[$repeatMode]}
 					onclick={() => void cyclePlayerRepeatMode()}
 				>
 					{repeatIcons[$repeatMode]}
+					{#if $repeatMode !== 'off'}
+						<span class="tp-repeat-mode tp-mode-label">{repeatModeNames[$repeatMode]}</span>
+					{/if}
 				</button>
 				<button
 					class="tp-btn"
@@ -821,6 +929,14 @@
 			</div>
 
 			<div class="np-controls">
+				<button
+					class="np-mute-btn"
+					type="button"
+					title={$volume === 0 ? 'Unmute' : 'Mute'}
+					aria-label={$volume === 0 ? 'Unmute' : 'Mute'}
+					aria-pressed={$volume === 0}
+					onclick={() => void toggleMute()}
+				>{$volume === 0 ? '🔇' : '🔊'}</button>
 				<label class="volume-control">
 					<span>Vol</span>
 					<input
@@ -841,6 +957,9 @@
 
 			</div>
 
+			{#if $playerError}
+				<p class="player-error">{$playerError}</p>
+			{/if}
 		</div>
 
 		<section class="queue-section">
@@ -869,23 +988,76 @@
 							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
 						</svg>
 					</button>
+					<button
+						class="queue-save-btn"
+						type="button"
+						title="Save queue as playlist"
+						aria-label="Save queue as playlist"
+						onclick={openSaveQueue}
+						disabled={upcomingQueue.length === 0 && !$currentTrack}
+					>Save</button>
+					<button
+						class="queue-clear-btn"
+						type="button"
+						title="Clear all upcoming tracks"
+						aria-label="Clear queue"
+						onclick={() => void handleClearQueue()}
+						disabled={upcomingQueue.length === 0}
+					>Clear</button>
 					<span class="queue-count">{Math.min(upcomingQueue.length, 40)}</span>
 				</div>
 			</div>
 
+			{#if saveQueueOpen}
+				<form
+					class="queue-save-form"
+					onsubmit={(event) => {
+						event.preventDefault();
+						void commitSaveQueue();
+					}}
+				>
+					<input
+						class="queue-save-input"
+						type="text"
+						placeholder="Playlist name"
+						bind:value={saveQueueName}
+						aria-label="Playlist name"
+						use:focusOnMount
+					/>
+					<button class="queue-save-confirm" type="submit" disabled={savePending || !saveQueueName.trim()}>
+						{savePending ? '…' : 'Save'}
+					</button>
+					<button
+						class="queue-save-cancel"
+						type="button"
+						onclick={() => { saveQueueOpen = false; }}
+					>Cancel</button>
+				</form>
+			{/if}
+
 			{#if upcomingQueue.length > 0}
-				<div class="queue-list">
+				<div class="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						<div
 							class:active={$currentTrack?.id === item.track.id}
+							class:dragging={dragItemId === item.id}
+							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
 							class="queue-row"
 							role="button"
 							tabindex="0"
+							draggable={true}
+							data-track-id={item.track.id}
 							onclick={() => void handleQueueTrackPlay(item.track.id)}
 							onkeydown={(event) => handleQueueTrackKeydown(item.track.id, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
+							ondragstart={(event) => handleQueueDragStart(event, item)}
+							ondragover={(event) => handleQueueDragOver(event, item)}
+							ondragleave={() => handleQueueDragLeave(item)}
+							ondrop={(event) => void handleQueueDrop(event, item)}
+							ondragend={handleQueueDragEnd}
 						>
+							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if item.track.artwork_url}
 									<img class="queue-art" src={item.track.artwork_url} alt="" />
@@ -905,9 +1077,6 @@
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-								{#if $radioReasons[item.track.id]}
-									<span class="queue-reason" title={$radioReasons[item.track.id]}>{$radioReasons[item.track.id]}</span>
 								{/if}
 							</div>
 
@@ -1232,9 +1401,6 @@
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-								{#if $radioReasons[item.track.id]}
-									<span class="queue-reason" title={$radioReasons[item.track.id]}>{$radioReasons[item.track.id]}</span>
 								{/if}
 							</div>
 							<div class="queue-side">
@@ -1634,6 +1800,20 @@
 		letter-spacing: -0.02em;
 	}
 
+	/* Marquee on hover when the title overflows. text-overflow:clip drops the
+	   ellipsis on hover, then a slide animation scrolls the full title back
+	   and forth. Pure CSS — relies on the parent clipping the overflow. */
+	.np-title:hover {
+		text-overflow: clip;
+		animation: np-title-marquee 9s ease-in-out infinite;
+	}
+
+	@keyframes np-title-marquee {
+		0%, 15% { transform: translateX(0); }
+		50%, 60% { transform: translateX(calc(-1 * (100% - 220px))); }
+		95%, 100% { transform: translateX(0); }
+	}
+
 	.np-artist {
 		color: var(--text-primary);
 		font-size: 0.9rem;
@@ -1651,6 +1831,17 @@
 		font-variant-numeric: tabular-nums;
 		letter-spacing: 0.02em;
 		margin-top: 0.1rem;
+	}
+
+	.np-source {
+		font-size: 0.72rem;
+		color: var(--text-secondary);
+		opacity: 0.75;
+		letter-spacing: 0.02em;
+		margin-top: 0.1rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	a.np-link {
@@ -1729,6 +1920,27 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	.np-times.scrubbing span:first-child {
+		color: var(--accent-strong, var(--accent));
+		font-weight: 600;
+	}
+
+	.tp-mode-btn {
+		position: relative;
+		min-width: 36px;
+		width: auto;
+		padding: 0 8px;
+		gap: 4px;
+	}
+
+	.tp-mode-label {
+		font-size: 0.62rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--accent-strong, var(--accent));
+		opacity: 0.9;
+	}
+
 	.transport {
 		display: flex;
 		align-items: center;
@@ -1764,31 +1976,6 @@
 		border-color: var(--accent-line);
 		color: var(--accent-strong);
 		box-shadow: 0 0 14px color-mix(in srgb, var(--accent-glow) 70%, transparent);
-	}
-
-	.tp-shuffle-btn {
-		width: auto;
-		min-width: 36px;
-		padding: 0 10px;
-		gap: 6px;
-		grid-auto-flow: column;
-	}
-
-	.tp-shuffle-icon {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.tp-shuffle-mode {
-		font-size: 0.68rem;
-		color: var(--text-secondary);
-		text-transform: lowercase;
-		letter-spacing: 0.02em;
-	}
-
-	.tp-btn.active .tp-shuffle-mode {
-		color: var(--accent-strong);
 	}
 
 	.tp-like-btn {
@@ -1832,6 +2019,32 @@
 		gap: 12px;
 	}
 
+	.np-mute-btn {
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
+		color: var(--text-primary);
+		font-size: 14px;
+		flex-shrink: 0;
+		cursor: pointer;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
+	}
+
+	.np-mute-btn:hover {
+		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 82%, transparent);
+	}
+
+	.np-mute-btn[aria-pressed='true'] {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
 	.volume-control {
 		flex: 1;
 		display: flex;
@@ -1870,80 +2083,6 @@
 		border: 1px solid color-mix(in srgb, var(--state-error) 24%, transparent);
 		color: var(--state-error);
 		font-size: 0.78rem;
-	}
-
-	.player-error-toast {
-		position: fixed;
-		top: 24px;
-		right: 24px;
-		left: auto;
-		z-index: 1300;
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		min-width: 280px;
-		max-width: 420px;
-		padding: 12px 14px;
-		border-radius: var(--radius-md, 14px);
-		background: color-mix(in srgb, var(--bg-elevated) 88%, var(--state-error) 12%);
-		border: 1px solid color-mix(in srgb, var(--state-error) 38%, transparent);
-		color: var(--text-primary);
-		font-size: 0.82rem;
-		font-weight: 500;
-		backdrop-filter: blur(18px) saturate(140%);
-		-webkit-backdrop-filter: blur(18px) saturate(140%);
-		box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.55),
-			0 0 0 1px color-mix(in srgb, var(--state-error) 18%, transparent) inset;
-	}
-	.player-error-icon {
-		flex-shrink: 0;
-		display: grid;
-		place-items: center;
-		width: 22px;
-		height: 22px;
-		color: var(--state-error);
-	}
-	.player-error-message {
-		flex: 1;
-		min-width: 0;
-		line-height: 1.35;
-	}
-	.player-error-retry {
-		flex-shrink: 0;
-		padding: 5px 12px;
-		border-radius: 999px;
-		border: 1px solid color-mix(in srgb, var(--state-error) 50%, transparent);
-		background: color-mix(in srgb, var(--state-error) 14%, transparent);
-		color: var(--state-error);
-		font-family: inherit;
-		font-size: 0.78rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: background 120ms ease, border-color 120ms ease;
-	}
-	.player-error-retry:hover {
-		background: color-mix(in srgb, var(--state-error) 22%, transparent);
-		border-color: color-mix(in srgb, var(--state-error) 70%, transparent);
-	}
-	.player-error-close {
-		flex-shrink: 0;
-		width: 22px;
-		height: 22px;
-		display: grid;
-		place-items: center;
-		border-radius: 50%;
-		border: none;
-		background: transparent;
-		color: var(--text-muted, currentColor);
-		font-size: 1.05rem;
-		line-height: 1;
-		cursor: pointer;
-		opacity: 0.7;
-		transition: opacity 120ms ease, background 120ms ease;
-	}
-	.player-error-close:hover {
-		opacity: 1;
-		background: color-mix(in srgb, var(--text-primary) 8%, transparent);
 	}
 
 	.queue-section {
@@ -2026,6 +2165,85 @@
 		box-shadow: 0 0 10px var(--accent), 0 0 0 1px var(--accent-line);
 	}
 
+	.queue-save-btn,
+	.queue-clear-btn {
+		height: 26px;
+		padding: 0 10px;
+		border-radius: 999px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: 0.74rem;
+		cursor: pointer;
+		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+	}
+
+	.queue-save-btn:hover:not(:disabled),
+	.queue-clear-btn:hover:not(:disabled) {
+		background: var(--bg-hover);
+		border-color: var(--border-strong);
+		color: var(--text-primary);
+	}
+
+	.queue-save-btn:disabled,
+	.queue-clear-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.queue-clear-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--state-error) 14%, transparent);
+		border-color: color-mix(in srgb, var(--state-error) 36%, transparent);
+		color: var(--state-error);
+	}
+
+	.queue-save-form {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 0 10px;
+	}
+
+	.queue-save-input {
+		flex: 1;
+		min-width: 0;
+		padding: 6px 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-surface);
+		color: var(--text-primary);
+		font-size: 0.78rem;
+	}
+
+	.queue-save-input:focus {
+		outline: none;
+		border-color: var(--accent-line);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-glow) 40%, transparent);
+	}
+
+	.queue-save-confirm,
+	.queue-save-cancel {
+		height: 28px;
+		padding: 0 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-surface);
+		color: var(--text-primary);
+		font-size: 0.74rem;
+		cursor: pointer;
+	}
+
+	.queue-save-confirm {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
+	.queue-save-confirm:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
 	.queue-eyebrow {
 		color: var(--text-tertiary);
 		font-size: 0.72rem;
@@ -2084,6 +2302,38 @@
 
 	.queue-row.active .queue-title {
 		color: var(--accent-strong);
+	}
+
+	.queue-row.dragging {
+		opacity: 0.55;
+	}
+
+	.queue-row.drag-over {
+		border-color: var(--accent-line);
+		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+		box-shadow: 0 -2px 0 var(--accent-strong) inset;
+	}
+
+	.queue-grip {
+		flex-shrink: 0;
+		width: 12px;
+		text-align: center;
+		font-size: 0.78rem;
+		line-height: 1;
+		color: var(--text-tertiary);
+		cursor: grab;
+		opacity: 0;
+		transition: opacity var(--motion-fast);
+		user-select: none;
+	}
+
+	.queue-row:hover .queue-grip,
+	.queue-row:focus-within .queue-grip {
+		opacity: 0.8;
+	}
+
+	.queue-row.dragging .queue-grip {
+		cursor: grabbing;
 	}
 
 	.queue-art-wrap {
@@ -2160,17 +2410,6 @@
 
 	a.queue-artist {
 		cursor: pointer;
-	}
-
-	.queue-reason {
-		color: var(--text-tertiary);
-		font-size: 0.7rem;
-		font-style: italic;
-		line-height: 1.25;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%;
 	}
 
 	a.queue-artist:hover {
