@@ -196,19 +196,45 @@ pub async fn resolve_stream(
         .map_err(|error| StreamResolveError::ManifestDecodeFailed {
             message: error.to_string(),
         })?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).map_err(|error| {
-        StreamResolveError::ManifestParseFailed {
-            message: error.to_string(),
-        }
-    })?;
 
-    let stream_url = manifest
-        .get("urls")
-        .and_then(|urls| urls.as_array())
-        .and_then(|urls| urls.first())
-        .and_then(|url| url.as_str())
-        .ok_or(StreamResolveError::MissingStreamUrl)?
-        .to_string();
+    let manifest_mime = resp
+        .get("manifestMimeType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let stream_url = if manifest_mime.contains("dash+xml") {
+        // MPEG-DASH XML manifest: extract the first <BaseURL> element
+        let manifest_str =
+            std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                StreamResolveError::ManifestParseFailed {
+                    message: format!("DASH manifest is not valid UTF-8: {error}"),
+                }
+            })?;
+        static DASH_URL_RE: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"<BaseURL[^>]*>(https?://[^<]+)</BaseURL>").unwrap()
+            });
+        DASH_URL_RE
+            .captures(manifest_str)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().to_string())
+            .ok_or(StreamResolveError::MissingStreamUrl)?
+    } else {
+        // JSON manifest (application/vnd.tidal.bts or similar)
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| {
+                StreamResolveError::ManifestParseFailed {
+                    message: error.to_string(),
+                }
+            })?;
+        manifest
+            .get("urls")
+            .and_then(|urls| urls.as_array())
+            .and_then(|urls| urls.first())
+            .and_then(|url| url.as_str())
+            .ok_or(StreamResolveError::MissingStreamUrl)?
+            .to_string()
+    };
 
     Ok(StreamInfo {
         url: stream_url,
