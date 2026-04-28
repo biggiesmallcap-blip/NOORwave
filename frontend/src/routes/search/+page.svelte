@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist } from '$lib/api/client'
+  import { goto } from '$app/navigation'
+  import type { Snapshot } from './$types'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type ChartEntry, type TrendingSource } from '$lib/api/client'
+  import TrackRow from '$lib/components/TrackRow.svelte'
+  import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum, playTidalPlaylist } from '$lib/stores/player'
@@ -72,6 +75,36 @@
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
 
+  // Phase 5 — Trending shelf (shown when query is empty)
+  const TRENDING_SOURCE_KEY = 'noor.trending.source'
+  function loadTrendingSource(): TrendingSource {
+    if (typeof localStorage === 'undefined') return 'lastfm'
+    const v = localStorage.getItem(TRENDING_SOURCE_KEY)
+    return v === 'tidal' ? 'tidal' : 'lastfm'
+  }
+  let trending = $state<ChartEntry[]>([])
+  let trendingSource = $state<TrendingSource>(loadTrendingSource())
+  let trendingLoading = $state(false)
+  async function loadTrending() {
+    trendingLoading = true
+    try {
+      const data = await api.getTrending({ source: trendingSource, limit: 25 })
+      trending = data.tracks ?? []
+    } catch {
+      trending = []
+    } finally {
+      trendingLoading = false
+    }
+  }
+  function setTrendingSource(s: TrendingSource) {
+    if (s === trendingSource) return
+    trendingSource = s
+    if (typeof localStorage !== 'undefined') {
+      try { localStorage.setItem(TRENDING_SOURCE_KEY, s) } catch { /* ignore */ }
+    }
+    void loadTrending()
+  }
+
   const parsedQuery = $derived(parseQuery(query))
   const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
 
@@ -91,6 +124,7 @@
       const { playlists } = await api.getPlaylists()
       localPlaylists = playlists
     } catch { /* ignore */ }
+    void loadTrending()
   })
 
   function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
@@ -451,49 +485,50 @@
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
 
-  // ─── Position memory ────────────────────────────────────────────────────
-  // Save the in-flight query + scroll on navigation away. Restore when the
-  // user returns via browser-back (popstate) so they land where they were.
-  const POS_KEY = 'noor_search_position'
-
-  beforeNavigate(() => {
-    if (typeof sessionStorage === 'undefined') return
-    if (!query.trim()) {
-      sessionStorage.removeItem(POS_KEY)
-      return
-    }
-    sessionStorage.setItem(POS_KEY, JSON.stringify({ query, scrollY: window.scrollY }))
-  })
-
+  // ─── Position memory (Phase 5B — SvelteKit snapshot) ─────────────────────
+  // Snapshot binds state to the browser's history entry, so back AND forward
+  // both land where the user left off.
   let pendingRestoreScroll: number | null = null
-
-  afterNavigate((nav) => {
-    if (typeof sessionStorage === 'undefined') return
-    if (nav.type !== 'popstate') return
-    const raw = sessionStorage.getItem(POS_KEY)
-    if (!raw) return
-    try {
-      const saved = JSON.parse(raw) as { query: string; scrollY: number }
-      if (typeof saved.query === 'string' && saved.query) {
-        query = saved.query
-        pendingRestoreScroll = saved.scrollY
-        // Trigger the search; scroll restore happens once results land.
-        onInput()
-      }
-    } catch {
-      /* ignore corrupted state */
-    }
-  })
 
   // Restore scroll once results render so the layout has its final height.
   $effect(() => {
     if (results !== null && pendingRestoreScroll !== null) {
       const target = pendingRestoreScroll
       pendingRestoreScroll = null
-      // Wait one frame for paint.
       requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
     }
   })
+
+  type SearchSnapshot = {
+    query: string
+    filterMode: FilterMode
+    trendingSource: TrendingSource
+    scrollY: number
+  }
+  export const snapshot: Snapshot<SearchSnapshot> = {
+    capture: () => ({
+      query,
+      filterMode,
+      trendingSource,
+      scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+    }),
+    restore: (saved) => {
+      filterMode = saved.filterMode
+      if (saved.trendingSource !== trendingSource) {
+        trendingSource = saved.trendingSource
+        void loadTrending()
+      }
+      if (typeof saved.query === 'string' && saved.query.trim()) {
+        query = saved.query
+        pendingRestoreScroll = saved.scrollY
+        // Re-trigger the search; scroll restore happens once results land.
+        onInput()
+      } else {
+        // No query — restore scroll directly on next frame.
+        requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }))
+      }
+    }
+  }
 
   // C4 — load discovery sections whenever the top result changes
   $effect(() => {
@@ -577,7 +612,51 @@
           {/each}
         </div>
       </section>
-    {:else}
+    {/if}
+
+    <section class="results-section">
+      <div class="trending-head">
+        <h3 class="section-label">Trending</h3>
+        <div class="chip-group" role="tablist" aria-label="Trending source">
+          <button
+            type="button"
+            class="chip"
+            class:active={trendingSource === 'lastfm'}
+            onclick={() => setTrendingSource('lastfm')}
+            role="tab"
+            aria-selected={trendingSource === 'lastfm'}>Last.fm</button>
+          <button
+            type="button"
+            class="chip"
+            class:active={trendingSource === 'tidal'}
+            onclick={() => setTrendingSource('tidal')}
+            role="tab"
+            aria-selected={trendingSource === 'tidal'}>Tidal</button>
+        </div>
+        {#if trendingLoading}
+          <span class="trending-loading">Loading…</span>
+        {/if}
+      </div>
+      {#if trending.length > 0}
+        <div class="trending-list">
+          {#each trending.slice(0, 25) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
+            {#if entry.local_track}
+              <TrackRow track={entry.local_track} index={i} />
+            {:else if entry.tidal_playable}
+              <TidalTrackRow track={entry.tidal_playable} index={i} />
+            {/if}
+          {/each}
+        </div>
+      {:else if !trendingLoading}
+        <p class="search-hint">
+          {trendingSource === 'tidal'
+            ? 'Tidal editorial chart unavailable. Try Last.fm.'
+            : 'Last.fm chart unavailable.'}
+        </p>
+      {/if}
+    </section>
+
+    {#if recent.length === 0 && trending.length === 0}
       <p class="search-hint">Start typing to search Tidal's full catalogue</p>
     {/if}
   {:else if loading}
@@ -1224,6 +1303,47 @@
     letter-spacing: 1.5px;
     color: var(--accent);
     margin-bottom: 14px;
+  }
+  .trending-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .trending-head .section-label { margin-bottom: 0; }
+  .trending-loading {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .chip-group {
+    display: inline-flex;
+    gap: 4px;
+    padding: 2px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+  }
+  .chip {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #888);
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .chip:hover { color: var(--text, #fff); }
+  .chip.active {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text, #fff);
+  }
+  .trending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   /* Artists */
   .artists-row {

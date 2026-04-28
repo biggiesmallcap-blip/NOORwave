@@ -397,6 +397,44 @@ impl TidalClient {
         Ok(self.search_catalog(query, limit).await?.tracks)
     }
 
+    /// Fetch Tidal editorial "Top Tracks" for the user's region.
+    ///
+    /// Tidal's public-ish editorial endpoints (e.g. `featured/{path}/tracks`)
+    /// vary by region and aren't documented for the API surface we use.
+    /// TODO(charts): wire this up once the canonical endpoint is confirmed —
+    /// candidate paths include `pages/explore`, `featured/new/tracks`, and
+    /// `editorial/charts/tracks`. Until then we attempt the most likely
+    /// `pages/genre/all/tracks` shape and return an empty list with a logged
+    /// warning if it fails so the route can fall back to Last.fm.
+    pub async fn get_editorial_top_tracks(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<TidalSearchTrack>> {
+        let url = format!(
+            "{}/pages/genre/all/tracks?countryCode={}&limit={}&deviceType=DESKTOP",
+            TIDAL_API_URL, self.country_code, limit
+        );
+        let payload: serde_json::Value = match self.get_json(&url).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    "TIDAL editorial chart fetch failed (endpoint not confirmed): {}",
+                    err
+                );
+                return Ok(Vec::new());
+            }
+        };
+        let tracks = payload
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(tracks
+            .into_iter()
+            .filter_map(Self::parse_search_track)
+            .collect())
+    }
+
     fn parse_search_track(value: serde_json::Value) -> Option<TidalSearchTrack> {
         let object = value.as_object()?;
         let id = object.get("id")?.as_i64()?;

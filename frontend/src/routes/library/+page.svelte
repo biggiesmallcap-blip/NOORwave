@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { beforeNavigate, afterNavigate } from '$app/navigation';
+	import { get } from 'svelte/store';
+	import type { Snapshot } from './$types';
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
@@ -977,43 +978,10 @@
 		};
 	});
 
-	// ─── Position memory ────────────────────────────────────────────────────
-	// Save the active tab + scroll position on navigation away. Restore when the
-	// user returns via browser-back (popstate) so they land where they were.
-	const POS_KEY = 'noor-library-scroll'
-
-	beforeNavigate(() => {
-		if (typeof sessionStorage === 'undefined') return
-		sessionStorage.setItem(
-			POS_KEY,
-			JSON.stringify({
-				activeTab,
-				expandedArtistId,
-				scrollY: window.scrollY
-			})
-		)
-	})
-
+	// ─── Position memory (Phase 5B — SvelteKit snapshot) ─────────────────────
+	// Snapshot binds state to the browser's history entry. Multi-selection is
+	// active-task state and is intentionally not captured (resets on nav).
 	let pendingRestoreScroll = $state<number | null>(null)
-
-	afterNavigate((nav) => {
-		if (typeof sessionStorage === 'undefined') return
-		if (nav.type !== 'popstate') return
-		const raw = sessionStorage.getItem(POS_KEY)
-		if (!raw) return
-		try {
-			const saved = JSON.parse(raw) as { activeTab: string; expandedArtistId: number | null; scrollY: number }
-			const validTabs = ['all', 'tracks', 'albums', 'artists'] as const
-			const savedTab = saved.activeTab
-			if (typeof savedTab === 'string' && (validTabs as readonly string[]).includes(savedTab)) {
-				activeTab = savedTab as typeof activeTab
-				expandedArtistId = saved.expandedArtistId
-				if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
-			}
-		} catch {
-			/* ignore corrupted state */
-		}
-	})
 
 	$effect(() => {
 		if (pendingRestoreScroll !== null) {
@@ -1022,6 +990,42 @@
 			requestAnimationFrame(() => window.scrollTo({ top: target, behavior: 'auto' }))
 		}
 	})
+
+	type LibrarySnapshot = {
+		activeTab: typeof activeTab
+		searchQuery: string
+		sortBy: string
+		sortDir: 'asc' | 'desc'
+		viewMode: 'grid' | 'list'
+		activeDecade: number | null
+		expandedArtistId: number | null
+		scrollY: number
+	}
+	export const snapshot: Snapshot<LibrarySnapshot> = {
+		capture: () => ({
+			activeTab,
+			searchQuery: get(searchQuery),
+			sortBy: get(sortBy),
+			sortDir: get(sortDir),
+			viewMode: get(viewMode),
+			activeDecade,
+			expandedArtistId,
+			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+		}),
+		restore: (saved) => {
+			const validTabs = ['all', 'tracks', 'albums', 'artists'] as const
+			if ((validTabs as readonly string[]).includes(saved.activeTab)) {
+				activeTab = saved.activeTab as typeof activeTab
+			}
+			if (typeof saved.searchQuery === 'string') searchQuery.set(saved.searchQuery)
+			if (typeof saved.sortBy === 'string') sortBy.set(saved.sortBy)
+			if (saved.sortDir === 'asc' || saved.sortDir === 'desc') sortDir.set(saved.sortDir)
+			if (saved.viewMode === 'grid' || saved.viewMode === 'list') viewMode.set(saved.viewMode)
+			activeDecade = saved.activeDecade
+			expandedArtistId = saved.expandedArtistId
+			if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
+		}
+	}
 
 	// Reset cursor when switching tabs or changing the search query.
 	$effect(() => {

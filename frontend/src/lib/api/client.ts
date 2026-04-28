@@ -161,6 +161,22 @@ export interface TidalPlayable {
 	is_in_library?: boolean;
 }
 
+/** Phase 5 — entry returned by `GET /api/charts`.
+ *
+ * Either `local_track` (when the chart entry resolved to a library track) or
+ * `tidal_playable` (when it didn't) is set; the frontend picks the row
+ * component accordingly. `image_url` is a fallback artwork preview from the
+ * source API and is only useful when neither resolution gave us artwork.
+ */
+export interface ChartEntry {
+	local_track: Track | null;
+	tidal_playable: TidalPlayable | null;
+	image_url: string | null;
+	source: 'lastfm' | 'tidal';
+}
+
+export type TrendingSource = 'lastfm' | 'tidal';
+
 export interface Album {
 	id: number;
 	tidal_id: number | null;
@@ -1012,6 +1028,17 @@ export const api = {
 			top_limit: String(topLimit),
 			days: String(days),
 		});
+	},
+
+	getTrending(opts: { source?: TrendingSource; limit?: number; country?: string } = {}) {
+		const params: Record<string, string> = {};
+		if (opts.source) params.source = opts.source;
+		if (opts.limit != null) params.limit = String(opts.limit);
+		if (opts.country) params.country = opts.country;
+		return fetchApi<{ source: string; limit: number; country: string | null; tracks: ChartEntry[] }>(
+			'/api/charts',
+			params,
+		);
 	},
 
 	getRecentListens(limit = 25) {

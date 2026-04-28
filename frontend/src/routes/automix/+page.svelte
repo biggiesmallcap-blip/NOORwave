@@ -24,8 +24,17 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import type { Snapshot } from './$types';
 
 	let saving = $state(false);
+
+	// Phase 5B — back/forward state via SvelteKit snapshot.
+	export const snapshot: Snapshot<{ scrollY: number }> = {
+		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
+		restore: (saved) => {
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 	let draftCrossfade = $state(0);
 	let errorMsg = $state('');
 

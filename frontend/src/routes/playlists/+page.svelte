@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import type { Snapshot } from './$types';
 	import {
 		api,
 		type Playlist,
@@ -166,6 +167,23 @@
 	let errorById = $state<Record<number, string | null>>({});
 	let isLoading = $state(true);
 	let loadError = $state('');
+
+	// Phase 5B — back/forward state via SvelteKit snapshot.
+	export const snapshot: Snapshot<{
+		expandedIds: number[];
+		scrollY: number;
+	}> = {
+		capture: () => ({
+			expandedIds: [...expandedPlaylistIds],
+			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+		}),
+		restore: (saved) => {
+			if (Array.isArray(saved.expandedIds)) {
+				expandedPlaylistIds = new Set(saved.expandedIds);
+			}
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 
 	// ─── Editor state ─────────────────────────────────────────────────────────
 	let editorOpen = $state(false);

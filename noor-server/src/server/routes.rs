@@ -29,8 +29,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use rusqlite::{params, OptionalExtension};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
@@ -405,6 +406,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/picks", get(get_home_picks))
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
+        // Trending / charts (Phase 5)
+        .route("/api/charts", get(get_charts))
         // Server auth management
         .route("/api/server/token", get(get_server_token_handler))
         .route("/api/server/token/regenerate", post(regenerate_server_token_handler))
@@ -8466,6 +8469,377 @@ async fn reanalyze_stale_tracks(
             "Analysis actor not configured. Stale rows cleared but no scan queued."
         }
     })))
+}
+
+// ─── Trending / Charts (Phase 5) ────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ChartParams {
+    /// "lastfm" (default) or "tidal".
+    source: Option<String>,
+    /// Max entries to return (clamped 1..=100).
+    limit: Option<u32>,
+    /// Optional country (Last.fm only): full English name e.g. "United States".
+    country: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChartTidalPlayable {
+    tidal_id: i64,
+    title: String,
+    artist_name: Option<String>,
+    artist_tidal_id: Option<i64>,
+    album_title: Option<String>,
+    artwork_url: Option<String>,
+    duration_ms: Option<i64>,
+    track_id: Option<i64>,
+    is_in_library: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChartEntryDto {
+    /// Local library Track when the chart entry was resolved to a known track.
+    /// Frontend renders these via `<TrackRow>` and gets full menu support.
+    local_track: Option<crate::db::models::Track>,
+    /// Otherwise a TidalPlayable-shaped DTO that the frontend renders via
+    /// `<TidalTrackRow>`. May be `None` only when both resolutions failed (rare).
+    tidal_playable: Option<ChartTidalPlayable>,
+    /// Optional preview image (mostly for Last.fm entries with no Tidal match).
+    image_url: Option<String>,
+    /// Source-tagged for the frontend ("lastfm" | "tidal").
+    source: String,
+}
+
+/// Cached chart payload with insertion timestamp.
+struct ChartCacheEntry {
+    inserted_at: Instant,
+    payload: serde_json::Value,
+}
+
+fn chart_cache() -> &'static StdMutex<HashMap<String, ChartCacheEntry>> {
+    static CACHE: OnceLock<StdMutex<HashMap<String, ChartCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Charts don't move minute-to-minute and Last.fm rate-limits aggressively.
+/// 2-hour TTL is a comfortable middle ground (within the 1–6 h spec).
+const CHART_CACHE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+
+fn chart_cache_get(key: &str) -> Option<serde_json::Value> {
+    let cache = chart_cache().lock().ok()?;
+    let entry = cache.get(key)?;
+    if entry.inserted_at.elapsed() > CHART_CACHE_TTL {
+        return None;
+    }
+    Some(entry.payload.clone())
+}
+
+fn chart_cache_put(key: String, payload: serde_json::Value) {
+    if let Ok(mut cache) = chart_cache().lock() {
+        // Bound cache size to avoid unbounded growth from arbitrary
+        // source/country/limit combos. 32 entries is plenty.
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(key, ChartCacheEntry { inserted_at: Instant::now(), payload });
+    }
+}
+
+async fn get_charts(
+    State(state): State<SharedState>,
+    Query(params): Query<ChartParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let source = params
+        .source
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "lastfm".to_string());
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let country_norm = params
+        .country
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // Cache key: source + limit + country.
+    let cache_key = format!(
+        "{}|{}|{}",
+        source,
+        limit,
+        country_norm.as_deref().unwrap_or("")
+    );
+    if let Some(cached) = chart_cache_get(&cache_key) {
+        return Ok(Json(cached));
+    }
+
+    let entries: Vec<ChartEntryDto> = match source.as_str() {
+        "tidal" => fetch_tidal_chart(&state, limit as i32).await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("tidal chart: {e}") })),
+            )
+        })?,
+        _ => fetch_lastfm_chart(&state, limit, country_norm.as_deref())
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("lastfm chart: {e}") })),
+                )
+            })?,
+    };
+
+    let payload = json!({
+        "source": source,
+        "limit": limit,
+        "country": country_norm,
+        "tracks": entries,
+    });
+    chart_cache_put(cache_key, payload.clone());
+    Ok(Json(payload))
+}
+
+async fn fetch_lastfm_chart(
+    state: &SharedState,
+    limit: u32,
+    country: Option<&str>,
+) -> anyhow::Result<Vec<ChartEntryDto>> {
+    let (http, db) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.db.clone())
+    };
+    let client = LastFmClient::load(http, &db)
+        .ok_or_else(|| anyhow::anyhow!("Last.fm API key not configured"))?;
+    let tracks = client.get_top_chart(limit, country).await?;
+
+    // Resolve each (artist, title) to a local library track when present.
+    // We do this in a single DB call by collecting all (artist, title) pairs
+    // and matching case-insensitively.
+    let pairs: Vec<(String, String)> = tracks
+        .iter()
+        .map(|t| (t.artist.clone(), t.title.clone()))
+        .collect();
+    let local_map = resolve_chart_pairs_to_local(&db, &pairs).unwrap_or_default();
+
+    let mut out = Vec::with_capacity(tracks.len());
+    for t in tracks {
+        let key = format!(
+            "{}\u{0001}{}",
+            t.artist.to_ascii_lowercase(),
+            t.title.to_ascii_lowercase()
+        );
+        let local_track = local_map.get(&key).cloned();
+        let tidal_playable = if local_track.is_none() {
+            // No local match; expose a TidalPlayable-shaped placeholder. The
+            // frontend will resolve to a real Tidal id via search if the user
+            // clicks play (existing ephemeral-play flow does this).
+            Some(ChartTidalPlayable {
+                tidal_id: 0,
+                title: t.title.clone(),
+                artist_name: Some(t.artist.clone()),
+                artist_tidal_id: None,
+                album_title: None,
+                artwork_url: t.image_url.clone(),
+                duration_ms: None,
+                track_id: None,
+                is_in_library: false,
+            })
+        } else {
+            None
+        };
+        out.push(ChartEntryDto {
+            local_track,
+            tidal_playable,
+            image_url: t.image_url,
+            source: "lastfm".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+async fn fetch_tidal_chart(
+    state: &SharedState,
+    limit: i32,
+) -> anyhow::Result<Vec<ChartEntryDto>> {
+    let (tokens_opt, http, db) = {
+        let s = state.read().await;
+        (s.tidal_tokens.clone(), s.http_client.clone(), s.db.clone())
+    };
+    let persisted = load_persisted_tidal_tokens(state).await?;
+    let tokens = tokens_opt.or(persisted);
+    let Some(tokens) = tokens else {
+        // Tidal not connected; degrade to empty list rather than failing.
+        tracing::warn!("Tidal chart requested but Tidal not connected");
+        return Ok(Vec::new());
+    };
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let tracks = match client.get_editorial_top_tracks(limit).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Tidal editorial chart failed: {}", e);
+            Vec::new()
+        }
+    };
+    if tracks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _ = http; // currently unused; reserved for future fallback paths
+
+    // Resolve to local tracks via tidal_id batch lookup.
+    let tidal_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+    let known: HashMap<i64, i64> = db
+        .with_conn(|conn| queries::get_tidal_track_local_ids(conn, &tidal_ids))
+        .unwrap_or_default();
+
+    // Pull full Track rows for any local matches.
+    let local_ids: Vec<i64> = known.values().copied().collect();
+    let local_tracks: HashMap<i64, crate::db::models::Track> = db
+        .with_conn(|conn| {
+            let mut map: HashMap<i64, crate::db::models::Track> = HashMap::new();
+            if local_ids.is_empty() {
+                return Ok(map);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.title, t.artist_id, a.name as artist_name, t.album_id, al.title as album_title,
+                        t.disc_number, t.track_number, t.duration_ms, t.isrc, t.tidal_id, t.ytmusic_id,
+                        t.soundcloud_id, t.best_quality, t.best_source, t.fidelity_score, t.is_favorite,
+                        t.play_count, t.last_played_at, t.date_added, t.source, t.artwork_url
+                 FROM tracks t
+                 LEFT JOIN artists a ON t.artist_id = a.id
+                 LEFT JOIN albums al ON t.album_id = al.id
+                 WHERE t.id = ?1
+                 LIMIT 1",
+            )?;
+            for id in &local_ids {
+                let mut rows = stmt.query(rusqlite::params![id])?;
+                if let Some(row) = rows.next()? {
+                    let track = crate::db::models::Track {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        artist_id: row.get(2)?,
+                        artist_name: row.get(3)?,
+                        album_id: row.get(4)?,
+                        album_title: row.get(5)?,
+                        disc_number: row.get(6)?,
+                        track_number: row.get(7)?,
+                        duration_ms: row.get(8)?,
+                        isrc: row.get(9)?,
+                        tidal_id: row.get(10)?,
+                        ytmusic_id: row.get(11)?,
+                        soundcloud_id: row.get(12)?,
+                        best_quality: row.get(13)?,
+                        best_source: row.get(14)?,
+                        fidelity_score: row.get(15)?,
+                        is_favorite: row.get::<_, i64>(16)? != 0,
+                        play_count: row.get(17)?,
+                        last_played_at: row.get(18)?,
+                        date_added: row.get(19)?,
+                        source: row.get(20)?,
+                        artwork_url: row.get(21)?,
+                    };
+                    map.insert(*id, track);
+                }
+            }
+            Ok(map)
+        })
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(tracks.len());
+    for t in tracks {
+        let local_track = known
+            .get(&t.id)
+            .and_then(|lid| local_tracks.get(lid))
+            .cloned();
+        let tidal_playable = if local_track.is_none() {
+            Some(ChartTidalPlayable {
+                tidal_id: t.id,
+                title: t.title.clone(),
+                artist_name: t.artist_name.clone(),
+                artist_tidal_id: t.artist_id,
+                album_title: t.album_title.clone(),
+                artwork_url: t.artwork_url.clone(),
+                duration_ms: Some(t.duration * 1000),
+                track_id: None,
+                is_in_library: false,
+            })
+        } else {
+            None
+        };
+        out.push(ChartEntryDto {
+            image_url: t.artwork_url.clone(),
+            local_track,
+            tidal_playable,
+            source: "tidal".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Resolve (artist, title) pairs to local Track rows, case-insensitively.
+/// Uses a single SQL query with a fold-table; falls back to empty map on error.
+fn resolve_chart_pairs_to_local(
+    db: &crate::db::Database,
+    pairs: &[(String, String)],
+) -> anyhow::Result<HashMap<String, crate::db::models::Track>> {
+    if pairs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::new();
+    db.with_conn(|conn| {
+        // Match by lower(artist_name) + lower(title). Library is small enough
+        // that one round-trip per pair is acceptable; a single OR-chained
+        // query also works but is harder to map back to pairs.
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.title, t.artist_id, a.name as artist_name, t.album_id, al.title as album_title,
+                    t.disc_number, t.track_number, t.duration_ms, t.isrc, t.tidal_id, t.ytmusic_id,
+                    t.soundcloud_id, t.best_quality, t.best_source, t.fidelity_score, t.is_favorite,
+                    t.play_count, t.last_played_at, t.date_added, t.source, t.artwork_url
+             FROM tracks t
+             LEFT JOIN artists a ON t.artist_id = a.id
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE LOWER(a.name) = LOWER(?1) AND LOWER(t.title) = LOWER(?2)
+             LIMIT 1",
+        )?;
+        for (artist, title) in pairs {
+            let mut rows = stmt.query(rusqlite::params![artist, title])?;
+            if let Some(row) = rows.next()? {
+                let track = crate::db::models::Track {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    artist_id: row.get(2)?,
+                    artist_name: row.get(3)?,
+                    album_id: row.get(4)?,
+                    album_title: row.get(5)?,
+                    disc_number: row.get(6)?,
+                    track_number: row.get(7)?,
+                    duration_ms: row.get(8)?,
+                    isrc: row.get(9)?,
+                    tidal_id: row.get(10)?,
+                    ytmusic_id: row.get(11)?,
+                    soundcloud_id: row.get(12)?,
+                    best_quality: row.get(13)?,
+                    best_source: row.get(14)?,
+                    fidelity_score: row.get(15)?,
+                    is_favorite: row.get::<_, i64>(16)? != 0,
+                    play_count: row.get(17)?,
+                    last_played_at: row.get(18)?,
+                    date_added: row.get(19)?,
+                    source: row.get(20)?,
+                    artwork_url: row.get(21)?,
+                };
+                let key = format!(
+                    "{}\u{0001}{}",
+                    artist.to_ascii_lowercase(),
+                    title.to_ascii_lowercase()
+                );
+                out.insert(key, track);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 

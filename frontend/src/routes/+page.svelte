@@ -1,17 +1,37 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import type { Snapshot } from './$types';
 	import {
 		api,
 		getApiBase,
 		authFetch,
 		type RSSFeedItem,
-		type HomePickTrack
+		type HomePickTrack,
+		type ChartEntry,
+		type TrendingSource
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
 	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import TrackRow from '$lib/components/TrackRow.svelte';
+	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
+
+	const TRENDING_SOURCE_KEY = 'noor.trending.source';
+	function loadTrendingSource(): TrendingSource {
+		if (typeof localStorage === 'undefined') return 'lastfm';
+		const v = localStorage.getItem(TRENDING_SOURCE_KEY);
+		return v === 'tidal' ? 'tidal' : 'lastfm';
+	}
+	function saveTrendingSource(s: TrendingSource) {
+		if (typeof localStorage === 'undefined') return;
+		try {
+			localStorage.setItem(TRENDING_SOURCE_KEY, s);
+		} catch {
+			/* ignore */
+		}
+	}
 
 	// Home page data
 	let releases = $state<RSSFeedItem[]>([]);
@@ -19,6 +39,31 @@
 	let genrePicks = $state<HomePickTrack[]>([]);
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
+
+	// Trending shelf (Phase 5)
+	let trending = $state<ChartEntry[]>([]);
+	let trendingSource = $state<TrendingSource>(loadTrendingSource());
+	let trendingLoading = $state(false);
+
+	async function loadTrending() {
+		trendingLoading = true;
+		try {
+			const data = await api.getTrending({ source: trendingSource, limit: 12 });
+			trending = data.tracks ?? [];
+		} catch (e) {
+			console.error('Failed to load trending:', e);
+			trending = [];
+		} finally {
+			trendingLoading = false;
+		}
+	}
+
+	function setTrendingSource(s: TrendingSource) {
+		if (s === trendingSource) return;
+		trendingSource = s;
+		saveTrendingSource(s);
+		void loadTrending();
+	}
 
 	// Status data
 	let status = $state<{ name: string; version: string; status: string } | null>(null);
@@ -66,7 +111,18 @@
 		loadPicks();
 		loadArticles();
 		loadNews();
+		void loadTrending();
 	}
+
+	// Phase 5B — back/forward state via SvelteKit snapshot
+	export const snapshot: Snapshot<{ scrollY: number }> = {
+		capture: () => ({
+			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+		}),
+		restore: (saved) => {
+			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
+		}
+	};
 
 	async function loadReleases() {
 		sectionsLoading.releases = true;
@@ -278,46 +334,51 @@
 			{/if}
 		</section>
 
-		<!-- Daily Picks Section -->
+		<!-- Trending Section (Phase 5) -->
 		<section class="discovery-section">
 			<div class="section-header">
 				<div class="section-title-group">
-					<p class="eyebrow">Curated for you</p>
-					<h2>Daily Picks</h2>
+					<p class="eyebrow">What's hot right now</p>
+					<h2>Trending</h2>
 				</div>
-				{#if sectionsLoading.picks}
-					<span class="loading-indicator">Loading...</span>
-				{/if}
+				<div class="trending-controls">
+					<div class="chip-group" role="tablist" aria-label="Trending source">
+						<button
+							type="button"
+							class="chip"
+							class:active={trendingSource === 'lastfm'}
+							onclick={() => setTrendingSource('lastfm')}
+							role="tab"
+							aria-selected={trendingSource === 'lastfm'}>Last.fm</button
+						>
+						<button
+							type="button"
+							class="chip"
+							class:active={trendingSource === 'tidal'}
+							onclick={() => setTrendingSource('tidal')}
+							role="tab"
+							aria-selected={trendingSource === 'tidal'}>Tidal</button
+						>
+					</div>
+					{#if trendingLoading}
+						<span class="loading-indicator">Loading...</span>
+					{/if}
+				</div>
 			</div>
 
-			{#if picks.length > 0 || genrePicks.length > 0}
+			{#if trending.length > 0}
 				<div class="picks-grid">
-					{#if picks.length > 0}
-						<div class="picks-subsection">
-							<h3 class="subsection-title">Top Picks</h3>
-							<div class="track-list">
-								{#each picks.slice(0, 8) as pick, i (`${pick.id}-${i}`)}
-									<div class="track-row glass-tile" role="button" tabindex="0" onclick={() => startSongRadio(pick.id)} onkeydown={(e) => e.key === 'Enter' && startSongRadio(pick.id)}>
-										{#if pick.artwork_url}
-											<img class="track-art" src={pick.artwork_url} alt="" />
-										{:else}
-											<div class="track-art placeholder">♫</div>
-										{/if}
-										<div class="track-meta">
-											<p class="track-title">{pick.title}</p>
-											<span class="track-artist">{pick.artist_name ?? 'Unknown artist'}</span>
-										</div>
-										<div class="track-stats">
-											<span class="stat">{pick.play_count} plays</span>
-											{#if pick.duration_ms}
-												<span class="stat">{formatDuration(pick.duration_ms)}</span>
-											{/if}
-										</div>
-									</div>
-								{/each}
-							</div>
+					<div class="picks-subsection">
+						<div class="track-list">
+							{#each trending.slice(0, 12) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
+								{#if entry.local_track}
+									<TrackRow track={entry.local_track} index={i} />
+								{:else if entry.tidal_playable}
+									<TidalTrackRow track={entry.tidal_playable} index={i} />
+								{/if}
+							{/each}
 						</div>
-					{/if}
+					</div>
 
 					{#if genrePicks.length > 0}
 						<div class="picks-subsection">
@@ -333,8 +394,13 @@
 						</div>
 					{/if}
 				</div>
-			{:else}
-				<EmptyState title="No daily picks yet" copy="Start listening to get personalized recommendations." />
+			{:else if !trendingLoading}
+				<EmptyState
+					title="No trending tracks"
+					copy={trendingSource === 'tidal'
+						? 'Tidal editorial chart is unavailable. Try Last.fm.'
+						: 'Last.fm chart is unavailable.'}
+				/>
 			{/if}
 		</section>
 
@@ -572,6 +638,38 @@
 		font-size: 0.78rem;
 		color: var(--text-muted);
 		font-style: italic;
+	}
+
+	.trending-controls {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.chip-group {
+		display: inline-flex;
+		gap: 4px;
+		padding: 2px;
+		background: rgba(255, 255, 255, 0.04);
+		border-radius: 999px;
+	}
+	.chip {
+		background: transparent;
+		border: none;
+		color: var(--text-muted, #888);
+		font: inherit;
+		font-size: 0.78rem;
+		font-weight: 500;
+		padding: 4px 10px;
+		border-radius: 999px;
+		cursor: pointer;
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+	.chip:hover {
+		color: var(--text, #fff);
+	}
+	.chip.active {
+		background: rgba(255, 255, 255, 0.12);
+		color: var(--text, #fff);
 	}
 
 	/* Horizontal scroll */
