@@ -63,7 +63,7 @@ impl TidalBackoff {
         BackoffState {
             active: remaining_secs > 0.0,
             remaining_secs,
-            reason,
+            reason: if remaining_secs > 0.0 { reason } else { String::new() },
         }
     }
 }

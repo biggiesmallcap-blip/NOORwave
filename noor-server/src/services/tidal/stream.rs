@@ -137,6 +137,12 @@ pub async fn resolve_stream(
     access_token: &str,
     request: &StreamRequest,
 ) -> std::result::Result<StreamInfo, StreamResolveError> {
+    crate::services::tidal::backoff::global()
+        .check()
+        .map_err(|error| StreamResolveError::RequestFailed {
+            message: error.to_string(),
+        })?;
+
     let url = format!(
         "{}/tracks/{}/playbackinfopostpaywall?audioquality={}&playbackmode={}&assetpresentation={}",
         TIDAL_API_URL,
@@ -165,6 +171,8 @@ pub async fn resolve_stream(
     tracing::debug!("TIDAL playback response: {}", raw);
 
     if !status.is_success() {
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw);
+
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
                 message: format!("TIDAL returned {status}: {raw}"),

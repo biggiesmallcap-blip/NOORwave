@@ -10,6 +10,7 @@ pub async fn add_favorite_track(
     track_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    crate::services::tidal::backoff::global().check()?;
     http.post(format!(
         "{}/users/{}/favorites/tracks?countryCode={}",
         TIDAL_API_URL, user_id, country_code
@@ -32,6 +33,7 @@ pub async fn remove_favorite_track(
     track_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    crate::services::tidal::backoff::global().check()?;
     http.delete(format!(
         "{}/users/{}/favorites/tracks/{}?countryCode={}",
         TIDAL_API_URL, user_id, track_id, country_code
@@ -53,6 +55,7 @@ pub async fn remove_favorite_album(
     album_id: i64,
     country_code: &str,
 ) -> Result<()> {
+    crate::services::tidal::backoff::global().check()?;
     http.delete(format!(
         "{}/users/{}/favorites/albums/{}?countryCode={}",
         TIDAL_API_URL, user_id, album_id, country_code
@@ -74,6 +77,7 @@ pub async fn add_to_playlist(
     track_ids: &[i64],
     country_code: &str,
 ) -> Result<()> {
+    crate::services::tidal::backoff::global().check()?;
     let ids: String = track_ids
         .iter()
         .map(|id| id.to_string())
@@ -101,6 +105,7 @@ pub async fn remove_favorite_tracks(
     track_ids: &[i64],
     country_code: &str,
 ) -> Result<usize> {
+    crate::services::tidal::backoff::global().check()?;
     let mut removed = 0;
     for track_id in track_ids {
         remove_favorite_track(http, access_token, user_id, *track_id, country_code).await?;
@@ -116,6 +121,7 @@ pub async fn remove_favorite_albums(
     album_ids: &[i64],
     country_code: &str,
 ) -> Result<usize> {
+    crate::services::tidal::backoff::global().check()?;
     let mut removed = 0;
     for album_id in album_ids {
         remove_favorite_album(http, access_token, user_id, *album_id, country_code).await?;
