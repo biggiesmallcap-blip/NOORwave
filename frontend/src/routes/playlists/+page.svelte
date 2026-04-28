@@ -12,7 +12,10 @@
 		type SampleDataSource,
 	} from '$lib/api/client';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
-	import { addTrackToQueue, playTrackNow, shufflePlaylist, startPlaylistRadio } from '$lib/stores/player';
+	import { addTrackToQueue, playTrackNow, shufflePlaylist, startPlaylistRadio, startSongRadio, toggleTrackFavorite } from '$lib/stores/player';
+	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { showToast } from '$lib/stores/toast';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
@@ -270,10 +273,6 @@
 	}
 
 	async function playTrack(trackId: number) { await playTrackNow(trackId); }
-	async function queueTrack(trackId: number, e: MouseEvent) {
-		e.stopPropagation();
-		await addTrackToQueue(trackId);
-	}
 
 	async function playPlaylist(id: number, e: MouseEvent) {
 		e.stopPropagation();
@@ -659,7 +658,14 @@
 								</div>
 								<div class="track-list">
 									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
-										<div class="track-row">
+										<div
+											class="track-row"
+											role="presentation"
+											oncontextmenu={(e) => {
+												e.preventDefault();
+												openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_id: track.artist_id, artist_name: track.artist_name, album_id: track.album_id, album_title: track.album_title, is_favorite: track.is_favorite }), track.title);
+											}}
+										>
 											<button
 												type="button"
 												class="track-row-main"
@@ -677,16 +683,63 @@
 													</span>
 												{/if}
 												<span>{formatDuration(track.duration_ms)}</span>
-												<button
-													type="button"
-													class="queue-btn"
-													aria-label="Add to queue"
-													onclick={(e) => void queueTrack(track.id, e)}
-												>
-													<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-														<path d="M12 5v14M5 12h14" />
-													</svg>
-												</button>
+												<div class="row-actions">
+													<button
+														type="button"
+														class="row-btn"
+														title="Play now"
+														aria-label="Play {track.title}"
+														onclick={(e) => { e.stopPropagation(); void playTrack(track.id); }}
+													>▶</button>
+													<button
+														type="button"
+														class="row-btn"
+														title="Add to queue"
+														aria-label="Queue {track.title}"
+														onclick={(e) => {
+															e.stopPropagation();
+															void addTrackToQueue(track.id);
+															showToast('Added to queue', 'success');
+														}}
+													>＋</button>
+													<button
+														type="button"
+														class="row-btn"
+														title="Start song radio"
+														aria-label="Start radio from {track.title}"
+														onclick={(e) => {
+															e.stopPropagation();
+															void startSongRadio(track.id);
+															showToast('Starting song radio…', 'info');
+														}}
+													>◎</button>
+													<button
+														type="button"
+														class="row-btn"
+														title="More options"
+														aria-label="More options"
+														onclick={(e) => {
+															e.stopPropagation();
+															openMenuAtElement(e.currentTarget as HTMLElement, buildTrackMenu({ id: track.id, title: track.title, artist_id: track.artist_id, artist_name: track.artist_name, album_id: track.album_id, album_title: track.album_title, is_favorite: track.is_favorite }), track.title);
+														}}
+													>⋯</button>
+													<button
+														type="button"
+														class="row-btn heart"
+														class:on={track.is_favorite}
+														aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+														onclick={(e) => {
+															e.stopPropagation();
+															const wasFavorite = track.is_favorite ?? false;
+															track.is_favorite = !wasFavorite;
+															playlistTracksById = { ...playlistTracksById };
+															void toggleTrackFavorite(track.id, wasFavorite).catch(() => {
+																track.is_favorite = wasFavorite;
+																playlistTracksById = { ...playlistTracksById };
+															});
+														}}
+													>{track.is_favorite ? '♥' : '♡'}</button>
+												</div>
 											</div>
 										</div>
 									{/each}
@@ -1536,6 +1589,27 @@
 	.action-btn.fav-btn.active {
 		color: var(--accent, #e00055);
 	}
+
+	.row-actions {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+	}
+	.row-btn {
+		background: none;
+		border: none;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		font-size: 14px;
+		padding: 4px;
+		border-radius: 4px;
+		opacity: 0;
+		transition: opacity 0.1s, color 0.1s;
+	}
+	.track-row:hover .row-btn,
+	.track-row:focus-within .row-btn { opacity: 1; }
+	.row-btn:hover { color: var(--text-primary); }
+	.row-btn.heart.on { color: var(--accent); opacity: 1; }
 
 	/* ─── Responsive ──────────────────────────────────────────── */
 

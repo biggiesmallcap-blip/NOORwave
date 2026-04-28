@@ -8,10 +8,12 @@
 		type HomePickTrack
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying, playTrackNow } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
 
 	// Home page data
 	let releases = $state<RSSFeedItem[]>([]);
@@ -297,7 +299,17 @@
 							<h3 class="subsection-title">Top Picks</h3>
 							<div class="track-list">
 								{#each picks.slice(0, 8) as pick, i (`${pick.id}-${i}`)}
-									<div class="track-row glass-tile" role="button" tabindex="0" onclick={() => startSongRadio(pick.id)} onkeydown={(e) => e.key === 'Enter' && startSongRadio(pick.id)}>
+									<div
+										class="track-row glass-tile"
+										role="button"
+										tabindex="0"
+										onclick={() => void playTrackNow(pick.id)}
+										onkeydown={(e) => e.key === 'Enter' && void playTrackNow(pick.id)}
+										oncontextmenu={(e) => {
+											e.preventDefault();
+											openContextMenu(e, buildTrackMenu({ id: pick.id, title: pick.title, artist_name: pick.artist_name, album_title: pick.album_title }), pick.title);
+										}}
+									>
 										{#if pick.artwork_url}
 											<img class="track-art" src={pick.artwork_url} alt="" />
 										{:else}
@@ -313,6 +325,16 @@
 												<span class="stat">{formatDuration(pick.duration_ms)}</span>
 											{/if}
 										</div>
+										<button
+											type="button"
+											class="track-row-menu"
+											title="More options"
+											aria-label="More options"
+											onclick={(e) => {
+												e.stopPropagation();
+												openMenuAtElement(e.currentTarget as HTMLElement, buildTrackMenu({ id: pick.id, title: pick.title, artist_name: pick.artist_name, album_title: pick.album_title }), pick.title);
+											}}
+										>⋯</button>
 									</div>
 								{/each}
 							</div>
@@ -711,6 +733,22 @@
 			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 		}
 	}
+
+	.track-row-menu {
+		background: none;
+		border: none;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		font-size: 16px;
+		padding: 4px 8px;
+		border-radius: 4px;
+		opacity: 0;
+		flex-shrink: 0;
+		transition: opacity 0.1s, color 0.1s;
+	}
+	.track-row:hover .track-row-menu,
+	.track-row:focus-within .track-row-menu { opacity: 1; }
+	.track-row-menu:hover { color: var(--text-primary); }
 
 	.track-art {
 		width: 48px;

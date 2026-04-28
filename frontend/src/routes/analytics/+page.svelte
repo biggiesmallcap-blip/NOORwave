@@ -7,7 +7,7 @@
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
-	import { openContextMenu } from '$lib/stores/context_menu';
+	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { playTrackNow } from '$lib/stores/player';
 
@@ -196,13 +196,30 @@
 				<SectionHeader eyebrow="Tracks" title="Top tracks" subtitle="The cuts coming back around most often." />
 				<div class="stack">
 					{#each dashboard.top_tracks as track}
-						<div class="list-card">
+						<div
+							class="list-card interactive"
+							role="button"
+							tabindex="0"
+							onclick={() => void playTrackNow(track.track_id)}
+							onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.track_id)}
+							oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.track_id, title: track.title, artist_name: track.artist_name, album_title: track.album_title }), track.title); }}
+						>
 							<div>
 								<h4>{track.title}</h4>
 								<p>{track.artist_name ?? 'Unknown artist'}</p>
 							</div>
 							<div class="list-card-side">
 								<strong>{formatCount(track.listens)}</strong>
+								<button
+									type="button"
+									class="list-card-menu"
+									title="More options"
+									aria-label="More options"
+									onclick={(e) => {
+										e.stopPropagation();
+										openMenuAtElement(e.currentTarget as HTMLElement, buildTrackMenu({ id: track.track_id, title: track.title, artist_name: track.artist_name, album_title: track.album_title }), track.title);
+									}}
+								>⋯</button>
 							</div>
 						</div>
 					{/each}
@@ -319,6 +336,21 @@
 		gap: 4px;
 		flex-shrink: 0;
 	}
+
+	.list-card-menu {
+		background: none;
+		border: none;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		font-size: 16px;
+		padding: 2px 6px;
+		border-radius: 4px;
+		opacity: 0;
+		transition: opacity 0.1s, color 0.1s;
+	}
+	.list-card.interactive:hover .list-card-menu,
+	.list-card.interactive:focus-within .list-card-menu { opacity: 1; }
+	.list-card-menu:hover { color: var(--text-primary); }
 
 	.list-card h4,
 	.behavior-row strong {

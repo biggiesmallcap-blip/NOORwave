@@ -5,6 +5,9 @@
 		playAlbum,
 		shuffleAlbum,
 		startAlbumRadio,
+		addTrackToQueue,
+		startSongRadio,
+		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -12,6 +15,7 @@
 	import { formatDuration } from '$lib/stores/library';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { showToast } from '$lib/stores/toast';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -262,16 +266,45 @@
 						<span class="track-plays">{track.play_count.toLocaleString()}</span>
 						<div class="track-actions">
 							<button
-								class="row-btn heart"
-								class:on={track.is_favorite}
-								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-								onclick={(e) => { e.stopPropagation(); }}
-							>{track.is_favorite ? '♥' : '♡'}</button>
+								class="row-btn"
+								title="Add to queue"
+								aria-label="Add {track.title} to queue"
+								onclick={(e) => {
+									e.stopPropagation();
+									void addTrackToQueue(track.id);
+									showToast('Added to queue', 'success');
+								}}
+							>＋</button>
+							<button
+								class="row-btn"
+								title="Start song radio"
+								aria-label="Start radio from {track.title}"
+								onclick={(e) => {
+									e.stopPropagation();
+									void startSongRadio(track.id);
+									showToast('Starting song radio…', 'info');
+								}}
+							>◎</button>
 							<button
 								class="row-btn"
 								aria-label="More actions"
 								onclick={(e) => onRowMenu(track, e)}
 							>⋯</button>
+							<button
+								class="row-btn heart"
+								class:on={track.is_favorite}
+								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+								onclick={(e) => {
+									e.stopPropagation();
+									const wasFavorite = track.is_favorite ?? false;
+									track.is_favorite = !wasFavorite;
+									tracks = tracks;
+									void toggleTrackFavorite(track.id, wasFavorite).catch(() => {
+										track.is_favorite = wasFavorite;
+										tracks = tracks;
+									});
+								}}
+							>{track.is_favorite ? '♥' : '♡'}</button>
 						</div>
 						<span class="track-duration">{formatDuration(track.duration_ms)}</span>
 					</li>
