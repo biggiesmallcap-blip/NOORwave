@@ -382,6 +382,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/login/poll", post(tidal_poll))
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
+        .route("/api/tidal/backoff", axum::routing::get(get_tidal_backoff_status))
         .route("/api/tidal/search", get(tidal_search))
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route("/api/tidal/playlists/{uuid}/tracks", get(tidal_playlist_tracks))
@@ -5638,6 +5639,12 @@ async fn load_persisted_tidal_tokens(
     }
 
     Ok(tokens)
+}
+
+/// Get TIDAL backoff gate status.
+async fn get_tidal_backoff_status() -> impl axum::response::IntoResponse {
+    let state = crate::services::tidal::backoff::global().state();
+    axum::Json(state)
 }
 
 /// Get TIDAL connection status.

@@ -161,6 +161,8 @@ impl TidalClient {
 
     /// Make an authenticated GET request and deserialize the response.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        crate::services::tidal::backoff::global().check()?;
+
         tracing::debug!("TIDAL GET {}", url);
         let resp = self
             .http
@@ -174,6 +176,7 @@ impl TidalClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
             anyhow::bail!("TIDAL API error {}: {}", status, body);
         }
 
