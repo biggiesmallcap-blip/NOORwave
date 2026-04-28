@@ -53,7 +53,6 @@
 	}
 
 	const PAGE_SIZE = 100;
-	const SEARCH_LIMIT = 200;
 
 	let activeTab = $state<'all' | 'tracks' | 'albums' | 'artists'>('all');
 	let playlists = $state<Playlist[]>([]);
@@ -77,6 +76,7 @@
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
 	let expandedArtistId = $state<number | null>(null);
+	let failedArtistImages = $state(new Set<number>());
 	let artistTracksById = $state<Record<number, Track[]>>({});
 	let artistTracksLoadingId = $state<number | null>(null);
 	let artistDiscographyById = $state<Record<number, TidalDiscographyAlbum[]>>({});
@@ -114,16 +114,18 @@
 	// Reactive grid template — must match the order of cells in .track-header and .track-row.
 	// Cells that get conditionally removed via {#if showXColumn} drop their column track here too,
 	// so header and row stay aligned.
+	// All non-fr columns must be explicit px — 'auto' sizes independently per row-grid,
+	// causing header/data drift when badge content differs from header text.
 	let trackGridColumns = $derived.by(() => {
 		const cols: string[] = ['40px', 'minmax(0, 2fr)', 'minmax(0, 1.5fr)', 'minmax(0, 1.5fr)']; // # title artist album
-		if (showQualityColumn) cols.push('auto');
-		if (showPlaysColumn) cols.push('auto');
-		if (showDateColumn) cols.push('auto', 'auto'); // date_added + last_played share the flag
+		if (showQualityColumn) cols.push('88px');
+		if (showPlaysColumn) cols.push('54px');
+		if (showDateColumn) cols.push('88px', '94px'); // date_added + last_played
 		if (showBpmColumn) cols.push('60px');
 		if (showKeyColumn) cols.push('50px');
-		if (showEnergyColumn) cols.push('55px');
-		if (showDanceColumn) cols.push('55px');
-		cols.push('auto', '40px'); // duration, actions
+		if (showEnergyColumn) cols.push('60px');
+		if (showDanceColumn) cols.push('60px');
+		cols.push('68px', '56px'); // duration, actions
 		return cols.join(' ');
 	});
 
@@ -131,7 +133,6 @@
 	onMount(() => {
 		void loadAlbums();
 		void loadTracks();
-		void loadArtists();
 		void loadBatchMeta();
 		return () => {
 			if (searchTimer) clearTimeout(searchTimer);
@@ -180,15 +181,15 @@
 		if (!$searchQuery.trim()) {
 			if (tab === 'tracks') loadTracks($sortBy, $sortDir);
 			if (tab === 'albums') loadAlbums();
-			// 'artists' and 'all' need no fetch — already loaded on mount
 		}
+		if (tab === 'artists' && artists.length === 0) void loadArtists();
 		clearSelection();
 	}
 
 	async function loadArtists() {
 		artistsLoading = true;
 		try {
-			const data = await api.getArtists('name', 'asc', 10000);
+			const data = await api.getArtists('name', 'asc', 500);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
@@ -560,6 +561,17 @@
 		updateAlbumSelection(albumId);
 	}
 
+	async function preloadAllTracks() {
+		if ($totalTracks > 0 && $tracks.length >= $totalTracks) return;
+		await loadTracks($sortBy, $sortDir, 99999, 0);
+	}
+
+	async function preloadAllAlbums() {
+		if ($totalAlbums > 0 && $albums.length >= $totalAlbums) return;
+		await loadAlbums($sortBy, $sortDir, 99999, 0);
+	}
+
+
 	async function runLibrarySearch(query: string) {
 		const trimmed = query.trim();
 		if (!trimmed) {
@@ -577,9 +589,6 @@
 				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) — route to audio search.
 				const params = buildAudioParams(parsed, genres);
 				const audio = await api.searchAudio(params);
-				// Adapt AudioSearchResult → Track shape minimally so existing rendering works.
-				// artist_id / album_id are not returned by the audio endpoint, so menu actions that need
-				// them will gracefully skip (buildTrackMenu guards on null).
 				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
 					id: r.id,
 					title: r.title,
@@ -609,10 +618,19 @@
 				}));
 				searchResults = { tracks: adaptedTracks, albums: [] };
 			} else {
-				const results = await api.search(trimmed, SEARCH_LIMIT);
+				// Plain text — filter the full library locally (always library-scoped, no network).
+				await Promise.all([preloadAllTracks(), preloadAllAlbums()]);
+				const q = trimmed.toLowerCase();
 				searchResults = {
-					tracks: results.tracks,
-					albums: results.albums
+					tracks: $tracks.filter(t =>
+						t.title.toLowerCase().includes(q) ||
+						(t.artist_name ?? '').toLowerCase().includes(q) ||
+						(t.album_title ?? '').toLowerCase().includes(q)
+					),
+					albums: $albums.filter(a =>
+						a.title.toLowerCase().includes(q) ||
+						(a.artist_name ?? '').toLowerCase().includes(q)
+					),
 				};
 			}
 			clearSelection();
@@ -861,8 +879,7 @@
 	}
 
 	function handleHomeArtistClick(artistId: number) {
-		switchTab('artists');
-		expandedArtistId = artistId;
+		void goto(`/artists/${artistId}`);
 	}
 
 	function handleHomeAlbumClick(albumId: number) {
@@ -1309,7 +1326,7 @@
 			{@const filteredArtists = q ? artists.filter(a => a.name.toLowerCase().includes(q)) : artists}
 			<div class="artist-grid">
 				{#each filteredArtists as artist (artist.id)}
-					{@const artistImg = artist.photo_url ?? artistArtworkById.get(artist.id) ?? null}
+					{@const artistImg = !failedArtistImages.has(artist.id) ? (artist.photo_url ?? artistArtworkById.get(artist.id) ?? null) : null}
 					<button
 						class="artist-card"
 						class:expanded={expandedArtistId === artist.id}
@@ -1318,7 +1335,7 @@
 					>
 						<div class="artist-photo">
 							{#if artistImg}
-								<img src={artistImg} alt={artist.name} loading="lazy" />
+								<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artist.id]); }} />
 							{:else}
 								<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
 							{/if}
@@ -1589,11 +1606,10 @@
 					{/if}
 					{#if showDateColumn}
 						<span class="col-date">
-							{#if $sortBy === 'last_played_at'}
-								<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '—'}</span>
-							{:else}
-								<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
-							{/if}
+							<span class="date-added">{track.date_added ? formatDateShort(track.date_added) : '—'}</span>
+						</span>
+						<span class="col-date">
+							<span class="last-played">{track.last_played_at ? formatDateShort(track.last_played_at) : '—'}</span>
 						</span>
 					{/if}
 					{#if showBpmColumn}
@@ -2174,6 +2190,9 @@
 		color: var(--text-muted, rgba(255,255,255,0.35));
 		padding: 4px 0 0 2px;
 		user-select: none;
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
 	}
 
 	.kbd-hint kbd {
@@ -3300,7 +3319,6 @@
 		text-align: right;
 		color: var(--text-tertiary);
 		font-size: 0.78rem;
-		min-width: 50px;
 	}
 
 	.plays-count {
@@ -3311,7 +3329,6 @@
 		text-align: right;
 		color: var(--text-tertiary);
 		font-size: 0.75rem;
-		min-width: 70px;
 	}
 
 	.date-added {
@@ -3322,7 +3339,6 @@
 		text-align: right;
 		color: var(--text-tertiary);
 		font-size: 0.8125rem;
-		min-width: 55px;
 	}
 
 	.col-title {

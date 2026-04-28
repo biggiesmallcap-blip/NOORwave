@@ -158,49 +158,72 @@ Recent searches auto-save as clickable chips.
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) stable toolchain
+- [Rust](https://rustup.rs/) stable toolchain (install via `rustup`)
 - Node.js 18+ and npm
 - A TIDAL account
 
-### Desktop App (Tauri)
+---
 
-```bash
-cd noor-app
-cargo tauri dev          # development
-cargo tauri build        # release bundle
+### Option A — Portable build (Windows, recommended)
+
+Produces a self-contained `dist\NOORwave\` folder with two executables and the built frontend. Run once from the workspace root:
+
+```powershell
+.\scripts\build-portable.ps1
 ```
 
-Or use `build-portable.ps1` at the workspace root for a self-contained Windows build.
+What the script does:
+1. `npm run build` in `frontend/` → static site in `frontend\build\`
+2. `cargo build --release -p noor-server` → `target\release\noor-server.exe`
+3. `cargo build --release -p noor-app` → `target\release\noor-app.exe`
+4. Assembles `dist\NOORwave\`:
+   ```
+   dist\NOORwave\
+     NOORwave.exe       ← Tauri desktop shell
+     noor-server.exe    ← backend + API server
+     www\               ← built frontend (served by noor-server on :3334)
+   ```
 
-### Dev Mode (Rust + Node)
+Then launch `dist\NOORwave\NOORwave.exe`. The Tauri shell spawns `noor-server.exe` automatically and shows the window once the server is ready.
+
+> **Note:** All three artifacts must be in the same folder. Copying only the exe files without `www\` will result in a blank window.
+
+---
+
+### Option B — Dev mode (browser UI, fastest iteration)
+
+Runs the backend and frontend separately. The frontend hot-reloads; the Tauri shell is not involved.
 
 ```bash
-# Terminal 1
-cd noor-server
-cargo run --release
+# Terminal 1 — backend
+cargo run --release -p noor-server
 
-# Terminal 2
+# Terminal 2 — frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5173`. The frontend connects to the backend on port 3334 automatically.
+
+---
 
 ### First Run
 
-1. Open the app — the browser on the server machine auto-connects
-2. Remote devices: enter the 6-digit PIN shown in **Settings → Access Token**
+1. Open the app — the browser on the server machine auto-connects without a PIN
+2. Remote/LAN devices: enter the 6-digit PIN shown in **Settings → Access Token**
 3. Complete TIDAL device-code auth in **Settings**
 4. Trigger a library sync — progress streams live via WebSocket
 5. Start playing
+
+---
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `NOOR_ADDR` | `0.0.0.0:3334` | Override server bind address |
-| `NOOR_DB` | `<workspace>/noor.db` | Override database path |
+| `NOOR_DB` | `<exe dir>/noor.db` | Override database path |
 | `RUST_LOG` | `noor_server=info` | Log level |
 | `TIDAL_CLIENT_ID` | *(built-in)* | Override TIDAL OAuth2 client ID |
 | `TIDAL_CLIENT_SECRET` | *(built-in)* | Override TIDAL OAuth2 client secret |

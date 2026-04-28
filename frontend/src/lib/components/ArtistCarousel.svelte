@@ -13,6 +13,8 @@
     onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
+  let failedImages = $state(new Set<number>());
+
   function letterColor(name: string): string {
     const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
     let h = 0;
@@ -35,8 +37,13 @@
         title={artist.name}
       >
         <div class="avatar-wrap">
-          {#if artist.photo_url}
-            <div class="artist-avatar" style="background-image: url('{artist.photo_url}')"></div>
+          {#if artist.photo_url && !failedImages.has(artist.id)}
+            <img
+              class="artist-avatar"
+              src={artist.photo_url}
+              alt={artist.name}
+              onerror={() => { failedImages = new Set([...failedImages, artist.id]); }}
+            />
           {:else}
             <div class="artist-avatar fallback" style="background: {letterColor(artist.name)}">
               <span>{initials(artist.name)}</span>
@@ -82,8 +89,8 @@
     width: 72px;
     height: 72px;
     border-radius: 50%;
-    background-size: cover;
-    background-position: center;
+    object-fit: cover;
+    display: block;
     transition: transform 0.15s;
   }
 

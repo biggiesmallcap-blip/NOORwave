@@ -26,19 +26,20 @@
   }
 </script>
 
-<div class="library-hero-card">
-  {#if artist.photo_url}
-    <div class="hero-bg" style="background-image: url('{artist.photo_url}')"></div>
-  {:else}
-    <div class="hero-bg hero-bg--color" style="background: {letterColor(artist.name)}"></div>
-  {/if}
+<div
+  class="library-hero-card"
+  class:has-image={!!artist.photo_url}
+  style={artist.photo_url ? `background-image: url('${artist.photo_url}')` : `background: ${letterColor(artist.name)}`}
+>
+  <!-- gradient overlay — same pattern as search page artist hero -->
+  <div class="hero-overlay"></div>
 
   <div class="hero-content">
     <div class="hero-art">
       {#if artist.photo_url}
-        <div class="hero-avatar" style="background-image: url('{artist.photo_url}')"></div>
+        <div class="hero-thumb" style="background-image: url('{artist.photo_url}')"></div>
       {:else}
-        <div class="hero-avatar hero-avatar--fallback" style="background: {letterColor(artist.name)}">
+        <div class="hero-thumb hero-thumb--fallback" style="background: {letterColor(artist.name)}">
           <span>{initials(artist.name)}</span>
         </div>
       {/if}
@@ -69,20 +70,25 @@
     background: var(--bg-glass, rgba(255,255,255,0.04));
     border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
     min-height: 200px;
-  }
-
-  .hero-bg {
-    position: absolute;
-    inset: 0;
     background-size: cover;
     background-position: center top;
-    filter: blur(40px) brightness(0.35) saturate(1.4);
-    transform: scale(1.1);
+  }
+
+  .hero-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to right,
+      rgba(0,0,0,0.92) 0%,
+      rgba(0,0,0,0.65) 50%,
+      rgba(0,0,0,0.2) 100%
+    );
     z-index: 0;
   }
 
-  .hero-bg--color {
-    opacity: 0.3;
+  /* when no photo, use a solid dark overlay instead */
+  .library-hero-card:not(.has-image) .hero-overlay {
+    background: rgba(0,0,0,0.45);
   }
 
   .hero-content {
@@ -94,17 +100,17 @@
     padding: 28px 32px;
   }
 
-  .hero-avatar {
+  .hero-thumb {
     width: 140px;
     height: 140px;
-    border-radius: 50%;
+    border-radius: 8px;
     background-size: cover;
     background-position: center;
     flex-shrink: 0;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
 
-  .hero-avatar--fallback {
+  .hero-thumb--fallback {
     display: flex;
     align-items: center;
     justify-content: center;

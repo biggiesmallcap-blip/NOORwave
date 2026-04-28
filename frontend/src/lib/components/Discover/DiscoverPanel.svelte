@@ -1,48 +1,160 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
 	import type { DiscoverTrackNode } from './discover.types';
+	import type { TidalSearchTrack } from '$lib/api/client';
+	import { playTidalTrackNow, addTidalTrackToQueue } from '$lib/stores/player';
 
 	let { node = null }: { node?: DiscoverTrackNode | null } = $props();
 
+	type ResolutionState = 'idle' | 'resolving' | 'resolved' | 'unavailable';
+
+	// Persists across node selections within this page session.
+	const resolutionCache = new Map<number, TidalSearchTrack | null>();
+
+	let resolutionState = $state<ResolutionState>('idle');
+	let resolvedTrack = $state<TidalSearchTrack | null>(null);
+
+	$effect(() => {
+		const n = node;
+		if (!n || n.source !== 'external') {
+			resolutionState = 'idle';
+			resolvedTrack = null;
+			return;
+		}
+
+		if (resolutionCache.has(n.track_id)) {
+			const cached = resolutionCache.get(n.track_id) as TidalSearchTrack | null;
+			resolvedTrack = cached;
+			resolutionState = cached !== null ? 'resolved' : 'unavailable';
+			return;
+		}
+
+		resolutionState = 'resolving';
+		resolvedTrack = null;
+		const capturedId = n.track_id;
+
+		api.searchTidal(`${n.title} ${n.artist_name}`, 1)
+			.then(results => {
+				if (node?.track_id !== capturedId) return;
+				const first = results.tracks[0] ?? null;
+				resolutionCache.set(capturedId, first);
+				resolvedTrack = first;
+				resolutionState = first !== null ? 'resolved' : 'unavailable';
+			})
+			.catch(() => {
+				if (node?.track_id !== capturedId) return;
+				resolutionCache.set(capturedId, null);
+				resolutionState = 'unavailable';
+			});
+	});
+
 	async function play() {
 		if (!node) return;
+		if (node.source === 'external') {
+			if (resolvedTrack) {
+				await playTidalTrackNow({
+					tidal_id: resolvedTrack.tidal_id,
+					title: resolvedTrack.title,
+					artist_name: resolvedTrack.artist_name,
+					album_title: resolvedTrack.album_title,
+					artwork_url: resolvedTrack.artwork_url,
+					duration_ms: resolvedTrack.duration_ms,
+					artist_tidal_id: resolvedTrack.artist_id ?? null,
+				});
+			}
+			return;
+		}
 		await api.playTrack(node.track_id);
 	}
 
 	async function queue() {
 		if (!node) return;
+		if (node.source === 'external') {
+			if (resolvedTrack) {
+				await addTidalTrackToQueue({
+					tidal_id: resolvedTrack.tidal_id,
+					title: resolvedTrack.title,
+					artist_name: resolvedTrack.artist_name,
+					album_title: resolvedTrack.album_title,
+					artwork_url: resolvedTrack.artwork_url,
+					duration_ms: resolvedTrack.duration_ms,
+					artist_tidal_id: resolvedTrack.artist_id ?? null,
+				});
+			}
+			return;
+		}
 		await api.addQueueTrack(node.track_id);
 	}
 </script>
 
 {#if node}
 	<div class="discover-panel glass-panel">
-		{#if node.artwork_url}
-			<img src={node.artwork_url} alt="" class="panel-artwork" />
+
+		{#if node.source !== 'external'}
+			<!-- ── Library / Tidal node (existing behaviour) ── -->
+			{#if node.artwork_url}
+				<img src={node.artwork_url} alt="" class="panel-artwork" />
+			{/if}
+			<h3>{node.title}</h3>
+			<p>{node.artist_name}</p>
+			{#if node.album_title}<p class="album">{node.album_title}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" onclick={play}>▶ Play</button>
+				<button class="action-btn" onclick={queue}>+ Queue</button>
+			</div>
+
+			<div class="metrics">
+				{#if node.bpm}<div class="metric"><span>BPM</span><strong>{Math.round(node.bpm)}</strong></div>{/if}
+				{#if node.camelot_key}<div class="metric"><span>Key</span><span class="key-badge">{node.camelot_key}</span></div>{/if}
+				{#if node.energy != null}
+					<div class="metric"><span>Energy</span>
+						<div class="bar"><div class="bar-fill" style="width:{node.energy * 100}%"></div></div>
+					</div>
+				{/if}
+				{#if node.danceability != null}
+					<div class="metric"><span>Dance</span>
+						<div class="bar"><div class="bar-fill" style="width:{node.danceability * 100}%"></div></div>
+					</div>
+				{/if}
+			</div>
+
+		{:else if resolutionState === 'resolving'}
+			<!-- ── Resolving: shimmer placeholder ── -->
+			<div class="shimmer panel-artwork-shimmer"></div>
+			<div class="shimmer title-shimmer"></div>
+			<div class="shimmer artist-shimmer"></div>
+			<div class="panel-actions">
+				<button class="action-btn primary" disabled>▶ Play</button>
+				<button class="action-btn" disabled>+ Queue</button>
+			</div>
+
+		{:else if resolutionState === 'resolved' && resolvedTrack}
+			<!-- ── Resolved: full Tidal panel ── -->
+			{#if resolvedTrack.artwork_url}
+				<img src={resolvedTrack.artwork_url} alt="" class="panel-artwork" />
+			{/if}
+			<h3>{resolvedTrack.title}</h3>
+			<p>{resolvedTrack.artist_name}</p>
+			{#if resolvedTrack.album_title}<p class="album">{resolvedTrack.album_title}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" onclick={play}>▶ Play</button>
+				<button class="action-btn" onclick={queue}>+ Queue</button>
+			</div>
+
+		{:else if resolutionState === 'unavailable'}
+			<!-- ── Unavailable: Last.fm info + disabled Play ── -->
+			<h3>{node.title}</h3>
+			<p>{node.artist_name}</p>
+			{#if node.radio_reason}<p class="match-score">{node.radio_reason}</p>{/if}
+
+			<div class="panel-actions">
+				<button class="action-btn primary" disabled>▶ Play</button>
+				<span class="not-on-tidal">Not on Tidal</span>
+			</div>
 		{/if}
-		<h3>{node.title}</h3>
-		<p>{node.artist_name}</p>
-		{#if node.album_title}<p class="album">{node.album_title}</p>{/if}
 
-		<div class="panel-actions">
-			<button class="action-btn primary" onclick={play}>▶ Play</button>
-			<button class="action-btn" onclick={queue}>+ Queue</button>
-		</div>
-
-		<div class="metrics">
-			{#if node.bpm}<div class="metric"><span>BPM</span><strong>{Math.round(node.bpm)}</strong></div>{/if}
-			{#if node.camelot_key}<div class="metric"><span>Key</span><span class="key-badge">{node.camelot_key}</span></div>{/if}
-			{#if node.energy != null}
-				<div class="metric"><span>Energy</span>
-					<div class="bar"><div class="bar-fill" style="width:{node.energy * 100}%"></div></div>
-				</div>
-			{/if}
-			{#if node.danceability != null}
-				<div class="metric"><span>Dance</span>
-					<div class="bar"><div class="bar-fill" style="width:{node.danceability * 100}%"></div></div>
-				</div>
-			{/if}
-		</div>
 	</div>
 {/if}
 
@@ -64,9 +176,9 @@
 		cursor: pointer;
 		transition: background 0.15s;
 	}
-	.action-btn:hover { background: rgba(255,255,255,0.12); }
+	.action-btn:not(:disabled):hover { background: rgba(255,255,255,0.12); }
 	.action-btn.primary { background: rgba(124,128,255,0.25); color: rgba(255,255,255,0.95); }
-	.action-btn.primary:hover { background: rgba(124,128,255,0.4); }
+	.action-btn.primary:not(:disabled):hover { background: rgba(124,128,255,0.4); }
 	.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 	.metric { display: flex; flex-direction: column; gap: 4px; }
 	.metric span { color: var(--text-secondary); font-size: 0.75rem; }
@@ -74,4 +186,28 @@
 	.key-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); font-size: 0.8rem; color: var(--text-primary); }
 	.bar { height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
 	.bar-fill { height: 100%; background: var(--accent, #7c80ff); border-radius: 2px; }
+
+	.action-btn:disabled { opacity: 0.35; cursor: default; }
+	.not-on-tidal {
+		align-self: center;
+		font-size: 0.72rem;
+		color: rgba(255,255,255,0.35);
+		letter-spacing: 0.03em;
+	}
+	.match-score { font-size: 0.72rem; color: rgba(255,255,255,0.3); font-style: italic; }
+
+	/* Shimmer animation */
+	@keyframes shimmer {
+		0%   { background-position: -200% 0; }
+		100% { background-position:  200% 0; }
+	}
+	.shimmer {
+		border-radius: 6px;
+		background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.09) 50%, rgba(255,255,255,0.04) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.4s infinite;
+	}
+	.panel-artwork-shimmer { width: 100%; aspect-ratio: 1; border-radius: var(--radius); margin-bottom: 10px; }
+	.title-shimmer  { height: 14px; width: 70%; margin-bottom: 8px; }
+	.artist-shimmer { height: 11px; width: 50%; margin-bottom: 10px; }
 </style>
