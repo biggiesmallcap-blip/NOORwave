@@ -415,9 +415,9 @@ pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>
 pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count
+                smart_rules, is_synced, track_count, is_favorite
          FROM playlists
-         ORDER BY name ASC",
+         ORDER BY is_favorite DESC, name ASC",
     )?;
 
     let playlists = stmt
@@ -427,10 +427,11 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
                 tidal_uuid: row.get(1)?,
                 name: row.get(2)?,
                 description: row.get(3)?,
-                is_smart: row.get(4)?,
+                is_smart: row.get::<_, i32>(4)? != 0,
                 smart_rules: row.get(5)?,
-                is_synced: row.get(6)?,
+                is_synced: row.get::<_, i32>(6)? != 0,
                 track_count: row.get(7)?,
+                is_favorite: row.get::<_, i32>(8)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -441,7 +442,7 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count
+                smart_rules, is_synced, track_count, is_favorite
          FROM playlists
          WHERE id = ?1",
     )?;
@@ -453,14 +454,82 @@ pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playli
             tidal_uuid: row.get(1)?,
             name: row.get(2)?,
             description: row.get(3)?,
-            is_smart: row.get(4)?,
+            is_smart: row.get::<_, i32>(4)? != 0,
             smart_rules: row.get(5)?,
-            is_synced: row.get(6)?,
+            is_synced: row.get::<_, i32>(6)? != 0,
             track_count: row.get(7)?,
+            is_favorite: row.get::<_, i32>(8)? != 0,
         }))
     } else {
         Ok(None)
     }
+}
+
+pub fn toggle_playlist_favorite(conn: &Connection, playlist_id: i64) -> Result<Playlist> {
+    conn.execute(
+        "UPDATE playlists SET is_favorite = NOT is_favorite WHERE id = ?1",
+        params![playlist_id],
+    )?;
+    get_playlist(conn, playlist_id)?
+        .ok_or_else(|| anyhow::anyhow!("playlist not found"))
+}
+
+/// Bulk-insert tracks into a playlist, skipping any already present.
+/// Returns the number of tracks actually inserted.
+pub fn add_tracks_to_playlist(
+    conn: &Connection,
+    playlist_id: i64,
+    track_ids: &[i64],
+) -> Result<usize> {
+    if track_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Find which tracks are already in the playlist
+    let existing: std::collections::HashSet<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1",
+        )?;
+        stmt.query_map(params![playlist_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+
+    let to_insert: Vec<i64> = {
+        let mut seen = std::collections::HashSet::new();
+        track_ids
+            .iter()
+            .copied()
+            .filter(|id| !existing.contains(id) && seen.insert(*id))
+            .collect()
+    };
+
+    if to_insert.is_empty() {
+        return Ok(0);
+    }
+
+    // Get the current max position
+    let max_pos: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id],
+        |row| row.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+    )?;
+    for (i, &track_id) in to_insert.iter().enumerate() {
+        stmt.execute(params![playlist_id, track_id, max_pos + 1 + i as i64])?;
+    }
+
+    // Keep track_count in sync
+    conn.execute(
+        "UPDATE playlists SET track_count = (
+            SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1
+         ) WHERE id = ?1",
+        params![playlist_id],
+    )?;
+
+    Ok(to_insert.len())
 }
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
@@ -3676,6 +3745,40 @@ mod tests {
         assert_eq!(heat.len(), 2);
         assert!(heat.iter().all(|entry| entry.listen_count == 0));
         assert!(heat.iter().all(|entry| entry.total_listened_ms == 0));
+    }
+
+    #[test]
+    fn test_add_tracks_to_playlist_deduplicates() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute_batch(r#"
+            INSERT INTO artists (id, name) VALUES (1, 'Test Artist');
+            INSERT INTO albums (id, title, artist_id) VALUES (1, 'Test Album', 1);
+            INSERT INTO tracks (id, title, artist_id, album_id) VALUES (1, 'Track A', 1, 1);
+            INSERT INTO tracks (id, title, artist_id, album_id) VALUES (2, 'Track B', 1, 1);
+            INSERT INTO tracks (id, title, artist_id, album_id) VALUES (3, 'Track C', 1, 1);
+            INSERT INTO playlists (id, name, is_smart, is_synced) VALUES (1, 'My Playlist', 0, 1);
+        "#).unwrap();
+
+        // First call adds both tracks
+        let added = add_tracks_to_playlist(&conn, 1, &[1, 2]).unwrap();
+        assert_eq!(added, 2);
+
+        // Second call with same tracks returns 0 (already present)
+        let added_again = add_tracks_to_playlist(&conn, 1, &[1, 2]).unwrap();
+        assert_eq!(added_again, 0);
+
+        // Duplicate IDs within a single call: [1, 1] — track 1 already present, so 0 added
+        let added_dup = add_tracks_to_playlist(&conn, 1, &[1, 1]).unwrap();
+        assert_eq!(added_dup, 0);
+
+        // Mixed: [1, 3] — track 1 already present, track 3 is new → 1 added
+        let added_mixed = add_tracks_to_playlist(&conn, 1, &[1, 3]).unwrap();
+        assert_eq!(added_mixed, 1);
+
+        // [3, 3] — track 3 now present, duplicate in input → 0 added
+        let added_dup_present = add_tracks_to_playlist(&conn, 1, &[3, 3]).unwrap();
+        assert_eq!(added_dup_present, 0);
     }
 }
 

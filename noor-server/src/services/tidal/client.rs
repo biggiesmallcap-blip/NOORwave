@@ -278,6 +278,31 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
+    pub async fn search_playlists(
+        &self,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<TidalPlaylist>> {
+        let url = format!(
+            "{}/search?query={}&countryCode={}&limit={}&types=PLAYLISTS",
+            TIDAL_API_URL,
+            urlencoding::encode(query),
+            self.country_code,
+            limit,
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        let items = payload
+            .get("playlists")
+            .and_then(|p| p.get("items"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(items
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<TidalPlaylist>(v).ok())
+            .collect())
+    }
+
     // ─── Album Tracks ──────────────────────────────────────
 
     pub async fn get_album_tracks(
