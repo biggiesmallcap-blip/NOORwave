@@ -12,7 +12,7 @@
 		type SampleDataSource,
 	} from '$lib/api/client';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
-	import { addTrackToQueue, playTrackNow } from '$lib/stores/player';
+	import { addTrackToQueue, playTrackNow, shufflePlaylist, startPlaylistRadio } from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
@@ -596,6 +596,24 @@
 						</div>
 					</button>
 
+					<div class="card-actions">
+						<button
+							class="action-btn fav-btn"
+							class:active={playlist.is_favorite}
+							onclick={async (e) => {
+								e.stopPropagation();
+								try {
+									const updated = await api.togglePlaylistFavorite(playlist.id);
+									playlists = playlists.map(p => p.id === playlist.id ? updated.playlist : p);
+								} catch {
+									// silently ignore — button state reverts on next data load
+								}
+							}}
+							title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+							aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+						>♥</button>
+					</div>
+
 					{#if playlist.is_smart}
 						<div class="smart-actions">
 							<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); openEdit(playlist); }}>
@@ -620,6 +638,24 @@
 							{:else if (playlistTracksById[playlist.id]?.length ?? 0) > 0}
 								<div class="playlist-body-actions">
 									<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylist(playlist.id, e)}>Play all</button>
+									<button
+										class="action-btn"
+										onclick={(e) => {
+											e.stopPropagation();
+											void shufflePlaylist(playlistTracksById[playlist.id]);
+										}}
+										title="Shuffle playlist"
+										aria-label="Shuffle playlist"
+									>⤮ Shuffle</button>
+									<button
+										class="action-btn"
+										onclick={(e) => {
+											e.stopPropagation();
+											void startPlaylistRadio(playlistTracksById[playlist.id]);
+										}}
+										title="Playlist radio"
+										aria-label="Playlist radio"
+									>◉ Radio</button>
 								</div>
 								<div class="track-list">
 									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
@@ -1464,6 +1500,42 @@
 	.add-rule-btn { align-self: flex-start; }
 
 	.editor-error { font-size: 0.875rem; color: var(--state-error); }
+
+	/* ─── Card action buttons ────────────────────────────────── */
+
+	.card-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin-top: 10px;
+	}
+
+	.action-btn {
+		background: var(--surface-2, #2a2a2a);
+		border: none;
+		color: var(--text-secondary, #ccc);
+		cursor: pointer;
+		font-size: 12px;
+		padding: 5px 10px;
+		border-radius: 5px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		white-space: nowrap;
+	}
+	.action-btn:hover {
+		background: var(--surface-3, #333);
+		color: var(--text-primary, #fff);
+	}
+	.action-btn.fav-btn {
+		background: none;
+		font-size: 16px;
+		padding: 5px;
+		color: var(--text-tertiary, #666);
+	}
+	.action-btn.fav-btn.active {
+		color: var(--accent, #e00055);
+	}
 
 	/* ─── Responsive ──────────────────────────────────────────── */
 

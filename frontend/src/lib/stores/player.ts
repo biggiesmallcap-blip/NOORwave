@@ -481,6 +481,37 @@ export async function startSongRadio(seedTrackId: number) {
 	}
 }
 
+export async function shufflePlaylist(
+	tracks: { id: number }[],
+) {
+	if (!tracks.length) return;
+	const shuffled = shuffleArray([...tracks]);
+	await loadQueueAndPlay(shuffled.map((t) => t.id));
+	showToast('Shuffling playlist', 'success');
+}
+
+export async function startPlaylistRadio(tracks: { id: number; play_count?: number }[]) {
+	if (!tracks.length) return;
+	// Seed from the most-played track; fall back to first track
+	const seed = [...tracks].sort((a, b) => (b.play_count ?? 0) - (a.play_count ?? 0))[0];
+	await startSongRadio(seed.id);
+}
+
+export async function playTidalPlaylist(tidalUuid: string) {
+	try {
+		const { tracks } = await api.getTidalPlaylistTracks(tidalUuid);
+		if (!tracks.length) {
+			playerError.set('No playable tracks in this playlist.');
+			return;
+		}
+		// TODO: queue remaining tracks once TIDAL ephemeral queue is supported (see addTidalTrackToQueue stub)
+		await playTidalTrackNow(tracks[0]);
+		showToast('Playing TIDAL playlist', 'success');
+	} catch (error) {
+		playerError.set(`Failed to load TIDAL playlist: ${error}`);
+	}
+}
+
 export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
