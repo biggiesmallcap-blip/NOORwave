@@ -164,6 +164,18 @@ Recent searches auto-save as clickable chips.
 
 ---
 
+**Windows portable — no install required. Unzip anywhere and run NOORwave.exe.**
+
+### Contents
+- `NOORwave.exe` — app window + system tray
+- `noor-server.exe` — local music server  
+- `www/` — bundled UI (do not delete)
+
+### Usage
+1. Unzip to any folder
+2. Double-click `NOORwave.exe`
+3. Window opens when server is ready (~2s)
+
 ### Option A — Portable build (Windows, recommended)
 
 Produces a self-contained `dist\NOORwave\` folder with two executables and the built frontend. Run once from the workspace root:
