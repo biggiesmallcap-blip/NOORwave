@@ -4398,13 +4398,15 @@ async fn search_underrated(
 }
 
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let live_position_ms = {
+    let (live_position_ms, ephemeral_playing) = {
         let state_guard = state.read().await;
-        state_guard
+        let live_pos = state_guard
             .playback_runtime
             .as_ref()
             .zip(state_guard.playback_runtime_info.as_ref())
-            .map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels))
+            .map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
+        let ephemeral = state_guard.ephemeral_tidal_track.is_some();
+        (live_pos, ephemeral)
     };
 
     let snapshot = {
@@ -4414,8 +4416,14 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
             .with_conn(player::load_snapshot)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
-    let snapshot =
+    let mut snapshot =
         overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
+
+    // If no audio runtime is active and no ephemeral track is playing, the persisted
+    // is_playing flag is stale (e.g. after a crash). Correct it before sending to frontend.
+    if live_position_ms.is_none() && !ephemeral_playing {
+        snapshot.state.is_playing = false;
+    }
 
     Ok(Json(json!({
         "state": snapshot.state,

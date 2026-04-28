@@ -188,6 +188,22 @@ export async function playPreviousTrack() {
 
 export async function playNextTrack() {
 	try {
+		// Optimistic update: show the next queued track immediately rather than waiting
+		// for TIDAL stream resolution (~2-5s). hydratePlayback below corrects any mismatch.
+		const currentRepeat = get(repeatMode);
+		if (currentRepeat !== 'one') {
+			const queue = get(playbackQueue);
+			const current = get(currentTrack);
+			const currentIdx = queue.findIndex((q) => q.track.id === (current?.id ?? -1));
+			const nextItem =
+				currentIdx >= 0 && currentIdx + 1 < queue.length ? queue[currentIdx + 1] : null;
+			if (nextItem) {
+				currentTrack.set(nextItem.track);
+			}
+		}
+		position.set(0);
+		anchorPositionTicker(0);
+
 		const snapshot = await api.nextTrack();
 		hydratePlayback(snapshot);
 		playerError.set(null);

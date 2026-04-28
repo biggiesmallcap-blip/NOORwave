@@ -192,6 +192,11 @@ async fn main() -> Result<()> {
     db.run_migrations()?;
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
     db.seed_genres_from_taxonomy()?;
+    // The audio runtime is ephemeral — it never survives a process restart. Clear the
+    // persisted is_playing flag so the frontend doesn't boot into a ghost-playing state.
+    db.with_conn(|conn| {
+        conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", []).map(|_| ())
+    })?;
     info!("Database initialized");
     info!("Genre taxonomy loaded: {} genres", genre_count);
 
