@@ -13,6 +13,7 @@ noor.db-shm
 .claude/settings.json
 .claude/skills/
 .claude/superpowers/
+.claude/worktrees/
 .design-refresh/
 .superpowers/
 .worktrees/
