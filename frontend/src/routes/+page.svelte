@@ -11,7 +11,7 @@
 		type TrendingSource
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio, playTrackNow, playTidalTrackNow } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -372,9 +372,25 @@
 						<div class="track-list">
 							{#each trending.slice(0, 12) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
 								{#if entry.local_track}
-									<TrackRow track={entry.local_track} index={i} />
+									{@const t = entry.local_track}
+									<TrackRow
+										track={t}
+										variant="art"
+										index={i}
+										isCurrent={$currentTrack?.id === t.id}
+										isPlaying={$isPlaying}
+										onRowClick={() => void playTrackNow(t.id)}
+									/>
 								{:else if entry.tidal_playable}
-									<TidalTrackRow track={entry.tidal_playable} index={i} />
+									{@const tp = entry.tidal_playable}
+									<TidalTrackRow
+										track={tp}
+										variant="art"
+										index={i}
+										isCurrent={false}
+										isPlaying={false}
+										onRowClick={() => void playTidalTrackNow(tp)}
+									/>
 								{/if}
 							{/each}
 						</div>

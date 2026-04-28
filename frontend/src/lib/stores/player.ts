@@ -506,7 +506,7 @@ export async function moveQueueItem(itemId: number, newPos: number) {
 	} catch (error) {
 		// Roll back on failure.
 		playbackQueue.set(before);
-		playerError.set(`Failed to reorder queue: ${error}`);
+		setError('reorder queue', error);
 	}
 }
 
@@ -526,7 +526,7 @@ export async function clearQueue(): Promise<QueueItem[]> {
 		}
 		return restorable;
 	} catch (error) {
-		playerError.set(`Failed to clear queue: ${error}`);
+		setError('clear queue', error);
 		return [];
 	}
 }
@@ -544,7 +544,7 @@ export async function restoreQueueItems(items: QueueItem[]): Promise<void> {
 		playbackQueue.set(snapshot.queue);
 		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Failed to restore queue: ${error}`);
+		setError('restore queue', error);
 	}
 }
 
@@ -566,7 +566,7 @@ export async function saveQueueAsPlaylist(
 		playerError.set(null);
 		return result.playlist;
 	} catch (error) {
-		playerError.set(`Failed to save queue as playlist: ${error}`);
+		setError('save queue as playlist', error);
 		showToast('Failed to save playlist', 'error');
 		return null;
 	}

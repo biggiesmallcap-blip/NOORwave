@@ -744,9 +744,25 @@
         <div class="trending-list">
           {#each trending.slice(0, 25) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
             {#if entry.local_track}
-              <TrackRow track={entry.local_track} index={i} />
+              {@const t = entry.local_track}
+              <TrackRow
+                track={t}
+                variant="art"
+                index={i}
+                isCurrent={false}
+                isPlaying={false}
+                onRowClick={() => void playTrackNow(t.id)}
+              />
             {:else if entry.tidal_playable}
-              <TidalTrackRow track={entry.tidal_playable} index={i} />
+              {@const tp = entry.tidal_playable}
+              <TidalTrackRow
+                track={tp}
+                variant="art"
+                index={i}
+                isCurrent={false}
+                isPlaying={false}
+                onRowClick={() => void playTidalTrackNow(tp)}
+              />
             {/if}
           {/each}
         </div>

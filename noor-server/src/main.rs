@@ -195,7 +195,8 @@ async fn main() -> Result<()> {
     // The audio runtime is ephemeral — it never survives a process restart. Clear the
     // persisted is_playing flag so the frontend doesn't boot into a ghost-playing state.
     db.with_conn(|conn| {
-        conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", []).map(|_| ())
+        conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", [])?;
+        Ok(())
     })?;
     info!("Database initialized");
     info!("Genre taxonomy loaded: {} genres", genre_count);
