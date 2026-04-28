@@ -24,12 +24,18 @@ const initial: ContextMenuState = { open: false, x: 0, y: 0, items: [], title: u
 export const contextMenu = writable<ContextMenuState>(initial);
 
 export function openContextMenu(
-	event: MouseEvent | { clientX: number; clientY: number; preventDefault?: () => void },
+	event: MouseEvent | { clientX: number; clientY: number; preventDefault?: () => void; stopPropagation?: () => void },
 	items: MenuItem[],
 	title?: string
 ) {
 	if ('preventDefault' in event && typeof event.preventDefault === 'function') {
 		event.preventDefault();
+	}
+	// Stop the same contextmenu event from bubbling up to <svelte:window> in
+	// ContextMenu.svelte, where the global handler would close the menu the
+	// instant it opens (the click that triggered open isn't inside menuEl yet).
+	if ('stopPropagation' in event && typeof event.stopPropagation === 'function') {
+		event.stopPropagation();
 	}
 	contextMenu.set({
 		open: true,

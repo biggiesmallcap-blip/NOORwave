@@ -229,7 +229,11 @@
 	async function loadArtists() {
 		artistsLoading = true;
 		try {
-			const data = await api.getArtists('name', 'asc', 500);
+			// 10k is well past today's library size (~6.5k artists). Loading all of
+			// them up front keeps the in-page filter working — paginating would
+			// hide artists past the cutoff (e.g. "Mac Miller" beyond an alpha-500
+			// window) when the user types a search.
+			const data = await api.getArtists('name', 'asc', 10000);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
