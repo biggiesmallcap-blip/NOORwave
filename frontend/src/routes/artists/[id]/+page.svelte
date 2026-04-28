@@ -7,11 +7,15 @@
 		shuffleArtist,
 		startArtistRadio,
 		playTidalAlbum,
+		playAlbum,
+		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
 	} from '$lib/stores/player';
 	import TrackRow from '$lib/components/TrackRow.svelte';
+	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 
 	let artistId = $derived(Number(page.params.id));
 
@@ -161,6 +165,40 @@
 		$isPlaying && tracks.some((t) => t.id === $currentTrack?.id)
 	);
 
+	let radioPending = $state(false);
+	async function onRadioClick() {
+		if (radioPending) return;
+		radioPending = true;
+		try {
+			await startArtistRadio(artistId);
+		} finally {
+			radioPending = false;
+		}
+	}
+
+	async function onHeartClick(track: Track, event: MouseEvent) {
+		event.stopPropagation();
+		// Optimistic local flip on the row data so the icon swaps before round-trip.
+		const previous = track.is_favorite;
+		tracks = tracks.map((t) =>
+			t.id === track.id ? { ...t, is_favorite: !previous } : t
+		);
+		try {
+			await toggleTrackFavorite(track.id, previous);
+		} catch {
+			// Roll back local row state on failure.
+			tracks = tracks.map((t) =>
+				t.id === track.id ? { ...t, is_favorite: previous } : t
+			);
+		}
+	}
+
+	function onAlbumCardPlay(album: { id: number | null }, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		if (album.id != null) void playAlbum(album.id);
+	}
+
 	let filterQuery = $state('');
 
 	const filteredPopular = $derived(
@@ -184,11 +222,19 @@
 
 <div class="artist-page">
 	{#if loading}
-		<p class="status">Loading artist…</p>
+		<div class="status-wrap"><Skeleton rows={4} label="Loading artist" /></div>
 	{:else if error}
-		<p class="status error">{error}</p>
+		<EmptyState title="Artist could not load" copy={error}>
+			{#snippet actions()}
+				<a class="empty-action" href="/library">Back to library</a>
+			{/snippet}
+		</EmptyState>
 	{:else if !header()}
-		<p class="status">Artist not found.</p>
+		<EmptyState title="Artist not found" copy="It may have been deleted or moved.">
+			{#snippet actions()}
+				<a class="empty-action" href="/library">Back to library</a>
+			{/snippet}
+		</EmptyState>
 	{:else}
 		{@const h = header()!}
 
@@ -227,8 +273,18 @@
 				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
 			</button>
 
-			<button class="ghost-btn" aria-label="Artist radio" onclick={() => void startArtistRadio(artistId)}>
-				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+			<button
+				class="ghost-btn"
+				class:pending={radioPending}
+				aria-label="Artist radio"
+				disabled={radioPending}
+				onclick={onRadioClick}
+			>
+				{#if radioPending}
+					<span class="btn-spinner" aria-hidden="true"></span>
+				{:else}
+					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+				{/if}
 			</button>
 		</div>
 
@@ -295,6 +351,12 @@
 											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
 											aria-label="Play {album.title}"
 										>▶</button>
+									{:else if album.local_id != null}
+										<button
+											class="art-play-overlay"
+											onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
+											aria-label="Play {album.title}"
+										>▶</button>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -334,6 +396,12 @@
 											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
 											aria-label="Play {album.title}"
 										>▶</button>
+									{:else if album.local_id != null}
+										<button
+											class="art-play-overlay"
+											onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
+											aria-label="Play {album.title}"
+										>▶</button>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -361,6 +429,13 @@
 									{:else}
 										<div class="grid-art placeholder">♫</div>
 									{/if}
+									{#if album.id != null}
+										<button
+											class="art-play-overlay"
+											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
+											aria-label="Play {album.title}"
+										>▶</button>
+									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
 								<p class="grid-sub">{album.tracks.length} tracks · Album</p>
@@ -384,6 +459,13 @@
 										<img class="grid-art" src={album.artwork_url} alt="" />
 									{:else}
 										<div class="grid-art placeholder">♫</div>
+									{/if}
+									{#if album.id != null}
+										<button
+											class="art-play-overlay"
+											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
+											aria-label="Play {album.title}"
+										>▶</button>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -415,7 +497,40 @@
 		text-align: center;
 		color: var(--text-secondary);
 	}
-	.status.error { color: var(--danger, #f87171); }
+
+	.status-wrap {
+		padding: 32px;
+	}
+
+	.empty-action {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 16px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		text-decoration: none;
+		font-size: 0.85rem;
+		font-weight: 600;
+		border: 1px solid var(--accent-line);
+	}
+	.empty-action:hover { background: var(--accent); color: #fff; }
+
+	.btn-spinner {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		border: 2px solid currentColor;
+		border-right-color: transparent;
+		display: inline-block;
+		animation: btn-spin 0.7s linear infinite;
+	}
+	.ghost-btn.pending { opacity: 0.85; cursor: progress; }
+	.ghost-btn:disabled { cursor: progress; }
+	@keyframes btn-spin {
+		to { transform: rotate(360deg); }
+	}
 
 	.hero {
 		position: relative;

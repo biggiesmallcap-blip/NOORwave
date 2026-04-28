@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { goto } from '$app/navigation'
+  import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type ChartEntry, type TrendingSource } from '$lib/api/client'
   import TrackRow from '$lib/components/TrackRow.svelte'
@@ -56,6 +56,10 @@
     topArtistImageFailed = false
   })
   let debounceTimer: ReturnType<typeof setTimeout>
+  // AbortController for in-flight search requests; cancelled on each new input
+  // and on route teardown so a slow query doesn't surface a phantom error after
+  // the user navigates away.
+  let abortController: AbortController | null = null
 
   // D5 — in-memory result cache (last 5 queries, keyed by normalised query string)
   const resultCache = new Map<string, TidalSearchResults>()
@@ -148,6 +152,9 @@
 
   function onInput() {
     clearTimeout(debounceTimer)
+    // Cancel any prior in-flight request so its rejection doesn't fire as an error.
+    abortController?.abort()
+    abortController = null
     if (!query.trim()) {
       results = null
       audioResults = null
@@ -160,11 +167,14 @@
     debounceTimer = setTimeout(async () => {
       const q = query.trim()
       const intent = parseIntent(q)
+      const controller = new AbortController()
+      abortController = controller
+      const signal = controller.signal
 
       // "play <query>" → fire immediately and clear input
       if (intent.intent.type === 'play') {
         loading = false
-        const r = await api.searchTidal(intent.free_text).catch(() => null)
+        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
         const first = r?.tracks[0]
         if (first) void playTidalTrackNow(toPlayable(first))
         query = ''
@@ -175,7 +185,7 @@
       // "similar to <query>" → start radio from first result
       if (intent.intent.type === 'radio') {
         loading = false
-        const r = await api.searchTidal(intent.free_text).catch(() => null)
+        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
         const first = r?.tracks[0]
         if (first) void startTidalSongRadio(toPlayable(first))
         query = ''
@@ -191,7 +201,7 @@
 
       try {
         if (effectiveHasFilters) {
-          const res = await api.searchAudio(buildAudioParams(effectiveParsed))
+          const res = await api.searchAudio(buildAudioParams(effectiveParsed), signal)
           audioResults = res.tracks
           results = null
           tidalPlaylistResults = []
@@ -202,13 +212,13 @@
           if (cached) {
             results = cached
           } else {
-            const fresh = await api.searchTidal(q)
+            const fresh = await api.searchTidal(q, 20, signal)
             results = fresh
             resultCache.set(cacheKey, fresh)
             if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
           }
           try {
-            const { playlists } = await api.searchTidalPlaylists(q)
+            const { playlists } = await api.searchTidalPlaylists(q, signal)
             tidalPlaylistResults = playlists
           } catch {
             tidalPlaylistResults = []
@@ -217,9 +227,12 @@
         error = null
         pushRecent(q)
       } catch (e) {
+        // Swallow abort errors — the user moved on or typed more.
+        if (signal.aborted || (e as Error)?.name === 'AbortError') return
         error = String(e)
       } finally {
-        loading = false
+        if (abortController === controller) abortController = null
+        if (!signal.aborted) loading = false
       }
     }, 300)
   }
@@ -411,6 +424,58 @@
   // queue/play-next. Arrow keys move a row cursor through the visible tracks.
   let inputEl: HTMLInputElement | null = $state(null)
   let cursor = $state(-1)
+  let inputFocused = $state(false)
+
+  // DSP filter syntax is invisible — surface a tiny set of example chips when
+  // the input is focused but empty so users discover bpm:/key:/energy: filters.
+  const HINT_CHIPS: { token: string; label: string }[] = [
+    { token: 'bpm:128 ', label: 'bpm:128' },
+    { token: 'key:Am ', label: 'key:Am' },
+    { token: 'energy:>0.7 ', label: 'energy:>0.7' },
+  ]
+
+  function insertHintChip(token: string) {
+    query = `${query}${query.endsWith(' ') || query.length === 0 ? '' : ' '}${token}`
+    inputEl?.focus()
+    onInput()
+  }
+
+  // Inline prefix completion: if the trailing token matches a known filter
+  // prefix (e.g. "bp", "ke", "en", "ge"), suggest the full filter key.
+  const FILTER_PREFIXES: Record<string, string> = {
+    bp: 'bpm:',
+    bpm: 'bpm:',
+    ke: 'key:',
+    key: 'key:',
+    en: 'energy:',
+    energy: 'energy:',
+    ge: 'genre:',
+    genre: 'genre:',
+    da: 'danceability:',
+    danceability: 'danceability:',
+  }
+
+  const inlineHint = $derived.by<string | null>(() => {
+    if (!query) return null
+    if (query.endsWith(' ')) return null
+    if (query.includes(':')) {
+      const tail = query.slice(query.lastIndexOf(' ') + 1)
+      if (tail.includes(':')) return null
+    }
+    const tail = query.slice(query.lastIndexOf(' ') + 1).toLowerCase()
+    if (!tail) return null
+    const completion = FILTER_PREFIXES[tail]
+    if (!completion) return null
+    return completion
+  })
+
+  function applyInlineHint() {
+    if (!inlineHint) return
+    const idx = query.lastIndexOf(' ')
+    const head = idx === -1 ? '' : query.slice(0, idx + 1)
+    query = `${head}${inlineHint}`
+    inputEl?.focus()
+  }
 
   // Reset cursor whenever the result set changes shape so we never point past the end.
   $effect(() => {
@@ -492,6 +557,14 @@
   // ─── Position memory (Phase 5B — SvelteKit snapshot) ─────────────────────
   // Snapshot binds state to the browser's history entry, so back AND forward
   // both land where the user left off.
+  // Also abort any in-flight search on navigation so a slow response doesn't
+  // surface a phantom error after we've left the page.
+  beforeNavigate(() => {
+    abortController?.abort()
+    abortController = null
+    clearTimeout(debounceTimer)
+  })
+
   let pendingRestoreScroll: number | null = null
 
   // Restore scroll once results render so the layout has its final height.
@@ -562,9 +635,35 @@
       placeholder="Search Tidal's full catalogue"
       bind:value={query}
       oninput={onInput}
-      onkeydown={inputKeydown}
+      onkeydown={(e) => {
+        if (e.key === 'Tab' && inlineHint && !e.shiftKey) {
+          e.preventDefault()
+          applyInlineHint()
+          return
+        }
+        inputKeydown(e)
+      }}
+      onfocus={() => { inputFocused = true }}
+      onblur={() => { inputFocused = false }}
       autofocus
     />
+    {#if inputFocused && !query.trim()}
+      <div class="hint-chips" aria-label="Search filter examples">
+        {#each HINT_CHIPS as chip (chip.token)}
+          <button
+            type="button"
+            class="hint-chip"
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => insertHintChip(chip.token)}
+          >{chip.label}</button>
+        {/each}
+      </div>
+    {/if}
+    {#if inlineHint && query.trim()}
+      <p class="inline-hint">
+        Try <code>{inlineHint}</code> <span class="hint-tab">Tab</span>
+      </p>
+    {/if}
     <p class="kbd-hint">
       <kbd>/</kbd> focus &nbsp;·&nbsp;
       <kbd>↑</kbd><kbd>↓</kbd> move &nbsp;·&nbsp;
@@ -1102,6 +1201,53 @@
     transition: border-color 0.15s, background 0.15s;
   }
   .search-input::placeholder { color: var(--text-tertiary); }
+
+  .hint-chips {
+    margin: 10px auto 0;
+    max-width: 640px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .hint-chip {
+    background: var(--bg-surface, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 11.5px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .hint-chip:hover {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border-color: var(--accent-line);
+  }
+  .inline-hint {
+    margin: 8px auto 0;
+    max-width: 640px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .inline-hint code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    color: var(--accent-strong);
+  }
+  .hint-tab {
+    background: var(--bg-surface, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+
   .kbd-hint {
     margin: 10px auto 0;
     max-width: 640px;

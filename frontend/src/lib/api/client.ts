@@ -1008,9 +1008,11 @@ export const api = {
 		});
 	},
 
-	searchTidalPlaylists(q: string) {
+	searchTidalPlaylists(q: string, signal?: AbortSignal) {
 		return fetchApi<{ playlists: TidalSearchPlaylist[] }>(
 			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}`,
+			undefined,
+			{ signal },
 		);
 	},
 
@@ -1215,13 +1217,14 @@ export const api = {
 		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) });
 	},
 
-	searchAudio(params: AudioSearchParams) {
+	searchAudio(params: AudioSearchParams, signal?: AbortSignal) {
 		// Strip null/undefined fields before sending
 		const body: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(params)) {
 			if (v !== null && v !== undefined) body[k] = v;
 		}
 		return fetchApi<{ tracks: AudioSearchResult[] }>('/api/search/audio', undefined, {
+			signal,
 			method: 'POST',
 			body: JSON.stringify(body),
 		});
@@ -1480,8 +1483,8 @@ export const api = {
 		});
 	},
 
-	searchTidal(q: string, limit = 20): Promise<TidalSearchResults> {
-		return fetchApi<TidalSearchResults>('/api/tidal/search', { q, limit: String(limit) });
+	searchTidal(q: string, limit = 20, signal?: AbortSignal): Promise<TidalSearchResults> {
+		return fetchApi<TidalSearchResults>('/api/tidal/search', { q, limit: String(limit) }, { signal });
 	},
 
 	playTidalTrack(track: TidalPlayable): Promise<void> {
