@@ -2,9 +2,10 @@
   import { page } from '$app/state'
   import { api, type TidalArtistProfile, type TidalDiscographyTrack } from '$lib/api/client'
   import { buildTidalTrackMenu } from '$lib/player/track_menu'
-  import { openContextMenu } from '$lib/stores/context_menu'
-  import { playTidalTrackNow } from '$lib/stores/player'
+  import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu'
+  import { playTidalTrackNow, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
+  import { showToast } from '$lib/stores/toast'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -38,6 +39,11 @@
       filterQuery ? a.title.toLowerCase().includes(filterQuery.toLowerCase()) : true
     ) ?? []
   )
+
+  function onTidalRowMenu(t: TidalDiscographyTrack, e: MouseEvent) {
+    e.stopPropagation()
+    openMenuAtElement(e.currentTarget as HTMLElement, buildTidalTrackMenu(trackAsPlayable(t)), t.title)
+  }
 
   function trackAsPlayable(t: TidalDiscographyTrack) {
     return {
@@ -104,11 +110,33 @@
               <button
                 class="row-btn"
                 onclick={() => playTidalTrackNow(trackAsPlayable(track))}
+                title="Play now"
                 aria-label="Play {track.title}"
               >▶</button>
               <button
                 class="row-btn"
-                onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
+                onclick={(e) => {
+                  e.stopPropagation()
+                  void addTidalTrackToQueue(trackAsPlayable(track))
+                  showToast('Added to queue', 'success')
+                }}
+                title="Add to queue"
+                aria-label="Queue {track.title}"
+              >＋</button>
+              <button
+                class="row-btn"
+                onclick={(e) => {
+                  e.stopPropagation()
+                  void startTidalSongRadio(trackAsPlayable(track))
+                  showToast('Starting song radio…', 'info')
+                }}
+                title="Start song radio"
+                aria-label="Start radio from {track.title}"
+              >◎</button>
+              <button
+                class="row-btn"
+                onclick={(e) => onTidalRowMenu(track, e)}
+                title="More options"
                 aria-label="More options"
               >⋯</button>
             </li>
@@ -176,7 +204,7 @@
   .tracks-list { list-style: none; padding: 0; margin: 0; }
   .pop-row {
     display: grid;
-    grid-template-columns: 38px 1fr auto 32px 32px;
+    grid-template-columns: 38px 1fr auto 32px 32px 32px 32px;
     align-items: center;
     gap: 12px;
     padding: 7px 6px;

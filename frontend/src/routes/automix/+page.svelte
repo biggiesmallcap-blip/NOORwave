@@ -24,6 +24,8 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
 
 	let saving = $state(false);
 	let draftCrossfade = $state(0);
@@ -341,7 +343,14 @@
 							</div>
 						{/if}
 					{/if}
-					<div class="queue-row glass-panel">
+					<div
+						class="queue-row glass-panel"
+						role="presentation"
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							openContextMenu(e, buildTrackMenu({ id: item.track.id, title: item.track.title, artist_id: item.track.artist_id, artist_name: item.track.artist_name, album_id: item.track.album_id, album_title: item.track.album_title, is_favorite: item.track.is_favorite }, { queueItemId: item.id }), item.track.title);
+						}}
+					>
 						{#if item.track.artwork_url}
 							<img class="queue-art" src={item.track.artwork_url} alt="" />
 						{:else}
@@ -354,6 +363,16 @@
 						{#if item.source === 'automix'}
 							<StateBadge label="Automix" tone="active" compact={true} />
 						{/if}
+						<button
+							type="button"
+							class="queue-row-menu"
+							title="More options"
+							aria-label="More options"
+							onclick={(e) => {
+								e.stopPropagation();
+								openMenuAtElement(e.currentTarget as HTMLElement, buildTrackMenu({ id: item.track.id, title: item.track.title, artist_id: item.track.artist_id, artist_name: item.track.artist_name, album_id: item.track.album_id, album_title: item.track.album_title, is_favorite: item.track.is_favorite }, { queueItemId: item.id }), item.track.title);
+							}}
+						>⋯</button>
 					</div>
 				{/each}
 				{#if queueUpcoming.length > INDICATOR_WINDOW}
@@ -547,6 +566,22 @@
 		text-align: center;
 		padding: 8px;
 	}
+
+	.queue-row-menu {
+		background: none;
+		border: none;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		font-size: 16px;
+		padding: 4px 8px;
+		border-radius: 4px;
+		opacity: 0;
+		flex-shrink: 0;
+		transition: opacity 0.1s, color 0.1s;
+	}
+	.queue-row:hover .queue-row-menu,
+	.queue-row:focus-within .queue-row-menu { opacity: 1; }
+	.queue-row-menu:hover { color: var(--text-primary); }
 
 	/* Harmonic compatibility indicators between queue rows */
 	.compat-indicator {

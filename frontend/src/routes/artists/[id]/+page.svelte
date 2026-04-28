@@ -6,14 +6,17 @@
 		shuffleArtist,
 		startArtistRadio,
 		playTidalAlbum,
+		addTrackToQueue,
+		startSongRadio,
+		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
-		togglePlayback,
-		toggleTrackFavorite
+		togglePlayback
 	} from '$lib/stores/player';
 	import { formatDuration } from '$lib/stores/library';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { showToast } from '$lib/stores/toast';
 
 	let artistId = $derived(Number(page.params.id));
 
@@ -279,20 +282,45 @@
 							<span class="pop-plays">{track.play_count.toLocaleString()}</span>
 							<div class="pop-actions">
 								<button
-									class="row-btn heart"
-									class:on={track.is_favorite}
-									aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+									class="row-btn"
+									title="Add to queue"
+									aria-label="Add {track.title} to queue"
 									onclick={(e) => {
 										e.stopPropagation();
-										void toggleTrackFavorite(track.id, track.is_favorite ?? false);
-										track.is_favorite = !track.is_favorite;
+										void addTrackToQueue(track.id);
+										showToast('Added to queue', 'success');
 									}}
-								>{track.is_favorite ? '♥' : '♡'}</button>
+								>＋</button>
+								<button
+									class="row-btn"
+									title="Start song radio"
+									aria-label="Start radio from {track.title}"
+									onclick={(e) => {
+										e.stopPropagation();
+										void startSongRadio(track.id);
+										showToast('Starting song radio…', 'info');
+									}}
+								>◎</button>
 								<button
 									class="row-btn"
 									aria-label="More actions"
 									onclick={(e) => onRowMenu(track, e)}
 								>⋯</button>
+								<button
+									class="row-btn heart"
+									class:on={track.is_favorite}
+									aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+									onclick={(e) => {
+										e.stopPropagation();
+										const wasFavorite = track.is_favorite ?? false;
+										track.is_favorite = !wasFavorite;
+										tracks = tracks;
+										void toggleTrackFavorite(track.id, wasFavorite).catch(() => {
+											track.is_favorite = wasFavorite;
+											tracks = tracks;
+										});
+									}}
+								>{track.is_favorite ? '♥' : '♡'}</button>
 							</div>
 							<span class="pop-duration">{formatDuration(track.duration_ms)}</span>
 						</li>
@@ -388,32 +416,17 @@
 					</div>
 					<div class="card-row">
 						{#each fallbackFullAlbums as album (album.id ?? album.title)}
-							{#if album.id != null}
-								<a class="grid-card" href={`/albums/${album.id}`}>
-									<div class="grid-art-wrap">
-										{#if album.artwork_url}
-											<img class="grid-art" src={album.artwork_url} alt="" />
-										{:else}
-											<div class="grid-art placeholder">♫</div>
-										{/if}
-									</div>
-									<p class="grid-title">{album.title}</p>
-									<p class="grid-sub">{album.tracks.length} tracks · Album</p>
-								</a>
-							{:else}
-								<div class="grid-card not-in-library">
-									<div class="grid-art-wrap">
-										{#if album.artwork_url}
-											<img class="grid-art" src={album.artwork_url} alt="" />
-										{:else}
-											<div class="grid-art placeholder">♫</div>
-										{/if}
-										<span class="badge-new">Not in library</span>
-									</div>
-									<p class="grid-title">{album.title}</p>
-									<p class="grid-sub">{album.tracks.length} tracks · Album</p>
+							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
+								<div class="grid-art-wrap">
+									{#if album.artwork_url}
+										<img class="grid-art" src={album.artwork_url} alt="" />
+									{:else}
+										<div class="grid-art placeholder">♫</div>
+									{/if}
 								</div>
-							{/if}
+								<p class="grid-title">{album.title}</p>
+								<p class="grid-sub">{album.tracks.length} tracks · Album</p>
+							</a>
 						{/each}
 					</div>
 				</section>
@@ -427,36 +440,19 @@
 					</div>
 					<div class="card-row">
 						{#each fallbackSinglesEPs as album (album.id ?? album.title)}
-							{#if album.id != null}
-								<a class="grid-card" href={`/albums/${album.id}`}>
-									<div class="grid-art-wrap">
-										{#if album.artwork_url}
-											<img class="grid-art" src={album.artwork_url} alt="" />
-										{:else}
-											<div class="grid-art placeholder">♫</div>
-										{/if}
-									</div>
-									<p class="grid-title">{album.title}</p>
-									<p class="grid-sub">
-										{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
-									</p>
-								</a>
-							{:else}
-								<div class="grid-card not-in-library">
-									<div class="grid-art-wrap">
-										{#if album.artwork_url}
-											<img class="grid-art" src={album.artwork_url} alt="" />
-										{:else}
-											<div class="grid-art placeholder">♫</div>
-										{/if}
-										<span class="badge-new">Not in library</span>
-									</div>
-									<p class="grid-title">{album.title}</p>
-									<p class="grid-sub">
-										{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
-									</p>
+							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
+								<div class="grid-art-wrap">
+									{#if album.artwork_url}
+										<img class="grid-art" src={album.artwork_url} alt="" />
+									{:else}
+										<div class="grid-art placeholder">♫</div>
+									{/if}
 								</div>
-							{/if}
+								<p class="grid-title">{album.title}</p>
+								<p class="grid-sub">
+									{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
+								</p>
+							</a>
 						{/each}
 					</div>
 				</section>
