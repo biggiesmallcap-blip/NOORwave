@@ -128,6 +128,14 @@ export interface TidalSearchArtist {
 	in_library: boolean;
 }
 
+export interface TidalSearchPlaylist {
+	uuid: string;
+	title: string;
+	description: string | null;
+	number_of_tracks: number | null;
+	square_image: string | null;
+}
+
 export interface TidalSearchResults {
 	tracks: TidalSearchTrack[];
 	albums: TidalSearchAlbum[];
@@ -149,6 +157,8 @@ export interface TidalPlayable {
 	artwork_url: string | null;
 	duration_ms: number | null;
 	artist_tidal_id?: number | null;
+	track_id?: number;
+	is_in_library?: boolean;
 }
 
 export interface Album {
@@ -189,6 +199,7 @@ export interface Playlist {
 	is_smart: boolean;
 	track_count: number;
 	smart_rules?: string | null;
+	is_favorite: boolean;
 }
 
 // ─── Smart Playlist Rule Types ───────────────────────────────────────────────
@@ -950,6 +961,31 @@ export const api = {
 		return fetchApi<{ deleted: boolean }>(`/api/smart/playlists/${id}`, undefined, {
 			method: 'DELETE',
 		});
+	},
+
+	togglePlaylistFavorite(id: number) {
+		return fetchApi<{ playlist: Playlist }>(`/api/playlists/${id}/favorite`, undefined, {
+			method: 'PATCH',
+		});
+	},
+
+	addTracksToPlaylist(id: number, trackIds: number[]) {
+		return fetchApi<{ added: number }>(`/api/playlists/${id}/tracks`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ track_ids: trackIds }),
+		});
+	},
+
+	searchTidalPlaylists(q: string) {
+		return fetchApi<{ playlists: TidalSearchPlaylist[] }>(
+			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}`,
+		);
+	},
+
+	getTidalPlaylistTracks(tidalUuid: string) {
+		return fetchApi<{ tracks: TidalPlayable[] }>(
+			`/api/tidal/playlists/${tidalUuid}/tracks`,
+		);
 	},
 
 	getAnalyticsOverview() {
