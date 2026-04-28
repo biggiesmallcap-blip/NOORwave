@@ -213,6 +213,11 @@
 			<span class="actions-hint">Click a song to start the album from there</span>
 		</div>
 
+		<p class="actions-microcopy">
+			<strong>Shuffle</strong> plays this album in random order.
+			<strong>Radio</strong> finds similar tracks across your library and Tidal.
+		</p>
+
 		<section class="track-table">
 			<div class="track-header">
 				<span class="col-num">#</span>
@@ -513,6 +518,19 @@
 	.actions-hint {
 		color: var(--text-tertiary);
 		font-size: 0.78rem;
+	}
+
+	.actions-microcopy {
+		margin: 0;
+		padding: 0 32px 8px;
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
+		line-height: 1.4;
+	}
+
+	.actions-microcopy strong {
+		color: var(--text-secondary);
+		font-weight: 600;
 	}
 
 	.track-table {
