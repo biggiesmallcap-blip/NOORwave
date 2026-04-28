@@ -1,18 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
-	import { buildTidalTrackMenu } from '$lib/player/track_menu';
-	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
-	import { playTidalTrackNow, playTidalAlbum, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player';
-	import { formatDuration } from '$lib/stores/library';
-	import { showToast } from '$lib/stores/toast';
-
-	function onTidalRowMenu(t: TidalDiscographyTrack, e: MouseEvent) {
-		e.stopPropagation();
-		openMenuAtElement(e.currentTarget as HTMLElement, buildTidalTrackMenu(trackAsPlayable(t)), t.title);
-	}
-
-	let tidalAlbumId = $derived(Number(page.params.id));
+	import { playTidalAlbum } from '$lib/stores/player';
+	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 
 	function trackAsPlayable(t: TidalDiscographyTrack) {
 		return {
@@ -23,9 +13,11 @@
 			artwork_url: t.artwork_url,
 			duration_ms: t.duration_ms,
 			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_tidal_id: t.album_tidal_id ?? tidalAlbumId,
+			track_number: t.track_number,
 		};
 	}
+
+	let tidalAlbumId = $derived(Number(page.params.id));
 
 	let tracks = $state<TidalDiscographyTrack[]>([]);
 	let loading = $state(true);
@@ -56,7 +48,6 @@
 		return {
 			title: first.album_title ?? 'Album',
 			artist_name: first.artist_name ?? 'Unknown artist',
-			artist_tidal_id: first.artist_tidal_id ?? null,
 			artwork_url: first.artwork_url,
 			track_count: tracks.length,
 			total_ms: totalMs
@@ -99,11 +90,7 @@
 					<p class="eyebrow">Album · TIDAL preview</p>
 					<h1 class="hero-title">{h.title}</h1>
 					<p class="hero-sub">
-						{#if h.artist_tidal_id != null}
-							<a class="hero-link" href={`/tidal/artists/${h.artist_tidal_id}`}>{h.artist_name}</a>
-						{:else}
-							<span class="hero-link">{h.artist_name}</span>
-						{/if}
+						<span class="hero-link">{h.artist_name}</span>
 						<span class="dot">·</span>
 						<span>{h.track_count} songs</span>
 						<span class="dot">·</span>
@@ -123,64 +110,15 @@
 				<span class="col-title">Title</span>
 				<span class="col-duration"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg></span>
 				<span></span>
-				<span></span>
-				<span></span>
-				<span></span>
 			</div>
 			<ol class="track-list">
 				{#each tracks as track, idx (track.tidal_id)}
-					<li
-						class="track-row"
-						ondblclick={() => playTidalTrackNow(trackAsPlayable(track))}
-						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
-					>
-						<span class="track-index">{track.track_number ?? idx + 1}</span>
-						<div class="track-meta">
-							<p class="track-title">{track.title}</p>
-							{#if track.artist_tidal_id != null}
-								<a
-									class="track-artist"
-									href={`/tidal/artists/${track.artist_tidal_id}`}
-									onclick={(e) => e.stopPropagation()}
-								>{track.artist_name}</a>
-							{:else}
-								<span class="track-artist">{track.artist_name}</span>
-							{/if}
-						</div>
-						<span class="track-duration">{formatDuration(track.duration_ms)}</span>
-						<button
-							class="row-btn"
-							onclick={() => playTidalTrackNow(trackAsPlayable(track))}
-							title="Play now"
-							aria-label="Play {track.title}"
-						>▶</button>
-						<button
-							class="row-btn"
-							onclick={(e) => {
-								e.stopPropagation();
-								void addTidalTrackToQueue(trackAsPlayable(track));
-								showToast('Added to queue', 'success');
-							}}
-							title="Add to queue"
-							aria-label="Queue {track.title}"
-						>＋</button>
-						<button
-							class="row-btn"
-							onclick={(e) => {
-								e.stopPropagation();
-								void startTidalSongRadio(trackAsPlayable(track));
-								showToast('Starting song radio…', 'info');
-							}}
-							title="Start song radio"
-							aria-label="Start radio from {track.title}"
-						>◎</button>
-						<button
-							class="row-btn"
-							onclick={(e) => onTidalRowMenu(track, e)}
-							title="More options"
-							aria-label="More options"
-						>⋯</button>
-					</li>
+					<TidalTrackRow
+						track={trackAsPlayable(track)}
+						variant="indexed"
+						index={idx}
+						showAlbum={false}
+					/>
 				{/each}
 			</ol>
 		</section>
@@ -336,7 +274,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 1fr 64px 32px 32px 32px 32px;
+		grid-template-columns: 40px 1fr 64px auto;
 		align-items: center;
 		gap: 14px;
 		padding: 6px 16px 10px;
@@ -359,67 +297,4 @@
 		flex-direction: column;
 		gap: 0;
 	}
-
-	.track-row {
-		display: grid;
-		grid-template-columns: 40px 1fr 64px 32px 32px 32px 32px;
-		align-items: center;
-		gap: 14px;
-		padding: 10px 16px;
-		border-radius: 6px;
-	}
-
-	.track-index {
-		text-align: center;
-		color: var(--text-secondary);
-		font-variant-numeric: tabular-nums;
-		font-size: 0.9rem;
-	}
-
-	.track-meta {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.track-title {
-		margin: 0;
-		font-weight: 600;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.track-artist {
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		text-decoration: none;
-	}
-	a.track-artist:hover { color: var(--text-primary); text-decoration: underline; }
-	a.hero-link { text-decoration: none; }
-	a.hero-link:hover { text-decoration: underline; }
-
-	.track-duration {
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.track-row:hover { background: var(--bg-hover); cursor: pointer; }
-
-	.row-btn {
-		background: none;
-		border: none;
-		color: var(--text-tertiary);
-		cursor: pointer;
-		font-size: 13px;
-		padding: 4px;
-		border-radius: 4px;
-		opacity: 0;
-		transition: opacity 0.1s, color 0.1s;
-	}
-	.track-row:hover .row-btn { opacity: 1; }
-	.row-btn:hover { color: var(--text-primary); }
 </style>

@@ -5,17 +5,11 @@
 		playAlbum,
 		shuffleAlbum,
 		startAlbumRadio,
-		addTrackToQueue,
-		startSongRadio,
-		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
 	} from '$lib/stores/player';
-	import { formatDuration } from '$lib/stores/library';
-	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
-	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { showToast } from '$lib/stores/toast';
+	import TrackRow from '$lib/components/TrackRow.svelte';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -117,20 +111,6 @@
 		void playAlbum(albumId, track.id);
 	}
 
-	function onRowContextMenu(track: Track, event: MouseEvent) {
-		event.preventDefault();
-		openContextMenu(event, buildTrackMenu(track, { hideAlbumActions: true }), track.title);
-	}
-
-	function onRowMenu(track: Track, event: MouseEvent) {
-		event.stopPropagation();
-		openMenuAtElement(
-			event.currentTarget as HTMLElement,
-			buildTrackMenu(track, { hideAlbumActions: true }),
-			track.title
-		);
-	}
-
 	function onHeroPlay() {
 		const current = $currentTrack;
 		if (current && tracks.some((t) => t.id === current.id)) {
@@ -227,92 +207,17 @@
 			</div>
 			<ol class="track-list">
 				{#each tracks as track, idx (track.id)}
-					{@const isCurrent = $currentTrack?.id === track.id}
-					<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-					<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-					<li
-						class="track-row"
-						class:active={isCurrent}
-						role="button"
-						tabindex="0"
-						onclick={() => onRowClick(track)}
-						onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), onRowClick(track))}
-						oncontextmenu={(e) => onRowContextMenu(track, e)}
-					>
-						<span class="track-index">
-							{#if isCurrent}
-								<button
-									class="track-play-indicator"
-									aria-label={$isPlaying ? 'Pause' : 'Play'}
-									onclick={(e) => { e.stopPropagation(); void togglePlayback(); }}
-								>
-									{#if $isPlaying}
-										<span class="eq">
-											<span></span><span></span><span></span>
-										</span>
-									{:else}
-										▶
-									{/if}
-								</button>
-							{:else}
-								<span class="num">{track.track_number ?? idx + 1}</span>
-								<span class="play-hover">▶</span>
-							{/if}
-						</span>
-						<div class="track-meta">
-							<p class="track-title">{track.title}</p>
-							<a
-								class="track-artist"
-								href="/artists/{track.artist_id}"
-								onclick={(e) => e.stopPropagation()}
-							>{track.artist_name ?? 'Unknown artist'}</a>
-						</div>
-						<span class="track-plays">{track.play_count.toLocaleString()}</span>
-						<div class="track-actions">
-							<button
-								class="row-btn"
-								title="Add to queue"
-								aria-label="Add {track.title} to queue"
-								onclick={(e) => {
-									e.stopPropagation();
-									void addTrackToQueue(track.id);
-									showToast('Added to queue', 'success');
-								}}
-							>＋</button>
-							<button
-								class="row-btn"
-								title="Start song radio"
-								aria-label="Start radio from {track.title}"
-								onclick={(e) => {
-									e.stopPropagation();
-									void startSongRadio(track.id);
-									showToast('Starting song radio…', 'info');
-								}}
-							>◎</button>
-							<button
-								class="row-btn"
-								aria-label="More actions"
-								onclick={(e) => onRowMenu(track, e)}
-							>⋯</button>
-							<button
-								class="row-btn heart"
-								class:on={track.is_favorite}
-								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-								onclick={(e) => {
-									e.stopPropagation();
-									const wasFavorite = track.is_favorite ?? false;
-									track.is_favorite = !wasFavorite;
-									tracks = tracks;
-									void toggleTrackFavorite(track.id, wasFavorite).catch(() => {
-										track.is_favorite = wasFavorite;
-										tracks = tracks;
-									});
-								}}
-							>{track.is_favorite ? '♥' : '♡'}</button>
-						</div>
-						<span class="track-duration">{formatDuration(track.duration_ms)}</span>
-					</li>
+					<TrackRow
+						{track}
+						variant="indexed"
+						index={idx}
+						isCurrent={$currentTrack?.id === track.id}
+						isPlaying={$isPlaying}
+						showAlbum={false}
+						showPlayCount={true}
+						onRowClick={() => onRowClick(track)}
+						menuOptions={{ hideAlbumActions: true }}
+					/>
 				{/each}
 			</ol>
 		</section>
@@ -567,154 +472,6 @@
 		gap: 0;
 	}
 
-	.track-row {
-		display: grid;
-		grid-template-columns: 40px 1fr 80px auto 64px;
-		align-items: center;
-		gap: 14px;
-		padding: 10px 16px;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: background var(--motion-fast);
-	}
-
-	.track-row:hover {
-		background: var(--bg-hover);
-	}
-
-	.track-row.active {
-		background: var(--accent-soft);
-	}
-
-	.track-row.active .track-title {
-		color: var(--accent-strong);
-	}
-
-	.track-index {
-		position: relative;
-		display: grid;
-		place-items: center;
-		width: 40px;
-		color: var(--text-secondary);
-		font-variant-numeric: tabular-nums;
-		font-size: 0.9rem;
-	}
-
-	.track-index .play-hover {
-		position: absolute;
-		inset: 0;
-		display: grid;
-		place-items: center;
-		opacity: 0;
-		color: var(--text-primary);
-		font-size: 0.8rem;
-	}
-
-	.track-row:hover .num { opacity: 0; }
-	.track-row:hover .play-hover { opacity: 1; }
-
-	.track-play-indicator {
-		all: unset;
-		cursor: pointer;
-		color: var(--accent-strong);
-		display: grid;
-		place-items: center;
-	}
-
-	.eq {
-		display: inline-flex;
-		align-items: flex-end;
-		gap: 2px;
-		height: 14px;
-	}
-	.eq span {
-		width: 3px;
-		background: var(--accent-strong);
-		animation: eq-bounce 0.9s infinite ease-in-out;
-		border-radius: 2px;
-	}
-	.eq span:nth-child(1) { animation-delay: -0.3s; }
-	.eq span:nth-child(2) { animation-delay: -0.15s; }
-	.eq span:nth-child(3) { animation-delay: 0s; }
-	@keyframes eq-bounce {
-		0%, 100% { height: 4px; }
-		50% { height: 14px; }
-	}
-
-	.track-meta {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.track-title {
-		margin: 0;
-		font-weight: 600;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.track-artist {
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		text-decoration: none;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%;
-	}
-	.track-artist:hover { color: var(--text-primary); text-decoration: underline; }
-
-	.track-plays {
-		color: var(--text-tertiary);
-		font-size: 0.82rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.track-actions {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		opacity: 0;
-		transition: opacity var(--motion-fast);
-	}
-
-	.track-row:hover .track-actions,
-	.track-row:focus-within .track-actions,
-	.track-row.active .track-actions { opacity: 1; }
-
-	.row-btn {
-		all: unset;
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border-radius: 999px;
-		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: 1rem;
-		transition: background var(--motion-fast), color var(--motion-fast);
-	}
-
-	.row-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.row-btn.heart.on {
-		color: var(--accent);
-	}
-
-	.track-duration {
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
 	.footnote {
 		padding: 22px 32px 4px;
 		color: var(--text-tertiary);
@@ -822,8 +579,8 @@
 		.hero-title { font-size: 2rem; }
 		.actions-bar { padding: 12px 20px; }
 		.track-table { padding: 8px 12px 0; }
-		.track-row, .track-header { grid-template-columns: 36px 1fr auto 56px; }
-		.col-plays, .track-plays { display: none; }
+		.track-header { grid-template-columns: 36px 1fr auto 56px; }
+		.col-plays { display: none; }
 		.more-section { padding: 24px 20px 0; }
 	}
 </style>

@@ -6,17 +6,11 @@
 		shuffleArtist,
 		startArtistRadio,
 		playTidalAlbum,
-		addTrackToQueue,
-		startSongRadio,
-		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
 	} from '$lib/stores/player';
-	import { formatDuration } from '$lib/stores/library';
-	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
-	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { showToast } from '$lib/stores/toast';
+	import TrackRow from '$lib/components/TrackRow.svelte';
 
 	let artistId = $derived(Number(page.params.id));
 
@@ -145,20 +139,6 @@
 	let fallbackFullAlbums = $derived(fallbackAlbums.filter((a) => a.tracks.length >= 3));
 	let fallbackSinglesEPs = $derived(fallbackAlbums.filter((a) => a.tracks.length < 3));
 
-	function onRowContextMenu(track: Track, event: MouseEvent) {
-		event.preventDefault();
-		openContextMenu(event, buildTrackMenu(track, { hideArtistActions: true }), track.title);
-	}
-
-	function onRowMenu(track: Track, event: MouseEvent) {
-		event.stopPropagation();
-		openMenuAtElement(
-			event.currentTarget as HTMLElement,
-			buildTrackMenu(track, { hideArtistActions: true }),
-			track.title
-		);
-	}
-
 	function onHeroPlay() {
 		const current = $currentTrack;
 		if (current && tracks.some((t) => t.id === current.id)) {
@@ -262,73 +242,17 @@
 				<h2 class="section-title">Popular</h2>
 				<ol class="popular-list">
 					{#each filteredPopular as track, idx (track.id)}
-						{@const isCurrent = $currentTrack?.id === track.id}
-						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-						<li
-							class="pop-row"
-							class:active={isCurrent}
-							role="button"
-							tabindex="0"
-							onclick={() => void playArtist(artistId, track.id)}
-							onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playArtist(artistId, track.id))}
-							oncontextmenu={(e) => onRowContextMenu(track, e)}
-						>
-							<span class="pop-index">{idx + 1}</span>
-							<div class="pop-art-wrap">
-								{#if track.artwork_url}
-									<img class="pop-art" src={track.artwork_url} alt="" />
-								{:else}
-									<div class="pop-art placeholder">♫</div>
-								{/if}
-							</div>
-							<p class="pop-title">{track.title}</p>
-							<span class="pop-plays">{track.play_count.toLocaleString()}</span>
-							<div class="pop-actions">
-								<button
-									class="row-btn"
-									title="Add to queue"
-									aria-label="Add {track.title} to queue"
-									onclick={(e) => {
-										e.stopPropagation();
-										void addTrackToQueue(track.id);
-										showToast('Added to queue', 'success');
-									}}
-								>＋</button>
-								<button
-									class="row-btn"
-									title="Start song radio"
-									aria-label="Start radio from {track.title}"
-									onclick={(e) => {
-										e.stopPropagation();
-										void startSongRadio(track.id);
-										showToast('Starting song radio…', 'info');
-									}}
-								>◎</button>
-								<button
-									class="row-btn"
-									aria-label="More actions"
-									onclick={(e) => onRowMenu(track, e)}
-								>⋯</button>
-								<button
-									class="row-btn heart"
-									class:on={track.is_favorite}
-									aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-									onclick={(e) => {
-										e.stopPropagation();
-										const wasFavorite = track.is_favorite ?? false;
-										track.is_favorite = !wasFavorite;
-										tracks = tracks;
-										void toggleTrackFavorite(track.id, wasFavorite).catch(() => {
-											track.is_favorite = wasFavorite;
-											tracks = tracks;
-										});
-									}}
-								>{track.is_favorite ? '♥' : '♡'}</button>
-							</div>
-							<span class="pop-duration">{formatDuration(track.duration_ms)}</span>
-						</li>
+						<TrackRow
+							{track}
+							variant="numbered"
+							index={idx}
+							isCurrent={$currentTrack?.id === track.id}
+							isPlaying={$isPlaying}
+							showArtist={false}
+							showPlayCount={true}
+							onRowClick={() => void playArtist(artistId, track.id)}
+							menuOptions={{ hideArtistActions: true }}
+						/>
 					{/each}
 				</ol>
 			</section>
@@ -571,6 +495,19 @@
 		padding: 18px 32px 8px;
 	}
 
+	.actions-microcopy {
+		margin: 0;
+		padding: 0 32px 8px;
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
+		line-height: 1.4;
+	}
+
+	.actions-microcopy strong {
+		color: var(--text-secondary);
+		font-weight: 600;
+	}
+
 	.play-fab {
 		all: unset;
 		width: 56px;
@@ -609,19 +546,6 @@
 		background: var(--bg-hover);
 	}
 
-	.actions-microcopy {
-		margin: 0;
-		padding: 0 32px 8px;
-		color: var(--text-tertiary);
-		font-size: 0.78rem;
-		line-height: 1.4;
-	}
-
-	.actions-microcopy strong {
-		color: var(--text-secondary);
-		font-weight: 600;
-	}
-
 	.section {
 		padding: 24px 32px 0;
 		display: flex;
@@ -654,91 +578,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0;
-	}
-
-	.pop-row {
-		display: grid;
-		grid-template-columns: 32px 42px 1fr 90px auto 60px;
-		align-items: center;
-		gap: 14px;
-		padding: 8px 12px;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: background var(--motion-fast);
-	}
-
-	.pop-row:hover { background: var(--bg-hover); }
-	.pop-row.active { background: var(--accent-soft); }
-	.pop-row.active .pop-title { color: var(--accent-strong); }
-
-	.pop-index {
-		color: var(--text-secondary);
-		text-align: center;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.pop-art-wrap {
-		width: 42px;
-		height: 42px;
-		border-radius: 4px;
-		overflow: hidden;
-		background: var(--bg-surface);
-	}
-	.pop-art { width: 100%; height: 100%; object-fit: cover; display: block; }
-	.pop-art.placeholder {
-		display: grid; place-items: center;
-		color: var(--text-tertiary);
-	}
-
-	.pop-title {
-		margin: 0;
-		font-weight: 600;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.pop-plays {
-		color: var(--text-tertiary);
-		font-size: 0.82rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.pop-actions {
-		display: flex;
-		gap: 4px;
-		opacity: 0;
-		transition: opacity var(--motion-fast);
-	}
-
-	.pop-row:hover .pop-actions,
-	.pop-row:focus-within .pop-actions,
-	.pop-row.active .pop-actions { opacity: 1; }
-
-	.row-btn {
-		all: unset;
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border-radius: 999px;
-		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: 1rem;
-		transition: background var(--motion-fast), color var(--motion-fast);
-	}
-	.row-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-	.row-btn.heart.on { color: var(--accent); }
-
-	.pop-duration {
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
 	}
 
 	.card-row {
@@ -860,7 +699,5 @@
 		.hero-title { font-size: 2.6rem; }
 		.actions-bar { padding: 12px 20px; }
 		.section { padding: 20px 20px 0; }
-		.pop-row { grid-template-columns: 28px 36px 1fr auto 56px; }
-		.pop-plays { display: none; }
 	}
 </style>

@@ -1,11 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state'
   import { api, type TidalArtistProfile, type TidalDiscographyTrack } from '$lib/api/client'
-  import { buildTidalTrackMenu } from '$lib/player/track_menu'
-  import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, addTidalTrackToQueue, startTidalSongRadio } from '$lib/stores/player'
-  import { formatDuration } from '$lib/stores/library'
-  import { showToast } from '$lib/stores/toast'
+  import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -40,11 +36,6 @@
     ) ?? []
   )
 
-  function onTidalRowMenu(t: TidalDiscographyTrack, e: MouseEvent) {
-    e.stopPropagation()
-    openMenuAtElement(e.currentTarget as HTMLElement, buildTidalTrackMenu(trackAsPlayable(t)), t.title)
-  }
-
   function trackAsPlayable(t: TidalDiscographyTrack) {
     return {
       tidal_id: t.tidal_id,
@@ -54,7 +45,6 @@
       artwork_url: t.artwork_url,
       duration_ms: t.duration_ms,
       artist_tidal_id: tidalArtistId,
-      album_tidal_id: t.album_tidal_id ?? null,
     }
   }
 </script>
@@ -82,64 +72,13 @@
       <section class="section">
         <h3 class="section-label">Top Tracks</h3>
         <ul class="tracks-list">
-          {#each filteredTracks as track (track.tidal_id)}
-            <li
-              class="pop-row"
-              ondblclick={() => playTidalTrackNow(trackAsPlayable(track))}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
-            >
-              <div
-                class="track-art"
-                style={track.artwork_url ? `background-image: url('${track.artwork_url}')` : ''}
-              ></div>
-              <div class="track-meta">
-                <p class="track-title">{track.title}</p>
-                {#if track.album_title}
-                  {#if track.album_tidal_id != null}
-                    <a
-                      class="track-album"
-                      href={`/tidal/albums/${track.album_tidal_id}`}
-                      onclick={(e) => e.stopPropagation()}
-                    >{track.album_title}</a>
-                  {:else}
-                    <p class="track-album">{track.album_title}</p>
-                  {/if}
-                {/if}
-              </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
-              <button
-                class="row-btn"
-                onclick={() => playTidalTrackNow(trackAsPlayable(track))}
-                title="Play now"
-                aria-label="Play {track.title}"
-              >▶</button>
-              <button
-                class="row-btn"
-                onclick={(e) => {
-                  e.stopPropagation()
-                  void addTidalTrackToQueue(trackAsPlayable(track))
-                  showToast('Added to queue', 'success')
-                }}
-                title="Add to queue"
-                aria-label="Queue {track.title}"
-              >＋</button>
-              <button
-                class="row-btn"
-                onclick={(e) => {
-                  e.stopPropagation()
-                  void startTidalSongRadio(trackAsPlayable(track))
-                  showToast('Starting song radio…', 'info')
-                }}
-                title="Start song radio"
-                aria-label="Start radio from {track.title}"
-              >◎</button>
-              <button
-                class="row-btn"
-                onclick={(e) => onTidalRowMenu(track, e)}
-                title="More options"
-                aria-label="More options"
-              >⋯</button>
-            </li>
+          {#each filteredTracks as track, idx (track.tidal_id)}
+            <TidalTrackRow
+              track={trackAsPlayable(track)}
+              variant="numbered"
+              index={idx}
+              showArtist={false}
+            />
           {/each}
         </ul>
       </section>
@@ -202,35 +141,6 @@
     margin-bottom: 14px;
   }
   .tracks-list { list-style: none; padding: 0; margin: 0; }
-  .pop-row {
-    display: grid;
-    grid-template-columns: 38px 1fr auto 32px 32px 32px 32px;
-    align-items: center;
-    gap: 12px;
-    padding: 7px 6px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .pop-row:hover { background: var(--bg-hover); }
-  .track-art {
-    width: 36px; height: 36px;
-    border-radius: 4px;
-    background: var(--bg-raised);
-    background-size: cover; background-position: center;
-  }
-  .track-title { font-size: 13px; color: var(--text-primary); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .track-album { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; display: block; }
-  a.track-album:hover { color: var(--text-primary); text-decoration: underline; }
-  .track-duration { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .row-btn {
-    background: none; border: none;
-    color: var(--text-tertiary); cursor: pointer;
-    font-size: 14px; padding: 4px;
-    border-radius: 4px; opacity: 0;
-    transition: opacity 0.1s, color 0.1s;
-  }
-  .pop-row:hover .row-btn { opacity: 1; }
-  .row-btn:hover { color: var(--text-primary); }
   .albums-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
