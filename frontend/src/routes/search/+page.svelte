@@ -43,6 +43,15 @@
   let audioResults = $state<AudioSearchResult[] | null>(null)
   let loading = $state(false)
   let error = $state<string | null>(null)
+  let failedArtistImages = $state(new Set<number>())
+  let topArtistImageFailed = $state(false)
+  $effect(() => {
+    // reset image error state when search results change
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    results
+    failedArtistImages = new Set()
+    topArtistImageFailed = false
+  })
   let debounceTimer: ReturnType<typeof setTimeout>
 
   // D5 — in-memory result cache (last 5 queries, keyed by normalised query string)
@@ -359,7 +368,7 @@
         album_title: track.album_title ?? null,
       })
     }
-    return buildTidalTrackMenu(track)
+    return buildTidalTrackMenu(toPlayable(track))
   }
 
   // ─── Keyboard navigation ────────────────────────────────────────────────
@@ -596,6 +605,7 @@
               tabindex="0"
               onclick={() => void playLibraryTrack(track)}
               onkeydown={(e) => e.key === 'Enter' && void playLibraryTrack(track)}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
@@ -620,6 +630,12 @@
                   title="Play now"
                   aria-label="Play {track.title}"
                 >▶</button>
+                <button
+                  class="row-btn"
+                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
+                  title="More options"
+                  aria-label="More options"
+                >⋯</button>
               </div>
             </li>
           {/each}
@@ -644,13 +660,19 @@
           class:artist-hero={top.kind === 'artist'}
           role="button"
           tabindex="0"
-          style={top.kind === 'artist' && artistBg ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
+          style={top.kind === 'artist' && artistBg && !topArtistImageFailed ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
+          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? buildAlbumMenu(top.entry) : buildArtistMenu(top.entry)) }}
         >
           {#if top.kind === 'artist'}
-            {#if artistBg}
-              <div class="top-art top-art--circle" style={`background-image: url('${artistBg}')`}></div>
+            {#if artistBg && !topArtistImageFailed}
+              <img
+                class="top-art top-art--circle"
+                src={artistBg}
+                alt={top.entry.name}
+                onerror={() => { topArtistImageFailed = true }}
+              />
             {:else}
               <div class="top-art top-art--circle fallback" style={`background: ${letterColor(top.entry.name)}`}>
                 <span>{initials(top.entry.name)}</span>
@@ -696,8 +718,13 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildArtistMenu(artist)) }}
             >
               <div class="avatar-wrap">
-                {#if artist.artwork_url}
-                  <div class="artist-avatar" style={`background-image: url('${artist.artwork_url}')`}></div>
+                {#if artist.artwork_url && !failedArtistImages.has(artist.tidal_id)}
+                  <img
+                    class="artist-avatar"
+                    src={artist.artwork_url}
+                    alt={artist.name}
+                    onerror={() => { failedArtistImages = new Set([...failedArtistImages, artist.tidal_id]) }}
+                  />
                 {:else}
                   <div class="artist-avatar fallback" style={`background: ${letterColor(artist.name)}`}>
                     <span>{initials(artist.name)}</span>
@@ -893,6 +920,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
@@ -924,6 +952,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
@@ -1132,10 +1161,13 @@
     background-size: cover;
     background-position: center;
     background-color: var(--bg-raised);
+    box-shadow: 0 12px 28px -12px rgba(0,0,0,0.6);
+    object-fit: cover;
+  }
+  .top-art.fallback {
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 12px 28px -12px rgba(0,0,0,0.6);
   }
   .top-art--circle { border-radius: 50%; }
   .top-art.fallback span {
@@ -1253,9 +1285,11 @@
     height: 72px;
     border-radius: 50%;
     background: var(--bg-raised);
-    background-size: cover;
-    background-position: center;
+    object-fit: cover;
+    display: block;
     transition: opacity 0.15s;
+  }
+  .artist-avatar.fallback {
     display: flex;
     align-items: center;
     justify-content: center;
