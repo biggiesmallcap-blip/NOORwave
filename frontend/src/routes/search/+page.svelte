@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { goto, beforeNavigate, afterNavigate } from '$app/navigation'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist } from '$lib/api/client'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum, playTidalPlaylist } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
   import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
@@ -57,7 +57,10 @@
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
 
-  type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library'
+  let localPlaylists = $state<Playlist[]>([])
+  let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
+
+  type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
 
   const parsedQuery = $derived(parseQuery(query))
@@ -74,6 +77,10 @@
         .map(e => e.artist_name)
         .filter((n): n is string => typeof n === 'string' && n.length > 0)
       recentArtistNames = new Set(names)
+    } catch { /* ignore */ }
+    try {
+      const { playlists } = await api.getPlaylists()
+      localPlaylists = playlists
     } catch { /* ignore */ }
   })
 
@@ -101,6 +108,7 @@
     if (!query.trim()) {
       results = null
       audioResults = null
+      tidalPlaylistResults = []
       loading = false
       error = null
       return
@@ -143,6 +151,7 @@
           const res = await api.searchAudio(buildAudioParams(effectiveParsed))
           audioResults = res.tracks
           results = null
+          tidalPlaylistResults = []
         } else {
           audioResults = null
           const cacheKey = q.toLowerCase()
@@ -154,6 +163,12 @@
             results = fresh
             resultCache.set(cacheKey, fresh)
             if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
+          }
+          try {
+            const { playlists } = await api.searchTidalPlaylists(q)
+            tidalPlaylistResults = playlists
+          } catch {
+            tidalPlaylistResults = []
           }
         }
         error = null
@@ -219,8 +234,20 @@
     !isEmpty &&
     sortedTracks.length === 0 &&
     sortedAlbums.length === 0 &&
-    sortedArtists.length === 0
+    sortedArtists.length === 0 &&
+    !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0))
   )
+
+  const showPlaylists = $derived(filterMode === 'all' || filterMode === 'playlists')
+
+  const filteredPlaylists = $derived.by(() => {
+    if (!query.trim()) return { local: [] as Playlist[], tidal: [] as TidalSearchPlaylist[] }
+    const q = query.trim().toLowerCase()
+    const matched = localPlaylists.filter(p => p.name.toLowerCase().includes(q))
+    const localNames = new Set(matched.map(p => p.name.toLowerCase()))
+    const tidalOnly = tidalPlaylistResults.filter(tp => !localNames.has(tp.title.toLowerCase()))
+    return { local: matched, tidal: tidalOnly }
+  })
 
   type TopResult =
     | { kind: 'artist'; entry: TidalSearchArtist }
@@ -515,6 +542,7 @@
           { id: 'artists', label: 'Artists' },
           { id: 'albums', label: 'Albums' },
           { id: 'tracks', label: 'Tracks' },
+          { id: 'playlists', label: 'Playlists' },
           { id: 'library', label: 'In Library' },
         ] as pill (pill.id)}
           <button
@@ -722,6 +750,61 @@
               {/if}
             </a>
           {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0)}
+      <section class="results-section">
+        <h3 class="section-label">Playlists</h3>
+        <div class="albums-row" use:wheelToHorizontal>
+
+          {#each filteredPlaylists.local as playlist (playlist.id)}
+            <a
+              class="album-card in-library"
+              href="/playlists"
+            >
+              <div class="art-wrap">
+                <div class="album-art fallback" style="background: {letterColor(playlist.name)}">
+                  <span>♫</span>
+                </div>
+                <span class="lib-badge" aria-label="In your library"></span>
+              </div>
+              <p class="album-title">{playlist.name}</p>
+              <p class="album-artist">{playlist.is_smart ? 'Smart playlist' : 'Playlist'} · {playlist.track_count} tracks</p>
+            </a>
+          {/each}
+
+          {#each filteredPlaylists.tidal as playlist (playlist.uuid)}
+            <div
+              class="album-card"
+              role="button"
+              tabindex="0"
+              onclick={() => void playTidalPlaylist(playlist.uuid)}
+              onkeydown={(e) => e.key === 'Enter' && void playTidalPlaylist(playlist.uuid)}
+            >
+              <div class="art-wrap">
+                {#if playlist.square_image}
+                  <div
+                    class="album-art"
+                    style="background-image: url('https://resources.tidal.com/images/{playlist.square_image.replaceAll('-', '/')}/320x320.jpg')"
+                  ></div>
+                {:else}
+                  <div class="album-art fallback" style="background: {letterColor(playlist.title)}">
+                    <span>♫</span>
+                  </div>
+                {/if}
+                <button
+                  class="art-play-overlay"
+                  onclick={(e) => { e.stopPropagation(); void playTidalPlaylist(playlist.uuid) }}
+                  aria-label="Play {playlist.title}"
+                >▶</button>
+              </div>
+              <p class="album-title">{playlist.title}</p>
+              <p class="album-artist">TIDAL · {playlist.number_of_tracks ?? '?'} tracks</p>
+            </div>
+          {/each}
+
         </div>
       </section>
     {/if}
