@@ -107,6 +107,39 @@ pub fn remove_queue_item(conn: &Connection, item_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Move the queue row identified by `item_id` to logical index `new_pos`
+/// (0-based, after the move). Out-of-range targets are clamped to the
+/// current queue length. After the move all positions are renormalised
+/// so they are contiguous and 0-based.
+pub fn move_queue_item(conn: &Connection, item_id: i64, new_pos: i32) -> Result<()> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
+        stmt.query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let from = match ids.iter().position(|&id| id == item_id) {
+        Some(idx) => idx,
+        None => return Ok(()),
+    };
+    let mut reordered = ids.clone();
+    let id = reordered.remove(from);
+    let target = (new_pos.max(0) as usize).min(reordered.len());
+    reordered.insert(target, id);
+
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE queue SET position = ?1 WHERE id = ?2")?;
+        for (idx, qid) in reordered.iter().enumerate() {
+            stmt.execute(params![idx as i32, qid])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn apply_shuffle(
     conn: &Connection,
     mode: ShuffleMode,
@@ -412,6 +445,38 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].track.id, 1);
         assert_eq!(queue[1].track.id, 2);
+    }
+
+    #[test]
+    fn move_queue_item_reorders_within_queue() {
+        let conn = conn();
+        let tracks = vec![
+            get_track_by_id(&conn, 1).unwrap().unwrap(),
+            get_track_by_id(&conn, 2).unwrap().unwrap(),
+            get_track_by_id(&conn, 3).unwrap().unwrap(),
+            get_track_by_id(&conn, 4).unwrap().unwrap(),
+        ];
+
+        replace_queue(&conn, &tracks, "test").unwrap();
+        let queue = load_queue(&conn).unwrap();
+
+        // Move the third item (track 3) to position 0.
+        let third = queue[2].id;
+        move_queue_item(&conn, third, 0).unwrap();
+        let queue = load_queue(&conn).unwrap();
+        assert_eq!(queue[0].track.id, 3);
+        assert_eq!(queue[1].track.id, 1);
+        assert_eq!(queue[2].track.id, 2);
+        assert_eq!(queue[3].track.id, 4);
+
+        // Out-of-range new_pos clamps to the end.
+        move_queue_item(&conn, queue[0].id, 999).unwrap();
+        let queue = load_queue(&conn).unwrap();
+        assert_eq!(queue[3].track.id, 3);
+        // Positions stay contiguous starting at 0.
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
     }
 
     #[test]

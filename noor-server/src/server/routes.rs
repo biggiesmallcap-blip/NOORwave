@@ -139,6 +139,19 @@ pub struct QueueRemoveRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct QueueMoveRequest {
+    item_id: i64,
+    new_pos: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlaylistFromQueueRequest {
+    name: String,
+    #[serde(default)]
+    include_tidal_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct BatchPlaylistRequest {
     playlist_id: i64,
     track_ids: Vec<i64>,
@@ -349,6 +362,9 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/playback/queue/add", post(add_queue_track))
         .route("/api/playback/queue/remove", post(remove_queue_track))
+        .route("/api/playback/queue/move", post(move_queue_track))
+        .route("/api/playback/queue/clear", post(clear_queue_route))
+        .route("/api/playlists/from-queue", post(create_playlist_from_queue))
         // Audio output settings + device enumeration
         .route("/api/audio/devices", get(get_audio_devices))
         .route(
@@ -5285,6 +5301,102 @@ async fn remove_queue_track(
             Ok(Json(json!({ "queue": queue })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn move_queue_track(
+    State(state): State<SharedState>,
+    Json(payload): Json<QueueMoveRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            queue::move_queue_item(conn, payload.item_id, payload.new_pos)?;
+            let queue = queue::load_queue(conn)?;
+            let _ = state.event_tx.send(AppEvent::QueueUpdated);
+            Ok(Json(json!({ "queue": queue })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn clear_queue_route(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            // Preserve the currently-playing row so playback continues.
+            let current_id = player::current_track_id(conn)?;
+            if let Some(track_id) = current_id {
+                conn.execute(
+                    "DELETE FROM queue WHERE track_id != ?1",
+                    params![track_id],
+                )?;
+            } else {
+                queue::clear_queue(conn)?;
+            }
+            let queue = queue::load_queue(conn)?;
+            let _ = state.event_tx.send(AppEvent::QueueUpdated);
+            Ok(Json(json!({ "queue": queue })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn create_playlist_from_queue(
+    State(state): State<SharedState>,
+    Json(payload): Json<PlaylistFromQueueRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Playlist name must not be empty" })),
+        ));
+    }
+    let include_tidal_only = payload.include_tidal_only.unwrap_or(true);
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let items = queue::load_queue(conn)?;
+            let track_ids: Vec<i64> = items
+                .iter()
+                .filter(|item| {
+                    if include_tidal_only {
+                        true
+                    } else {
+                        // "tidal_stream" / "tidal_ephemeral" sources are tidal-only;
+                        // local + best_source != tidal counts as on-disk.
+                        item.track.source.as_str() != "tidal_stream"
+                            && item.track.source.as_str() != "tidal_ephemeral"
+                    }
+                })
+                .map(|item| item.track.id)
+                .filter(|id| *id > 0)
+                .collect();
+
+            // Insert empty playlist row, then bulk-add tracks.
+            conn.execute(
+                "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+                 VALUES (?1, NULL, 0, 0, 0)",
+                params![name],
+            )?;
+            let playlist_id = conn.last_insert_rowid();
+            let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
+            let playlist = queries::get_playlist(conn, playlist_id)?
+                .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
+            Ok(Json(json!({
+                "playlist": playlist,
+                "added": added,
+            })))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })
 }
 
 async fn status() -> Json<Value> {
