@@ -1401,7 +1401,7 @@
 			{/if}
 
 			{#if expandedArtistId !== null}
-				{@const expandedArtist = artists.find(a => a.id === expandedArtistId)}
+				{@const expandedArtist = artists.find(a => a.id === expandedArtistId) ?? searchResults.artists.find(a => a.id === expandedArtistId)}
 				{#if expandedArtist}
 					<div class="artist-panel glass-panel">
 						<div class="artist-panel-header">
