@@ -112,6 +112,20 @@
 	let scrubPosition = $state(0);
 	let theme = $state<'dark' | 'light'>('dark');
 	let displayVolume = $state(Math.round($volume * 100));
+
+	// Auto-dismiss the error toast after 6s. Cancel on next change so a new
+	// error doesn't inherit the previous timer.
+	let _errorDismissTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const err = $playerError;
+		if (_errorDismissTimer) {
+			clearTimeout(_errorDismissTimer);
+			_errorDismissTimer = null;
+		}
+		if (err) {
+			_errorDismissTimer = setTimeout(() => playerError.set(null), 6000);
+		}
+	});
 	let nowPlayingOpen = $state(false);
 	let moreOpen = $state(false);
 	let mobileFavoritePending = $state(false);
@@ -958,7 +972,24 @@
 			</div>
 
 			{#if $playerError}
-				<p class="player-error">{$playerError}</p>
+				<div class="player-error" role="alert">
+					<span class="player-error-msg">{$playerError.message}</span>
+					{#if $playerError.retry}
+						<button
+							class="player-error-btn"
+							onclick={async () => {
+								const retry = $playerError?.retry;
+								playerError.set(null);
+								if (retry) await retry();
+							}}
+						>Retry</button>
+					{/if}
+					<button
+						class="player-error-close"
+						aria-label="Dismiss"
+						onclick={() => playerError.set(null)}
+					>×</button>
+				</div>
 			{/if}
 		</div>
 
@@ -2077,12 +2108,42 @@
 
 
 	.player-error {
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		padding: 10px 12px;
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--state-error) 12%, transparent);
 		border: 1px solid color-mix(in srgb, var(--state-error) 24%, transparent);
 		color: var(--state-error);
 		font-size: 0.78rem;
+		margin-top: 8px;
+	}
+
+	.player-error-msg {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.player-error-btn,
+	.player-error-close {
+		background: transparent;
+		border: 1px solid color-mix(in srgb, var(--state-error) 40%, transparent);
+		color: inherit;
+		border-radius: 4px;
+		cursor: pointer;
+		font: inherit;
+		padding: 2px 8px;
+		flex-shrink: 0;
+	}
+	.player-error-btn:hover,
+	.player-error-close:hover {
+		background: color-mix(in srgb, var(--state-error) 18%, transparent);
+	}
+	.player-error-close {
+		padding: 0 8px;
+		font-size: 1rem;
+		line-height: 1.2;
 	}
 
 	.queue-section {
