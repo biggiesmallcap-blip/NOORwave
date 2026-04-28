@@ -888,7 +888,8 @@
   }
   .search-input::placeholder { color: var(--text-tertiary); }
   .kbd-hint {
-    margin: 10px 0 0;
+    margin: 10px auto 0;
+    max-width: 640px;
     font-size: 11px;
     color: var(--text-tertiary);
     display: flex;
