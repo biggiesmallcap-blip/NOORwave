@@ -1,10 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state'
   import { api, type TidalArtistProfile, type TidalDiscographyTrack } from '$lib/api/client'
-  import { buildTidalTrackMenu } from '$lib/player/track_menu'
-  import { openContextMenu } from '$lib/stores/context_menu'
-  import { playTidalTrackNow } from '$lib/stores/player'
-  import { formatDuration } from '$lib/stores/library'
+  import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -75,34 +72,13 @@
       <section class="section">
         <h3 class="section-label">Top Tracks</h3>
         <ul class="tracks-list">
-          {#each filteredTracks as track (track.tidal_id)}
-            <li
-              class="pop-row"
-              ondblclick={() => playTidalTrackNow(trackAsPlayable(track))}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
-            >
-              <div
-                class="track-art"
-                style={track.artwork_url ? `background-image: url('${track.artwork_url}')` : ''}
-              ></div>
-              <div class="track-meta">
-                <p class="track-title">{track.title}</p>
-                {#if track.album_title}
-                  <p class="track-album">{track.album_title}</p>
-                {/if}
-              </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
-              <button
-                class="row-btn"
-                onclick={() => playTidalTrackNow(trackAsPlayable(track))}
-                aria-label="Play {track.title}"
-              >▶</button>
-              <button
-                class="row-btn"
-                onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTidalTrackMenu(trackAsPlayable(track))) }}
-                aria-label="More options"
-              >⋯</button>
-            </li>
+          {#each filteredTracks as track, idx (track.tidal_id)}
+            <TidalTrackRow
+              track={trackAsPlayable(track)}
+              variant="numbered"
+              index={idx}
+              showArtist={false}
+            />
           {/each}
         </ul>
       </section>
@@ -165,34 +141,6 @@
     margin-bottom: 14px;
   }
   .tracks-list { list-style: none; padding: 0; margin: 0; }
-  .pop-row {
-    display: grid;
-    grid-template-columns: 38px 1fr auto 32px 32px;
-    align-items: center;
-    gap: 12px;
-    padding: 7px 6px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .pop-row:hover { background: var(--bg-hover); }
-  .track-art {
-    width: 36px; height: 36px;
-    border-radius: 4px;
-    background: var(--bg-raised);
-    background-size: cover; background-position: center;
-  }
-  .track-title { font-size: 13px; color: var(--text-primary); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .track-album { font-size: 11px; color: var(--text-muted); margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .track-duration { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .row-btn {
-    background: none; border: none;
-    color: var(--text-tertiary); cursor: pointer;
-    font-size: 14px; padding: 4px;
-    border-radius: 4px; opacity: 0;
-    transition: opacity 0.1s, color 0.1s;
-  }
-  .pop-row:hover .row-btn { opacity: 1; }
-  .row-btn:hover { color: var(--text-primary); }
   .albums-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
