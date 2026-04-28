@@ -311,9 +311,15 @@ export async function cyclePlayerShuffleMode() {
 }
 
 export async function addTrackToQueue(trackId: number) {
-	const result = await api.addQueueTrack(trackId);
-	playbackQueue.set(result.queue);
-	playerError.set(null);
+	try {
+		const result = await api.addQueueTrack(trackId);
+		playbackQueue.set(result.queue);
+		playerError.set(null);
+		showToast('Added to queue', 'success');
+	} catch (error) {
+		playerError.set(`Failed to add to queue: ${error}`);
+		throw error;
+	}
 }
 
 export async function moveQueueTrackNext(queueItemId: number) {
@@ -368,11 +374,14 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 		nextFavorite = !activeTrack.is_favorite;
 	}
 
+	// Optimistic flip — UI updates immediately, rollback on rejection.
+	setTrackFavoriteStatus(trackId, nextFavorite);
 	try {
 		await api.setTrackFavorite(trackId, nextFavorite);
-		setTrackFavoriteStatus(trackId, nextFavorite);
 		playerError.set(null);
 	} catch (error) {
+		// Roll back the optimistic update.
+		setTrackFavoriteStatus(trackId, !nextFavorite);
 		playerError.set(`Failed to ${nextFavorite ? 'like' : 'unlike'} track: ${error}`);
 		throw error;
 	}

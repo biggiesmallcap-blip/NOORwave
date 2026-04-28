@@ -5,6 +5,7 @@
 		playAlbum,
 		shuffleAlbum,
 		startAlbumRadio,
+		toggleTrackFavorite,
 		currentTrack,
 		isPlaying,
 		togglePlayback
@@ -12,6 +13,8 @@
 	import { formatDuration } from '$lib/stores/library';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -139,15 +142,49 @@
 	let isAlbumPlaying = $derived(
 		$isPlaying && tracks.some((t) => t.id === $currentTrack?.id)
 	);
+
+	let radioPending = $state(false);
+	async function onRadioClick() {
+		if (radioPending) return;
+		radioPending = true;
+		try {
+			await startAlbumRadio(albumId);
+		} finally {
+			radioPending = false;
+		}
+	}
+
+	async function onHeartClick(track: Track, event: MouseEvent) {
+		event.stopPropagation();
+		const previous = track.is_favorite;
+		tracks = tracks.map((t) =>
+			t.id === track.id ? { ...t, is_favorite: !previous } : t
+		);
+		try {
+			await toggleTrackFavorite(track.id, previous);
+		} catch {
+			tracks = tracks.map((t) =>
+				t.id === track.id ? { ...t, is_favorite: previous } : t
+			);
+		}
+	}
 </script>
 
 <div class="album-page">
 	{#if loading}
-		<p class="status">Loading album…</p>
+		<div class="status-wrap"><Skeleton rows={4} label="Loading album" /></div>
 	{:else if error}
-		<p class="status error">{error}</p>
+		<EmptyState title="Album could not load" copy={error}>
+			{#snippet actions()}
+				<a class="empty-action" href="/library">Back to library</a>
+			{/snippet}
+		</EmptyState>
 	{:else if !header()}
-		<p class="status">Album not found.</p>
+		<EmptyState title="Album not found" copy="It may have been deleted or moved.">
+			{#snippet actions()}
+				<a class="empty-action" href="/library">Back to library</a>
+			{/snippet}
+		</EmptyState>
 	{:else}
 		{@const h = header()!}
 
@@ -198,10 +235,16 @@
 
 			<button
 				class="ghost-btn"
+				class:pending={radioPending}
 				aria-label="Album radio"
-				onclick={() => void startAlbumRadio(albumId)}
+				disabled={radioPending}
+				onclick={onRadioClick}
 			>
-				<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+				{#if radioPending}
+					<span class="btn-spinner" aria-hidden="true"></span>
+				{:else}
+					<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.5 5.5a9 9 0 000 13M18.5 5.5a9 9 0 010 13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+				{/if}
 			</button>
 
 			<span class="actions-spacer"></span>
@@ -265,7 +308,7 @@
 								class="row-btn heart"
 								class:on={track.is_favorite}
 								aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-								onclick={(e) => { e.stopPropagation(); }}
+								onclick={(e) => void onHeartClick(track, e)}
 							>{track.is_favorite ? '♥' : '♡'}</button>
 							<button
 								class="row-btn"
@@ -318,12 +361,39 @@
 		flex-direction: column;
 	}
 
-	.status {
-		padding: 48px 28px;
-		text-align: center;
-		color: var(--text-secondary);
+	.status-wrap {
+		padding: 32px;
 	}
-	.status.error { color: var(--danger, #f87171); }
+
+	.empty-action {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 16px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		text-decoration: none;
+		font-size: 0.85rem;
+		font-weight: 600;
+		border: 1px solid var(--accent-line);
+	}
+	.empty-action:hover { background: var(--accent); color: #fff; }
+
+	.btn-spinner {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		border: 2px solid currentColor;
+		border-right-color: transparent;
+		display: inline-block;
+		animation: btn-spin 0.7s linear infinite;
+	}
+	.ghost-btn.pending { opacity: 0.85; cursor: progress; }
+	.ghost-btn:disabled { cursor: progress; }
+	@keyframes btn-spin {
+		to { transform: rotate(360deg); }
+	}
 
 	.hero {
 		position: relative;
