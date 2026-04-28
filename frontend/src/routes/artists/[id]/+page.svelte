@@ -8,7 +8,8 @@
 		playTidalAlbum,
 		currentTrack,
 		isPlaying,
-		togglePlayback
+		togglePlayback,
+		toggleTrackFavorite
 	} from '$lib/stores/player';
 	import { formatDuration } from '$lib/stores/library';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
@@ -280,8 +281,12 @@
 								<button
 									class="row-btn heart"
 									class:on={track.is_favorite}
-									aria-label="Favorite"
-									onclick={(e) => e.stopPropagation()}
+									aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+									onclick={(e) => {
+										e.stopPropagation();
+										void toggleTrackFavorite(track.id, track.is_favorite ?? false);
+										track.is_favorite = !track.is_favorite;
+									}}
 								>{track.is_favorite ? '♥' : '♡'}</button>
 								<button
 									class="row-btn"
@@ -383,17 +388,32 @@
 					</div>
 					<div class="card-row">
 						{#each fallbackFullAlbums as album (album.id ?? album.title)}
-							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
-								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
-									{:else}
-										<div class="grid-art placeholder">♫</div>
-									{/if}
+							{#if album.id != null}
+								<a class="grid-card" href={`/albums/${album.id}`}>
+									<div class="grid-art-wrap">
+										{#if album.artwork_url}
+											<img class="grid-art" src={album.artwork_url} alt="" />
+										{:else}
+											<div class="grid-art placeholder">♫</div>
+										{/if}
+									</div>
+									<p class="grid-title">{album.title}</p>
+									<p class="grid-sub">{album.tracks.length} tracks · Album</p>
+								</a>
+							{:else}
+								<div class="grid-card not-in-library">
+									<div class="grid-art-wrap">
+										{#if album.artwork_url}
+											<img class="grid-art" src={album.artwork_url} alt="" />
+										{:else}
+											<div class="grid-art placeholder">♫</div>
+										{/if}
+										<span class="badge-new">Not in library</span>
+									</div>
+									<p class="grid-title">{album.title}</p>
+									<p class="grid-sub">{album.tracks.length} tracks · Album</p>
 								</div>
-								<p class="grid-title">{album.title}</p>
-								<p class="grid-sub">{album.tracks.length} tracks · Album</p>
-							</a>
+							{/if}
 						{/each}
 					</div>
 				</section>
@@ -407,19 +427,36 @@
 					</div>
 					<div class="card-row">
 						{#each fallbackSinglesEPs as album (album.id ?? album.title)}
-							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
-								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
-									{:else}
-										<div class="grid-art placeholder">♫</div>
-									{/if}
+							{#if album.id != null}
+								<a class="grid-card" href={`/albums/${album.id}`}>
+									<div class="grid-art-wrap">
+										{#if album.artwork_url}
+											<img class="grid-art" src={album.artwork_url} alt="" />
+										{:else}
+											<div class="grid-art placeholder">♫</div>
+										{/if}
+									</div>
+									<p class="grid-title">{album.title}</p>
+									<p class="grid-sub">
+										{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
+									</p>
+								</a>
+							{:else}
+								<div class="grid-card not-in-library">
+									<div class="grid-art-wrap">
+										{#if album.artwork_url}
+											<img class="grid-art" src={album.artwork_url} alt="" />
+										{:else}
+											<div class="grid-art placeholder">♫</div>
+										{/if}
+										<span class="badge-new">Not in library</span>
+									</div>
+									<p class="grid-title">{album.title}</p>
+									<p class="grid-sub">
+										{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
+									</p>
 								</div>
-								<p class="grid-title">{album.title}</p>
-								<p class="grid-sub">
-									{album.tracks.length === 1 ? 'Single' : `${album.tracks.length} tracks · EP`}
-								</p>
-							</a>
+							{/if}
 						{/each}
 					</div>
 				</section>

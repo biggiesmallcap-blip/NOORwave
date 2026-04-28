@@ -136,7 +136,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 }
 
 export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
-	return [
+	const items: MenuItem[] = [
 		{
 			label: 'Play next',
 			icon: '⤴',
@@ -155,10 +155,31 @@ export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
 			onSelect: () => void startTidalSongRadio(track),
 		},
 		SEPARATOR,
-		{
-			label: 'Play now',
-			icon: '▶',
-			onSelect: () => void playTidalTrackNow(track),
-		},
 	];
+
+	if (track.artist_tidal_id != null) {
+		items.push({
+			label: `Go to ${track.artist_name ?? 'artist'}`,
+			icon: '→',
+			onSelect: () => void goto(`/tidal/artists/${track.artist_tidal_id}`),
+		});
+	}
+	if (track.album_tidal_id != null) {
+		items.push({
+			label: `Go to ${track.album_title ?? 'album'}`,
+			icon: '→',
+			onSelect: () => void goto(`/tidal/albums/${track.album_tidal_id}`),
+		});
+	}
+	if (track.artist_tidal_id != null || track.album_tidal_id != null) {
+		items.push(SEPARATOR);
+	}
+
+	items.push({
+		label: 'Play now',
+		icon: '▶',
+		onSelect: () => void playTidalTrackNow(track),
+	});
+
+	return items;
 }

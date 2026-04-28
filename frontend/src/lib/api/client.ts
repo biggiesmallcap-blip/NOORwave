@@ -104,6 +104,7 @@ export interface TidalSearchTrack {
 	artist_id: number | null;
 	artist_name: string | null;
 	album_title: string | null;
+	album_tidal_id: number | null;
 	artwork_url: string | null;
 	audio_quality: string | null;
 	stream_ready: boolean | null;
@@ -157,6 +158,7 @@ export interface TidalPlayable {
 	artwork_url: string | null;
 	duration_ms: number | null;
 	artist_tidal_id?: number | null;
+	album_tidal_id?: number | null;
 	track_id?: number;
 	is_in_library?: boolean;
 }
