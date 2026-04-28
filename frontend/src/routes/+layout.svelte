@@ -109,6 +109,40 @@
 	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
 
+	// Auto-dismiss the player error toast 6 s after it's set, cancelling on
+	// every change (incl. set-null) so a fresh error doesn't inherit the prior
+	// timer and a manual dismiss isn't second-guessed.
+	let _playerErrorDismissTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const current = $playerError;
+		if (_playerErrorDismissTimer !== null) {
+			clearTimeout(_playerErrorDismissTimer);
+			_playerErrorDismissTimer = null;
+		}
+		if (current) {
+			_playerErrorDismissTimer = setTimeout(() => {
+				playerError.set(null);
+				_playerErrorDismissTimer = null;
+			}, 6000);
+		}
+	});
+
+	function dismissPlayerError() {
+		playerError.set(null);
+	}
+
+	async function retryPlayerError() {
+		const current = $playerError;
+		if (!current?.retry) return;
+		const retry = current.retry;
+		playerError.set(null);
+		try {
+			await retry();
+		} catch {
+			// retry handlers manage their own error state via setError
+		}
+	}
+
 	const navZones = [
 		{
 			label: 'Atlas',
@@ -547,6 +581,32 @@
 <Toast />
 <CommandPalette />
 
+{#if $playerError}
+	<div class="player-error player-error-toast" role="alert" aria-live="assertive">
+		<span class="player-error-icon" aria-hidden="true">
+			<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+				<circle cx="8" cy="8" r="6.5" />
+				<path d="M8 4.5v4" stroke-linecap="round" />
+				<circle cx="8" cy="11" r="0.6" fill="currentColor" stroke="none" />
+			</svg>
+		</span>
+		<span class="player-error-message">{$playerError.message}</span>
+		{#if $playerError.retry}
+			<button type="button" class="player-error-retry" onclick={() => void retryPlayerError()}>
+				Retry
+			</button>
+		{/if}
+		<button
+			type="button"
+			class="player-error-close"
+			aria-label="Dismiss"
+			onclick={dismissPlayerError}
+		>
+			×
+		</button>
+	</div>
+{/if}
+
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
@@ -767,9 +827,6 @@
 
 			</div>
 
-			{#if $playerError}
-				<p class="player-error">{$playerError}</p>
-			{/if}
 		</div>
 
 		<section class="queue-section">
@@ -1768,6 +1825,80 @@
 		border: 1px solid color-mix(in srgb, var(--state-error) 24%, transparent);
 		color: var(--state-error);
 		font-size: 0.78rem;
+	}
+
+	.player-error-toast {
+		position: fixed;
+		top: 24px;
+		right: 24px;
+		left: auto;
+		z-index: 1300;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 280px;
+		max-width: 420px;
+		padding: 12px 14px;
+		border-radius: var(--radius-md, 14px);
+		background: color-mix(in srgb, var(--bg-elevated) 88%, var(--state-error) 12%);
+		border: 1px solid color-mix(in srgb, var(--state-error) 38%, transparent);
+		color: var(--text-primary);
+		font-size: 0.82rem;
+		font-weight: 500;
+		backdrop-filter: blur(18px) saturate(140%);
+		-webkit-backdrop-filter: blur(18px) saturate(140%);
+		box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.55),
+			0 0 0 1px color-mix(in srgb, var(--state-error) 18%, transparent) inset;
+	}
+	.player-error-icon {
+		flex-shrink: 0;
+		display: grid;
+		place-items: center;
+		width: 22px;
+		height: 22px;
+		color: var(--state-error);
+	}
+	.player-error-message {
+		flex: 1;
+		min-width: 0;
+		line-height: 1.35;
+	}
+	.player-error-retry {
+		flex-shrink: 0;
+		padding: 5px 12px;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--state-error) 50%, transparent);
+		background: color-mix(in srgb, var(--state-error) 14%, transparent);
+		color: var(--state-error);
+		font-family: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 120ms ease, border-color 120ms ease;
+	}
+	.player-error-retry:hover {
+		background: color-mix(in srgb, var(--state-error) 22%, transparent);
+		border-color: color-mix(in srgb, var(--state-error) 70%, transparent);
+	}
+	.player-error-close {
+		flex-shrink: 0;
+		width: 22px;
+		height: 22px;
+		display: grid;
+		place-items: center;
+		border-radius: 50%;
+		border: none;
+		background: transparent;
+		color: var(--text-muted, currentColor);
+		font-size: 1.05rem;
+		line-height: 1;
+		cursor: pointer;
+		opacity: 0.7;
+		transition: opacity 120ms ease, background 120ms ease;
+	}
+	.player-error-close:hover {
+		opacity: 1;
+		background: color-mix(in srgb, var(--text-primary) 8%, transparent);
 	}
 
 	.queue-section {

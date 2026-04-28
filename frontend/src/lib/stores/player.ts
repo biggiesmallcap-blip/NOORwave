@@ -10,6 +10,7 @@ import {
 	type Track
 } from '$lib/api/client';
 import { showToast } from '$lib/stores/toast';
+import { wsConnected } from '$lib/api/ws';
 
 function trackLabel(track: { title?: string | null; artist_name?: string | null }): string {
 	const t = (track.title ?? '').trim();
@@ -22,10 +23,78 @@ export const currentTrack = writable<Track | null>(null);
 export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
 export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
 
+// ─── Error model ──────────────────────────────────────────────────────────────
+// `playerError` holds a friendly message + optional retry callback. The layout
+// renders a toast with auto-dismiss; the store stays inert so we can replace
+// the message at any time without juggling timers in here.
+export interface PlayerError {
+	message: string;
+	retry?: () => Promise<void>;
+}
+
+export const playerError = writable<PlayerError | null>(null);
+
+// Tracks the last successful API call so `assertOnline` can avoid bouncing the
+// user when the WS happens to be transiently disconnected but the HTTP path is
+// healthy.
+export const lastSuccessfulCallAt = writable<number>(0);
+const ONLINE_GRACE_MS = 30_000;
+
+function noteSuccess() {
+	lastSuccessfulCallAt.set(Date.now());
+}
+
+/**
+ * Map an arbitrary error into a short, friendly message. The raw `error` is
+ * dropped in production so we never leak `TypeError: Failed to fetch` style
+ * goo into the UI; we keep it appended in dev for debugging convenience.
+ */
+export function normalizePlayerError(action: string, error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error ?? '');
+	const lower = raw.toLowerCase();
+
+	if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
+		return "Can't reach the server. Check it's running.";
+	}
+	if (/\b(401|403)\b/.test(raw) || lower.includes('unauthorized') || lower.includes('forbidden')) {
+		return 'Session expired — sign in again.';
+	}
+	if (/\b404\b/.test(raw) || lower.includes('not found')) {
+		return "We couldn't find that.";
+	}
+	if (/\b5\d\d\b/.test(raw)) {
+		return 'Server hiccup. Try that again in a moment.';
+	}
+
+	const fallback = `Couldn't ${action}.`;
+	if (import.meta.env.DEV && raw) {
+		return `${fallback} (${raw})`;
+	}
+	return fallback;
+}
+
+function setError(action: string, error: unknown, retry?: () => Promise<void>) {
+	playerError.set({ message: normalizePlayerError(action, error), retry });
+}
+
+/**
+ * Pre-flight gate for heavy actions. Returns true if the WebSocket is open OR
+ * a successful HTTP call landed within the last 30 s. Otherwise sets a
+ * "Reconnecting…" toast and returns false so the caller can bail without
+ * firing a request that's likely to hang.
+ */
+export function assertOnline(): boolean {
+	if (get(wsConnected)) return true;
+	if (Date.now() - get(lastSuccessfulCallAt) < ONLINE_GRACE_MS) return true;
+	playerError.set({ message: 'Reconnecting to the server…' });
+	return false;
+}
+
 export async function refreshPlaybackRuntime() {
 	try {
 		const result = await api.getPlaybackRuntime();
 		currentStreamDisplay.set(result.stream ?? null);
+		noteSuccess();
 	} catch {
 		// non-critical — playback still works without live stream info
 	}
@@ -115,7 +184,6 @@ export const repeatMode = writable<PlaybackState['repeat_mode']>('off');
 export const crossfadeMs = writable(0);
 export const playbackQueue = writable<QueueItem[]>([]);
 export const playerReady = writable(false);
-export const playerError = writable<string | null>(null);
 
 // Cycle: off → genre (Galaxy default) → weighted → true → back to off
 const SHUFFLE_SEQUENCE: PlaybackState['shuffle_mode'][] = ['off', 'genre', 'weighted', 'true'];
@@ -140,28 +208,31 @@ export function hydratePlayback(snapshot: PlaybackSnapshot) {
 	playbackQueue.set(snapshot.queue);
 	playerReady.set(true);
 	playerError.set(null);
+	noteSuccess();
 }
 
 export async function refreshPlaybackState() {
+	playerError.set(null);
 	try {
 		const snapshot = await api.getPlaybackState();
 		hydratePlayback(snapshot);
 	} catch (error) {
-		playerError.set(`Failed to load playback state: ${error}`);
+		setError('load playback state', error, () => refreshPlaybackState());
 	}
 }
 
 export async function playTrackNow(trackId: number) {
+	playerError.set(null);
 	try {
 		const snapshot = await api.playTrack(trackId);
 		hydratePlayback(snapshot);
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Playback failed: ${error}`);
+		setError('play that track', error, () => playTrackNow(trackId));
 	}
 }
 
 export async function togglePlayback() {
+	playerError.set(null);
 	try {
 		if (get(isPlaying)) {
 			const result = await api.pausePlayback();
@@ -170,59 +241,64 @@ export async function togglePlayback() {
 			const result = await api.resumePlayback();
 			applyState(result.state);
 		}
-		playerError.set(null);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Playback control failed: ${error}`);
+		setError('toggle playback', error, () => togglePlayback());
 	}
 }
 
 export async function playPreviousTrack() {
+	playerError.set(null);
 	try {
 		const snapshot = await api.previousTrack();
 		hydratePlayback(snapshot);
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Failed to go to previous track: ${error}`);
+		setError('go to previous track', error, () => playPreviousTrack());
 	}
 }
 
 export async function playNextTrack() {
+	playerError.set(null);
 	try {
 		const snapshot = await api.nextTrack();
 		hydratePlayback(snapshot);
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Failed to advance to next track: ${error}`);
+		setError('skip to next track', error, () => playNextTrack());
 	}
 }
 
 export async function setPlayerVolume(nextVolume: number) {
+	playerError.set(null);
 	try {
 		const result = await api.setPlaybackVolume(nextVolume);
 		// Only sync volume — applying full state would overwrite the local position
 		// ticker with a slightly stale server value, causing the displayed time to jump.
 		volume.set(result.state.volume);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to set volume: ${error}`);
+		setError('set volume', error);
 	}
 }
 
 export async function setPlayerPosition(nextPositionMs: number) {
+	playerError.set(null);
 	try {
 		const result = await api.setPlaybackPosition(nextPositionMs);
 		applyState(result.state);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to seek: ${error}`);
+		setError('seek', error, () => setPlayerPosition(nextPositionMs));
 	}
 }
 
 export async function setPlayerRepeatMode(mode: PlaybackState['repeat_mode']) {
+	playerError.set(null);
 	try {
 		const result = await api.setPlaybackRepeat(mode);
 		applyState(result.state);
-		playerError.set(null);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to set repeat mode: ${error}`);
+		setError('set repeat mode', error, () => setPlayerRepeatMode(mode));
 	}
 }
 
@@ -234,12 +310,12 @@ export async function cyclePlayerRepeatMode() {
 }
 
 export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) {
+	playerError.set(null);
 	try {
 		const snapshot = await api.setPlaybackShuffle(mode);
 		hydratePlayback(snapshot);
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Failed to set shuffle mode: ${error}`);
+		setError('set shuffle mode', error, () => setPlayerShuffleMode(mode));
 	}
 }
 
@@ -250,6 +326,7 @@ export async function setPlayerAutomixEnabled(
 	use_learning?: boolean,
 	allow_external?: boolean
 ) {
+	playerError.set(null);
 	try {
 		const result = await api.setPlaybackAutomix(
 			enabled,
@@ -265,9 +342,11 @@ export async function setPlayerAutomixEnabled(
 		automixUseLearning.set(result.state.automix_use_learning);
 		automixAllowExternal.set(result.state.automix_allow_external);
 		if (result.queue) playbackQueue.set(result.queue);
-		playerError.set(null);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to set automix: ${error}`);
+		setError('update automix', error, () =>
+			setPlayerAutomixEnabled(enabled, crossfade_ms, discover_new, use_learning, allow_external)
+		);
 	}
 }
 
@@ -310,13 +389,21 @@ export async function cyclePlayerShuffleMode() {
 	await setPlayerShuffleMode(nextMode);
 }
 
+// Cheap action: stays optimistic — no `assertOnline` gate, no retry button.
 export async function addTrackToQueue(trackId: number) {
-	const result = await api.addQueueTrack(trackId);
-	playbackQueue.set(result.queue);
-	playerError.set(null);
+	try {
+		const result = await api.addQueueTrack(trackId);
+		playbackQueue.set(result.queue);
+		playerError.set(null);
+		noteSuccess();
+	} catch (error) {
+		setError('add to queue', error);
+		throw error;
+	}
 }
 
 export async function moveQueueTrackNext(queueItemId: number) {
+	playerError.set(null);
 	const queue = [...get(playbackQueue)];
 	const targetIndex = queue.findIndex((item) => item.id === queueItemId);
 	if (targetIndex === -1 || queue.length <= 1) return;
@@ -329,15 +416,24 @@ export async function moveQueueTrackNext(queueItemId: number) {
 	const insertIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
 	queue.splice(insertIndex, 0, targetItem);
 
-	const result = await api.replacePlaybackQueue(queue.map((item) => item.track.id));
-	playbackQueue.set(result.queue);
-	playerError.set(null);
+	try {
+		const result = await api.replacePlaybackQueue(queue.map((item) => item.track.id));
+		playbackQueue.set(result.queue);
+		noteSuccess();
+	} catch (error) {
+		setError('reorder queue', error, () => moveQueueTrackNext(queueItemId));
+	}
 }
 
 export async function removeTrackFromQueue(queueItemId: number) {
-	const result = await api.removeQueueTrack(queueItemId);
-	playbackQueue.set(result.queue);
 	playerError.set(null);
+	try {
+		const result = await api.removeQueueTrack(queueItemId);
+		playbackQueue.set(result.queue);
+		noteSuccess();
+	} catch (error) {
+		setError('remove from queue', error, () => removeTrackFromQueue(queueItemId));
+	}
 }
 
 export function setTrackFavoriteStatus(trackId: number, favorite: boolean) {
@@ -356,6 +452,7 @@ export function setTrackFavoriteStatus(trackId: number, favorite: boolean) {
 	);
 }
 
+// Cheap action: stays optimistic — no `assertOnline` gate.
 export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: boolean) {
 	let nextFavorite: boolean;
 	if (currentIsFavorite !== undefined) {
@@ -372,8 +469,9 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 		await api.setTrackFavorite(trackId, nextFavorite);
 		setTrackFavoriteStatus(trackId, nextFavorite);
 		playerError.set(null);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to ${nextFavorite ? 'like' : 'unlike'} track: ${error}`);
+		setError(nextFavorite ? 'like that track' : 'unlike that track', error);
 		throw error;
 	}
 }
@@ -383,13 +481,14 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 // at the first one. Order matters — the first ID in `trackIds` is played first.
 async function loadQueueAndPlay(trackIds: number[]) {
 	if (trackIds.length === 0) return;
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		await api.replacePlaybackQueue(trackIds);
 		const snapshot = await api.playTrack(trackIds[0]);
 		hydratePlayback(snapshot);
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Failed to start playback: ${error}`);
+		setError('start playback', error, () => loadQueueAndPlay(trackIds));
 	}
 }
 
@@ -403,10 +502,12 @@ function shuffleArray<T>(items: T[]): T[] {
 }
 
 export async function playAlbum(albumId: number, startTrackId?: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getAlbumTracks(albumId);
 		if (tracks.length === 0) {
-			playerError.set('Album has no tracks.');
+			playerError.set({ message: 'Album has no tracks.' });
 			return;
 		}
 		const ordered = startTrackId
@@ -417,29 +518,33 @@ export async function playAlbum(albumId: number, startTrackId?: number) {
 			: tracks;
 		await loadQueueAndPlay(ordered.map((t) => t.id));
 	} catch (error) {
-		playerError.set(`Failed to play album: ${error}`);
+		setError('play that album', error, () => playAlbum(albumId, startTrackId));
 	}
 }
 
 export async function shuffleAlbum(albumId: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getAlbumTracks(albumId);
 		if (tracks.length === 0) {
-			playerError.set('Album has no tracks.');
+			playerError.set({ message: 'Album has no tracks.' });
 			return;
 		}
 		const shuffled = shuffleArray(tracks);
 		await loadQueueAndPlay(shuffled.map((t) => t.id));
 	} catch (error) {
-		playerError.set(`Failed to shuffle album: ${error}`);
+		setError('shuffle that album', error, () => shuffleAlbum(albumId));
 	}
 }
 
 export async function playArtist(artistId: number, startTrackId?: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
 		if (tracks.length === 0) {
-			playerError.set('Artist has no tracks.');
+			playerError.set({ message: 'Artist has no tracks.' });
 			return;
 		}
 		const ordered = startTrackId
@@ -450,24 +555,28 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 			: tracks;
 		await loadQueueAndPlay(ordered.map((t) => t.id));
 	} catch (error) {
-		playerError.set(`Failed to play artist: ${error}`);
+		setError('play that artist', error, () => playArtist(artistId, startTrackId));
 	}
 }
 
 export async function shuffleArtist(artistId: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
 		if (tracks.length === 0) {
-			playerError.set('Artist has no tracks.');
+			playerError.set({ message: 'Artist has no tracks.' });
 			return;
 		}
 		await loadQueueAndPlay(shuffleArray(tracks).map((t) => t.id));
 	} catch (error) {
-		playerError.set(`Failed to shuffle artist: ${error}`);
+		setError('shuffle that artist', error, () => shuffleArtist(artistId));
 	}
 }
 
 export async function startSongRadio(seedTrackId: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const queue = await api.startRadioSong({ seed_track_id: seedTrackId, limit: 60 });
 		const radioIds = queue.tracks
@@ -477,7 +586,7 @@ export async function startSongRadio(seedTrackId: number) {
 		await loadQueueAndPlay([seedTrackId, ...radioIds]);
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
-		playerError.set(`Failed to start radio: ${error}`);
+		setError('start radio', error, () => startSongRadio(seedTrackId));
 	}
 }
 
@@ -498,55 +607,62 @@ export async function startPlaylistRadio(tracks: { id: number; play_count?: numb
 }
 
 export async function playTidalPlaylist(tidalUuid: string) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getTidalPlaylistTracks(tidalUuid);
 		if (!tracks.length) {
-			playerError.set('No playable tracks in this playlist.');
+			playerError.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
 		// TODO: queue remaining tracks once TIDAL ephemeral queue is supported (see addTidalTrackToQueue stub)
 		await playTidalTrackNow(tracks[0]);
 		showToast('Playing TIDAL playlist', 'success');
 	} catch (error) {
-		playerError.set(`Failed to load TIDAL playlist: ${error}`);
+		setError('load TIDAL playlist', error, () => playTidalPlaylist(tidalUuid));
 	}
 }
 
 export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
 		const radioIds = queue.tracks
 			.filter((t) => t.is_in_library && t.track_id > 0)
 			.map((t) => t.track_id);
 		if (radioIds.length === 0) {
-			playerError.set('No library tracks found for radio.');
+			playerError.set({ message: 'No library tracks found for radio.' });
 			return;
 		}
 		await loadQueueAndPlay(radioIds);
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
-		playerError.set(`Failed to start artist radio: ${error}`);
+		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
 	}
 }
 
 export async function startAlbumRadio(albumId: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
 		const radioIds = queue.tracks
 			.filter((t) => t.is_in_library && t.track_id > 0)
 			.map((t) => t.track_id);
 		if (radioIds.length === 0) {
-			playerError.set('No library tracks found for radio.');
+			playerError.set({ message: 'No library tracks found for radio.' });
 			return;
 		}
 		await loadQueueAndPlay(radioIds);
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
-		playerError.set(`Failed to start album radio: ${error}`);
+		setError('start album radio', error, () => startAlbumRadio(albumId));
 	}
 }
 
 export async function playTrackNext(trackId: number) {
+	playerError.set(null);
 	// Add to queue, then move next to the currently-playing track.
 	try {
 		const addResult = await api.addQueueTrack(trackId);
@@ -555,13 +671,14 @@ export async function playTrackNext(trackId: number) {
 		if (justAdded) {
 			await moveQueueTrackNext(justAdded.id);
 		}
-		playerError.set(null);
+		noteSuccess();
 	} catch (error) {
-		playerError.set(`Failed to queue track: ${error}`);
+		setError('queue that track', error, () => playTrackNext(trackId));
 	}
 }
 
 export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
+	playerError.set(null);
 	try {
 		await api.playTidalTrack(track);
 		currentTrack.set({
@@ -588,10 +705,10 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 			artwork_url: track.artwork_url,
 		});
 		isPlaying.set(true);
-		playerError.set(null);
+		noteSuccess();
 		showToast(`Playing ${trackLabel(track)}`, 'success');
 	} catch (error) {
-		playerError.set(`Tidal playback failed: ${error}`);
+		setError('play that Tidal track', error, () => playTidalTrackNow(track));
 		showToast(`Playback failed`, 'error');
 	}
 }
@@ -607,6 +724,8 @@ export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> 
 }
 
 export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	try {
 		const { tracks } = await api.getTidalAlbumTracks(tidalAlbumId);
 		if (tracks.length === 0) {
@@ -623,12 +742,14 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 			duration_ms: first.duration_ms,
 		});
 	} catch (error) {
-		playerError.set(`Tidal album playback failed: ${error}`);
+		setError('play that Tidal album', error, () => playTidalAlbum(tidalAlbumId));
 		showToast(`Album playback failed`, 'error');
 	}
 }
 
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
+	if (!assertOnline()) return;
+	playerError.set(null);
 	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
 	try {
 		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
@@ -643,7 +764,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		// 404 = track not yet in library index — fall through to silent import.
 		// Any other error is a real failure.
 		if (!(error instanceof Error && error.message.includes('404'))) {
-			playerError.set(`Tidal radio failed: ${error}`);
+			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			showToast(`Radio failed`, 'error');
 			return;
 		}
