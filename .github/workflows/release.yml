@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build portable
+        shell: pwsh
+        run: .\scripts\build-portable.ps1
+
+      - name: Rename artifact with version tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Rename-Item dist\NOORwave-portable.zip "NOORwave-$tag-windows-x64.zip"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
+          generate_release_notes: true
+          body: |
+            **Windows portable — no install required. Unzip anywhere and run NOORwave.exe.**
+
+            ### Contents
+            - `NOORwave.exe` — app window + system tray
+            - `noor-server.exe` — local music server
+            - `www/` — bundled UI (do not delete)
+
+            ### Usage
+            1. Unzip to any folder
+            2. Double-click `NOORwave.exe`
+            3. Window opens when server is ready (~2s)

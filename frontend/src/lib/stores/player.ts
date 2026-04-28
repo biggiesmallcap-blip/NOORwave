@@ -629,21 +629,34 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 }
 
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
+	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
 	try {
 		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
 		const radioIds = tracks.map((t) => t.track_id);
 		if (radioIds.length > 0) {
-			// Tidal seed cannot be prepended to the library queue (queue only accepts library track IDs).
-			// Radio plays from the first library neighbour found.
 			await loadQueueAndPlay(radioIds);
 			showToast(`Radio from ${trackLabel(track)}`, 'success');
-		} else {
-			// No library tracks matched — fall back to playing the seed directly.
-			await playTidalTrackNow(track);
+			playerError.set(null);
+			return;
 		}
-		playerError.set(null);
 	} catch (error) {
-		playerError.set(`Tidal radio failed: ${error}`);
-		showToast(`Radio failed`, 'error');
+		// 404 = track not yet in library index — fall through to silent import.
+		// Any other error is a real failure.
+		if (!(error instanceof Error && error.message.includes('404'))) {
+			playerError.set(`Tidal radio failed: ${error}`);
+			showToast(`Radio failed`, 'error');
+			return;
+		}
+	}
+
+	// Fallback: silently import the track as a tidal_stream entry (invisible in library grids)
+	// so the radio engine can use it as a seed, then run song radio from the resulting local ID.
+	try {
+		const { local_id } = await api.importTidalTrackForRadio(track);
+		await startSongRadio(local_id);
+		playerError.set(null);
+	} catch {
+		showToast(`No radio results for "${trackLabel(track)}"`, 'info');
+		playerError.set(null);
 	}
 }
