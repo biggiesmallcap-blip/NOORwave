@@ -117,6 +117,25 @@ export const playbackQueue = writable<QueueItem[]>([]);
 export const playerReady = writable(false);
 export const playerError = writable<string | null>(null);
 
+// Map track_id → human-readable "why this track is here" string, populated when
+// a radio orchestrator returns candidates. The server attaches a `reason` to
+// every RadioCandidate but our queue endpoint rebuilds QueueItems server-side
+// from track ids, dropping the reason. Keep a client-side map so the queue
+// panel can surface it.
+export const radioReasons = writable<Record<number, string>>({});
+
+function setRadioReasons(entries: { track_id: number; reason?: string | null }[]) {
+	const next: Record<number, string> = {};
+	for (const e of entries) {
+		if (e.reason && e.track_id > 0) next[e.track_id] = e.reason;
+	}
+	radioReasons.set(next);
+}
+
+function clearRadioReasons() {
+	radioReasons.set({});
+}
+
 // Cycle: off → genre (Galaxy default) → weighted → true → back to off
 const SHUFFLE_SEQUENCE: PlaybackState['shuffle_mode'][] = ['off', 'genre', 'weighted', 'true'];
 
@@ -381,8 +400,9 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 // ─── "Start from here" actions ────────────────────────────────────────────────
 // Shared helper: replace the queue with the given track IDs and begin playback
 // at the first one. Order matters — the first ID in `trackIds` is played first.
-async function loadQueueAndPlay(trackIds: number[]) {
+async function loadQueueAndPlay(trackIds: number[], options?: { preserveRadioReasons?: boolean }) {
 	if (trackIds.length === 0) return;
+	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
 		await api.replacePlaybackQueue(trackIds);
 		const snapshot = await api.playTrack(trackIds[0]);
@@ -474,7 +494,8 @@ export async function startSongRadio(seedTrackId: number) {
 			.filter((t) => t.is_in_library && t.track_id > 0)
 			.map((t) => t.track_id)
 			.filter((id) => id !== seedTrackId);
-		await loadQueueAndPlay([seedTrackId, ...radioIds]);
+		setRadioReasons(queue.tracks);
+		await loadQueueAndPlay([seedTrackId, ...radioIds], { preserveRadioReasons: true });
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		playerError.set(`Failed to start radio: ${error}`);
@@ -522,7 +543,8 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 			playerError.set('No library tracks found for radio.');
 			return;
 		}
-		await loadQueueAndPlay(radioIds);
+		setRadioReasons(queue.tracks);
+		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true });
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		playerError.set(`Failed to start artist radio: ${error}`);
@@ -539,7 +561,8 @@ export async function startAlbumRadio(albumId: number) {
 			playerError.set('No library tracks found for radio.');
 			return;
 		}
-		await loadQueueAndPlay(radioIds);
+		setRadioReasons(queue.tracks);
+		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true });
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		playerError.set(`Failed to start album radio: ${error}`);

@@ -239,6 +239,11 @@
 			</button>
 		</div>
 
+		<p class="actions-microcopy">
+			<strong>Shuffle</strong> plays this artist's tracks in random order.
+			<strong>Radio</strong> finds similar tracks across your library and Tidal.
+		</p>
+
 		<div class="filter-bar">
 			<input
 				class="filter-input"
@@ -569,6 +574,19 @@
 	.ghost-btn:hover {
 		color: var(--text-primary);
 		background: var(--bg-hover);
+	}
+
+	.actions-microcopy {
+		margin: 0;
+		padding: 0 32px 8px;
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
+		line-height: 1.4;
+	}
+
+	.actions-microcopy strong {
+		color: var(--text-secondary);
+		font-weight: 600;
 	}
 
 	.section {

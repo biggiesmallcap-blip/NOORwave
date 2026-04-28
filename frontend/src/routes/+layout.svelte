@@ -17,6 +17,7 @@
 		playbackQueue,
 		playerReady,
 		playerError,
+		radioReasons,
 		refreshPlaybackState,
 		playTrackNow,
 		togglePlayback,
@@ -147,6 +148,16 @@
 		genre: '◈',
 		weighted: '◉',
 		true: '⤮'
+	};
+
+	// Short, user-facing names for each active shuffle mode. Rendered next to
+	// the transport icon when shuffle ≠ off so people can tell at a glance
+	// which strategy is steering "next track" picks.
+	const shuffleModeNames: Record<string, string> = {
+		off: '',
+		genre: 'genre',
+		weighted: 'weighted',
+		true: 'all'
 	};
 
 	const repeatLabels: Record<string, string> = {
@@ -716,12 +727,15 @@
 				</button>
 				<button
 					class:active={$shuffleMode !== 'off'}
-					class="tp-btn"
+					class="tp-btn tp-shuffle-btn"
 					title={shuffleLabels[$shuffleMode]}
 					aria-label={shuffleLabels[$shuffleMode]}
 					onclick={() => void cyclePlayerShuffleMode()}
 				>
-					{shuffleIcons[$shuffleMode]}
+					<span class="tp-shuffle-icon">{shuffleIcons[$shuffleMode]}</span>
+					{#if $shuffleMode !== 'off'}
+						<span class="tp-shuffle-mode">{shuffleModeNames[$shuffleMode]}</span>
+					{/if}
 				</button>
 				<button class="tp-btn" onclick={() => void playPreviousTrack()} aria-label="Previous">⏮</button>
 				<button class="tp-play" onclick={() => void togglePlayback()} aria-label="Play or pause">
@@ -834,6 +848,9 @@
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
+								{/if}
+								{#if $radioReasons[item.track.id]}
+									<span class="queue-reason" title={$radioReasons[item.track.id]}>{$radioReasons[item.track.id]}</span>
 								{/if}
 							</div>
 
@@ -1158,6 +1175,9 @@
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
+								{/if}
+								{#if $radioReasons[item.track.id]}
+									<span class="queue-reason" title={$radioReasons[item.track.id]}>{$radioReasons[item.track.id]}</span>
 								{/if}
 							</div>
 							<div class="queue-side">
@@ -1689,6 +1709,31 @@
 		box-shadow: 0 0 14px color-mix(in srgb, var(--accent-glow) 70%, transparent);
 	}
 
+	.tp-shuffle-btn {
+		width: auto;
+		min-width: 36px;
+		padding: 0 10px;
+		gap: 6px;
+		grid-auto-flow: column;
+	}
+
+	.tp-shuffle-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.tp-shuffle-mode {
+		font-size: 0.68rem;
+		color: var(--text-secondary);
+		text-transform: lowercase;
+		letter-spacing: 0.02em;
+	}
+
+	.tp-btn.active .tp-shuffle-mode {
+		color: var(--accent-strong);
+	}
+
 	.tp-like-btn {
 		font-size: 18px;
 		color: var(--text-secondary);
@@ -1984,6 +2029,17 @@
 
 	a.queue-artist {
 		cursor: pointer;
+	}
+
+	.queue-reason {
+		color: var(--text-tertiary);
+		font-size: 0.7rem;
+		font-style: italic;
+		line-height: 1.25;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 100%;
 	}
 
 	a.queue-artist:hover {

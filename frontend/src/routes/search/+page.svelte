@@ -890,7 +890,7 @@
                 <button
                   class="row-btn"
                   onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
-                  title="Start song radio"
+                  title="Song radio — mix of related tracks from your library and Tidal"
                   aria-label="Start radio from {track.title}"
                 >◎</button>
                 <button
