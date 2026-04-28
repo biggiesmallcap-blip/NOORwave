@@ -851,6 +851,7 @@ async function fetchApi<T>(
 		const message =
 			errorBody?.message ??
 			errorBody?.details ??
+			errorBody?.error ??
 			errorBody?.status ??
 			`API error: ${resp.status}`;
 		throw new Error(message);

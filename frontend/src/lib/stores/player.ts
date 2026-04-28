@@ -56,6 +56,9 @@ export function normalizePlayerError(action: string, error: unknown): string {
 	if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
 		return "Can't reach the server. Check it's running.";
 	}
+	if (lower.includes('tidal not connected')) {
+		return 'Tidal disconnected — re-auth in Settings.';
+	}
 	if (/\b(401|403)\b/.test(raw) || lower.includes('unauthorized') || lower.includes('forbidden')) {
 		return 'Session expired — sign in again.';
 	}
