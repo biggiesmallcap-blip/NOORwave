@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
 
@@ -11,16 +11,21 @@ pub async fn add_favorite_track(
     country_code: &str,
 ) -> Result<()> {
     crate::services::tidal::backoff::global().check()?;
-    http.post(format!(
-        "{}/users/{}/favorites/tracks?countryCode={}",
-        TIDAL_API_URL, user_id, country_code
-    ))
-    .header("Authorization", format!("Bearer {}", access_token))
-    .form(&[("trackIds", track_id.to_string())])
-    .send()
-    .await?
-    .error_for_status()
-    .context("Failed to add favorite track")?;
+    let resp = http
+        .post(format!(
+            "{}/users/{}/favorites/tracks?countryCode={}",
+            TIDAL_API_URL, user_id, country_code
+        ))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .form(&[("trackIds", track_id.to_string())])
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    }
 
     Ok(())
 }
@@ -34,15 +39,20 @@ pub async fn remove_favorite_track(
     country_code: &str,
 ) -> Result<()> {
     crate::services::tidal::backoff::global().check()?;
-    http.delete(format!(
-        "{}/users/{}/favorites/tracks/{}?countryCode={}",
-        TIDAL_API_URL, user_id, track_id, country_code
-    ))
-    .header("Authorization", format!("Bearer {}", access_token))
-    .send()
-    .await?
-    .error_for_status()
-    .context("Failed to remove favorite track")?;
+    let resp = http
+        .delete(format!(
+            "{}/users/{}/favorites/tracks/{}?countryCode={}",
+            TIDAL_API_URL, user_id, track_id, country_code
+        ))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    }
 
     Ok(())
 }
@@ -56,15 +66,20 @@ pub async fn remove_favorite_album(
     country_code: &str,
 ) -> Result<()> {
     crate::services::tidal::backoff::global().check()?;
-    http.delete(format!(
-        "{}/users/{}/favorites/albums/{}?countryCode={}",
-        TIDAL_API_URL, user_id, album_id, country_code
-    ))
-    .header("Authorization", format!("Bearer {}", access_token))
-    .send()
-    .await?
-    .error_for_status()
-    .context("Failed to remove favorite album")?;
+    let resp = http
+        .delete(format!(
+            "{}/users/{}/favorites/albums/{}?countryCode={}",
+            TIDAL_API_URL, user_id, album_id, country_code
+        ))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    }
 
     Ok(())
 }
@@ -84,16 +99,21 @@ pub async fn add_to_playlist(
         .collect::<Vec<_>>()
         .join(",");
 
-    http.post(format!(
-        "{}/playlists/{}/items?countryCode={}",
-        TIDAL_API_URL, playlist_uuid, country_code
-    ))
-    .header("Authorization", format!("Bearer {}", access_token))
-    .form(&[("trackIds", ids)])
-    .send()
-    .await?
-    .error_for_status()
-    .context("Failed to add tracks to playlist")?;
+    let resp = http
+        .post(format!(
+            "{}/playlists/{}/items?countryCode={}",
+            TIDAL_API_URL, playlist_uuid, country_code
+        ))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .form(&[("trackIds", ids)])
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    }
 
     Ok(())
 }
@@ -105,7 +125,6 @@ pub async fn remove_favorite_tracks(
     track_ids: &[i64],
     country_code: &str,
 ) -> Result<usize> {
-    crate::services::tidal::backoff::global().check()?;
     let mut removed = 0;
     for track_id in track_ids {
         remove_favorite_track(http, access_token, user_id, *track_id, country_code).await?;
@@ -121,7 +140,6 @@ pub async fn remove_favorite_albums(
     album_ids: &[i64],
     country_code: &str,
 ) -> Result<usize> {
-    crate::services::tidal::backoff::global().check()?;
     let mut removed = 0;
     for album_id in album_ids {
         remove_favorite_album(http, access_token, user_id, *album_id, country_code).await?;
