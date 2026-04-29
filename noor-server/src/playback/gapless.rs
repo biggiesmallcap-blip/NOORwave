@@ -118,6 +118,7 @@ mod tests {
     fn stream(codec: &str) -> StreamInfo {
         StreamInfo {
             url: "https://example.com/stream.flac".to_string(),
+            segment_urls: vec![],
             track_id: 1,
             audio_quality: "LOSSLESS".to_string(),
             codec: codec.to_string(),

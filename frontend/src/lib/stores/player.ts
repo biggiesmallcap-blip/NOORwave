@@ -11,6 +11,7 @@ import {
 } from '$lib/api/client';
 import { showToast } from '$lib/stores/toast';
 import { wsConnected } from '$lib/api/ws';
+import { updateLibraryTrackFavorite } from '$lib/stores/library';
 
 function trackLabel(track: { title?: string | null; artist_name?: string | null }): string {
 	const t = (track.title ?? '').trim();
@@ -575,44 +576,70 @@ export async function saveQueueAsPlaylist(
 	}
 }
 
-export function setTrackFavoriteStatus(trackId: number, favorite: boolean) {
-	currentTrack.update((track) =>
-		track && track.id === trackId ? { ...track, is_favorite: favorite } : track
+export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track?: Track) {
+	currentTrack.update((t) =>
+		t && t.id === trackId ? { ...t, is_favorite: favorite } : t
 	);
 	playbackQueue.update((queue) =>
 		queue.map((item) =>
 			item.track.id === trackId
-				? {
-						...item,
-						track: { ...item.track, is_favorite: favorite }
-					}
+				? { ...item, track: { ...item.track, is_favorite: favorite } }
 				: item
 		)
 	);
+	updateLibraryTrackFavorite(trackId, favorite, track);
 }
 
 // Cheap action: stays optimistic — no `assertOnline` gate.
 export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: boolean) {
+	// Ephemeral Tidal tracks have a negative id (= -tidal_id) and no local DB row yet.
+	// Import them first so we have a real id to favorite.
+	if (trackId < 0) {
+		const ephemeral = get(currentTrack);
+		if (!ephemeral || !ephemeral.tidal_id) return;
+		try {
+			const { local_id } = await api.importTidalTrackForRadio({
+				tidal_id: ephemeral.tidal_id,
+				title: ephemeral.title ?? 'Unknown',
+				artist_name: ephemeral.artist_name,
+				album_title: ephemeral.album_title,
+				artwork_url: ephemeral.artwork_url,
+				duration_ms: ephemeral.duration_ms,
+			});
+			currentTrack.update((t) => (t && t.id === trackId ? { ...t, id: local_id } : t));
+			playbackQueue.update((q) =>
+				q.map((item) =>
+					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id } } : item
+				)
+			);
+			return toggleTrackFavorite(local_id, false);
+		} catch (error) {
+			setError('like that track', error);
+			throw error;
+		}
+	}
+
+	const current = get(currentTrack);
+	const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
+	const playerTrack = current?.id === trackId ? current : queued;
+
 	let nextFavorite: boolean;
 	if (currentIsFavorite !== undefined) {
 		nextFavorite = !currentIsFavorite;
 	} else {
-		const current = get(currentTrack);
-		const queued = get(playbackQueue).find((item) => item.track.id === trackId)?.track ?? null;
-		const activeTrack = current?.id === trackId ? current : queued;
-		if (!activeTrack) return;
-		nextFavorite = !activeTrack.is_favorite;
+		if (!playerTrack) return;
+		nextFavorite = !playerTrack.is_favorite;
 	}
 
 	// Optimistic flip — UI updates immediately, rollback on rejection.
-	setTrackFavoriteStatus(trackId, nextFavorite);
+	setTrackFavoriteStatus(trackId, nextFavorite, playerTrack ?? undefined);
 	try {
 		await api.setTrackFavorite(trackId, nextFavorite);
 		playerError.set(null);
 		noteSuccess();
 	} catch (error) {
 		// Roll back the optimistic update.
-		setTrackFavoriteStatus(trackId, !nextFavorite);
+		setTrackFavoriteStatus(trackId, !nextFavorite, playerTrack ?? undefined);
 		setError(nextFavorite ? 'like that track' : 'unlike that track', error);
 		throw error;
 	}

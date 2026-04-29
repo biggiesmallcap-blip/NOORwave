@@ -912,9 +912,6 @@
 					onclick={() => void cyclePlayerShuffleMode()}
 				>
 					{shuffleIcons[$shuffleMode]}
-					{#if $shuffleMode !== 'off'}
-						<span class="tp-shuffle-mode tp-mode-label">{shuffleModeNames[$shuffleMode]}</span>
-					{/if}
 				</button>
 				<button class="tp-btn" onclick={() => void playPreviousTrack()} aria-label="Previous">⏮</button>
 				<button class="tp-play" onclick={() => void togglePlayback()} aria-label="Play or pause">
@@ -929,9 +926,6 @@
 					onclick={() => void cyclePlayerRepeatMode()}
 				>
 					{repeatIcons[$repeatMode]}
-					{#if $repeatMode !== 'off'}
-						<span class="tp-repeat-mode tp-mode-label">{repeatModeNames[$repeatMode]}</span>
-					{/if}
 				</button>
 				<button
 					class="tp-btn"
@@ -1958,19 +1952,9 @@
 
 	.tp-mode-btn {
 		position: relative;
-		min-width: 36px;
-		width: auto;
-		padding: 0 8px;
-		gap: 4px;
 	}
 
-	.tp-mode-label {
-		font-size: 0.62rem;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--accent-strong, var(--accent));
-		opacity: 0.9;
-	}
+
 
 	.transport {
 		display: flex;

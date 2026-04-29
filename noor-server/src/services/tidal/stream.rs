@@ -29,6 +29,7 @@ impl StreamRequest {
 #[derive(Debug, Deserialize)]
 pub struct StreamInfo {
     pub url: String,
+    pub segment_urls: Vec<String>,
     #[serde(rename = "trackId")]
     pub track_id: i64,
     #[serde(rename = "audioQuality")]
@@ -131,6 +132,131 @@ fn session_expired_body(body: &str) -> bool {
         || lower.contains("\"substatus\":6001")
 }
 
+fn xml_entity_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+// Parses ISO 8601 duration strings of the form PT[M]M[S]S (e.g. PT3M14.093S, PT194S).
+fn parse_iso_duration(s: &str) -> Option<f64> {
+    let s = s.strip_prefix("PT")?;
+    let (minutes, rest) = if let Some(m_pos) = s.find('M') {
+        let m: f64 = s[..m_pos].parse().ok()?;
+        (m, &s[m_pos + 1..])
+    } else {
+        (0.0, s)
+    };
+    let seconds: f64 = rest
+        .strip_suffix('S')
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    Some(minutes * 60.0 + seconds)
+}
+
+// Extracts the audio codec string from a DASH manifest's codecs= attribute (e.g. "flac", "mp4a.40.2").
+fn extract_dash_codec(xml: &str) -> String {
+    static CODECS_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\bcodecs="([^"]+)""#).unwrap());
+    CODECS_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "audio/mp4".to_string())
+}
+
+// Parses a DASH SegmentTemplate manifest and returns (init_url, vec_of_segment_urls).
+// Handles both duration= attribute (uniform segments) and <SegmentTimeline> (variable).
+fn parse_dash_segment_template(
+    xml: &str,
+) -> Result<(String, Vec<String>), StreamResolveError> {
+    fn parse_err(msg: impl Into<String>) -> StreamResolveError {
+        StreamResolveError::ManifestParseFailed { message: msg.into() }
+    }
+
+    static MPD_DURATION_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r#"mediaPresentationDuration="([^"]+)""#).unwrap()
+        });
+    static INIT_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"initialization="([^"]+)""#).unwrap());
+    static MEDIA_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\bmedia="([^"]+)""#).unwrap());
+    static TIMESCALE_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"timescale="(\d+)""#).unwrap());
+    static SEG_DUR_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\bduration="(\d+)""#).unwrap());
+    static START_NUM_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"startNumber="(\d+)""#).unwrap());
+    static S_ELEM_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"<S\s[^>]*>"#).unwrap());
+    static S_R_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\br="(\d+)""#).unwrap());
+
+    let duration_str = MPD_DURATION_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+        .ok_or_else(|| parse_err("DASH manifest missing mediaPresentationDuration"))?;
+    let total_secs = parse_iso_duration(duration_str)
+        .ok_or_else(|| parse_err(format!("DASH manifest unparseable duration: {duration_str}")))?;
+
+    let init_url = INIT_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .map(|m| xml_entity_decode(m.as_str()))
+        .ok_or_else(|| parse_err("DASH manifest missing initialization URL"))?;
+    let media_template = MEDIA_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .map(|m| xml_entity_decode(m.as_str()))
+        .ok_or_else(|| parse_err("DASH manifest missing media URL template"))?;
+    let timescale: u64 = TIMESCALE_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+        .ok_or_else(|| parse_err("DASH manifest missing timescale"))?;
+    let start_number: u64 = START_NUM_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+        .unwrap_or(1);
+
+    let segment_count: usize = if let Some(seg_dur) = SEG_DUR_RE
+        .captures(xml)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok())
+    {
+        let total_ts = (total_secs * timescale as f64).ceil() as u64;
+        ((total_ts + seg_dur - 1) / seg_dur) as usize
+    } else {
+        S_ELEM_RE
+            .captures_iter(xml)
+            .map(|cap| {
+                let elem = cap.get(0).map_or("", |m| m.as_str());
+                let repeat = S_R_RE
+                    .captures(elem)
+                    .and_then(|c| c.get(1))
+                    .and_then(|m| m.as_str().parse::<usize>().ok())
+                    .unwrap_or(0);
+                1 + repeat
+            })
+            .sum()
+    };
+
+    if segment_count == 0 {
+        return Err(parse_err("DASH manifest: could not determine segment count"));
+    }
+
+    let segment_urls: Vec<String> = (start_number..start_number + segment_count as u64)
+        .map(|n| media_template.replace("$Number$", &n.to_string()))
+        .collect();
+
+    Ok((init_url, segment_urls))
+}
+
 /// Resolve a TIDAL stream using a pre-built request description.
 pub async fn resolve_stream(
     http: &reqwest::Client,
@@ -210,23 +336,45 @@ pub async fn resolve_stream(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let stream_url = if manifest_mime.contains("dash+xml") {
-        // MPEG-DASH XML manifest: extract the first <BaseURL> element
+    // Resolve the manifest into (stream_url, segment_urls, audio_codec).
+    // segment_urls is non-empty only for segmented DASH (SegmentTemplate shape).
+    let (stream_url, segment_urls, dash_codec) = if manifest_mime.contains("dash+xml") {
         let manifest_str =
             std::str::from_utf8(&manifest_bytes).map_err(|error| {
                 StreamResolveError::ManifestParseFailed {
                     message: format!("DASH manifest is not valid UTF-8: {error}"),
                 }
             })?;
-        static DASH_URL_RE: std::sync::LazyLock<regex::Regex> =
-            std::sync::LazyLock::new(|| {
-                regex::Regex::new(r"<BaseURL[^>]*>(https?://[^<]+)</BaseURL>").unwrap()
-            });
-        DASH_URL_RE
-            .captures(manifest_str)
-            .and_then(|cap| cap.get(1))
-            .map(|m| m.as_str().to_string())
-            .ok_or(StreamResolveError::MissingStreamUrl)?
+        let codec = extract_dash_codec(manifest_str);
+
+        // Try SegmentTemplate (segmented CMAF fMP4) first.
+        match parse_dash_segment_template(manifest_str) {
+            Ok((init_url, segs)) => (init_url, segs, Some(codec)),
+            Err(_) => {
+                // Fall back to single <BaseURL> (simpler DASH shape from older catalogue).
+                static DASH_URL_RE: std::sync::LazyLock<regex::Regex> =
+                    std::sync::LazyLock::new(|| {
+                        regex::Regex::new(r"<BaseURL[^>]*>(https?://[^<]+)</BaseURL>").unwrap()
+                    });
+                match DASH_URL_RE
+                    .captures(manifest_str)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string())
+                {
+                    Some(url) => (url, vec![], Some(codec)),
+                    None => {
+                        let preview: String = manifest_str.chars().take(2048).collect();
+                        tracing::warn!(
+                            track_id = request.track_id,
+                            manifest_mime = %manifest_mime,
+                            manifest_preview = %preview,
+                            "TIDAL DASH manifest: no SegmentTemplate or BaseURL found"
+                        );
+                        return Err(StreamResolveError::MissingStreamUrl);
+                    }
+                }
+            }
+        }
     } else {
         // JSON manifest (application/vnd.tidal.bts or similar)
         let manifest: serde_json::Value =
@@ -235,28 +383,48 @@ pub async fn resolve_stream(
                     message: error.to_string(),
                 }
             })?;
-        manifest
+        match manifest
             .get("urls")
             .and_then(|urls| urls.as_array())
             .and_then(|urls| urls.first())
             .and_then(|url| url.as_str())
-            .ok_or(StreamResolveError::MissingStreamUrl)?
-            .to_string()
+            .map(|s| s.to_string())
+        {
+            Some(url) => (url, vec![], None),
+            None => {
+                let preview: String = String::from_utf8_lossy(&manifest_bytes)
+                    .chars()
+                    .take(2048)
+                    .collect();
+                tracing::warn!(
+                    track_id = request.track_id,
+                    manifest_mime = %manifest_mime,
+                    manifest_preview = %preview,
+                    "TIDAL JSON manifest missing urls[0]"
+                );
+                return Err(StreamResolveError::MissingStreamUrl);
+            }
+        }
     };
 
     Ok(StreamInfo {
         url: stream_url,
+        segment_urls,
         track_id: request.track_id,
         audio_quality: resp
             .get("audioQuality")
             .and_then(|value| value.as_str())
             .unwrap_or(request.audio_quality.as_str())
             .to_string(),
-        codec: resp
-            .get("manifestMimeType")
-            .and_then(|value| value.as_str())
-            .unwrap_or("audio/flac")
-            .to_string(),
+        // For DASH, use the codec extracted from codecs= attribute (e.g. "flac", "mp4a.40.2")
+        // so codec_kind() returns the right audio type for gapless decisions.
+        // For JSON manifests, use manifestMimeType as before.
+        codec: dash_codec.unwrap_or_else(|| {
+            resp.get("manifestMimeType")
+                .and_then(|value| value.as_str())
+                .unwrap_or("audio/flac")
+                .to_string()
+        }),
         sample_rate: resp
             .get("sampleRate")
             .and_then(|value| value.as_i64())

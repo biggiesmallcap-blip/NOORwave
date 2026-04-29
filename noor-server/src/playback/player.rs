@@ -1348,6 +1348,7 @@ mod tests {
         let track = track_with_tidal_id(7, Some(77), Some("LOSSLESS"));
         let stream = StreamInfo {
             url: "https://example.com/stream.flac".to_string(),
+            segment_urls: vec![],
             track_id: 77,
             audio_quality: "LOSSLESS".to_string(),
             codec: "audio/flac".to_string(),

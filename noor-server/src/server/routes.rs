@@ -3905,66 +3905,26 @@ async fn set_track_favorite(
             })?
     };
 
-    // Try to sync with TIDAL if track has tidal_id and tokens are available
     let tidal_id = track.tidal_id;
-    let has_tidal = tidal_id.is_some();
-    
-    if let (Some(tidal_id), Some(tokens)) = (tidal_id, {
+    let was_favorite = track.is_favorite;
+    let state_changed = was_favorite != payload.favorite;
+
+    let (tidal_tokens, http_client) = {
         let state = state.read().await;
-        state.tidal_tokens.clone()
-    }) {
-        // Only call TIDAL API if the state is actually changing
-        if track.is_favorite != payload.favorite {
-            let http_client = {
-                let state = state.read().await;
-                state.http_client.clone()
-            };
-            
-            let mutation_result = if payload.favorite {
-                tidal_mutations::add_favorite_track(
-                    &http_client,
-                    &tokens.access_token,
-                    &tokens.user_id,
-                    tidal_id,
-                    &tokens.country_code,
-                )
-                .await
-            } else {
-                tidal_mutations::remove_favorite_track(
-                    &http_client,
-                    &tokens.access_token,
-                    &tokens.user_id,
-                    tidal_id,
-                    &tokens.country_code,
-                )
-                .await
-            };
+        (state.tidal_tokens.clone(), state.http_client.clone())
+    };
 
-            if let Err(error) = mutation_result {
-                warn!(
-                    "Failed to sync {} favorite for track {} (tidal {}): {error}",
-                    if payload.favorite { "set" } else { "clear" },
-                    payload.track_id,
-                    tidal_id
-                );
-                // Continue to local DB update even if TIDAL sync fails
-            }
-        }
-    } else if has_tidal && track.is_favorite != payload.favorite {
-        warn!(
-            "Track {} has tidal_id but no tokens available for sync",
-            payload.track_id
-        );
-    }
-
-    // Always update local database
+    // Update local DB immediately — Tidal sync happens in the background.
+    // When liking for the first time, bump date_added so the track sorts to top of the library.
     {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
                 conn.execute(
-                    "UPDATE tracks SET is_favorite = ?1 WHERE id = ?2",
+                    "UPDATE tracks SET is_favorite = ?1, \
+                     date_added = CASE WHEN ?1 = 1 AND is_favorite = 0 THEN datetime('now') ELSE date_added END \
+                     WHERE id = ?2",
                     rusqlite::params![if payload.favorite { 1 } else { 0 }, payload.track_id],
                 )?;
                 Ok(())
@@ -3986,11 +3946,50 @@ async fn set_track_favorite(
         let _ = state.event_tx.send(AppEvent::LibrarySynced);
     }
 
+    // Fire Tidal sync in the background so the response returns immediately.
+    if let (Some(tidal_id), Some(tokens)) = (tidal_id, tidal_tokens) {
+        if state_changed {
+            let favorite = payload.favorite;
+            tokio::spawn(async move {
+                let result = if favorite {
+                    tidal_mutations::add_favorite_track(
+                        &http_client,
+                        &tokens.access_token,
+                        &tokens.user_id,
+                        tidal_id,
+                        &tokens.country_code,
+                    )
+                    .await
+                } else {
+                    tidal_mutations::remove_favorite_track(
+                        &http_client,
+                        &tokens.access_token,
+                        &tokens.user_id,
+                        tidal_id,
+                        &tokens.country_code,
+                    )
+                    .await
+                };
+                if let Err(error) = result {
+                    warn!(
+                        "Failed to background-sync {} favorite for tidal track {tidal_id}: {error}",
+                        if favorite { "set" } else { "clear" },
+                    );
+                }
+            });
+        }
+    } else if tidal_id.is_some() && state_changed {
+        warn!(
+            "Track {} has tidal_id but no tokens available for sync",
+            payload.track_id
+        );
+    }
+
     Ok(Json(json!({
         "track_id": payload.track_id,
         "tidal_id": tidal_id,
         "favorite": payload.favorite,
-        "updated": track.is_favorite != payload.favorite
+        "updated": state_changed
     })))
 }
 
@@ -4418,7 +4417,7 @@ async fn search_underrated(
 }
 
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let (live_position_ms, ephemeral_playing) = {
+    let (live_position_ms, ephemeral_playing, audio_active) = {
         let state_guard = state.read().await;
         let live_pos = state_guard
             .playback_runtime
@@ -4426,7 +4425,8 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
             .zip(state_guard.playback_runtime_info.as_ref())
             .map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
         let ephemeral = state_guard.ephemeral_tidal_track.is_some();
-        (live_pos, ephemeral)
+        let active = state_guard.audio_active.load(std::sync::atomic::Ordering::Relaxed);
+        (live_pos, ephemeral, active)
     };
 
     let snapshot = {
@@ -4439,9 +4439,11 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
     let mut snapshot =
         overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
 
-    // If no audio runtime is active and no ephemeral track is playing, the persisted
-    // is_playing flag is stale (e.g. after a crash). Correct it before sending to frontend.
-    if live_position_ms.is_none() && !ephemeral_playing {
+    // Correct a stale is_playing flag before sending to the frontend:
+    // - no runtime at all (server restarted, runtime crashed), OR
+    // - runtime exists but CPAL buffer hasn't started draining yet (buffering phase).
+    // Ephemeral TIDAL tracks bypass this check — they set is_playing themselves.
+    if (!audio_active || live_position_ms.is_none()) && !ephemeral_playing {
         snapshot.state.is_playing = false;
     }
 
@@ -7002,6 +7004,8 @@ fn spawn_playback_runtime_listener(
         loop {
             match rx.recv().await {
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished { track_id }) => {
+                    // Track is no longer producing audio — clear the flag before advancing.
+                    state.write().await.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Err(error) = handle_runtime_finished(state.clone(), track_id).await {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
@@ -7018,6 +7022,7 @@ fn spawn_playback_runtime_listener(
                     channels,
                 }) => {
                     let mut state_guard = state.write().await;
+                    state_guard.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
                     let last_error = state_guard
                         .playback_runtime_info
                         .as_ref()
@@ -7032,6 +7037,8 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Started { track_id, .. }) => {
                     let mut state_guard = state.write().await;
+                    // CPAL buffer threshold crossed — samples are actually flowing now.
+                    state_guard.audio_active.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.active_track_id = Some(track_id);
                         info.last_error = None;
@@ -7051,6 +7058,7 @@ fn spawn_playback_runtime_listener(
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stopped) => {
                     let mut state_guard = state.write().await;
+                    state_guard.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.active_track_id = None;
                     }

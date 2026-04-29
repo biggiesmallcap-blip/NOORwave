@@ -117,6 +117,22 @@ export function clearSelection() {
 	lastSelectedAlbumId.set(null);
 }
 
+export function updateLibraryTrackFavorite(trackId: number, isFavorite: boolean, track?: Track) {
+	tracks.update((list) => {
+		const idx = list.findIndex((t) => t.id === trackId);
+		if (idx !== -1) {
+			if (!isFavorite) {
+				return list.filter((t) => t.id !== trackId);
+			}
+			return list.map((t) => (t.id === trackId ? { ...t, is_favorite: true } : t));
+		}
+		if (isFavorite && track) {
+			return [{ ...track, is_favorite: true, date_added: new Date().toISOString() }, ...list];
+		}
+		return list;
+	});
+}
+
 export function formatDuration(ms: number | null): string {
 	if (!ms) return '--:--';
 	const totalSeconds = Math.floor(ms / 1000);

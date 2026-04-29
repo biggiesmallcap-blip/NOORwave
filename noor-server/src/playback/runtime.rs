@@ -1691,6 +1691,7 @@ fn decode_and_buffer_job(
             let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(32);
             let http = config.http_client.clone();
             let url = stream_info.url.clone();
+            let segment_urls = stream_info.segment_urls.clone();
             thread::Builder::new()
                 .name("noor-stream-download".into())
                 .spawn(move || {
@@ -1700,21 +1701,47 @@ fn decode_and_buffer_job(
                         .expect("failed to build download runtime");
                     dl_rt.block_on(async move {
                         let result: anyhow::Result<()> = async {
-                            let response = http
-                                .get(&url)
-                                .send()
-                                .await
-                                .context("download request failed")?
-                                .error_for_status()
-                                .context("download returned error status")?;
-                            // Send Content-Length before any chunks so the decode thread
-                            // can populate StreamPipe::known_length immediately.
-                            let _ = len_tx.send(response.content_length());
-                            let mut stream = response.bytes_stream();
-                            while let Some(chunk) = stream.next().await {
-                                let bytes = chunk.context("chunk read error")?;
-                                if chunk_tx.send(Some(bytes.to_vec())).is_err() {
-                                    break; // decoder stopped early (track skipped/stopped)
+                            if segment_urls.is_empty() {
+                                // Single-URL path (JSON manifest or DASH BaseURL shape)
+                                let response = http
+                                    .get(&url)
+                                    .send()
+                                    .await
+                                    .context("download request failed")?
+                                    .error_for_status()
+                                    .context("download returned error status")?;
+                                // Send Content-Length before any chunks so the decode thread
+                                // can populate StreamPipe::known_length immediately.
+                                let _ = len_tx.send(response.content_length());
+                                let mut stream = response.bytes_stream();
+                                while let Some(chunk) = stream.next().await {
+                                    let bytes = chunk.context("chunk read error")?;
+                                    if chunk_tx.send(Some(bytes.to_vec())).is_err() {
+                                        break; // decoder stopped early (track skipped/stopped)
+                                    }
+                                }
+                            } else {
+                                // DASH SegmentTemplate path: init segment then media segments.
+                                // Total length is unknown upfront; send None so StreamPipe
+                                // skips seek-from-end and falls back to linear reads.
+                                let _ = len_tx.send(None);
+                                'segments: for seg_url in
+                                    std::iter::once(&url).chain(segment_urls.iter())
+                                {
+                                    let response = http
+                                        .get(seg_url.as_str())
+                                        .send()
+                                        .await
+                                        .context("DASH segment request failed")?
+                                        .error_for_status()
+                                        .context("DASH segment returned error status")?;
+                                    let mut stream = response.bytes_stream();
+                                    while let Some(chunk) = stream.next().await {
+                                        let bytes = chunk.context("DASH segment chunk error")?;
+                                        if chunk_tx.send(Some(bytes.to_vec())).is_err() {
+                                            break 'segments; // decoder stopped early
+                                        }
+                                    }
                                 }
                             }
                             Ok(())
@@ -1742,23 +1769,30 @@ fn decode_and_buffer_job(
             // Without this, the MP4/AAC reader tries SeekFrom::End to locate the
             // moov atom, which can fail on a live streaming pipe.
             let mut hint = Hint::new();
-            let codec_lower = stream_info.codec.to_ascii_lowercase();
-            let ext = if codec_lower.contains("flac") {
-                Some("flac")
-            } else if codec_lower.contains("mp3") || codec_lower.contains("mpeg") {
-                Some("mp3")
-            } else if codec_lower.contains("aac")
-                || codec_lower.contains("mp4")
-                || codec_lower.contains("m4a")
-            {
-                Some("m4a")
-            } else if codec_lower.contains("ogg") {
-                Some("ogg")
+            if !stream_info.segment_urls.is_empty() {
+                // DASH fMP4 (CMAF): init+segments form an ISOBMFF stream regardless of inner
+                // codec. The m4a hint routes Symphonia to its IsoMp4 reader which handles
+                // fragmented MP4 linearly without attempting a SeekFrom::End moov search.
+                hint.with_extension("m4a");
             } else {
-                None
-            };
-            if let Some(ext) = ext {
-                hint.with_extension(ext);
+                let codec_lower = stream_info.codec.to_ascii_lowercase();
+                let ext = if codec_lower.contains("flac") {
+                    Some("flac")
+                } else if codec_lower.contains("mp3") || codec_lower.contains("mpeg") {
+                    Some("mp3")
+                } else if codec_lower.contains("aac")
+                    || codec_lower.contains("mp4")
+                    || codec_lower.contains("m4a")
+                {
+                    Some("m4a")
+                } else if codec_lower.contains("ogg") {
+                    Some("ogg")
+                } else {
+                    None
+                };
+                if let Some(ext) = ext {
+                    hint.with_extension(ext);
+                }
             }
 
             let probed = symphonia::default::get_probe()

@@ -120,7 +120,7 @@ impl FeedAggregator {
         Self {
             http_client,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            cache_ttl: std::time::Duration::from_secs(300), // 5 minutes
+            cache_ttl: std::time::Duration::from_secs(86400), // 24 hours
         }
     }
 

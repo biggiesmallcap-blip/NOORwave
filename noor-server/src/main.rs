@@ -82,6 +82,11 @@ pub struct AppState {
     pub discovery_train_cancel: Arc<AtomicBool>,
     /// Shared bearer token for network auth
     pub server_token: String,
+    /// `true` only while the CPAL callback is actively draining samples (set by the
+    /// `Started` runtime event, cleared on `Stopped` / `Finished` / startup).
+    /// Lets `get_playback_state` return `is_playing: false` during the buffering phase
+    /// so the frontend doesn't show a running counter with no audio.
+    pub audio_active: Arc<AtomicBool>,
 }
 
 /// Events broadcast across the application
@@ -285,6 +290,7 @@ async fn main() -> Result<()> {
         lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         discovery_train_cancel: Arc::new(AtomicBool::new(false)),
         server_token,
+        audio_active: Arc::new(AtomicBool::new(false)),
     }));
 
     // Check for auto-sync daily services and trigger sync if needed
