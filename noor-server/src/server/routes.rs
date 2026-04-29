@@ -4582,6 +4582,30 @@ async fn play_track(
             })),
         )
     })?;
+    // Fire-and-forget play event — session health + artist attribution
+    if let Some(tidal_id) = track.tidal_id {
+        let http = {
+            let g = state.read().await;
+            g.http_client.clone()
+        };
+        let token = {
+            let g = state.read().await;
+            g.tidal_tokens.as_ref().map(|t| t.access_token.clone())
+        };
+        if let Some(token) = token {
+            let quality = stream_info.audio_quality.clone();
+            let duration_ms = track.duration_ms.unwrap_or(0);
+            tokio::spawn(async move {
+                if let Err(e) = crate::services::tidal::play_reporter::report_play(
+                    &http, &token, tidal_id, &quality, duration_ms,
+                )
+                .await
+                {
+                    tracing::warn!("play report failed: {e}");
+                }
+            });
+        }
+    }
     {
         let mut state_guard = state.write().await;
         state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
