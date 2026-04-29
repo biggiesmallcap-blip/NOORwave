@@ -68,7 +68,10 @@ pub async fn report_play(
         "uuid": event_id,
         "user": {
             "id": claims.uid,
-            "clientId": claims.cid.parse::<i64>().unwrap_or(0),
+            "clientId": claims.cid.parse::<i64>().unwrap_or_else(|_| {
+                tracing::warn!("play_reporter: cid '{}' is not an integer, sending 0", claims.cid);
+                0
+            }),
             "sessionId": claims.sid,
         },
         "client": {
@@ -123,6 +126,7 @@ pub async fn report_play(
         .await?;
 
     tracing::debug!("play report: HTTP {}", resp.status());
+    let _ = resp.bytes().await;
     Ok(())
 }
 
