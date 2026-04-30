@@ -149,9 +149,6 @@ pub struct PendingCandidateRequest {
     pub artist: String,
     pub title: String,
     #[serde(default)]
-    pub duration_ms: Option<i64>,
-    pub lastfm_match_score: f64,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -5028,11 +5025,121 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
+/// Attempts to resolve the current pending queue item to a Tidal track.
+///
+/// Called when `player::next_track` writes `current_track_id = NULL` because the
+/// new current item is a `resolution_state = 'pending'` row (a last.fm hit not yet
+/// matched to a Tidal track). Searches Tidal by artist+title and applies a
+/// Jaro-Winkler artist-name confirmation threshold of 0.85.
+///
+/// Returns `Some(synthetic_track)` on a successful match (queue row updated to
+/// `resolved`), or `None` if no acceptable match exists (queue row marked
+/// `unresolvable`). Either way the caller is responsible for advancing the queue
+/// if the result is `None`.
+async fn resolve_pending_current_queue_item(
+    state: &SharedState,
+) -> Option<crate::db::models::Track> {
+    // Read current_queue_item_id and the pending metadata in one query
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+
+    let (queue_item_id, pending_artist, pending_title): (i64, String, String) = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT q.id, q.pending_artist, q.pending_title
+                 FROM playback_state ps
+                 JOIN queue q ON q.id = ps.current_queue_item_id
+                 WHERE ps.id = 1 AND q.resolution_state = 'pending'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?)
+        })
+        .ok()
+        .flatten()?;
+
+    // Load Tidal tokens
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(state).await.ok()??;
+        let s = state.read().await;
+        s.tidal_tokens.clone().unwrap_or(persisted)
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let query = format!("{} {}", pending_artist, pending_title);
+    let results = match client.search(&query, 5).await {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    fn normalize_artist(s: &str) -> String {
+        s.to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    let norm_expected = normalize_artist(&pending_artist);
+    let best = results.into_iter().find(|t| {
+        t.artist_name.as_deref().map(|a| {
+            strsim::jaro_winkler(&normalize_artist(a), &norm_expected) >= 0.85
+        }).unwrap_or(false)
+    });
+
+    if let Some(tidal_track) = best {
+        let tidal_id = tidal_track.id;
+        let _ = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE queue SET resolution_state = 'resolved', resolved_tidal_id = ?1 WHERE id = ?2",
+                rusqlite::params![tidal_id, queue_item_id],
+            ).map_err(anyhow::Error::from)
+        });
+
+        Some(crate::db::models::Track {
+            id: -tidal_id,
+            title: tidal_track.title,
+            artist_id: 0,
+            artist_name: tidal_track.artist_name,
+            album_id: None,
+            album_title: tidal_track.album_title,
+            disc_number: None,
+            track_number: None,
+            duration_ms: Some(tidal_track.duration * 1000),
+            isrc: None,
+            tidal_id: Some(tidal_id),
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: tidal_track.audio_quality.or_else(|| Some("LOSSLESS".to_string())),
+            best_source: Some("tidal".to_string()),
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "radio_pending".to_string(),
+            artwork_url: tidal_track.artwork_url,
+        })
+    } else {
+        let _ = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE queue SET resolution_state = 'unresolvable' WHERE id = ?1",
+                rusqlite::params![queue_item_id],
+            ).map_err(anyhow::Error::from)
+        });
+        None
+    }
+}
+
 async fn next_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let previous_track_id = current_playback_track_id(&state).await;
-    let snapshot = {
+    let mut snapshot = {
         let state = state.read().await;
         state
             .db
@@ -5049,6 +5156,31 @@ async fn next_track(
     };
 
     set_external_playback_track(&state, None).await;
+
+    // If the new current item has no library track (pending row), resolve it to Tidal now.
+    let effective_current_track: Option<crate::db::models::Track> =
+        if let Some(t) = snapshot.state.current_track.clone() {
+            Some(t)
+        } else {
+            let resolved = resolve_pending_current_queue_item(&state).await;
+            match resolved {
+                Some(ref t) => {
+                    // Store for snapshot overlay at the bottom of this handler.
+                    set_external_playback_track(&state, Some(t.clone())).await;
+                }
+                None => {
+                    // Unresolvable: advance one more step to skip the dead row.
+                    if let Ok(next_snapshot) = {
+                        let s = state.read().await;
+                        s.db.with_conn(|conn| player::next_track(conn))
+                    } {
+                        snapshot = next_snapshot;
+                    }
+                }
+            }
+            resolved
+        };
+
     record_transition_if_changed(&state, previous_track_id, &snapshot, "queue", true).await;
 
     // When "Include New" is enabled, search TIDAL for genre/artist-matched tracks and
@@ -5082,14 +5214,20 @@ async fn next_track(
         }
     }
 
-    let end_reason = if snapshot.state.current_track.is_some() {
+    // A resolved pending track counts as Replaced, not QueueEnded.
+    let end_reason = if effective_current_track.is_some() || snapshot.state.current_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
     sync_session_after_snapshot(&state, &snapshot, end_reason).await;
 
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+    // Use the resolved pending track if the snapshot has no library track.
+    let play_track = effective_current_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref());
+
+    if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
         let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
@@ -5154,10 +5292,14 @@ async fn next_track(
     }
 
     let state_guard = state.read().await;
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+    let event_track_id = effective_current_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref())
+        .map(|t| t.id);
+    if let Some(track_id) = event_track_id {
         let _ = state_guard
             .event_tx
-            .send(AppEvent::TrackChanged { track_id: track.id });
+            .send(AppEvent::TrackChanged { track_id });
     }
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
@@ -5424,8 +5566,6 @@ async fn replace_playback_queue(
                         .map(|p| PendingCandidate {
                             artist: p.artist.clone(),
                             title: p.title.clone(),
-                            duration_ms: p.duration_ms,
-                            lastfm_match_score: p.lastfm_match_score,
                             reason: p.reason.clone(),
                         })
                         .collect();

@@ -38,15 +38,36 @@ impl ShuffleMode {
 
 pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
     let mut stmt = conn.prepare(
+        // Phase 2c-ii-a: LEFT JOIN so pending rows (track_id IS NULL) appear.
+        // COALESCE fills non-nullable Track fields from pending_* columns so the
+        // row mapper doesn't need to know whether a row is pending or resolved.
+        // Columns 0-3: queue metadata; 4-25: Track fields; 26: is_pending flag.
         "SELECT q.id, q.position, q.source, q.reason,
-                t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+                COALESCE(t.id, 0),
+                COALESCE(t.title, q.pending_title, ''),
+                COALESCE(t.artist_id, 0),
+                COALESCE(a.name, q.pending_artist),
+                t.album_id,
+                al.title,
+                t.disc_number,
+                t.track_number,
+                t.duration_ms,
+                t.isrc,
+                t.tidal_id,
+                t.ytmusic_id,
+                t.soundcloud_id,
+                t.best_quality,
+                t.best_source,
+                COALESCE(t.fidelity_score, 0),
+                COALESCE(t.is_favorite, 0),
+                COALESCE(t.play_count, 0),
+                t.last_played_at,
+                t.date_added,
+                COALESCE(t.source, 'tidal_stream'),
+                al.artwork_url,
+                (q.track_id IS NULL) AS is_pending
          FROM queue q
-         JOIN tracks t ON q.track_id = t.id
+         LEFT JOIN tracks t ON q.track_id = t.id
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          ORDER BY q.position ASC, q.id ASC",
@@ -60,6 +81,7 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
                 source: row.get(2)?,
                 reason: row.get(3)?,
                 track: track_from_row_with_offset(row, 4)?,
+                is_pending: row.get(26)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -68,7 +90,9 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
 }
 
 pub fn queue_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT track_id FROM queue ORDER BY position ASC, id ASC")?;
+    let mut stmt = conn.prepare(
+        "SELECT track_id FROM queue WHERE track_id IS NOT NULL ORDER BY position ASC, id ASC",
+    )?;
     let ids = stmt
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -105,6 +129,41 @@ pub fn append_tracks_with_reasons(
         conn.execute(
             "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
             params![track.id, start_pos + idx as i32, source, reason],
+        )?;
+    }
+
+    load_queue(conn)
+}
+
+/// A last.fm similar-track candidate that has not yet been resolved to a local Tidal track.
+pub struct PendingCandidate {
+    pub artist: String,
+    pub title: String,
+    pub reason: Option<String>,
+}
+
+/// Append non-library (pending) queue rows for last.fm candidates.
+///
+/// These rows have `track_id = NULL` and `pending_at` set. The background
+/// resolver claims each row via `resolving_at`, performs a Tidal search, and
+/// writes `track_id`, `resolved_at`, and `tidal_match_score` atomically.
+/// At play time, if a row is still unresolved, the async caller performs a
+/// lazy fallback search before calling `next_track()` again.
+pub fn append_pending_tracks(
+    conn: &Connection,
+    candidates: &[PendingCandidate],
+) -> Result<Vec<QueueItem>> {
+    let start_pos: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
+        [],
+        |row| row.get(0),
+    )?;
+
+    for (idx, c) in candidates.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, reason, pending_artist, pending_title, pending_at)
+             VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'))",
+            params![start_pos + idx as i32, c.reason, c.artist, c.title],
         )?;
     }
 
@@ -422,10 +481,17 @@ mod tests {
                 source TEXT DEFAULT 'tidal'
             );
             CREATE TABLE queue (
-                id INTEGER PRIMARY KEY,
-                track_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                source TEXT DEFAULT 'user'
+                id               INTEGER PRIMARY KEY,
+                track_id         INTEGER,
+                position         INTEGER NOT NULL,
+                source           TEXT    DEFAULT 'user',
+                reason           TEXT,
+                pending_artist   TEXT,
+                pending_title    TEXT,
+                pending_at       TIMESTAMP,
+                resolving_at     TIMESTAMP,
+                resolved_at      TIMESTAMP,
+                tidal_match_score REAL
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
