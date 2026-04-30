@@ -610,6 +610,37 @@
 	let queueCountLabel = $derived(
 		upcomingQueue.length === 1 ? '1 track queued' : `${upcomingQueue.length} tracks queued`
 	);
+
+	let queueTotalMs = $derived(
+		upcomingQueue.reduce((sum, item) => sum + (item.track.duration_ms ?? 0), 0)
+	);
+
+	function formatQueueTotal(ms: number): string {
+		if (ms < 60_000) return '<1 min';
+		const totalMin = Math.round(ms / 60_000);
+		if (totalMin < 60) return `${totalMin} min`;
+		const hr = Math.floor(totalMin / 60);
+		const min = totalMin % 60;
+		return min === 0 ? `${hr} hr` : `${hr} hr ${min} min`;
+	}
+
+	let queueTotalLabel = $derived(formatQueueTotal(queueTotalMs));
+
+	const QUEUE_EXPANDED_KEY = 'noor.queueExpanded';
+
+	function loadQueueExpanded(): boolean {
+		if (typeof localStorage === 'undefined') return false;
+		return localStorage.getItem(QUEUE_EXPANDED_KEY) === '1';
+	}
+
+	let queueExpanded = $state(loadQueueExpanded());
+
+	function toggleQueueExpanded() {
+		queueExpanded = !queueExpanded;
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
+		}
+	}
 	let playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
