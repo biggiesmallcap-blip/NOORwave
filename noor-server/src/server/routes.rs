@@ -138,6 +138,21 @@ pub struct QueueReplaceRequest {
     /// indices are treated as `None`. Excess entries are ignored.
     #[serde(default)]
     reasons: Option<Vec<Option<String>>>,
+    /// Phase 2c-ii-a: last.fm candidates that have no library track_id yet.
+    /// These are appended after the library tracks as pending queue rows.
+    #[serde(default)]
+    pending_candidates: Option<Vec<PendingCandidateRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingCandidateRequest {
+    pub artist: String,
+    pub title: String,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    pub lastfm_match_score: f64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3935,8 +3950,14 @@ async fn set_track_favorite(
     let state_changed = was_favorite != payload.favorite;
 
     let (tidal_tokens, http_client) = {
-        let state = state.read().await;
-        (state.tidal_tokens.clone(), state.http_client.clone())
+        let s = state.read().await;
+        (s.tidal_tokens.clone(), s.http_client.clone())
+    };
+    // Fall back to persisted tokens when the in-memory slot is empty (e.g. just after startup).
+    let tidal_tokens = if tidal_tokens.is_none() {
+        load_persisted_tidal_tokens(&state).await.ok().flatten()
+    } else {
+        tidal_tokens
     };
 
     // Update local DB immediately — Tidal sync happens in the background.
@@ -3975,6 +3996,7 @@ async fn set_track_favorite(
     if let (Some(tidal_id), Some(tokens)) = (tidal_id, tidal_tokens) {
         if state_changed {
             let favorite = payload.favorite;
+            let state_for_sync = state.clone();
             tokio::spawn(async move {
                 let result = if favorite {
                     tidal_mutations::add_favorite_track(
@@ -3996,10 +4018,50 @@ async fn set_track_favorite(
                     .await
                 };
                 if let Err(error) = result {
-                    warn!(
-                        "Failed to background-sync {} favorite for tidal track {tidal_id}: {error}",
-                        if favorite { "set" } else { "clear" },
-                    );
+                    if error_looks_like_auth(&error) {
+                        // Token expired — refresh and retry once, matching the pattern
+                        // used by search/stream/playlist paths in this file.
+                        match recover_tidal_session(&state_for_sync, &http_client, &tokens).await {
+                            Ok(refreshed) => {
+                                let retry = if favorite {
+                                    tidal_mutations::add_favorite_track(
+                                        &http_client,
+                                        &refreshed.access_token,
+                                        &refreshed.user_id,
+                                        tidal_id,
+                                        &refreshed.country_code,
+                                    )
+                                    .await
+                                } else {
+                                    tidal_mutations::remove_favorite_track(
+                                        &http_client,
+                                        &refreshed.access_token,
+                                        &refreshed.user_id,
+                                        tidal_id,
+                                        &refreshed.country_code,
+                                    )
+                                    .await
+                                };
+                                if let Err(e2) = retry {
+                                    error!(
+                                        "Failed to sync {} favorite for tidal track {tidal_id} after session refresh: {e2}",
+                                        if favorite { "set" } else { "clear" },
+                                    );
+                                }
+                            }
+                            Err(re) => {
+                                error!(
+                                    "Session refresh failed while syncing {} favorite for tidal track {tidal_id}: {re}",
+                                    if favorite { "set" } else { "clear" },
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Failed to background-sync {} favorite for tidal track {tidal_id}: {error}",
+                            if favorite { "set" } else { "clear" },
+                        );
+                    }
                 }
             });
         }
@@ -5343,7 +5405,8 @@ async fn replace_playback_queue(
     state
         .db
         .with_conn(|conn| {
-            let queue = match payload.reasons.as_ref() {
+            // Replace with library tracks first.
+            match payload.reasons.as_ref() {
                 Some(reasons) => player::replace_queue_with_reasons(
                     conn,
                     &payload.track_ids,
@@ -5352,8 +5415,26 @@ async fn replace_playback_queue(
                 )?,
                 None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
             };
+            // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
+            if let Some(pending) = &payload.pending_candidates {
+                if !pending.is_empty() {
+                    use crate::playback::queue::{PendingCandidate, append_pending_tracks};
+                    let candidates: Vec<PendingCandidate> = pending
+                        .iter()
+                        .map(|p| PendingCandidate {
+                            artist: p.artist.clone(),
+                            title: p.title.clone(),
+                            duration_ms: p.duration_ms,
+                            lastfm_match_score: p.lastfm_match_score,
+                            reason: p.reason.clone(),
+                        })
+                        .collect();
+                    append_pending_tracks(conn, &candidates)?;
+                }
+            }
+            let final_queue = crate::playback::queue::load_queue(conn)?;
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": queue })))
+            Ok(Json(json!({ "queue": final_queue })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
