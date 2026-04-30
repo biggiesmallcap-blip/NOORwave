@@ -5038,7 +5038,7 @@ async fn next_track(
         let job = player::build_playback_preparation(
             track,
             Some(&stream_info),
-            snapshot.state.crossfade_ms,
+            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
@@ -5148,7 +5148,7 @@ async fn previous_track(
         let job = player::build_playback_preparation(
             track,
             Some(&stream_info),
-            snapshot.state.crossfade_ms,
+            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
         );
         runtime_handle.switch_to(job).map_err(|error| {
@@ -7096,6 +7096,19 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
             return Ok(());
         }
 
+        // Skip pre-decode in exclusive mode — only one stream can grab the
+        // device exclusively, and a paused pre-buffer engine would force-share
+        // the device which the OS rejects with AUDCLNT_E_DEVICE_IN_USE.
+        // The next track will cold-start when the current one finishes.
+        let exclusive = state_guard
+            .db
+            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+            .map(|s| s.exclusive_mode)
+            .unwrap_or(false);
+        if exclusive {
+            return Ok(());
+        }
+
         let next = state_guard.db.with_conn(player::peek_next_track)?;
         let handle = state_guard
             .playback_runtime
@@ -7293,7 +7306,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
         let job = player::build_playback_preparation(
             track,
             Some(&stream_info),
-            snapshot.state.crossfade_ms,
+            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
         );
         runtime_handle.switch_to(job)?;
@@ -7391,13 +7404,27 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
 ///
 /// Every code path that calls `player::build_playback_preparation` to start a
 /// track on the host audio runtime must source `crossfade_ms` through this
-/// helper (or the equivalent `snapshot.state.crossfade_ms` after a
-/// `next_track`/`previous_track` snapshot). Passing a hardcoded 0 disables the
-/// per-engine fade-out ramp AND prevents `CrossfadeStart` from firing, which
-/// silently breaks both gapless and crossfade transitions.
+/// helper (or `effective_crossfade_ms` to apply the exclusive-mode override).
+/// Passing a hardcoded 0 disables the per-engine fade-out ramp AND prevents
+/// `CrossfadeStart` from firing, which silently breaks both gapless and
+/// crossfade transitions.
+/// Returns `configured` unless exclusive mode is on, in which case it returns 0.
+/// Used by callsites that already have a snapshot's `crossfade_ms` and want the
+/// same exclusive-mode override that `current_crossfade_ms` applies, without
+/// re-querying `playback_state`.
+async fn effective_crossfade_ms(state: &SharedState, configured: i32) -> i32 {
+    let guard = state.read().await;
+    let exclusive = guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .map(|s| s.exclusive_mode)
+        .unwrap_or(false);
+    if exclusive { 0 } else { configured }
+}
+
 async fn current_crossfade_ms(state: &SharedState) -> i32 {
     let guard = state.read().await;
-    guard
+    let configured = guard
         .db
         .with_conn(|conn| {
             conn.query_row(
@@ -7407,7 +7434,19 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
             )
             .map_err(Into::into)
         })
-        .unwrap_or(0)
+        .unwrap_or(0);
+
+    // Exclusive mode owns the device with a single stream — crossfade
+    // requires two simultaneous streams, which the OS rejects with
+    // AUDCLNT_E_DEVICE_IN_USE. Force 0 here so the fade-out ramp on the
+    // outgoing track also goes away (otherwise we'd attenuate the last
+    // few seconds of every track for no reason).
+    let exclusive = guard
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        .map(|s| s.exclusive_mode)
+        .unwrap_or(false);
+    if exclusive { 0 } else { configured }
 }
 
 async fn current_user_audio_quality(
@@ -7463,41 +7502,119 @@ async fn put_audio_settings(
         ));
     }
 
-    let guard = state.read().await;
-    let (old, saved) = guard
-        .db
-        .with_conn(|conn| {
-            let old = crate::db::audio_settings::load(conn)?;
-            crate::db::audio_settings::save(conn, &new)?;
-            Ok((old, new.clone()))
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "message": e.to_string() })),
-            )
-        })?;
-    let new = saved;
+    let (old, new) = {
+        let guard = state.read().await;
+        let (old, saved) = guard
+            .db
+            .with_conn(|conn| {
+                let old = crate::db::audio_settings::load(conn)?;
+                crate::db::audio_settings::save(conn, &new)?;
+                Ok((old, new.clone()))
+            })
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "message": e.to_string() })),
+                )
+            })?;
 
-    // Live-apply iff anything affecting the output stream changed.
-    let needs_swap = old.output_device != new.output_device
-        || old.exclusive_mode != new.exclusive_mode
-        || old.sample_rate_follow != new.sample_rate_follow;
+        // Live-apply iff anything affecting the output stream changed.
+        let needs_swap = old.output_device != saved.output_device
+            || old.exclusive_mode != saved.exclusive_mode
+            || old.sample_rate_follow != saved.sample_rate_follow;
 
-    if needs_swap {
-        if let Some(runtime) = guard.playback_runtime.as_ref() {
-            if let Err(e) = runtime.handle.device_swap(
-                playback_runtime::OutputDeviceSelection::from_pref(new.output_device.as_deref()),
-                new.exclusive_mode,
-                new.sample_rate_follow,
-                None,
-            ) {
-                warn!("Audio settings update: live device_swap failed: {e}");
+        if needs_swap {
+            if let Some(runtime) = guard.playback_runtime.as_ref() {
+                if let Err(e) = runtime.handle.device_swap(
+                    playback_runtime::OutputDeviceSelection::from_pref(
+                        saved.output_device.as_deref(),
+                    ),
+                    saved.exclusive_mode,
+                    saved.sample_rate_follow,
+                    None,
+                ) {
+                    warn!("Audio settings update: live device_swap failed: {e}");
+                }
             }
+        }
+
+        (old, saved)
+    };
+
+    // Quality changed → re-issue the current track at the new quality so the
+    // user immediately hears (and sees) the new tier. The track restarts from
+    // 0; preserving position would require partial-stream offset support that
+    // TIDAL's playbackinfo API doesn't expose.
+    if old.quality != new.quality {
+        if let Err(e) = reissue_current_track_at_new_quality(&state).await {
+            warn!("Audio settings update: re-issue at new quality failed: {e}");
         }
     }
 
     Ok(Json(new))
+}
+
+/// Re-resolve the currently-playing track at the user's current quality and
+/// switch the runtime to it. Called after `put_audio_settings` when the user
+/// flips the quality dropdown — without this, quality changes don't take effect
+/// until the next track and the user can't tell the setting did anything.
+async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Result<()> {
+    let Some(track_id) = current_playback_track_id(state).await else {
+        return Ok(());
+    };
+
+    let track = {
+        let guard = state.read().await;
+        guard
+            .db
+            .with_conn(|conn| queue::get_track_by_id(conn, track_id))?
+    };
+    let Some(track) = track else {
+        return Ok(());
+    };
+
+    let user_quality = current_user_audio_quality(state).await;
+    let Some(stream_request) = player::build_tidal_stream_request(&track, user_quality.clone())
+    else {
+        // Local-library tracks don't have a TIDAL stream to re-resolve.
+        return Ok(());
+    };
+
+    let stream_info = match resolve_tidal_playback_stream(state, &track, &stream_request).await {
+        Ok(info) => info,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "stream resolve failed: {}",
+                describe_tidal_playback_error(&e)
+            ));
+        }
+    };
+
+    let runtime_handle = {
+        let guard = state.read().await;
+        guard.playback_runtime.as_ref().map(|r| r.handle.clone())
+    };
+    let Some(handle) = runtime_handle else {
+        return Ok(());
+    };
+
+    let crossfade_ms = current_crossfade_ms(state).await;
+    let job =
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
+
+    handle.switch_to(job)?;
+
+    {
+        let mut state_guard = state.write().await;
+        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: stream_info.audio_quality.clone(),
+            sample_rate: stream_info.sample_rate,
+            bit_depth: stream_info.bit_depth,
+        });
+        state_guard.pending_stream_display = None;
+    }
+
+    Ok(())
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {

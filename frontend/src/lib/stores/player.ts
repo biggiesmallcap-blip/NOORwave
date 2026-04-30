@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
 import {
 	api,
+	ApiError,
 	type AudioDspFeatures,
 	type PlaybackSnapshot,
 	type PlaybackState,
@@ -936,7 +937,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	} catch (error) {
 		// 404 = track not yet in library index — fall through to silent import.
 		// Any other error is a real failure.
-		if (!(error instanceof Error && error.message.includes('404'))) {
+		if (!(error instanceof ApiError && error.status === 404)) {
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			showToast(`Radio failed`, 'error');
 			return;

@@ -1370,6 +1370,8 @@
 							</div>
 							<p class="page-copy" style="font-size:0.8rem">
 								When on, no other app can use this device while NOORwave is playing.
+								Crossfade and gapless pre-decode are disabled — exclusive mode
+								holds the device with a single stream.
 							</p>
 						{/if}
 						<div class="info-row">

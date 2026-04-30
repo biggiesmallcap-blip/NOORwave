@@ -29,10 +29,27 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let www_dir = exe_dir.and_then(|d| {
-        let p = d.join("www");
-        if p.is_dir() { Some(p) } else { None }
-    });
+    let www_dir = exe_dir
+        .as_ref()
+        .and_then(|d| {
+            let p = d.join("www");
+            if p.is_dir() { Some(p) } else { None }
+        })
+        .or_else(|| {
+            // Dev fallback: walk up from the exe looking for frontend/build/.
+            // Lets `cargo build && target/release/noor-app.exe` work without
+            // copying www/ into target/. Portable builds hit the www/ branch
+            // above first and never reach this.
+            let mut cursor = exe_dir.as_deref();
+            while let Some(dir) = cursor {
+                let candidate = dir.join("frontend").join("build");
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+                cursor = dir.parent();
+            }
+            None
+        });
 
     // Public — no auth required. Static file serving lives here so it is
     // never touched by the require_token middleware.

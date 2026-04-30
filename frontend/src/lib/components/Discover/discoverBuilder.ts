@@ -1,9 +1,9 @@
 import type { DiscoverTrackNode, DiscoverArtistNode, DiscoverEdge, DiscoverViewMode } from './discover.types';
 
-const REPULSION = 800;
-const ATTRACTION = 0.005;
+const REPULSION = 2400;
+const ATTRACTION = 0.003;
 const DAMPING = 0.85;
-const CENTER_GRAVITY = 0.01;
+const CENTER_GRAVITY = 0.0025;
 
 export function applyForces(
   nodes: (DiscoverTrackNode | DiscoverArtistNode)[],
@@ -60,8 +60,8 @@ export function applyForces(
       if (isNaN(num)) continue;
       const isA = key.includes('A');
       const angle = ((num - 1) / 12) * Math.PI * 2 + (isA ? 0 : 0.26);
-      const targetX = Math.cos(angle) * 300;
-      const targetY = Math.sin(angle) * 300;
+      const targetX = Math.cos(angle) * 650;
+      const targetY = Math.sin(angle) * 650;
       for (const node of group) {
         node.vx += (targetX - node.x) * 0.02;
         node.vy += (targetY - node.y) * 0.02;
@@ -71,7 +71,7 @@ export function applyForces(
     // Pull low-energy left, high-energy right
     for (const node of nodes) {
       const energy = ('energy' in node ? node.energy : null) ?? 0.5;
-      const targetX = (energy - 0.5) * 600;
+      const targetX = (energy - 0.5) * 1300;
       node.vx += (targetX - node.x) * 0.01;
     }
   }
@@ -97,7 +97,7 @@ export function buildInitialLayout(
 ): DiscoverTrackNode[] {
   return tracks.map((t, i) => {
     const angle = (i / Math.max(tracks.length, 1)) * Math.PI * 2;
-    const radius = 100 + Math.random() * 200;
+    const radius = 250 + Math.random() * 450;
     return {
       track_id: t.track_id || t.id,
       title: t.title,

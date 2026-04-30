@@ -840,6 +840,13 @@ async function fetchApiResponse(
 	return resp;
 }
 
+export class ApiError extends Error {
+	constructor(public status: number, message: string) {
+		super(message);
+		this.name = 'ApiError';
+	}
+}
+
 async function fetchApi<T>(
 	path: string,
 	params?: Record<string, string>,
@@ -854,7 +861,7 @@ async function fetchApi<T>(
 			errorBody?.error ??
 			errorBody?.status ??
 			`API error: ${resp.status}`;
-		throw new Error(message);
+		throw new ApiError(resp.status, message);
 	}
 	return resp.json();
 }

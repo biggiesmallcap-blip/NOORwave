@@ -58,6 +58,24 @@
 					<span class="edge-label">{row.label}</span>
 				</div>
 			{/each}
+
+			<div class="strength-encoding">
+				<div class="strength-label-row">
+					<span>weak</span>
+					<span>strong</span>
+				</div>
+				<svg class="strength-bar" viewBox="0 0 140 12" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+					<defs>
+						<linearGradient id="nw-strength-alpha" x1="0%" y1="0%" x2="100%" y2="0%">
+							<stop offset="0%" stop-color="#c0c0d8" stop-opacity="0.4" />
+							<stop offset="100%" stop-color="#c0c0d8" stop-opacity="0.9" />
+						</linearGradient>
+					</defs>
+					<!-- Tapered wedge: thin+faint left → thick+vivid right -->
+					<path d="M0,5.6 L140,2.5 L140,9.5 L0,6.4 Z" fill="url(#nw-strength-alpha)" />
+				</svg>
+				<div class="strength-caption">opacity + width = connection weight</div>
+			</div>
 		</div>
 	</div>
 {/if}
@@ -207,5 +225,32 @@
 
 	.edge-label {
 		color: #c0c0d8;
+	}
+
+	.strength-encoding {
+		margin-top: 8px;
+	}
+
+	.strength-label-row {
+		display: flex;
+		justify-content: space-between;
+		font-size: 9px;
+		color: #7b7b9a;
+		margin-bottom: 2px;
+	}
+
+	.strength-bar {
+		width: 100%;
+		height: 12px;
+		display: block;
+		border-radius: 2px;
+		overflow: visible;
+	}
+
+	.strength-caption {
+		font-size: 9px;
+		color: #7b7b9a;
+		text-align: center;
+		margin-top: 3px;
 	}
 </style>

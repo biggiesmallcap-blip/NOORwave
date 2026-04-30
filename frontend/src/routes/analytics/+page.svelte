@@ -185,7 +185,7 @@
 
 		<section class="panel-grid">
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Artists" title="Top artists" subtitle="Who has dominated the room most recently." />
+				<SectionHeader eyebrow="Artists" title="Top artists" subtitle="Who has dominated the room, all-time." />
 				<div class="stack">
 					{#each dashboard.top_artists as artist}
 						<div class="list-card">

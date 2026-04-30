@@ -8,10 +8,11 @@
 		type RSSFeedItem,
 		type HomePickTrack,
 		type ChartEntry,
-		type TrendingSource
+		type TrendingSource,
+		type TidalPlayable,
 	} from '$lib/api/client';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio, playTrackNow, playTidalTrackNow } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio, playTrackNow, playTidalTrackNow, playerError } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -63,6 +64,30 @@
 		trendingSource = s;
 		saveTrendingSource(s);
 		void loadTrending();
+	}
+
+	async function playTrendingTidalTrack(tp: TidalPlayable): Promise<void> {
+		if (tp.tidal_id !== 0) return playTidalTrackNow(tp);
+		const q = [tp.artist_name, tp.title].filter(Boolean).join(' ');
+		try {
+			const results = await api.searchTidal(q, 1);
+			const hit = results.tracks[0];
+			if (!hit) {
+				playerError.set({ message: "Couldn't find that track on Tidal." });
+				return;
+			}
+			return playTidalTrackNow({
+				tidal_id: hit.tidal_id,
+				title: hit.title,
+				artist_name: hit.artist_name,
+				album_title: hit.album_title,
+				artwork_url: hit.artwork_url ?? tp.artwork_url,
+				duration_ms: hit.duration_ms,
+				artist_tidal_id: null,
+			});
+		} catch {
+			playerError.set({ message: "Couldn't find that track on Tidal." });
+		}
 	}
 
 	// Status data
@@ -389,7 +414,7 @@
 										index={i}
 										isCurrent={false}
 										isPlaying={false}
-										onRowClick={() => void playTidalTrackNow(tp)}
+										onRowClick={() => void playTrendingTidalTrack(tp)}
 									/>
 								{/if}
 							{/each}

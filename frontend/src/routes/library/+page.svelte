@@ -807,7 +807,9 @@
 		albumCount: number;
 	}
 
-	let topArtist = $derived.by<HomeArtist | null>(() => {
+	type HeroArtist = HomeArtist & { kind: 'top' | 'forgotten_favorite' };
+
+	let heroArtists = $derived.by<HeroArtist[]>(() => {
 		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
 		const countMap = new Map<number, HomeArtist>();
 		const albumsByArtist = new Map<number, Set<number>>();
@@ -819,7 +821,6 @@
 			if (info) {
 				info.playCount += track.play_count ?? 0;
 				info.trackCount++;
-				// Take the first non-null artwork we see for this artist
 				if (!info.photo_url && track.artwork_url) info.photo_url = track.artwork_url;
 			} else {
 				countMap.set(track.artist_id, {
@@ -839,10 +840,25 @@
 		for (const [id, data] of countMap) {
 			data.albumCount = albumsByArtist.get(id)?.size ?? 0;
 		}
-		// Only show real listening data — skip artists with no plays at all.
-		const played = [...countMap.values()].filter(a => a.playCount > 0);
-		if (played.length === 0) return null;
-		return played.reduce((best, cur) => cur.playCount > best.playCount ? cur : best);
+
+		const all = [...countMap.values()];
+		const played = all.filter(a => a.playCount > 0).sort((a, b) => b.playCount - a.playCount);
+		const top: HeroArtist[] = played.slice(0, 5).map(a => ({ ...a, kind: 'top' }));
+
+		// Forgotten favourite: an artist in the local DB (which only contains
+		// Tidal-favourited artists) that the user has barely listened to.
+		const topIds = new Set(top.map(a => a.id));
+		const candidates = all
+			.filter(a => !topIds.has(a.id) && !!a.photo_url && a.playCount === 0);
+		const fallback = candidates.length === 0
+			? all.filter(a => !topIds.has(a.id) && !!a.photo_url && a.playCount < 2)
+			: candidates;
+		if (fallback.length > 0) {
+			const pick = fallback[Math.floor(Math.random() * fallback.length)];
+			top.push({ ...pick, kind: 'forgotten_favorite' as const });
+		}
+
+		return top;
 	});
 
 	interface HomeArtistCard {
@@ -929,17 +945,15 @@
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
-	function playAllFromTopArtist() {
-		if (!topArtist) return;
-		const artistTracks = $tracks.filter(t => t.artist_id === topArtist!.id);
+	function playAllForArtist(artistId: number) {
+		const artistTracks = $tracks.filter(t => t.artist_id === artistId);
 		if (!artistTracks.length) return;
 		void playTrackNow(artistTracks[0].id);
 		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
 	}
 
-	function shuffleTopArtist() {
-		if (!topArtist) return;
-		const artistTracks = [...$tracks.filter(t => t.artist_id === topArtist!.id)];
+	function shuffleArtist(artistId: number) {
+		const artistTracks = [...$tracks.filter(t => t.artist_id === artistId)];
 		artistTracks.sort(() => Math.random() - 0.5);
 		if (!artistTracks.length) return;
 		void playTrackNow(artistTracks[0].id);
@@ -1206,11 +1220,11 @@
 
 	{:else if activeTab === 'all'}
 		<div class="library-home">
-			{#if topArtist}
+			{#if heroArtists.length > 0}
 				<LibraryHero
-					artist={topArtist}
-					onPlayAll={playAllFromTopArtist}
-					onShuffle={shuffleTopArtist}
+					artists={heroArtists}
+					onPlayAll={playAllForArtist}
+					onShuffle={shuffleArtist}
 				/>
 			{:else if $isLoading}
 				<div class="home-loading">Loading your library…</div>

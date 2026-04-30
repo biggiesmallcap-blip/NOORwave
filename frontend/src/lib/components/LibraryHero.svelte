@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fade } from 'svelte/transition';
+
   interface Artist {
     id: number;
     name: string;
@@ -6,13 +8,22 @@
     playCount: number;
     trackCount: number;
     albumCount: number;
+    kind: 'top' | 'forgotten_favorite';
   }
 
-  let { artist, onPlayAll, onShuffle }: {
-    artist: Artist;
-    onPlayAll: () => void;
-    onShuffle: () => void;
+  let { artists, onPlayAll, onShuffle }: {
+    artists: Artist[];
+    onPlayAll: (artistId: number) => void;
+    onShuffle: (artistId: number) => void;
   } = $props();
+
+  const ROTATE_MS = 8000;
+
+  let currentIndex = $state(0);
+  let paused = $state(false);
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  const current = $derived(artists[currentIndex] ?? artists[0]);
 
   function letterColor(name: string): string {
     const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
@@ -24,43 +35,98 @@
   function initials(name: string): string {
     return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
   }
+
+  function startTimer() {
+    stopTimer();
+    if (artists.length <= 1) return;
+    timer = setInterval(() => {
+      if (!paused) currentIndex = (currentIndex + 1) % artists.length;
+    }, ROTATE_MS);
+  }
+
+  function stopTimer() {
+    if (timer) clearInterval(timer);
+    timer = undefined;
+  }
+
+  function jump(delta: number) {
+    if (artists.length === 0) return;
+    currentIndex = (currentIndex + delta + artists.length) % artists.length;
+    startTimer();
+  }
+
+  $effect(() => {
+    startTimer();
+    return stopTimer;
+  });
+
+  // Clamp index if the artists list shrinks (e.g. on library refresh)
+  $effect(() => {
+    if (currentIndex >= artists.length) currentIndex = 0;
+  });
 </script>
 
-<div
-  class="library-hero-card"
-  class:has-image={!!artist.photo_url}
-  style={artist.photo_url ? `background-image: url('${artist.photo_url}')` : `background: ${letterColor(artist.name)}`}
->
-  <!-- gradient overlay — same pattern as search page artist hero -->
-  <div class="hero-overlay"></div>
+{#if current}
+  <div
+    class="library-hero-card"
+    class:has-image={!!current.photo_url}
+    onmouseenter={() => paused = true}
+    onmouseleave={() => paused = false}
+    role="region"
+    aria-label="Featured artist"
+  >
+    {#key currentIndex}
+      <div
+        class="hero-bg"
+        style={current.photo_url
+          ? `background-image: url('${current.photo_url}')`
+          : `background: ${letterColor(current.name)}`}
+        in:fade={{ duration: 600 }}
+      ></div>
+    {/key}
 
-  <div class="hero-content">
-    <div class="hero-art">
-      {#if artist.photo_url}
-        <div class="hero-thumb" style="background-image: url('{artist.photo_url}')"></div>
-      {:else}
-        <div class="hero-thumb hero-thumb--fallback" style="background: {letterColor(artist.name)}">
-          <span>{initials(artist.name)}</span>
+    <div class="hero-overlay"></div>
+
+    <div class="hero-content">
+      <div class="hero-art">
+        {#if current.photo_url}
+          <div class="hero-thumb" style="background-image: url('{current.photo_url}')"></div>
+        {:else}
+          <div class="hero-thumb hero-thumb--fallback" style="background: {letterColor(current.name)}">
+            <span>{initials(current.name)}</span>
+          </div>
+        {/if}
+      </div>
+
+      <div class="hero-meta">
+        <span class="hero-kind" class:hero-kind--forgotten={current.kind === 'forgotten_favorite'}>
+          {current.kind === 'forgotten_favorite' ? 'FORGOTTEN FAVORITE' : 'YOUR TOP ARTIST'}
+        </span>
+        <h2 class="hero-title">{current.name}</h2>
+        <p class="hero-sub">{current.trackCount} tracks &nbsp;·&nbsp; {current.albumCount} albums</p>
+        <div class="hero-actions">
+          <button class="btn btn-primary hero-play" onclick={() => onPlayAll(current.id)}>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+              <path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
+            </svg>
+            Play All
+          </button>
+          <button class="btn btn-glass" onclick={() => onShuffle(current.id)}>Shuffle</button>
         </div>
-      {/if}
-    </div>
-
-    <div class="hero-meta">
-      <span class="hero-kind">YOUR TOP ARTIST</span>
-      <h2 class="hero-title">{artist.name}</h2>
-      <p class="hero-sub">{artist.trackCount} tracks &nbsp;·&nbsp; {artist.albumCount} albums</p>
-      <div class="hero-actions">
-        <button class="btn btn-primary hero-play" onclick={onPlayAll}>
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
-            <path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
-          </svg>
-          Play All
-        </button>
-        <button class="btn btn-glass" onclick={onShuffle}>Shuffle</button>
       </div>
     </div>
+
+    {#if artists.length > 1}
+      <button class="hero-nav hero-nav--prev" onclick={() => jump(-1)} aria-label="Previous artist">‹</button>
+      <button class="hero-nav hero-nav--next" onclick={() => jump(1)} aria-label="Next artist">›</button>
+      <div class="hero-dots" aria-hidden="true">
+        {#each artists as _, i}
+          <span class="hero-dot" class:active={i === currentIndex}></span>
+        {/each}
+      </div>
+    {/if}
   </div>
-</div>
+{/if}
 
 <style>
   .library-hero-card {
@@ -70,8 +136,15 @@
     background: var(--bg-glass, rgba(255,255,255,0.04));
     border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
     min-height: 200px;
+  }
+
+  .hero-bg {
+    position: absolute;
+    inset: -8%;
     background-size: cover;
-    background-position: center top;
+    background-position: center;
+    filter: blur(40px) saturate(1.4);
+    z-index: 0;
   }
 
   .hero-overlay {
@@ -80,20 +153,19 @@
     background: linear-gradient(
       to right,
       rgba(0,0,0,0.92) 0%,
-      rgba(0,0,0,0.65) 50%,
-      rgba(0,0,0,0.2) 100%
+      rgba(0,0,0,0.6) 55%,
+      rgba(0,0,0,0.15) 100%
     );
-    z-index: 0;
+    z-index: 1;
   }
 
-  /* when no photo, use a solid dark overlay instead */
   .library-hero-card:not(.has-image) .hero-overlay {
     background: rgba(0,0,0,0.45);
   }
 
   .hero-content {
     position: relative;
-    z-index: 1;
+    z-index: 2;
     display: flex;
     align-items: center;
     gap: 28px;
@@ -131,6 +203,11 @@
     letter-spacing: 1.5px;
     color: var(--accent, #9b6fff);
     text-transform: uppercase;
+    transition: color 300ms ease;
+  }
+
+  .hero-kind--forgotten {
+    color: #f4a261;
   }
 
   .hero-title {
@@ -163,4 +240,48 @@
     font-size: 14px;
     font-weight: 600;
   }
+
+  .hero-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 3;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.85);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 200ms ease, background 200ms ease;
+  }
+  .library-hero-card:hover .hero-nav { opacity: 1; }
+  .hero-nav:hover { background: rgba(0,0,0,0.75); }
+  .hero-nav--prev { left: 12px; }
+  .hero-nav--next { right: 12px; }
+
+  .hero-dots {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 3;
+    display: flex;
+    gap: 6px;
+  }
+
+  .hero-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.25);
+    transition: background 200ms ease;
+  }
+  .hero-dot.active { background: rgba(255,255,255,0.85); }
 </style>

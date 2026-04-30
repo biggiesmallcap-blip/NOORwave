@@ -315,6 +315,16 @@ struct PlaybackRuntimeLoopState {
     /// drains, at which point it self-terminates and we drop it silently —
     /// the queue advance has already happened at swap time.
     fading_out_engine: Option<PlaybackEngine>,
+    /// Last-known exclusive mode flag from the most recent `DeviceSwap`. When
+    /// `true`, freshly cold-started engines immediately swap to the WASAPI
+    /// exclusive backend so the user's "bit-perfect" toggle stays in effect
+    /// across track boundaries (otherwise every new track would silently
+    /// fall back to cpal shared mode).
+    current_exclusive: bool,
+    /// Last-known sample-rate-follow flag, used the same way as `current_exclusive`.
+    current_sample_rate_follow: bool,
+    /// Last-known device selection for cold-started engines.
+    current_device_selection: OutputDeviceSelection,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -400,6 +410,9 @@ fn run_runtime_loop(
         engine: None,
         next_engine: None,
         fading_out_engine: None,
+        current_exclusive: false,
+        current_sample_rate_follow: false,
+        current_device_selection: OutputDeviceSelection::Default,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -659,6 +672,20 @@ fn run_runtime_loop(
                     _ => None,
                 };
 
+                // In exclusive mode only one stream can hold the device, so
+                // drop the pre-buffered + fading engines and only swap the
+                // active one. Any in-flight crossfade is sacrificed at this
+                // point; the user is intentionally trading multi-stream mixing
+                // for bit-perfect output.
+                if exclusive {
+                    if let Some(mut stale) = state.next_engine.take() {
+                        stale.stop();
+                    }
+                    if let Some(mut stale) = state.fading_out_engine.take() {
+                        stale.stop();
+                    }
+                }
+
                 // Rebuild the stream on every live engine so they all play on
                 // the new device.
                 let mut swap_failed = false;
@@ -704,6 +731,9 @@ fn run_runtime_loop(
                 if let Some(rate) = desired_rate {
                     state.device_sample_rate = rate;
                 }
+                state.current_exclusive = exclusive;
+                state.current_sample_rate_follow = sample_rate_follow;
+                state.current_device_selection = selection;
 
                 let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
                     device_name: new_name,
@@ -780,7 +810,7 @@ fn transition_to_job(
         if let Some(mut stale) = state.next_engine.take() {
             stale.stop();
         }
-        let eng = PlaybackEngine::start(
+        let mut eng = PlaybackEngine::start(
             config,
             command_tx,
             device,
@@ -796,6 +826,26 @@ fn transition_to_job(
         // Redirect the handle's reader to this engine's counter (which IS
         // position_samples for cold starts, but re-pointing is always correct).
         *position_source.lock().unwrap() = Arc::clone(position_samples);
+
+        // If exclusive mode is currently engaged, swap the just-built cpal
+        // shared stream over to the WASAPI exclusive backend so the user
+        // doesn't silently get shared-mode output for every new track.
+        if state.current_exclusive {
+            if let Err(err) = eng.swap_stream(
+                device,
+                output_config,
+                output_sample_format,
+                command_tx.clone(),
+                event_tx.clone(),
+                true,
+                None,
+            ) {
+                warn!(
+                    "transition_to_job: failed to engage exclusive mode for new engine: {err:?}; \
+                     falling back to shared mode"
+                );
+            }
+        }
         eng
     };
 
@@ -867,12 +917,35 @@ fn promote_next_to_active(
     }
 }
 
+/// Output stream backend. Shared mode goes through cpal (which uses WASAPI
+/// shared internally on Windows, the system mixer routes everything through);
+/// exclusive mode uses our own WASAPI exclusive driver that bypasses the OS
+/// audio engine entirely. Both feed from the same `PlaybackSharedState`.
+enum OutputStream {
+    Cpal(Stream),
+    #[cfg(target_os = "windows")]
+    Wasapi(crate::playback::wasapi_exclusive::ExclusiveStream),
+}
+
+impl OutputStream {
+    /// Start producing audio. Cpal streams are constructed paused; the WASAPI
+    /// exclusive driver starts its render thread the moment it's built, so
+    /// this is a no-op for that backend.
+    fn start(&self) -> Result<()> {
+        match self {
+            Self::Cpal(s) => s.play().context("failed to start cpal stream"),
+            #[cfg(target_os = "windows")]
+            Self::Wasapi(_) => Ok(()),
+        }
+    }
+}
+
 struct PlaybackEngine {
     track_id: i64,
     source_kind: PlaybackSourceKind,
-    /// Active CPAL stream; `None` only briefly during a `DeviceSwap` while we
-    /// rebuild the stream on the new device.
-    stream: Option<Stream>,
+    /// Active output stream; `None` only briefly during a `DeviceSwap` while
+    /// we rebuild it on the new device or backend.
+    stream: Option<OutputStream>,
     decoder_thread: Option<JoinHandle<()>>,
     shared: Arc<PlaybackSharedState>,
 }
@@ -932,7 +1005,7 @@ impl PlaybackEngine {
             })
             .context("failed to spawn playback decoder thread")?;
 
-        let stream = build_output_stream(
+        let cpal_stream = build_output_stream(
             device,
             output_config,
             output_sample_format,
@@ -940,7 +1013,8 @@ impl PlaybackEngine {
             shared.command_tx.clone(),
             event_tx.clone(),
         )?;
-        stream.play().context("failed to start output stream")?;
+        let stream = OutputStream::Cpal(cpal_stream);
+        stream.start()?;
 
         Ok(Self {
             track_id,
@@ -1003,8 +1077,7 @@ impl PlaybackEngine {
         self.shared.paused.store(true, Ordering::SeqCst);
         drop(self.stream.take());
 
-        let effective_config =
-            build_stream_config(output_config, exclusive, desired_sample_rate);
+        let effective_config = build_stream_config(output_config, desired_sample_rate);
 
         // Re-target the decoder's resampler to the new stream rate so the
         // sample stream stays at the right pitch. We do this AFTER computing
@@ -1018,39 +1091,41 @@ impl PlaybackEngine {
 
         #[cfg(target_os = "windows")]
         let new_stream = if exclusive {
-            build_wasapi_exclusive_stream(
-                device,
-                &effective_config,
-                output_sample_format,
+            let device_name = device.name().ok();
+            let exclusive_stream = crate::playback::wasapi_exclusive::build_exclusive_stream(
+                device_name.as_deref(),
+                effective_config.sample_rate.0,
+                effective_config.channels,
                 Arc::clone(&self.shared),
                 command_tx,
                 event_tx,
-            )?
+            )?;
+            OutputStream::Wasapi(exclusive_stream)
         } else {
-            build_output_stream(
+            OutputStream::Cpal(build_output_stream(
                 device,
                 &effective_config,
                 output_sample_format,
                 Arc::clone(&self.shared),
                 command_tx,
                 event_tx,
-            )?
+            )?)
         };
         #[cfg(not(target_os = "windows"))]
         let new_stream = {
             let _ = exclusive;
-            build_output_stream(
+            OutputStream::Cpal(build_output_stream(
                 device,
                 &effective_config,
                 output_sample_format,
                 Arc::clone(&self.shared),
                 command_tx,
                 event_tx,
-            )?
+            )?)
         };
 
         new_stream
-            .play()
+            .start()
             .context("failed to start swapped output stream")?;
         self.stream = Some(new_stream);
         self.shared.paused.store(was_paused, Ordering::SeqCst);
@@ -1059,64 +1134,18 @@ impl PlaybackEngine {
 }
 
 /// Build the effective `cpal::StreamConfig` for a swap, starting from the
-/// device's existing config and applying the `exclusive` low-latency buffer
-/// (Windows-only) and an optional sample-rate override.
+/// device's existing config and applying an optional sample-rate override.
 ///
-/// CPAL 0.15 does not expose `ShareMode::Exclusive` directly through
-/// `StreamConfig`. The user-facing toggle, dedicated code path, and low-latency
-/// buffer are wired here; full `ShareMode::Exclusive` requires a cpal upgrade or
-/// raw `windows-rs` `IAudioClient` and is acknowledged as a follow-up in the
-/// spec.
-fn build_stream_config(
-    base: &StreamConfig,
-    exclusive: bool,
-    desired_sample_rate: Option<u32>,
-) -> StreamConfig {
+/// The `exclusive` parameter is intentionally inert here — when exclusive mode
+/// is on we bypass cpal entirely (see `wasapi_exclusive::build_exclusive_stream`)
+/// so the cpal config never gets used. We only consume the desired sample rate
+/// to plumb through to the WASAPI session.
+fn build_stream_config(base: &StreamConfig, desired_sample_rate: Option<u32>) -> StreamConfig {
     let mut config = base.clone();
     if let Some(rate) = desired_sample_rate {
         config.sample_rate = cpal::SampleRate(rate);
     }
-
-    #[cfg(target_os = "windows")]
-    if exclusive {
-        // ~10 ms at 48 kHz. A small fixed buffer is the one piece of real
-        // latency improvement we can ship today without a cpal upgrade.
-        config.buffer_size = cpal::BufferSize::Fixed(480);
-    }
-    #[cfg(not(target_os = "windows"))]
-    let _ = exclusive;
-
     config
-}
-
-/// Windows-only dedicated entry point for the WASAPI exclusive code path.
-/// Today this logs and falls back to the standard builder (with the low-latency
-/// buffer already baked into `config` by `build_stream_config`). It exists as a
-/// stable call site so a follow-up (cpal upgrade or raw `windows-rs`
-/// `IAudioClient`) can swap in real `ShareMode::Exclusive` logic without
-/// touching the swap path.
-#[cfg(target_os = "windows")]
-#[allow(clippy::too_many_arguments)]
-fn build_wasapi_exclusive_stream(
-    device: &cpal::Device,
-    config: &StreamConfig,
-    output_sample_format: SampleFormat,
-    shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-) -> Result<Stream> {
-    info!(
-        target: "playback",
-        "building WASAPI exclusive stream (low-latency buffer; ShareMode::Exclusive pending cpal upgrade)"
-    );
-    build_output_stream(
-        device,
-        config,
-        output_sample_format,
-        shared,
-        command_tx,
-        event_tx,
-    )
 }
 
 fn build_output_stream(
@@ -1165,6 +1194,20 @@ fn write_output_f32(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) {
     write_output_buffer(data, shared, command_tx, event_tx, |sample| sample)
+}
+
+/// Fill an f32 interleaved buffer from the shared playback state. Mirrors
+/// what `write_output_f32` does for cpal callbacks, but exposed for the
+/// WASAPI exclusive render thread which manages its own buffers instead of
+/// receiving them from the OS mixer.
+#[cfg(target_os = "windows")]
+pub(crate) fn fill_f32_from_shared(
+    data: &mut [f32],
+    shared: &Arc<PlaybackSharedState>,
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) {
+    write_output_f32(data, shared, command_tx, event_tx);
 }
 
 fn write_output_i16(
@@ -1351,7 +1394,7 @@ fn write_output_buffer<T>(
 }
 
 #[derive(Debug)]
-struct PlaybackSharedState {
+pub(crate) struct PlaybackSharedState {
     track_id: i64,
     source_kind: PlaybackSourceKind,
     paused: AtomicBool,
