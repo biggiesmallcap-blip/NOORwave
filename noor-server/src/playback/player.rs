@@ -314,8 +314,8 @@ pub fn set_volume(conn: &Connection, volume: f64) -> Result<PlaybackSnapshot> {
 }
 
 pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<PlaybackSnapshot> {
-    let current_track_id: Option<i64> = conn.query_row(
-        "SELECT current_track_id FROM playback_state WHERE id = 1",
+    let current_queue_item_id: Option<i64> = conn.query_row(
+        "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
         [],
         |row| row.get(0),
     )?;
@@ -323,7 +323,7 @@ pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<Playback
         "UPDATE playback_state SET shuffle_mode = ?1 WHERE id = 1",
         params![mode.as_str()],
     )?;
-    queue::apply_shuffle(conn, mode, current_track_id)?;
+    queue::apply_shuffle(conn, mode, current_queue_item_id)?;
     load_snapshot(conn)
 }
 
@@ -455,59 +455,81 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
 }
 
 pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
-    let (current_track_id, position_ms): (Option<i64>, i64) = conn.query_row(
-        "SELECT current_track_id, position_ms FROM playback_state WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (current_track_id, current_queue_item_id, position_ms): (Option<i64>, Option<i64>, i64) =
+        conn.query_row(
+            "SELECT current_track_id, current_queue_item_id, position_ms FROM playback_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
 
     let queue_items = queue::load_queue(conn)?;
     if queue_items.is_empty() {
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = NULL, position_ms = 0, is_playing = 0
+             SET current_track_id = NULL, current_queue_item_id = NULL,
+                 position_ms = 0, is_playing = 0
              WHERE id = 1",
             [],
         )?;
         return load_snapshot(conn);
     }
 
-    if let Some(track_id) = current_track_id {
-        if position_ms >= 3_000 {
-            conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
-            return load_snapshot(conn);
-        }
-
-        let current_index = queue_items
-            .iter()
-            .position(|item| item.track.id == track_id);
-
-        if let Some(previous_item) = current_index
-            .and_then(|idx| idx.checked_sub(1))
-            .and_then(|idx| queue_items.get(idx))
-        {
-            conn.execute(
-                "UPDATE playback_state
-                 SET current_track_id = ?1, position_ms = 0, is_playing = 1
-                 WHERE id = 1",
-                params![previous_item.track.id],
-            )?;
-            return load_snapshot(conn);
-        }
-
+    // Restart in place when more than 3s into the track.
+    if (current_track_id.is_some() || current_queue_item_id.is_some()) && position_ms >= 3_000 {
         conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
         return load_snapshot(conn);
     }
 
-    if let Some(first_item) = queue_items.first() {
+    // Locate current position by queue item id first (works for pending rows too),
+    // falling back to track id for rows written before migration 021.
+    let current_index = current_queue_item_id
+        .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
+        .or_else(|| {
+            current_track_id.and_then(|track_id| {
+                queue_items.iter().position(|item| item.track.id == track_id)
+            })
+        });
+
+    if let Some(previous_item) = current_index
+        .and_then(|idx| idx.checked_sub(1))
+        .and_then(|idx| queue_items.get(idx))
+    {
+        let new_track_id: Option<i64> = if previous_item.track.id != 0 {
+            Some(previous_item.track.id)
+        } else {
+            None
+        };
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = ?1, position_ms = 0, is_playing = 1
+             SET current_track_id = ?1, current_queue_item_id = ?2,
+                 position_ms = 0, is_playing = 1
              WHERE id = 1",
-            params![first_item.track.id],
+            params![new_track_id, previous_item.id],
         )?;
+        return load_snapshot(conn);
     }
 
+    // Nothing was playing — jump to the first item rather than doing nothing.
+    if current_index.is_none() {
+        if let Some(first_item) = queue_items.first() {
+            let new_track_id: Option<i64> = if first_item.track.id != 0 {
+                Some(first_item.track.id)
+            } else {
+                None
+            };
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = ?1, current_queue_item_id = ?2,
+                     position_ms = 0, is_playing = 1
+                 WHERE id = 1",
+                params![new_track_id, first_item.id],
+            )?;
+            return load_snapshot(conn);
+        }
+    }
+
+    // Already at the start of the queue — just restart position.
+    conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
     load_snapshot(conn)
 }
 
@@ -1199,11 +1221,17 @@ mod tests {
                 source TEXT DEFAULT 'tidal'
             );
             CREATE TABLE queue (
-                id INTEGER PRIMARY KEY,
-                track_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                source TEXT DEFAULT 'user',
-                reason TEXT
+                id               INTEGER PRIMARY KEY,
+                track_id         INTEGER,
+                position         INTEGER NOT NULL,
+                source           TEXT    DEFAULT 'user',
+                reason           TEXT,
+                pending_artist   TEXT,
+                pending_title    TEXT,
+                pending_at       TIMESTAMP,
+                resolving_at     TIMESTAMP,
+                resolved_at      TIMESTAMP,
+                tidal_match_score REAL
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
@@ -1227,6 +1255,7 @@ mod tests {
             CREATE TABLE playback_state (
                 id INTEGER PRIMARY KEY,
                 current_track_id INTEGER,
+                current_queue_item_id INTEGER,
                 position_ms INTEGER NOT NULL DEFAULT 0,
                 is_playing INTEGER NOT NULL DEFAULT 0,
                 volume REAL NOT NULL DEFAULT 1.0,
@@ -1524,11 +1553,17 @@ mod tests {
                 source TEXT DEFAULT 'tidal'
             );
             CREATE TABLE queue (
-                id INTEGER PRIMARY KEY,
-                track_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                source TEXT DEFAULT 'user',
-                reason TEXT
+                id               INTEGER PRIMARY KEY,
+                track_id         INTEGER,
+                position         INTEGER NOT NULL,
+                source           TEXT    DEFAULT 'user',
+                reason           TEXT,
+                pending_artist   TEXT,
+                pending_title    TEXT,
+                pending_at       TIMESTAMP,
+                resolving_at     TIMESTAMP,
+                resolved_at      TIMESTAMP,
+                tidal_match_score REAL
             );
             CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, parent_id INTEGER);
             CREATE TABLE track_genres (

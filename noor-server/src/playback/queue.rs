@@ -232,7 +232,7 @@ pub fn move_queue_item(conn: &Connection, item_id: i64, new_pos: i32) -> Result<
 pub fn apply_shuffle(
     conn: &Connection,
     mode: ShuffleMode,
-    current_track_id: Option<i64>,
+    current_queue_item_id: Option<i64>,
 ) -> Result<Vec<QueueItem>> {
     let queue_items = load_queue(conn)?;
     if queue_items.len() <= 1 || mode == ShuffleMode::Off {
@@ -241,10 +241,11 @@ pub fn apply_shuffle(
 
     let mut locked_prefix = Vec::new();
     let mut candidates = Vec::new();
-    let split_index = current_track_id.and_then(|track_id| {
+    // Use queue item id for split so pending rows (track.id == 0) are found correctly.
+    let split_index = current_queue_item_id.and_then(|qid| {
         queue_items
             .iter()
-            .position(|item| item.track.id == track_id)
+            .position(|item| item.id == qid)
             .map(|idx| idx + 1)
     });
 
