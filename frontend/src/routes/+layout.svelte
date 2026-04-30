@@ -1024,20 +1024,34 @@
 
 		<section class="queue-section">
 			<div class="queue-header">
-				<div>
-					<p class="queue-eyebrow">Up next</p>
-					<h3>{queueCountLabel}</h3>
-				</div>
+				<button
+					class="queue-banner"
+					type="button"
+					onclick={toggleQueueExpanded}
+					aria-expanded={queueExpanded}
+					aria-controls="queue-list"
+					title={queueExpanded ? 'Collapse queue' : 'Expand queue'}
+				>
+					<span class="queue-eyebrow">Up next</span>
+					{#if upcomingQueue.length > 0}
+						<span class="queue-count-num">{upcomingQueue.length}</span>
+						<span class="queue-count-unit">
+							{upcomingQueue.length === 1 ? 'track' : 'tracks'} · {queueTotalLabel}
+						</span>
+					{:else}
+						<span class="queue-count-unit">No tracks queued</span>
+					{/if}
+				</button>
 				<div class="queue-header-actions">
 					<button
-						class="queue-automix-btn"
+						class="queue-icon-btn queue-automix-btn"
 						class:active={$automixEnabled}
 						title={$automixEnabled ? 'Automix on' : 'Automix off'}
 						aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
 						onclick={() => void togglePlayerAutomix()}
 					>🎧</button>
 					<button
-						class="queue-discover-btn"
+						class="queue-icon-btn queue-discover-btn"
 						class:active={$automixDiscoverNew}
 						title={$automixDiscoverNew ? 'Include New: on — pulling in tracks outside your library' : 'Include New: off — tap to find new music during automix'}
 						aria-label={$automixDiscoverNew ? 'Disable discover new' : 'Enable discover new'}
@@ -1049,22 +1063,29 @@
 						</svg>
 					</button>
 					<button
-						class="queue-save-btn"
+						class="queue-icon-btn queue-save-btn"
 						type="button"
 						title="Save queue as playlist"
 						aria-label="Save queue as playlist"
 						onclick={openSaveQueue}
 						disabled={upcomingQueue.length === 0 && !$currentTrack}
-					>Save</button>
+					>＋</button>
 					<button
-						class="queue-clear-btn"
+						class="queue-icon-btn queue-clear-btn"
 						type="button"
 						title="Clear all upcoming tracks"
 						aria-label="Clear queue"
 						onclick={() => void handleClearQueue()}
 						disabled={upcomingQueue.length === 0}
-					>Clear</button>
-					<span class="queue-count">{Math.min(upcomingQueue.length, 40)}</span>
+					>⌫</button>
+					<button
+						class="queue-icon-btn queue-expand-btn"
+						type="button"
+						title={queueExpanded ? 'Collapse queue' : 'Expand queue'}
+						aria-label={queueExpanded ? 'Collapse queue' : 'Expand queue'}
+						aria-expanded={queueExpanded}
+						onclick={toggleQueueExpanded}
+					>▲</button>
 				</div>
 			</div>
 
@@ -1096,7 +1117,7 @@
 			{/if}
 
 			{#if upcomingQueue.length > 0}
-				<div class="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
+				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						<div
@@ -2253,10 +2274,46 @@
 
 	.queue-header {
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
 		justify-content: space-between;
 		gap: 12px;
 		padding-bottom: 12px;
+	}
+
+	.queue-banner {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		padding: 4px 8px;
+		margin: -4px -8px;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		text-align: left;
+		color: inherit;
+		cursor: pointer;
+		min-width: 0;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
+	}
+
+	.queue-banner:hover {
+		background: var(--bg-hover);
+		border-color: var(--border-subtle);
+	}
+
+	.queue-count-num {
+		font-size: 1.05rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.queue-count-unit {
+		font-size: 0.74rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.queue-header-actions {
@@ -2321,30 +2378,50 @@
 		box-shadow: 0 0 10px var(--accent), 0 0 0 1px var(--accent-line);
 	}
 
-	.queue-save-btn,
-	.queue-clear-btn {
-		height: 26px;
-		padding: 0 10px;
-		border-radius: 999px;
+	.queue-icon-btn {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 0.74rem;
+		font-size: 0.82rem;
 		cursor: pointer;
-		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast),
+			transform var(--motion-fast);
 	}
 
-	.queue-save-btn:hover:not(:disabled),
-	.queue-clear-btn:hover:not(:disabled) {
+	.queue-icon-btn:hover:not(:disabled) {
 		background: var(--bg-hover);
 		border-color: var(--border-strong);
 		color: var(--text-primary);
 	}
 
-	.queue-save-btn:disabled,
-	.queue-clear-btn:disabled {
+	.queue-icon-btn:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
+	}
+
+	.queue-expand-btn {
+		color: var(--accent-strong);
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
+	}
+
+	.queue-expand-btn:hover:not(:disabled) {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+		transform: translateY(-1px);
+	}
+
+	.now-playing-panel.queue-expanded .queue-expand-btn {
+		transform: rotate(180deg);
 	}
 
 	.queue-clear-btn:hover:not(:disabled) {
@@ -2406,23 +2483,6 @@
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		margin-bottom: 2px;
-	}
-
-	.queue-header h3 {
-		font-size: 1rem;
-	}
-
-	.queue-count {
-		min-width: 28px;
-		height: 28px;
-		padding: 0 8px;
-		display: inline-grid;
-		place-items: center;
-		border-radius: 99px;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		font-size: 0.75rem;
 	}
 
 	.queue-list {
