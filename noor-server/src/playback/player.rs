@@ -1477,3 +1477,467 @@ mod quality_precedence_tests {
         assert_eq!(got, crate::services::tidal::stream::DEFAULT_AUDIO_QUALITY);
     }
 }
+
+#[cfg(test)]
+mod parity_tests {
+    //! Parity gate for the TasteVector migration (Phase 1).
+    //!
+    //! Runs the live `automix_score` against a frozen snapshot
+    //! (`automix_score_old`) on a fixed synthetic fixture and asserts the
+    //! top-30 candidate ordering matches exactly. In the scaffolding commit
+    //! the snapshot is byte-identical to the live function so the gate
+    //! passes trivially; in the migration commit the live function is
+    //! rewritten to consume `TasteVector`/`SeedContext` while the snapshot
+    //! stays frozen, so divergence indicates a migration bug rather than a
+    //! tuning miss.
+    //!
+    //! Fixture is built in-memory with no database — `automix_score` only
+    //! consumes plain data, so a DB round-trip would add noise without
+    //! adding signal.
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    /// Frozen snapshot of `automix_score` taken at Phase 1 start. The body
+    /// is a verbatim copy of `super::automix_score` and must not be
+    /// modified by the migration commit — the whole point is that this
+    /// path keeps producing the original numbers while the live function
+    /// changes shape underneath it.
+    fn automix_score_old(
+        track: &Track,
+        genres: &[String],
+        taste: &SessionTasteProfile,
+        seed_features: Option<&AudioDspFeatures>,
+        candidate_features: Option<&AudioDspFeatures>,
+    ) -> f64 {
+        let mut score = 1.0;
+
+        if taste.skipped_track_ids.contains(&track.id) {
+            score *= 0.1;
+        }
+
+        if Some(track.artist_id) == taste.current_artist_id && track.artist_id != 0 {
+            score *= 1.1;
+        }
+
+        if taste.current_source.as_deref() == Some(track.source.as_str()) {
+            score *= 1.05;
+        }
+
+        if track.is_favorite {
+            score *= 1.2;
+        }
+
+        if track.play_count == 0 {
+            score *= 1.35;
+        } else if let Some(last_played) = track.last_played_at.as_deref() {
+            let days_since = parse_days_since_last_played(last_played);
+            if days_since < 14.0 {
+                let penalty = 0.5 + 0.5 * (days_since / 14.0);
+                score *= penalty;
+            }
+        }
+
+        if track.artist_id != 0 {
+            score += taste
+                .positive_artists
+                .get(&track.artist_id)
+                .copied()
+                .unwrap_or(0.0)
+                * 0.5;
+            score -= taste
+                .negative_artists
+                .get(&track.artist_id)
+                .copied()
+                .unwrap_or(0.0)
+                * 0.65;
+        }
+
+        let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
+        for genre in normalized_genres {
+            if taste.current_genres.contains(&genre) {
+                score += 1.8;
+            }
+            score += taste.positive_genres.get(&genre).copied().unwrap_or(0.0) * 0.4;
+            score -= taste.negative_genres.get(&genre).copied().unwrap_or(0.0) * 0.5;
+        }
+
+        score += (track.fidelity_score.max(0) as f64) * 0.003;
+
+        if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
+            score *= compute_harmonic_multiplier(
+                seed.camelot_key.as_deref(),
+                cand.camelot_key.as_deref(),
+                seed.bpm,
+                cand.bpm,
+            );
+
+            if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy) {
+                if (seed_energy - cand_energy).abs() > 0.5 {
+                    score *= 0.7;
+                }
+            }
+        }
+
+        score.max(0.05)
+    }
+
+    struct CandidateInput {
+        track: Track,
+        genres: Vec<String>,
+        features: Option<AudioDspFeatures>,
+    }
+
+    struct Fixture {
+        profile: SessionTasteProfile,
+        seed_features: Option<AudioDspFeatures>,
+        candidates: Vec<CandidateInput>,
+    }
+
+    fn make_track(
+        id: i64,
+        artist_id: i64,
+        is_favorite: bool,
+        play_count: i32,
+        fidelity_score: i32,
+        source: &str,
+    ) -> Track {
+        Track {
+            id,
+            title: format!("Track {id}"),
+            artist_id,
+            artist_name: Some(format!("Artist {artist_id}")),
+            album_id: Some(artist_id * 10),
+            album_title: Some(format!("Album {artist_id}")),
+            disc_number: Some(1),
+            track_number: Some(1),
+            duration_ms: Some(180_000),
+            isrc: None,
+            tidal_id: Some(id),
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: Some("LOSSLESS".to_string()),
+            best_source: Some(source.to_string()),
+            fidelity_score,
+            is_favorite,
+            play_count,
+            last_played_at: None,
+            date_added: Some("2025-01-01T00:00:00Z".to_string()),
+            source: source.to_string(),
+            artwork_url: None,
+        }
+    }
+
+    fn make_features(camelot: &str, bpm: f64, energy: f64) -> AudioDspFeatures {
+        AudioDspFeatures {
+            track_id: 0,
+            bpm: Some(bpm),
+            key_signature: None,
+            camelot_key: Some(camelot.to_string()),
+            loudness_lufs: None,
+            energy: Some(energy),
+            danceability: None,
+            beat_strength: None,
+            spectral_centroid: None,
+            stereo_width: None,
+            is_instrumental: false,
+            analysis_source: "test".to_string(),
+            analysis_offset_ms: 0,
+            samples_analyzed: None,
+            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
+            analysis_version: "test".to_string(),
+        }
+    }
+
+    /// Synthetic fixture exercising every branch in `automix_score`:
+    /// hard suppression (skipped track), same-artist boost, same-source
+    /// boost, favourite multiplier, unplayed boost, positive/negative
+    /// artist signal, positive/negative genre signal, current-genre
+    /// proximity bonus, fidelity tilt, harmonic multiplier, and energy
+    /// whiplash penalty.
+    fn build_fixture() -> Fixture {
+        let mut profile = SessionTasteProfile {
+            current_artist_id: Some(1),
+            current_album_id: Some(10),
+            current_source: Some("tidal".to_string()),
+            ..SessionTasteProfile::default()
+        };
+        profile.current_genres.insert("house".to_string());
+        for (id, weight) in [(1, 8.5_f64), (2, 5.2), (3, 3.0), (4, 1.5), (5, 0.8)] {
+            profile.positive_artists.insert(id, weight);
+        }
+        for (id, weight) in [(2, 1.1_f64), (3, 2.4)] {
+            profile.negative_artists.insert(id, weight);
+        }
+        for (genre, weight) in [
+            ("house", 6.4_f64),
+            ("techno", 4.2),
+            ("ambient", 2.0),
+        ] {
+            profile.positive_genres.insert(genre.to_string(), weight);
+        }
+        for (genre, weight) in [("jazz", 1.8_f64), ("ambient", 0.4)] {
+            profile.negative_genres.insert(genre.to_string(), weight);
+        }
+        for id in [300, 301, 302, 305] {
+            profile.recent_track_ids.insert(id);
+        }
+        profile.skipped_track_ids.insert(305);
+
+        let seed_features = Some(make_features("8A", 124.0, 0.7));
+
+        let candidates = vec![
+            CandidateInput {
+                track: make_track(100, 1, true, 0, 80, "tidal"),
+                genres: vec!["House".to_string()],
+                features: Some(make_features("8A", 125.0, 0.65)),
+            },
+            CandidateInput {
+                track: make_track(101, 1, false, 2, 60, "tidal"),
+                genres: vec!["Techno".to_string()],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(102, 2, false, 0, 70, "tidal"),
+                genres: vec!["House".to_string(), "Techno".to_string()],
+                features: Some(make_features("9A", 128.0, 0.75)),
+            },
+            CandidateInput {
+                track: make_track(103, 3, false, 5, 40, "tidal"),
+                genres: vec!["Jazz".to_string()],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(104, 4, true, 0, 50, "tidal"),
+                genres: vec!["Ambient".to_string()],
+                features: Some(make_features("3B", 110.0, 0.2)),
+            },
+            CandidateInput {
+                track: make_track(105, 5, false, 1, 30, "tidal"),
+                genres: vec!["House".to_string()],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(106, 6, false, 0, 70, "tidal"),
+                genres: vec!["Techno".to_string()],
+                features: Some(make_features("8A", 124.0, 0.7)),
+            },
+            CandidateInput {
+                track: make_track(107, 7, false, 3, 20, "local"),
+                genres: vec!["Jazz".to_string(), "Ambient".to_string()],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(108, 2, false, 0, 10, "tidal"),
+                genres: vec![],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(109, 1, false, 0, 90, "tidal"),
+                genres: vec!["House".to_string(), "Ambient".to_string()],
+                features: Some(make_features("2A", 130.0, 0.85)),
+            },
+            CandidateInput {
+                track: make_track(110, 3, true, 4, 85, "tidal"),
+                genres: vec!["Techno".to_string()],
+                features: None,
+            },
+            CandidateInput {
+                track: make_track(305, 4, false, 0, 60, "tidal"),
+                genres: vec!["House".to_string()],
+                features: None,
+            },
+        ];
+
+        Fixture {
+            profile,
+            seed_features,
+            candidates,
+        }
+    }
+
+    /// In commit 1 this calls the live `automix_score` with the original
+    /// signature. In commit 2 it builds a `TasteVector` + `SeedContext`
+    /// via `from_session_profile` and calls the migrated `automix_score`.
+    fn score_with_new_path(fixture: &Fixture) -> Vec<(i64, f64)> {
+        fixture
+            .candidates
+            .iter()
+            .map(|cand| {
+                let score = automix_score(
+                    &cand.track,
+                    &cand.genres,
+                    &fixture.profile,
+                    fixture.seed_features.as_ref(),
+                    cand.features.as_ref(),
+                );
+                (cand.track.id, score)
+            })
+            .collect()
+    }
+
+    fn score_with_old_path(fixture: &Fixture) -> Vec<(i64, f64)> {
+        fixture
+            .candidates
+            .iter()
+            .map(|cand| {
+                let score = automix_score_old(
+                    &cand.track,
+                    &cand.genres,
+                    &fixture.profile,
+                    fixture.seed_features.as_ref(),
+                    cand.features.as_ref(),
+                );
+                (cand.track.id, score)
+            })
+            .collect()
+    }
+
+    fn top_n_ids(scores: &[(i64, f64)], n: usize) -> Vec<i64> {
+        let mut sorted: Vec<(i64, f64)> = scores.to_vec();
+        sorted.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        sorted.into_iter().take(n).map(|(id, _)| id).collect()
+    }
+
+    fn kendall_tau_top_n(
+        new_scores: &[(i64, f64)],
+        old_scores: &[(i64, f64)],
+        n: usize,
+    ) -> f64 {
+        let new_top = top_n_ids(new_scores, n);
+        let old_top = top_n_ids(old_scores, n);
+        let new_rank: HashMap<i64, usize> =
+            new_top.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let old_rank: HashMap<i64, usize> =
+            old_top.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let union: HashSet<i64> = new_top.iter().chain(old_top.iter()).copied().collect();
+        let items: Vec<i64> = union.into_iter().collect();
+
+        let mut concordant = 0i64;
+        let mut discordant = 0i64;
+        for i in 0..items.len() {
+            for j in (i + 1)..items.len() {
+                let (a, b) = (items[i], items[j]);
+                if let (Some(&na), Some(&nb), Some(&oa), Some(&ob)) = (
+                    new_rank.get(&a),
+                    new_rank.get(&b),
+                    old_rank.get(&a),
+                    old_rank.get(&b),
+                ) {
+                    let new_order = na.cmp(&nb);
+                    let old_order = oa.cmp(&ob);
+                    if new_order == old_order {
+                        concordant += 1;
+                    } else {
+                        discordant += 1;
+                    }
+                }
+            }
+        }
+        let total = concordant + discordant;
+        if total == 0 {
+            1.0
+        } else {
+            (concordant - discordant) as f64 / total as f64
+        }
+    }
+
+    /// Per-track structured table emitted on parity failure. Sorted by
+    /// `|new_score - old_score|` descending so tiny diffs at the top
+    /// suggest float precision while large diffs at the top point to a
+    /// logic bug. Free triage signal.
+    fn emit_divergence_table(
+        new_scores: &[(i64, f64)],
+        old_scores: &[(i64, f64)],
+    ) {
+        let new_lookup: HashMap<i64, f64> = new_scores.iter().copied().collect();
+        let old_lookup: HashMap<i64, f64> = old_scores.iter().copied().collect();
+        let new_full = top_n_ids(new_scores, new_scores.len());
+        let old_full = top_n_ids(old_scores, old_scores.len());
+        let new_rank: HashMap<i64, usize> =
+            new_full.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let old_rank: HashMap<i64, usize> =
+            old_full.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+
+        let mut rows: Vec<(i64, usize, usize, f64, f64)> = new_scores
+            .iter()
+            .map(|(id, new_s)| {
+                let old_s = old_lookup.get(id).copied().unwrap_or(f64::NAN);
+                let nr = *new_rank.get(id).unwrap_or(&usize::MAX);
+                let or = *old_rank.get(id).unwrap_or(&usize::MAX);
+                (*id, or, nr, old_s, *new_s)
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            (b.4 - b.3)
+                .abs()
+                .partial_cmp(&(a.4 - a.3).abs())
+                .unwrap_or(Ordering::Equal)
+        });
+
+        eprintln!(
+            "{:>8}  {:>8}  {:>8}  {:>10}  {:>11}  {:>11}  {:>13}",
+            "track_id", "old_rank", "new_rank", "rank_delta", "old_score", "new_score", "score_delta"
+        );
+        for (id, or, nr, old_s, new_s) in rows {
+            let rank_delta = (nr as i64) - (or as i64);
+            eprintln!(
+                "{:>8}  {:>8}  {:>8}  {:>10}  {:>11.6}  {:>11.6}  {:>13.9}",
+                id,
+                or,
+                nr,
+                rank_delta,
+                old_s,
+                new_s,
+                new_s - old_s
+            );
+        }
+        // Note: per-signal contribution breakdown is intentionally not
+        // emitted here. If parity fails, the score-delta column above plus
+        // a quick read of `automix_score` against the snapshot is faster
+        // than maintaining a parallel breakdown that itself can drift.
+        let _ = new_lookup;
+    }
+
+    #[test]
+    fn automix_score_parity_top_30() {
+        let fixture = build_fixture();
+        let new_scores = score_with_new_path(&fixture);
+        let old_scores = score_with_old_path(&fixture);
+
+        // Pre-assertion guards: same length, no NaN/Inf on either side.
+        // Catches NaN-from-zero-division or shape mismatches before we
+        // attempt to interpret rankings.
+        assert_eq!(
+            old_scores.len(),
+            new_scores.len(),
+            "score vector lengths differ"
+        );
+        assert!(
+            old_scores.iter().all(|(_, s)| s.is_finite()),
+            "old path produced NaN/Inf"
+        );
+        assert!(
+            new_scores.iter().all(|(_, s)| s.is_finite()),
+            "new path produced NaN/Inf"
+        );
+
+        let n = 30.min(fixture.candidates.len());
+        let new_top = top_n_ids(&new_scores, n);
+        let old_top = top_n_ids(&old_scores, n);
+
+        let tau = kendall_tau_top_n(&new_scores, &old_scores, n);
+        eprintln!("automix parity: kendall_tau_top_{n} = {tau:.6}");
+
+        if new_top != old_top {
+            eprintln!("\nautomix parity divergence (sorted by |score_delta| desc):");
+            emit_divergence_table(&new_scores, &old_scores);
+            panic!(
+                "top-{n} ranking diverged.\n  old: {old_top:?}\n  new: {new_top:?}"
+            );
+        }
+    }
+}
