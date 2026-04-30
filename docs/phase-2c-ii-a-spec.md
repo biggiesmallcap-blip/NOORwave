@@ -60,12 +60,16 @@ CREATE TABLE queue (
     pending_artist      TEXT,   -- populated on insert; kept after resolution for audit
     pending_title       TEXT,   -- same
     pending_at          TIMESTAMP,           -- set on insert for pending rows; NULL for direct inserts
+    resolving_at        TIMESTAMP,           -- set when a resolver claims the row; cleared on completion
     resolved_at         TIMESTAMP,           -- set atomically with track_id
     tidal_match_score   REAL                 -- set atomically with track_id
 );
+
+CREATE INDEX idx_queue_session_position ON queue(session_id, position);
+CREATE INDEX idx_queue_pending          ON queue(track_id, pending_at);
 ```
 
-Re-create existing indexes after rebuild.
+Re-create any other existing indexes after rebuild.
 
 `pending_artist` / `pending_title` remain populated after resolution. They serve as the human-readable label while pending and as an audit trail for resolution quality (score vs. what we asked for) after resolution.
 
@@ -96,7 +100,22 @@ endpoint that builds the queue atomically.
 2. In a single DB transaction: insert library tracks as direct queue rows (with `track_id`), insert
    non-library tracks as pending rows (`track_id NULL`, `pending_at` set).
 3. After the transaction commits, spawn background resolvers for all pending rows (see §Resolution).
-4. Return `{ "first_track_id": <id of first library track> }` for the frontend to start playback.
+4. Return a `first_playable` descriptor for the frontend to start playback.
+
+**Response shape:**
+```json
+{
+  "first_playable": {
+    "type": "library" | "pending",
+    "queue_item_id": 42,
+    "track_id": 123 | null
+  }
+}
+```
+
+`type: "library"` — frontend proceeds as normal, `track_id` is set.  
+`type: "pending"` — all radio results were non-library; frontend triggers lazy resolution on the
+first queue item before starting playback. `track_id` is null.
 
 The frontend stops assembling the queue from the candidate list. `startSongRadio` in `player.ts`
 calls this endpoint instead.
@@ -129,17 +148,53 @@ async caller in `routes.rs`:
 This is synchronous from the user's perspective (the `POST /api/queue/advance` response waits) but
 non-blocking on the runtime.
 
+### Resolver ownership guard
+
+Both paths (background and lazy) claim a row before searching Tidal:
+
+```sql
+UPDATE queue
+SET resolving_at = datetime('now')
+WHERE id = ?1
+  AND resolving_at IS NULL
+  AND track_id IS NULL
+RETURNING id
+```
+
+If `RETURNING` returns a row, this resolver owns it. If the `RETURNING` result is empty, another
+resolver is already in flight or the row is resolved — both cases mean skip. On completion (success
+or failure), `resolving_at` is cleared back to NULL.
+
+Stale lock detection: `resolving_at` older than 30 seconds (Tidal request timeout + buffer)
+indicates a crashed or abandoned resolver. The GC sweep clears these, returning the row to
+claimable state.
+
+### Resolution write: first resolver wins
+
+The resolution `UPDATE` includes `AND track_id IS NULL` so the first resolver to complete writes
+its result and subsequent attempts are silent no-ops:
+
+```sql
+UPDATE queue
+SET track_id = ?1, resolved_at = datetime('now'), tidal_match_score = ?2, resolving_at = NULL
+WHERE id = ?3
+  AND track_id IS NULL
+```
+
+The "best score wins" variant is not used — simpler is better here.
+
 ### Race safety
 
-Background and lazy resolvers may fire concurrently on the same row. This is safe:
+Background and lazy resolvers may both claim the same row if the ownership guard races (e.g., both
+read `resolving_at IS NULL` before either writes). This is safe:
 
 - `import_track_from_metadata` contains a SELECT-before-INSERT inside a transaction, keyed on
   `tidal_id`.
 - The UNIQUE constraint on `tracks.tidal_id` (hard prerequisite above) ensures the second
   concurrent INSERT fails cleanly rather than producing a duplicate row.
-- Both resolvers produce the same `local_id`; the second `UPDATE queue SET track_id=...` sees the
-  row already set and is a no-op.
-- No lock is needed beyond what SQLite's single-writer model provides.
+- Both resolvers produce the same `local_id`; the conditional UPDATE (`AND track_id IS NULL`)
+  means the second write is a no-op.
+- No additional lock is needed beyond what SQLite's single-writer model provides.
 
 ### Resolution robustness under user actions
 
@@ -155,15 +210,26 @@ be the next-up row. This is intentional.
 
 ### Scoring
 
+When Tidal search results carry album metadata:
+
 ```
-score = 0.6 × jaro_winkler(normalize(result.artist), normalize(pending_artist))
-      + 0.4 × jaro_winkler(normalize(result.title),  normalize(pending_title))
+score = 0.55 × jaro_winkler(normalize(result.artist), normalize(pending_artist))
+      + 0.35 × jaro_winkler(normalize(result.title),  normalize(pending_title))
+      + 0.10 × jaro_winkler(normalize(result.album),  normalize(pending_album))
+```
+
+When album metadata is absent (falls back to two-field scoring):
+
+```
+score = 0.60 × jaro_winkler(normalize(result.artist), normalize(pending_artist))
+      + 0.40 × jaro_winkler(normalize(result.title),  normalize(pending_title))
 ```
 
 `normalize`: lowercase, strip punctuation, collapse whitespace.
 
-Weighting: 60% artist, 40% title. Title collisions are more common across artists (covers, remixes
-share titles); artist collisions are rarer, making artist the stronger discriminator.
+The album boost is conditional — the two-field weights rebalance to keep totals at ~1.0 when album
+is unavailable. Artist remains the dominant signal in both variants: title collisions (covers,
+remixes sharing titles across artists) are more common than artist collisions.
 
 Duration is excluded from scoring — Tidal durations for live/radio edits diverge from expected
 values often enough to be a noisy signal at this threshold.
@@ -172,14 +238,15 @@ values often enough to be a noisy signal at this threshold.
 
 ```rust
 const MATCH_QUALITY_THRESHOLD: f64 = 0.85;
-// artist weight = 0.6, title weight = 0.4 (document alongside threshold)
+// two-field weights:  artist = 0.60, title = 0.40
+// three-field weights: artist = 0.55, title = 0.35, album = 0.10
 ```
 
-Both values are **starting heuristics**, not empirically validated. Log the actual score on every
+All values are **starting heuristics**, not empirically validated. Log the actual score on every
 resolution attempt (not just on accept/reject) so the score distribution is visible after a few
-real sessions. Revisit the threshold and weighting after smoke-test data is available — the
+real sessions. Revisit the threshold and all three weights after smoke-test data is available — the
 threshold may need tightening (too many bad covers accepted) or loosening (too many valid matches
-rejected). Do not bake these as magic numbers; both must remain named constants.
+rejected). Do not bake these as magic numbers; all must remain named constants.
 
 ### On threshold miss
 
@@ -299,7 +366,9 @@ migration.
 
 ## Garbage Collection
 
-**Unresolved rows past TTL:** any `queue` row where `track_id IS NULL AND pending_at < datetime('now', '-1 hour')` is stale. A sweep runs at server startup and hourly via `tokio::time::interval`. Rows surviving an hour are unresolvable (background resolver completed long ago; lazy resolver fires only at play time).
+**Unresolved rows past TTL:** any `queue` row where `track_id IS NULL AND pending_at < datetime('now', '-6 hours')` is stale. A sweep runs at server startup and hourly via `tokio::time::interval`. 6 hours covers normal pause behaviour (user pauses a session for a few hours) without needing active-session-only logic, which adds complexity for marginal benefit. Rows surviving 6 hours are genuinely unresolvable.
+
+**Stale `resolving_at` locks:** any row where `resolving_at < datetime('now', '-30 seconds') AND track_id IS NULL` had its resolver crash or time out. The GC sweep clears `resolving_at` to NULL, returning the row to claimable state for the lazy resolver.
 
 **Resolved rows:** standard queue GC handles these. "Clear queue" and session-change deletes apply to all rows including resolved pending rows.
 
@@ -315,7 +384,7 @@ Assuming `tracks.tidal_id` already has a UNIQUE constraint (verify first):
 
 | # | Description |
 |---|---|
-| 020 | Rebuild `queue` table (nullable `track_id`, add `pending_at`, `resolved_at`, `tidal_match_score`, `pending_artist`, `pending_title`) |
+| 020 | Rebuild `queue` table (nullable `track_id`, add `pending_at`, `resolving_at`, `resolved_at`, `tidal_match_score`, `pending_artist`, `pending_title`; add `idx_queue_session_position` and `idx_queue_pending`) |
 | 021 | `ALTER TABLE playback_state ADD COLUMN current_queue_item_id INTEGER REFERENCES queue(id)` |
 
 If `tracks.tidal_id` lacks a UNIQUE constraint, that becomes migration 020 and the above shift to 021–022.
