@@ -25,13 +25,13 @@ pub struct ExternalDiscoveryContext {
 }
 
 #[derive(Debug, Clone)]
-struct TasteMeshProfile {
-    artist_affinity: HashMap<String, f64>,
-    genre_affinity: HashMap<String, f64>,
-    recent_artist_penalty: HashMap<String, f64>,
-    completion_bias: f64,
-    favorite_bias: f64,
-    novelty_bias: f64,
+pub(crate) struct TasteMeshProfile {
+    pub(crate) artist_affinity: HashMap<String, f64>,
+    pub(crate) genre_affinity: HashMap<String, f64>,
+    pub(crate) recent_artist_penalty: HashMap<String, f64>,
+    pub(crate) completion_bias: f64,
+    pub(crate) favorite_bias: f64,
+    pub(crate) novelty_bias: f64,
 }
 
 struct ScoredDiscoveryResult {

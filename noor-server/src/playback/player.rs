@@ -7,6 +7,8 @@ use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleMode};
 use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
 use crate::services::audio_analysis::compute_harmonic_multiplier;
+use crate::smart::taste_vector::adapters::from_session_profile;
+use crate::smart::taste_vector::{SeedContext, TasteVector};
 use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -65,17 +67,17 @@ const SESSION_FEEDBACK_LIMIT: i64 = 60;
 const TRUE_SHUFFLE_POOL_MULTIPLIER: usize = 12;
 
 #[derive(Debug, Default)]
-struct SessionTasteProfile {
-    positive_artists: HashMap<i64, f64>,
-    negative_artists: HashMap<i64, f64>,
-    positive_genres: HashMap<String, f64>,
-    negative_genres: HashMap<String, f64>,
-    recent_track_ids: HashSet<i64>,
-    skipped_track_ids: HashSet<i64>,
-    current_artist_id: Option<i64>,
-    current_album_id: Option<i64>,
-    current_source: Option<String>,
-    current_genres: HashSet<String>,
+pub(crate) struct SessionTasteProfile {
+    pub(crate) positive_artists: HashMap<i64, f64>,
+    pub(crate) negative_artists: HashMap<i64, f64>,
+    pub(crate) positive_genres: HashMap<String, f64>,
+    pub(crate) negative_genres: HashMap<String, f64>,
+    pub(crate) recent_track_ids: HashSet<i64>,
+    pub(crate) skipped_track_ids: HashSet<i64>,
+    pub(crate) current_artist_id: Option<i64>,
+    pub(crate) current_album_id: Option<i64>,
+    pub(crate) current_source: Option<String>,
+    pub(crate) current_genres: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -672,12 +674,15 @@ fn build_automix_extension(
         }
     }
 
-    let taste = build_session_taste_profile(conn, current_track)?;
+    let session_profile = build_session_taste_profile(conn, current_track)?;
     let mut excluded_track_ids = queue_items
         .iter()
         .map(|item| item.track.id)
         .collect::<Vec<_>>();
-    excluded_track_ids.extend(taste.recent_track_ids.iter().copied());
+    excluded_track_ids.extend(session_profile.recent_track_ids.iter().copied());
+    // Convert once, after recent_track_ids has been read for exclusions, so
+    // the move into TasteVector below doesn't force an extra clone.
+    let (taste, seed) = from_session_profile(&session_profile);
     excluded_track_ids.sort_unstable();
     excluded_track_ids.dedup();
 
@@ -732,6 +737,7 @@ fn build_automix_extension(
         candidates,
         &candidate_genres,
         &taste,
+        &seed,
         needed,
         seed_features.as_ref(),
         &candidate_features,
@@ -842,11 +848,16 @@ fn build_session_taste_profile(
     Ok(profile)
 }
 
+// Eight inputs is one over clippy's default threshold, but `taste` and `seed`
+// represent distinct concepts (per-user preference vs per-query seed track)
+// and bundling them just to satisfy the lint would obscure that.
+#[allow(clippy::too_many_arguments)]
 fn order_automix_candidates(
     mode: ShuffleMode,
     candidates: Vec<Track>,
     candidate_genres: &HashMap<i64, Vec<String>>,
-    taste: &SessionTasteProfile,
+    taste: &TasteVector,
+    seed: &SeedContext,
     needed: usize,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: &HashMap<i64, AudioDspFeatures>,
@@ -861,6 +872,7 @@ fn order_automix_candidates(
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
                 taste,
+                seed,
                 seed_features,
                 candidate_features.get(&track.id),
             );
@@ -901,7 +913,7 @@ fn order_automix_candidates(
                     .get(&entry.track.id)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                if matches_preferred_genres(genres, taste) {
+                if matches_preferred_genres(genres, taste, seed) {
                     preferred.push(entry.track);
                 } else {
                     fallback.push(entry.track);
@@ -976,7 +988,8 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
 fn automix_score(
     track: &Track,
     genres: &[String],
-    taste: &SessionTasteProfile,
+    taste: &TasteVector,
+    seed: &SeedContext,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
 ) -> f64 {
@@ -989,11 +1002,11 @@ fn automix_score(
 
     // Same-artist: gentle familiarity boost, not enough to cause artist runs.
     // Artist spread is handled at the queue level by decluster_by_album.
-    if Some(track.artist_id) == taste.current_artist_id && track.artist_id != 0 {
+    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
         score *= 1.1;
     }
 
-    if taste.current_source.as_deref() == Some(track.source.as_str()) {
+    if seed.source.as_deref() == Some(track.source.as_str()) {
         score *= 1.05;
     }
 
@@ -1014,27 +1027,21 @@ fn automix_score(
     }
 
     if track.artist_id != 0 {
-        score += taste
-            .positive_artists
-            .get(&track.artist_id)
-            .copied()
-            .unwrap_or(0.0)
-            * 0.5;
-        score -= taste
-            .negative_artists
-            .get(&track.artist_id)
-            .copied()
-            .unwrap_or(0.0)
-            * 0.65;
+        if let Some(affinity) = taste.artist_affinity.get(&track.artist_id) {
+            score += affinity.pos * 0.5;
+            score -= affinity.neg * 0.65;
+        }
     }
 
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
-        if taste.current_genres.contains(&genre) {
+        if seed.genres.contains(&genre) {
             score += 1.8;
         }
-        score += taste.positive_genres.get(&genre).copied().unwrap_or(0.0) * 0.4;
-        score -= taste.negative_genres.get(&genre).copied().unwrap_or(0.0) * 0.5;
+        if let Some(affinity) = taste.genre_affinity.get(&genre) {
+            score += affinity.pos * 0.4;
+            score -= affinity.neg * 0.5;
+        }
     }
 
     score += (track.fidelity_score.max(0) as f64) * 0.003;
@@ -1071,12 +1078,20 @@ fn parse_days_since_last_played(timestamp: &str) -> f64 {
     elapsed.num_seconds().max(0) as f64 / 86_400.0
 }
 
-fn matches_preferred_genres(genres: &[String], taste: &SessionTasteProfile) -> bool {
+fn matches_preferred_genres(
+    genres: &[String],
+    taste: &TasteVector,
+    seed: &SeedContext,
+) -> bool {
     genres
         .iter()
         .map(|genre| normalize_genre_key(genre))
         .any(|genre| {
-            taste.current_genres.contains(&genre) || taste.positive_genres.contains_key(&genre)
+            seed.genres.contains(&genre)
+                || taste
+                    .genre_affinity
+                    .get(&genre)
+                    .is_some_and(|affinity| affinity.pos > 0.0)
         })
 }
 
@@ -1755,10 +1770,13 @@ mod parity_tests {
         }
     }
 
-    /// In commit 1 this calls the live `automix_score` with the original
-    /// signature. In commit 2 it builds a `TasteVector` + `SeedContext`
-    /// via `from_session_profile` and calls the migrated `automix_score`.
+    /// Builds a `TasteVector` + `SeedContext` from the fixture's
+    /// `SessionTasteProfile` via `from_session_profile`, then calls the
+    /// migrated `automix_score`. Conversion happens once per call (not per
+    /// candidate) to mirror the production call site.
     fn score_with_new_path(fixture: &Fixture) -> Vec<(i64, f64)> {
+        let (taste, seed) =
+            crate::smart::taste_vector::adapters::from_session_profile(&fixture.profile);
         fixture
             .candidates
             .iter()
@@ -1766,7 +1784,8 @@ mod parity_tests {
                 let score = automix_score(
                     &cand.track,
                     &cand.genres,
-                    &fixture.profile,
+                    &taste,
+                    &seed,
                     fixture.seed_features.as_ref(),
                     cand.features.as_ref(),
                 );
