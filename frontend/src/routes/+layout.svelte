@@ -2175,6 +2175,82 @@
 		padding: 16px;
 	}
 
+	.now-playing-panel .np-artwork-wrap,
+	.now-playing-panel .np-progress,
+	.now-playing-panel .np-info,
+	.now-playing-panel .transport {
+		transition:
+			max-height var(--motion-base, 240ms) ease,
+			opacity var(--motion-base, 240ms) ease,
+			gap var(--motion-base, 240ms) ease,
+			padding var(--motion-base, 240ms) ease;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.now-playing-panel .np-artwork-wrap,
+		.now-playing-panel .np-progress,
+		.now-playing-panel .np-info,
+		.now-playing-panel .transport {
+			transition: none;
+		}
+	}
+
+	.now-playing-panel.queue-expanded .np-artwork-wrap {
+		max-height: 64px;
+		overflow: hidden;
+	}
+
+	.now-playing-panel.queue-expanded .np-artwork {
+		object-fit: cover;
+		object-position: center 30%;
+		height: 64px;
+	}
+
+	.now-playing-panel.queue-expanded .np-info {
+		padding-block: 6px;
+	}
+
+	.now-playing-panel.queue-expanded .np-copy .np-eyebrow {
+		display: none;
+	}
+
+	.now-playing-panel.queue-expanded .np-copy .np-album,
+	.now-playing-panel.queue-expanded .np-copy .np-source,
+	.now-playing-panel.queue-expanded .np-copy .np-stream-detail {
+		display: none;
+	}
+
+	.now-playing-panel.queue-expanded .np-copy .np-title {
+		font-size: 0.95rem;
+		line-height: 1.2;
+		margin: 0;
+	}
+
+	.now-playing-panel.queue-expanded .np-copy .np-artist {
+		font-size: 0.78rem;
+	}
+
+	.now-playing-panel.queue-expanded .np-progress {
+		max-height: 0;
+		opacity: 0;
+		overflow: hidden;
+		pointer-events: none;
+	}
+
+	.now-playing-panel.queue-expanded .transport {
+		gap: 6px;
+	}
+
+	.now-playing-panel.queue-expanded .tp-btn,
+	.now-playing-panel.queue-expanded .tp-play {
+		width: 30px;
+		height: 30px;
+	}
+
+	.now-playing-panel.queue-expanded .np-quality {
+		display: none;
+	}
+
 	.queue-header {
 		display: flex;
 		align-items: flex-start;
