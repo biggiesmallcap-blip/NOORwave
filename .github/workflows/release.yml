@@ -24,6 +24,14 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      - name: Sync version from tag
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          (Get-Content noor-app/Cargo.toml) -replace '^version = "[^"]+"', "version = ""$version""" | Set-Content noor-app/Cargo.toml -Encoding utf8
+          (Get-Content noor-server/Cargo.toml) -replace '^version = "[^"]+"', "version = ""$version""" | Set-Content noor-server/Cargo.toml -Encoding utf8
+          (Get-Content noor-app/tauri.conf.json) -replace '"version": "[^"]+"', """version"": ""$version""" | Set-Content noor-app/tauri.conf.json -Encoding utf8
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:

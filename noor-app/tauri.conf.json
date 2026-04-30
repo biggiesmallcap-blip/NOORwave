@@ -1,6 +1,6 @@
 {
   "productName": "NOORwave",
-  "version": "0.1.0",
+  "version": "0.1.7",
   "identifier": "com.noorwave.app",
   "app": {
     "windows": [
