@@ -5026,20 +5026,16 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
 }
 
 /// Attempts to resolve the current pending queue item to a Tidal track.
+/// Called when the current queue item is a pending (unresolved) row — track_id IS NULL.
+/// Claims ownership via resolving_at, searches Tidal with combined Jaro-Winkler scoring
+/// (0.60×artist + 0.40×title, threshold 0.85), imports the match via
+/// import_track_from_metadata, and atomically promotes the queue row.
 ///
-/// Called when `player::next_track` writes `current_track_id = NULL` because the
-/// new current item is a `resolution_state = 'pending'` row (a last.fm hit not yet
-/// matched to a Tidal track). Searches Tidal by artist+title and applies a
-/// Jaro-Winkler artist-name confirmation threshold of 0.85.
-///
-/// Returns `Some(synthetic_track)` on a successful match (queue row updated to
-/// `resolved`), or `None` if no acceptable match exists (queue row marked
-/// `unresolvable`). Either way the caller is responsible for advancing the queue
-/// if the result is `None`.
+/// Returns the resolved Track on success, or None if no acceptable match or on error.
+/// On failure the resolving_at ownership lock is always released.
 async fn resolve_pending_current_queue_item(
     state: &SharedState,
 ) -> Option<crate::db::models::Track> {
-    // Read current_queue_item_id and the pending metadata in one query
     let db = {
         let s = state.read().await;
         s.db.clone()
@@ -5051,7 +5047,7 @@ async fn resolve_pending_current_queue_item(
                 "SELECT q.id, q.pending_artist, q.pending_title
                  FROM playback_state ps
                  JOIN queue q ON q.id = ps.current_queue_item_id
-                 WHERE ps.id = 1 AND q.resolution_state = 'pending'",
+                 WHERE ps.id = 1 AND q.track_id IS NULL AND q.pending_at IS NOT NULL",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -5060,9 +5056,35 @@ async fn resolve_pending_current_queue_item(
         .ok()
         .flatten()?;
 
-    // Load Tidal tokens
+    // Claim ownership; bail if another resolver already claimed this row.
+    let claimed = db
+        .with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE queue SET resolving_at = datetime('now')
+                 WHERE id = ?1 AND resolving_at IS NULL AND track_id IS NULL",
+                rusqlite::params![queue_item_id],
+            )? == 1)
+        })
+        .unwrap_or(false);
+    if !claimed {
+        return None;
+    }
+
+    let release_lock = |db: &crate::db::Database, qid: i64| {
+        let _ = db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE queue SET resolving_at = NULL WHERE id = ?1",
+                rusqlite::params![qid],
+            )
+            .map_err(anyhow::Error::from)
+        });
+    };
+
     let tokens = {
-        let persisted = load_persisted_tidal_tokens(state).await.ok()??;
+        let persisted = match load_persisted_tidal_tokens(state).await.ok().flatten() {
+            Some(t) => t,
+            None => { release_lock(&db, queue_item_id); return None; }
+        };
         let s = state.read().await;
         s.tidal_tokens.clone().unwrap_or(persisted)
     };
@@ -5071,10 +5093,10 @@ async fn resolve_pending_current_queue_item(
     let query = format!("{} {}", pending_artist, pending_title);
     let results = match client.search(&query, 5).await {
         Ok(r) => r,
-        Err(_) => return None,
+        Err(_) => { release_lock(&db, queue_item_id); return None; }
     };
 
-    fn normalize_artist(s: &str) -> String {
+    fn normalize(s: &str) -> String {
         s.to_ascii_lowercase()
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { ' ' })
@@ -5084,55 +5106,75 @@ async fn resolve_pending_current_queue_item(
             .join(" ")
     }
 
-    let norm_expected = normalize_artist(&pending_artist);
-    let best = results.into_iter().find(|t| {
-        t.artist_name.as_deref().map(|a| {
-            strsim::jaro_winkler(&normalize_artist(a), &norm_expected) >= 0.85
-        }).unwrap_or(false)
+    let norm_artist = normalize(&pending_artist);
+    let norm_title = normalize(&pending_title);
+
+    let best = results
+        .into_iter()
+        .filter_map(|t| {
+            let a = strsim::jaro_winkler(
+                &normalize(t.artist_name.as_deref().unwrap_or("")),
+                &norm_artist,
+            );
+            let ttl = strsim::jaro_winkler(&normalize(&t.title), &norm_title);
+            let combined = 0.60 * a + 0.40 * ttl;
+            if combined >= 0.85 { Some((combined, t)) } else { None }
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let (score, tidal_track) = match best {
+        Some(pair) => pair,
+        None => { release_lock(&db, queue_item_id); return None; }
+    };
+
+    let tidal_id = tidal_track.id;
+    let duration_ms = Some(tidal_track.duration * 1000);
+    let imported = crate::services::tidal::import::import_track_from_metadata(
+        &db,
+        tidal_id,
+        tidal_track.title,
+        tidal_track.artist_name.unwrap_or_default(),
+        tidal_track.artist_id,
+        tidal_track.album_title,
+        duration_ms,
+    )
+    .await;
+
+    let local_id = match imported {
+        Ok(imp) => imp.local_id,
+        Err(_) => { release_lock(&db, queue_item_id); return None; }
+    };
+
+    let score_stored = (score * 1000.0) as i32;
+    // Atomic promotion: only one resolver wins even under a race.
+    let promoted = db
+        .with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE queue
+                 SET track_id = ?1, resolved_at = datetime('now'),
+                     tidal_match_score = ?2, resolving_at = NULL
+                 WHERE id = ?3 AND track_id IS NULL",
+                rusqlite::params![local_id, score_stored, queue_item_id],
+            )? == 1)
+        })
+        .unwrap_or(false);
+
+    if !promoted {
+        return None;
+    }
+
+    // Close the NULL window so playback_state reflects the real track.
+    let _ = db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = ?1 WHERE id = 1",
+            rusqlite::params![local_id],
+        )
+        .map_err(anyhow::Error::from)
     });
 
-    if let Some(tidal_track) = best {
-        let tidal_id = tidal_track.id;
-        let _ = db.with_conn(|conn| {
-            conn.execute(
-                "UPDATE queue SET resolution_state = 'resolved', resolved_tidal_id = ?1 WHERE id = ?2",
-                rusqlite::params![tidal_id, queue_item_id],
-            ).map_err(anyhow::Error::from)
-        });
-
-        Some(crate::db::models::Track {
-            id: -tidal_id,
-            title: tidal_track.title,
-            artist_id: 0,
-            artist_name: tidal_track.artist_name,
-            album_id: None,
-            album_title: tidal_track.album_title,
-            disc_number: None,
-            track_number: None,
-            duration_ms: Some(tidal_track.duration * 1000),
-            isrc: None,
-            tidal_id: Some(tidal_id),
-            ytmusic_id: None,
-            soundcloud_id: None,
-            best_quality: tidal_track.audio_quality.or_else(|| Some("LOSSLESS".to_string())),
-            best_source: Some("tidal".to_string()),
-            fidelity_score: 0,
-            is_favorite: false,
-            play_count: 0,
-            last_played_at: None,
-            date_added: None,
-            source: "radio_pending".to_string(),
-            artwork_url: tidal_track.artwork_url,
-        })
-    } else {
-        let _ = db.with_conn(|conn| {
-            conn.execute(
-                "UPDATE queue SET resolution_state = 'unresolvable' WHERE id = ?1",
-                rusqlite::params![queue_item_id],
-            ).map_err(anyhow::Error::from)
-        });
-        None
-    }
+    db.with_conn(move |conn| queue::get_track_by_id(conn, local_id))
+        .ok()
+        .flatten()
 }
 
 async fn next_track(
@@ -5187,17 +5229,15 @@ async fn next_track(
     // inject any that aren't already in the library. Runs as a detached background task
     // so the next_track response returns immediately without blocking on TIDAL API calls.
     if snapshot.state.automix_discover_new {
-        let current_track_id = snapshot
-            .state
-            .current_track
-            .as_ref()
-            .map(|t| t.id)
-            .unwrap_or(-1);
         let current_pos = snapshot
-            .queue
-            .iter()
-            .find(|q| q.track.id == current_track_id)
-            .map(|q| q.position)
+            .state
+            .current_queue_item_id
+            .and_then(|qid| snapshot.queue.iter().find(|q| q.id == qid).map(|q| q.position))
+            .or_else(|| {
+                snapshot.state.current_track.as_ref().and_then(|t| {
+                    snapshot.queue.iter().find(|q| q.track.id == t.id).map(|q| q.position)
+                })
+            })
             .unwrap_or(0);
         let new_upcoming = snapshot
             .queue
@@ -5618,15 +5658,24 @@ async fn clear_queue_route(
     state
         .db
         .with_conn(|conn| {
-            // Preserve the currently-playing row so playback continues.
-            let current_id = player::current_track_id(conn)?;
-            if let Some(track_id) = current_id {
-                conn.execute(
-                    "DELETE FROM queue WHERE track_id != ?1",
-                    params![track_id],
+            let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
+                conn.query_row(
+                    "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
-            } else {
-                queue::clear_queue(conn)?;
+            match (current_track_id, current_queue_item_id) {
+                (Some(track_id), _) => {
+                    // Library track playing — preserve by track_id.
+                    conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
+                }
+                (None, Some(qid)) => {
+                    // Pending row playing — preserve by queue item id.
+                    conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
+                }
+                (None, None) => {
+                    queue::clear_queue(conn)?;
+                }
             }
             let queue = queue::load_queue(conn)?;
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
@@ -7900,6 +7949,9 @@ async fn record_transition_if_changed(
     let Some(to_track_id) = snapshot.state.current_track.as_ref().map(|track| track.id) else {
         return;
     };
+    if to_track_id <= 0 {
+        return;
+    }
     if from_track_id == to_track_id {
         return;
     }
@@ -7993,6 +8045,9 @@ fn flush_active_listen_session_locked(
 
     let started_at = session.started_at.to_rfc3339();
     let track_id = session.track_id;
+    if track_id <= 0 {
+        return Ok(None);
+    }
     let completed = state.db.with_conn(|conn| {
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)

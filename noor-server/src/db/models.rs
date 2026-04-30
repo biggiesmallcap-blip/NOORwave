@@ -82,6 +82,11 @@ pub struct Genre {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackState {
     pub current_track: Option<Track>,
+    /// Queue item id of the currently-playing row. Set even when current_track_id
+    /// is NULL (pending rows). Used for position scans that must work for both
+    /// library and pending rows.
+    #[serde(default)]
+    pub current_queue_item_id: Option<i64>,
     pub position_ms: i64,
     pub is_playing: bool,
     pub volume: f64,

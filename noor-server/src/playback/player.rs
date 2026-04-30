@@ -183,7 +183,7 @@ pub fn load_snapshot(conn: &Connection) -> Result<PlaybackSnapshot> {
 pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
     let row = conn
         .query_row(
-            "SELECT current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms, automix_discover_new, automix_use_learning, automix_allow_external
+            "SELECT current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms, automix_discover_new, automix_use_learning, automix_allow_external, current_queue_item_id
              FROM playback_state
              WHERE id = 1",
             [],
@@ -200,6 +200,7 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
                     row.get::<_, bool>(8)?,
                     row.get::<_, bool>(9)?,
                     row.get::<_, bool>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
                 ))
             },
         )
@@ -213,6 +214,7 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
 
     Ok(PlaybackState {
         current_track,
+        current_queue_item_id: row.11,
         position_ms: row.1,
         is_playing: row.2,
         volume: row.3,
