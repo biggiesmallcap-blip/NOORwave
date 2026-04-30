@@ -13,6 +13,7 @@
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
   import { parseIntent } from '$lib/search/intent'
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
+  import { tidalSearchTrackToPlayable } from '$lib/utils/track'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -482,13 +483,7 @@
     if (cursor >= sortedTracks.length) cursor = sortedTracks.length - 1
   })
 
-  function toPlayable(track: TidalSearchTrack) {
-    return {
-      ...track,
-      artist_tidal_id: track.artist_id ?? null,
-      album_tidal_id: track.album_tidal_id ?? null,
-    }
-  }
+  const toPlayable = tidalSearchTrackToPlayable;
 
   function actOnTrack(track: TidalSearchTrack, mode: 'play' | 'queue' | 'next') {
     if (mode === 'queue') void addTidalTrackToQueue(toPlayable(track))

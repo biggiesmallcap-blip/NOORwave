@@ -2825,7 +2825,23 @@ struct RadioSongRequest {
 async fn radio_song(
     State(state): State<SharedState>,
     Json(payload): Json<RadioSongRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Reject ephemeral Tidal ids (negative) and zero up front. The
+    // orchestrator can only resolve positive library ids; previous
+    // behaviour was a 500 with no body and a WARN log, which made
+    // mis-routed callers (e.g. menu dispatch bugs) look like server
+    // failures rather than bad inputs. Hand back a 400 with a hint
+    // pointing at the right endpoint for Tidal-only seeds.
+    if payload.seed_track_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "seed_track_id must be a positive library id",
+                "hint": "for Tidal-only seeds, POST /api/discovery/radio with seed_tidal_id"
+            })),
+        ));
+    }
+
     let blend = payload.blend.unwrap_or_default();
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
@@ -2847,7 +2863,10 @@ async fn radio_song(
     .await
     .map_err(|e| {
         tracing::warn!("radio_song failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "radio orchestration failed" })),
+        )
     })?;
 
     Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
@@ -9422,5 +9441,68 @@ mod tests {
                 .unwrap();
         assert_eq!(body["host_mode"], true);
         assert!(body["bind_address"].as_str().unwrap().starts_with("0.0.0.0"));
+    }
+
+    /// Reproducer for the Phase 2b hotfix: `/api/radio/song` must
+    /// reject ephemeral Tidal track ids (negative or zero) with a
+    /// 400 + actionable error body, not a 500 with no body.
+    ///
+    /// Pre-fix behaviour: handler accepted any i64, passed it
+    /// through to `orchestrate_song` which logged
+    /// `WARN "radio_song failed: seed track not found: -85771852"`
+    /// and returned 500. Frontend kept the prior queue, producing
+    /// the "kitchen-sink" symptom the bug report described.
+    #[tokio::test]
+    async fn radio_song_rejects_negative_seed_id_with_400() {
+        let app = build_test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/radio/song")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"seed_track_id": -85771852}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("positive library id"),
+            "unexpected error body: {body}"
+        );
+        assert!(
+            body["hint"].as_str().unwrap_or("").contains("seed_tidal_id"),
+            "expected hint to mention seed_tidal_id: {body}"
+        );
+    }
+
+    /// Boundary: `seed_track_id == 0` is also rejected. Zero is
+    /// neither a valid library id (rowids start at 1) nor an
+    /// ephemeral negative — it usually indicates a serialisation
+    /// default leaking through, which still shouldn't reach the
+    /// orchestrator.
+    #[tokio::test]
+    async fn radio_song_rejects_zero_seed_id_with_400() {
+        let app = build_test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/radio/song")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"seed_track_id": 0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

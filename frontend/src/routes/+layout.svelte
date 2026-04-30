@@ -38,7 +38,7 @@
 		saveQueueAsPlaylist
 	} from '$lib/stores/player';
 	import { get } from 'svelte/store';
-	import type { QueueItem } from '$lib/api/client';
+	import type { QueueItem, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
@@ -48,7 +48,8 @@
 	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
-	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
 	import { wallpaper } from '$lib/stores/wallpaper';
@@ -472,16 +473,42 @@
 
 	type QueueItemType = (typeof $playbackQueue)[number];
 
+	/**
+	 * Pick the right context-menu builder for a `Track`. Ephemeral
+	 * Tidal tracks (negative `id`, set by `play_tidal_ephemeral` on
+	 * the backend) need the Tidal-aware builder so "Song radio" goes
+	 * to `/api/discovery/radio` with `seed_tidal_id` rather than the
+	 * library-only `/api/radio/song` which doesn't know how to look
+	 * up negative ids and 500s.
+	 */
+	function pickMenuBuilder(track: Track, options?: { queueItemId?: number }) {
+		const tidal = trackToTidalPlayable(track);
+		if (tidal) {
+			if (options?.queueItemId !== undefined) {
+				// Ephemeral Tidal tracks should never end up in the
+				// persisted queue table — `play_tidal_ephemeral`
+				// overlays them via AppState rather than writing
+				// rows. Surface the assumption violation rather than
+				// silently strip queue-row-specific menu options.
+				console.warn(
+					`pickMenuBuilder: ephemeral Tidal track in persisted queue (queueItemId=${options.queueItemId}, tidal_id=${track.tidal_id})`
+				);
+			}
+			return buildTidalTrackMenu(tidal);
+		}
+		return buildTrackMenu(track, options);
+	}
+
 	function openQueueRowMenu(item: QueueItemType, event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
-		const items = buildTrackMenu(item.track, { queueItemId: item.id });
+		const items = pickMenuBuilder(item.track, { queueItemId: item.id });
 		openContextMenu(event, items, item.track.title);
 	}
 
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
 		event.stopPropagation();
-		const items = buildTrackMenu(item.track, { queueItemId: item.id });
+		const items = pickMenuBuilder(item.track, { queueItemId: item.id });
 		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
 	}
 
@@ -633,14 +660,14 @@
 		const track = $currentTrack;
 		if (!track) return;
 		event.stopPropagation();
-		const items = buildTrackMenu(track);
+		const items = pickMenuBuilder(track);
 		openMenuAtElement(event.currentTarget as HTMLElement, items, track.title);
 	}
 
 	function openNowPlayingContextMenu(event: MouseEvent) {
 		const track = $currentTrack;
 		if (!track) return;
-		const items = buildTrackMenu(track);
+		const items = pickMenuBuilder(track);
 		openContextMenu(event, items, track.title);
 	}
 
