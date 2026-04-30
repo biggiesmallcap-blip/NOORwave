@@ -9278,6 +9278,7 @@ mod tests {
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_token: String::new(),
+            audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })));
 
         let response = app
@@ -9348,6 +9349,7 @@ mod tests {
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_token: String::new(),
+            audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })))
     }
 
