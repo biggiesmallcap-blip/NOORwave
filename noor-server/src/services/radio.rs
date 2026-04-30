@@ -1428,6 +1428,64 @@ mod radio_phase2_tests {
         let ids: Vec<i64> = engine_path.iter().map(|c| c.track_id).collect();
         assert_eq!(ids, vec![101, 102, 103]);
     }
+
+    // ─── Phase 2b Stage 1: reason-string JSON suffix ──────────────────────────
+
+    #[test]
+    fn annotate_reasons_appends_json_suffix_for_library_candidate() {
+        // Library candidate with a genre Jaccard and an affinity multiplier
+        // both populated. Suffix carries both fields.
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.10)];
+        let pre_affinity = std::collections::HashMap::from([(
+            (
+                RadioSource::Library,
+                100,
+                normalize_for_dedup("A", "Song"),
+            ),
+            1.0_f64,
+        )]);
+        let jaccard_by_index = std::collections::HashMap::from([(0_usize, 0.67_f64)]);
+        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        let reason = &candidates[0].reason;
+        assert!(reason.contains(" | "), "expected JSON suffix separator, got: {reason}");
+        assert!(reason.contains("\"genre_jaccard\":0.6700"), "got: {reason}");
+        assert!(reason.contains("\"affinity_mult\":1.1000"), "got: {reason}");
+    }
+
+    #[test]
+    fn annotate_reasons_emits_partial_suffix_when_only_one_field_available() {
+        // Last.fm candidate (track_id=0): no Jaccard. Only the affinity
+        // multiplier appears in the suffix.
+        let mut candidates = vec![cand(0, RadioSource::Lastfm, "B", "Tune", 0.20)];
+        let pre_affinity = std::collections::HashMap::from([(
+            (
+                RadioSource::Lastfm,
+                0,
+                normalize_for_dedup("B", "Tune"),
+            ),
+            0.20_f64,
+        )]);
+        let jaccard_by_index: std::collections::HashMap<usize, f64> =
+            std::collections::HashMap::new();
+        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        let reason = &candidates[0].reason;
+        assert!(reason.contains(" | "), "got: {reason}");
+        assert!(!reason.contains("genre_jaccard"), "got: {reason}");
+        assert!(reason.contains("\"affinity_mult\":1.0000"), "got: {reason}");
+    }
+
+    #[test]
+    fn annotate_reasons_skips_when_no_signals_present() {
+        // No pre_affinity entry, no Jaccard. Reason is left untouched.
+        let mut candidates = vec![cand(0, RadioSource::Lastfm, "C", "Song", 0.5)];
+        let original_reason = candidates[0].reason.clone();
+        let pre_affinity: std::collections::HashMap<(RadioSource, i64, String), f64> =
+            std::collections::HashMap::new();
+        let jaccard_by_index: std::collections::HashMap<usize, f64> =
+            std::collections::HashMap::new();
+        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        assert_eq!(candidates[0].reason, original_reason);
+    }
 }
 
 #[cfg(test)]
