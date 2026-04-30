@@ -353,6 +353,38 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Pending-queue GC: sweep stale locks and expired unresolved rows.
+    {
+        let gc_state = state.clone();
+        tokio::spawn(async move {
+            // Startup sweep — clear any locks left over from a previous crash.
+            {
+                let s = gc_state.read().await;
+                if let Err(e) = s.db.with_conn(crate::playback::queue::gc_pending_queue) {
+                    tracing::warn!("pending queue GC (startup): {e}");
+                }
+            }
+            // Hourly sweeps.
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+            ticker.tick().await; // consume the immediate first tick
+            loop {
+                ticker.tick().await;
+                let s = gc_state.read().await;
+                match s.db.with_conn(crate::playback::queue::gc_pending_queue) {
+                    Ok((expired, locks)) if expired > 0 || locks > 0 => {
+                        tracing::info!(
+                            expired,
+                            stale_locks_cleared = locks,
+                            "pending queue GC sweep"
+                        );
+                    }
+                    Err(e) => tracing::warn!("pending queue GC: {e}"),
+                    _ => {}
+                }
+            }
+        });
+    }
+
     // Start HTTP + WebSocket server
     info!("Starting server on http://{}", addr);
     server::start(state, &addr).await?;

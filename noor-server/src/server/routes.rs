@@ -322,6 +322,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/radio/song", post(radio_song))
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))
+        .route("/api/radio/start", post(radio_start))
         .route("/api/discovery/space/meta", get(get_discovery_space_meta))
         .route("/api/discovery/artists", get(get_discovery_artists))
         .route(
@@ -2884,6 +2885,178 @@ async fn radio_song(
     Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
 }
 
+// ─── POST /api/radio/start ───────────────────────────────────────────────────
+//
+// Atomically builds a radio queue from a seed track, inserting library tracks
+// directly and non-library Last.fm results as pending rows, then spawns
+// background resolvers bounded by RESOLVER_POOL_SIZE.
+
+#[derive(Debug, Deserialize)]
+struct RadioStartRequest {
+    seed_track_id: i64,
+    #[serde(default)]
+    blend: Option<crate::services::radio::RadioBlend>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn radio_start(
+    State(state): State<SharedState>,
+    Json(payload): Json<RadioStartRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if payload.seed_track_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "seed_track_id must be a positive library id" })),
+        ));
+    }
+
+    let blend = payload.blend.unwrap_or_default();
+    let limit = payload.limit.unwrap_or(60).clamp(8, 200);
+
+    let (db, lastfm) = {
+        let g = state.read().await;
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
+        (g.db.clone(), lastfm)
+    };
+
+    let radio_queue = crate::services::radio::orchestrate_song(
+        &db,
+        lastfm.as_ref(),
+        payload.seed_track_id,
+        blend,
+        limit,
+        &[],
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("radio_start: orchestrate_song failed: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "radio orchestration failed" })),
+        )
+    })?;
+
+    // Library tracks first (immediately playable), pending tracks appended after.
+    let (library_cands, pending_cands): (Vec<_>, Vec<_>) = radio_queue
+        .tracks
+        .into_iter()
+        .partition(|c| c.is_in_library && c.track_id > 0);
+
+    if library_cands.is_empty() && pending_cands.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "radio returned no candidates" })),
+        ));
+    }
+
+    // Build queue atomically and collect pending row IDs for background tasks.
+    let (first_item, pending_item_ids) = db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            tx.execute("DELETE FROM queue", [])?;
+
+            let mut pos = 0i32;
+            for c in &library_cands {
+                tx.execute(
+                    "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', ?3)",
+                    rusqlite::params![c.track_id, pos, c.reason],
+                )?;
+                pos += 1;
+            }
+            for c in &pending_cands {
+                tx.execute(
+                    "INSERT INTO queue (track_id, position, source, reason,
+                                        pending_artist, pending_title, pending_at)
+                     VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'))",
+                    rusqlite::params![pos, c.reason, c.artist_name, c.title],
+                )?;
+                pos += 1;
+            }
+
+            tx.commit()?;
+
+            let first: Option<(i64, Option<i64>)> = conn
+                .query_row(
+                    "SELECT id, track_id FROM queue ORDER BY position ASC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            let pending_ids: Vec<i64> = conn
+                .prepare(
+                    "SELECT id FROM queue WHERE track_id IS NULL AND pending_at IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok((first, pending_ids))
+        })
+        .map_err(|e| {
+            tracing::error!("radio_start: queue build failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to build queue" })),
+            )
+        })?;
+
+    let first_playable = match first_item {
+        Some((queue_item_id, Some(track_id))) => json!({
+            "type": "library",
+            "queue_item_id": queue_item_id,
+            "track_id": track_id
+        }),
+        Some((queue_item_id, None)) => json!({
+            "type": "pending",
+            "queue_item_id": queue_item_id,
+            "track_id": null
+        }),
+        None => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "queue is empty after insert" })),
+            ));
+        }
+    };
+
+    // Spawn bounded background resolvers for all pending rows.
+    if !pending_item_ids.is_empty() {
+        let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
+            let s = state.read().await;
+            if let Some(t) = s.tidal_tokens.clone() {
+                Some(t)
+            } else {
+                drop(s);
+                load_persisted_tidal_tokens(&state).await.ok().flatten()
+            }
+        };
+
+        if let Some(tokens) = tokens_opt {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
+            for item_id in pending_item_ids {
+                let sem = semaphore.clone();
+                let db_bg = db.clone();
+                let tok = tokens.clone();
+                tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok();
+                    resolve_pending_row(db_bg, tok, item_id).await;
+                });
+            }
+        } else {
+            tracing::warn!("radio_start: Tidal tokens unavailable — pending rows will rely on lazy resolution");
+        }
+    }
+
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::QueueUpdated);
+    }
+
+    Ok(Json(json!({ "first_playable": first_playable })))
+}
+
 #[derive(Debug, Deserialize)]
 struct RadioAlbumRequest {
     seed_album_id: i64,
@@ -5025,6 +5198,177 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
+// ─── Pending-row resolution ──────────────────────────────────────────────────
+//
+// Both the lazy (next_track caller) and background-eager (radio_start) paths
+// share the same scoring constants. The lazy path also closes the
+// playback_state NULL window after promotion; the background path does not.
+
+const MATCH_QUALITY_THRESHOLD: f64 = 0.85;
+const RESOLVER_POOL_SIZE: usize = 4;
+
+// Scoring weights (two-field, no album metadata available from Last.fm).
+// Three-field variant (0.55/0.35/0.10) applies when pending_album is stored —
+// not yet in schema; constants named here to make the future wiring obvious.
+const SCORE_W_ARTIST: f64 = 0.60;
+const SCORE_W_TITLE: f64 = 0.40;
+
+fn score_tidal_candidate(
+    result_artist: &str,
+    result_title: &str,
+    pending_artist: &str,
+    pending_title: &str,
+) -> f64 {
+    fn normalize(s: &str) -> String {
+        s.to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    let a = strsim::jaro_winkler(&normalize(result_artist), &normalize(pending_artist));
+    let t = strsim::jaro_winkler(&normalize(result_title), &normalize(pending_title));
+    SCORE_W_ARTIST * a + SCORE_W_TITLE * t
+}
+
+/// Background-eager resolver for a single pending queue row.
+///
+/// Spawned by `radio_start` after inserting pending rows. Bounded by
+/// `Arc<Semaphore>` (RESOLVER_POOL_SIZE permits). Unlike the lazy path, this
+/// does **not** update `playback_state.current_track_id` — the playing row
+/// may not be the one being resolved.
+async fn resolve_pending_row(
+    db: crate::db::Database,
+    tokens: crate::services::tidal::auth::TidalTokens,
+    queue_item_id: i64,
+) {
+    let row: Option<(String, String)> = db
+        .with_conn(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT pending_artist, pending_title FROM queue
+                     WHERE id = ?1 AND track_id IS NULL AND pending_at IS NOT NULL",
+                    rusqlite::params![queue_item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })
+        .unwrap_or(None);
+
+    let (pending_artist, pending_title) = match row {
+        Some(r) => r,
+        None => return,
+    };
+
+    let claimed = db
+        .with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE queue SET resolving_at = datetime('now')
+                 WHERE id = ?1 AND resolving_at IS NULL AND track_id IS NULL",
+                rusqlite::params![queue_item_id],
+            )? == 1)
+        })
+        .unwrap_or(false);
+    if !claimed {
+        return;
+    }
+
+    let release = |db: &crate::db::Database, qid: i64| {
+        let _ = db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE queue SET resolving_at = NULL WHERE id = ?1",
+                rusqlite::params![qid],
+            )
+            .map_err(anyhow::Error::from)
+        });
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let query = format!("{} {}", pending_artist, pending_title);
+    let results = match client.search(&query, 5).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal search failed");
+            release(&db, queue_item_id);
+            return;
+        }
+    };
+
+    let best = results
+        .into_iter()
+        .filter_map(|t| {
+            let s = score_tidal_candidate(
+                t.artist_name.as_deref().unwrap_or(""),
+                &t.title,
+                &pending_artist,
+                &pending_title,
+            );
+            if s >= MATCH_QUALITY_THRESHOLD { Some((s, t)) } else { None }
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let (score, tidal_track) = match best {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                queue_item_id,
+                artist = %pending_artist,
+                title = %pending_title,
+                "background resolver: no match above threshold"
+            );
+            release(&db, queue_item_id);
+            return;
+        }
+    };
+
+    let tidal_id = tidal_track.id;
+    let imported = crate::services::tidal::import::import_track_from_metadata(
+        &db,
+        tidal_id,
+        tidal_track.title,
+        tidal_track.artist_name.unwrap_or_default(),
+        tidal_track.artist_id,
+        tidal_track.album_title,
+        Some(tidal_track.duration * 1000),
+    )
+    .await;
+
+    let local_id = match imported {
+        Ok(imp) => imp.local_id,
+        Err(e) => {
+            tracing::warn!(queue_item_id, error = %e, "background resolver: import failed");
+            release(&db, queue_item_id);
+            return;
+        }
+    };
+
+    let score_stored = (score * 1000.0) as i32;
+    let promoted = db
+        .with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE queue
+                 SET track_id = ?1, resolved_at = datetime('now'),
+                     tidal_match_score = ?2, resolving_at = NULL
+                 WHERE id = ?3 AND track_id IS NULL",
+                rusqlite::params![local_id, score_stored, queue_item_id],
+            )? == 1)
+        })
+        .unwrap_or(false);
+
+    if promoted {
+        tracing::info!(
+            queue_item_id,
+            local_id,
+            artist = %pending_artist,
+            title = %pending_title,
+            score,
+            "background resolver: promoted pending row"
+        );
+    }
+}
+
 /// Attempts to resolve the current pending queue item to a Tidal track.
 /// Called when the current queue item is a pending (unresolved) row — track_id IS NULL.
 /// Claims ownership via resolving_at, searches Tidal with combined Jaro-Winkler scoring
@@ -5096,29 +5440,16 @@ async fn resolve_pending_current_queue_item(
         Err(_) => { release_lock(&db, queue_item_id); return None; }
     };
 
-    fn normalize(s: &str) -> String {
-        s.to_ascii_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    let norm_artist = normalize(&pending_artist);
-    let norm_title = normalize(&pending_title);
-
     let best = results
         .into_iter()
         .filter_map(|t| {
-            let a = strsim::jaro_winkler(
-                &normalize(t.artist_name.as_deref().unwrap_or("")),
-                &norm_artist,
+            let s = score_tidal_candidate(
+                t.artist_name.as_deref().unwrap_or(""),
+                &t.title,
+                &pending_artist,
+                &pending_title,
             );
-            let ttl = strsim::jaro_winkler(&normalize(&t.title), &norm_title);
-            let combined = 0.60 * a + 0.40 * ttl;
-            if combined >= 0.85 { Some((combined, t)) } else { None }
+            if s >= MATCH_QUALITY_THRESHOLD { Some((s, t)) } else { None }
         })
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 

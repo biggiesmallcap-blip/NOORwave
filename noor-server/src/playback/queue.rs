@@ -450,6 +450,29 @@ fn track_from_row_with_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<
     })
 }
 
+/// Remove stale pending rows and clear orphaned resolver locks.
+///
+/// Two sweeps:
+///   1. Delete rows where `track_id IS NULL AND pending_at < datetime('now', '-6 hours')`.
+///      These are unresolvable: either Tidal has no match or the row was abandoned.
+///   2. Clear `resolving_at` on rows where `resolving_at < datetime('now', '-30 seconds')
+///      AND track_id IS NULL` — the resolver crashed or timed out; returning to NULL lets the
+///      lazy path reclaim the row.
+///
+/// Returns `(expired_deleted, locks_cleared)`.
+pub fn gc_pending_queue(conn: &Connection) -> Result<(usize, usize)> {
+    let expired = conn.execute(
+        "DELETE FROM queue WHERE track_id IS NULL AND pending_at < datetime('now', '-6 hours')",
+        [],
+    )?;
+    let locks = conn.execute(
+        "UPDATE queue SET resolving_at = NULL
+         WHERE track_id IS NULL AND resolving_at < datetime('now', '-30 seconds')",
+        [],
+    )?;
+    Ok((expired, locks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
