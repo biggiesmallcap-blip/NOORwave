@@ -635,12 +635,12 @@
 	);
 
 	function formatQueueTotal(ms: number): string {
-		if (ms < 60_000) return '<1 min';
+		if (ms < 60_000) return '<1m';
 		const totalMin = Math.round(ms / 60_000);
-		if (totalMin < 60) return `${totalMin} min`;
+		if (totalMin < 60) return `${totalMin}m`;
 		const hr = Math.floor(totalMin / 60);
 		const min = totalMin % 60;
-		return min === 0 ? `${hr} hr` : `${hr} hr ${min} min`;
+		return min === 0 ? `${hr}h` : `${hr}h ${min}m`;
 	}
 
 	let queueTotalLabel = $derived(formatQueueTotal(queueTotalMs));
@@ -2303,9 +2303,9 @@
 		flex: 1 1 auto;
 		display: flex;
 		align-items: baseline;
-		gap: 6px;
-		padding: 4px 8px;
-		margin: -4px -8px;
+		gap: 4px;
+		padding: 4px 6px;
+		margin: -4px -6px;
 		background: transparent;
 		border: 1px solid transparent;
 		border-radius: 8px;
@@ -2325,7 +2325,7 @@
 
 	.queue-count-num {
 		flex: 0 0 auto;
-		font-size: 1.05rem;
+		font-size: 0.95rem;
 		font-weight: 600;
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
@@ -2335,7 +2335,7 @@
 	.queue-count-unit {
 		flex: 1 1 auto;
 		min-width: 0;
-		font-size: 0.74rem;
+		font-size: 0.72rem;
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
