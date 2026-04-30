@@ -249,6 +249,25 @@
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (isTypingTarget(event.target)) return;
 
+		if (event.key === 'q' || event.key === 'Q') {
+			event.preventDefault();
+			toggleQueueExpanded();
+			return;
+		}
+
+		const target = event.target as HTMLElement | null;
+		const inQueueSection = target?.closest?.('.queue-section') != null;
+		if (inQueueSection && event.key === 'ArrowUp' && !queueExpanded) {
+			event.preventDefault();
+			toggleQueueExpanded();
+			return;
+		}
+		if (inQueueSection && event.key === 'ArrowDown' && queueExpanded) {
+			event.preventDefault();
+			toggleQueueExpanded();
+			return;
+		}
+
 		switch (event.key) {
 			case ' ':
 			case 'Spacebar':
