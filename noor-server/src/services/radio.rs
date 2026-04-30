@@ -575,15 +575,40 @@ fn pick_dedup_winner(group: Vec<RadioCandidate>) -> Option<RadioCandidate> {
     })
 }
 
+/// Saturation constant for affinity compression. At `x = K` the
+/// compressed value is 0.5; at `x = 4K` it's 0.8; asymptote is 1.0.
+/// `pos` and `neg` are unbounded recency-weighted accumulators that
+/// easily reach 20–50 for any artist with recent listen history, so the
+/// raw values cannot drive the multiplier directly without saturating.
+const AFFINITY_SATURATION: f64 = 10.0;
+
+/// Bounded effect a saturated positive affinity adds to the multiplier.
+/// At `pos = ∞` the multiplier is `1.0 + SCALE_POS = 1.20`.
+const AFFINITY_SCALE_POS: f64 = 0.20;
+
+/// Bounded effect a saturated negative affinity subtracts. At
+/// `neg = ∞` the multiplier is `1.0 - SCALE_NEG = 0.70`. Asymmetric vs
+/// `SCALE_POS` to mirror automix's "negatives hurt more than positives
+/// help" weighting (0.5 / 0.65 there, 0.20 / 0.30 here).
+const AFFINITY_SCALE_NEG: f64 = 0.30;
+
+/// Floor on the multiplier so even heavily-skipped artists still appear
+/// in the queue at low rank rather than being eliminated entirely. The
+/// formula above never produces a value below `1.0 − SCALE_NEG = 0.70`,
+/// so this is a defensive backstop, not the load-bearing clamp the
+/// previous implementation relied on.
+const AFFINITY_FLOOR: f64 = 0.1;
+
 /// Apply per-user taste signals to a deduped candidate list. Drops tracks
 /// the user just skipped; nudges `similarity_score` up for liked artists
 /// and down for skipped ones.
 ///
-/// Multiplier coefficients are deliberately tiny (0.05 / 0.07) because
-/// `similarity_score` lives in `[0, 1]` rather than the unbounded scale
-/// `automix_score` runs on. The 0.05/0.07 ratio mirrors automix's
-/// 0.5/0.65 asymmetry — negatives bite slightly harder than positives
-/// reward.
+/// Compression first: the raw `pos` and `neg` accumulators get
+/// `x / (x + K)` so 20 vs 50 vs 200 all map to roughly the same
+/// region of `[0, 1]`. Then asymmetric scaling: positives are worth at
+/// most +20% of the score, negatives at most −30%, mirroring automix's
+/// pos:neg ratio at a magnitude that suits radio's bounded
+/// `similarity_score`.
 ///
 /// Resolver misses (last.fm hit naming an artist not in the library) leave
 /// `similarity_score` unchanged. That is the documented Phase 2a
@@ -603,8 +628,11 @@ fn apply_taste_signals(
         if let Some(artist_id) = resolver.lookup(&cand.artist_name)
             && let Some(affinity) = taste.artist_affinity.get(&artist_id)
         {
-            let multiplier = 1.0 + (affinity.pos * 0.05) - (affinity.neg * 0.07);
-            cand.similarity_score *= multiplier.max(0.0);
+            let pos_c = affinity.pos / (affinity.pos + AFFINITY_SATURATION);
+            let neg_c = affinity.neg / (affinity.neg + AFFINITY_SATURATION);
+            let multiplier =
+                1.0 + (pos_c * AFFINITY_SCALE_POS) - (neg_c * AFFINITY_SCALE_NEG);
+            cand.similarity_score *= multiplier.max(AFFINITY_FLOOR);
         }
     }
 }
@@ -910,8 +938,10 @@ mod radio_phase2_tests {
 
     #[test]
     fn apply_taste_signals_nudges_score_for_known_artist() {
-        // Resolver maps "A" -> 1, taste says artist 1 has pos=10, neg=0.
-        // Expected multiplier: 1.0 + (10*0.05) - (0*0.07) = 1.5.
+        // Artist 1: pos=10, neg=0. Saturation K=10:
+        //   pos_c = 10/20 = 0.5, neg_c = 0
+        //   multiplier = 1.0 + 0.5*0.20 - 0*0.30 = 1.10
+        //   final = 0.5 * 1.10 = 0.55
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -920,12 +950,15 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 10.0, 0.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!((candidates[0].similarity_score - 0.75).abs() < 1e-12);
+        assert!((candidates[0].similarity_score - 0.55).abs() < 1e-12);
     }
 
     #[test]
     fn apply_taste_signals_penalises_negative_artist() {
-        // Artist 1: pos=0, neg=10 -> multiplier 1.0 - 0.7 = 0.3.
+        // Artist 1: pos=0, neg=10. Saturation K=10:
+        //   pos_c = 0, neg_c = 10/20 = 0.5
+        //   multiplier = 1.0 + 0 - 0.5*0.30 = 0.85
+        //   final = 0.5 * 0.85 = 0.425
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -934,7 +967,7 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 0.0, 10.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!((candidates[0].similarity_score - 0.15).abs() < 1e-12);
+        assert!((candidates[0].similarity_score - 0.425).abs() < 1e-12);
     }
 
     #[test]
@@ -949,11 +982,16 @@ mod radio_phase2_tests {
     }
 
     #[test]
-    fn apply_taste_signals_clamps_negative_multiplier_to_zero() {
-        // Pathological: pos=0, neg=20 produces 1.0 - 1.4 = -0.4.
-        // Multiplier should clamp to 0.0 so similarity_score never goes
-        // negative. (A negative similarity_score would scramble blend
-        // ordering downstream.)
+    fn apply_taste_signals_never_zeroes_under_high_negative_signal() {
+        // Regression guard for the Doja Cat case. Old formula at neg=20:
+        //   multiplier = 1.0 - 20*0.07 = -0.4, clamped to 0.0,
+        //   destroying every library candidate from a recently-skipped
+        //   artist.
+        // New saturating formula at neg=20:
+        //   neg_c = 20/30 = 0.667, multiplier = 1.0 - 0.667*0.30 = 0.80
+        //   final = 0.5 * 0.80 = 0.40
+        // Library candidates from skipped artists are demoted, not
+        // eliminated.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -962,8 +1000,62 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 0.0, 20.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!(candidates[0].similarity_score >= 0.0);
-        assert!((candidates[0].similarity_score - 0.0).abs() < 1e-12);
+        assert!(
+            candidates[0].similarity_score > 0.3,
+            "expected score > 0.3, got {}",
+            candidates[0].similarity_score
+        );
+        assert!((candidates[0].similarity_score - 0.40).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_taste_signals_neg_50_does_not_zero_score() {
+        // High-magnitude neg: even a heavily-skipped artist should keep
+        // a meaningful score. With the old 0.05/0.07 formula, neg = 50
+        // gave multiplier = -2.5 → clamped to 0. With saturating
+        // compression:
+        //   neg_c = 50/60 = 0.833, multiplier = 1.0 - 0.833*0.30 = 0.75
+        //   final = 0.5 * 0.75 = 0.375
+        // The asymptote is 1.0 - 0.30 = 0.70 regardless of how large
+        // neg gets, which is the point of the saturation curve.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 0.0, 50.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.0)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        let multiplier = candidates[0].similarity_score;
+        assert!(
+            multiplier > 0.5,
+            "neg=50 should leave multiplier > 0.5, got {multiplier}"
+        );
+        assert!((multiplier - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_taste_signals_pos_50_does_not_overshoot() {
+        // High-magnitude pos: a beloved artist still gets a bounded
+        // boost, not unbounded growth that would swamp source-native
+        // similarity. With the old 0.05 formula, pos = 50 gave
+        // multiplier = 3.5 → score 5x boosted, which would dwarf
+        // last.fm match scores entirely. With saturating compression:
+        //   pos_c = 50/60 = 0.833, multiplier = 1.0 + 0.833*0.20 = 1.167
+        // Asymptote is 1.0 + 0.20 = 1.20.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 50.0, 0.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.0)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        let multiplier = candidates[0].similarity_score;
+        assert!(
+            (1.10..=1.30).contains(&multiplier),
+            "pos=50 multiplier should sit in [1.10, 1.30], got {multiplier}"
+        );
     }
 
     // ─── Stage 2: engine slot fills with track_similarity ─────────────────────
@@ -1152,20 +1244,24 @@ mod radio_phase2_tests {
             );
         }
 
-        // Expected multiplier from the formula: 1.0 + 4*0.05 - 1*0.07 = 1.13.
-        // Same artist on every candidate, so every multiplier is 1.13.
-        for (_, post_score) in &post {
-            let pre_score = pre.iter().find(|(_, _)| true).unwrap().1;
-            // Use any pre score from the same candidate position; we just
-            // need to confirm the multiplier holds.
-            let _ = pre_score;
-        }
+        // Expected multiplier from the saturating formula:
+        //   pos_c = 4/(4+10) = 0.2857..
+        //   neg_c = 1/(1+10) = 0.0909..
+        //   mult  = 1.0 + 0.2857*0.20 - 0.0909*0.30 ≈ 1.02987
+        // Same artist on every candidate, so every multiplier is the
+        // same. Compared to the old 0.05/0.07 formula's 1.13, the
+        // saturated version produces a smaller nudge for low-magnitude
+        // pos/neg — which is correct: "barely any signal" should
+        // barely move the score.
+        let expected_mult = 1.0
+            + (4.0_f64 / 14.0) * 0.20
+            - (1.0_f64 / 11.0) * 0.30;
         for (track_id, post_score) in &post {
             let pre_score = pre.iter().find(|(id, _)| id == track_id).unwrap().1;
+            let actual_mult = post_score / pre_score;
             assert!(
-                ((post_score / pre_score) - 1.13).abs() < 1e-9,
-                "expected multiplier 1.13 for track {track_id}, got {}",
-                post_score / pre_score
+                (actual_mult - expected_mult).abs() < 1e-9,
+                "expected multiplier {expected_mult:.6} for track {track_id}, got {actual_mult:.6}"
             );
         }
 
