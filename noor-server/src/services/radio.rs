@@ -606,15 +606,40 @@ fn pick_dedup_winner(group: Vec<RadioCandidate>) -> Option<RadioCandidate> {
     })
 }
 
+/// Saturation constant for affinity compression. At `x = K` the
+/// compressed value is 0.5; at `x = 4K` it's 0.8; asymptote is 1.0.
+/// `pos` and `neg` are unbounded recency-weighted accumulators that
+/// easily reach 20–50 for any artist with recent listen history, so the
+/// raw values cannot drive the multiplier directly without saturating.
+const AFFINITY_SATURATION: f64 = 10.0;
+
+/// Bounded effect a saturated positive affinity adds to the multiplier.
+/// At `pos = ∞` the multiplier is `1.0 + SCALE_POS = 1.20`.
+const AFFINITY_SCALE_POS: f64 = 0.20;
+
+/// Bounded effect a saturated negative affinity subtracts. At
+/// `neg = ∞` the multiplier is `1.0 - SCALE_NEG = 0.70`. Asymmetric vs
+/// `SCALE_POS` to mirror automix's "negatives hurt more than positives
+/// help" weighting (0.5 / 0.65 there, 0.20 / 0.30 here).
+const AFFINITY_SCALE_NEG: f64 = 0.30;
+
+/// Floor on the multiplier so even heavily-skipped artists still appear
+/// in the queue at low rank rather than being eliminated entirely. The
+/// formula above never produces a value below `1.0 − SCALE_NEG = 0.70`,
+/// so this is a defensive backstop, not the load-bearing clamp the
+/// previous implementation relied on.
+const AFFINITY_FLOOR: f64 = 0.1;
+
 /// Apply per-user taste signals to a deduped candidate list. Drops tracks
 /// the user just skipped; nudges `similarity_score` up for liked artists
 /// and down for skipped ones.
 ///
-/// Multiplier coefficients are deliberately tiny (0.05 / 0.07) because
-/// `similarity_score` lives in `[0, 1]` rather than the unbounded scale
-/// `automix_score` runs on. The 0.05/0.07 ratio mirrors automix's
-/// 0.5/0.65 asymmetry — negatives bite slightly harder than positives
-/// reward.
+/// Compression first: the raw `pos` and `neg` accumulators get
+/// `x / (x + K)` so 20 vs 50 vs 200 all map to roughly the same
+/// region of `[0, 1]`. Then asymmetric scaling: positives are worth at
+/// most +20% of the score, negatives at most −30%, mirroring automix's
+/// pos:neg ratio at a magnitude that suits radio's bounded
+/// `similarity_score`.
 ///
 /// Resolver misses (last.fm hit naming an artist not in the library) leave
 /// `similarity_score` unchanged. That is the documented Phase 2a
@@ -634,8 +659,11 @@ fn apply_taste_signals(
         if let Some(artist_id) = resolver.lookup(&cand.artist_name)
             && let Some(affinity) = taste.artist_affinity.get(&artist_id)
         {
-            let multiplier = 1.0 + (affinity.pos * 0.05) - (affinity.neg * 0.07);
-            cand.similarity_score *= multiplier.max(0.0);
+            let pos_c = affinity.pos / (affinity.pos + AFFINITY_SATURATION);
+            let neg_c = affinity.neg / (affinity.neg + AFFINITY_SATURATION);
+            let multiplier =
+                1.0 + (pos_c * AFFINITY_SCALE_POS) - (neg_c * AFFINITY_SCALE_NEG);
+            cand.similarity_score *= multiplier.max(AFFINITY_FLOOR);
         }
     }
 }
@@ -1057,8 +1085,10 @@ mod radio_phase2_tests {
 
     #[test]
     fn apply_taste_signals_nudges_score_for_known_artist() {
-        // Resolver maps "A" -> 1, taste says artist 1 has pos=10, neg=0.
-        // Expected multiplier: 1.0 + (10*0.05) - (0*0.07) = 1.5.
+        // Artist 1: pos=10, neg=0. Saturation K=10:
+        //   pos_c = 10/20 = 0.5, neg_c = 0
+        //   multiplier = 1.0 + 0.5*0.20 - 0*0.30 = 1.10
+        //   final = 0.5 * 1.10 = 0.55
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -1067,12 +1097,15 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 10.0, 0.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!((candidates[0].similarity_score - 0.75).abs() < 1e-12);
+        assert!((candidates[0].similarity_score - 0.55).abs() < 1e-12);
     }
 
     #[test]
     fn apply_taste_signals_penalises_negative_artist() {
-        // Artist 1: pos=0, neg=10 -> multiplier 1.0 - 0.7 = 0.3.
+        // Artist 1: pos=0, neg=10. Saturation K=10:
+        //   pos_c = 0, neg_c = 10/20 = 0.5
+        //   multiplier = 1.0 + 0 - 0.5*0.30 = 0.85
+        //   final = 0.5 * 0.85 = 0.425
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -1081,7 +1114,7 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 0.0, 10.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!((candidates[0].similarity_score - 0.15).abs() < 1e-12);
+        assert!((candidates[0].similarity_score - 0.425).abs() < 1e-12);
     }
 
     #[test]
@@ -1096,11 +1129,16 @@ mod radio_phase2_tests {
     }
 
     #[test]
-    fn apply_taste_signals_clamps_negative_multiplier_to_zero() {
-        // Pathological: pos=0, neg=20 produces 1.0 - 1.4 = -0.4.
-        // Multiplier should clamp to 0.0 so similarity_score never goes
-        // negative. (A negative similarity_score would scramble blend
-        // ordering downstream.)
+    fn apply_taste_signals_never_zeroes_under_high_negative_signal() {
+        // Regression guard for the Doja Cat case. Old formula at neg=20:
+        //   multiplier = 1.0 - 20*0.07 = -0.4, clamped to 0.0,
+        //   destroying every library candidate from a recently-skipped
+        //   artist.
+        // New saturating formula at neg=20:
+        //   neg_c = 20/30 = 0.667, multiplier = 1.0 - 0.667*0.30 = 0.80
+        //   final = 0.5 * 0.80 = 0.40
+        // Library candidates from skipped artists are demoted, not
+        // eliminated.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .unwrap();
@@ -1109,8 +1147,62 @@ mod radio_phase2_tests {
         let taste = make_taste(&[], &[(1, 0.0, 20.0)]);
         let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
         apply_taste_signals(&mut candidates, &taste, &resolver);
-        assert!(candidates[0].similarity_score >= 0.0);
-        assert!((candidates[0].similarity_score - 0.0).abs() < 1e-12);
+        assert!(
+            candidates[0].similarity_score > 0.3,
+            "expected score > 0.3, got {}",
+            candidates[0].similarity_score
+        );
+        assert!((candidates[0].similarity_score - 0.40).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_taste_signals_neg_50_does_not_zero_score() {
+        // High-magnitude neg: even a heavily-skipped artist should keep
+        // a meaningful score. With the old 0.05/0.07 formula, neg = 50
+        // gave multiplier = -2.5 → clamped to 0. With saturating
+        // compression:
+        //   neg_c = 50/60 = 0.833, multiplier = 1.0 - 0.833*0.30 = 0.75
+        //   final = 0.5 * 0.75 = 0.375
+        // The asymptote is 1.0 - 0.30 = 0.70 regardless of how large
+        // neg gets, which is the point of the saturation curve.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 0.0, 50.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.0)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        let multiplier = candidates[0].similarity_score;
+        assert!(
+            multiplier > 0.5,
+            "neg=50 should leave multiplier > 0.5, got {multiplier}"
+        );
+        assert!((multiplier - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_taste_signals_pos_50_does_not_overshoot() {
+        // High-magnitude pos: a beloved artist still gets a bounded
+        // boost, not unbounded growth that would swamp source-native
+        // similarity. With the old 0.05 formula, pos = 50 gave
+        // multiplier = 3.5 → score 5x boosted, which would dwarf
+        // last.fm match scores entirely. With saturating compression:
+        //   pos_c = 50/60 = 0.833, multiplier = 1.0 + 0.833*0.20 = 1.167
+        // Asymptote is 1.0 + 0.20 = 1.20.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 50.0, 0.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.0)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        let multiplier = candidates[0].similarity_score;
+        assert!(
+            (1.10..=1.30).contains(&multiplier),
+            "pos=50 multiplier should sit in [1.10, 1.30], got {multiplier}"
+        );
     }
 
     // ─── Stage 2: engine slot fills with track_similarity ─────────────────────
@@ -1299,20 +1391,24 @@ mod radio_phase2_tests {
             );
         }
 
-        // Expected multiplier from the formula: 1.0 + 4*0.05 - 1*0.07 = 1.13.
-        // Same artist on every candidate, so every multiplier is 1.13.
-        for (_, post_score) in &post {
-            let pre_score = pre.iter().find(|(_, _)| true).unwrap().1;
-            // Use any pre score from the same candidate position; we just
-            // need to confirm the multiplier holds.
-            let _ = pre_score;
-        }
+        // Expected multiplier from the saturating formula:
+        //   pos_c = 4/(4+10) = 0.2857..
+        //   neg_c = 1/(1+10) = 0.0909..
+        //   mult  = 1.0 + 0.2857*0.20 - 0.0909*0.30 ≈ 1.02987
+        // Same artist on every candidate, so every multiplier is the
+        // same. Compared to the old 0.05/0.07 formula's 1.13, the
+        // saturated version produces a smaller nudge for low-magnitude
+        // pos/neg — which is correct: "barely any signal" should
+        // barely move the score.
+        let expected_mult = 1.0
+            + (4.0_f64 / 14.0) * 0.20
+            - (1.0_f64 / 11.0) * 0.30;
         for (track_id, post_score) in &post {
             let pre_score = pre.iter().find(|(id, _)| id == track_id).unwrap().1;
+            let actual_mult = post_score / pre_score;
             assert!(
-                ((post_score / pre_score) - 1.13).abs() < 1e-9,
-                "expected multiplier 1.13 for track {track_id}, got {}",
-                post_score / pre_score
+                (actual_mult - expected_mult).abs() < 1e-9,
+                "expected multiplier {expected_mult:.6} for track {track_id}, got {actual_mult:.6}"
             );
         }
 
@@ -1331,5 +1427,451 @@ mod radio_phase2_tests {
         // path) is independent and may or may not also surface them.
         let ids: Vec<i64> = engine_path.iter().map(|c| c.track_id).collect();
         assert_eq!(ids, vec![101, 102, 103]);
+    }
+}
+
+#[cfg(test)]
+mod radio_diagnostic_harness {
+    //! # Radio quality diagnostic harness
+    //!
+    //! Permanent debug tool, not dead code. Run against the live
+    //! database to inspect what `orchestrate_song` actually produces for
+    //! a given seed track and why.
+    //!
+    //! ## Usage
+    //!
+    //! ```bash
+    //! NOOR_SEED=1634 NOOR_DB=/e/NOORwave/noor.db \
+    //!     cargo test -p noor-server radio_diagnostic_for_seed \
+    //!     -- --ignored --nocapture
+    //! ```
+    //!
+    //! Defaults: `NOOR_SEED=1634` (Doja Cat — "Go To Town" — Amala, the
+    //! seed that surfaced the Phase 2a affinity-zeroing regression),
+    //! `NOOR_DB=e:/NOORwave/noor.db`. Override either with the env var.
+    //!
+    //! ## What it prints
+    //!
+    //! - The seed's title, artist, and genres.
+    //! - TasteVector fixture sizes (artist/genre affinity entries,
+    //!   skipped/recent track counts).
+    //! - Per-source candidate counts before dedup.
+    //! - Survivor count after `combine_with_dedup` and after
+    //!   `apply_taste_signals`.
+    //! - A per-candidate table for the final queue: source, track_id,
+    //!   pre-affinity score, post-affinity score, multiplier, and genre
+    //!   overlap with the seed.
+    //! - The top 30 `track_similarity` neighbours with their score
+    //!   components and genre overlap.
+    //! - Hypothesis-discriminator summary lines so a regression has an
+    //!   immediately-readable verdict.
+    //!
+    //! ## Why `#[ignore]`
+    //!
+    //! Touches the live database and (when configured) live Last.fm.
+    //! Out of scope for `cargo test` defaults; only run on demand. The
+    //! `#[ignore]` gate is the cleanest way to opt the harness out of
+    //! CI while keeping it inside the same crate as the private radio
+    //! helpers it inspects.
+    //!
+    //! ## Adding a new diagnostic seed
+    //!
+    //! Just pass `NOOR_SEED=<id>`. No code change needed. Pick a seed
+    //! whose listen-history pattern matches the regression class you're
+    //! investigating: heavy negative signal seeds (recently-skipped
+    //! artist) are likely to have demoted library candidates;
+    //! positive-history seeds should keep library on top.
+    use super::*;
+    use crate::metadata::lastfm::LastFmClient;
+    use std::collections::{HashMap, HashSet};
+
+    fn track_genres(db: &Database, track_id: i64) -> HashSet<i64> {
+        if track_id <= 0 {
+            return HashSet::new();
+        }
+        db.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT genre_id FROM track_genres WHERE track_id = ?1")?;
+            let ids = stmt
+                .query_map(rusqlite::params![track_id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids.into_iter().collect())
+        })
+        .unwrap_or_default()
+    }
+
+    fn truncate(s: &str, n: usize) -> String {
+        s.chars().take(n).collect()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn radio_diagnostic_for_seed() {
+        let db_path =
+            std::env::var("NOOR_DB").unwrap_or_else(|_| "e:/NOORwave/noor.db".to_string());
+        let seed_id: i64 = std::env::var("NOOR_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1634);
+        let blend = RadioBlend::Mixed;
+        let limit: usize = 30;
+
+        let db = Database::open(&db_path).expect("open live db");
+
+        // ─── Seed metadata + genres ───────────────────────────────────────
+        let (seed_title, seed_artist) = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT t.title, COALESCE(a.name, '?') FROM tracks t \
+                     LEFT JOIN artists a ON a.id = t.artist_id WHERE t.id = ?1",
+                    rusqlite::params![seed_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .expect("seed lookup");
+        let seed_genres = track_genres(&db, seed_id);
+        let seed_genre_names: Vec<String> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id WHERE tg.track_id = ?1",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![seed_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "\n=== SEED: track {seed_id} '{seed_title}' by '{seed_artist}' ===\n  Genres: {:?}\n",
+            seed_genre_names
+        );
+
+        // ─── TasteVector + ArtistResolver ─────────────────────────────────
+        let (taste, resolver) = build_taste_inputs(&db, seed_id);
+        eprintln!(
+            "TasteVector: artist_affinity={}, genre_affinity={}, skipped_track_ids={}, recent_track_ids={}",
+            taste.artist_affinity.len(),
+            taste.genre_affinity.len(),
+            taste.skipped_track_ids.len(),
+            taste.recent_track_ids.len()
+        );
+
+        // ─── Replicate orchestrate_song's source generation ───────────────
+        let exclude_set: HashSet<i64> = HashSet::new();
+        let (lib_w, lfm_w, eng_w) = blend.weights();
+        let target_per_source = |w: f64| ((limit as f64 * w * 1.5).ceil() as usize).max(1);
+        let lib_target = target_per_source(lib_w);
+        let lfm_target = target_per_source(lfm_w);
+        let eng_target = target_per_source(eng_w);
+
+        // Library
+        let library_results: Vec<RadioCandidate> = {
+            let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
+            excl.push(seed_id);
+            let creativity = match blend {
+                RadioBlend::Familiar => 0.15,
+                RadioBlend::Mixed => 0.30,
+                RadioBlend::Adventurous => 0.50,
+            };
+            crate::services::learning::radio_from_neighbors(
+                &db,
+                seed_id,
+                &excl,
+                lib_target as i64,
+                creativity,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| RadioCandidate {
+                track_id: n.track_id,
+                tidal_track_id: None,
+                title: n.title,
+                artist_name: n.artist_name.unwrap_or_default(),
+                album_title: n.album_title,
+                artwork_url: n.artwork_url,
+                duration_ms: n.duration_ms,
+                isrc: None,
+                is_in_library: true,
+                source: RadioSource::Library,
+                reason: format!("library similarity {:.2}", n.similarity_score),
+                similarity_score: n.similarity_score,
+            })
+            .collect()
+        };
+        eprintln!("\nLibrary source: {} candidates (target {})", library_results.len(), lib_target);
+
+        // Last.fm
+        let http_client = reqwest::Client::new();
+        let lastfm = LastFmClient::load(http_client, &db);
+        let lastfm_results: Vec<RadioCandidate> = if let Some(client) = lastfm.as_ref() {
+            client
+                .track_get_similar(&seed_artist, &seed_title, lfm_target.max(20))
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .take(lfm_target * 2)
+                .map(|hit| RadioCandidate {
+                    track_id: 0,
+                    tidal_track_id: None,
+                    title: hit.title,
+                    artist_name: hit.artist,
+                    album_title: None,
+                    artwork_url: None,
+                    duration_ms: None,
+                    isrc: None,
+                    is_in_library: false,
+                    source: RadioSource::Lastfm,
+                    reason: format!("Last.fm match {:.2}", hit.match_score),
+                    similarity_score: hit.match_score.clamp(0.0, 1.0),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        eprintln!(
+            "Last.fm source: {} candidates (target {}, client={})",
+            lastfm_results.len(),
+            lfm_target,
+            lastfm.is_some()
+        );
+
+        // Engine
+        let mut engine_excl: Vec<i64> = exclude_set.iter().copied().collect();
+        engine_excl.push(seed_id);
+        let engine_results =
+            engine_results_from_track_similarity(&db, seed_id, eng_target, &engine_excl)
+                .unwrap_or_default();
+        eprintln!("Engine source: {} candidates (target {})", engine_results.len(), eng_target);
+
+        // ─── Combine + dedup → snapshot pre-affinity ──────────────────────
+        let combined = combine_with_dedup(
+            library_results.clone(),
+            lastfm_results.clone(),
+            engine_results.clone(),
+        );
+        eprintln!("\nAfter combine_with_dedup: {} candidates", combined.len());
+
+        // Map (source, track_id, normalised key) -> pre-affinity score
+        let pre_affinity: HashMap<(RadioSource, i64, String), f64> = combined
+            .iter()
+            .map(|c| {
+                (
+                    (
+                        c.source,
+                        c.track_id,
+                        normalize_for_dedup(&c.artist_name, &c.title),
+                    ),
+                    c.similarity_score,
+                )
+            })
+            .collect();
+
+        // ─── Apply taste signals ──────────────────────────────────────────
+        let mut after_affinity = combined.clone();
+        apply_taste_signals(&mut after_affinity, &taste, &resolver);
+        let dropped_by_suppression = combined.len() - after_affinity.len();
+        eprintln!(
+            "After apply_taste_signals: {} candidates (dropped {} via skipped_track_ids)",
+            after_affinity.len(),
+            dropped_by_suppression
+        );
+
+        // ─── Blend interleave → final queue ───────────────────────────────
+        let final_queue = blend_interleave(after_affinity.clone(), blend, limit);
+        eprintln!("\nFinal queue length: {}\n", final_queue.len());
+
+        // ─── Per-candidate breakdown ──────────────────────────────────────
+        eprintln!("==== FINAL QUEUE PER-CANDIDATE BREAKDOWN ====");
+        eprintln!(
+            "{:>3} {:>7} {:>7} {:>9} {:>9} {:>7} {:>5} {:<28} {:<28}",
+            "#", "src", "tid", "pre_aff", "post_aff", "mult", "g_olp", "artist", "title"
+        );
+        let mut zero_overlap_count = 0;
+        let mut unknown_overlap_count = 0;
+        let mut overlap_present_count = 0;
+        for (i, cand) in final_queue.iter().enumerate() {
+            let key = (
+                cand.source,
+                cand.track_id,
+                normalize_for_dedup(&cand.artist_name, &cand.title),
+            );
+            let pre = pre_affinity.get(&key).copied().unwrap_or(f64::NAN);
+            let mult = if pre > 0.0 {
+                cand.similarity_score / pre
+            } else {
+                f64::NAN
+            };
+            let cand_genres = track_genres(&db, cand.track_id);
+            let overlap_label = if cand.track_id <= 0 {
+                unknown_overlap_count += 1;
+                "?".to_string()
+            } else {
+                let n = cand_genres.intersection(&seed_genres).count();
+                if n == 0 {
+                    zero_overlap_count += 1;
+                } else {
+                    overlap_present_count += 1;
+                }
+                n.to_string()
+            };
+            let src = match cand.source {
+                RadioSource::Library => "library",
+                RadioSource::Lastfm => "lastfm",
+                RadioSource::Engine => "engine",
+            };
+            eprintln!(
+                "{:>3} {:>7} {:>7} {:>9.4} {:>9.4} {:>7.4} {:>5} {:<28} {:<28}",
+                i + 1,
+                src,
+                cand.track_id,
+                pre,
+                cand.similarity_score,
+                mult,
+                overlap_label,
+                truncate(&cand.artist_name, 26),
+                truncate(&cand.title, 26)
+            );
+        }
+
+        // ─── Top 30 track_similarity neighbours, with genre overlap ───────
+        eprintln!("\n==== TOP 30 track_similarity NEIGHBOURS for seed ====");
+        let neighbours: Vec<(i64, String, String, f64, f64, f64, f64)> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.title, COALESCE(a.name, '?'), \
+                            ts.similarity_score, ts.co_album_score, ts.co_artist_score, ts.genre_proximity \
+                     FROM track_similarity ts \
+                     JOIN tracks t ON t.id = CASE WHEN ts.track_a = ?1 THEN ts.track_b ELSE ts.track_a END \
+                     LEFT JOIN artists a ON a.id = t.artist_id \
+                     WHERE (ts.track_a = ?1 OR ts.track_b = ?1) AND t.id != ?1 \
+                     ORDER BY ts.similarity_score DESC LIMIT 30",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![seed_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, f64>(5)?,
+                            row.get::<_, f64>(6)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap_or_default();
+
+        eprintln!(
+            "{:>3} {:>7} {:>5} {:>5} {:>5} {:>5} {:>5} {:<28} {:<28}",
+            "#", "tid", "sim", "alb", "art", "gen", "g_olp", "artist", "title"
+        );
+        let mut neighbour_overlap = 0;
+        for (i, (tid, title, artist, sim, ca, cr, gp)) in neighbours.iter().enumerate() {
+            let cand_genres = track_genres(&db, *tid);
+            let overlap = cand_genres.intersection(&seed_genres).count();
+            if overlap > 0 {
+                neighbour_overlap += 1;
+            }
+            eprintln!(
+                "{:>3} {:>7} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5} {:<28} {:<28}",
+                i + 1,
+                tid,
+                sim,
+                ca,
+                cr,
+                gp,
+                overlap,
+                truncate(artist, 26),
+                truncate(title, 26)
+            );
+        }
+        eprintln!(
+            "\n{} of top-{} track_similarity neighbours share at least one genre with seed.",
+            neighbour_overlap,
+            neighbours.len()
+        );
+
+        // ─── Summary ──────────────────────────────────────────────────────
+        let by_source: HashMap<RadioSource, usize> =
+            final_queue.iter().fold(HashMap::new(), |mut m, c| {
+                *m.entry(c.source).or_insert(0) += 1;
+                m
+            });
+        eprintln!("\n==== SUMMARY ====");
+        eprintln!("Final queue source breakdown: {:?}", by_source);
+        eprintln!(
+            "Genre overlap in final queue: {} share, {} zero, {} unknown (lastfm)",
+            overlap_present_count, zero_overlap_count, unknown_overlap_count
+        );
+
+        // ─── Hypothesis discriminator ─────────────────────────────────────
+        eprintln!("\n==== HYPOTHESIS DISCRIMINATOR ====");
+
+        // H1: weak source candidates across the board
+        let h1_signal = library_results.is_empty() || engine_results.is_empty();
+        eprintln!(
+            "H1 (weak sources): library={} lastfm={} engine={}{}",
+            library_results.len(),
+            lastfm_results.len(),
+            engine_results.len(),
+            if h1_signal { "  [SIGNAL]" } else { "" }
+        );
+
+        // H2: apply_taste_signals promoting unrelated artists
+        let mut h2_promoted = 0;
+        for cand in &after_affinity {
+            let key = (
+                cand.source,
+                cand.track_id,
+                normalize_for_dedup(&cand.artist_name, &cand.title),
+            );
+            if let Some(pre) = pre_affinity.get(&key).copied() {
+                if cand.similarity_score > pre * 1.05 && cand.track_id > 0 {
+                    let cg = track_genres(&db, cand.track_id);
+                    if !cg.is_empty() && cg.intersection(&seed_genres).count() == 0 {
+                        h2_promoted += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "H2 (affinity promotes off-genre): {} candidates promoted >5% with zero genre overlap{}",
+            h2_promoted,
+            if h2_promoted > 3 { "  [SIGNAL]" } else { "" }
+        );
+
+        // H3: dedup letting unrelated cross-source candidates through
+        // Specifically: lastfm winners (track_id=0) where the same key had a library candidate that lost.
+        let mut h3_lastfm_wins = 0;
+        for c in &combined {
+            if c.source == RadioSource::Lastfm {
+                let norm = normalize_for_dedup(&c.artist_name, &c.title);
+                let library_loser_at_same_key = library_results
+                    .iter()
+                    .any(|lib| normalize_for_dedup(&lib.artist_name, &lib.title) == norm);
+                if library_loser_at_same_key {
+                    h3_lastfm_wins += 1;
+                }
+            }
+        }
+        eprintln!(
+            "H3 (cross-source dedup): {} lastfm winners where a library candidate existed at the same key{}",
+            h3_lastfm_wins,
+            if h3_lastfm_wins > 5 { "  [SIGNAL]" } else { "" }
+        );
+
+        // H4: stale track_similarity
+        let h4_signal = neighbour_overlap < (neighbours.len() / 2).max(1);
+        eprintln!(
+            "H4 (stale track_similarity): {}/{} top-30 neighbours share a genre with seed{}",
+            neighbour_overlap,
+            neighbours.len(),
+            if h4_signal { "  [SIGNAL]" } else { "" }
+        );
     }
 }
