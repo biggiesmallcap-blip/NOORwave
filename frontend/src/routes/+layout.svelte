@@ -45,6 +45,7 @@
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
+	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -128,6 +129,30 @@
 	});
 	let nowPlayingOpen = $state(false);
 	let moreOpen = $state(false);
+
+	// Phase 2b: queue-row "why is this here" tooltip. Tracks the
+	// reason string of the currently-hovered row plus the cursor
+	// position so QueueReasonCard can place itself near the trigger.
+	let hoveredReason = $state<string | null>(null);
+	let reasonMouseX = $state(0);
+	let reasonMouseY = $state(0);
+
+	function showQueueReason(reason: string | null | undefined, event: MouseEvent) {
+		if (!reason) return;
+		hoveredReason = reason;
+		reasonMouseX = event.clientX;
+		reasonMouseY = event.clientY;
+	}
+
+	function moveQueueReason(event: MouseEvent) {
+		if (hoveredReason === null) return;
+		reasonMouseX = event.clientX;
+		reasonMouseY = event.clientY;
+	}
+
+	function hideQueueReason() {
+		hoveredReason = null;
+	}
 	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
 
@@ -783,6 +808,7 @@
 <ContextMenu />
 <Toast />
 <CommandPalette />
+<QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
@@ -1183,6 +1209,19 @@
 							<div class="queue-side">
 								<span class="queue-time">{formatDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
+									{#if item.reason}
+										<button
+											class="queue-action icon reason"
+											aria-label="Why is this here?"
+											title="Why is this here?"
+											onmouseenter={(event) => showQueueReason(item.reason, event)}
+											onmousemove={moveQueueReason}
+											onmouseleave={hideQueueReason}
+											onfocus={(event) => showQueueReason(item.reason, event as unknown as MouseEvent)}
+											onblur={hideQueueReason}
+											onclick={stopPropagation}
+										>ⓘ</button>
+									{/if}
 									<button
 										class="queue-action icon"
 										class:active={item.track.is_favorite}

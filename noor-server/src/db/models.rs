@@ -100,6 +100,13 @@ pub struct QueueItem {
     pub track: Track,
     pub position: i32,
     pub source: String,
+    /// Per-row provenance string written by radio when a candidate
+    /// enters the queue. NULL for queue entries from automix, manual
+    /// add-to-queue, play-album, etc. — those producers will start
+    /// writing reasons in later phases. Frontend treats NULL as "no
+    /// reason recorded" and skips the tooltip.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

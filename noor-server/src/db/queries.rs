@@ -605,6 +605,59 @@ pub fn get_track_genre_paths(conn: &Connection) -> Result<HashMap<i64, Vec<Strin
     Ok(by_track)
 }
 
+/// Selective batch variant of [`get_track_genre_paths`]: returns the
+/// leaf-and-ancestor path strings for a specific list of track ids
+/// rather than the whole library. Used by radio's per-request genre
+/// enrichment pass — typically 30–60 candidates, well sized for a
+/// single recursive-CTE query.
+///
+/// Tracks with no genre rows are absent from the returned map (callers
+/// should treat absence as "no genre data" rather than insert a default
+/// empty Vec).
+pub fn get_genres_for_tracks(
+    conn: &Connection,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // SQLite parameter limit is generous (default 999) but we keep the
+    // CSV path predictable: one '?' per id, bound as int values.
+    let placeholders = std::iter::repeat("?")
+        .take(track_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
+            SELECT id, parent_id, name
+            FROM genres
+            WHERE parent_id IS NULL
+            UNION ALL
+            SELECT g.id, g.parent_id, genre_paths.path || ' > ' || g.name
+            FROM genres g
+            JOIN genre_paths ON g.parent_id = genre_paths.id
+        )
+        SELECT tg.track_id, genre_paths.path
+        FROM track_genres tg
+        JOIN genre_paths ON genre_paths.id = tg.genre_id
+        WHERE tg.track_id IN ({placeholders})
+        ORDER BY tg.track_id, genre_paths.path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_iter = rusqlite::params_from_iter(track_ids.iter().copied());
+    let mut rows = stmt.query(params_iter)?;
+
+    let mut by_track: HashMap<i64, Vec<String>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let track_id: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        by_track.entry(track_id).or_default().push(path);
+    }
+
+    Ok(by_track)
+}
+
 pub fn create_smart_playlist(
     conn: &Connection,
     name: &str,

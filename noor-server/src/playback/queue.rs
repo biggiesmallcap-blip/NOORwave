@@ -38,7 +38,7 @@ impl ShuffleMode {
 
 pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
     let mut stmt = conn.prepare(
-        "SELECT q.id, q.position, q.source,
+        "SELECT q.id, q.position, q.source, q.reason,
                 t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
                 t.tidal_id, t.ytmusic_id, t.soundcloud_id,
@@ -58,7 +58,8 @@ pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
                 id: row.get(0)?,
                 position: row.get(1)?,
                 source: row.get(2)?,
-                track: track_from_row_with_offset(row, 3)?,
+                reason: row.get(3)?,
+                track: track_from_row_with_offset(row, 4)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -75,16 +76,35 @@ pub fn queue_track_ids(conn: &Connection) -> Result<Vec<i64>> {
 }
 
 pub fn append_tracks(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
+    let with_reasons: Vec<(Track, Option<String>)> = tracks
+        .iter()
+        .cloned()
+        .map(|track| (track, None))
+        .collect();
+    append_tracks_with_reasons(conn, &with_reasons, source)
+}
+
+/// Append tracks with per-row reason strings.
+///
+/// Radio is the producer of reasons today; automix and manual paths
+/// pass `None` via [`append_tracks`]. The reason column stays
+/// queryable but the frontend treats NULL as "no provenance recorded"
+/// and renders no tooltip.
+pub fn append_tracks_with_reasons(
+    conn: &Connection,
+    tracks: &[(Track, Option<String>)],
+    source: &str,
+) -> Result<Vec<QueueItem>> {
     let start_pos: i32 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
         [],
         |row| row.get(0),
     )?;
 
-    for (idx, track) in tracks.iter().enumerate() {
+    for (idx, (track, reason)) in tracks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO queue (track_id, position, source) VALUES (?1, ?2, ?3)",
-            params![track.id, start_pos + idx as i32, source],
+            "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
+            params![track.id, start_pos + idx as i32, source, reason],
         )?;
     }
 
@@ -94,6 +114,16 @@ pub fn append_tracks(conn: &Connection, tracks: &[Track], source: &str) -> Resul
 pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
     conn.execute("DELETE FROM queue", [])?;
     append_tracks(conn, tracks, source)
+}
+
+/// Wipe the queue and replace with tracks plus per-row reasons.
+pub fn replace_queue_with_reasons(
+    conn: &Connection,
+    tracks: &[(Track, Option<String>)],
+    source: &str,
+) -> Result<Vec<QueueItem>> {
+    conn.execute("DELETE FROM queue", [])?;
+    append_tracks_with_reasons(conn, tracks, source)
 }
 
 pub fn clear_queue(conn: &Connection) -> Result<()> {

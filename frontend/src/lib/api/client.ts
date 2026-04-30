@@ -262,6 +262,14 @@ export interface QueueItem {
 	position: number;
 	source: string;
 	track: Track;
+	/**
+	 * Per-row provenance string. Radio writes a structured "why is this
+	 * here" reason on insert; automix and manual paths leave it null
+	 * until those producers migrate. Format: an optional human prefix
+	 * followed by " | " and a JSON suffix the frontend tooltip parses
+	 * (see `parseReason` in $lib/utils/reason).
+	 */
+	reason?: string | null;
 }
 
 export interface PlaybackState {
@@ -1355,10 +1363,12 @@ export const api = {
 		});
 	},
 
-	replacePlaybackQueue(trackIds: number[]) {
+	replacePlaybackQueue(trackIds: number[], reasons?: (string | null)[]) {
+		const body: Record<string, unknown> = { track_ids: trackIds };
+		if (reasons) body.reasons = reasons;
 		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue', undefined, {
 			method: 'POST',
-			body: JSON.stringify({ track_ids: trackIds }),
+			body: JSON.stringify(body),
 		});
 	},
 

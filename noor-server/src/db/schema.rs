@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_015,
     MIGRATION_016,
     MIGRATION_017,
+    MIGRATION_018,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -564,6 +565,14 @@ ALTER TABLE discovery_feedback ADD COLUMN session_id TEXT;
 const MIGRATION_017: &str = r#"
 ALTER TABLE playlists ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX idx_playlists_favorite ON playlists(is_favorite);
+"#;
+
+// Phase 2b: per-queue-item provenance string. Radio writes a structured
+// "why is this here" reason on insert; automix-extended items carry NULL
+// until automix migrates in a later phase. Frontend renders the reason
+// in a queue-row tooltip and tolerates NULL gracefully.
+const MIGRATION_018: &str = r#"
+ALTER TABLE queue ADD COLUMN reason TEXT;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

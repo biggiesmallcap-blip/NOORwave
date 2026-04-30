@@ -649,13 +649,21 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 // ─── "Start from here" actions ────────────────────────────────────────────────
 // Shared helper: replace the queue with the given track IDs and begin playback
 // at the first one. Order matters — the first ID in `trackIds` is played first.
-async function loadQueueAndPlay(trackIds: number[], options?: { preserveRadioReasons?: boolean }) {
+//
+// `reasons` is index-aligned with `trackIds`. Radio paths pass per-row
+// provenance strings; non-radio callers pass nothing (the queue rows
+// land with NULL reasons). The backend persists whatever it gets and
+// the queue tooltip reads from the round-tripped QueueItem.reason.
+async function loadQueueAndPlay(
+	trackIds: number[],
+	options?: { preserveRadioReasons?: boolean; reasons?: (string | null)[] },
+) {
 	if (trackIds.length === 0) return;
 	if (!assertOnline()) return;
 	playerError.set(null);
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
-		await api.replacePlaybackQueue(trackIds);
+		await api.replacePlaybackQueue(trackIds, options?.reasons);
 		const snapshot = await api.playTrack(trackIds[0]);
 		hydratePlayback(snapshot);
 	} catch (error) {
@@ -750,12 +758,19 @@ export async function startSongRadio(seedTrackId: number) {
 	playerError.set(null);
 	try {
 		const queue = await api.startRadioSong({ seed_track_id: seedTrackId, limit: 60 });
-		const radioIds = queue.tracks
-			.filter((t) => t.is_in_library && t.track_id > 0)
-			.map((t) => t.track_id)
-			.filter((id) => id !== seedTrackId);
+		const inLibrary = queue.tracks.filter(
+			(t) => t.is_in_library && t.track_id > 0 && t.track_id !== seedTrackId,
+		);
+		const radioIds = inLibrary.map((t) => t.track_id);
+		const radioReasons = inLibrary.map((t) => t.reason ?? null);
 		setRadioReasons(queue.tracks);
-		await loadQueueAndPlay([seedTrackId, ...radioIds], { preserveRadioReasons: true });
+		// Seed track leads with no reason (it's the user's pick, not a
+		// recommendation), library candidates carry their backend-issued
+		// reason strings.
+		await loadQueueAndPlay([seedTrackId, ...radioIds], {
+			preserveRadioReasons: true,
+			reasons: [null, ...radioReasons],
+		});
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start radio', error, () => startSongRadio(seedTrackId));
@@ -800,15 +815,15 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 	playerError.set(null);
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
-		const radioIds = queue.tracks
-			.filter((t) => t.is_in_library && t.track_id > 0)
-			.map((t) => t.track_id);
+		const inLibrary = queue.tracks.filter((t) => t.is_in_library && t.track_id > 0);
+		const radioIds = inLibrary.map((t) => t.track_id);
+		const radioReasons = inLibrary.map((t) => t.reason ?? null);
 		if (radioIds.length === 0) {
 			playerError.set({ message: 'No library tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true });
+		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true, reasons: radioReasons });
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
@@ -820,15 +835,15 @@ export async function startAlbumRadio(albumId: number) {
 	playerError.set(null);
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
-		const radioIds = queue.tracks
-			.filter((t) => t.is_in_library && t.track_id > 0)
-			.map((t) => t.track_id);
+		const inLibrary = queue.tracks.filter((t) => t.is_in_library && t.track_id > 0);
+		const radioIds = inLibrary.map((t) => t.track_id);
+		const radioReasons = inLibrary.map((t) => t.reason ?? null);
 		if (radioIds.length === 0) {
 			playerError.set({ message: 'No library tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true });
+		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true, reasons: radioReasons });
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start album radio', error, () => startAlbumRadio(albumId));

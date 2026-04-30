@@ -132,6 +132,12 @@ pub struct PlaybackTrackRequest {
 #[derive(Debug, Deserialize)]
 pub struct QueueReplaceRequest {
     track_ids: Vec<i64>,
+    /// Optional per-row provenance strings, aligned by index with
+    /// `track_ids`. `None` (or omission) means "no reason recorded".
+    /// When the client sends a shorter list than `track_ids`, missing
+    /// indices are treated as `None`. Excess entries are ignored.
+    #[serde(default)]
+    reasons: Option<Vec<Option<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5318,7 +5324,15 @@ async fn replace_playback_queue(
     state
         .db
         .with_conn(|conn| {
-            let queue = player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?;
+            let queue = match payload.reasons.as_ref() {
+                Some(reasons) => player::replace_queue_with_reasons(
+                    conn,
+                    &payload.track_ids,
+                    reasons,
+                    "user",
+                )?,
+                None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
+            };
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
             Ok(Json(json!({ "queue": queue })))
         })

@@ -246,6 +246,27 @@ pub fn replace_queue_with_tracks(
     queue::replace_queue(conn, &tracks, source)
 }
 
+/// Replace the queue with tracks plus optional per-row reasons.
+///
+/// `reasons` is index-aligned with `track_ids`. Missing or shorter
+/// reasons lists default to `None` for the absent indices. Tracks that
+/// fail to load are skipped (consistent with `replace_queue_with_tracks`).
+pub fn replace_queue_with_reasons(
+    conn: &Connection,
+    track_ids: &[i64],
+    reasons: &[Option<String>],
+    source: &str,
+) -> Result<Vec<QueueItem>> {
+    let mut paired: Vec<(Track, Option<String>)> = Vec::with_capacity(track_ids.len());
+    for (idx, track_id) in track_ids.iter().enumerate() {
+        if let Some(track) = queue::get_track_by_id(conn, *track_id)? {
+            let reason = reasons.get(idx).cloned().unwrap_or(None);
+            paired.push((track, reason));
+        }
+    }
+    queue::replace_queue_with_reasons(conn, &paired, source)
+}
+
 pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapshot> {
     let track = queue::get_track_by_id(conn, track_id)?
         .ok_or_else(|| anyhow!("track {track_id} not found"))?;
@@ -1151,7 +1172,8 @@ mod tests {
                 id INTEGER PRIMARY KEY,
                 track_id INTEGER NOT NULL,
                 position INTEGER NOT NULL,
-                source TEXT DEFAULT 'user'
+                source TEXT DEFAULT 'user',
+                reason TEXT
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,

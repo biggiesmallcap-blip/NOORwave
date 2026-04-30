@@ -208,7 +208,38 @@ pub async fn orchestrate_song(
 
     // ── Combine + blend ───────────────────────────────────────────────────────
     let mut combined = combine_with_dedup(library_results, lastfm_results, engine_results);
+
+    // Snapshot pre-affinity scores so the reason-string suffix can
+    // record the affinity multiplier per candidate. Keyed by
+    // (source, track_id, normalised dedup key) — same shape the
+    // diagnostic harness uses.
+    let pre_affinity_scores: HashMap<(RadioSource, i64, String), f64> = combined
+        .iter()
+        .map(|c| {
+            (
+                (
+                    c.source,
+                    c.track_id,
+                    normalize_for_dedup(&c.artist_name, &c.title),
+                ),
+                c.similarity_score,
+            )
+        })
+        .collect();
+
+    // Genre enrichment: load genre paths for every candidate with a
+    // real track_id (lastfm hits with track_id=0 are skipped — they
+    // have no library row to look up). Build weighted genre sets and
+    // a per-candidate Jaccard against the seed.
+    let jaccard_by_index = compute_genre_jaccard(db, seed_track_id, &combined);
+
     apply_taste_signals(&mut combined, &taste, &resolver);
+
+    // Reason-string enrichment: append a JSON suffix carrying the
+    // structured breakdown that the frontend tooltip parses. Best
+    // effort — failure here just keeps the prefix.
+    annotate_reasons(&mut combined, &pre_affinity_scores, &jaccard_by_index);
+
     let ordered = blend_interleave(combined, blend, limit);
 
     Ok(RadioQueue {
@@ -606,6 +637,122 @@ fn apply_taste_signals(
             let multiplier = 1.0 + (affinity.pos * 0.05) - (affinity.neg * 0.07);
             cand.similarity_score *= multiplier.max(0.0);
         }
+    }
+}
+
+/// Compute a weighted Jaccard genre similarity between the seed and
+/// every candidate that has a real library `track_id`.
+///
+/// Returns a `HashMap<usize, f64>` keyed by candidate index in the
+/// passed slice. Lastfm candidates (track_id == 0) and library
+/// candidates with no genre rows are absent from the map; callers
+/// should treat absence as "no signal" rather than "zero similarity".
+///
+/// On any DB error or missing seed genres, returns an empty map and
+/// logs. Genre signal failure must not take the radio request offline.
+fn compute_genre_jaccard(
+    db: &Database,
+    seed_track_id: i64,
+    candidates: &[RadioCandidate],
+) -> HashMap<usize, f64> {
+    use crate::genre::jaccard::{weighted_genre_set, weighted_jaccard};
+
+    let cand_ids: Vec<i64> = candidates
+        .iter()
+        .map(|c| c.track_id)
+        .filter(|id| *id > 0)
+        .collect();
+    if cand_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut all_ids = cand_ids.clone();
+    all_ids.push(seed_track_id);
+    all_ids.sort_unstable();
+    all_ids.dedup();
+
+    let paths_by_track = match db.with_conn(move |conn| {
+        crate::db::queries::get_genres_for_tracks(conn, &all_ids)
+    }) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                seed_track_id,
+                "radio: genre enrichment query failed ({err:#}); skipping genre signal"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let seed_set = match paths_by_track.get(&seed_track_id) {
+        Some(paths) => weighted_genre_set(paths),
+        None => {
+            tracing::debug!(
+                seed_track_id,
+                "radio: seed has no genre rows; genre Jaccard skipped for all candidates"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let mut out = HashMap::new();
+    for (idx, cand) in candidates.iter().enumerate() {
+        if cand.track_id <= 0 {
+            continue;
+        }
+        let Some(paths) = paths_by_track.get(&cand.track_id) else {
+            continue;
+        };
+        let cand_set = weighted_genre_set(paths);
+        let score = weighted_jaccard(&seed_set, &cand_set);
+        out.insert(idx, score);
+    }
+    out
+}
+
+/// Append a structured JSON suffix to each candidate's `reason` string,
+/// carrying the genre Jaccard and the affinity multiplier for the
+/// frontend tooltip to display.
+///
+/// Format: `"<existing prefix> | <json>"`. The frontend parser splits
+/// on the rightmost ` | ` and tries `JSON.parse` on the right half;
+/// candidates without the suffix keep working as plain strings.
+///
+/// Best-effort: serialisation failure is silently swallowed so a
+/// reason-formatting bug never fails a radio request.
+fn annotate_reasons(
+    candidates: &mut [RadioCandidate],
+    pre_affinity: &HashMap<(RadioSource, i64, String), f64>,
+    jaccard_by_index: &HashMap<usize, f64>,
+) {
+    for (idx, cand) in candidates.iter_mut().enumerate() {
+        let key = (
+            cand.source,
+            cand.track_id,
+            normalize_for_dedup(&cand.artist_name, &cand.title),
+        );
+        let pre = pre_affinity.get(&key).copied();
+        let affinity_mult = match pre {
+            Some(p) if p > 0.0 => Some(cand.similarity_score / p),
+            _ => None,
+        };
+        let jaccard = jaccard_by_index.get(&idx).copied();
+
+        // Build the JSON suffix manually to avoid pulling in serde_json
+        // formatting overhead for a 1–2 field payload. Only the fields
+        // we actually computed get emitted.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(j) = jaccard {
+            parts.push(format!("\"genre_jaccard\":{j:.4}"));
+        }
+        if let Some(m) = affinity_mult {
+            parts.push(format!("\"affinity_mult\":{m:.4}"));
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let suffix = format!("{{{}}}", parts.join(","));
+        cand.reason = format!("{} | {}", cand.reason, suffix);
     }
 }
 
