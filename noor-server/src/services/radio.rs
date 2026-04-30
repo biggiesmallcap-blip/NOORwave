@@ -121,10 +121,11 @@ pub async fn orchestrate_song(
     // not fatal — it just means no affinity nudges this call.
     let (taste, resolver) = build_taste_inputs(db, seed_track_id);
 
-    let (lib_w, lfm_w, _eng_w) = blend.weights();
+    let (lib_w, lfm_w, eng_w) = blend.weights();
     let target_per_source = |w: f64| ((limit as f64 * w * 1.5).ceil() as usize).max(1);
     let lib_target = target_per_source(lib_w);
     let lfm_target = target_per_source(lfm_w);
+    let eng_target = target_per_source(eng_w);
 
     // ── Library source ────────────────────────────────────────────────────────
     let library_results: Vec<RadioCandidate> = {
@@ -192,8 +193,21 @@ pub async fn orchestrate_song(
             Vec::new()
         };
 
+    // ── Engine source ─────────────────────────────────────────────────────────
+    // Pre-computed track_similarity table (co-album / co-artist /
+    // co-listen / genre-proximity / duration / era). Library-only,
+    // independent recall path from the embedding model that
+    // `radio_from_neighbors` uses. Excludes seed + caller's exclude
+    // list so we don't surface tracks the user already has queued.
+    let engine_results: Vec<RadioCandidate> = {
+        let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
+        excl.push(seed_track_id);
+        engine_results_from_track_similarity(db, seed_track_id, eng_target, &excl)
+            .unwrap_or_default()
+    };
+
     // ── Combine + blend ───────────────────────────────────────────────────────
-    let mut combined = combine_with_dedup(library_results, lastfm_results, Vec::new());
+    let mut combined = combine_with_dedup(library_results, lastfm_results, engine_results);
     apply_taste_signals(&mut combined, &taste, &resolver);
     let ordered = blend_interleave(combined, blend, limit);
 
@@ -351,6 +365,78 @@ fn build_taste_inputs(db: &Database, seed_track_id: i64) -> (TasteVector, Artist
             (TasteVector::default(), ArtistResolver::default())
         }
     }
+}
+
+/// Pull engine-source candidates from the precomputed `track_similarity`
+/// table. Independent recall path from `radio_from_neighbors` (which uses
+/// the embedding model) — both can return library tracks but they score
+/// proximity differently, so the union is meaningfully wider than either
+/// alone.
+///
+/// Hands back at most `target` candidates, sorted by `similarity_score`
+/// desc. Errors are logged and swallowed: an engine miss should not take
+/// the radio request offline, the other two sources can carry it.
+///
+/// The result `track_id` is a library id, so `is_in_library = true` and
+/// hard-suppression in `apply_taste_signals` works against it. The
+/// `reason` field carries the component breakdown so the
+/// "Why is this here?" hover-card can show co-album / co-artist /
+/// co-listen / genre-proximity scores.
+fn engine_results_from_track_similarity(
+    db: &Database,
+    seed_track_id: i64,
+    target: usize,
+    exclude_ids: &[i64],
+) -> Result<Vec<RadioCandidate>> {
+    if target == 0 {
+        return Ok(Vec::new());
+    }
+    // Fetch up to 2x target so the dedup downstream has room to drop
+    // duplicates without starving the engine slot.
+    let fetch_limit = (target * 2).max(8) as i64;
+    let exclude_owned: Vec<i64> = exclude_ids.to_vec();
+    let rows = db.with_conn(move |conn| {
+        crate::db::queries::get_similar_tracks(conn, seed_track_id, fetch_limit, &exclude_owned)
+    });
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                seed_track_id,
+                "radio: engine source (track_similarity) lookup failed ({err:#}); returning empty"
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    let candidates: Vec<RadioCandidate> = rows
+        .into_iter()
+        .map(|ts| RadioCandidate {
+            track_id: ts.track_id,
+            tidal_track_id: None,
+            title: ts.title,
+            artist_name: ts.artist_name.unwrap_or_default(),
+            album_title: ts.album_title,
+            artwork_url: ts.artwork_url,
+            duration_ms: ts.duration_ms,
+            isrc: None,
+            is_in_library: true,
+            source: RadioSource::Engine,
+            reason: format!(
+                "library similarity {:.2} (co-album {:.2}, co-artist {:.2}, co-listen {:.2}, genre {:.2})",
+                ts.similarity_score,
+                ts.co_album_score,
+                ts.co_artist_score,
+                ts.co_listen_score,
+                ts.genre_proximity
+            ),
+            similarity_score: ts.similarity_score,
+        })
+        .take(target)
+        .collect();
+
+    Ok(candidates)
 }
 
 /// Generate a session id like "rad_2a4f...".
@@ -878,5 +964,225 @@ mod radio_phase2_tests {
         apply_taste_signals(&mut candidates, &taste, &resolver);
         assert!(candidates[0].similarity_score >= 0.0);
         assert!((candidates[0].similarity_score - 0.0).abs() < 1e-12);
+    }
+
+    // ─── Stage 2: engine slot fills with track_similarity ─────────────────────
+
+    /// Build an in-memory Database with the full schema and seed:
+    ///   - artist 1 "A"
+    ///   - 4 tracks (100..103) — 100 is the radio seed
+    ///   - 3 track_similarity rows pointing seed→{101, 102, 103} with
+    ///     different score components (co-album, co-artist, genre proximity)
+    ///
+    /// The seeded rows represent three legitimate library-similarity
+    /// signals that the engine slot should surface:
+    ///   - track 101 (sim 0.85, co_album=1.0): same album as seed.
+    ///   - track 102 (sim 0.65, co_artist=1.0): same artist, different album.
+    ///   - track 103 (sim 0.30, genre=0.5):    shared genre branch only.
+    ///
+    /// These are the three new tracks the engine slot brings to a radio
+    /// queue that previously (Stage 1) would have returned only library
+    /// (embedding) and lastfm results. None of them require an embedding
+    /// model to surface; track_similarity is the second recall path.
+    fn seed_engine_test_db() -> Database {
+        let db = Database::open(":memory:").expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            for id in 100..=103 {
+                conn.execute(
+                    "INSERT INTO tracks (id, title, artist_id, album_id, source) \
+                     VALUES (?1, ?2, 1, NULL, 'tidal')",
+                    rusqlite::params![id, format!("Track {id}")],
+                )?;
+            }
+            // track_similarity has CHECK (track_a < track_b), so seed=100
+            // is always track_a. similarity_score is the rolled-up field
+            // that engine_results_from_track_similarity sorts by.
+            for (b, sim, co_album, co_artist, genre) in [
+                (101_i64, 0.85_f64, 1.0_f64, 0.0_f64, 0.0_f64),
+                (102_i64, 0.65_f64, 0.0_f64, 1.0_f64, 0.0_f64),
+                (103_i64, 0.30_f64, 0.0_f64, 0.0_f64, 0.5_f64),
+            ] {
+                conn.execute(
+                    "INSERT INTO track_similarity \
+                     (track_a, track_b, similarity_score, co_album_score, co_artist_score, genre_proximity) \
+                     VALUES (100, ?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![b, sim, co_album, co_artist, genre],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn engine_returns_seeded_track_similarity_in_score_order() {
+        let db = seed_engine_test_db();
+        let results =
+            engine_results_from_track_similarity(&db, 100, 10, &[]).expect("engine results");
+
+        assert_eq!(results.len(), 3, "expected 3 seeded similarity rows");
+
+        // Ordering: 101 (0.85) > 102 (0.65) > 103 (0.30).
+        let ids: Vec<i64> = results.iter().map(|c| c.track_id).collect();
+        assert_eq!(ids, vec![101, 102, 103]);
+
+        // Provenance: every result is engine-source, in-library, with a
+        // reason string carrying the score breakdown so the
+        // "Why is this here?" UI can show it.
+        for cand in &results {
+            assert_eq!(cand.source, RadioSource::Engine);
+            assert!(cand.is_in_library);
+            assert!(cand.reason.starts_with("library similarity"));
+            assert!(cand.reason.contains("co-album"));
+            assert!(cand.reason.contains("co-artist"));
+            assert!(cand.reason.contains("genre"));
+        }
+
+        // Specific component check: track 101 was seeded with co_album=1.0,
+        // so its reason should mention that magnitude.
+        let r101 = results.iter().find(|c| c.track_id == 101).unwrap();
+        assert!(r101.reason.contains("co-album 1.00"));
+    }
+
+    #[test]
+    fn engine_respects_target_limit() {
+        let db = seed_engine_test_db();
+        let results = engine_results_from_track_similarity(&db, 100, 2, &[])
+            .expect("engine results truncated to 2");
+        assert_eq!(results.len(), 2);
+        // Top 2 by similarity_score: 101 (0.85), 102 (0.65).
+        assert_eq!(results[0].track_id, 101);
+        assert_eq!(results[1].track_id, 102);
+    }
+
+    #[test]
+    fn engine_excludes_listed_track_ids() {
+        let db = seed_engine_test_db();
+        // Exclude track 101 — should drop the top result.
+        let results = engine_results_from_track_similarity(&db, 100, 10, &[101])
+            .expect("engine results with exclusion");
+        let ids: Vec<i64> = results.iter().map(|c| c.track_id).collect();
+        assert_eq!(ids, vec![102, 103]);
+    }
+
+    #[test]
+    fn engine_returns_empty_when_target_is_zero() {
+        let db = seed_engine_test_db();
+        let results = engine_results_from_track_similarity(&db, 100, 0, &[]).expect("zero target");
+        assert!(results.is_empty());
+    }
+
+    /// Stage 2 before/after diff demonstration with affinity logging.
+    ///
+    /// Before (Stage 1): library + lastfm + empty engine = `empty_input`
+    /// candidate set after combine_with_dedup. With empty taste and an
+    /// empty resolver, apply_taste_signals is a no-op. Result is the
+    /// `empty_input` count.
+    ///
+    /// After (Stage 2): library + lastfm + non-empty engine = three new
+    /// engine candidates surface. Each is a real library track with
+    /// documented similarity provenance. None override existing dedup
+    /// winners (they cover artist names not present in the library/
+    /// lastfm slots in this fixture).
+    ///
+    /// Per-candidate affinity multiplier is logged for visibility — soft
+    /// signal, not a gate. With the small artist-affinity values seeded
+    /// here the multipliers stay close to 1.0; if a future change made
+    /// the formula aggressive enough to swamp the source-native score,
+    /// these logs would make it obvious.
+    #[test]
+    fn stage_2_engine_diff_with_affinity_logging() {
+        let db = seed_engine_test_db();
+
+        // Empty engine baseline (Stage 1 shape): combine library +
+        // lastfm + empty engine. Use empty source slots since this test
+        // exercises only the diff brought by the engine slot itself.
+        let mut empty_path =
+            combine_with_dedup(Vec::new(), Vec::new(), Vec::new());
+        assert!(empty_path.is_empty(), "no candidates without engine slot");
+
+        // Engine-on (Stage 2 shape): same combine, with engine populated.
+        let engine = engine_results_from_track_similarity(&db, 100, 10, &[])
+            .expect("engine results");
+        let engine_count = engine.len();
+        let mut engine_path = combine_with_dedup(Vec::new(), Vec::new(), engine);
+
+        assert_eq!(
+            engine_path.len(),
+            engine_count,
+            "every engine candidate survives dedup when no other source competes"
+        );
+
+        // Apply a non-empty taste to exercise the affinity path. Artist
+        // 1 (which all engine candidates belong to) is mildly liked.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 4.0, 1.0)]); // pos=4, neg=1
+
+        // Snapshot scores before affinity to compute the multiplier
+        // empirically per candidate.
+        let pre: Vec<(i64, f64)> = engine_path
+            .iter()
+            .map(|c| (c.track_id, c.similarity_score))
+            .collect();
+
+        apply_taste_signals(&mut engine_path, &taste, &resolver);
+
+        // Stage 2 visibility: print per-candidate affinity multiplier
+        // so any future formula change shows up here. Soft signal,
+        // not a hard gate.
+        eprintln!(
+            "stage 2 affinity multipliers (artist=A, pos=4, neg=1):"
+        );
+        let post: Vec<(i64, f64)> = engine_path
+            .iter()
+            .map(|c| (c.track_id, c.similarity_score))
+            .collect();
+        for (track_id, post_score) in &post {
+            let pre_score = pre.iter().find(|(id, _)| id == track_id).unwrap().1;
+            let multiplier = post_score / pre_score;
+            eprintln!(
+                "  track {track_id}: pre={pre_score:.4} post={post_score:.4} multiplier={multiplier:.4}"
+            );
+        }
+
+        // Expected multiplier from the formula: 1.0 + 4*0.05 - 1*0.07 = 1.13.
+        // Same artist on every candidate, so every multiplier is 1.13.
+        for (_, post_score) in &post {
+            let pre_score = pre.iter().find(|(_, _)| true).unwrap().1;
+            // Use any pre score from the same candidate position; we just
+            // need to confirm the multiplier holds.
+            let _ = pre_score;
+        }
+        for (track_id, post_score) in &post {
+            let pre_score = pre.iter().find(|(id, _)| id == track_id).unwrap().1;
+            assert!(
+                ((post_score / pre_score) - 1.13).abs() < 1e-9,
+                "expected multiplier 1.13 for track {track_id}, got {}",
+                post_score / pre_score
+            );
+        }
+
+        // Justification (for the commit and for future readers):
+        // - Track 101 surfaces because it shares an album with the seed
+        //   (co_album=1.0). Same-album tracks are correctly classified as
+        //   similar by the precomputed table.
+        // - Track 102 surfaces because it shares the artist (co_artist=1.0)
+        //   without sharing the album — exactly the kind of "more by this
+        //   artist" expansion radio should offer.
+        // - Track 103 surfaces from genre-proximity alone (genre=0.5) at a
+        //   correspondingly lower score, reflecting weaker library
+        //   evidence for similarity.
+        // None of these would have surfaced in Stage 1 because the engine
+        // slot was empty; the embedding model (the other library recall
+        // path) is independent and may or may not also surface them.
+        let ids: Vec<i64> = engine_path.iter().map(|c| c.track_id).collect();
+        assert_eq!(ids, vec![101, 102, 103]);
     }
 }
