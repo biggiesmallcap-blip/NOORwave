@@ -40,6 +40,9 @@ export interface BuildTrackMenuOptions {
 	hideArtistActions?: boolean;
 	/** Callback after a destructive action like remove, so caller can refetch. */
 	onRemoved?: () => void;
+	/** Phase 2c-ii-a: pending rows have no resolved track_id; strip all actions
+	 *  that require one, leaving only Remove from queue. */
+	isPending?: boolean;
 }
 
 const SEPARATOR: MenuItem = { separator: true, label: '' };
@@ -51,6 +54,22 @@ const SEPARATOR: MenuItem = { separator: true, label: '' };
  * here makes it available everywhere.
  */
 export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions = {}): MenuItem[] {
+	// Pending rows haven't resolved to a library track yet; only removal is safe.
+	if (options.isPending) {
+		if (options.queueItemId != null) {
+			return [{
+				label: 'Remove from queue',
+				icon: '×',
+				danger: true,
+				onSelect: async () => {
+					await removeTrackFromQueue(options.queueItemId!);
+					options.onRemoved?.();
+				}
+			}];
+		}
+		return [];
+	}
+
 	const items: MenuItem[] = [];
 	const hasAlbum = !options.hideAlbumActions && track.album_id != null;
 	const hasArtist = !options.hideArtistActions && track.artist_id != null;

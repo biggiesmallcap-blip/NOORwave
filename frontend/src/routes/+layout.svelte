@@ -6,6 +6,7 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import {
 		currentTrack,
+		currentQueueItemId,
 		currentStreamDisplay,
 		isPlaying,
 		position,
@@ -481,7 +482,7 @@
 	 * library-only `/api/radio/song` which doesn't know how to look
 	 * up negative ids and 500s.
 	 */
-	function pickMenuBuilder(track: Track, options?: { queueItemId?: number }) {
+	function pickMenuBuilder(track: Track, options?: { queueItemId?: number; isPending?: boolean }) {
 		const tidal = trackToTidalPlayable(track);
 		if (tidal) {
 			if (options?.queueItemId !== undefined) {
@@ -502,13 +503,13 @@
 	function openQueueRowMenu(item: QueueItemType, event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
-		const items = pickMenuBuilder(item.track, { queueItemId: item.id });
+		const items = pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openContextMenu(event, items, item.track.title);
 	}
 
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
 		event.stopPropagation();
-		const items = pickMenuBuilder(item.track, { queueItemId: item.id });
+		const items = pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
 	}
 
@@ -1192,9 +1193,11 @@
 				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
-						{@const isPending = item.resolution_state === 'pending'}
+						{@const isPending = item.is_pending === true}
 						<div
-							class:active={$currentTrack?.id === item.track.id}
+							class:active={$currentQueueItemId != null
+								? $currentQueueItemId === item.id
+								: $currentTrack?.id === item.track.id}
 							class:dragging={dragItemId === item.id}
 							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
 							class:pending={isPending}
@@ -1258,6 +1261,7 @@
 										class:active={item.track.is_favorite}
 										aria-label={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
 										title={item.track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+										disabled={isPending}
 										onclick={(event) => void handleQueueRowFavorite(item.track.id, event)}
 									>{item.track.is_favorite ? '♥' : '♡'}</button>
 									<button
@@ -1544,10 +1548,12 @@
 				<div class="mobile-np-queue-list">
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
-						{@const isPending = item.resolution_state === 'pending'}
+						{@const isPending = item.is_pending === true}
 						<div
 							class="queue-row"
-							class:active={$currentTrack.id === item.track.id}
+							class:active={$currentQueueItemId != null
+								? $currentQueueItemId === item.id
+								: $currentTrack?.id === item.track.id}
 							class:pending={isPending}
 							role="button"
 							tabindex="0"

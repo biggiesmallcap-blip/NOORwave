@@ -23,6 +23,7 @@ function trackLabel(track: { title?: string | null; artist_name?: string | null 
 }
 
 export const currentTrack = writable<Track | null>(null);
+export const currentQueueItemId = writable<number | null>(null);
 export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
 export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
 
@@ -216,6 +217,7 @@ const SHUFFLE_SEQUENCE: PlaybackState['shuffle_mode'][] = ['off', 'genre', 'weig
 
 function applyState(state: PlaybackState) {
 	currentTrack.set(state.current_track);
+	currentQueueItemId.set(state.current_queue_item_id ?? null);
 	isPlaying.set(state.is_playing);
 	position.set(state.position_ms);
 	anchorPositionTicker(state.position_ms);
@@ -762,36 +764,18 @@ export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
 	try {
-		const queue = await api.startRadioSong({ seed_track_id: seedTrackId, limit: 60 });
-		const inLibrary = queue.tracks.filter(
-			(t) => t.is_in_library && t.track_id > 0 && t.track_id !== seedTrackId,
-		);
-		const radioIds = inLibrary.map((t) => t.track_id);
-		const radioReasons = inLibrary.map((t) => t.reason ?? null);
-		setRadioReasons(queue.tracks);
+		const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
+		const { first_playable } = result;
 
-		// Collect last.fm candidates that have no library match yet (track_id === 0).
-		// These are appended to the queue as pending rows and resolved to Tidal stream
-		// URLs at play time (Phase 2c-ii-a).
-		const pendingCandidates: PendingCandidateInfo[] = queue.tracks
-			.filter((t) => !t.is_in_library && t.track_id === 0)
-			.map((t) => ({
-				artist: t.artist_name ?? '',
-				title: t.title,
-				duration_ms: t.duration_ms ?? null,
-				lastfm_match_score: t.similarity_score,
-				reason: t.reason ?? null,
-			}));
-
-		// Seed track leads with no reason (it's the user's pick, not a
-		// recommendation), library candidates carry their backend-issued
-		// reason strings.
-		await loadQueueAndPlay([seedTrackId, ...radioIds], {
-			preserveRadioReasons: true,
-			reasons: [null, ...radioReasons],
-			pendingCandidates: pendingCandidates.length > 0 ? pendingCandidates : undefined,
-		});
-		showToast(`Radio from ${queue.seed.title}`, 'success');
+		if (first_playable.type === 'library' && first_playable.track_id != null) {
+			// First queue item is a resolved library track — play it directly.
+			await playTrackNow(first_playable.track_id);
+		} else {
+			// All radio results are pending (no library tracks). Advance to the
+			// first queue item; the server-side lazy resolver fires on next_track.
+			await playNextTrack();
+		}
+		showToast('Song Radio started', 'success');
 	} catch (error) {
 		setError('start radio', error, () => startSongRadio(seedTrackId));
 	}

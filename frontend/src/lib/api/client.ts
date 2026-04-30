@@ -270,8 +270,8 @@ export interface QueueItem {
 	 * (see `parseReason` in $lib/utils/reason).
 	 */
 	reason?: string | null;
-	/** Phase 2c-ii-a: "resolved" | "pending" | "unresolvable" | null (legacy = resolved) */
-	resolution_state?: string | null;
+	/** Phase 2c-ii-a: true while track_id is not yet resolved to a Tidal match. */
+	is_pending?: boolean;
 }
 
 /** A last.fm-sourced radio candidate that has no library track yet. */
@@ -285,6 +285,8 @@ export interface PendingCandidateInfo {
 
 export interface PlaybackState {
 	current_track: Track | null;
+	/** Set even when current_track is null (pending row playing). */
+	current_queue_item_id?: number | null;
 	position_ms: number;
 	is_playing: boolean;
 	volume: number;
@@ -1205,6 +1207,24 @@ export const api = {
 		exclude_track_ids?: number[];
 	}): Promise<RadioQueue> {
 		return fetchApi<RadioQueue>('/api/radio/song', undefined, {
+			method: 'POST',
+			body: JSON.stringify(params),
+		});
+	},
+
+	/** POST /api/radio/start — atomically builds queue and returns first playable item. */
+	startRadioStart(params: {
+		seed_track_id: number;
+		blend?: RadioBlend;
+		limit?: number;
+	}): Promise<{
+		first_playable: {
+			type: 'library' | 'pending';
+			queue_item_id: number;
+			track_id: number | null;
+		};
+	}> {
+		return fetchApi('/api/radio/start', undefined, {
 			method: 'POST',
 			body: JSON.stringify(params),
 		});
