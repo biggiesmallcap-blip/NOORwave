@@ -16,9 +16,17 @@
 		setPlayerDiscoverNew,
 		setPlayerAutomixUseLearning,
 		setPlayerAutomixAllowExternal,
+		refreshPlaybackRuntime,
+		currentStreamDisplay,
 		refreshPlaybackState
 	} from '$lib/stores/player';
-	import { api, type AudioDspFeatures } from '$lib/api/client';
+	import {
+		api,
+		type AudioDspFeatures,
+		type AudioFeaturesStats,
+		type DiscoveryStatus,
+		type PlaybackRuntimeInfo
+	} from '$lib/api/client';
 	import { harmonicCompat } from '$lib/utils/camelot';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
@@ -27,30 +35,54 @@
 	import type { Snapshot } from './$types';
 
 	let saving = $state(false);
+	let draftCrossfade = $state(0);
+	let errorMsg = $state('');
+	let runtime = $state<PlaybackRuntimeInfo | null>(null);
+	let runtimeAvailable = $state(false);
+	let audioStats = $state<AudioFeaturesStats | null>(null);
+	let discoveryStatus = $state<DiscoveryStatus | null>(null);
 
-	// Phase 5B — back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
 		capture: () => ({ scrollY: typeof window !== 'undefined' ? window.scrollY : 0 }),
 		restore: (saved) => {
 			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
 		}
 	};
-	let draftCrossfade = $state(0);
-	let errorMsg = $state('');
 
 	onMount(() => {
 		void refreshPlaybackState();
+		void loadControlData();
 		const unsub = crossfadeMs.subscribe((v) => {
 			draftCrossfade = v;
 		});
 		return unsub;
 	});
 
-	async function applyAutomix(enabled: boolean) {
+	async function loadControlData() {
+		try {
+			const [runtimeResponse, statsResponse, discoveryResponse] = await Promise.all([
+				api.getPlaybackRuntime().catch(() => null),
+				api.getAudioFeaturesStats().catch(() => null),
+				api.getDiscoveryStatus().catch(() => null)
+			]);
+			if (runtimeResponse) {
+				runtimeAvailable = runtimeResponse.available;
+				runtime = runtimeResponse.runtime;
+				currentStreamDisplay.set(runtimeResponse.stream ?? null);
+			}
+			audioStats = statsResponse?.stats ?? null;
+			discoveryStatus = discoveryResponse?.status ?? null;
+			await refreshPlaybackRuntime();
+		} catch {
+			// Secondary cockpit data should never block playback controls.
+		}
+	}
+
+	async function runSaving(action: () => Promise<void>) {
 		saving = true;
 		errorMsg = '';
 		try {
-			await setPlayerAutomixEnabled(enabled, draftCrossfade);
+			await action();
 		} catch (e) {
 			errorMsg = String(e);
 		} finally {
@@ -58,52 +90,24 @@
 		}
 	}
 
-	async function toggleDiscoverNew() {
-		saving = true;
-		errorMsg = '';
-		try {
-			await setPlayerDiscoverNew(!$automixDiscoverNew);
-		} catch (e) {
-			errorMsg = String(e);
-		} finally {
-			saving = false;
-		}
+	function applyAutomix(enabled: boolean) {
+		return runSaving(() => setPlayerAutomixEnabled(enabled, draftCrossfade));
 	}
 
-	async function toggleUseLearning() {
-		saving = true;
-		errorMsg = '';
-		try {
-			await setPlayerAutomixUseLearning(!$automixUseLearning);
-		} catch (e) {
-			errorMsg = String(e);
-		} finally {
-			saving = false;
-		}
+	function toggleDiscoverNew() {
+		return runSaving(() => setPlayerDiscoverNew(!$automixDiscoverNew));
 	}
 
-	async function toggleAllowExternal() {
-		saving = true;
-		errorMsg = '';
-		try {
-			await setPlayerAutomixAllowExternal(!$automixAllowExternal);
-		} catch (e) {
-			errorMsg = String(e);
-		} finally {
-			saving = false;
-		}
+	function toggleUseLearning() {
+		return runSaving(() => setPlayerAutomixUseLearning(!$automixUseLearning));
 	}
 
-	async function saveCrossfade() {
-		saving = true;
-		errorMsg = '';
-		try {
-			await setPlayerCrossfadeMs(draftCrossfade);
-		} catch (e) {
-			errorMsg = String(e);
-		} finally {
-			saving = false;
-		}
+	function toggleAllowExternal() {
+		return runSaving(() => setPlayerAutomixAllowExternal(!$automixAllowExternal));
+	}
+
+	function saveCrossfade() {
+		return runSaving(() => setPlayerCrossfadeMs(draftCrossfade));
 	}
 
 	const CROSSFADE_STEPS = [0, 1000, 2000, 3000, 5000, 8000, 10000, 12000];
@@ -115,30 +119,44 @@
 	}
 
 	const shuffleModes = [
-		{ mode: 'off' as const, label: 'Off', copy: 'Sequential — follows queue order.' },
-		{ mode: 'genre' as const, label: 'Genre mix', copy: 'Interleaves genres from your session taste — familiar clusters with discovery woven in.' },
-		{ mode: 'weighted' as const, label: 'Smart shuffle', copy: 'Boosts unplayed and favourite tracks, penalises recently played ones with time-decay.' },
-		{ mode: 'true' as const, label: 'True shuffle', copy: 'Fisher-Yates full-coverage — statistically flat, no weighting.' },
+		{ mode: 'off' as const, label: 'Off', copy: 'Queue order stays untouched.', meter: 0.15 },
+		{ mode: 'genre' as const, label: 'Genre mix', copy: 'Clustered flow with related detours.', meter: 0.62 },
+		{ mode: 'weighted' as const, label: 'Smart shuffle', copy: 'Freshness, favorites, and skips all count.', meter: 0.8 },
+		{ mode: 'true' as const, label: 'True shuffle', copy: 'Flat random coverage for the full queue.', meter: 0.38 }
 	];
 
-	const queueUpcoming = $derived($playbackQueue.filter((item) => {
-		const currentId = $currentTrack?.id;
-		if (!currentId) return true;
-		const currentPos = $playbackQueue.find((q) => q.track.id === currentId)?.position ?? -1;
-		return item.position > currentPos;
-	}));
+	const queueUpcoming = $derived(
+		$playbackQueue.filter((item) => {
+			const currentId = $currentTrack?.id;
+			if (!currentId) return true;
+			const currentPos = $playbackQueue.find((q) => q.track.id === currentId)?.position ?? -1;
+			return item.position > currentPos;
+		})
+	);
 
-	// ─── DSP feature cache for queue harmonic indicators ──────────────────────
-	// Queue items don't carry DSP features, so we lazily fetch them for the
-	// visible top-N rows. Cache entries: undefined = not yet requested, null =
-	// fetched but no features available, object = loaded. All reactive via a
-	// bumped version counter to avoid mutating the Map in place losing Svelte's
-	// reactivity.
+	const automixQueueCount = $derived(
+		queueUpcoming.filter((item) => item.source === 'automix').length
+	);
+	const pendingQueueCount = $derived(
+		queueUpcoming.filter((item) => item.resolution_state === 'pending').length
+	);
+	const analyzedCoverage = $derived(
+		audioStats && $playbackQueue.length > 0
+			? Math.min(1, audioStats.total_analyzed / Math.max(1, $playbackQueue.length + audioStats.total_analyzed))
+			: null
+	);
+	const currentFeatureSummary = $derived(formatFeatureSummary($currentTrackFeatures));
+	const selectedShuffle = $derived(shuffleModes.find((m) => m.mode === $shuffleMode) ?? shuffleModes[0]);
+	const discoveryCoverageLabel = $derived(
+		discoveryStatus
+			? `${Math.round(discoveryStatus.coverage_ratio * 100)}% embedded`
+			: 'Not loaded'
+	);
+
 	const featureCache = new Map<number, AudioDspFeatures | null>();
 	const inflight = new Set<number>();
 	let featureCacheVersion = $state(0);
-
-	const INDICATOR_WINDOW = 20;
+	const INDICATOR_WINDOW = 24;
 
 	function requestFeatures(trackId: number): void {
 		if (featureCache.has(trackId) || inflight.has(trackId)) return;
@@ -160,28 +178,51 @@
 
 	function featuresFor(trackId: number | null | undefined): AudioDspFeatures | null | undefined {
 		if (trackId == null) return undefined;
-		// Reading the version counter ensures derived/$effect recomputes when cache fills.
 		void featureCacheVersion;
 		const current = $currentTrack;
-		if (current && current.id === trackId) {
-			return $currentTrackFeatures;
-		}
+		if (current && current.id === trackId) return $currentTrackFeatures;
 		return featureCache.get(trackId);
 	}
 
-	// Eagerly kick off fetches for the window we're about to render so indicators
-	// populate without flicker. Re-runs whenever the queue slice changes.
 	$effect(() => {
-		const visible = queueUpcoming.slice(0, INDICATOR_WINDOW);
-		for (const item of visible) {
+		for (const item of queueUpcoming.slice(0, INDICATOR_WINDOW)) {
 			requestFeatures(item.track.id);
 		}
 	});
+
+	const compatibilityRows = $derived.by(() => {
+		const rows: { level: string; keyLabel: string | null; bpmDelta: number | null }[] = [];
+		const visible = queueUpcoming.slice(0, INDICATOR_WINDOW);
+		for (let i = 0; i < visible.length; i += 1) {
+			const previousTrackId = i === 0 ? $currentTrack?.id : visible[i - 1].track.id;
+			const compat = harmonicCompat(featuresFor(previousTrackId), featuresFor(visible[i].track.id));
+			if (compat) rows.push(compat);
+		}
+		return rows;
+	});
+
+	const goodMixCount = $derived(compatibilityRows.filter((row) => row.level === 'good').length);
+	const clashMixCount = $derived(compatibilityRows.filter((row) => row.level === 'clash').length);
 
 	function bpmDeltaLabel(delta: number | null): string | null {
 		if (delta === null) return null;
 		const sign = delta > 0 ? '+' : '';
 		return `${sign}${delta.toFixed(1)} BPM`;
+	}
+
+	function formatFeatureSummary(features: AudioDspFeatures | null): string {
+		if (!features) return 'DSP pending';
+		const parts = [
+			features.camelot_key ?? features.key_signature,
+			features.bpm ? `${Math.round(features.bpm)} BPM` : null,
+			features.energy != null ? `${Math.round(features.energy * 100)}% energy` : null
+		].filter(Boolean);
+		return parts.join(' / ') || 'DSP pending';
+	}
+
+	function percentLabel(value: number | null | undefined): string {
+		if (value == null || !Number.isFinite(value)) return '--';
+		return `${Math.round(value * 100)}%`;
 	}
 </script>
 
@@ -192,38 +233,11 @@
 <div class="page-shell automix-page animate-in">
 	<PageHeader
 		eyebrow="Automix"
-		title="DJ-style continuous playback with automatic transitions."
-		subtitle="Enable automix to keep the queue topped up with genre-matched tracks and blend between them with a configurable crossfade."
+		title="Transition desk for continuous listening."
+		subtitle="Tune the handoff logic, watch the next blends, and keep an eye on the data engines that make the queue feel intentional."
 	>
 		{#snippet actions()}
-			<button
-				class="discover-toggle {$automixDiscoverNew ? 'active' : ''}"
-				onclick={toggleDiscoverNew}
-				disabled={saving}
-				title={$automixDiscoverNew ? 'Include New: on — finding tracks outside your library' : 'Include New: off — library only'}
-				aria-pressed={$automixDiscoverNew}
-			>
-				<svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-					<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
-				</svg>
-				<span>Include New</span>
-			</button>
-			<button
-				class="discover-toggle {$automixUseLearning ? 'active' : ''}"
-				onclick={toggleUseLearning}
-				disabled={saving}
-				aria-pressed={$automixUseLearning}
-			>
-				<span>Use learned radio</span>
-			</button>
-			<button
-				class="discover-toggle {$automixAllowExternal ? 'active' : ''}"
-				onclick={toggleAllowExternal}
-				disabled={saving}
-				aria-pressed={$automixAllowExternal}
-			>
-				<span>Allow external</span>
-			</button>
+			<button class="btn btn-glass" onclick={loadControlData} disabled={saving}>Refresh data</button>
 			<button
 				class="btn {$automixEnabled ? 'btn-primary' : 'btn-glass'}"
 				onclick={() => applyAutomix(!$automixEnabled)}
@@ -234,38 +248,79 @@
 		{/snippet}
 	</PageHeader>
 
-	<section class="stat-grid">
-		<MetricPair
-			label="Status"
-			value={$automixEnabled ? 'Active' : 'Inactive'}
-			copy="Automix continuously extends the queue when enabled."
-		/>
-		<MetricPair
-			label="Crossfade"
-			value={crossfadeLabel($crossfadeMs)}
-			copy="Duration of the overlap between tracks."
-		/>
-		<MetricPair
-			label="Shuffle"
-			value={shuffleModes.find((m) => m.mode === $shuffleMode)?.label ?? $shuffleMode}
-			copy="Shuffle mode affects automix track selection."
-		/>
-	</section>
-
 	{#if errorMsg}
 		<div class="error-banner glass-panel">{errorMsg}</div>
 	{/if}
 
-	<div class="controls-grid">
-		<section class="control-card glass-panel">
-			<h3>Crossfade</h3>
-			<p class="section-copy">Overlap duration between consecutive tracks. Both fades are applied — the outgoing track fades out while the incoming one fades in.</p>
+	<section class="automix-hero glass-panel">
+		<div class="now-card">
+			<div class="now-art-shell">
+				{#if $currentTrack?.artwork_url}
+					<img src={$currentTrack.artwork_url} alt="" />
+				{:else}
+					<div class="now-art-empty">NOOR</div>
+				{/if}
+			</div>
+			<div class="now-copy">
+				<p class="eyebrow">Now feeding automix</p>
+				<h2>{$currentTrack?.title ?? 'No active track'}</h2>
+				<p>{$currentTrack?.artist_name ?? 'Start playback to seed the transition graph.'}</p>
+				<div class="signal-strip">
+					<span>{currentFeatureSummary}</span>
+					<span>{$currentStreamDisplay?.audio_quality ?? 'Stream idle'}</span>
+					<span>{runtime?.device_name ?? (runtimeAvailable ? 'Runtime ready' : 'Runtime offline')}</span>
+				</div>
+			</div>
+		</div>
+
+		<div class="mix-radar">
+			<div class="radar-ring" style={`--mix:${selectedShuffle.meter}; --fade:${Math.min(1, draftCrossfade / 12000)}`}>
+				<div class="radar-core">
+					<strong>{crossfadeLabel(draftCrossfade)}</strong>
+					<span>{selectedShuffle.label}</span>
+				</div>
+			</div>
+			<div class="radar-stats">
+				<div>
+					<span>Good blends</span>
+					<strong>{goodMixCount}</strong>
+				</div>
+				<div>
+					<span>Clashes</span>
+					<strong>{clashMixCount}</strong>
+				</div>
+				<div>
+					<span>Pending</span>
+					<strong>{pendingQueueCount}</strong>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="stat-grid">
+		<MetricPair label="Upcoming" value={queueUpcoming.length} copy="Tracks after the current playhead." />
+		<MetricPair label="Automix picks" value={automixQueueCount} copy="Rows generated by automix." />
+		<MetricPair label="Discovery model" value={discoveryCoverageLabel} copy={`${discoveryStatus?.playable_tracks?.toLocaleString() ?? 0} playable tracks indexed.`} />
+		<MetricPair label="DSP library" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`Average BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'}, top key ${audioStats?.top_key ?? '--'}.`} />
+	</section>
+
+	<section class="control-layout">
+		<section class="glass-panel control-card">
+			<div class="card-heading">
+				<div>
+					<p class="eyebrow">Blend shape</p>
+					<h3>Crossfade envelope</h3>
+				</div>
+				<StateBadge label={crossfadeLabel($crossfadeMs)} tone={$crossfadeMs > 0 ? 'active' : 'muted'} compact={true} />
+			</div>
 
 			<div class="crossfade-steps">
 				{#each CROSSFADE_STEPS as step}
 					<button
 						class="step-btn {draftCrossfade === step ? 'active' : ''}"
-						onclick={() => { draftCrossfade = step; }}
+						onclick={() => {
+							draftCrossfade = step;
+						}}
 					>
 						{crossfadeLabel(step)}
 					</button>
@@ -273,92 +328,100 @@
 			</div>
 
 			<div class="slider-row">
-				<input
-					type="range"
-					min="0"
-					max="12000"
-					step="500"
-					bind:value={draftCrossfade}
-					class="crossfade-slider"
-				/>
+				<input type="range" min="0" max="12000" step="500" bind:value={draftCrossfade} class="crossfade-slider" />
 				<span class="slider-value">{crossfadeLabel(draftCrossfade)}</span>
 			</div>
 
 			<button class="btn btn-primary save-btn" onclick={saveCrossfade} disabled={saving || draftCrossfade === $crossfadeMs}>
-				{saving ? 'Saving…' : 'Apply crossfade'}
+				{saving ? 'Saving...' : 'Apply crossfade'}
 			</button>
 		</section>
 
-		<section class="control-card glass-panel">
-			<h3>Shuffle mode</h3>
-			<p class="section-copy">Controls how automix selects the next track when extending the queue.</p>
+		<section class="glass-panel control-card">
+			<div class="card-heading">
+				<div>
+					<p class="eyebrow">Selection logic</p>
+					<h3>Automix policy</h3>
+				</div>
+			</div>
+			<div class="policy-grid">
+				<button class="policy-toggle {$automixDiscoverNew ? 'active' : ''}" onclick={toggleDiscoverNew} disabled={saving} aria-pressed={$automixDiscoverNew}>
+					<strong>Include new</strong>
+					<span>Let automix look beyond local rows.</span>
+				</button>
+				<button class="policy-toggle {$automixUseLearning ? 'active' : ''}" onclick={toggleUseLearning} disabled={saving} aria-pressed={$automixUseLearning}>
+					<strong>Learned radio</strong>
+					<span>Use taste-vector and feedback signals.</span>
+				</button>
+				<button class="policy-toggle {$automixAllowExternal ? 'active' : ''}" onclick={toggleAllowExternal} disabled={saving} aria-pressed={$automixAllowExternal}>
+					<strong>External picks</strong>
+					<span>Allow unresolved stream candidates.</span>
+				</button>
+			</div>
+		</section>
 
+		<section class="glass-panel control-card wide">
+			<div class="card-heading">
+				<div>
+					<p class="eyebrow">Queue movement</p>
+					<h3>Shuffle engine</h3>
+				</div>
+			</div>
 			<div class="shuffle-options">
-				{#each shuffleModes as { mode, label, copy }}
+				{#each shuffleModes as { mode, label, copy, meter }}
 					<button
 						class="shuffle-opt {$shuffleMode === mode ? 'active' : ''}"
 						onclick={() => void setPlayerShuffleMode(mode)}
+						style={`--meter:${meter}`}
 					>
+						<span class="shuffle-meter"></span>
 						<strong>{label}</strong>
-						<span>{copy}</span>
+						<small>{copy}</small>
 					</button>
 				{/each}
 			</div>
 		</section>
-	</div>
+	</section>
 
-	<section class="queue-section">
-		<h2>Upcoming in queue</h2>
+	<section class="queue-lab glass-panel">
+		<div class="card-heading">
+			<div>
+				<p class="eyebrow">Blend forecast</p>
+				<h3>Upcoming queue lab</h3>
+			</div>
+			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
+		</div>
+
 		{#if queueUpcoming.length === 0}
 			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
 		{:else}
 			<div class="queue-list">
 				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (`${item.id}-${i}`)}
-					{#if i > 0}
-						{@const prevTrackId = queueUpcoming[i - 1].track.id}
-						{@const compat = harmonicCompat(featuresFor(prevTrackId), featuresFor(item.track.id))}
-						{#if compat}
-							<div class="compat-indicator compat-{compat.level}" role="presentation">
-								<span class="compat-dot" aria-hidden="true"></span>
-								<span class="compat-labels">
-									{#if compat.keyLabel}
-										<span class="compat-key">{compat.keyLabel}</span>
-									{/if}
-									{#if compat.bpmDelta !== null}
-										<span class="compat-bpm">{bpmDeltaLabel(compat.bpmDelta)}</span>
-									{/if}
-								</span>
-							</div>
-						{/if}
-					{:else}
-						{@const currentId = $currentTrack?.id}
-						{@const compatFromCurrent =
-							currentId != null
-								? harmonicCompat(featuresFor(currentId), featuresFor(item.track.id))
-								: null}
-						{#if compatFromCurrent}
-							<div class="compat-indicator compat-{compatFromCurrent.level}" role="presentation">
-								<span class="compat-dot" aria-hidden="true"></span>
-								<span class="compat-labels">
-									{#if compatFromCurrent.keyLabel}
-										<span class="compat-key">{compatFromCurrent.keyLabel}</span>
-									{/if}
-									{#if compatFromCurrent.bpmDelta !== null}
-										<span class="compat-bpm">{bpmDeltaLabel(compatFromCurrent.bpmDelta)}</span>
-									{/if}
-								</span>
-							</div>
-						{/if}
-					{/if}
-					<div class="queue-row glass-panel">
+					{@const previousTrackId = i === 0 ? $currentTrack?.id : queueUpcoming[i - 1].track.id}
+					{@const compat = harmonicCompat(featuresFor(previousTrackId), featuresFor(item.track.id))}
+					<div class="queue-row">
+						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
 						{#if item.track.artwork_url}
 							<img class="queue-art" src={item.track.artwork_url} alt="" />
 						{:else}
-							<div class="queue-art placeholder">♫</div>
+							<div class="queue-art placeholder">♪</div>
 						{/if}
 						<div class="queue-meta">
 							<strong>{item.track.title}</strong>
 							<span>{item.track.artist_name ?? 'Unknown artist'}</span>
+						</div>
+						<div class="queue-dsp">
+							<span>{formatFeatureSummary(featuresFor(item.track.id) ?? null)}</span>
+							{#if compat}
+								<b class="compat-pill compat-{compat.level}">
+									{compat.keyLabel ?? compat.level}
+									{#if compat.bpmDelta !== null}
+										<small>{bpmDeltaLabel(compat.bpmDelta)}</small>
+									{/if}
+								</b>
+							{:else}
+								<b class="compat-pill">Analyzing</b>
+							{/if}
 						</div>
 						{#if item.source === 'automix'}
 							<StateBadge label="Automix" tone="active" compact={true} />
@@ -366,62 +429,230 @@
 					</div>
 				{/each}
 				{#if queueUpcoming.length > INDICATOR_WINDOW}
-					<p class="queue-overflow">+ {queueUpcoming.length - INDICATOR_WINDOW} more tracks</p>
+					<p class="queue-overflow">+ {queueUpcoming.length - INDICATOR_WINDOW} more tracks below the forecast window</p>
 				{/if}
 			</div>
 		{/if}
 	</section>
+
+	<section class="data-calls">
+		<div class="glass-panel data-card">
+			<span>Embedding coverage</span>
+			<strong>{percentLabel(discoveryStatus?.coverage_ratio)}</strong>
+			<div class="mini-bar"><i style={`width:${percentLabel(discoveryStatus?.coverage_ratio)}`}></i></div>
+		</div>
+		<div class="glass-panel data-card">
+			<span>Neighbor tracks</span>
+			<strong>{discoveryStatus?.neighbor_tracks?.toLocaleString() ?? '0'}</strong>
+			<div class="mini-bar"><i style={`width:${Math.min(100, (discoveryStatus?.neighbor_tracks ?? 0) / 100).toFixed(0)}%`}></i></div>
+		</div>
+		<div class="glass-panel data-card">
+			<span>Queue DSP proxy</span>
+			<strong>{analyzedCoverage == null ? '--' : percentLabel(analyzedCoverage)}</strong>
+			<div class="mini-bar"><i style={`width:${percentLabel(analyzedCoverage ?? 0)}`}></i></div>
+		</div>
+	</section>
 </div>
 
 <style>
-	.controls-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-		gap: var(--space-4);
-		margin-bottom: var(--space-4);
+	.automix-page {
+		gap: var(--space-5);
 	}
 
-	.control-card {
-		padding: 24px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-	}
-
-	.control-card h3 {
-		font-size: 1rem;
-		font-weight: 600;
-		margin: 0;
-	}
-
-	.section-copy {
-		color: var(--text-secondary);
+	.error-banner {
+		padding: 12px 16px;
+		color: var(--state-error);
 		font-size: 0.875rem;
-		margin: 0;
-		line-height: 1.5;
 	}
 
-	.crossfade-steps {
+	.automix-hero {
+		display: grid;
+		grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+		gap: 22px;
+		padding: 22px;
+		align-items: stretch;
+	}
+
+	.now-card {
+		display: grid;
+		grid-template-columns: 150px minmax(0, 1fr);
+		gap: 18px;
+		align-items: center;
+		min-width: 0;
+	}
+
+	.now-art-shell,
+	.now-art-empty {
+		aspect-ratio: 1;
+		border-radius: 12px;
+		overflow: hidden;
+		background: linear-gradient(135deg, rgba(124, 128, 255, 0.18), rgba(109, 184, 155, 0.08));
+		border: 1px solid var(--border-subtle);
+	}
+
+	.now-art-shell img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.now-art-empty {
+		display: grid;
+		place-items: center;
+		font-family: var(--font-mono);
+		color: var(--text-tertiary);
+	}
+
+	.now-copy {
+		min-width: 0;
+		display: grid;
+		gap: 10px;
+	}
+
+	.now-copy h2 {
+		font-size: clamp(1.7rem, 3vw, 3rem);
+		overflow-wrap: anywhere;
+	}
+
+	.now-copy p:not(.eyebrow) {
+		color: var(--text-secondary);
+	}
+
+	.signal-strip {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
 	}
 
-	.step-btn {
-		padding: 6px 14px;
-		border-radius: 20px;
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.04);
+	.signal-strip span,
+	.compat-pill,
+	.step-btn,
+	.policy-toggle,
+	.shuffle-opt {
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.035);
+	}
+
+	.signal-strip span {
+		padding: 6px 9px;
+		border-radius: 999px;
 		color: var(--text-secondary);
-		font-size: 0.8125rem;
-		cursor: pointer;
-		transition: all 0.15s;
+		font-size: 0.78rem;
+	}
+
+	.mix-radar {
+		display: grid;
+		grid-template-columns: 180px 1fr;
+		gap: 18px;
+		align-items: center;
+	}
+
+	.radar-ring {
+		--mix: 0.5;
+		--fade: 0.4;
+		aspect-ratio: 1;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		background:
+			conic-gradient(from 210deg, var(--accent) calc(var(--mix) * 280deg), rgba(255, 255, 255, 0.08) 0),
+			radial-gradient(circle, rgba(109, 184, 155, calc(var(--fade) * 0.22)) 0 45%, transparent 46%);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.radar-core {
+		width: 68%;
+		aspect-ratio: 1;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		align-content: center;
+		gap: 4px;
+		background: color-mix(in srgb, var(--bg-base) 78%, transparent);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.radar-core strong {
+		font-family: var(--font-display);
+		font-size: 1.8rem;
+	}
+
+	.radar-core span,
+	.radar-stats span,
+	.data-card span {
+		color: var(--text-secondary);
+		font-size: 0.78rem;
+	}
+
+	.radar-stats {
+		display: grid;
+		gap: 10px;
+	}
+
+	.radar-stats div {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+		padding-bottom: 10px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.control-layout {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(280px, 1fr));
+		gap: var(--space-4);
+	}
+
+	.control-card,
+	.queue-lab,
+	.data-card {
+		padding: 20px;
+	}
+
+	.control-card {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.control-card.wide {
+		grid-column: 1 / -1;
+	}
+
+	.card-heading {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 14px;
+	}
+
+	.card-heading h3 {
+		font-size: 1rem;
+	}
+
+	.crossfade-steps,
+	.policy-grid,
+	.shuffle-options,
+	.data-calls {
+		display: grid;
+		gap: 8px;
+	}
+
+	.crossfade-steps {
+		grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+	}
+
+	.step-btn {
+		padding: 8px 12px;
+		border-radius: 999px;
+		color: var(--text-secondary);
+		transition: all var(--motion-fast);
 	}
 
 	.step-btn.active,
 	.step-btn:hover {
-		border-color: rgba(124, 128, 255, 0.5);
-		background: rgba(124, 128, 255, 0.12);
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
 		color: var(--text-primary);
 	}
 
@@ -433,89 +664,117 @@
 
 	.crossfade-slider {
 		flex: 1;
-		accent-color: rgba(124, 128, 255, 0.8);
 	}
 
 	.slider-value {
-		min-width: 36px;
+		min-width: 42px;
 		text-align: right;
 		font-variant-numeric: tabular-nums;
 		color: var(--text-secondary);
-		font-size: 0.875rem;
 	}
 
 	.save-btn {
 		align-self: flex-start;
 	}
 
+	.policy-grid {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.policy-toggle {
+		display: grid;
+		gap: 6px;
+		padding: 14px;
+		border-radius: 12px;
+		text-align: left;
+		transition: all var(--motion-fast);
+	}
+
+	.policy-toggle span,
+	.shuffle-opt small {
+		color: var(--text-secondary);
+		font-size: 0.78rem;
+	}
+
+	.policy-toggle.active {
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
+	}
+
 	.shuffle-options {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 	}
 
 	.shuffle-opt {
-		padding: 12px 16px;
-		border-radius: var(--radius);
-		border: 1px solid rgba(255, 255, 255, 0.06);
-		background: rgba(255, 255, 255, 0.03);
+		--meter: 0.4;
+		position: relative;
+		overflow: hidden;
+		display: grid;
+		gap: 7px;
+		padding: 14px;
+		border-radius: 12px;
 		text-align: left;
-		cursor: pointer;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		transition: all 0.15s;
 	}
 
-	.shuffle-opt strong {
-		font-size: 0.875rem;
-		color: var(--text-primary);
+	.shuffle-meter {
+		width: 100%;
+		height: 5px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.08);
+		overflow: hidden;
 	}
 
-	.shuffle-opt span {
-		font-size: 0.8125rem;
-		color: var(--text-secondary);
+	.shuffle-meter::after {
+		content: '';
+		display: block;
+		width: calc(var(--meter) * 100%);
+		height: 100%;
+		border-radius: inherit;
+		background: linear-gradient(90deg, var(--accent), var(--state-success));
 	}
 
 	.shuffle-opt.active {
-		border-color: rgba(124, 128, 255, 0.4);
-		background: rgba(124, 128, 255, 0.1);
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
 	}
 
-	.shuffle-opt:hover {
-		background: rgba(255, 255, 255, 0.06);
-	}
-
-	.queue-section {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.queue-section h2 {
-		font-size: 1.125rem;
-		font-weight: 600;
+	.queue-lab {
+		display: grid;
+		gap: 16px;
 	}
 
 	.queue-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+		display: grid;
+		gap: 6px;
 	}
 
 	.queue-row {
-		display: flex;
+		display: grid;
+		grid-template-columns: 34px 44px minmax(0, 1fr) minmax(180px, 0.7fr) auto;
 		align-items: center;
 		gap: 12px;
-		padding: 10px 16px;
+		padding: 10px;
+		border-radius: 10px;
+		background: rgba(255, 255, 255, 0.026);
+		border: 1px solid transparent;
+	}
+
+	.queue-row:hover {
+		border-color: var(--border-subtle);
+		background: rgba(255, 255, 255, 0.045);
+	}
+
+	.queue-index {
+		font-family: var(--font-mono);
+		color: var(--text-tertiary);
+		font-size: 0.78rem;
 	}
 
 	.queue-art {
-		width: 38px;
-		height: 38px;
+		width: 44px;
+		height: 44px;
 		border-radius: 8px;
 		object-fit: cover;
-		flex-shrink: 0;
 		background: rgba(255, 255, 255, 0.04);
 	}
 
@@ -523,136 +782,128 @@
 		display: grid;
 		place-items: center;
 		color: var(--text-tertiary);
-		font-size: 1rem;
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 	}
 
-	.queue-meta {
-		flex: 1;
+	.queue-meta,
+	.queue-dsp {
 		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
+		display: grid;
+		gap: 3px;
 	}
 
-	.queue-meta strong {
-		font-size: 0.875rem;
-		white-space: nowrap;
+	.queue-meta strong,
+	.queue-meta span,
+	.queue-dsp span {
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
-	.queue-meta span {
-		font-size: 0.8rem;
+	.queue-meta span,
+	.queue-dsp span {
 		color: var(--text-secondary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		font-size: 0.78rem;
+	}
+
+	.compat-pill {
+		width: fit-content;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 8px;
+		border-radius: 999px;
+		color: var(--text-secondary);
+		font-size: 0.68rem;
+	}
+
+	.compat-good {
+		color: #86efac;
+		border-color: rgba(74, 222, 128, 0.28);
+		background: rgba(74, 222, 128, 0.1);
+	}
+
+	.compat-okay {
+		color: #fcd34d;
+		border-color: rgba(251, 191, 36, 0.28);
+		background: rgba(251, 191, 36, 0.1);
+	}
+
+	.compat-clash {
+		color: #fca5a5;
+		border-color: rgba(248, 113, 113, 0.28);
+		background: rgba(248, 113, 113, 0.1);
 	}
 
 	.queue-overflow {
 		color: var(--text-secondary);
-		font-size: 0.875rem;
 		text-align: center;
 		padding: 8px;
 	}
 
-	/* Harmonic compatibility indicators between queue rows */
-	.compat-indicator {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 2px 20px;
-		margin: -4px 0;
-		font-size: 0.72rem;
-		line-height: 1;
-		opacity: 0.85;
+	.data-calls {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
-	.compat-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		flex-shrink: 0;
-		box-shadow: 0 0 6px currentColor;
-	}
-
-	.compat-labels {
-		display: flex;
+	.data-card {
+		display: grid;
 		gap: 10px;
-		color: var(--text-secondary);
-		font-variant-numeric: tabular-nums;
 	}
 
-	.compat-key {
-		opacity: 0.95;
+	.data-card strong {
+		font-family: var(--font-display);
+		font-size: 1.9rem;
 	}
 
-	.compat-bpm {
-		opacity: 0.7;
+	.mini-bar {
+		height: 6px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.08);
+		overflow: hidden;
 	}
 
-	.compat-good .compat-dot {
-		background: #4ade80;
-		color: #4ade80;
+	.mini-bar i {
+		display: block;
+		height: 100%;
+		border-radius: inherit;
+		background: linear-gradient(90deg, var(--accent), var(--state-success));
 	}
 
-	.compat-good .compat-key {
-		color: #86efac;
+	@media (max-width: 980px) {
+		.automix-hero,
+		.control-layout,
+		.data-calls {
+			grid-template-columns: 1fr;
+		}
+
+		.mix-radar {
+			grid-template-columns: 160px 1fr;
+		}
+
+		.shuffle-options,
+		.policy-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+
+		.queue-row {
+			grid-template-columns: 28px 40px minmax(0, 1fr);
+		}
+
+		.queue-dsp {
+			grid-column: 3 / -1;
+		}
 	}
 
-	.compat-okay .compat-dot {
-		background: #fbbf24;
-		color: #fbbf24;
-	}
+	@media (max-width: 640px) {
+		.now-card,
+		.mix-radar,
+		.shuffle-options,
+		.policy-grid {
+			grid-template-columns: 1fr;
+		}
 
-	.compat-okay .compat-key {
-		color: #fcd34d;
-	}
-
-	.compat-clash .compat-dot {
-		background: #f87171;
-		color: #f87171;
-	}
-
-	.compat-clash .compat-key {
-		color: #fca5a5;
-	}
-
-	.error-banner {
-		padding: 12px 16px;
-		color: #ff6b6b;
-		font-size: 0.875rem;
-	}
-
-	.discover-toggle {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 7px 14px;
-		border-radius: 20px;
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.04);
-		color: var(--text-secondary);
-		font-size: 0.8125rem;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-
-	.discover-toggle:hover {
-		border-color: rgba(124, 128, 255, 0.4);
-		background: rgba(124, 128, 255, 0.08);
-		color: var(--text-primary);
-	}
-
-	.discover-toggle.active {
-		border-color: rgba(124, 128, 255, 0.55);
-		background: rgba(124, 128, 255, 0.15);
-		color: rgba(180, 182, 255, 1);
-	}
-
-	.discover-toggle:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+		.now-art-shell {
+			width: min(180px, 70vw);
+		}
 	}
 </style>
