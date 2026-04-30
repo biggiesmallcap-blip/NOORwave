@@ -225,6 +225,85 @@ pub async fn import_track_from_metadata(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+
+    fn setup_db() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE artists (
+                     id       INTEGER PRIMARY KEY,
+                     tidal_id INTEGER UNIQUE,
+                     name     TEXT NOT NULL
+                 );
+                 CREATE TABLE albums (
+                     id        INTEGER PRIMARY KEY,
+                     tidal_id  INTEGER UNIQUE,
+                     title     TEXT NOT NULL,
+                     artist_id INTEGER,
+                     source    TEXT NOT NULL DEFAULT 'tidal_stream'
+                 );
+                 CREATE TABLE tracks (
+                     id        INTEGER PRIMARY KEY,
+                     tidal_id  INTEGER UNIQUE,
+                     title     TEXT NOT NULL,
+                     artist_id INTEGER NOT NULL,
+                     album_id  INTEGER,
+                     duration_ms INTEGER,
+                     best_quality TEXT,
+                     best_source TEXT,
+                     fidelity_score INTEGER DEFAULT 0,
+                     is_favorite INTEGER DEFAULT 0,
+                     source    TEXT NOT NULL DEFAULT 'tidal_stream'
+                 );",
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn import_track_from_metadata_is_idempotent_on_tidal_id() {
+        let db = setup_db();
+
+        let first = import_track_from_metadata(
+            &db,
+            99001,
+            "Teardrop".to_string(),
+            "Massive Attack".to_string(),
+            None,
+            Some("Mezzanine".to_string()),
+            Some(330_000),
+        )
+        .await
+        .expect("first import should succeed");
+
+        let second = import_track_from_metadata(
+            &db,
+            99001,
+            "Teardrop".to_string(),
+            "Massive Attack".to_string(),
+            None,
+            Some("Mezzanine".to_string()),
+            Some(330_000),
+        )
+        .await
+        .expect("second import with same tidal_id should succeed");
+
+        assert_eq!(
+            first.local_id, second.local_id,
+            "both calls must return the same local_id — the UNIQUE constraint and \
+             SELECT-before-INSERT guarantee this for sequential calls; concurrent \
+             calls are safe via SQLite single-writer + UNIQUE constraint backstop"
+        );
+    }
+}
+
 fn upsert_track_tx(
     tx: &rusqlite::Transaction<'_>,
     t: &TidalTrack,

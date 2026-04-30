@@ -21,6 +21,8 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_017,
     MIGRATION_018,
     MIGRATION_019,
+    MIGRATION_020,
+    MIGRATION_021,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -581,6 +583,43 @@ ALTER TABLE queue ADD COLUMN reason TEXT;
 // Nullable because pre-existing rows from migration 015 don't have it.
 const MIGRATION_019: &str = r#"
 ALTER TABLE lastfm_unresolved_tags ADD COLUMN last_track_id INTEGER;
+"#;
+
+// Phase 2c-ii-a: track current queue item ID separately from current_track_id
+// so pending rows (track_id = NULL) can be the "current" item without a FK violation.
+const MIGRATION_021: &str = r#"
+ALTER TABLE playback_state ADD COLUMN current_queue_item_id INTEGER;
+"#;
+
+// Phase 2c-ii-a: allow non-library (pending last.fm) entries in the queue.
+// Rebuilds queue to make track_id nullable and adds pending-row metadata.
+// SQLite requires a full table rebuild to drop NOT NULL on track_id.
+// Existing library rows are preserved; new columns are NULL for them.
+const MIGRATION_020: &str = r#"
+ALTER TABLE queue RENAME TO _queue_v019;
+
+CREATE TABLE queue (
+    id                  INTEGER PRIMARY KEY,
+    track_id            INTEGER REFERENCES tracks(id),
+    position            INTEGER NOT NULL,
+    source              TEXT    DEFAULT 'user',
+    reason              TEXT,
+    pending_artist      TEXT,
+    pending_title       TEXT,
+    pending_at          TIMESTAMP,
+    resolving_at        TIMESTAMP,
+    resolved_at         TIMESTAMP,
+    tidal_match_score   REAL
+);
+
+INSERT INTO queue (id, track_id, position, source, reason)
+SELECT id, track_id, position, source, reason
+FROM _queue_v019;
+
+DROP TABLE _queue_v019;
+
+CREATE INDEX idx_queue_position ON queue(position);
+CREATE INDEX idx_queue_pending  ON queue(track_id, pending_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -51,11 +51,10 @@ The `queue` table must be rebuilt (SQLite cannot drop `NOT NULL` via `ALTER COLU
 
 ```sql
 CREATE TABLE queue (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id          INTEGER NOT NULL REFERENCES sessions(id),
+    id                  INTEGER PRIMARY KEY,
     track_id            INTEGER REFERENCES tracks(id),   -- NULL until resolved
     position            INTEGER NOT NULL,
-    source              TEXT    NOT NULL DEFAULT 'manual',
+    source              TEXT    DEFAULT 'user',
     reason              TEXT,
     pending_artist      TEXT,   -- populated on insert; kept after resolution for audit
     pending_title       TEXT,   -- same
@@ -65,8 +64,8 @@ CREATE TABLE queue (
     tidal_match_score   REAL                 -- set atomically with track_id
 );
 
-CREATE INDEX idx_queue_session_position ON queue(session_id, position);
-CREATE INDEX idx_queue_pending          ON queue(track_id, pending_at);
+CREATE INDEX idx_queue_position ON queue(position);
+CREATE INDEX idx_queue_pending  ON queue(track_id, pending_at);
 ```
 
 Re-create any other existing indexes after rebuild.
@@ -384,7 +383,7 @@ Assuming `tracks.tidal_id` already has a UNIQUE constraint (verify first):
 
 | # | Description |
 |---|---|
-| 020 | Rebuild `queue` table (nullable `track_id`, add `pending_at`, `resolving_at`, `resolved_at`, `tidal_match_score`, `pending_artist`, `pending_title`; add `idx_queue_session_position` and `idx_queue_pending`) |
+| 020 | Rebuild `queue` table (nullable `track_id`, add `pending_at`, `resolving_at`, `resolved_at`, `tidal_match_score`, `pending_artist`, `pending_title`; add `idx_queue_position` and `idx_queue_pending`) |
 | 021 | `ALTER TABLE playback_state ADD COLUMN current_queue_item_id INTEGER REFERENCES queue(id)` |
 
 If `tracks.tidal_id` lacks a UNIQUE constraint, that becomes migration 020 and the above shift to 021–022.

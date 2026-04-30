@@ -32,6 +32,15 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     pub fn run_migrations(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         schema::run_migrations(&conn)
