@@ -846,7 +846,11 @@
 		{@render children()}
 	</main>
 
-	<aside class="now-playing-panel" oncontextmenu={openNowPlayingContextMenu}>
+	<aside
+		class="now-playing-panel"
+		class:queue-expanded={queueExpanded}
+		oncontextmenu={openNowPlayingContextMenu}
+	>
 		<div class="np-top">
 			<div class="np-artwork-wrap">
 				{#key $currentTrack?.artwork_url}
