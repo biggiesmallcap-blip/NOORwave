@@ -230,15 +230,44 @@ pub async fn orchestrate_song(
     // Genre enrichment: load genre paths for every candidate with a
     // real track_id (lastfm hits with track_id=0 are skipped — they
     // have no library row to look up). Build weighted genre sets and
-    // a per-candidate Jaccard against the seed.
-    let jaccard_by_index = compute_genre_jaccard(db, seed_track_id, &combined);
+    // a per-candidate Jaccard against the seed. Map keys are stable
+    // across both apply_taste_signals and apply_genre_signals
+    // candidate drops.
+    let jaccard_by_key = compute_genre_jaccard(db, seed_track_id, &combined);
 
     apply_taste_signals(&mut combined, &taste, &resolver);
+
+    // Snapshot post-affinity / pre-genre scores so the reason suffix
+    // can attribute the affinity contribution and the genre
+    // contribution to separate fields.
+    let post_affinity_scores: HashMap<(RadioSource, i64, String), f64> = combined
+        .iter()
+        .map(|c| {
+            (
+                (
+                    c.source,
+                    c.track_id,
+                    normalize_for_dedup(&c.artist_name, &c.title),
+                ),
+                c.similarity_score,
+            )
+        })
+        .collect();
+
+    // Phase 2b Stage 2: genre coherence scoring + mode-based hard
+    // reject. Lastfm candidates pass through untouched (no genre data
+    // for tracks outside the library).
+    apply_genre_signals(&mut combined, &jaccard_by_key, blend);
 
     // Reason-string enrichment: append a JSON suffix carrying the
     // structured breakdown that the frontend tooltip parses. Best
     // effort — failure here just keeps the prefix.
-    annotate_reasons(&mut combined, &pre_affinity_scores, &jaccard_by_index);
+    annotate_reasons(
+        &mut combined,
+        &pre_affinity_scores,
+        &post_affinity_scores,
+        &jaccard_by_key,
+    );
 
     let ordered = blend_interleave(combined, blend, limit);
 
@@ -671,10 +700,12 @@ fn apply_taste_signals(
 /// Compute a weighted Jaccard genre similarity between the seed and
 /// every candidate that has a real library `track_id`.
 ///
-/// Returns a `HashMap<usize, f64>` keyed by candidate index in the
-/// passed slice. Lastfm candidates (track_id == 0) and library
-/// candidates with no genre rows are absent from the map; callers
-/// should treat absence as "no signal" rather than "zero similarity".
+/// Returns a `HashMap` keyed by `(source, track_id, normalised dedup
+/// key)` — the same shape `pre_affinity_scores` uses, deliberately
+/// stable across `apply_taste_signals`'s `candidates.retain(...)`
+/// drops. Lastfm candidates (track_id == 0) and library candidates
+/// with no genre rows are absent from the map; callers should treat
+/// absence as "no signal" rather than "zero similarity".
 ///
 /// On any DB error or missing seed genres, returns an empty map and
 /// logs. Genre signal failure must not take the radio request offline.
@@ -682,7 +713,7 @@ fn compute_genre_jaccard(
     db: &Database,
     seed_track_id: i64,
     candidates: &[RadioCandidate],
-) -> HashMap<usize, f64> {
+) -> HashMap<(RadioSource, i64, String), f64> {
     use crate::genre::jaccard::{weighted_genre_set, weighted_jaccard};
 
     let cand_ids: Vec<i64> = candidates
@@ -724,7 +755,7 @@ fn compute_genre_jaccard(
     };
 
     let mut out = HashMap::new();
-    for (idx, cand) in candidates.iter().enumerate() {
+    for cand in candidates.iter() {
         if cand.track_id <= 0 {
             continue;
         }
@@ -733,48 +764,130 @@ fn compute_genre_jaccard(
         };
         let cand_set = weighted_genre_set(paths);
         let score = weighted_jaccard(&seed_set, &cand_set);
-        out.insert(idx, score);
+        let key = (
+            cand.source,
+            cand.track_id,
+            normalize_for_dedup(&cand.artist_name, &cand.title),
+        );
+        out.insert(key, score);
     }
     out
 }
 
+/// Phase 2b Stage 2: genre coherence multiplier and mode-based hard
+/// reject.
+///
+/// For each candidate with a Jaccard value (library/engine candidates;
+/// lastfm hits are absent from the map and pass through untouched):
+///
+/// - **Hard reject** if `jaccard < threshold[blend]`. Familiar drops
+///   below 0.10, Mixed drops below 0.05, Adventurous never drops.
+///   This filters out candidates that share no genre relationship with
+///   the seed at all — the kind of false-positive Phase 2b targets.
+///
+/// - **Multiplier** `1.0 + (jaccard * 0.30) - ((1.0 - jaccard) * 0.20
+///   when jaccard < 0.5 else 0)`. Substantial overlap (jaccard >= 0.5)
+///   only ever helps; partial overlap can demote. Floored at 0.1
+///   defensively (the formula itself never goes below 0.80).
+///
+/// Lastfm candidates pass through with no adjustment by design — the
+/// system has no genre data for tracks not in the library, and a
+/// library-artist proxy was rejected as too lossy. They compete on
+/// source-native similarity score and artist-affinity multiplier
+/// only.
+fn apply_genre_signals(
+    candidates: &mut Vec<RadioCandidate>,
+    jaccard_by_key: &HashMap<(RadioSource, i64, String), f64>,
+    blend: RadioBlend,
+) {
+    let hard_reject_threshold = match blend {
+        RadioBlend::Familiar => Some(0.10),
+        RadioBlend::Mixed => Some(0.05),
+        RadioBlend::Adventurous => None,
+    };
+
+    candidates.retain_mut(|cand| {
+        let key = (
+            cand.source,
+            cand.track_id,
+            normalize_for_dedup(&cand.artist_name, &cand.title),
+        );
+        let Some(jaccard) = jaccard_by_key.get(&key).copied() else {
+            // No genre data — pass through unchanged.
+            return true;
+        };
+
+        // Mode-based hard reject.
+        if let Some(threshold) = hard_reject_threshold {
+            if jaccard < threshold {
+                return false;
+            }
+        }
+
+        // Multiplier per the locked Phase 2b formula.
+        let bonus = jaccard * 0.30;
+        let penalty = if jaccard < 0.5 {
+            (1.0 - jaccard) * 0.20
+        } else {
+            0.0
+        };
+        let multiplier = (1.0 + bonus - penalty).max(0.1);
+        cand.similarity_score *= multiplier;
+        true
+    });
+}
+
 /// Append a structured JSON suffix to each candidate's `reason` string,
-/// carrying the genre Jaccard and the affinity multiplier for the
-/// frontend tooltip to display.
+/// carrying the genre Jaccard, the affinity multiplier, and (in Stage
+/// 2) the genre multiplier for the frontend tooltip to display.
 ///
 /// Format: `"<existing prefix> | <json>"`. The frontend parser splits
 /// on the rightmost ` | ` and tries `JSON.parse` on the right half;
 /// candidates without the suffix keep working as plain strings.
+///
+/// `pre_affinity` is the snapshot taken *before* both `apply_taste_signals`
+/// and `apply_genre_signals`; `post_affinity` is the snapshot taken
+/// between the two. The current `cand.similarity_score` is the
+/// post-genre value. From these three points we extract:
+///
+/// - `affinity_mult = post_affinity / pre_affinity`
+/// - `genre_mult    = post_genre    / post_affinity`
 ///
 /// Best-effort: serialisation failure is silently swallowed so a
 /// reason-formatting bug never fails a radio request.
 fn annotate_reasons(
     candidates: &mut [RadioCandidate],
     pre_affinity: &HashMap<(RadioSource, i64, String), f64>,
-    jaccard_by_index: &HashMap<usize, f64>,
+    post_affinity: &HashMap<(RadioSource, i64, String), f64>,
+    jaccard_by_key: &HashMap<(RadioSource, i64, String), f64>,
 ) {
-    for (idx, cand) in candidates.iter_mut().enumerate() {
+    for cand in candidates.iter_mut() {
         let key = (
             cand.source,
             cand.track_id,
             normalize_for_dedup(&cand.artist_name, &cand.title),
         );
-        let pre = pre_affinity.get(&key).copied();
-        let affinity_mult = match pre {
-            Some(p) if p > 0.0 => Some(cand.similarity_score / p),
+        let pre_aff = pre_affinity.get(&key).copied();
+        let post_aff = post_affinity.get(&key).copied();
+        let affinity_mult = match (pre_aff, post_aff) {
+            (Some(p), Some(a)) if p > 0.0 => Some(a / p),
             _ => None,
         };
-        let jaccard = jaccard_by_index.get(&idx).copied();
+        let genre_mult = match post_aff {
+            Some(a) if a > 0.0 => Some(cand.similarity_score / a),
+            _ => None,
+        };
+        let jaccard = jaccard_by_key.get(&key).copied();
 
-        // Build the JSON suffix manually to avoid pulling in serde_json
-        // formatting overhead for a 1–2 field payload. Only the fields
-        // we actually computed get emitted.
         let mut parts: Vec<String> = Vec::new();
         if let Some(j) = jaccard {
             parts.push(format!("\"genre_jaccard\":{j:.4}"));
         }
         if let Some(m) = affinity_mult {
             parts.push(format!("\"affinity_mult\":{m:.4}"));
+        }
+        if let Some(m) = genre_mult {
+            parts.push(format!("\"genre_mult\":{m:.4}"));
         }
         if parts.is_empty() {
             continue;
@@ -1433,58 +1546,230 @@ mod radio_phase2_tests {
 
     #[test]
     fn annotate_reasons_appends_json_suffix_for_library_candidate() {
-        // Library candidate with a genre Jaccard and an affinity multiplier
-        // both populated. Suffix carries both fields.
-        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.10)];
-        let pre_affinity = std::collections::HashMap::from([(
-            (
-                RadioSource::Library,
-                100,
-                normalize_for_dedup("A", "Song"),
-            ),
-            1.0_f64,
-        )]);
-        let jaccard_by_index = std::collections::HashMap::from([(0_usize, 0.67_f64)]);
-        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        // Library candidate with all three signals populated. Suffix
+        // carries genre_jaccard, affinity_mult, and genre_mult.
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 1.32)];
+        let key = (
+            RadioSource::Library,
+            100,
+            normalize_for_dedup("A", "Song"),
+        );
+        let pre_affinity =
+            std::collections::HashMap::from([(key.clone(), 1.0_f64)]);
+        // Post-affinity = 1.10 means apply_taste_signals applied a +10% nudge.
+        // The candidate's current similarity_score (1.32) divided by post_affinity
+        // gives genre_mult = 1.20.
+        let post_affinity =
+            std::collections::HashMap::from([(key.clone(), 1.10_f64)]);
+        let jaccard_by_key =
+            std::collections::HashMap::from([(key, 0.67_f64)]);
+        annotate_reasons(
+            &mut candidates,
+            &pre_affinity,
+            &post_affinity,
+            &jaccard_by_key,
+        );
         let reason = &candidates[0].reason;
         assert!(reason.contains(" | "), "expected JSON suffix separator, got: {reason}");
         assert!(reason.contains("\"genre_jaccard\":0.6700"), "got: {reason}");
         assert!(reason.contains("\"affinity_mult\":1.1000"), "got: {reason}");
+        assert!(reason.contains("\"genre_mult\":1.2000"), "got: {reason}");
     }
 
     #[test]
-    fn annotate_reasons_emits_partial_suffix_when_only_one_field_available() {
-        // Last.fm candidate (track_id=0): no Jaccard. Only the affinity
-        // multiplier appears in the suffix.
+    fn annotate_reasons_emits_partial_suffix_when_only_affinity_available() {
+        // Last.fm candidate (track_id=0): no Jaccard, no genre_mult
+        // (lastfm passes through apply_genre_signals untouched).
         let mut candidates = vec![cand(0, RadioSource::Lastfm, "B", "Tune", 0.20)];
-        let pre_affinity = std::collections::HashMap::from([(
-            (
-                RadioSource::Lastfm,
-                0,
-                normalize_for_dedup("B", "Tune"),
-            ),
-            0.20_f64,
-        )]);
-        let jaccard_by_index: std::collections::HashMap<usize, f64> =
+        let key = (
+            RadioSource::Lastfm,
+            0,
+            normalize_for_dedup("B", "Tune"),
+        );
+        let pre_affinity =
+            std::collections::HashMap::from([(key.clone(), 0.20_f64)]);
+        // Post-affinity equals the live score (no genre pass touched it).
+        let post_affinity =
+            std::collections::HashMap::from([(key, 0.20_f64)]);
+        let jaccard_by_key: std::collections::HashMap<(RadioSource, i64, String), f64> =
             std::collections::HashMap::new();
-        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        annotate_reasons(
+            &mut candidates,
+            &pre_affinity,
+            &post_affinity,
+            &jaccard_by_key,
+        );
         let reason = &candidates[0].reason;
         assert!(reason.contains(" | "), "got: {reason}");
         assert!(!reason.contains("genre_jaccard"), "got: {reason}");
         assert!(reason.contains("\"affinity_mult\":1.0000"), "got: {reason}");
+        // genre_mult is post / post = 1.0 — emitted, but indistinguishable
+        // from no-op. That's fine; the tooltip filters near-1.0 values.
     }
 
     #[test]
     fn annotate_reasons_skips_when_no_signals_present() {
-        // No pre_affinity entry, no Jaccard. Reason is left untouched.
+        // No pre_affinity / post_affinity / Jaccard entries. Reason
+        // string is left untouched.
         let mut candidates = vec![cand(0, RadioSource::Lastfm, "C", "Song", 0.5)];
         let original_reason = candidates[0].reason.clone();
         let pre_affinity: std::collections::HashMap<(RadioSource, i64, String), f64> =
             std::collections::HashMap::new();
-        let jaccard_by_index: std::collections::HashMap<usize, f64> =
+        let post_affinity: std::collections::HashMap<(RadioSource, i64, String), f64> =
             std::collections::HashMap::new();
-        annotate_reasons(&mut candidates, &pre_affinity, &jaccard_by_index);
+        let jaccard_by_key: std::collections::HashMap<(RadioSource, i64, String), f64> =
+            std::collections::HashMap::new();
+        annotate_reasons(
+            &mut candidates,
+            &pre_affinity,
+            &post_affinity,
+            &jaccard_by_key,
+        );
         assert_eq!(candidates[0].reason, original_reason);
+    }
+
+    // ─── Phase 2b Stage 2: genre coherence scoring ────────────────────────────
+
+    fn run_genre_signals(
+        cand_pairs: &[(RadioSource, i64, &str, &str, f64)],
+        jaccards: &[(RadioSource, i64, &str, &str, f64)],
+        blend: RadioBlend,
+    ) -> Vec<RadioCandidate> {
+        let mut candidates: Vec<RadioCandidate> = cand_pairs
+            .iter()
+            .map(|(s, tid, an, t, score)| cand(*tid, *s, an, t, *score))
+            .collect();
+        let map: HashMap<(RadioSource, i64, String), f64> = jaccards
+            .iter()
+            .map(|(s, tid, an, t, j)| {
+                ((*s, *tid, normalize_for_dedup(an, t)), *j)
+            })
+            .collect();
+        apply_genre_signals(&mut candidates, &map, blend);
+        candidates
+    }
+
+    #[test]
+    fn genre_score_multiplier_full_overlap() {
+        // jaccard 1.0: bonus 0.30, no penalty (>= 0.5). Multiplier 1.30.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            RadioBlend::Mixed,
+        );
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0].similarity_score - 1.30).abs() < 1e-9,
+            "got {}",
+            result[0].similarity_score
+        );
+    }
+
+    #[test]
+    fn genre_score_multiplier_partial_no_penalty_at_threshold() {
+        // jaccard 0.5: bonus 0.15, no penalty (penalty branch fires only
+        // for jaccard < 0.5). Multiplier 1.15.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.5)],
+            RadioBlend::Mixed,
+        );
+        assert!((result[0].similarity_score - 1.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn genre_score_multiplier_zero_overlap() {
+        // jaccard 0.0 under Adventurous (no hard reject):
+        // bonus 0.0, penalty 1.0*0.20 = 0.20. Multiplier 0.80.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.0)],
+            RadioBlend::Adventurous,
+        );
+        assert!((result[0].similarity_score - 0.80).abs() < 1e-9);
+    }
+
+    #[test]
+    fn genre_score_multiplier_floor_clamp() {
+        // Pathological negative multiplier (shouldn't happen with the
+        // current formula but defensive floor must hold).
+        // The formula floors at 0.1 — even with the bonus and penalty
+        // values, jaccard=0 produces 0.80, not below the floor.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.0)],
+            RadioBlend::Adventurous,
+        );
+        assert!(result[0].similarity_score >= 0.1);
+    }
+
+    #[test]
+    fn genre_hard_reject_familiar_drops_disjoint() {
+        // jaccard 0.05 under Familiar (threshold 0.10): drop.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.05)],
+            RadioBlend::Familiar,
+        );
+        assert_eq!(result.len(), 0, "Familiar should hard-reject jaccard 0.05");
+    }
+
+    #[test]
+    fn genre_hard_reject_mixed_borderline() {
+        // jaccard 0.04 under Mixed (threshold 0.05): drop.
+        // jaccard 0.06 under Mixed: keep.
+        let dropped = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.04)],
+            RadioBlend::Mixed,
+        );
+        assert_eq!(dropped.len(), 0);
+        let kept = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.06)],
+            RadioBlend::Mixed,
+        );
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn genre_hard_reject_adventurous_keeps_disjoint() {
+        // jaccard 0.0 under Adventurous: keep (no hard reject), score
+        // demoted by penalty.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 1.0)],
+            &[(RadioSource::Library, 100, "A", "Song", 0.0)],
+            RadioBlend::Adventurous,
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].similarity_score < 1.0);
+    }
+
+    #[test]
+    fn genre_lastfm_skipped_when_no_genre_data() {
+        // Lastfm candidate with track_id=0 has no entry in jaccard_by_key.
+        // It must pass through apply_genre_signals with similarity_score
+        // unchanged AND not be hard-rejected even under Familiar.
+        let result = run_genre_signals(
+            &[(RadioSource::Lastfm, 0, "C", "Song", 0.20)],
+            &[],
+            RadioBlend::Familiar,
+        );
+        assert_eq!(result.len(), 1);
+        assert!((result[0].similarity_score - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn genre_library_with_no_jaccard_passes_through() {
+        // Library candidate without a jaccard entry (e.g. seed had no
+        // genres, or this candidate had no genre rows). Pass through.
+        let result = run_genre_signals(
+            &[(RadioSource::Library, 100, "A", "Song", 0.50)],
+            &[],
+            RadioBlend::Familiar,
+        );
+        assert_eq!(result.len(), 1);
+        assert!((result[0].similarity_score - 0.50).abs() < 1e-9);
     }
 }
 
@@ -1737,19 +2022,52 @@ mod radio_diagnostic_harness {
             dropped_by_suppression
         );
 
+        // ─── Compute genre Jaccard + Stage 2 genre signal ─────────────────
+        let jaccard_by_key = compute_genre_jaccard(&db, seed_id, &after_affinity);
+        let pre_genre = after_affinity.clone();
+        let pre_genre_count = pre_genre.len();
+        let mut after_genre = after_affinity.clone();
+        apply_genre_signals(&mut after_genre, &jaccard_by_key, blend);
+        eprintln!(
+            "After apply_genre_signals: {} candidates (dropped {} via genre hard reject in {:?})",
+            after_genre.len(),
+            pre_genre_count - after_genre.len(),
+            blend
+        );
+
         // ─── Blend interleave → final queue ───────────────────────────────
-        let final_queue = blend_interleave(after_affinity.clone(), blend, limit);
+        let final_queue = blend_interleave(after_genre.clone(), blend, limit);
         eprintln!("\nFinal queue length: {}\n", final_queue.len());
 
         // ─── Per-candidate breakdown ──────────────────────────────────────
+        // Columns: pre_aff (combine_with_dedup output), post_aff
+        // (after apply_taste_signals), final (after apply_genre_signals
+        // — the score blend_interleave actually sorts on), aff_mult
+        // (post_aff / pre_aff), gen_mult (final / post_aff), jacc (the
+        // Jaccard value from compute_genre_jaccard), g_olp (raw genre
+        // overlap count between candidate and seed for sanity).
         eprintln!("==== FINAL QUEUE PER-CANDIDATE BREAKDOWN ====");
         eprintln!(
-            "{:>3} {:>7} {:>7} {:>9} {:>9} {:>7} {:>5} {:<28} {:<28}",
-            "#", "src", "tid", "pre_aff", "post_aff", "mult", "g_olp", "artist", "title"
+            "{:>3} {:>7} {:>7} {:>8} {:>8} {:>8} {:>6} {:>6} {:>5} {:>5} {:<26} {:<26}",
+            "#", "src", "tid", "pre_aff", "post_aff", "final",
+            "aff_m", "gen_m", "jacc", "g_olp", "artist", "title"
         );
         let mut zero_overlap_count = 0;
         let mut unknown_overlap_count = 0;
         let mut overlap_present_count = 0;
+        let post_affinity_lookup: HashMap<(RadioSource, i64, String), f64> = pre_genre
+            .iter()
+            .map(|c| {
+                (
+                    (
+                        c.source,
+                        c.track_id,
+                        normalize_for_dedup(&c.artist_name, &c.title),
+                    ),
+                    c.similarity_score,
+                )
+            })
+            .collect();
         for (i, cand) in final_queue.iter().enumerate() {
             let key = (
                 cand.source,
@@ -1757,11 +2075,25 @@ mod radio_diagnostic_harness {
                 normalize_for_dedup(&cand.artist_name, &cand.title),
             );
             let pre = pre_affinity.get(&key).copied().unwrap_or(f64::NAN);
-            let mult = if pre > 0.0 {
-                cand.similarity_score / pre
+            let post_aff = post_affinity_lookup
+                .get(&key)
+                .copied()
+                .unwrap_or(f64::NAN);
+            let aff_m = if pre > 0.0 {
+                post_aff / pre
             } else {
                 f64::NAN
             };
+            let gen_m = if post_aff > 0.0 {
+                cand.similarity_score / post_aff
+            } else {
+                f64::NAN
+            };
+            let jacc = jaccard_by_key
+                .get(&key)
+                .copied()
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "—".to_string());
             let cand_genres = track_genres(&db, cand.track_id);
             let overlap_label = if cand.track_id <= 0 {
                 unknown_overlap_count += 1;
@@ -1781,16 +2113,19 @@ mod radio_diagnostic_harness {
                 RadioSource::Engine => "engine",
             };
             eprintln!(
-                "{:>3} {:>7} {:>7} {:>9.4} {:>9.4} {:>7.4} {:>5} {:<28} {:<28}",
+                "{:>3} {:>7} {:>7} {:>8.4} {:>8.4} {:>8.4} {:>6.3} {:>6.3} {:>5} {:>5} {:<26} {:<26}",
                 i + 1,
                 src,
                 cand.track_id,
                 pre,
+                post_aff,
                 cand.similarity_score,
-                mult,
+                aff_m,
+                gen_m,
+                jacc,
                 overlap_label,
-                truncate(&cand.artist_name, 26),
-                truncate(&cand.title, 26)
+                truncate(&cand.artist_name, 24),
+                truncate(&cand.title, 24)
             );
         }
 
