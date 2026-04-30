@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_016,
     MIGRATION_017,
     MIGRATION_018,
+    MIGRATION_019,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -573,6 +574,13 @@ CREATE INDEX idx_playlists_favorite ON playlists(is_favorite);
 // in a queue-row tooltip and tolerates NULL gracefully.
 const MIGRATION_018: &str = r#"
 ALTER TABLE queue ADD COLUMN reason TEXT;
+"#;
+
+// Sample track context for unresolved last.fm tags, so taxonomy curation
+// can spot-check what kind of music produces a given un-mappable tag.
+// Nullable because pre-existing rows from migration 015 don't have it.
+const MIGRATION_019: &str = r#"
+ALTER TABLE lastfm_unresolved_tags ADD COLUMN last_track_id INTEGER;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

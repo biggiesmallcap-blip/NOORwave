@@ -30,35 +30,35 @@ const LASTFM_CONFIDENCE: f64 = 0.40;
 /// doesn't correspond to an already-seeded genre row. The genres table is a
 /// closed set — this function never inserts into it.
 ///
-/// When a tag resolves canonically but the genre isn't in the DB (taxonomy
-/// gap), the tag is logged to `lastfm_unresolved_tags` for later curation.
-fn resolve_to_genre_id(tag: &str, conn: &Connection) -> Option<i64> {
+/// Tags that pass the keep-filter but fail canonical resolution are logged
+/// to `lastfm_unresolved_tags` for taxonomy-curation triage. See
+/// docs/tidal-genre-source-investigation.md (appendix) for why this is the
+/// right log point.
+fn resolve_to_genre_id(tag: &str, track_id: i64, conn: &Connection) -> Option<i64> {
     if !should_keep_tag(tag, conn) {
         return None;
     }
 
     let resolution = crate::genre::builder::embedded_builder().resolve(tag);
-    let canonical = resolution.canonical_name()?;
+    let Some(canonical) = resolution.canonical_name() else {
+        let _ = conn.execute(
+            "INSERT INTO lastfm_unresolved_tags (tag, seen_count, last_seen, last_track_id)
+             VALUES (?1, 1, datetime('now'), ?2)
+             ON CONFLICT(tag) DO UPDATE SET
+                 seen_count    = seen_count + 1,
+                 last_seen     = datetime('now'),
+                 last_track_id = excluded.last_track_id",
+            rusqlite::params![tag, track_id],
+        );
+        return None;
+    };
 
-    match conn.query_row(
+    conn.query_row(
         "SELECT id FROM genres WHERE name = ?1",
         [canonical],
         |row| row.get::<_, i64>(0),
-    ) {
-        Ok(id) => Some(id),
-        Err(_) => {
-            // Canonical name found but not in DB — taxonomy has a gap.
-            let _ = conn.execute(
-                "INSERT INTO lastfm_unresolved_tags (tag, seen_count, last_seen)
-                 VALUES (?1, 1, datetime('now'))
-                 ON CONFLICT(tag) DO UPDATE SET
-                     seen_count = seen_count + 1,
-                     last_seen  = datetime('now')",
-                [canonical],
-            );
-            None
-        }
-    }
+    )
+    .ok()
 }
 
 /// Build the set of genre IDs already associated with a track and a map from
@@ -303,7 +303,7 @@ where
             let (existing_ids, existing_parents) = existing_genre_ids(track_id, conn);
 
             for raw in &raw_tags {
-                let Some(genre_id) = resolve_to_genre_id(raw, conn) else {
+                let Some(genre_id) = resolve_to_genre_id(raw, track_id, conn) else {
                     continue;
                 };
 
@@ -389,4 +389,92 @@ where
         }
     }
     Err(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE lastfm_unresolved_tags (
+                 tag           TEXT PRIMARY KEY,
+                 seen_count    INTEGER NOT NULL DEFAULT 1,
+                 last_seen     TEXT NOT NULL DEFAULT (datetime('now')),
+                 last_track_id INTEGER
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn unresolvable_tag_gets_logged_with_track_context() {
+        let conn = setup_conn();
+
+        // Nonsense string: passes the keep-filter (length, not a stop tag, not
+        // a locale, not a digit-decade, not a known artist) but the embedded
+        // genre resolver returns no canonical match (jaro_winkler well below
+        // the 0.92 fuzzy threshold and no shared tokens with any taxonomy
+        // node). This is the previously-silent drop path.
+        let raw = "zzzfakegenrexyz";
+
+        let result = resolve_to_genre_id(raw, 42, &conn);
+        assert!(result.is_none(), "expected unresolvable tag to return None");
+
+        let (logged_tag, seen_count, last_track_id): (String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT tag, seen_count, last_track_id
+                 FROM lastfm_unresolved_tags WHERE tag = ?1",
+                [raw],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("unresolved tag row should have been inserted");
+
+        assert_eq!(logged_tag, raw);
+        assert_eq!(seen_count, 1);
+        assert_eq!(last_track_id, Some(42));
+    }
+
+    #[test]
+    fn repeat_observation_increments_count_and_updates_track_id() {
+        let conn = setup_conn();
+        let raw = "zzzfakegenrexyz";
+
+        resolve_to_genre_id(raw, 42, &conn);
+        resolve_to_genre_id(raw, 99, &conn);
+
+        let (seen_count, last_track_id): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT seen_count, last_track_id
+                 FROM lastfm_unresolved_tags WHERE tag = ?1",
+                [raw],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(seen_count, 2);
+        assert_eq!(last_track_id, Some(99));
+    }
+
+    #[test]
+    fn filtered_tag_does_not_get_logged() {
+        let conn = setup_conn();
+
+        // Stop tags are intentional non-genres; they should not pollute the
+        // unresolved log because they're not candidates for taxonomy expansion.
+        resolve_to_genre_id("seen live", 42, &conn);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM lastfm_unresolved_tags",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }
