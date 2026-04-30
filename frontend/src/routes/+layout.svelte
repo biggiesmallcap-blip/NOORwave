@@ -1051,14 +1051,14 @@
 					aria-controls="queue-list"
 					title={queueExpanded ? 'Collapse queue' : 'Expand queue'}
 				>
-					<span class="queue-eyebrow">Up next</span>
 					{#if upcomingQueue.length > 0}
 						<span class="queue-count-num">{upcomingQueue.length}</span>
 						<span class="queue-count-unit">
 							{upcomingQueue.length === 1 ? 'track' : 'tracks'} · {queueTotalLabel}
 						</span>
 					{:else}
-						<span class="queue-count-unit">No tracks queued</span>
+						<span class="queue-eyebrow">Up next</span>
+						<span class="queue-count-unit">empty</span>
 					{/if}
 				</button>
 				<div class="queue-header-actions">
@@ -2300,9 +2300,10 @@
 	}
 
 	.queue-banner {
+		flex: 1 1 auto;
 		display: flex;
 		align-items: baseline;
-		gap: 8px;
+		gap: 6px;
 		padding: 4px 8px;
 		margin: -4px -8px;
 		background: transparent;
@@ -2312,6 +2313,8 @@
 		color: inherit;
 		cursor: pointer;
 		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
 		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 
@@ -2321,73 +2324,36 @@
 	}
 
 	.queue-count-num {
+		flex: 0 0 auto;
 		font-size: 1.05rem;
 		font-weight: 600;
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
+		line-height: 1;
 	}
 
 	.queue-count-unit {
+		flex: 1 1 auto;
+		min-width: 0;
 		font-size: 0.74rem;
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		line-height: 1;
 	}
 
 	.queue-header-actions {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 4px;
 		flex-shrink: 0;
-	}
-
-	.queue-automix-btn {
-		width: 28px;
-		height: 28px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		font-size: 0.82rem;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			box-shadow var(--motion-fast);
-	}
-
-	.queue-automix-btn:hover {
-		background: var(--bg-hover);
-		border-color: var(--border-strong);
 	}
 
 	.queue-automix-btn.active {
 		background: var(--accent-soft);
 		border-color: var(--accent-line);
 		box-shadow: 0 0 10px var(--accent), 0 0 0 1px var(--accent-line);
-	}
-
-	.queue-discover-btn {
-		width: 28px;
-		height: 28px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast),
-			box-shadow var(--motion-fast);
-	}
-
-	.queue-discover-btn:hover {
-		background: var(--bg-hover);
-		border-color: var(--border-strong);
-		color: var(--text-primary);
 	}
 
 	.queue-discover-btn.active {
@@ -2398,15 +2364,17 @@
 	}
 
 	.queue-icon-btn {
-		width: 28px;
-		height: 28px;
+		width: 24px;
+		height: 24px;
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 0.82rem;
+		font-size: 0.7rem;
+		line-height: 1;
+		flex-shrink: 0;
 		cursor: pointer;
 		transition:
 			background var(--motion-fast),
