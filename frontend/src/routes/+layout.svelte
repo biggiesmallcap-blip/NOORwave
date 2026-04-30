@@ -1192,17 +1192,19 @@
 				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
+						{@const isPending = item.resolution_state === 'pending'}
 						<div
 							class:active={$currentTrack?.id === item.track.id}
 							class:dragging={dragItemId === item.id}
 							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
+							class:pending={isPending}
 							class="queue-row"
 							role="button"
 							tabindex="0"
 							draggable={true}
 							data-track-id={item.track.id}
-							onclick={() => void handleQueueTrackPlay(item.track.id)}
-							onkeydown={(event) => handleQueueTrackKeydown(item.track.id, event)}
+							onclick={() => { if (!isPending) void handleQueueTrackPlay(item.track.id); }}
+							onkeydown={(event) => { if (!isPending) handleQueueTrackKeydown(item.track.id, event); }}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1212,7 +1214,9 @@
 						>
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if item.track.artwork_url}
+								{#if isPending}
+									<div class="queue-art placeholder pending-art" title="Resolving track...">…</div>
+								{:else if item.track.artwork_url}
 									<img class="queue-art" src={item.track.artwork_url} alt="" />
 								{:else}
 									<div class="queue-art placeholder">♫</div>
@@ -1222,7 +1226,7 @@
 
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if aid && aid > 0}
+								{#if !isPending && aid && aid > 0}
 									<a
 										class="queue-artist"
 										href="/artists/{aid}"
@@ -1540,17 +1544,21 @@
 				<div class="mobile-np-queue-list">
 					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
+						{@const isPending = item.resolution_state === 'pending'}
 						<div
 							class="queue-row"
 							class:active={$currentTrack.id === item.track.id}
+							class:pending={isPending}
 							role="button"
 							tabindex="0"
-							onclick={() => void handleQueueTrackPlay(item.track.id)}
-							onkeydown={(event) => handleQueueTrackKeydown(item.track.id, event)}
+							onclick={() => { if (!isPending) void handleQueueTrackPlay(item.track.id); }}
+							onkeydown={(event) => { if (!isPending) handleQueueTrackKeydown(item.track.id, event); }}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if item.track.artwork_url}
+								{#if isPending}
+									<div class="queue-art placeholder pending-art" title="Resolving track...">…</div>
+								{:else if item.track.artwork_url}
 									<img class="queue-art" src={item.track.artwork_url} alt="" />
 								{:else}
 									<div class="queue-art placeholder">♫</div>
@@ -1559,7 +1567,7 @@
 							</div>
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if aid && aid > 0}
+								{#if !isPending && aid && aid > 0}
 									<a
 										class="queue-artist"
 										href="/artists/{aid}"
@@ -2581,6 +2589,22 @@
 		border-color: var(--accent-line);
 		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
 		box-shadow: 0 -2px 0 var(--accent-strong) inset;
+	}
+
+	.queue-row.pending {
+		cursor: default;
+		opacity: 0.7;
+	}
+
+	.queue-row.pending:hover,
+	.queue-row.pending:focus-within {
+		transform: none;
+	}
+
+	.queue-art.placeholder.pending-art {
+		font-size: 0.9rem;
+		letter-spacing: 0.1em;
+		opacity: 0.5;
 	}
 
 	.queue-grip {

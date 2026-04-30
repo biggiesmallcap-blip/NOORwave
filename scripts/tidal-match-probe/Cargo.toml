@@ -1,0 +1,18 @@
+# Standalone diagnostic — opts out of the parent workspace so it doesn't
+# get pulled into normal noor-server builds.
+[workspace]
+
+[package]
+name = "tidal-match-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+strsim = "0.11"

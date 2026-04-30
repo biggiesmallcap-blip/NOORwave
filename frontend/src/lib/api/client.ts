@@ -270,6 +270,17 @@ export interface QueueItem {
 	 * (see `parseReason` in $lib/utils/reason).
 	 */
 	reason?: string | null;
+	/** Phase 2c-ii-a: "resolved" | "pending" | "unresolvable" | null (legacy = resolved) */
+	resolution_state?: string | null;
+}
+
+/** A last.fm-sourced radio candidate that has no library track yet. */
+export interface PendingCandidateInfo {
+	artist: string;
+	title: string;
+	duration_ms?: number | null;
+	lastfm_match_score: number;
+	reason?: string | null;
 }
 
 export interface PlaybackState {
@@ -1363,9 +1374,14 @@ export const api = {
 		});
 	},
 
-	replacePlaybackQueue(trackIds: number[], reasons?: (string | null)[]) {
+	replacePlaybackQueue(
+		trackIds: number[],
+		reasons?: (string | null)[],
+		pendingCandidates?: PendingCandidateInfo[],
+	) {
 		const body: Record<string, unknown> = { track_ids: trackIds };
 		if (reasons) body.reasons = reasons;
+		if (pendingCandidates?.length) body.pending_candidates = pendingCandidates;
 		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),

@@ -198,9 +198,15 @@ async fn main() -> Result<()> {
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
     db.seed_genres_from_taxonomy()?;
     // The audio runtime is ephemeral — it never survives a process restart. Clear the
-    // persisted is_playing flag so the frontend doesn't boot into a ghost-playing state.
+    // whole transient session (current track, position, queue) so the player boots fresh
+    // instead of showing a stale track that "Play" can't actually resume. User prefs
+    // (volume, shuffle/repeat/automix modes) stay put.
     db.with_conn(|conn| {
-        conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", [])?;
+        conn.execute(
+            "UPDATE playback_state SET is_playing = 0, current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0 WHERE id = 1",
+            [],
+        )?;
+        conn.execute("DELETE FROM queue", [])?;
         Ok(())
     })?;
     info!("Database initialized");

@@ -385,26 +385,34 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         [],
         |row| row.get(0),
     )?;
-    let current_track_id: Option<i64> = conn.query_row(
-        "SELECT current_track_id FROM playback_state WHERE id = 1",
+    let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
         [],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
     let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING)?;
     if queue_items.is_empty() {
         conn.execute(
-            "UPDATE playback_state SET current_track_id = NULL, is_playing = 0, position_ms = 0 WHERE id = 1",
+            "UPDATE playback_state SET current_track_id = NULL, current_queue_item_id = NULL, is_playing = 0, position_ms = 0 WHERE id = 1",
             [],
         )?;
         return load_snapshot(conn);
     }
 
-    let current_index = current_track_id.and_then(|track_id| {
-        queue_items
-            .iter()
-            .position(|item| item.track.id == track_id)
-    });
+    // Prefer track_id lookup (library rows); fall back to queue item ID (pending rows
+    // where current_track_id is NULL because the track isn't in the library yet).
+    let current_index = current_track_id
+        .and_then(|track_id| {
+            queue_items
+                .iter()
+                .position(|item| item.track.id == track_id)
+        })
+        .or_else(|| {
+            current_queue_item_id.and_then(|qid| {
+                queue_items.iter().position(|item| item.id == qid)
+            })
+        });
 
     let next_track = match repeat_mode.as_str() {
         "one" => current_index
@@ -425,16 +433,19 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
     };
 
     if let Some(item) = next_track {
+        // Pending rows have track.id == 0 (COALESCE sentinel); write NULL so the FK is not
+        // violated. current_queue_item_id tracks position for the next advance.
+        let new_track_id: Option<i64> = if item.track.id != 0 { Some(item.track.id) } else { None };
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = ?1, position_ms = 0, is_playing = 1
+             SET current_track_id = ?1, current_queue_item_id = ?2, position_ms = 0, is_playing = 1
              WHERE id = 1",
-            params![item.track.id],
+            params![new_track_id, item.id],
         )?;
     } else {
         conn.execute(
             "UPDATE playback_state
-             SET current_track_id = NULL, position_ms = 0, is_playing = 0
+             SET current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0, is_playing = 0
              WHERE id = 1",
             [],
         )?;

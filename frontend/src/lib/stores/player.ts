@@ -3,6 +3,7 @@ import {
 	api,
 	ApiError,
 	type AudioDspFeatures,
+	type PendingCandidateInfo,
 	type PlaybackSnapshot,
 	type PlaybackState,
 	type QueueItem,
@@ -656,14 +657,18 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 // the queue tooltip reads from the round-tripped QueueItem.reason.
 async function loadQueueAndPlay(
 	trackIds: number[],
-	options?: { preserveRadioReasons?: boolean; reasons?: (string | null)[] },
+	options?: {
+		preserveRadioReasons?: boolean;
+		reasons?: (string | null)[];
+		pendingCandidates?: PendingCandidateInfo[];
+	},
 ) {
 	if (trackIds.length === 0) return;
 	if (!assertOnline()) return;
 	playerError.set(null);
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
-		await api.replacePlaybackQueue(trackIds, options?.reasons);
+		await api.replacePlaybackQueue(trackIds, options?.reasons, options?.pendingCandidates);
 		const snapshot = await api.playTrack(trackIds[0]);
 		hydratePlayback(snapshot);
 	} catch (error) {
@@ -764,12 +769,27 @@ export async function startSongRadio(seedTrackId: number) {
 		const radioIds = inLibrary.map((t) => t.track_id);
 		const radioReasons = inLibrary.map((t) => t.reason ?? null);
 		setRadioReasons(queue.tracks);
+
+		// Collect last.fm candidates that have no library match yet (track_id === 0).
+		// These are appended to the queue as pending rows and resolved to Tidal stream
+		// URLs at play time (Phase 2c-ii-a).
+		const pendingCandidates: PendingCandidateInfo[] = queue.tracks
+			.filter((t) => !t.is_in_library && t.track_id === 0)
+			.map((t) => ({
+				artist: t.artist_name ?? '',
+				title: t.title,
+				duration_ms: t.duration_ms ?? null,
+				lastfm_match_score: t.similarity_score,
+				reason: t.reason ?? null,
+			}));
+
 		// Seed track leads with no reason (it's the user's pick, not a
 		// recommendation), library candidates carry their backend-issued
 		// reason strings.
 		await loadQueueAndPlay([seedTrackId, ...radioIds], {
 			preserveRadioReasons: true,
 			reasons: [null, ...radioReasons],
+			pendingCandidates: pendingCandidates.length > 0 ? pendingCandidates : undefined,
 		});
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
