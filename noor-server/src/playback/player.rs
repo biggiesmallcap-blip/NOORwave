@@ -721,6 +721,25 @@ fn build_automix_extension(
         &excluded_track_ids,
     )
     .unwrap_or_default();
+
+    // Phase 2c hotfix: if we got here, the embedding fast-path produced
+    // nothing usable (model missing, no neighbours, or filtered to
+    // empty). If the precomputed similarity table is also empty for
+    // this seed, the track has no recommendation signal at all.
+    // Filling with a 500-track random library pool below would produce
+    // a kitchen-sink queue that reads as "the system is broken" — most
+    // commonly seen on fresh `tidal_stream` imports that haven't been
+    // enriched yet. Skip the extension and let the queue end gracefully.
+    // Seeds with sparse-but-non-empty signal still fall through to the
+    // random pool below; only the truly-empty case is guarded.
+    if similar.is_empty() {
+        tracing::debug!(
+            seed_track_id = current_track.id,
+            "automix: skipping extension — seed has no recommendation signal (no embedding neighbours, no track_similarity rows)"
+        );
+        return Ok(Vec::new());
+    }
+
     let mut candidates: Vec<Track> = if similar.len() >= needed {
         let similar_ids = similar.iter().map(|r| r.track_id).collect::<Vec<_>>();
         queue::get_tracks_by_ids(conn, &similar_ids)?
@@ -1458,6 +1477,179 @@ mod tests {
         assert_eq!(next.id, 3);
         let queue_items = queue::load_queue(&conn).unwrap();
         assert!(queue_items.len() > 2);
+    }
+
+    /// Build an isolated DB fixture with the full surface
+    /// `build_automix_extension` needs (the standard `conn()` helper
+    /// above lacks `embedding_models`, `track_embeddings`, and
+    /// `track_similarity`). Returns a connection with one seed track
+    /// inserted but **no** embedding row and **no** similarity rows —
+    /// the "no recommendation signal" case the guard targets.
+    fn empty_signal_conn() -> (Connection, Track) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT);
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                artist_id INTEGER NOT NULL,
+                album_id INTEGER,
+                disc_number INTEGER,
+                track_number INTEGER,
+                duration_ms INTEGER,
+                isrc TEXT,
+                tidal_id INTEGER,
+                ytmusic_id TEXT,
+                soundcloud_id INTEGER,
+                best_quality TEXT,
+                best_source TEXT,
+                fidelity_score INTEGER DEFAULT 0,
+                is_favorite INTEGER DEFAULT 0,
+                play_count INTEGER DEFAULT 0,
+                last_played_at TEXT,
+                date_added TEXT,
+                source TEXT DEFAULT 'tidal'
+            );
+            CREATE TABLE queue (
+                id INTEGER PRIMARY KEY,
+                track_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                source TEXT DEFAULT 'user',
+                reason TEXT
+            );
+            CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, parent_id INTEGER);
+            CREATE TABLE track_genres (
+                track_id INTEGER NOT NULL,
+                genre_id INTEGER NOT NULL,
+                source TEXT,
+                confidence REAL DEFAULT 1.0
+            );
+            CREATE TABLE listen_history (
+                id INTEGER PRIMARY KEY,
+                track_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                duration_listened_ms INTEGER DEFAULT 0,
+                completed INTEGER DEFAULT 0
+            );
+            CREATE TABLE embedding_models (
+                id INTEGER PRIMARY KEY,
+                model_key TEXT NOT NULL UNIQUE,
+                family TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                trained_at TEXT,
+                config_json TEXT,
+                metrics_json TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE track_embeddings (
+                model_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                vector_blob BLOB NOT NULL,
+                PRIMARY KEY (model_id, track_id)
+            );
+            CREATE TABLE track_similarity (
+                track_a INTEGER NOT NULL,
+                track_b INTEGER NOT NULL,
+                similarity_score REAL NOT NULL DEFAULT 0,
+                co_listen_score REAL DEFAULT 0,
+                co_album_score REAL DEFAULT 0,
+                co_artist_score REAL DEFAULT 0,
+                genre_proximity REAL DEFAULT 0,
+                duration_proximity REAL DEFAULT 0,
+                era_proximity REAL DEFAULT 0,
+                computed_at TEXT,
+                PRIMARY KEY (track_a, track_b)
+            );
+            ",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Unenriched Artist')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (1, 'Fresh Tidal Import', 1, 'tidal_stream', 0)",
+            [],
+        )
+        .unwrap();
+
+        let track = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+        (conn, track)
+    }
+
+    /// Phase 2c hotfix: when both the embedding fast-path AND the
+    /// precomputed similarity table are empty for a seed,
+    /// `build_automix_extension` must return `Vec::new()` rather than
+    /// falling back to a 500-track random library pool.
+    ///
+    /// Reproduces the Amy Shark "I Said Hi" symptom from the
+    /// diagnostic: fresh `tidal_stream` import, no enrichment, no
+    /// similarity rows, no embedding. Pre-fix behaviour was a queue
+    /// full of unrelated library tracks (Mac Miller, Bob Marley,
+    /// James Brown, etc.); post-fix the queue ends gracefully.
+    #[test]
+    fn build_automix_extension_returns_empty_when_seed_has_no_signal() {
+        let (conn, seed) = empty_signal_conn();
+        let extension = build_automix_extension(
+            &conn,
+            &seed,
+            &[],          // empty queue
+            ShuffleMode::Off,
+            12,           // typical needed
+            true,         // use_learning enabled — fast-path will run, find no model, fall through
+        )
+        .expect("extension call");
+        assert!(
+            extension.is_empty(),
+            "expected empty extension for seed with no signal, got {} tracks",
+            extension.len()
+        );
+    }
+
+    /// Same fixture but with one similarity row for the seed → the
+    /// guard should NOT fire. We deliberately don't assert on the
+    /// extension's exact contents (that depends on scoring), only on
+    /// the fact that the guard's early-return path didn't engage.
+    /// Sparse-but-non-empty signal is the documented "still falls
+    /// through to random pool below" case.
+    #[test]
+    fn build_automix_extension_does_not_skip_when_seed_has_some_signal() {
+        let (conn, seed) = empty_signal_conn();
+        // Add a second track + one similarity row from seed (id=1) to it.
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
+             VALUES (2, 'Other Track', 1, 'tidal_stream', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_similarity (track_a, track_b, similarity_score)
+             VALUES (1, 2, 0.5)",
+            [],
+        )
+        .unwrap();
+
+        let extension = build_automix_extension(
+            &conn,
+            &seed,
+            &[],
+            ShuffleMode::Off,
+            12,
+            true,
+        )
+        .expect("extension call");
+
+        // We don't pin contents — only that the empty-signal guard
+        // didn't bail. Sparse-signal seeds still walk through the
+        // random-pool path which is intended legacy behaviour.
+        assert!(
+            !extension.is_empty(),
+            "expected non-empty extension once a similarity row exists"
+        );
     }
 }
 
