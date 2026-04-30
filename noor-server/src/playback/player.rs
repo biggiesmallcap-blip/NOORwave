@@ -746,7 +746,7 @@ fn build_automix_extension(
     Ok(ordered.into_iter().take(needed).collect())
 }
 
-fn build_session_taste_profile(
+pub(crate) fn build_session_taste_profile(
     conn: &Connection,
     current_track: &Track,
 ) -> Result<SessionTasteProfile> {

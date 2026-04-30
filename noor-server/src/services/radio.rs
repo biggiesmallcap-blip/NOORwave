@@ -10,9 +10,11 @@
 
 use crate::db::Database;
 use crate::metadata::lastfm::LastFmClient;
+use crate::smart::artist_resolver::ArtistResolver;
+use crate::smart::taste_vector::TasteVector;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -112,6 +114,13 @@ pub async fn orchestrate_song(
         artist_name: seed_meta.artist_name.clone(),
     };
 
+    // Build per-request taste signals + artist resolver. If the seed
+    // track or session profile fails to load, log and fall back to an
+    // empty TasteVector so taste-aware adjustments become a no-op
+    // rather than failing the whole radio request. Resolver miss is
+    // not fatal — it just means no affinity nudges this call.
+    let (taste, resolver) = build_taste_inputs(db, seed_track_id);
+
     let (lib_w, lfm_w, _eng_w) = blend.weights();
     let target_per_source = |w: f64| ((limit as f64 * w * 1.5).ceil() as usize).max(1);
     let lib_target = target_per_source(lib_w);
@@ -184,7 +193,8 @@ pub async fn orchestrate_song(
         };
 
     // ── Combine + blend ───────────────────────────────────────────────────────
-    let combined = combine_with_dedup(library_results, lastfm_results, Vec::new());
+    let mut combined = combine_with_dedup(library_results, lastfm_results, Vec::new());
+    apply_taste_signals(&mut combined, &taste, &resolver);
     let ordered = blend_interleave(combined, blend, limit);
 
     Ok(RadioQueue {
@@ -307,6 +317,42 @@ pub async fn orchestrate_artist(
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+/// Build per-request taste signals + artist resolver.
+///
+/// Loads the seed track, builds a `SessionTasteProfile` against the live
+/// listen history, converts via `from_session_profile`, and loads an
+/// `ArtistResolver` for cross-source artist_id lookups. All three steps
+/// share a single connection so the radio request pays for one open, not
+/// three.
+///
+/// On any DB error the function logs a warning and returns empty
+/// defaults so taste-aware adjustments become a no-op rather than
+/// failing the whole radio request. A skipped artist or a stale seed
+/// track id should not take the user's radio offline.
+fn build_taste_inputs(db: &Database, seed_track_id: i64) -> (TasteVector, ArtistResolver) {
+    let result = db.with_conn(move |conn| -> Result<(TasteVector, ArtistResolver)> {
+        let seed_track = crate::playback::queue::get_track_by_id(conn, seed_track_id)?
+            .ok_or_else(|| anyhow::anyhow!("seed track not found: {seed_track_id}"))?;
+        let profile =
+            crate::playback::player::build_session_taste_profile(conn, &seed_track)?;
+        let resolver = ArtistResolver::load(conn)?;
+        let (taste, _seed_ctx) =
+            crate::smart::taste_vector::adapters::from_session_profile(&profile);
+        Ok((taste, resolver))
+    });
+
+    match result {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(
+                seed_track_id,
+                "radio: failed to build taste inputs ({err:#}); falling back to no-op taste"
+            );
+            (TasteVector::default(), ArtistResolver::default())
+        }
+    }
+}
+
 /// Generate a session id like "rad_2a4f...".
 pub(crate) fn new_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -334,23 +380,147 @@ pub(crate) fn normalize_for_dedup(artist: &str, title: &str) -> String {
     s
 }
 
+/// Group candidates by normalised (artist, title) and pick one winner per
+/// group.
+///
+/// The historical behaviour was "library wins all ties because it iterates
+/// first", which silently cannibalised Last.fm's exploration value when the
+/// library was dense around a seed. The new rule:
+///
+/// - If a library candidate is in the group AND its `similarity_score` is
+///   within 5% of the best non-library score, library wins. Preserves the
+///   "prefer in-library, all else equal" instinct without letting it
+///   dominate when an external source is meaningfully more confident.
+/// - Otherwise the highest `similarity_score` wins.
+/// - Ties (within 1e-9 after the 5% rule) break by source priority
+///   Library > Engine > Lastfm so HashMap iteration order doesn't flap
+///   between runs.
+///
+/// Order across groups follows first-seen insertion order across the
+/// library/lastfm/engine input slices (in that order). Each input is
+/// expected to be roughly score-sorted by its producer, so first-seen
+/// approximates a stable, score-ordered output across the deduped set.
 fn combine_with_dedup(
     library: Vec<RadioCandidate>,
     lastfm: Vec<RadioCandidate>,
     engine: Vec<RadioCandidate>,
 ) -> Vec<RadioCandidate> {
-    let mut seen_norm: HashSet<String> = HashSet::new();
-    let mut out: Vec<RadioCandidate> = Vec::new();
+    let mut groups: HashMap<String, Vec<RadioCandidate>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
     for source_list in [library, lastfm, engine] {
         for cand in source_list {
             let norm = normalize_for_dedup(&cand.artist_name, &cand.title);
-            if norm.is_empty() || !seen_norm.insert(norm) {
+            if norm.is_empty() {
                 continue;
             }
-            out.push(cand);
+            if !groups.contains_key(&norm) {
+                order.push(norm.clone());
+            }
+            groups.entry(norm).or_default().push(cand);
+        }
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for norm in order {
+        if let Some(winner) = pick_dedup_winner(groups.remove(&norm).unwrap_or_default()) {
+            out.push(winner);
         }
     }
     out
+}
+
+/// Returns the higher-priority numeric for tie-breaking. Order is
+/// Library, then Engine, then Lastfm — matching the implicit preference
+/// from the legacy behaviour (library first), narrowed to only fire on
+/// score ties.
+fn source_priority(source: RadioSource) -> u8 {
+    match source {
+        RadioSource::Library => 3,
+        RadioSource::Engine => 2,
+        RadioSource::Lastfm => 1,
+    }
+}
+
+const LIBRARY_TIE_BREAK_THRESHOLD: f64 = 0.95;
+
+fn pick_dedup_winner(group: Vec<RadioCandidate>) -> Option<RadioCandidate> {
+    if group.is_empty() {
+        return None;
+    }
+
+    let best_library_score = group
+        .iter()
+        .filter(|c| c.source == RadioSource::Library)
+        .map(|c| c.similarity_score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let best_other_score = group
+        .iter()
+        .filter(|c| c.source != RadioSource::Library)
+        .map(|c| c.similarity_score)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let library_present = best_library_score.is_finite();
+    let other_threshold = if best_other_score.is_finite() {
+        best_other_score * LIBRARY_TIE_BREAK_THRESHOLD
+    } else {
+        f64::NEG_INFINITY
+    };
+
+    if library_present && best_library_score >= other_threshold {
+        // Library wins: pick the highest-scoring library candidate.
+        return group
+            .into_iter()
+            .filter(|c| c.source == RadioSource::Library)
+            .max_by(|a, b| {
+                a.similarity_score
+                    .partial_cmp(&b.similarity_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+    }
+
+    // Highest-score wins. Tie-break by source priority so HashMap
+    // iteration order doesn't make the output flap.
+    group.into_iter().max_by(|a, b| {
+        a.similarity_score
+            .partial_cmp(&b.similarity_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| source_priority(a.source).cmp(&source_priority(b.source)))
+    })
+}
+
+/// Apply per-user taste signals to a deduped candidate list. Drops tracks
+/// the user just skipped; nudges `similarity_score` up for liked artists
+/// and down for skipped ones.
+///
+/// Multiplier coefficients are deliberately tiny (0.05 / 0.07) because
+/// `similarity_score` lives in `[0, 1]` rather than the unbounded scale
+/// `automix_score` runs on. The 0.05/0.07 ratio mirrors automix's
+/// 0.5/0.65 asymmetry — negatives bite slightly harder than positives
+/// reward.
+///
+/// Resolver misses (last.fm hit naming an artist not in the library) leave
+/// `similarity_score` unchanged. That is the documented Phase 2a
+/// behaviour: unknown artists carry no affinity, full stop.
+fn apply_taste_signals(
+    candidates: &mut Vec<RadioCandidate>,
+    taste: &TasteVector,
+    resolver: &ArtistResolver,
+) {
+    // Hard suppression: drop tracks the user just skipped. Only fires
+    // for candidates with a real library track_id; last.fm hits have
+    // track_id = 0 and skip the check.
+    candidates
+        .retain(|cand| cand.track_id == 0 || !taste.skipped_track_ids.contains(&cand.track_id));
+
+    for cand in candidates.iter_mut() {
+        if let Some(artist_id) = resolver.lookup(&cand.artist_name)
+            && let Some(affinity) = taste.artist_affinity.get(&artist_id)
+        {
+            let multiplier = 1.0 + (affinity.pos * 0.05) - (affinity.neg * 0.07);
+            cand.similarity_score *= multiplier.max(0.0);
+        }
+    }
 }
 
 fn blend_interleave(candidates: Vec<RadioCandidate>, blend: RadioBlend, limit: usize) -> Vec<RadioCandidate> {
@@ -460,5 +630,253 @@ mod tests {
             let back: RadioBlend = serde_json::from_str(&s).unwrap();
             assert_eq!(blend, back);
         }
+    }
+}
+
+#[cfg(test)]
+mod radio_phase2_tests {
+    //! Phase 2a Stage 1 component tests for the dedup tie-break change
+    //! and the `apply_taste_signals` pass.
+    //!
+    //! A full orchestrator-level snapshot test would require seeding an
+    //! embedding model (for `radio_from_neighbors` to return library
+    //! results) plus a Last.fm stub; both add scope without strengthening
+    //! the gate beyond what these component tests already cover. The
+    //! orchestrator wiring is exercised end-to-end by the existing radio
+    //! API endpoints in production.
+    use super::*;
+    use crate::smart::taste_vector::{AffinitySignal, TasteVector};
+
+    fn cand(
+        track_id: i64,
+        source: RadioSource,
+        artist_name: &str,
+        title: &str,
+        score: f64,
+    ) -> RadioCandidate {
+        RadioCandidate {
+            track_id,
+            tidal_track_id: None,
+            title: title.to_string(),
+            artist_name: artist_name.to_string(),
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library: source == RadioSource::Library,
+            source,
+            reason: format!("test {source:?}"),
+            similarity_score: score,
+        }
+    }
+
+    // ─── combine_with_dedup: 5% library tie-break rule ────────────────────────
+
+    #[test]
+    fn dedup_library_wins_when_within_five_percent() {
+        // Library 0.96 vs Lastfm 1.00 — library is 96% of lastfm, inside the
+        // 0.95 threshold, so library still wins despite lower raw score.
+        let lib = vec![cand(1, RadioSource::Library, "A", "Song", 0.96)];
+        let lfm = vec![cand(0, RadioSource::Lastfm, "A", "Song", 1.0)];
+        let out = combine_with_dedup(lib, lfm, Vec::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Library);
+        assert_eq!(out[0].track_id, 1);
+    }
+
+    #[test]
+    fn dedup_lastfm_wins_when_library_below_threshold() {
+        // Library 0.80 vs Lastfm 1.00 — library is 80%, below 0.95
+        // threshold, so the higher non-library score wins.
+        let lib = vec![cand(1, RadioSource::Library, "A", "Song", 0.80)];
+        let lfm = vec![cand(0, RadioSource::Lastfm, "A", "Song", 1.0)];
+        let out = combine_with_dedup(lib, lfm, Vec::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Lastfm);
+    }
+
+    #[test]
+    fn dedup_library_wins_alone_when_only_source_present() {
+        // No competing source: library wins by default (0.95 of nothing
+        // is satisfied).
+        let lib = vec![cand(1, RadioSource::Library, "A", "Song", 0.20)];
+        let out = combine_with_dedup(lib, Vec::new(), Vec::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Library);
+    }
+
+    #[test]
+    fn dedup_picks_highest_when_no_library_in_group() {
+        // Lastfm 0.60 vs Engine 0.85 — no library, highest score wins.
+        let lfm = vec![cand(0, RadioSource::Lastfm, "A", "Song", 0.60)];
+        let eng = vec![cand(2, RadioSource::Engine, "A", "Song", 0.85)];
+        let out = combine_with_dedup(Vec::new(), lfm, eng);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Engine);
+    }
+
+    #[test]
+    fn dedup_tie_break_prefers_library_then_engine_then_lastfm() {
+        // All three sources at identical score 0.5. Library wins (and
+        // would win regardless via the 5% rule), but the tie-break
+        // ordering also matters when library is absent.
+        let lib = vec![cand(1, RadioSource::Library, "A", "Song", 0.5)];
+        let lfm = vec![cand(0, RadioSource::Lastfm, "A", "Song", 0.5)];
+        let eng = vec![cand(2, RadioSource::Engine, "A", "Song", 0.5)];
+        let out = combine_with_dedup(lib, lfm, eng);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Library);
+
+        // Without library, engine should beat lastfm at the same score.
+        let lfm = vec![cand(0, RadioSource::Lastfm, "A", "Song", 0.5)];
+        let eng = vec![cand(2, RadioSource::Engine, "A", "Song", 0.5)];
+        let out = combine_with_dedup(Vec::new(), lfm, eng);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, RadioSource::Engine);
+    }
+
+    #[test]
+    fn dedup_keeps_unique_candidates_in_first_seen_order() {
+        let lib = vec![
+            cand(1, RadioSource::Library, "A", "First", 0.9),
+            cand(2, RadioSource::Library, "B", "Second", 0.8),
+        ];
+        let lfm = vec![cand(0, RadioSource::Lastfm, "C", "Third", 0.7)];
+        let out = combine_with_dedup(lib, lfm, Vec::new());
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].title, "First");
+        assert_eq!(out[1].title, "Second");
+        assert_eq!(out[2].title, "Third");
+    }
+
+    #[test]
+    fn dedup_drops_candidates_with_empty_normalised_key() {
+        // Empty artist + title produces an empty norm key and is dropped.
+        let lib = vec![
+            cand(1, RadioSource::Library, "", "", 0.9),
+            cand(2, RadioSource::Library, "Real", "Song", 0.8),
+        ];
+        let out = combine_with_dedup(lib, Vec::new(), Vec::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].track_id, 2);
+    }
+
+    // ─── apply_taste_signals: hard suppression + artist affinity ──────────────
+
+    fn make_taste(
+        skipped: &[i64],
+        artist_signals: &[(i64, f64, f64)], // (artist_id, pos, neg)
+    ) -> TasteVector {
+        let mut t = TasteVector::default();
+        for id in skipped {
+            t.skipped_track_ids.insert(*id);
+        }
+        for (artist_id, pos, neg) in artist_signals {
+            t.artist_affinity
+                .insert(*artist_id, AffinitySignal { pos: *pos, neg: *neg });
+        }
+        t
+    }
+
+    #[test]
+    fn apply_taste_signals_is_noop_on_empty_taste() {
+        let taste = TasteVector::default();
+        let resolver = ArtistResolver::default();
+        let mut candidates = vec![
+            cand(1, RadioSource::Library, "A", "Song1", 0.8),
+            cand(2, RadioSource::Library, "B", "Song2", 0.6),
+        ];
+        let before = candidates.clone();
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+
+        assert_eq!(candidates.len(), before.len());
+        for (a, b) in candidates.iter().zip(before.iter()) {
+            assert_eq!(a.track_id, b.track_id);
+            assert!((a.similarity_score - b.similarity_score).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn apply_taste_signals_drops_skipped_library_candidates() {
+        let taste = make_taste(&[2], &[]);
+        let resolver = ArtistResolver::default();
+        let mut candidates = vec![
+            cand(1, RadioSource::Library, "A", "Keep", 0.8),
+            cand(2, RadioSource::Library, "B", "Drop", 0.9),
+            cand(3, RadioSource::Engine, "C", "Keep", 0.7),
+        ];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|c| c.track_id != 2));
+    }
+
+    #[test]
+    fn apply_taste_signals_does_not_drop_lastfm_with_zero_track_id() {
+        // Lastfm hits have track_id = 0 even when track_id 0 is in
+        // skipped_track_ids; they should never be hard-suppressed by this
+        // path.
+        let taste = make_taste(&[0], &[]);
+        let resolver = ArtistResolver::default();
+        let mut candidates = vec![cand(0, RadioSource::Lastfm, "A", "Song", 0.5)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn apply_taste_signals_nudges_score_for_known_artist() {
+        // Resolver maps "A" -> 1, taste says artist 1 has pos=10, neg=0.
+        // Expected multiplier: 1.0 + (10*0.05) - (0*0.07) = 1.5.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 10.0, 0.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert!((candidates[0].similarity_score - 0.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_taste_signals_penalises_negative_artist() {
+        // Artist 1: pos=0, neg=10 -> multiplier 1.0 - 0.7 = 0.3.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 0.0, 10.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert!((candidates[0].similarity_score - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_taste_signals_skips_unknown_artist_silently() {
+        // Resolver has no entry for "Unknown"; affinity adjustment doesn't
+        // fire and the score stays as-is.
+        let resolver = ArtistResolver::default();
+        let taste = make_taste(&[], &[(1, 10.0, 0.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "Unknown", "Song", 0.5)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert!((candidates[0].similarity_score - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_taste_signals_clamps_negative_multiplier_to_zero() {
+        // Pathological: pos=0, neg=20 produces 1.0 - 1.4 = -0.4.
+        // Multiplier should clamp to 0.0 so similarity_score never goes
+        // negative. (A negative similarity_score would scramble blend
+        // ordering downstream.)
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO artists VALUES (1, 'A')", []).unwrap();
+        let resolver = ArtistResolver::load(&conn).unwrap();
+        let taste = make_taste(&[], &[(1, 0.0, 20.0)]);
+        let mut candidates = vec![cand(100, RadioSource::Library, "A", "Song", 0.5)];
+        apply_taste_signals(&mut candidates, &taste, &resolver);
+        assert!(candidates[0].similarity_score >= 0.0);
+        assert!((candidates[0].similarity_score - 0.0).abs() < 1e-12);
     }
 }

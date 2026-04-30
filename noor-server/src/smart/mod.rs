@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod artist_resolver;
 pub mod discovery;
 pub mod external_discovery;
 pub mod playlists;
