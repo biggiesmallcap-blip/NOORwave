@@ -37,6 +37,7 @@ Your entire TIDAL library, synced locally and always fast.
 
 - Full library sync (tracks, albums, artists, playlists) with real-time WebSocket progress
 - Home view: top artist hero card, recently played artist carousel, recently added album shelf, recent tracks
+- **Trending shelf** — unified Last.fm + TIDAL chart cards with country and genre scopes, lazy artwork backfill for missing covers, 6-hour shared cache so navigation between pages doesn't refetch
 - Artist pages: blurred-artwork hero, full TIDAL discography (Albums / Singles & EPs), in-library flags, out-of-library cards linking to TIDAL preview
 - Album pages: track table, hover-reveal actions, equalizer bar on active row, "More by" shelf
 - Bulk operations: add/remove favorites, manage playlists at scale
@@ -71,7 +72,7 @@ bpm:120-140 genre:house energy:>0.7
 /underrated   → surfaces buried gems in your library
 ```
 
-**`Ctrl+K`** — global command palette. Slash commands, quick-nav, and actions without leaving the keyboard.
+**`Ctrl+K`** / **`⌘K`** — global command palette, reachable from anywhere (including inside Quiet Mode). Slash commands, quick-nav, and per-result action menus (Play now / Play next / Queue / Song radio / Go to artist) without leaving the keyboard. `ArrowRight` on the active row opens the actions menu; clicking the `⋯` icon toggles it.
 
 Recent searches auto-save as clickable chips.
 
@@ -130,12 +131,14 @@ Recent searches auto-save as clickable chips.
 ### UI & Access
 
 - Five GLSL shader wallpapers: Aurora, Chrome, Grid, Nebula, Topo — sidebar and now-playing panel float as glass tiles over them
+- **Quiet Mode** — fullscreen "just listen" overlay launched from a button on the now-playing artwork. Large artwork + transport, blurred backdrop, body-scroll lock, embedded `⌘K` search pill. Esc cascade is deterministic across the three overlays (action menu → palette → quiet mode).
 - 6-digit PIN auth: auto-submits on the sixth digit, numeric keyboard on mobile; local browser auto-connects
 - LAN access: run on one machine, open from any browser on the network
 - WebSocket-driven: playback state, sync progress, queue, training progress push instantly without polling
-- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat
+- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat · `⌘K` / `Ctrl+K` command palette
 - **Tauri desktop app**: system tray menu (network toggle, restart, exit), global media key shortcuts, native window management
 - Audio device enumeration and switching; sample rate follows source on track transition
+- WASAPI exclusive-mode bit-perfect output (Windows)
 
 ---
 
@@ -258,7 +261,6 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 | Bug | Notes |
 |---|---|
 | Duplicate detection UI missing | Backend detection logic complete; UI not yet wired |
-| WASAPI exclusive mode | Code path scaffolded; low-latency buffer pending cpal upgrade |
 | ACRCloud sample recognition | Mostly placeholder; not reliably functional |
 | Playlist save failing under certain conditions | Edge case — reproducing intermittently |
 | Shuffle genre-spread not always respected | Algorithm issue under investigation |
@@ -289,6 +291,16 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Power filter syntax in search
 - [x] Tauri desktop app with tray menu and media keys
 - [x] Last.fm genre pipeline (closed taxonomy + hierarchy-aware merge)
+- [x] WASAPI exclusive-mode bit-perfect output (v0.1.7)
+- [x] Pending-queue UX polish: spinner artwork + radio loading toast (v0.1.8)
+- [x] Manual purge of orphan `tidal_stream` tracks (v0.1.8)
+- [x] Trending shelf: unified Last.fm + TIDAL charts with country/genre scopes, lazy artwork backfill, 6-hour shared cache, stable shelf layout (v0.1.8)
+- [x] Last.fm `artist.getsimilar` fallback when track-level recall is empty
+- [x] Radio orchestration: prepend seed track, drop empty-candidates 422 path, diagnostic tracing
+- [x] Quiet Mode — fullscreen now-playing overlay with embedded ⌘K search (v0.1.9)
+- [x] CommandPalette per-row action menus (Play / Queue / Radio / Go to artist|album), keyboard-driven (v0.1.9)
+- [x] Three-overlay Esc cascade (action menu → palette → quiet mode) with deterministic z-index ordering (v0.1.9)
+- [x] Extracted shared `NowPlayingMetadata` / `Progress` / `Transport` components consumed by desktop panel + mobile sheet + Quiet Mode (v0.1.9)
 
 </details>
 
@@ -296,12 +308,13 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 
 - [ ] Gapless crossfade audio blend (audio-level mixing)
 - [ ] Duplicate detection UI
-- [ ] WASAPI exclusive mode
-- [ ] Song Radio tuning
-- [ ] Genre Galaxy polish
+- [ ] Song Radio tuning (recommendation quality + diversity)
+- [ ] Genre Galaxy polish (interaction + rendering issues)
 - [ ] YouTube Music integration
 - [ ] SoundCloud integration
 - [ ] Tauri auto-updater
+- [ ] Lyrics view inside Quiet Mode
+- [ ] Color-sampled dynamic backdrop tint in Quiet Mode
 
 ---
 
