@@ -25,6 +25,22 @@ pub struct ImportedTrack {
     pub local_id: i64,
 }
 
+/// Inputs for [`import_track_from_metadata`]. Most fields are optional so
+/// callers can pass whatever Tidal handed them — radio resolvers get the full
+/// picture (album cover + artist photo); the legacy import endpoint may not.
+#[derive(Debug, Clone, Default)]
+pub struct ImportTrackMetadata {
+    pub tidal_id: i64,
+    pub title: String,
+    pub artist_name: String,
+    pub artist_tidal_id: Option<i64>,
+    pub artist_picture: Option<String>,
+    pub album_title: Option<String>,
+    pub album_tidal_id: Option<i64>,
+    pub album_artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
 pub async fn import_album(
     conn_pool: &crate::db::Database,
     tidal: &TidalClient,
@@ -61,7 +77,13 @@ pub async fn import_album(
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
 
-        let artist_id = upsert_artist_tx(&tx, primary_artist.id, &primary_artist.name)?;
+        let primary_picture = TidalClient::get_artwork_url(&primary_artist.picture, 640);
+        let artist_id = upsert_artist_tx(
+            &tx,
+            primary_artist.id,
+            &primary_artist.name,
+            primary_picture.as_deref(),
+        )?;
         let album_id = upsert_album_tx(
             &tx,
             tidal_album_id,
@@ -76,7 +98,8 @@ pub async fn import_album(
             let track_artist_id = if t.artist.id == primary_artist.id {
                 artist_id
             } else {
-                upsert_artist_tx(&tx, t.artist.id, &t.artist.name)?
+                let picture = TidalClient::get_artwork_url(&t.artist.picture, 640);
+                upsert_artist_tx(&tx, t.artist.id, &t.artist.name, picture.as_deref())?
             };
             let local_id = upsert_track_tx(&tx, t, track_artist_id, album_id)?;
             imported.push(ImportedTrack {
@@ -97,6 +120,7 @@ fn upsert_artist_tx(
     tx: &rusqlite::Transaction<'_>,
     tidal_id: i64,
     name: &str,
+    photo_url: Option<&str>,
 ) -> Result<i64> {
     if tidal_id > 0 {
         let existing: Option<i64> = tx
@@ -107,11 +131,12 @@ fn upsert_artist_tx(
             )
             .optional()?;
         if let Some(id) = existing {
+            backfill_artist_photo(tx, id, photo_url)?;
             return Ok(id);
         }
         tx.execute(
-            "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2)",
-            params![tidal_id, name],
+            "INSERT INTO artists (tidal_id, name, photo_url) VALUES (?1, ?2, ?3)",
+            params![tidal_id, name, photo_url],
         )?;
         return Ok(tx.last_insert_rowid());
     }
@@ -124,10 +149,28 @@ fn upsert_artist_tx(
         )
         .optional()?;
     if let Some(id) = existing {
+        backfill_artist_photo(tx, id, photo_url)?;
         return Ok(id);
     }
-    tx.execute("INSERT INTO artists (name) VALUES (?1)", params![name])?;
+    tx.execute(
+        "INSERT INTO artists (name, photo_url) VALUES (?1, ?2)",
+        params![name, photo_url],
+    )?;
     Ok(tx.last_insert_rowid())
+}
+
+fn backfill_artist_photo(
+    tx: &rusqlite::Transaction<'_>,
+    artist_id: i64,
+    photo_url: Option<&str>,
+) -> Result<()> {
+    if let Some(url) = photo_url {
+        tx.execute(
+            "UPDATE artists SET photo_url = ?1 WHERE id = ?2 AND photo_url IS NULL",
+            params![url, artist_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn upsert_album_tx(
@@ -158,35 +201,26 @@ fn upsert_album_tx(
 
 pub async fn import_track_from_metadata(
     conn_pool: &crate::db::Database,
-    tidal_id: i64,
-    title: String,
-    artist_name: String,
-    artist_tidal_id: Option<i64>,
-    album_title: Option<String>,
-    duration_ms: Option<i64>,
+    meta: ImportTrackMetadata,
 ) -> Result<ImportedTrack> {
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
 
-        let artist_id = upsert_artist_tx(&tx, artist_tidal_id.unwrap_or(0), &artist_name)?;
+        let artist_id = upsert_artist_tx(
+            &tx,
+            meta.artist_tidal_id.unwrap_or(0),
+            &meta.artist_name,
+            meta.artist_picture.as_deref(),
+        )?;
 
-        let album_id: Option<i64> = if let Some(ref atitle) = album_title {
-            let existing: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2 LIMIT 1",
-                    params![artist_id, atitle],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(id) = existing {
-                Some(id)
-            } else {
-                tx.execute(
-                    "INSERT INTO albums (title, artist_id, source) VALUES (?1, ?2, ?3)",
-                    params![atitle, artist_id, TIDAL_STREAM_SOURCE],
-                )?;
-                Some(tx.last_insert_rowid())
-            }
+        let album_id: Option<i64> = if meta.album_title.is_some() || meta.album_tidal_id.is_some() {
+            Some(upsert_album_from_metadata_tx(
+                &tx,
+                meta.album_tidal_id,
+                meta.album_title.as_deref(),
+                artist_id,
+                meta.album_artwork_url.as_deref(),
+            )?)
         } else {
             None
         };
@@ -194,7 +228,7 @@ pub async fn import_track_from_metadata(
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM tracks WHERE tidal_id = ?1",
-                params![tidal_id],
+                params![meta.tidal_id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -209,11 +243,11 @@ pub async fn import_track_from_metadata(
                     is_favorite, source
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 'LOSSLESS', 'tidal', 700, 0, ?6)",
                 params![
-                    tidal_id,
-                    title,
+                    meta.tidal_id,
+                    meta.title,
                     artist_id,
                     album_id,
-                    duration_ms.unwrap_or(0),
+                    meta.duration_ms.unwrap_or(0),
                     TIDAL_STREAM_SOURCE,
                 ],
             )?;
@@ -221,8 +255,85 @@ pub async fn import_track_from_metadata(
         };
 
         tx.commit()?;
-        Ok(ImportedTrack { tidal_id, local_id })
+        Ok(ImportedTrack {
+            tidal_id: meta.tidal_id,
+            local_id,
+        })
     })
+}
+
+/// Album upsert tailored to the metadata-only import path: prefer matching by
+/// Tidal id (so we share rows with full album imports), fall back to
+/// (artist_id, title), and backfill `tidal_id` / `artwork_url` on rows that
+/// were created without them.
+fn upsert_album_from_metadata_tx(
+    tx: &rusqlite::Transaction<'_>,
+    album_tidal_id: Option<i64>,
+    album_title: Option<&str>,
+    artist_id: i64,
+    artwork_url: Option<&str>,
+) -> Result<i64> {
+    if let Some(tid) = album_tidal_id.filter(|t| *t > 0) {
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM albums WHERE tidal_id = ?1",
+                params![tid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            backfill_album_artwork(tx, id, artwork_url)?;
+            return Ok(id);
+        }
+    }
+
+    if let Some(title) = album_title {
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2 LIMIT 1",
+                params![artist_id, title],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            if let Some(tid) = album_tidal_id.filter(|t| *t > 0) {
+                tx.execute(
+                    "UPDATE albums SET tidal_id = ?1 WHERE id = ?2 AND tidal_id IS NULL",
+                    params![tid, id],
+                )?;
+            }
+            backfill_album_artwork(tx, id, artwork_url)?;
+            return Ok(id);
+        }
+    }
+
+    let title = album_title.unwrap_or("Unknown album");
+    tx.execute(
+        "INSERT INTO albums (tidal_id, title, artist_id, artwork_url, source)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            album_tidal_id.filter(|t| *t > 0),
+            title,
+            artist_id,
+            artwork_url,
+            TIDAL_STREAM_SOURCE,
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn backfill_album_artwork(
+    tx: &rusqlite::Transaction<'_>,
+    album_id: i64,
+    artwork_url: Option<&str>,
+) -> Result<()> {
+    if let Some(url) = artwork_url {
+        tx.execute(
+            "UPDATE albums SET artwork_url = ?1 WHERE id = ?2 AND artwork_url IS NULL",
+            params![url, album_id],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -237,13 +348,15 @@ mod tests {
                 "CREATE TABLE artists (
                      id       INTEGER PRIMARY KEY,
                      tidal_id INTEGER UNIQUE,
-                     name     TEXT NOT NULL
+                     name     TEXT NOT NULL,
+                     photo_url TEXT
                  );
                  CREATE TABLE albums (
                      id        INTEGER PRIMARY KEY,
                      tidal_id  INTEGER UNIQUE,
                      title     TEXT NOT NULL,
                      artist_id INTEGER,
+                     artwork_url TEXT,
                      source    TEXT NOT NULL DEFAULT 'tidal_stream'
                  );
                  CREATE TABLE tracks (
@@ -267,33 +380,28 @@ mod tests {
         db
     }
 
+    fn meta(tidal_id: i64) -> ImportTrackMetadata {
+        ImportTrackMetadata {
+            tidal_id,
+            title: "Teardrop".to_string(),
+            artist_name: "Massive Attack".to_string(),
+            album_title: Some("Mezzanine".to_string()),
+            duration_ms: Some(330_000),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn import_track_from_metadata_is_idempotent_on_tidal_id() {
         let db = setup_db();
 
-        let first = import_track_from_metadata(
-            &db,
-            99001,
-            "Teardrop".to_string(),
-            "Massive Attack".to_string(),
-            None,
-            Some("Mezzanine".to_string()),
-            Some(330_000),
-        )
-        .await
-        .expect("first import should succeed");
+        let first = import_track_from_metadata(&db, meta(99001))
+            .await
+            .expect("first import should succeed");
 
-        let second = import_track_from_metadata(
-            &db,
-            99001,
-            "Teardrop".to_string(),
-            "Massive Attack".to_string(),
-            None,
-            Some("Mezzanine".to_string()),
-            Some(330_000),
-        )
-        .await
-        .expect("second import with same tidal_id should succeed");
+        let second = import_track_from_metadata(&db, meta(99001))
+            .await
+            .expect("second import with same tidal_id should succeed");
 
         assert_eq!(
             first.local_id, second.local_id,
@@ -301,6 +409,107 @@ mod tests {
              SELECT-before-INSERT guarantee this for sequential calls; concurrent \
              calls are safe via SQLite single-writer + UNIQUE constraint backstop"
         );
+    }
+
+    #[tokio::test]
+    async fn import_track_from_metadata_persists_album_artwork() {
+        let db = setup_db();
+
+        let imported = import_track_from_metadata(
+            &db,
+            ImportTrackMetadata {
+                tidal_id: 42_001,
+                title: "Common People".to_string(),
+                artist_name: "Pulp".to_string(),
+                artist_tidal_id: Some(1234),
+                artist_picture: Some("https://resources.tidal.com/images/artist.jpg".to_string()),
+                album_title: Some("Different Class".to_string()),
+                album_tidal_id: Some(9876),
+                album_artwork_url: Some("https://resources.tidal.com/images/cover.jpg".to_string()),
+                duration_ms: Some(238_000),
+            },
+        )
+        .await
+        .expect("import should succeed");
+
+        let (album_artwork, artist_photo): (Option<String>, Option<String>) = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT al.artwork_url, a.photo_url
+                     FROM tracks t
+                     JOIN artists a ON t.artist_id = a.id
+                     LEFT JOIN albums al ON t.album_id = al.id
+                     WHERE t.id = ?1",
+                    params![imported.local_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .unwrap();
+
+        assert_eq!(
+            album_artwork.as_deref(),
+            Some("https://resources.tidal.com/images/cover.jpg"),
+            "album artwork must be persisted so the queue row can render it"
+        );
+        assert_eq!(
+            artist_photo.as_deref(),
+            Some("https://resources.tidal.com/images/artist.jpg"),
+            "artist photo must be persisted so the artist page can render it"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_track_from_metadata_backfills_existing_rows() {
+        let db = setup_db();
+
+        // Pre-existing artist + album rows without artwork (e.g. created by an
+        // earlier metadata import before this fix landed).
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2)",
+                params![5555, "Pulp"],
+            )?;
+            let aid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO albums (title, artist_id, source) VALUES (?1, ?2, 'tidal_stream')",
+                params!["This Is Hardcore", aid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        import_track_from_metadata(
+            &db,
+            ImportTrackMetadata {
+                tidal_id: 7777,
+                title: "Help The Aged".to_string(),
+                artist_name: "Pulp".to_string(),
+                artist_tidal_id: Some(5555),
+                artist_picture: Some("artist.jpg".to_string()),
+                album_title: Some("This Is Hardcore".to_string()),
+                album_tidal_id: Some(3333),
+                album_artwork_url: Some("cover.jpg".to_string()),
+                duration_ms: Some(269_000),
+            },
+        )
+        .await
+        .expect("import should succeed");
+
+        let (album_artwork, album_tidal, artist_photo): (Option<String>, Option<i64>, Option<String>) =
+            db.with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT al.artwork_url, al.tidal_id, a.photo_url
+                     FROM albums al JOIN artists a ON al.artist_id = a.id
+                     WHERE al.title = 'This Is Hardcore'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
+            .unwrap();
+
+        assert_eq!(album_artwork.as_deref(), Some("cover.jpg"));
+        assert_eq!(album_tidal, Some(3333));
+        assert_eq!(artist_photo.as_deref(), Some("artist.jpg"));
     }
 }
 

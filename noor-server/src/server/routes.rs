@@ -843,6 +843,8 @@ struct ImportTidalTrackBody {
     artist_name: String,
     artist_tidal_id: Option<i64>,
     album_title: Option<String>,
+    album_tidal_id: Option<i64>,
+    artwork_url: Option<String>,
     duration_ms: Option<i64>,
 }
 
@@ -856,12 +858,17 @@ async fn import_tidal_track_for_radio(
     };
     let imported = tidal_import::import_track_from_metadata(
         &db,
-        body.tidal_id,
-        body.title,
-        body.artist_name,
-        body.artist_tidal_id,
-        body.album_title,
-        body.duration_ms,
+        tidal_import::ImportTrackMetadata {
+            tidal_id: body.tidal_id,
+            title: body.title,
+            artist_name: body.artist_name,
+            artist_tidal_id: body.artist_tidal_id,
+            artist_picture: None,
+            album_title: body.album_title,
+            album_tidal_id: body.album_tidal_id,
+            album_artwork_url: body.artwork_url,
+            duration_ms: body.duration_ms,
+        },
     )
     .await
     .map_err(|e| {
@@ -5344,12 +5351,17 @@ async fn resolve_pending_row(
     let tidal_id = tidal_track.id;
     let imported = crate::services::tidal::import::import_track_from_metadata(
         &db,
-        tidal_id,
-        tidal_track.title,
-        tidal_track.artist_name.unwrap_or_default(),
-        tidal_track.artist_id,
-        tidal_track.album_title,
-        Some(tidal_track.duration * 1000),
+        crate::services::tidal::import::ImportTrackMetadata {
+            tidal_id,
+            title: tidal_track.title,
+            artist_name: tidal_track.artist_name.unwrap_or_default(),
+            artist_tidal_id: tidal_track.artist_id,
+            artist_picture: tidal_track.artist_picture,
+            album_title: tidal_track.album_title,
+            album_tidal_id: tidal_track.album_id,
+            album_artwork_url: tidal_track.artwork_url,
+            duration_ms: Some(tidal_track.duration * 1000),
+        },
     )
     .await;
 
@@ -5480,12 +5492,17 @@ async fn resolve_pending_current_queue_item(
     let duration_ms = Some(tidal_track.duration * 1000);
     let imported = crate::services::tidal::import::import_track_from_metadata(
         &db,
-        tidal_id,
-        tidal_track.title,
-        tidal_track.artist_name.unwrap_or_default(),
-        tidal_track.artist_id,
-        tidal_track.album_title,
-        duration_ms,
+        crate::services::tidal::import::ImportTrackMetadata {
+            tidal_id,
+            title: tidal_track.title,
+            artist_name: tidal_track.artist_name.unwrap_or_default(),
+            artist_tidal_id: tidal_track.artist_id,
+            artist_picture: tidal_track.artist_picture,
+            album_title: tidal_track.album_title,
+            album_tidal_id: tidal_track.album_id,
+            album_artwork_url: tidal_track.artwork_url,
+            duration_ms,
+        },
     )
     .await;
 
@@ -8574,6 +8591,9 @@ fn apply_tidal_favorite_flags(
     Ok(())
 }
 
+// Returns `[]` in steady state: the Tidal v1 endpoints we use don't expose
+// genre fields. Kept for free in case Tidal adds them later. See
+// docs/tidal-genre-source-investigation.md (2026-04-30).
 fn infer_tidal_track_genres(track: &crate::services::tidal::client::TidalTrack) -> Vec<String> {
     let mut candidates = extract_genre_candidates_from_extra(&track.extra);
     if let Some(album) = track.album.as_ref() {
@@ -9514,6 +9534,147 @@ struct ChartEntryDto {
     image_url: Option<String>,
     /// Source-tagged for the frontend ("lastfm" | "tidal").
     source: String,
+    /// Top genre name for the resolved local track (None for Tidal-only entries
+    /// where we have no genre data without an extra API call).
+    genre: Option<String>,
+}
+
+/// Fill in missing artwork for chart entries by searching Tidal for the
+/// (artist, title) pair. Updates `image_url` (top-level fallback) and the
+/// nested `tidal_playable.artwork_url` so the frontend's preference chain
+/// always lands on something usable.
+async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryDto>) {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    /// Last.fm's blank-star fallback. We never want to surface this — both the
+    /// usable-art check below and the replace-on-enrich path treat it as empty.
+    const LASTFM_PLACEHOLDER: &str = "2a96cbd8b46e442fc41c2b86b821562f";
+
+    fn is_unusable(url: Option<&str>) -> bool {
+        let Some(url) = url else { return true };
+        let trimmed = url.trim();
+        trimmed.is_empty() || trimmed.contains(LASTFM_PLACEHOLDER)
+    }
+
+    fn has_usable_art(e: &ChartEntryDto) -> bool {
+        let local_ok = !is_unusable(e.local_track.as_ref().and_then(|t| t.artwork_url.as_deref()));
+        let tp_ok =
+            !is_unusable(e.tidal_playable.as_ref().and_then(|tp| tp.artwork_url.as_deref()));
+        let img_ok = !is_unusable(e.image_url.as_deref());
+        local_ok || tp_ok || img_ok
+    }
+
+    let needs: Vec<(usize, String, String)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| {
+            if has_usable_art(e) {
+                return None;
+            }
+            let title = e
+                .local_track
+                .as_ref()
+                .map(|t| t.title.clone())
+                .or_else(|| e.tidal_playable.as_ref().map(|tp| tp.title.clone()))?;
+            let artist = e
+                .local_track
+                .as_ref()
+                .and_then(|t| t.artist_name.clone())
+                .or_else(|| e.tidal_playable.as_ref().and_then(|tp| tp.artist_name.clone()))?;
+            Some((idx, artist, title))
+        })
+        .collect();
+
+    if needs.is_empty() {
+        return;
+    }
+
+    let tokens = {
+        let s = state.read().await;
+        s.tidal_tokens.clone()
+    };
+    let tokens = match tokens {
+        Some(t) => Some(t),
+        None => load_persisted_tidal_tokens(state).await.ok().flatten(),
+    };
+    let Some(tokens) = tokens else {
+        return;
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+
+    let mut tasks = FuturesUnordered::new();
+    for (idx, artist, title) in needs {
+        let client = client.clone();
+        tasks.push(async move {
+            let q = format!("{artist} {title}");
+            let result = client.search(&q, 1).await.ok();
+            let url = result
+                .and_then(|r| r.into_iter().next())
+                .and_then(|t| t.artwork_url);
+            (idx, url)
+        });
+    }
+
+    while let Some((idx, url)) = tasks.next().await {
+        let Some(url) = url else { continue };
+        if let Some(entry) = entries.get_mut(idx) {
+            if is_unusable(entry.image_url.as_deref()) {
+                entry.image_url = Some(url.clone());
+            }
+            if let Some(tp) = entry.tidal_playable.as_mut() {
+                if is_unusable(tp.artwork_url.as_deref()) {
+                    tp.artwork_url = Some(url);
+                }
+            }
+        }
+    }
+}
+
+/// Look up the most-confident genre name for each track id in a single query.
+/// Returns a map keyed by track_id; tracks with no genre rows are absent.
+fn fetch_top_genres_for_tracks(
+    db: &crate::db::Database,
+    track_ids: &[i64],
+) -> HashMap<i64, String> {
+    if track_ids.is_empty() {
+        return HashMap::new();
+    }
+    db.with_conn(|conn| {
+        let placeholders = std::iter::repeat("?")
+            .take(track_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // Pick the highest-confidence genre per track. Ties broken by
+        // alphabetical order so the result is stable.
+        let sql = format!(
+            "SELECT track_id, name FROM (
+                SELECT tg.track_id, g.name,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY tg.track_id
+                           ORDER BY tg.confidence DESC, g.name ASC
+                       ) AS rn
+                FROM track_genres tg
+                JOIN genres g ON g.id = tg.genre_id
+                WHERE tg.track_id IN ({placeholders})
+             ) WHERE rn = 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = track_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (id, name) = row?;
+            map.insert(id, name);
+        }
+        Ok(map)
+    })
+    .unwrap_or_default()
 }
 
 /// Cached chart payload with insertion timestamp.
@@ -9580,7 +9741,7 @@ async fn get_charts(
         return Ok(Json(cached));
     }
 
-    let entries: Vec<ChartEntryDto> = match source.as_str() {
+    let mut entries: Vec<ChartEntryDto> = match source.as_str() {
         "tidal" => fetch_tidal_chart(&state, limit as i32).await.map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -9596,6 +9757,12 @@ async fn get_charts(
                 )
             })?,
     };
+
+    // Backfill missing artwork via Tidal search. Last.fm's chart.getTopTracks
+    // mostly returns a generic placeholder image, and many older library albums
+    // have NULL artwork_url, so this is the difference between blank tiles and
+    // real covers on the trending shelf.
+    enrich_chart_artwork(&state, &mut entries).await;
 
     let payload = json!({
         "source": source,
@@ -9628,6 +9795,8 @@ async fn fetch_lastfm_chart(
         .map(|t| (t.artist.clone(), t.title.clone()))
         .collect();
     let local_map = resolve_chart_pairs_to_local(&db, &pairs).unwrap_or_default();
+    let local_ids: Vec<i64> = local_map.values().map(|t| t.id).collect();
+    let genre_map = fetch_top_genres_for_tracks(&db, &local_ids);
 
     let mut out = Vec::with_capacity(tracks.len());
     for t in tracks {
@@ -9637,6 +9806,9 @@ async fn fetch_lastfm_chart(
             t.title.to_ascii_lowercase()
         );
         let local_track = local_map.get(&key).cloned();
+        let genre = local_track
+            .as_ref()
+            .and_then(|lt| genre_map.get(&lt.id).cloned());
         let tidal_playable = if local_track.is_none() {
             // No local match; expose a TidalPlayable-shaped placeholder. The
             // frontend will resolve to a real Tidal id via search if the user
@@ -9660,6 +9832,7 @@ async fn fetch_lastfm_chart(
             tidal_playable,
             image_url: t.image_url,
             source: "lastfm".to_string(),
+            genre,
         });
     }
     Ok(out)
@@ -9752,12 +9925,18 @@ async fn fetch_tidal_chart(
         })
         .unwrap_or_default();
 
+    let resolved_local_ids: Vec<i64> = local_tracks.values().map(|t| t.id).collect();
+    let genre_map = fetch_top_genres_for_tracks(&db, &resolved_local_ids);
+
     let mut out = Vec::with_capacity(tracks.len());
     for t in tracks {
         let local_track = known
             .get(&t.id)
             .and_then(|lid| local_tracks.get(lid))
             .cloned();
+        let genre = local_track
+            .as_ref()
+            .and_then(|lt| genre_map.get(&lt.id).cloned());
         let tidal_playable = if local_track.is_none() {
             Some(ChartTidalPlayable {
                 tidal_id: t.id,
@@ -9778,6 +9957,7 @@ async fn fetch_tidal_chart(
             local_track,
             tidal_playable,
             source: "tidal".to_string(),
+            genre,
         });
     }
     Ok(out)

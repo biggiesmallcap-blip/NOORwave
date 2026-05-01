@@ -87,6 +87,7 @@ pub struct TidalSearchTrack {
     pub duration: i64,
     pub artist_id: Option<i64>,
     pub artist_name: Option<String>,
+    pub artist_picture: Option<String>,
     pub album_title: Option<String>,
     pub album_id: Option<i64>,
     pub artwork_url: Option<String>,
@@ -457,6 +458,10 @@ impl TidalClient {
             .and_then(|a| a.get("name"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let artist_picture = primary_artist
+            .and_then(|a| a.get("picture"))
+            .and_then(serde_json::Value::as_str)
+            .map(|p| Self::artwork_url(p, 640));
         let album = object.get("album");
         let album_title = album
             .and_then(|album| album.get("title"))
@@ -484,6 +489,7 @@ impl TidalClient {
             duration,
             artist_id,
             artist_name,
+            artist_picture,
             album_title,
             album_id,
             artwork_url,

@@ -159,6 +159,7 @@ impl TidalDiscoveryProvider {
                         .and_then(|artists| artists.first())
                         .map(|artist| artist.name.clone())
                         .or_else(|| Some(track.artist.name.clone())),
+                    artist_picture: TidalClient::get_artwork_url(&track.artist.picture, 640),
                     album_title: track.album.as_ref().map(|album| album.title.clone()),
                     album_id: track.album.as_ref().map(|album| album.id),
                     artwork_url: TidalClient::get_artwork_url(
@@ -388,6 +389,7 @@ mod tests {
             duration: 449,
             artist_id: None,
             artist_name: Some("Nadja Lind".to_string()),
+            artist_picture: None,
             album_title: Some(
                 "Deep Space Night - Panorama of Dub Techno, Minimal Deep Berlin Underground Club Tech House & Dreamy Chill out Music".to_string(),
             ),

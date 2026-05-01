@@ -106,10 +106,14 @@ CREATE TABLE genres (
     name TEXT NOT NULL UNIQUE,
     slug TEXT NOT NULL UNIQUE,
     parent_id INTEGER REFERENCES genres(id),
+    -- Reserved-but-empty: Tidal v1 API doesn't expose per-genre IDs on the
+    -- endpoints we use. See docs/tidal-genre-source-investigation.md.
     tidal_genre_id TEXT
 );
 
 -- Track <-> Genre (many-to-many)
+-- Note: source='tidal' is reserved-but-unpopulated in practice; lastfm and
+-- musicbrainz are the active sources. See docs/tidal-genre-source-investigation.md.
 CREATE TABLE track_genres (
     track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     genre_id INTEGER NOT NULL REFERENCES genres(id),
