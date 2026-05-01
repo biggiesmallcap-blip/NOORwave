@@ -11,7 +11,7 @@ import {
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
-import { showToast } from '$lib/stores/toast';
+import { showToast, dismissToast } from '$lib/stores/toast';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
 
@@ -763,6 +763,10 @@ export async function shuffleArtist(artistId: number) {
 export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	// Server-side fallback (artist.getsimilar when track-level recall is empty)
+	// can take a few seconds. Surface a loading toast so the user knows the
+	// click registered. Dismissed before the success/error toast lands.
+	const loadingToastId = showToast('Starting Song Radio…', 'info', 8000);
 	try {
 		const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
 		const { first_playable } = result;
@@ -775,8 +779,10 @@ export async function startSongRadio(seedTrackId: number) {
 			// first queue item; the server-side lazy resolver fires on next_track.
 			await playNextTrack();
 		}
+		dismissToast(loadingToastId);
 		showToast('Song Radio started', 'success');
 	} catch (error) {
+		dismissToast(loadingToastId);
 		setError('start radio', error, () => startSongRadio(seedTrackId));
 	}
 }

@@ -1218,7 +1218,9 @@
 							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">…</div>
+									<div class="queue-art placeholder pending-art" title="Resolving track...">
+										<span class="queue-spinner" aria-hidden="true"></span>
+									</div>
 								{:else if item.track.artwork_url}
 									<img class="queue-art" src={item.track.artwork_url} alt="" />
 								{:else}
@@ -1563,7 +1565,9 @@
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
 								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">…</div>
+									<div class="queue-art placeholder pending-art" title="Resolving track...">
+										<span class="queue-spinner" aria-hidden="true"></span>
+									</div>
 								{:else if item.track.artwork_url}
 									<img class="queue-art" src={item.track.artwork_url} alt="" />
 								{:else}
@@ -2608,9 +2612,20 @@
 	}
 
 	.queue-art.placeholder.pending-art {
-		font-size: 0.9rem;
-		letter-spacing: 0.1em;
-		opacity: 0.5;
+		opacity: 0.7;
+	}
+
+	.queue-spinner {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		border: 2px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
+		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+		animation: queue-spinner-spin 0.9s linear infinite;
+	}
+
+	@keyframes queue-spinner-spin {
+		to { transform: rotate(360deg); }
 	}
 
 	.queue-grip {
