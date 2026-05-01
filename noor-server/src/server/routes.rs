@@ -9696,8 +9696,9 @@ fn chart_cache() -> &'static StdMutex<HashMap<String, ChartCacheEntry>> {
 }
 
 /// Charts don't move minute-to-minute and Last.fm rate-limits aggressively.
-/// 2-hour TTL is a comfortable middle ground (within the 1–6 h spec).
-const CHART_CACHE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+/// 6-hour TTL matches the frontend's in-memory cache so the trending shelf
+/// stays static across page navigations within the window.
+const CHART_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn chart_cache_get(key: &str) -> Option<serde_json::Value> {
     let cache = chart_cache().lock().ok()?;

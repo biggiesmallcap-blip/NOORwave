@@ -10,7 +10,8 @@
   Mounted by Home (always) and Search (only when the search query is empty).
 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
+	import { get } from 'svelte/store';
 	import {
 		api,
 		type ChartEntry,
@@ -26,6 +27,7 @@
 		selectedGenre,
 		type TrendingMode,
 	} from '$lib/stores/trending-prefs';
+	import { getCached, putCached } from '$lib/stores/trending-cache';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 
@@ -54,13 +56,60 @@
 	let loading = $state(true);
 	let error = $state(false);
 
+	// Single source of truth for "what scope are we currently fetching" — used
+	// by both the on-mount kickoff and the store subscriptions below to avoid
+	// duplicate fetches when the same scope is revisited.
+	let lastToken = '';
+	let unsubs: Array<() => void> = [];
+
+	function tokenFor(mode: TrendingMode, country: string, genre: string): string {
+		if (mode === 'country') return `country:${country}`;
+		if (mode === 'genre') return `genre:${genre}`;
+		return mode;
+	}
+
+	function maybeLoad() {
+		const mode = get(selectedTrendingMode);
+		const country = get(selectedCountry);
+		const genre = get(selectedGenre);
+		// Don't fetch country/genre modes until curated lists are loaded.
+		if ((mode === 'country' || mode === 'genre') && !curatedLoaded) return;
+		const token = tokenFor(mode, country, genre);
+		if (token === lastToken) return;
+		lastToken = token;
+		// Cache hit: skip the network round-trip entirely. Frontend cache TTL
+		// matches the backend's 6h, so navigating between Home/Search keeps the
+		// shelf static until the window expires.
+		const cached = getCached(token);
+		if (cached) {
+			tracks = cached;
+			loading = false;
+			error = false;
+			return;
+		}
+		void load(mode, country, genre, token);
+	}
+
 	onMount(() => {
-		// If a stale 'tidal' mode is in localStorage from the legacy migration,
-		// nudge to a working mode so the user doesn't open to an empty shelf.
-		if (!MODES.some((m) => m.id === $selectedTrendingMode)) {
+		// Fix stale 'tidal' from the legacy migration before anything else reads it.
+		if (!MODES.some((m) => m.id === get(selectedTrendingMode))) {
 			selectedTrendingMode.set('worldwide');
 		}
-		void loadCurated();
+		// Initial fetch — guaranteed to fire regardless of effect timing.
+		maybeLoad();
+		// Curated lists race the first chart fetch — retry once they land in
+		// case the user is on a country/genre mode that was gated by the guard.
+		void loadCurated().then(() => maybeLoad());
+		// Store subscriptions handle subsequent changes. The synchronous
+		// initial call from each subscribe dedups via lastToken.
+		unsubs.push(selectedTrendingMode.subscribe(() => maybeLoad()));
+		unsubs.push(selectedCountry.subscribe(() => maybeLoad()));
+		unsubs.push(selectedGenre.subscribe(() => maybeLoad()));
+	});
+
+	onDestroy(() => {
+		for (const u of unsubs) u();
+		unsubs = [];
 	});
 
 	async function loadCurated() {
@@ -78,31 +127,7 @@
 		}
 	}
 
-	// Refetch whenever the effective scope changes. The reads of all three
-	// stores below establish reactive deps; we then build a dedup token and
-	// skip if it hasn't changed (avoids double-fires on no-op store writes).
-	let lastToken = '';
-	$effect(() => {
-		const mode = $selectedTrendingMode;
-		const country = $selectedCountry;
-		const genre = $selectedGenre;
-
-		// Don't fetch country/genre modes until curated lists are loaded —
-		// we'd otherwise send the default code/key and immediately refetch.
-		if ((mode === 'country' || mode === 'genre') && !curatedLoaded) return;
-
-		const token =
-			mode === 'country'
-				? `country:${country}`
-				: mode === 'genre'
-					? `genre:${genre}`
-					: mode;
-		if (token === lastToken) return;
-		lastToken = token;
-		void load(mode, country, genre);
-	});
-
-	async function load(mode: TrendingMode, country: string, genre: string) {
+	async function load(mode: TrendingMode, country: string, genre: string, token: string) {
 		// Keep `tracks` populated while we fetch — replacing only when new data
 		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
@@ -118,7 +143,11 @@
 			} else {
 				data = await api.getTrending({ source: 'lastfm', limit });
 			}
-			tracks = data.tracks ?? [];
+			const next = data.tracks ?? [];
+			tracks = next;
+			// Only cache non-empty payloads so a transient 5xx returning [] doesn't
+			// poison the cache for 6h.
+			if (next.length > 0) putCached(token, next);
 		} catch (e) {
 			console.error('Failed to load trending:', e);
 			tracks = [];
