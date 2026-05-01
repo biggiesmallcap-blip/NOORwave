@@ -16,8 +16,7 @@
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import TrackRow from '$lib/components/TrackRow.svelte';
-	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
+	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
 	const TRENDING_SOURCE_KEY = 'noor.trending.source';
 	function loadTrendingSource(): TrendingSource {
@@ -394,31 +393,16 @@
 			{#if trending.length > 0}
 				<div class="picks-grid">
 					<div class="picks-subsection">
-						<ol class="trending-list">
+						<div class="trending-grid">
 							{#each trending.slice(0, 12) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
-								{#if entry.local_track}
-									{@const t = entry.local_track}
-									<TrackRow
-										track={t}
-										variant="art"
-										index={i}
-										isCurrent={$currentTrack?.id === t.id}
-										isPlaying={$isPlaying}
-										onRowClick={() => void playTrackNow(t.id)}
-									/>
-								{:else if entry.tidal_playable}
-									{@const tp = entry.tidal_playable}
-									<TidalTrackRow
-										track={tp}
-										variant="art"
-										index={i}
-										isCurrent={false}
-										isPlaying={false}
-										onRowClick={() => void playTrendingTidalTrack(tp)}
-									/>
-								{/if}
+								<TrendingCard
+									{entry}
+									index={i}
+									onTrack={(t) => void playTrackNow(t.id)}
+									onTidal={(tp) => void playTrendingTidalTrack(tp)}
+								/>
 							{/each}
-						</ol>
+						</div>
 					</div>
 
 					{#if genrePicks.length > 0}
@@ -833,13 +817,17 @@
 		gap: 12px;
 	}
 
-	.trending-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
+	.trending-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+		gap: 14px;
+	}
+
+	@media (max-width: 720px) {
+		.trending-grid {
+			grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+			gap: 10px;
+		}
 	}
 
 	.track-row {

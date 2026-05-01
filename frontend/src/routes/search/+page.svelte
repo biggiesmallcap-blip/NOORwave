@@ -3,8 +3,7 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type ChartEntry, type TrendingSource } from '$lib/api/client'
-  import TrackRow from '$lib/components/TrackRow.svelte'
-  import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
+  import TrendingCard from '$lib/components/TrendingCard.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum, playTidalPlaylist } from '$lib/stores/player'
@@ -736,29 +735,14 @@
         {/if}
       </div>
       {#if trending.length > 0}
-        <div class="trending-list">
+        <div class="trending-grid">
           {#each trending.slice(0, 25) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
-            {#if entry.local_track}
-              {@const t = entry.local_track}
-              <TrackRow
-                track={t}
-                variant="art"
-                index={i}
-                isCurrent={false}
-                isPlaying={false}
-                onRowClick={() => void playTrackNow(t.id)}
-              />
-            {:else if entry.tidal_playable}
-              {@const tp = entry.tidal_playable}
-              <TidalTrackRow
-                track={tp}
-                variant="art"
-                index={i}
-                isCurrent={false}
-                isPlaying={false}
-                onRowClick={() => void playTidalTrackNow(tp)}
-              />
-            {/if}
+            <TrendingCard
+              {entry}
+              index={i}
+              onTrack={(t) => void playTrackNow(t.id)}
+              onTidal={(tp) => void playTidalTrackNow(tp)}
+            />
           {/each}
         </div>
       {:else if !trendingLoading}
@@ -1530,10 +1514,16 @@
     background: rgba(255, 255, 255, 0.12);
     color: var(--text, #fff);
   }
-  .trending-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .trending-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 14px;
+  }
+  @media (max-width: 720px) {
+    .trending-grid {
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+    }
   }
   /* Artists */
   .artists-row {

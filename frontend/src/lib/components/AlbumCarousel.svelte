@@ -1,5 +1,6 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+  import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 
   interface AlbumCard {
     id: number;
@@ -14,6 +15,8 @@
     onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
+  let lazyArt = $state<Record<number, string>>({});
+
   function letterColor(name: string): string {
     const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
     let h = 0;
@@ -25,15 +28,21 @@
 {#if albums.length > 0}
   <div class="albums-row" use:wheelToHorizontal>
     {#each albums as album (album.id)}
+      {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
       <button
         class="album-card"
         onclick={() => onAlbumClick?.(album.id)}
         oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, album.id); } }}
         title={album.title}
+        use:lazyTidalArt={{
+          enabled: !album.artwork_url && !lazyArt[album.id],
+          query: { artist: album.artist_name, title: album.title },
+          onResolve: (url) => (lazyArt[album.id] = url),
+        }}
       >
         <div class="art-wrap">
-          {#if album.artwork_url}
-            <div class="album-art" style="background-image: url('{album.artwork_url}')"></div>
+          {#if resolved}
+            <div class="album-art" style="background-image: url('{resolved}')"></div>
           {:else}
             <div class="album-art fallback" style="background: {letterColor(album.title)}">
               <span>♫</span>

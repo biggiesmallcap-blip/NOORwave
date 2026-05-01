@@ -1,5 +1,6 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+  import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 
   interface ArtistCard {
     id: number;
@@ -14,6 +15,7 @@
   } = $props();
 
   let failedImages = $state(new Set<number>());
+  let lazyArt = $state<Record<number, string>>({});
 
   function letterColor(name: string): string {
     const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
@@ -30,17 +32,24 @@
 {#if artists.length > 0}
   <div class="artists-row" use:wheelToHorizontal>
     {#each artists as artist (artist.id)}
+      {@const baseSrc = artist.photo_url && !failedImages.has(artist.id) ? artist.photo_url : null}
+      {@const resolved = baseSrc ?? lazyArt[artist.id] ?? null}
       <button
         class="artist-card"
         onclick={() => onArtistClick?.(artist.id)}
         oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, artist.id); } }}
         title={artist.name}
+        use:lazyTidalArt={{
+          enabled: !baseSrc && !lazyArt[artist.id],
+          query: { artist: artist.name },
+          onResolve: (url) => (lazyArt[artist.id] = url),
+        }}
       >
         <div class="avatar-wrap">
-          {#if artist.photo_url && !failedImages.has(artist.id)}
+          {#if resolved}
             <img
               class="artist-avatar"
-              src={artist.photo_url}
+              src={resolved}
               alt={artist.name}
               onerror={() => { failedImages = new Set([...failedImages, artist.id]); }}
             />

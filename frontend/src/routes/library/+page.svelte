@@ -18,6 +18,7 @@
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
+	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { parseQuery } from '$lib/search/query_parser';
@@ -932,6 +933,11 @@
 			.slice(0, 10)
 	);
 
+	// Per-tile lazy artwork. Keyed by domain-prefixed id so we never collide
+	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
+	// when a tile without baked artwork scrolls into view.
+	let lazyArt = $state<Record<string, string>>({});
+
 	// First non-null track artwork keyed by artist_id — used as a fallback when
 	// the artist row has no photo_url (most do not, since Tidal sync doesn't populate it).
 	let artistArtworkById = $derived.by(() => {
@@ -1260,6 +1266,8 @@
 					</div>
 					<div class="home-track-list">
 						{#each recentTracks as track (track.id)}
+							{@const trackKey = `track-${track.id}`}
+							{@const trackArt = track.artwork_url ?? lazyArt[trackKey] ?? null}
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 							<div
@@ -1269,9 +1277,14 @@
 								oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildTrackMenu(track)); }}
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
+								use:lazyTidalArt={{
+									enabled: !track.artwork_url && !lazyArt[trackKey],
+									query: { artist: track.artist_name, title: track.title },
+									onResolve: (url) => (lazyArt[trackKey] = url),
+								}}
 							>
-								{#if track.artwork_url}
-									<div class="ht-art" style="background-image: url('{track.artwork_url}')"></div>
+								{#if trackArt}
+									<div class="ht-art" style="background-image: url('{trackArt}')"></div>
 								{:else}
 									<div class="ht-art ht-art--fallback"></div>
 								{/if}
@@ -1319,6 +1332,8 @@
 		<!-- Album Grid -->
 		<div class="album-grid" class:album-list={$viewMode === 'list'}>
 			{#each visibleAlbums as album (album.id)}
+				{@const albumKey = `album-${album.id}`}
+				{@const albumArt = album.artwork_url ?? lazyArt[albumKey] ?? null}
 				<div
 					class="album-card"
 					class:selected={$selectedAlbumIds.has(album.id)}
@@ -1328,10 +1343,15 @@
 					onclick={(event) => handleAlbumCardClick(album.id, event)}
 					oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(event, buildLocalAlbumMenu(album)); }}
 					onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
+					use:lazyTidalArt={{
+						enabled: !album.artwork_url && !lazyArt[albumKey],
+						query: { artist: album.artist_name, title: album.title },
+						onResolve: (url) => (lazyArt[albumKey] = url),
+					}}
 				>
 					<div class="album-art">
-						{#if album.artwork_url}
-							<img src={album.artwork_url} alt={album.title} loading="lazy" />
+						{#if albumArt}
+							<img src={albumArt} alt={album.title} loading="lazy" />
 						{:else}
 							<div class="art-placeholder">♫</div>
 						{/if}
@@ -1426,7 +1446,9 @@
 				: artists}
 			<div class="artist-grid">
 				{#each filteredArtists as artist (artist.id)}
-					{@const artistImg = !failedArtistImages.has(artist.id) ? (artist.photo_url ?? artistArtworkById.get(artist.id) ?? null) : null}
+					{@const artistKey = `artist-${artist.id}`}
+					{@const baseArtistImg = !failedArtistImages.has(artist.id) ? (artist.photo_url ?? artistArtworkById.get(artist.id) ?? null) : null}
+					{@const artistImg = baseArtistImg ?? lazyArt[artistKey] ?? null}
 					<button
 						class="artist-card"
 						class:expanded={expandedArtistId === artist.id}
@@ -1439,6 +1461,11 @@
 							], artist.name);
 						}}
 						title="Expand {artist.name}"
+						use:lazyTidalArt={{
+							enabled: !baseArtistImg && !lazyArt[artistKey],
+							query: { artist: artist.name },
+							onResolve: (url) => (lazyArt[artistKey] = url),
+						}}
 					>
 						<div class="artist-photo">
 							{#if artistImg}

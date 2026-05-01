@@ -175,6 +175,7 @@ export interface ChartEntry {
 	tidal_playable: TidalPlayable | null;
 	image_url: string | null;
 	source: 'lastfm' | 'tidal';
+	genre: string | null;
 }
 
 export type TrendingSource = 'lastfm' | 'tidal';
@@ -957,6 +958,8 @@ export const api = {
 				artist_name: track.artist_name,
 				artist_tidal_id: track.artist_tidal_id ?? null,
 				album_title: track.album_title,
+				album_tidal_id: track.album_tidal_id ?? null,
+				artwork_url: track.artwork_url,
 				duration_ms: track.duration_ms,
 			}),
 		});
