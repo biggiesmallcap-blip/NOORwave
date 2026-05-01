@@ -538,10 +538,17 @@ impl LastFmClient {
         ];
         query.extend(params.iter().map(|(key, value)| (*key, value.clone())));
 
+        // Per-call timeout. The shared `reqwest::Client` is constructed
+        // without one upstream, so without this a slow Last.fm response
+        // would leave a chart request (and the frontend shelf) hung
+        // indefinitely. 8s leaves room for a normal response while keeping
+        // the worst case bounded.
+        const LASTFM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
         let response = self
             .http
             .get(LASTFM_API_URL)
             .query(&query)
+            .timeout(LASTFM_TIMEOUT)
             .send()
             .await
             .context("Last.fm request failed")?;
