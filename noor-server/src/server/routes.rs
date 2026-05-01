@@ -415,6 +415,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
         .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
         .route("/api/library/enrich/spotify/reset", post(reset_spotify_enrichment))
+        .route("/api/library/tidal-stream/purge", post(purge_orphan_tidal_stream_tracks))
         // Last.fm
         .route("/api/lastfm/config", post(lastfm_save_config))
         .route("/api/lastfm/config", axum::routing::delete(lastfm_clear_config))
@@ -8959,6 +8960,44 @@ async fn reset_spotify_enrichment(
         Err(e) => Ok(Json(json!({
             "status": "error",
             "message": format!("Reset failed: {}", e),
+        }))),
+    }
+}
+
+// Manual cleanup: delete `tidal_stream` track rows that have no remaining
+// references (no listen history, not favorited, not in any queue/playlist/etc).
+// Safe to run any time. CASCADE FKs (track_neighbors, embeddings, transitions,
+// audio_dsp_features, etc.) take care of trained-data cleanup automatically.
+async fn purge_orphan_tidal_stream_tracks(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let result: anyhow::Result<usize> = s.db.with_conn(|conn| {
+        // Filter against every non-CASCADE FK referencing tracks(id) so the
+        // DELETE doesn't fail with a constraint violation.
+        let deleted = conn.execute(
+            "DELETE FROM tracks
+             WHERE source = 'tidal_stream'
+               AND is_favorite = 0
+               AND id NOT IN (SELECT track_id FROM listen_history WHERE track_id IS NOT NULL)
+               AND id NOT IN (SELECT track_id FROM queue WHERE track_id IS NOT NULL)
+               AND id NOT IN (SELECT track_id FROM playlist_tracks)
+               AND id NOT IN (SELECT current_track_id FROM playback_state WHERE current_track_id IS NOT NULL)
+               AND id NOT IN (SELECT track_id FROM shuffle_state)
+               AND id NOT IN (SELECT track_id FROM duplicate_group_members)
+               AND id NOT IN (SELECT track_id FROM acrcloud_results)",
+            [],
+        )?;
+        Ok(deleted)
+    });
+    match result {
+        Ok(deleted) => {
+            tracing::info!(deleted, "purge_orphan_tidal_stream_tracks");
+            Ok(Json(json!({ "status": "ok", "deleted": deleted })))
+        }
+        Err(e) => Ok(Json(json!({
+            "status": "error",
+            "message": format!("Purge failed: {}", e),
         }))),
     }
 }

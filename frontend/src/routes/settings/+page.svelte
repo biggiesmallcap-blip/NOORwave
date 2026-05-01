@@ -40,7 +40,6 @@
 		deleteAcrCloudConfig,
 		startAcrCloudScan
 	} from '$lib/stores/acrcloud';
-	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -490,6 +489,36 @@
 		}
 	}
 
+	let purgeRunning = $state(false);
+	let purgeError = $state('');
+	let purgeLastDeleted = $state<number | null>(null);
+
+	async function purgeOrphanTidalStream() {
+		if (
+			!confirm(
+				'Delete tidal_stream tracks that have no listen history, are not favorited, and are not in any queue or playlist?\n\nThis cascades to trained data referencing those tracks (embeddings, neighbours, transitions). It will not affect anything you have actually played or favorited. Storage saved is small (~200 bytes per track) — only run for tidiness.'
+			)
+		)
+			return;
+		purgeRunning = true;
+		purgeError = '';
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/library/tidal-stream/purge`, { method: 'POST' });
+			markServerOnline();
+			const data = await resp.json();
+			if (data.status === 'error') {
+				purgeError = data.message ?? 'Purge failed.';
+			} else {
+				purgeLastDeleted = data.deleted ?? 0;
+			}
+		} catch (e) {
+			purgeError = e instanceof Error ? e.message : String(e);
+			if (isFetchConnectionError(e)) markServerOffline();
+		} finally {
+			purgeRunning = false;
+		}
+	}
+
 	async function loadLastfmStatus() {
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/lastfm/status`);
@@ -891,12 +920,20 @@
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
-		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'TIDAL, MusicBrainz, ACRCloud' },
+		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'discovery', label: 'Discovery', icon: '✦', hint: 'Learned radio engine' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Runtime + DSP analysis' },
 		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
 	];
+
+	let visibleSettingsCategories = $derived(
+		settingsCategories.filter((category) => category.id !== 'discovery' && category.id !== 'data')
+	);
+
+	let activeCategoryMeta = $derived(
+		visibleSettingsCategories.find((category) => category.id === activeCategory) ?? visibleSettingsCategories[0]
+	);
 
 	function rgbCss(c: [number, number, number]): string {
 		return `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`;
@@ -916,30 +953,44 @@
 </svelte:head>
 
 <div class="page-shell settings-page animate-in">
-	<PageHeader
-		eyebrow="Settings"
-		title="Connections, sync, and playback runtime."
-		subtitle="Everything operational lives here: service auth, library sync, genre enrichment, and the audio engine."
-	>
-		{#snippet meta()}
+	<header class="settings-command">
+		<div class="settings-title">
+			<p class="eyebrow">Settings</p>
+			<h1>Settings</h1>
+			<p>Sources, appearance, audio, and access.</p>
+		</div>
+		<div class="settings-status">
 			<StateBadge label={tidalBadgeLabel} tone={tidalBadgeTone} />
 			<StateBadge label={serverBadgeLabel} tone={serverBadgeTone} />
 			<StateBadge label={runtimeAvailable ? 'Runtime active' : 'Runtime idle'} tone={runtimeAvailable ? 'active' : 'muted'} />
-		{/snippet}
-	</PageHeader>
+		</div>
+	</header>
 
 	{#if errorMsg}
 		<EmptyState title="Something needs attention" copy={errorMsg} />
 	{/if}
 
-	<section class="stat-grid">
-		<MetricPair label="Sync" value={$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : 'Ready'} copy="Current TIDAL library sync state." />
-		<MetricPair label="Enrichment" value={`${enrichmentPercent}%`} copy="Tracks with MusicBrainz genre coverage." />
-		<MetricPair label="Output" value={playbackRuntime?.device_name ?? 'Waiting'} copy="Current playback target." />
+	<section class="settings-status-strip">
+		<div>
+			<span>Sync</span>
+			<strong>{$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : 'Ready'}</strong>
+		</div>
+		<div>
+			<span>Enrichment</span>
+			<strong>{enrichmentPercent}%</strong>
+		</div>
+		<div>
+			<span>Output</span>
+			<strong>{playbackRuntime?.device_name ?? 'Waiting'}</strong>
+		</div>
+		<div>
+			<span>Active panel</span>
+			<strong>{activeCategoryMeta.label}</strong>
+		</div>
 	</section>
 
 	<nav class="settings-rail" aria-label="Settings categories">
-		{#each settingsCategories as cat (cat.id)}
+		{#each visibleSettingsCategories as cat (cat.id)}
 			<button
 				type="button"
 				class="settings-rail-btn"
@@ -947,7 +998,21 @@
 				onclick={() => (activeCategory = cat.id)}
 				aria-pressed={activeCategory === cat.id}
 			>
-				<span class="settings-rail-icon" aria-hidden="true">{cat.icon}</span>
+				<span class="settings-rail-icon" aria-hidden="true">
+					{#if cat.id === 'appearance'}
+						<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v16M4 12h16" /></svg>
+					{:else if cat.id === 'sources'}
+						<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>
+					{:else if cat.id === 'discovery'}
+						<svg viewBox="0 0 24 24"><path d="M12 3l2.3 6.2L21 12l-6.7 2.8L12 21l-2.3-6.2L3 12l6.7-2.8z" /></svg>
+					{:else if cat.id === 'audio'}
+						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
+					{:else if cat.id === 'data'}
+						<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /><path d="M8 4v16M16 4v16" /></svg>
+					{:else}
+						<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M5 21c1.5-4 4-6 7-6s5.5 2 7 6" /></svg>
+					{/if}
+				</span>
 				<span class="settings-rail-copy">
 					<strong>{cat.label}</strong>
 					<span class="settings-rail-hint">{cat.hint}</span>
@@ -956,11 +1021,14 @@
 		{/each}
 	</nav>
 
-	<section class="settings-grid">
+	<section
+		class="settings-grid"
+		class:single-column={activeCategory === 'appearance' || activeCategory === 'account'}
+	>
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="Coordinated palette — drives both the UI accent and the wallpaper colours." />
+				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent and wallpaper colors." />
 				<div class="palette-row">
 					<select
 						class="palette-select"
@@ -980,7 +1048,7 @@
 			</section>
 
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Hover a tile to preview the shader, then click to apply." />
+				<SectionHeader eyebrow="Wallpaper" title="Background" subtitle="Preview, then apply." />
 
 				<div class="wallpaper-big-preview">
 					{#if previewShader}
@@ -1027,7 +1095,7 @@
 
 			{#if activeCategory === 'account'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Enter this 6-digit PIN on any new device to connect it to NOOR." />
+				<SectionHeader eyebrow="Access" title="Access PIN" subtitle="Use this PIN on another device." />
 				<div class="token-row">
 					<code class="token-value">{tokenVisible ? serverToken : '•'.repeat(serverToken.length || 6)}</code>
 					<button class="btn btn-glass btn-sm" onclick={() => (tokenVisible = !tokenVisible)}>
@@ -1051,7 +1119,7 @@
 
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Sign in once, then NOOR can sync favorites, playlists, and playback-ready metadata." />
+				<SectionHeader eyebrow="Streaming" title="Connect TIDAL" subtitle="Auth, sync, and playback metadata." />
 
 				{#if serverStatus === 'offline' && $tidalStatus !== 'connecting'}
 					<div class="auth-card glass">
@@ -1126,7 +1194,7 @@
 
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Run MusicBrainz enrichment" subtitle="Fill out genre coverage in the background so browsing, shuffle, and discovery have more signal." />
+				<SectionHeader eyebrow="Metadata" title="MusicBrainz enrichment" subtitle="Genre coverage for browsing and discovery." />
 
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Tagged" value={mbStats ? mbStats.enriched_tracks.toLocaleString() : '0'} copy="Tracks with genres found." />
@@ -1164,14 +1232,14 @@
 			</section>
 
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Spotify genre enrichment" subtitle="Spotify locked their Web API behind a Premium subscription in late 2024. Free Developer accounts now get 403 Forbidden on every request, so this source is unavailable until the policy changes." />
+				<SectionHeader eyebrow="Metadata" title="Spotify tags" subtitle="Unavailable: Premium-only API access." />
 				<p class="page-copy">
 					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
 				</p>
 			</section>
 
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Last.fm tag enrichment" subtitle="Pull crowd-sourced genre tags from Last.fm. Register at last.fm/api/account/create for a free API key, paste it below — stored only on this machine." />
+				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
 					<p class="page-copy" style="color: var(--color-error, #f87171)">{lastfmError}</p>
@@ -1264,9 +1332,9 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'discovery'}
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Track how much of the library the learned radio engine has covered, and refresh it when listening behavior changes." />
+				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
 				<div class="discovery-warning glass-panel">
 					<h4>⚠ Heads up — this runs hot.</h4>
@@ -1319,7 +1387,7 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Streaming quality, output device, and exclusive-mode behaviour for TIDAL playback." />
+				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Quality, device, and exclusive mode." />
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
 					<div class="info-list">
@@ -1406,9 +1474,9 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'data'}
+			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Transfer" title="Portable MusicBrainz snapshot" subtitle="Move enrichment between machines through the repo snapshot in `data/musicbrainz`." />
+				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz enrichment." />
 
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
@@ -1450,12 +1518,46 @@
 				</div>
 			</section>
 			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Cleanup"
+					title="Clear non-library entries"
+					subtitle="Prune tidal_stream tracks that left no trace."
+				/>
+				<p class="page-copy">
+					Last.fm radio recommendations get resolved into <code>tidal_stream</code> rows in the
+					tracks table so playback, listen history, and the resolution cache all keep working.
+					This action removes any such row that you never played, never favorited, and isn't in
+					any queue or playlist.
+				</p>
+				<p class="page-copy" style="color: var(--state-warning, #f3c969)">
+					Cascades to trained data referencing those tracks (embeddings, neighbours, transitions).
+					Storage savings are tiny — even 1,000 tracks/month for 10 years is ~20MB. Run for
+					tidiness only.
+				</p>
+				{#if purgeLastDeleted !== null}
+					<p class="page-copy">
+						Last run deleted <strong>{purgeLastDeleted.toLocaleString()}</strong> orphan track{purgeLastDeleted === 1 ? '' : 's'}.
+					</p>
+				{/if}
+				{#if purgeError}
+					<p class="page-copy" style="color: var(--state-error, #f87171)">{purgeError}</p>
+				{/if}
+				<div class="action-row">
+					<button class="btn btn-glass danger" onclick={purgeOrphanTidalStream} disabled={purgeRunning}>
+						{purgeRunning ? 'Purging…' : 'Clear non-library entries'}
+					</button>
+				</div>
+			</section>
+			{/if}
 		</div>
 
 		<div class="settings-side">
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and output format." />
+				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and format." />
 				<div class="info-list">
 					<div class="info-row">
 						<span>Device</span>
@@ -1485,7 +1587,7 @@
 
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned expansion beyond the current TIDAL workflow." />
+				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
 				<div class="roadmap-list">
 					<div class="roadmap-item">
 						<h4>YouTube Music</h4>
@@ -1501,7 +1603,7 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="DSP" title="Audio Analysis" subtitle="Extract BPM, key, energy, and danceability from your library." />
+				<SectionHeader eyebrow="DSP" title="Audio analysis" subtitle="BPM, key, energy, danceability." />
 
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
@@ -1543,7 +1645,7 @@
 
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Recognition" title="Sample Recognition (ACRCloud)" subtitle="Identify samples and covers in your library via ACRCloud." />
+				<SectionHeader eyebrow="Recognition" title="ACRCloud" subtitle="Sample and cover detection." />
 
 				{#if !$acrCloud.connected}
 					<p class="page-copy">Connect ACRCloud to identify samples in your library.</p>
@@ -1583,17 +1685,93 @@
 </div>
 
 <style>
-	.settings-grid {
+	.settings-page {
+		gap: 14px;
+	}
+
+	.settings-command {
 		display: flex;
-		flex-direction: column;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 18px;
+		padding: 4px 0 2px;
+	}
+
+	.settings-title {
+		display: grid;
+		gap: 5px;
+		min-width: 0;
+	}
+
+	.settings-title h1 {
+		font-family: var(--font-body);
+		font-size: 1.42rem;
+		font-weight: 700;
+		line-height: 1.15;
+		letter-spacing: 0;
+	}
+
+	.settings-title p:not(.eyebrow) {
+		color: var(--text-secondary);
+		max-width: 64ch;
+	}
+
+	.settings-status {
+		display: flex;
+		justify-content: flex-end;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+
+	.settings-status-strip {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 1px;
+		overflow: hidden;
+		border: 1px solid var(--border-subtle);
+		border-radius: 12px;
+		background: var(--border-subtle);
+	}
+
+	.settings-status-strip div {
+		min-width: 0;
+		display: grid;
+		gap: 3px;
+		padding: 10px 12px;
+		background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+	}
+
+	.settings-status-strip span {
+		color: var(--text-tertiary);
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.09em;
+		text-transform: uppercase;
+	}
+
+	.settings-status-strip strong {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.86rem;
+	}
+
+	.settings-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
 		gap: var(--space-4);
+		align-items: start;
+	}
+
+	.settings-grid.single-column {
+		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.settings-main,
 	.settings-side {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
+		display: grid;
+		gap: 12px;
 	}
 
 	.settings-main:empty,
@@ -1603,19 +1781,25 @@
 
 	.settings-rail {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 10px;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 6px;
+		padding: 6px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 14px;
+		background: rgba(255, 255, 255, 0.022);
 	}
 
 	.settings-rail-btn {
 		all: unset;
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		padding: 12px 14px;
-		border-radius: var(--radius-sm);
-		border: 1px solid rgba(255, 255, 255, 0.06);
-		background: rgba(255, 255, 255, 0.02);
+		gap: 9px;
+		min-width: 0;
+		min-height: 46px;
+		padding: 8px 12px;
+		border-radius: 9px;
+		border: 1px solid transparent;
+		background: transparent;
 		cursor: pointer;
 		transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
 	}
@@ -1626,19 +1810,29 @@
 	}
 
 	.settings-rail-btn.active {
-		background: color-mix(in srgb, var(--accent-strong, #6366f1) 14%, transparent);
-		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 45%, transparent);
+		background: color-mix(in srgb, var(--accent-strong, #6366f1) 12%, transparent);
+		border-color: color-mix(in srgb, var(--accent-strong, #6366f1) 36%, transparent);
 	}
 
 	.settings-rail-icon {
-		font-size: 1.25rem;
-		width: 32px;
-		height: 32px;
+		flex: 0 0 auto;
+		width: 30px;
+		height: 30px;
 		display: grid;
 		place-items: center;
-		border-radius: 8px;
+		border-radius: 7px;
 		background: rgba(255, 255, 255, 0.04);
 		color: rgba(255, 255, 255, 0.82);
+	}
+
+	.settings-rail-icon svg {
+		width: 17px;
+		height: 17px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.settings-rail-btn.active .settings-rail-icon {
@@ -1650,19 +1844,26 @@
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
+		max-width: 22ch;
 	}
 
 	.settings-rail-copy strong {
-		font-size: 0.9rem;
+		font-size: 0.82rem;
 		color: var(--text-primary);
-	}
-
-	.settings-rail-hint {
-		font-size: 0.74rem;
-		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.settings-rail-hint {
+		font-size: 0.68rem;
+		color: var(--text-secondary);
+		white-space: normal;
+		display: -webkit-box;
+		line-clamp: 1;
+		-webkit-line-clamp: 1;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
 	}
 
 	.palette-row {
@@ -1693,8 +1894,9 @@
 	/* ── Shared preview panel ── */
 	.wallpaper-big-preview {
 		position: relative;
-		aspect-ratio: 16 / 7;
-		border-radius: 14px;
+		aspect-ratio: 16 / 5;
+		max-height: 260px;
+		border-radius: 10px;
 		overflow: hidden;
 		background: #08080c;
 		border: 1px solid rgba(255, 255, 255, 0.07);
@@ -1794,14 +1996,38 @@
 	}
 
 	.section-panel {
-		padding: 22px;
+		padding: 16px;
 		display: flex;
 		flex-direction: column;
-		gap: 18px;
+		gap: 14px;
+		border-radius: 14px;
+	}
+
+	.settings-grid.single-column .settings-main {
+		max-width: none;
+	}
+
+	.settings-grid.single-column .section-panel {
+		max-width: none;
 	}
 
 	.inner-metrics {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.inner-metrics :global(.metric-pair) {
+		padding: 12px;
+		border-radius: 10px;
+	}
+
+	.inner-metrics :global(.metric-pair strong) {
+		font-family: var(--font-body);
+		font-size: 1.05rem;
+		letter-spacing: 0;
+	}
+
+	.inner-metrics :global(.metric-pair p) {
+		font-size: 0.78rem;
 	}
 
 	.enrichment-progress {
@@ -1925,12 +2151,37 @@
 	}
 
 	@media (max-width: 960px) {
+		.settings-command {
+			flex-direction: column;
+		}
+
+		.settings-status {
+			justify-content: flex-start;
+		}
+
+		.settings-status-strip {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
 		.settings-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.settings-rail {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 	}
 
 	@media (max-width: 640px) {
+		.settings-status-strip,
+		.settings-rail {
+			grid-template-columns: 1fr;
+		}
+
+		.settings-rail-btn {
+			padding: 10px 11px;
+		}
+
 		.inner-metrics {
 			grid-template-columns: 1fr;
 		}
