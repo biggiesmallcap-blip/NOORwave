@@ -3,7 +3,6 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
-	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import {
 		currentTrack,
 		currentQueueItemId,
@@ -47,6 +46,11 @@
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
+	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
+	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
+	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
+	import QuietMode from '$lib/components/QuietMode.svelte';
+	import { openQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
@@ -665,6 +669,13 @@
 		openMenuAtElement(event.currentTarget as HTMLElement, items, track.title);
 	}
 
+	function openNowPlayingMenuAt(anchor: HTMLElement) {
+		const track = $currentTrack;
+		if (!track) return;
+		const items = pickMenuBuilder(track);
+		openMenuAtElement(anchor, items, track.title);
+	}
+
 	function openNowPlayingContextMenu(event: MouseEvent) {
 		const track = $currentTrack;
 		if (!track) return;
@@ -836,6 +847,7 @@
 <ContextMenu />
 <Toast />
 <CommandPalette />
+<QuietMode />
 <QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
 
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
@@ -943,106 +955,47 @@
 						{formatQuality($currentTrack.best_quality)}
 					</span>
 				{/if}
+
+				{#if $currentTrack}
+					<button
+						class="np-fullscreen-btn"
+						aria-label="Enter quiet mode"
+						title="Quiet mode"
+						onclick={openQuietMode}
+					>⛶</button>
+				{/if}
 			</div>
 
-			<div class="np-info">
-				<div class="np-copy">
-					<p class="np-eyebrow">Listening Instrument</p>
-					<h2 class="np-title">{$currentTrack?.title ?? 'Nothing queued'}</h2>
-					{#if $currentTrack?.artist_id && $currentTrack.artist_id > 0}
-						<a class="np-artist np-link" href="/artists/{$currentTrack.artist_id}">
-							{$currentTrack.artist_name ?? 'Unknown artist'}
-						</a>
-					{:else if $currentTrack?.artist_tidal_id}
-						<a class="np-artist np-link" href="/tidal/artists/{$currentTrack.artist_tidal_id}">
-							{$currentTrack.artist_name ?? 'Unknown artist'}
-						</a>
-					{:else}
-						<p class="np-artist">{$currentTrack?.artist_name ?? 'Choose a track to begin playback.'}</p>
-					{/if}
-					{#if $currentTrack?.album_id}
-						<a class="np-album np-link" href="/albums/{$currentTrack.album_id}">
-							{$currentTrack.album_title ?? 'Unknown album'}
-						</a>
-					{:else}
-						<p class="np-album">{$currentTrack?.album_title ?? 'Playback controls stay docked here.'}</p>
-					{/if}
-					{#if nowPlayingAttribution}
-						<p class="np-source">{nowPlayingAttribution}</p>
-					{/if}
-					{#if formatStreamDetail($currentStreamDisplay)}
-						<p class="np-stream-detail">{formatStreamDetail($currentStreamDisplay)}</p>
-					{/if}
-				</div>
+			<NowPlayingMetadata
+				track={$currentTrack}
+				nowPlayingAttribution={nowPlayingAttribution}
+				streamDetail={formatStreamDetail($currentStreamDisplay)}
+				playerState={playerState}
+				isScrubbing={isScrubbing}
+			/>
 
-				<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={$currentTrack ? 'active' : 'muted'} compact={true} />
-			</div>
+			<NowPlayingProgress
+				position={$position}
+				duration={$currentTrack?.duration_ms ?? 0}
+				onSeek={(p) => void setPlayerPosition(p)}
+				onScrubStart={() => { isScrubbing = true; }}
+				onScrubEnd={() => { isScrubbing = false; }}
+			/>
 
-			<div class="np-progress">
-				<div class="np-progress-track" style="--pct: {progressWidth}">
-					<div class="np-progress-fill" style={`width: ${progressWidth}`}></div>
-					<input
-						class="np-progress-input"
-						type="range"
-						min="0"
-						max={$currentTrack?.duration_ms ?? 0}
-						step="1000"
-						bind:value={scrubPosition}
-						oninput={beginScrub}
-						onchange={() => void commitScrub()}
-						disabled={!$currentTrack?.duration_ms}
-						aria-label="Seek playback"
-					/>
-				</div>
-
-				<div class="np-times" class:scrubbing={isScrubbing}>
-					<span>{formatDuration(scrubPosition)}</span>
-					<span>{formatDuration($currentTrack?.duration_ms ?? 0)}</span>
-				</div>
-			</div>
-
-			<div class="transport">
-				<button
-					class:active={$currentTrack?.is_favorite}
-					class="tp-btn tp-like-btn"
-					title={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-					aria-label={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-					onclick={() => void handleDesktopFavoriteToggle()}
-					disabled={desktopFavoritePending || !$currentTrack}
-				>
-					{$currentTrack?.is_favorite ? '♥' : '♡'}
-				</button>
-				<button
-					class:active={$shuffleMode !== 'off'}
-					class="tp-btn tp-mode-btn"
-					title={shuffleLabels[$shuffleMode]}
-					aria-label={shuffleLabels[$shuffleMode]}
-					onclick={() => void cyclePlayerShuffleMode()}
-				>
-					{shuffleIcons[$shuffleMode]}
-				</button>
-				<button class="tp-btn" onclick={() => void playPreviousTrack()} aria-label="Previous">⏮</button>
-				<button class="tp-play" onclick={() => void togglePlayback()} aria-label="Play or pause">
-					{$isPlaying ? '⏸' : '▶'}
-				</button>
-				<button class="tp-btn" onclick={() => void playNextTrack()} aria-label="Next">⏭</button>
-				<button
-					class:active={$repeatMode !== 'off'}
-					class="tp-btn tp-mode-btn"
-					title={repeatLabels[$repeatMode]}
-					aria-label={repeatLabels[$repeatMode]}
-					onclick={() => void cyclePlayerRepeatMode()}
-				>
-					{repeatIcons[$repeatMode]}
-				</button>
-				<button
-					class="tp-btn"
-					title="More actions — song radio, play album, shuffle album…"
-					aria-label="More actions"
-					onclick={openNowPlayingMenu}
-					disabled={!$currentTrack}
-				>⋯</button>
-			</div>
+			<NowPlayingTransport
+				track={$currentTrack}
+				isPlaying={$isPlaying}
+				shuffleMode={$shuffleMode}
+				repeatMode={$repeatMode}
+				favoritePending={desktopFavoritePending}
+				onToggleFavorite={() => void handleDesktopFavoriteToggle()}
+				onCycleShuffle={() => void cyclePlayerShuffleMode()}
+				onPrev={() => void playPreviousTrack()}
+				onPlayPause={() => void togglePlayback()}
+				onNext={() => void playNextTrack()}
+				onCycleRepeat={() => void cyclePlayerRepeatMode()}
+				onOpenMore={(anchor) => openNowPlayingMenuAt(anchor)}
+			/>
 
 			<div class="np-controls">
 				<button
@@ -1921,6 +1874,36 @@
 		flex-shrink: 0;
 	}
 
+	.np-fullscreen-btn {
+		position: absolute;
+		top: 10px;
+		left: 10px;
+		width: 30px;
+		height: 30px;
+		border-radius: 8px;
+		display: grid;
+		place-items: center;
+		font-size: 14px;
+		color: #fff;
+		background: rgba(0, 0, 0, 0.45);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		backdrop-filter: blur(8px);
+		opacity: 0;
+		transform: translateY(-4px);
+		transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
+		cursor: pointer;
+	}
+
+	.np-artwork-wrap:hover .np-fullscreen-btn,
+	.np-fullscreen-btn:focus-visible {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	.np-fullscreen-btn:hover {
+		background: rgba(0, 0, 0, 0.65);
+	}
+
 	.np-artwork {
 		width: 100%;
 		height: 100%;
@@ -2028,18 +2011,6 @@
 		text-overflow: ellipsis;
 	}
 
-	a.np-link {
-		color: inherit;
-		text-decoration: none;
-		cursor: pointer;
-		transition: color var(--motion-fast);
-	}
-
-	a.np-link:hover {
-		color: var(--accent-strong, #6366f1);
-		text-decoration: underline;
-	}
-
 	.np-progress {
 		display: flex;
 		flex-direction: column;
@@ -2102,11 +2073,6 @@
 		color: var(--text-secondary);
 		font-size: 0.74rem;
 		font-variant-numeric: tabular-nums;
-	}
-
-	.np-times.scrubbing span:first-child {
-		color: var(--accent-strong, var(--accent));
-		font-weight: 600;
 	}
 
 	.tp-mode-btn {
@@ -2330,43 +2296,43 @@
 		height: 64px;
 	}
 
-	.now-playing-panel.queue-expanded .np-info {
+	.now-playing-panel.queue-expanded :global(.np-info) {
 		padding-block: 6px;
 	}
 
-	.now-playing-panel.queue-expanded .np-copy .np-eyebrow {
+	.now-playing-panel.queue-expanded :global(.np-copy .np-eyebrow) {
 		display: none;
 	}
 
-	.now-playing-panel.queue-expanded .np-copy .np-album,
-	.now-playing-panel.queue-expanded .np-copy .np-source,
-	.now-playing-panel.queue-expanded .np-copy .np-stream-detail {
+	.now-playing-panel.queue-expanded :global(.np-copy .np-album),
+	.now-playing-panel.queue-expanded :global(.np-copy .np-source),
+	.now-playing-panel.queue-expanded :global(.np-copy .np-stream-detail) {
 		display: none;
 	}
 
-	.now-playing-panel.queue-expanded .np-copy .np-title {
+	.now-playing-panel.queue-expanded :global(.np-copy .np-title) {
 		font-size: 0.95rem;
 		line-height: 1.2;
 		margin: 0;
 	}
 
-	.now-playing-panel.queue-expanded .np-copy .np-artist {
+	.now-playing-panel.queue-expanded :global(.np-copy .np-artist) {
 		font-size: 0.78rem;
 	}
 
-	.now-playing-panel.queue-expanded .np-progress {
+	.now-playing-panel.queue-expanded :global(.np-progress) {
 		max-height: 0;
 		opacity: 0;
 		overflow: hidden;
 		pointer-events: none;
 	}
 
-	.now-playing-panel.queue-expanded .transport {
+	.now-playing-panel.queue-expanded :global(.transport) {
 		gap: 6px;
 	}
 
-	.now-playing-panel.queue-expanded .tp-btn,
-	.now-playing-panel.queue-expanded .tp-play {
+	.now-playing-panel.queue-expanded :global(.tp-btn),
+	.now-playing-panel.queue-expanded :global(.tp-play) {
 		width: 30px;
 		height: 30px;
 	}

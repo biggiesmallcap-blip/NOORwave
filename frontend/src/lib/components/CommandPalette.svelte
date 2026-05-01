@@ -2,10 +2,20 @@
 	import { fly, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { goto } from '$app/navigation';
+	import { get } from 'svelte/store';
 	import { api, type TidalSearchTrack, type TidalSearchAlbum, type TidalSearchArtist } from '$lib/api/client';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
-	import { playTidalTrackNow } from '$lib/stores/player';
-	import { matchCommands, parseSlashInput, type SlashCommand } from '$lib/search/commands';
+	import {
+		playTidalTrackNow,
+		playTidalTrackNext,
+		addTidalTrackToQueue,
+		startTidalSongRadio,
+		playTidalAlbum,
+		startAlbumRadio,
+		startArtistRadio,
+	} from '$lib/stores/player';
+	import { matchCommands, parseSlashInput } from '$lib/search/commands';
+	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let query = $state('');
@@ -15,6 +25,7 @@
 	let artists = $state<TidalSearchArtist[]>([]);
 	let cursor = $state(0);
 	let debounceTimer: ReturnType<typeof setTimeout>;
+	let rowEls: (HTMLElement | null)[] = $state([]);
 
 	const isSlashMode = $derived(query.startsWith('/'));
 	const slashMatches = $derived(isSlashMode ? matchCommands(query) : []);
@@ -78,6 +89,128 @@
 		goto(artist.local_id ? `/artists/${artist.local_id}` : `/tidal/artists/${artist.tidal_id}`);
 	}
 
+	// Wrap menu items so they always close the palette after firing.
+	function wrapMenuItems(items: MenuItem[]): MenuItem[] {
+		return items.map((item) => {
+			if (item.separator) return item;
+			const original = item.onSelect;
+			return {
+				...item,
+				onSelect: original
+					? async () => {
+						try {
+							await original();
+						} finally {
+							commandPaletteOpen.set(false);
+						}
+					}
+					: undefined,
+			};
+		});
+	}
+
+	function buildTrackRowMenu(track: TidalSearchTrack): MenuItem[] {
+		const playable = { ...track, artist_tidal_id: track.artist_id ?? null };
+		const items: MenuItem[] = [
+			{ label: 'Play now', icon: '▶', onSelect: () => void playTidalTrackNow(playable) },
+			{ label: 'Play next', icon: '⤴', onSelect: () => void playTidalTrackNext(playable) },
+			{ label: 'Add to queue', icon: '＋', onSelect: () => void addTidalTrackToQueue(playable) },
+			{ separator: true, label: '' },
+			{ label: 'Song radio', icon: '◉', onSelect: () => void startTidalSongRadio(playable) },
+		];
+		if (track.artist_id != null) {
+			items.push({
+				label: `Go to ${track.artist_name ?? 'artist'}`,
+				icon: '→',
+				onSelect: () => void goto(`/tidal/artists/${track.artist_id}`),
+			});
+		}
+		if (track.album_tidal_id != null) {
+			items.push({
+				label: `Go to ${track.album_title ?? 'album'}`,
+				icon: '→',
+				onSelect: () => void goto(`/tidal/albums/${track.album_tidal_id}`),
+			});
+		}
+		return wrapMenuItems(items);
+	}
+
+	function buildAlbumRowMenu(album: TidalSearchAlbum): MenuItem[] {
+		const items: MenuItem[] = [
+			{ label: 'Play album', icon: '▶', onSelect: () => void playTidalAlbum(album.tidal_id) },
+		];
+		// startAlbumRadio takes a local DB id; only offer when the album is in the library.
+		if (album.local_id != null) {
+			items.push({
+				label: 'Album radio',
+				icon: '◉',
+				onSelect: () => void startAlbumRadio(album.local_id!),
+			});
+		}
+		items.push({ separator: true, label: '' });
+		items.push({
+			label: 'Go to album',
+			icon: '→',
+			onSelect: () =>
+				void goto(album.local_id ? `/albums/${album.local_id}` : `/tidal/albums/${album.tidal_id}`),
+		});
+		return wrapMenuItems(items);
+	}
+
+	function buildArtistRowMenu(artist: TidalSearchArtist): MenuItem[] {
+		const items: MenuItem[] = [];
+		// startArtistRadio takes a local DB id; only offer when the artist is in the library.
+		if (artist.local_id != null) {
+			items.push({
+				label: 'Artist radio',
+				icon: '✦',
+				onSelect: () => void startArtistRadio(artist.local_id!),
+			});
+			items.push({ separator: true, label: '' });
+		}
+		items.push({
+			label: 'Go to artist',
+			icon: '→',
+			onSelect: () =>
+				void goto(artist.local_id ? `/artists/${artist.local_id}` : `/tidal/artists/${artist.tidal_id}`),
+		});
+		return wrapMenuItems(items);
+	}
+
+	function openRowMenuAt(anchor: HTMLElement, index: number) {
+		const allItems = [...artists, ...albums, ...tracks];
+		const item = allItems[index];
+		if (!item) return;
+		let menu: MenuItem[];
+		let title: string;
+		if ('name' in item) {
+			menu = buildArtistRowMenu(item as TidalSearchArtist);
+			title = (item as TidalSearchArtist).name;
+		} else if (!('duration_ms' in item)) {
+			const album = item as TidalSearchAlbum;
+			menu = buildAlbumRowMenu(album);
+			title = album.title;
+		} else {
+			const track = item as TidalSearchTrack;
+			menu = buildTrackRowMenu(track);
+			title = track.title;
+		}
+		openMenuAtElement(anchor, menu, title);
+	}
+
+	function handleMoreClick(event: MouseEvent, index: number) {
+		event.stopPropagation();
+		openRowMenuAt(event.currentTarget as HTMLElement, index);
+	}
+
+	function handleMoreKeydown(event: KeyboardEvent, index: number) {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			event.stopPropagation();
+			openRowMenuAt(event.currentTarget as HTMLElement, index);
+		}
+	}
+
 	async function executeSlashCommand() {
 		const { command, arg } = parseSlashInput(query);
 		if (!command) return;
@@ -86,9 +219,24 @@
 	}
 
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+		if (e.key === 'Escape') {
+			// Defer to context menu if it's open (its own window handler will close it).
+			if (get(contextMenu).open) return;
+			e.preventDefault();
+			e.stopPropagation();
+			close();
+			return;
+		}
 		if (e.key === 'ArrowDown') { e.preventDefault(); cursor = (cursor + 1) % Math.max(totalItems, 1); return; }
 		if (e.key === 'ArrowUp') { e.preventDefault(); cursor = (cursor - 1 + Math.max(totalItems, 1)) % Math.max(totalItems, 1); return; }
+		if (e.key === 'ArrowRight' && !isSlashMode && totalItems > 0) {
+			const anchor = rowEls[cursor];
+			if (anchor) {
+				e.preventDefault();
+				openRowMenuAt(anchor, cursor);
+			}
+			return;
+		}
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			if (isSlashMode) {
@@ -161,10 +309,10 @@
 		{:else if !isSlashMode && (tracks.length > 0 || albums.length > 0 || artists.length > 0)}
 			<ul class="palette-list">
 				{#each artists as artist, i (artist.tidal_id)}
-					<li>
+					{@const idx = i}
+					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
 						<button
 							class="palette-row"
-							class:palette-row--active={cursor === i}
 							onclick={() => selectArtist(artist)}
 						>
 							{#if artist.artwork_url}
@@ -176,13 +324,20 @@
 							<span class="row-kind">Artist</span>
 							{#if artist.in_library}<span class="row-lib">✓</span>{/if}
 						</button>
+						<button
+							class="row-more"
+							aria-label="Open actions"
+							tabindex={-1}
+							onclick={(e) => handleMoreClick(e, idx)}
+							onkeydown={(e) => handleMoreKeydown(e, idx)}
+						>⋯</button>
 					</li>
 				{/each}
 				{#each albums as album, i (album.tidal_id)}
-					<li>
+					{@const idx = artists.length + i}
+					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
 						<button
 							class="palette-row"
-							class:palette-row--active={cursor === artists.length + i}
 							onclick={() => selectAlbum(album)}
 						>
 							{#if album.artwork_url}
@@ -194,13 +349,20 @@
 							<span class="row-kind">Album</span>
 							{#if album.in_library}<span class="row-lib">✓</span>{/if}
 						</button>
+						<button
+							class="row-more"
+							aria-label="Open actions"
+							tabindex={-1}
+							onclick={(e) => handleMoreClick(e, idx)}
+							onkeydown={(e) => handleMoreKeydown(e, idx)}
+						>⋯</button>
 					</li>
 				{/each}
 				{#each tracks as track, i (track.tidal_id)}
-					<li>
+					{@const idx = artists.length + albums.length + i}
+					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
 						<button
 							class="palette-row"
-							class:palette-row--active={cursor === artists.length + albums.length + i}
 							onclick={() => void selectTrack(track)}
 						>
 							{#if track.artwork_url}
@@ -215,6 +377,13 @@
 							<span class="row-kind">Track</span>
 							{#if track.in_library}<span class="row-lib">✓</span>{/if}
 						</button>
+						<button
+							class="row-more"
+							aria-label="Open actions"
+							tabindex={-1}
+							onclick={(e) => handleMoreClick(e, idx)}
+							onkeydown={(e) => handleMoreKeydown(e, idx)}
+						>⋯</button>
 					</li>
 				{/each}
 			</ul>
@@ -231,7 +400,7 @@
 		position: fixed;
 		inset: 0;
 		background: rgba(0,0,0,0.45);
-		z-index: 1400;
+		z-index: 1600;
 	}
 	.palette-panel {
 		position: fixed;
@@ -243,7 +412,7 @@
 		border: 1px solid var(--border-strong);
 		border-radius: 14px;
 		box-shadow: 0 32px 64px -16px rgba(0,0,0,0.7);
-		z-index: 1401;
+		z-index: 1601;
 		overflow: hidden;
 	}
 	.palette-input-wrap {
@@ -283,8 +452,20 @@
 		max-height: 400px;
 		overflow-y: auto;
 	}
+	.palette-row-wrap {
+		display: flex;
+		align-items: stretch;
+		position: relative;
+	}
+	.palette-row-wrap:hover,
+	.palette-row-wrap--active,
+	.palette-row:hover,
+	.palette-row--active {
+		background: var(--bg-hover);
+	}
 	.palette-row {
-		width: 100%;
+		flex: 1;
+		min-width: 0;
 		display: flex;
 		align-items: center;
 		gap: 10px;
@@ -297,8 +478,28 @@
 		cursor: pointer;
 		text-align: left;
 	}
-	.palette-row:hover, .palette-row--active {
-		background: var(--bg-hover);
+	.row-more {
+		flex-shrink: 0;
+		width: 32px;
+		display: grid;
+		place-items: center;
+		background: none;
+		border: none;
+		color: var(--text-secondary, var(--text-muted));
+		font-size: 16px;
+		cursor: pointer;
+		opacity: 0;
+		padding: 0 14px 0 4px;
+		transition: opacity 120ms ease, color 120ms ease;
+	}
+	.palette-row-wrap:hover .row-more,
+	.palette-row-wrap--active .row-more,
+	.row-more:hover,
+	.row-more:focus-visible {
+		opacity: 1;
+	}
+	.row-more:hover {
+		color: var(--text-primary);
 	}
 	.row-art {
 		width: 32px; height: 32px;

@@ -32,6 +32,7 @@
 	function handleKey(event: KeyboardEvent) {
 		if (event.key === 'Escape' && $contextMenu.open) {
 			event.preventDefault();
+			event.stopPropagation();
 			closeContextMenu();
 		}
 	}
@@ -130,7 +131,7 @@
 <style>
 	.context-menu {
 		position: fixed;
-		z-index: 120;
+		z-index: 1700;
 		min-width: 220px;
 		max-width: 280px;
 		padding: 6px;
