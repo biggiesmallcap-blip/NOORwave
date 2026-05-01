@@ -64,6 +64,21 @@
 		return mode;
 	}
 
+	// Per-entry key for the grid each-block. Last.fm-only entries arrive with
+	// `tidal_playable.tidal_id === 0` (placeholder), so `??` falls through to
+	// the index-based fallback, since 0 is falsy-but-not-nullish — without
+	// this, every unresolved card collides on key `0` and Svelte throws
+	// `each_key_duplicate`, which prevents the whole shelf from rendering.
+	function entryKey(entry: ChartEntry, i: number): string {
+		const localId = entry.local_track?.id;
+		if (typeof localId === 'number' && localId > 0) return `local:${localId}`;
+		const tidalId = entry.tidal_playable?.tidal_id;
+		if (typeof tidalId === 'number' && tidalId > 0) return `tidal:${tidalId}`;
+		const artist = entry.tidal_playable?.artist_name ?? entry.local_track?.artist_name ?? '';
+		const title = entry.tidal_playable?.title ?? entry.local_track?.title ?? '';
+		return `lf:${i}:${artist}:${title}`;
+	}
+
 	onMount(() => {
 		// Migrate stale 'tidal' from the pre-merge source key before reads happen.
 		if (!MODES.some((m) => m.id === get(selectedTrendingMode))) {
@@ -238,7 +253,7 @@
 
 	{#if tracks.length > 0}
 		<div class="trending-grid">
-			{#each tracks.slice(0, limit) as entry, i (entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? `idx-${i}`)}
+			{#each tracks.slice(0, limit) as entry, i (entryKey(entry, i))}
 				<TrendingCard {entry} index={i} {onTrack} onTidal={playChartTidalTrack} />
 			{/each}
 		</div>
