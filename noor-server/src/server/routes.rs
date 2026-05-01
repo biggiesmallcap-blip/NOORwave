@@ -2937,18 +2937,15 @@ async fn radio_start(
         )
     })?;
 
-    // Library tracks first (immediately playable), pending tracks appended after.
+    // Seed track leads the queue (matches the user's pick — like prepending it
+    // before recommendations). orchestrate_song already excludes the seed from
+    // its own results; the filter below is a defensive guard against duplicates.
+    let seed_id = payload.seed_track_id;
     let (library_cands, pending_cands): (Vec<_>, Vec<_>) = radio_queue
         .tracks
         .into_iter()
+        .filter(|c| c.track_id != seed_id)
         .partition(|c| c.is_in_library && c.track_id > 0);
-
-    if library_cands.is_empty() && pending_cands.is_empty() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": "radio returned no candidates" })),
-        ));
-    }
 
     // Build queue atomically and collect pending row IDs for background tasks.
     let (first_item, pending_item_ids) = db
@@ -2958,6 +2955,11 @@ async fn radio_start(
             tx.execute("DELETE FROM queue", [])?;
 
             let mut pos = 0i32;
+            tx.execute(
+                "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', NULL)",
+                rusqlite::params![seed_id, pos],
+            )?;
+            pos += 1;
             for c in &library_cands {
                 tx.execute(
                     "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', ?3)",
