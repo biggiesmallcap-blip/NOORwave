@@ -196,13 +196,19 @@ The thing that picks the next track when Automix or Song Radio is running.
 
 ### Contents
 - `NOORwave.exe` — app window + system tray
-- `noor-server.exe` — local music server  
+- `noor-server.exe` — local music server
 - `www/` — bundled UI (do not delete)
+
+Created next to the exes on first run:
+- `noor.db` (+ `noor.db-wal`, `noor.db-shm`) — your library, settings, and TIDAL session
+- `noor-server.log` — server output
 
 ### Usage
 1. Unzip to any folder
 2. Double-click `NOORwave.exe`
 3. Window opens when server is ready (~2s)
+
+The folder is fully relocatable — drag `NOORwave\` to a different drive or rename the parent and it keeps working, as long as the contents stay together.
 
 ### Option A — Portable build (Windows, recommended)
 
@@ -263,7 +269,7 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 | Variable | Default | Description |
 |---|---|---|
 | `NOOR_ADDR` | `0.0.0.0:3334` | Override server bind address |
-| `NOOR_DB` | `<exe dir>/noor.db` | Override database path |
+| `NOOR_DB` | `<exe dir>/noor.db` (workspace root in dev) | Override database path |
 | `RUST_LOG` | `noor_server=info` | Log level |
 | `TIDAL_CLIENT_ID` | *(built-in)* | Override TIDAL OAuth2 client ID |
 | `TIDAL_CLIENT_SECRET` | *(built-in)* | Override TIDAL OAuth2 client secret |
