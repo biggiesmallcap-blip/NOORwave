@@ -106,7 +106,7 @@
 	<div class="discover-header">
 		<div class="header-text">
 			<span class="eyebrow">Sound Space</span>
-			<h1>Navigate your music by feel.</h1>
+			<h1>Seed, branch, build.</h1>
 		</div>
 		<form class="search-form" onsubmit={handleSearch}>
 			<input
@@ -164,11 +164,11 @@
 		<div class="discover-main">
 			{#if resolvedSeedId === null}
 				<EmptyState
-					title="Play something to start discovering"
-					copy="Discover finds new music similar to whatever you're playing. Hit play, or lock a track as your seed."
+					title="Play something to seed the map"
+					copy="Start playback or lock the current track."
 				/>
 			{:else if $discoverSpace.loading && $discoverSpace.nodes.length === 0}
-				<EmptyState title="Mapping your sound space" copy="This takes a moment on first load." />
+				<EmptyState title="Mapping sound space" copy="Loading nearby tracks." />
 			{:else if $discoverSpace.nodes.length === 0}
 				<EmptyState title="No tracks found" copy="Try a different mode or seed track." />
 			{:else}

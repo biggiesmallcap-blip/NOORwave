@@ -66,6 +66,14 @@
 		color: var(--text-tertiary);
 	}
 
+	h1 {
+		font-family: var(--font-body);
+		font-size: clamp(1.55rem, 2vw, 1.9rem);
+		font-weight: 700;
+		line-height: 1.15;
+		letter-spacing: 0;
+	}
+
 	.subtitle {
 		color: var(--text-secondary);
 	}

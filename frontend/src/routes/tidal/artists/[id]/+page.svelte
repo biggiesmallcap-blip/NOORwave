@@ -36,6 +36,12 @@
     ) ?? []
   )
 
+  const heroArt = $derived(
+    profile?.albums.find((album) => album.artwork_url)?.artwork_url ??
+    profile?.top_tracks.find((track) => track.artwork_url)?.artwork_url ??
+    null
+  )
+
   function trackAsPlayable(t: TidalDiscographyTrack) {
     return {
       tidal_id: t.tidal_id,
@@ -56,7 +62,15 @@
 {:else if profile}
   <div class="artist-page">
     <div class="artist-hero">
-      <h1 class="artist-name">{profile.artist_name ?? 'Artist'}</h1>
+      {#if heroArt}
+        <div class="artist-hero-backdrop" style={`background-image: url('${heroArt}')`}></div>
+      {/if}
+      <div class="artist-hero-veil"></div>
+      <div class="artist-hero-body">
+        <span class="tidal-badge">TIDAL preview</span>
+        <h1 class="artist-name display-face">{profile.artist_name ?? 'Artist'}</h1>
+        <p class="artist-meta">{profile.top_tracks.length} top tracks / {profile.albums.length} releases</p>
+      </div>
     </div>
 
     <div class="filter-bar">
@@ -115,9 +129,60 @@
 <style>
   .loading { padding: 48px; color: var(--text-muted); text-align: center; }
   .error { color: var(--state-error); }
-  .artist-page { padding: 32px 48px; }
-  .artist-hero { margin-bottom: 24px; }
-  .artist-name { font-size: 32px; font-weight: 700; color: var(--text-primary); margin: 0; }
+  .artist-page { padding: 0 48px 48px; }
+  .artist-hero {
+    position: relative;
+    min-height: 260px;
+    margin: 0 -48px 24px;
+    padding: 44px 48px 30px;
+    display: flex;
+    align-items: flex-end;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .artist-hero-backdrop {
+    position: absolute;
+    inset: -70px;
+    background-size: cover;
+    background-position: center;
+    filter: blur(70px) saturate(1.7);
+    transform: scale(1.25);
+    opacity: 0.72;
+    z-index: -2;
+  }
+  .artist-hero-veil {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.48) 70%, var(--bg-base) 100%);
+    z-index: -1;
+  }
+  .artist-hero-body {
+    display: grid;
+    gap: 8px;
+  }
+  .tidal-badge {
+    width: fit-content;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.06);
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .artist-name {
+    font-size: clamp(2.4rem, 5.4vw, 4.6rem);
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+  }
+  .artist-meta {
+    color: var(--text-secondary);
+    margin: 0;
+    font-size: 0.9rem;
+  }
   .filter-bar { margin-bottom: 28px; }
   .filter-input {
     background: var(--input-bg);

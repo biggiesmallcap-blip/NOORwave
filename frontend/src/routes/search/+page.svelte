@@ -880,7 +880,7 @@
           {/if}
           <div class="top-meta">
             <span class="top-kind">{top.kind === 'artist' ? 'Artist' : top.kind === 'album' ? 'Album' : 'Track'}{#if top.entry.in_library} · In your library{/if}</span>
-            <h2 class="top-title">
+            <h2 class="top-title" class:display-face={top.kind !== 'track'}>
               {top.kind === 'artist' ? top.entry.name : top.entry.title}
             </h2>
             {#if top.kind === 'album' && top.entry.artist_name}
@@ -1450,13 +1450,22 @@
     font-weight: 600;
   }
   .top-title {
-    font-family: var(--font-display, inherit);
-    font-size: clamp(28px, 3.6vw, 44px);
-    line-height: 1.05;
+    font-family: var(--font-body, inherit);
+    font-size: clamp(24px, 2.8vw, 36px);
+    font-weight: 750;
+    line-height: 1.1;
+    letter-spacing: 0;
     margin: 0;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .top-title.display-face {
+    font-family: var(--font-display, serif);
+    font-size: clamp(28px, 3.4vw, 42px);
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
   }
   .top-sub {
     font-size: 14px;
@@ -1596,7 +1605,7 @@
     justify-content: center;
   }
   .artist-avatar.fallback span {
-    font-family: var(--font-display, inherit);
+    font-family: var(--font-body, inherit);
     font-size: 22px;
     font-weight: 600;
     color: rgba(255, 255, 255, 0.78);

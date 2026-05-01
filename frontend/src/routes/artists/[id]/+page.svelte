@@ -249,7 +249,7 @@
 					<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 2l2.9 6.5 7.1.6-5.4 4.7 1.6 7-6.2-3.7L5.8 21l1.6-7L2 9.1l7.1-.6L12 2z" fill="currentColor"/></svg>
 					Artist
 				</p>
-				<h1 class="hero-title">{h.name}</h1>
+				<h1 class="hero-title display-face">{h.name}</h1>
 				<p class="hero-sub">
 					{h.track_count.toLocaleString()} {h.track_count === 1 ? 'song' : 'songs'} in your library
 				</p>
@@ -534,9 +534,9 @@
 
 	.hero {
 		position: relative;
-		padding: 60px 32px 36px;
+		padding: 46px 32px 30px;
 		display: flex;
-		min-height: 340px;
+		min-height: 300px;
 		overflow: hidden;
 		isolation: isolate;
 		align-items: flex-end;
@@ -581,7 +581,7 @@
 
 	.hero-title {
 		font-family: var(--font-display);
-		font-size: clamp(3rem, 7vw, 6rem);
+		font-size: clamp(2.6rem, 6vw, 5rem);
 		line-height: 1;
 		letter-spacing: -0.03em;
 		margin: 0;
@@ -678,10 +678,11 @@
 	}
 
 	.section-title {
-		font-family: var(--font-display);
-		font-size: 1.5rem;
+		font-family: var(--font-body);
+		font-size: 1.15rem;
+		font-weight: 700;
 		margin: 0;
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 	}
 
 	.shelf-head {

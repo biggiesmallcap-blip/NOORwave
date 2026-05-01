@@ -1995,7 +1995,7 @@
 	.library-home {
 		display: flex;
 		flex-direction: column;
-		gap: 32px;
+		gap: 24px;
 		padding: 8px 0 40px;
 	}
 
@@ -2006,9 +2006,9 @@
 	}
 
 	.section-label {
-		font-size: 10px;
+		font-size: 0.68rem;
 		font-weight: 700;
-		letter-spacing: 1.5px;
+		letter-spacing: 0.12em;
 		text-transform: uppercase;
 		color: var(--accent, #9b6fff);
 		margin: 0;
@@ -2616,7 +2616,9 @@
 
 	.detail-album-info h2,
 	.detail-track-info h2 {
-		font-size: 1.5rem;
+		font-size: 1.25rem;
+		font-weight: 750;
+		letter-spacing: 0;
 		line-height: 1.2;
 	}
 
@@ -3664,8 +3666,9 @@
 	}
 
 	.artist-initial {
-		font-family: var(--font-display);
-		font-size: 1.6rem;
+		font-family: var(--font-body);
+		font-size: 1.25rem;
+		font-weight: 700;
 		color: var(--accent-strong);
 		line-height: 1;
 	}
@@ -3720,8 +3723,9 @@
 		background: var(--accent-soft);
 		display: grid;
 		place-items: center;
-		font-family: var(--font-display);
-		font-size: 1.4rem;
+		font-family: var(--font-body);
+		font-size: 1.15rem;
+		font-weight: 700;
 		color: var(--accent-strong);
 	}
 

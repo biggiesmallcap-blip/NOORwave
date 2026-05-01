@@ -273,15 +273,23 @@ textarea {
 .state-muted { opacity: var(--state-alpha-muted); }
 
 /* ── Typography ───────────────────────────────────────── */
-h1, h2, .display-face {
+.display-face {
 	font-family: var(--font-display);
 	font-weight: 600;
 	line-height: 1.04;
 	letter-spacing: -0.03em;
 }
 
-h1 { font-size: clamp(2.2rem, 3.5vw, 3.8rem); }
-h2 { font-size: clamp(1.4rem, 2vw, 2.2rem); }
+h1,
+h2 {
+	font-family: var(--font-body);
+	font-weight: 700;
+	line-height: 1.15;
+	letter-spacing: 0;
+}
+
+h1 { font-size: clamp(1.5rem, 2.2vw, 2rem); }
+h2 { font-size: clamp(1.15rem, 1.5vw, 1.4rem); }
 
 h3 {
 	font-size: 0.95rem;

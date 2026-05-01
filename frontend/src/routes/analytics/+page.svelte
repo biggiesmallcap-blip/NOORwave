@@ -172,19 +172,19 @@
 		const topArtist = dashboard.top_artists[0];
 		return [
 			{
-				label: 'Listening posture',
-				value: behavior.completion_rate >= 0.72 ? 'Deep sessions' : 'Browsing mode',
-				copy: `${formatPercent(behavior.completion_rate)} completion across ${formatCount(behavior.total_listens)} listens.`
+				label: 'Session shape',
+				value: behavior.completion_rate >= 0.72 ? 'Focused' : 'Browsing',
+				copy: `${formatPercent(behavior.completion_rate)} completion / ${formatCount(behavior.total_listens)} listens.`
 			},
 			{
-				label: 'Taste gravity',
+				label: 'Top genre',
 				value: topGenre?.genre_name ?? 'No genre yet',
-				copy: topGenre ? `${formatCount(topGenre.listens)} listens in the leading genre.` : 'Genre tags will sharpen this once listening history grows.'
+				copy: topGenre ? `${formatCount(topGenre.listens)} listens.` : 'Waiting for tagged plays.'
 			},
 			{
-				label: 'Collection signal',
+				label: 'Top artist',
 				value: topArtist?.artist_name ?? 'No artist yet',
-				copy: topArtist ? `${formatCount(topArtist.unique_tracks)} unique tracks reached.` : `${formatPercent(taggedRatio)} of the library is tagged.`
+				copy: topArtist ? `${formatCount(topArtist.unique_tracks)} unique tracks.` : `${formatPercent(taggedRatio)} tagged.`
 			}
 		];
 	});
@@ -197,8 +197,8 @@
 <div class="page-shell analytics-page animate-in">
 	<PageHeader
 		eyebrow="Analytics"
-		title="A living map of the library."
-		subtitle="Recent listening, genre gravity, DSP coverage, and the signals discovery is already learning from."
+		title="Library analytics"
+		subtitle="Listening history, genre heat, DSP coverage, and repeat signals."
 	>
 		{#snippet actions()}
 			<button class="btn btn-glass" onclick={refreshAnalytics} disabled={loading || refreshing}>
@@ -219,15 +219,15 @@
 			{/snippet}
 		</EmptyState>
 	{:else if loading && !dashboard}
-		<EmptyState title="Loading analytics" copy="Pulling listening history, audio features, and genre heat." />
+		<EmptyState title="Loading analytics" copy="Loading listens, genres, and DSP stats." />
 	{:else if dashboard && overview && behavior}
 		<section class="analytics-hero glass-panel">
 			<div class="hero-copy">
-				<p class="eyebrow">30 day listening pulse</p>
+				<p class="eyebrow">Last 30 days</p>
 				<h2>{formatDuration(behavior.total_listened_ms)} listened</h2>
 				<p>
-					{formatCount(behavior.unique_tracks)} unique tracks reached over {formatCount(behavior.active_days)}
-					active days, with {formatPercent(behavior.completion_rate)} completion.
+					{formatCount(behavior.unique_tracks)} tracks / {formatCount(behavior.active_days)} active days /
+					{formatPercent(behavior.completion_rate)} completion.
 				</p>
 				<div class="hero-badges">
 					<StateBadge label={`${formatPercent(favoriteRatio)} favorites`} tone="active" compact={true} />
@@ -252,10 +252,10 @@
 		</section>
 
 		<section class="stat-grid">
-			<MetricPair label="Tracks" value={formatCount(overview.tracks)} copy={`${formatCount(overview.albums)} albums, ${formatCount(overview.artists)} artists.`} />
-			<MetricPair label="Listen rows" value={formatCount(behavior.total_listens)} copy="Stored playback sessions." />
-			<MetricPair label="Completion" value={formatPercent(behavior.completion_rate)} copy={`${formatCount(behavior.skipped_listens)} sessions ended early.`} />
-			<MetricPair label="Avg listen" value={formatDuration(behavior.average_listen_ms)} copy={`${formatCount(behavior.repeat_track_count)} repeat-heavy tracks.`} />
+			<MetricPair label="Tracks" value={formatCount(overview.tracks)} copy={`${formatCount(overview.albums)} albums / ${formatCount(overview.artists)} artists.`} />
+			<MetricPair label="Listens" value={formatCount(behavior.total_listens)} copy="Playback sessions." />
+			<MetricPair label="Completion" value={formatPercent(behavior.completion_rate)} copy={`${formatCount(behavior.skipped_listens)} skips.`} />
+			<MetricPair label="Avg listen" value={formatDuration(behavior.average_listen_ms)} copy={`${formatCount(behavior.repeat_track_count)} repeat tracks.`} />
 		</section>
 
 		<section class="insight-grid">
@@ -270,7 +270,7 @@
 
 		<section class="dashboard-grid">
 			<section class="glass-panel panel recent-panel">
-				<SectionHeader eyebrow="History" title="Recent listens" subtitle="The latest sessions recorded by playback." />
+				<SectionHeader eyebrow="History" title="Recent listens" subtitle="Latest playback rows." />
 				{#if dashboard.recent_listens.length === 0}
 					<EmptyState title="No listens yet" copy="Start playback and this history will begin to fill in." />
 				{:else}
@@ -304,7 +304,7 @@
 			</section>
 
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Heat" title="Genre pressure" subtitle="Recent listening weight across mapped genres." />
+				<SectionHeader eyebrow="Heat" title="Genre heat" subtitle="Recent listening weight." />
 				<div class="heat-list">
 					{#each hottestGenres as genre}
 						<div class="heat-row">
@@ -327,7 +327,7 @@
 
 		<section class="dashboard-grid">
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Artists" title="Top artists" subtitle="Who has dominated the room." />
+				<SectionHeader eyebrow="Artists" title="Top artists" subtitle="Most-played artists." />
 				<div class="rank-list">
 					{#each dashboard.top_artists as artist, i}
 						<div class="rank-row">
@@ -343,7 +343,7 @@
 			</section>
 
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Tracks" title="Top tracks" subtitle="The tracks with the strongest return signal." />
+				<SectionHeader eyebrow="Tracks" title="Top tracks" subtitle="Most repeated tracks." />
 				<div class="rank-list">
 					{#each dashboard.top_tracks as track, i}
 						<div
@@ -383,7 +383,7 @@
 
 		<section class="signal-grid">
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Audio intelligence" title="DSP profile" subtitle="The analyzed tempo, key, and energy layer." />
+				<SectionHeader eyebrow="DSP" title="Audio profile" subtitle="Tempo, key, and energy coverage." />
 				<div class="dsp-grid">
 					<div>
 						<span>Analyzed tracks</span>
@@ -410,7 +410,7 @@
 			</section>
 
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Cohorts" title="Taste families" subtitle="Genre cohorts over the last 90 days." />
+				<SectionHeader eyebrow="Cohorts" title="Taste cohorts" subtitle="90-day genre groups." />
 				<div class="cohort-list">
 					{#each genreCohorts.slice(0, 7) as cohort}
 						<div class="cohort-row">
@@ -432,7 +432,7 @@
 		</section>
 
 		<section class="glass-panel panel">
-			<SectionHeader eyebrow="Taste" title="Genre and audio signals" subtitle="The most useful raw signals for discovery and automix." />
+			<SectionHeader eyebrow="Signals" title="Genre and audio" subtitle="Inputs used by discovery and automix." />
 			<div class="genre-signal-layout">
 				<div class="genre-row">
 					{#each dashboard.top_genres as genre}
@@ -452,7 +452,7 @@
 
 		{#if latestEvolution.length > 0}
 			<section class="glass-panel panel">
-				<SectionHeader eyebrow="Trajectory" title="Latest genre movement" subtitle="Recent period points from the genre evolution endpoint." />
+				<SectionHeader eyebrow="Movement" title="Genre movement" subtitle="Recent evolution points." />
 				<div class="evolution-strip">
 					{#each latestEvolution as point}
 						<div>
@@ -469,6 +469,22 @@
 <style>
 	.analytics-page {
 		gap: var(--space-5);
+	}
+
+	.analytics-page :global(.page-header) {
+		align-items: center;
+		padding-top: 2px;
+	}
+
+	.analytics-page :global(.page-header .intro) {
+		max-width: 68ch;
+		gap: 7px;
+	}
+
+	.analytics-page :global(.page-header .subtitle) {
+		max-width: 62ch;
+		font-size: 0.95rem;
+		line-height: 1.55;
 	}
 
 	.meta-time {
@@ -491,7 +507,10 @@
 	}
 
 	.hero-copy h2 {
-		font-size: clamp(2rem, 4vw, 4rem);
+		font-family: var(--font-body);
+		font-size: clamp(1.7rem, 2.8vw, 2.8rem);
+		font-weight: 760;
+		letter-spacing: 0;
 	}
 
 	.hero-copy p:not(.eyebrow) {
@@ -525,8 +544,9 @@
 
 	.activity-header strong {
 		color: var(--text-primary);
-		font-family: var(--font-display);
-		font-size: 1.5rem;
+		font-family: var(--font-body);
+		font-size: 1.1rem;
+		letter-spacing: 0;
 	}
 
 	.activity-bars {
@@ -593,8 +613,10 @@
 	}
 
 	.insight-card strong {
-		font-family: var(--font-display);
-		font-size: 1.7rem;
+		font-family: var(--font-body);
+		font-size: 1.2rem;
+		font-weight: 750;
+		letter-spacing: 0;
 		line-height: 1.05;
 	}
 
@@ -780,8 +802,10 @@
 	}
 
 	.dsp-grid strong {
-		font-family: var(--font-display);
-		font-size: 1.6rem;
+		font-family: var(--font-body);
+		font-size: 1.15rem;
+		font-weight: 750;
+		letter-spacing: 0;
 	}
 
 	.key-row,

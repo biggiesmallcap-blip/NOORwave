@@ -469,25 +469,10 @@
 		gap: 7px;
 	}
 
-	.automix-page :global(.page-header h1) {
-		font-family: var(--font-body);
-		font-size: clamp(1.65rem, 2.1vw, 2.35rem);
-		font-weight: 750;
-		line-height: 1.12;
-		letter-spacing: 0;
-	}
-
 	.automix-page :global(.page-header .subtitle) {
 		max-width: 62ch;
 		font-size: 0.95rem;
 		line-height: 1.55;
-	}
-
-	.automix-page :global(.metric-pair strong) {
-		font-family: var(--font-body);
-		font-size: 1.28rem;
-		font-weight: 750;
-		letter-spacing: 0;
 	}
 
 	.error-banner {

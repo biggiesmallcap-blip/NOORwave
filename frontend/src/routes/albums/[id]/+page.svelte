@@ -197,7 +197,7 @@
 				</div>
 				<div class="hero-info">
 					<p class="eyebrow">Album</p>
-					<h1 class="hero-title">{h.title}</h1>
+					<h1 class="hero-title display-face">{h.title}</h1>
 					<p class="hero-sub">
 						<a href="/artists/{h.artist_id}" class="hero-link">{h.artist_name}</a>
 						<span class="dot">·</span>
@@ -349,9 +349,9 @@
 
 	.hero {
 		position: relative;
-		padding: 40px 32px 28px;
+		padding: 32px 32px 24px;
 		display: flex;
-		min-height: 340px;
+		min-height: 300px;
 		overflow: hidden;
 		isolation: isolate;
 	}
@@ -377,16 +377,16 @@
 
 	.hero-body {
 		display: grid;
-		grid-template-columns: 232px 1fr;
-		gap: 28px;
+		grid-template-columns: 204px 1fr;
+		gap: 24px;
 		align-items: end;
 		width: 100%;
 		max-width: 1400px;
 	}
 
 	.hero-art-wrap {
-		width: 232px;
-		height: 232px;
+		width: 204px;
+		height: 204px;
 		border-radius: 8px;
 		overflow: hidden;
 		box-shadow: 0 28px 70px -14px rgba(0, 0, 0, 0.7);
@@ -425,7 +425,7 @@
 
 	.hero-title {
 		font-family: var(--font-display);
-		font-size: clamp(2.4rem, 5vw, 4.4rem);
+		font-size: clamp(2.15rem, 4.4vw, 3.8rem);
 		line-height: 1.02;
 		letter-spacing: -0.02em;
 		margin: 0;
@@ -573,10 +573,11 @@
 	}
 
 	.more-title {
-		font-family: var(--font-display);
-		font-size: 1.4rem;
+		font-family: var(--font-body);
+		font-size: 1.1rem;
+		font-weight: 700;
 		margin: 0;
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 	}
 
 	.show-all {

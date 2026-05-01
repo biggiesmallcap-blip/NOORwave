@@ -472,11 +472,11 @@
 	<div class="galaxy-stage">
 		{#if loading}
 			<div class="state-overlay">
-				<EmptyState title="Calibrating the genre observatory" copy="Mapping taxonomy topology, sampling 90-day momentum, and stabilizing constellation layout." />
+				<EmptyState title="Loading genres" copy="Mapping taxonomy and recent heat." />
 			</div>
 		{:else if error}
 			<div class="state-overlay">
-				<EmptyState title="Genre observatory unavailable" copy={error}>
+				<EmptyState title="Genres unavailable" copy={error}>
 					{#snippet actions()}
 						<button class="btn btn-glass" onclick={() => void loadGalaxy()}>Retry</button>
 					{/snippet}
@@ -484,7 +484,7 @@
 			</div>
 		{:else if noGenresLoaded}
 			<div class="state-overlay">
-				<EmptyState title="No genres loaded yet" copy="The taxonomy seed needs to exist before the galaxy can render." />
+				<EmptyState title="No genres loaded yet" copy="Run genre enrichment to seed the map." />
 			</div>
 		{:else}
 			<div class="galaxy-map-frame">
@@ -511,8 +511,8 @@
 			<div class="hud glass-panel">
 				<div class="hud-topline">
 					<div>
-						<h1>Genre Galaxy</h1>
-						<p class="hud-copy">Navigate your library as a living genre cosmos.</p>
+						<h1 class="display-face">Genre Galaxy</h1>
+						<p class="hud-copy">Navigate the library by genre gravity.</p>
 					</div>
 					<span class="mode-chip">{viewMode}</span>
 				</div>
@@ -520,9 +520,9 @@
 				<div class="hud-status">
 					<span>
 						{refreshingTopology
-							? 'Refreshing mapped genres and observatory signals...'
+							? 'Refreshing mapped genres...'
 							: refreshingHeat
-								? 'Refreshing observatory signals...'
+								? 'Refreshing heat...'
 								: activeModeCopy}
 					</span>
 				</div>
@@ -741,7 +741,8 @@
 
 	.hud-stats strong {
 		font-size: 0.96rem;
-		font-family: var(--font-display);
+		font-family: var(--font-body);
+		font-weight: 700;
 	}
 
 	.hud-stats span {

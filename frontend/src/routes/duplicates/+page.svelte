@@ -137,8 +137,8 @@
 <div class="page-shell duplicates-page animate-in">
 	<PageHeader
 		eyebrow="Duplicates"
-		title="Review repeated tracks and keep the version worth keeping."
-		subtitle="Lead with the candidate groups, compare versions side by side, and resolve the library without guesswork."
+		title="Duplicate review"
+		subtitle="Compare versions, keep the best copy, or dismiss the match."
 	>
 		{#snippet actions()}
 			<button class="btn btn-primary" onclick={runScan} disabled={scanState === 'scanning'}>
@@ -149,7 +149,7 @@
 
 	<section class="stat-grid">
 		<MetricPair label="Groups" value={(scanStats?.groups_found ?? total).toLocaleString()} copy="Open duplicate sets." />
-		<MetricPair label="Extra copies" value={removableCount.toLocaleString()} copy="Possible removals if you keep one from each set." />
+		<MetricPair label="Extra copies" value={removableCount.toLocaleString()} copy="Possible removals." />
 		<MetricPair label="ISRC matches" value={(scanStats?.isrc_matches ?? 0).toLocaleString()} copy="Exact recording matches." />
 	</section>
 
@@ -207,7 +207,7 @@
 										<StateBadge label="Favorite" tone="warning" compact={true} />
 									{/if}
 									{#if member.is_preferred}
-										<StateBadge label="Best candidate" tone="active" compact={true} />
+										<StateBadge label="Recommended keep" tone="active" compact={true} />
 									{/if}
 								</div>
 

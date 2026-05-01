@@ -554,8 +554,8 @@
 <div class="page-shell playlists-page animate-in">
 	<PageHeader
 		eyebrow="Playlists"
-		title="Saved sets and smart curation."
-		subtitle="Regular playlists and rules-based smart lists. Create smart playlists to auto-populate from your library using any combination of rules."
+		title="Playlists"
+		subtitle="Synced lists and rules-based smart sets."
 	>
 		{#snippet actions()}
 			<button class="btn btn-glass" onclick={loadPlaylists}>Refresh</button>
@@ -564,9 +564,9 @@
 	</PageHeader>
 
 	<section class="stat-grid">
-		<MetricPair label="Total" value={playlists.length} copy="All synced and local playlists." />
-		<MetricPair label="Smart" value={smartCount()} copy="Rules-based, always up to date." />
-		<MetricPair label="Regular" value={regularCount()} copy="Standard curated playlists." />
+		<MetricPair label="Total" value={playlists.length} copy="Synced and local." />
+		<MetricPair label="Smart" value={smartCount()} copy="Rule driven." />
+		<MetricPair label="Regular" value={regularCount()} copy="Curated lists." />
 	</section>
 
 	{#if deleteError}

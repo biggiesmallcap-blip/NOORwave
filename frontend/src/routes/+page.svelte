@@ -243,7 +243,7 @@
 	{#if error}
 		<section class="page-header">
 			<p class="eyebrow">NOOR</p>
-			<h1>Your music discovery hub</h1>
+			<h1 class="display-face">Music command center</h1>
 		</section>
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
@@ -253,7 +253,7 @@
 	{:else}
 		<section class="page-header">
 			<p class="eyebrow">NOOR</p>
-			<h1>Your music discovery hub</h1>
+			<h1 class="display-face">Music command center</h1>
 			<div class="system-badges">
 				{#if status}
 					<StateBadge label={`Server v${status?.version}`} tone="success" />
@@ -325,8 +325,8 @@
 		<section class="discovery-section">
 			<div class="section-header">
 				<div class="section-title-group">
-					<p class="eyebrow">Fresh from AllMusic</p>
-					<h2>New Releases</h2>
+					<p class="eyebrow">AllMusic</p>
+					<h2>New releases</h2>
 				</div>
 				{#if sectionsLoading.releases}
 					<span class="loading-indicator">Loading...</span>
@@ -363,7 +363,7 @@
 		<section class="discovery-section">
 			<div class="section-header">
 				<div class="section-title-group">
-					<p class="eyebrow">What's hot right now</p>
+					<p class="eyebrow">Now moving</p>
 					<h2>Trending</h2>
 				</div>
 				<div class="trending-controls">
@@ -423,7 +423,7 @@
 
 					{#if genrePicks.length > 0}
 						<div class="picks-subsection">
-							<h3 class="subsection-title">Genre Variety</h3>
+							<h3 class="subsection-title">Genre variety</h3>
 							<div class="genre-pills">
 								{#each genrePicks as pick, i (`${pick.id}-${i}`)}
 									<div class="genre-pill glass-tile">
@@ -449,8 +449,8 @@
 		<section class="discovery-section">
 			<div class="section-header">
 				<div class="section-title-group">
-					<p class="eyebrow">From AllMusic</p>
-					<h2>Weekly Articles</h2>
+					<p class="eyebrow">AllMusic</p>
+					<h2>Weekly articles</h2>
 				</div>
 				{#if sectionsLoading.articles}
 					<span class="loading-indicator">Loading...</span>
@@ -487,8 +487,8 @@
 		<section class="discovery-section">
 			<div class="section-header">
 				<div class="section-title-group">
-					<p class="eyebrow">Music industry</p>
-					<h2>Latest News</h2>
+					<p class="eyebrow">Industry</p>
+					<h2>Latest news</h2>
 				</div>
 				{#if sectionsLoading.news}
 					<span class="loading-indicator">Loading...</span>
@@ -538,6 +538,8 @@
 
 	.page-header h1 {
 		max-width: 16ch;
+		font-size: clamp(2rem, 3.4vw, 3.2rem);
+		line-height: 1.02;
 	}
 
 	.system-badges {

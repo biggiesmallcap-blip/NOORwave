@@ -34,10 +34,10 @@
 	}
 
 	strong {
-		font-family: var(--font-display);
-		font-size: 1.8rem;
-		font-weight: 600;
-		letter-spacing: -0.03em;
+		font-family: var(--font-body);
+		font-size: 1.55rem;
+		font-weight: 700;
+		letter-spacing: -0.01em;
 	}
 
 	p {
