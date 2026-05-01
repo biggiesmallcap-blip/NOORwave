@@ -4753,6 +4753,21 @@ async fn play_track(
     State(state): State<SharedState>,
     Json(payload): Json<PlaybackTrackRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Library tracks have positive IDs. id == 0 is the COALESCE sentinel for
+    // pending queue rows (resolution_state='pending'); id < 0 is the ephemeral
+    // Tidal-only convention used by /api/tidal/play_ephemeral. Neither belongs
+    // in this route.
+    if payload.track_id <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "invalid_track_id",
+                "message": "play_track requires a positive library track id.",
+                "track_id": payload.track_id,
+            })),
+        ));
+    }
+
     let previous_track_id = current_playback_track_id(&state).await;
     let track = {
         let state_guard = state.read().await;
@@ -5688,7 +5703,7 @@ async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let previous_track_id = current_playback_track_id(&state).await;
-    let snapshot = {
+    let mut snapshot = {
         let state = state.read().await;
         state
             .db
@@ -5705,6 +5720,30 @@ async fn previous_track(
     };
 
     set_external_playback_track(&state, None).await;
+
+    // If the previous item is a pending (non-library) queue row, resolve it to Tidal now.
+    // Same pattern as `next_track`. Unresolvable rows are skipped by stepping back once more.
+    let effective_current_track: Option<crate::db::models::Track> =
+        if let Some(t) = snapshot.state.current_track.clone() {
+            Some(t)
+        } else {
+            let resolved = resolve_pending_current_queue_item(&state).await;
+            match resolved {
+                Some(ref t) => {
+                    set_external_playback_track(&state, Some(t.clone())).await;
+                }
+                None => {
+                    if let Ok(prev_snapshot) = {
+                        let s = state.read().await;
+                        s.db.with_conn(|conn| player::previous_track(conn))
+                    } {
+                        snapshot = prev_snapshot;
+                    }
+                }
+            }
+            resolved
+        };
+
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
@@ -5714,7 +5753,11 @@ async fn previous_track(
     )
     .await;
 
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+    let play_track = effective_current_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref());
+
+    if let Some(track) = play_track {
         let user_quality = current_user_audio_quality(&state).await;
         let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
             (
@@ -5777,10 +5820,14 @@ async fn previous_track(
     }
 
     let state_guard = state.read().await;
-    if let Some(track) = snapshot.state.current_track.as_ref() {
+    let event_track_id = effective_current_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref())
+        .map(|t| t.id);
+    if let Some(track_id) = event_track_id {
         let _ = state_guard
             .event_tx
-            .send(AppEvent::TrackChanged { track_id: track.id });
+            .send(AppEvent::TrackChanged { track_id });
     }
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 
