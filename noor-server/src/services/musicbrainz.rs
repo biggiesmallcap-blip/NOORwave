@@ -283,14 +283,23 @@ fn resolve_db_path() -> PathBuf {
             .join(path);
     }
 
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| {
-            p.parent()?
-                .parent()?
-                .parent()
-                .map(|root| root.join("noor.db"))
-        })
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_ref().and_then(|p| p.parent());
+
+    let dev_db = exe_dir.and_then(|d| {
+        let profile = d.file_name()?.to_str()?;
+        if profile != "debug" && profile != "release" {
+            return None;
+        }
+        let target = d.parent()?;
+        if target.file_name()?.to_str()? != "target" {
+            return None;
+        }
+        target.parent().map(|root| root.join("noor.db"))
+    });
+
+    dev_db
+        .or_else(|| exe_dir.map(|d| d.join("noor.db")))
         .unwrap_or_else(|| {
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))

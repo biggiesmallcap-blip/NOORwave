@@ -177,17 +177,27 @@ async fn main() -> Result<()> {
 
     info!("NOOR — Starting up...");
 
-    // Resolve DB path: NOOR_DB env var, or noor.db next to the binary (workspace root in dev).
+    // Resolve DB path: NOOR_DB env var, then exe-dir/noor.db (portable/installed),
+    // with a dev-only fallback to workspace-root/noor.db when the exe is in target/{debug,release}.
     let db_path = std::env::var("NOOR_DB").unwrap_or_else(|_| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| {
-                // Binary is at workspace/target/{profile}/noor-server — go up 3 levels.
-                p.parent()?
-                    .parent()?
-                    .parent()
-                    .map(|root| root.join("noor.db").to_string_lossy().into_owned())
-            })
+        let exe = std::env::current_exe().ok();
+        let exe_dir = exe.as_ref().and_then(|p| p.parent());
+
+        let dev_db = exe_dir.and_then(|d| {
+            let profile = d.file_name()?.to_str()?;
+            if profile != "debug" && profile != "release" {
+                return None;
+            }
+            let target = d.parent()?;
+            if target.file_name()?.to_str()? != "target" {
+                return None;
+            }
+            target.parent().map(|root| root.join("noor.db"))
+        });
+
+        dev_db
+            .or_else(|| exe_dir.map(|d| d.join("noor.db")))
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "noor.db".to_string())
     });
     info!("Database path: {}", db_path);
