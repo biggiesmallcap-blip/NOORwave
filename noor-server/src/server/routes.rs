@@ -445,6 +445,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/news", get(get_home_news))
         // Trending / charts (Phase 5)
         .route("/api/charts", get(get_charts))
+        .route("/api/charts/lastfm/genres", get(list_lastfm_genres))
+        .route("/api/charts/lastfm/countries", get(list_lastfm_countries))
         // Server auth management
         .route("/api/server/token", get(get_server_token_handler))
         .route("/api/server/token/regenerate", post(regenerate_server_token_handler))
@@ -9505,8 +9507,13 @@ pub struct ChartParams {
     source: Option<String>,
     /// Max entries to return (clamped 1..=100).
     limit: Option<u32>,
-    /// Optional country (Last.fm only): full English name e.g. "United States".
+    /// Optional country (Last.fm only). Accepts either an ISO 3166-1 alpha-2
+    /// code (e.g. "AU") which is mapped via `CURATED_COUNTRIES`, or the full
+    /// English name (e.g. "United States") for legacy/free-form callers.
     country: Option<String>,
+    /// Optional curated genre key (Last.fm only), e.g. "hip-hop".
+    /// Mutually exclusive with `country`.
+    tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9716,6 +9723,8 @@ async fn get_charts(
     State(state): State<SharedState>,
     Query(params): Query<ChartParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::charts::curated;
+
     let source = params
         .source
         .as_deref()
@@ -9723,19 +9732,67 @@ async fn get_charts(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "lastfm".to_string());
     let limit = params.limit.unwrap_or(50).clamp(1, 100);
-    let country_norm = params
+
+    let country_input = params
         .country
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .filter(|s| !s.is_empty());
+    let tag_input = params
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
-    // Cache key: source + limit + country.
+    if country_input.is_some() && tag_input.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "tag_country_exclusive" })),
+        ));
+    }
+
+    // Resolve country: ISO code or full name → curated entry. Two-char inputs
+    // that aren't curated codes are rejected; longer strings that don't match
+    // a curated `lastfm_name` pass through as free-form (legacy callers).
+    // The cache token is always the ISO code when curated, so `?country=AU`
+    // and `?country=Australia` collapse to one cache entry.
+    let (country_resolved, country_cache_token): (Option<String>, Option<String>) =
+        match country_input {
+            None => (None, None),
+            Some(s) if s.len() == 2 => match curated::find_country_by_code(s) {
+                Some(entry) => (Some(entry.lastfm_name.to_string()), Some(entry.code.to_string())),
+                None => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "unknown_country" })),
+                    ))
+                }
+            },
+            Some(s) => match curated::find_country_by_code_or_name(s) {
+                Some(entry) => (Some(entry.lastfm_name.to_string()), Some(entry.code.to_string())),
+                None => (Some(s.to_string()), Some(s.to_ascii_uppercase())),
+            },
+        };
+
+    let tag_resolved: Option<&'static curated::GenreEntry> = match tag_input {
+        Some(key) => match curated::find_genre(key) {
+            Some(entry) => Some(entry),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "unknown_genre" })),
+                ))
+            }
+        },
+        None => None,
+    };
+
     let cache_key = format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         source,
         limit,
-        country_norm.as_deref().unwrap_or("")
+        country_cache_token.as_deref().unwrap_or(""),
+        tag_resolved.map(|g| g.key).unwrap_or("")
     );
     if let Some(cached) = chart_cache_get(&cache_key) {
         return Ok(Json(cached));
@@ -9748,7 +9805,7 @@ async fn get_charts(
                 Json(json!({ "error": format!("tidal chart: {e}") })),
             )
         })?,
-        _ => fetch_lastfm_chart(&state, limit, country_norm.as_deref())
+        _ => fetch_lastfm_chart(&state, limit, country_resolved.as_deref(), tag_resolved)
             .await
             .map_err(|e| {
                 (
@@ -9767,17 +9824,37 @@ async fn get_charts(
     let payload = json!({
         "source": source,
         "limit": limit,
-        "country": country_norm,
+        "country": country_cache_token,
+        "tag": tag_resolved.map(|g| g.key),
         "tracks": entries,
     });
     chart_cache_put(cache_key, payload.clone());
     Ok(Json(payload))
 }
 
+async fn list_lastfm_genres() -> Json<Value> {
+    use crate::services::charts::curated::{CURATED_GENRES, DEFAULT_GENRE_KEY};
+    let genres: Vec<_> = CURATED_GENRES
+        .iter()
+        .map(|g| json!({ "key": g.key, "label": g.label }))
+        .collect();
+    Json(json!({ "genres": genres, "default_genre": DEFAULT_GENRE_KEY }))
+}
+
+async fn list_lastfm_countries() -> Json<Value> {
+    use crate::services::charts::curated::{CURATED_COUNTRIES, DEFAULT_COUNTRY_CODE};
+    let countries: Vec<_> = CURATED_COUNTRIES
+        .iter()
+        .map(|c| json!({ "code": c.code, "label": c.label }))
+        .collect();
+    Json(json!({ "countries": countries, "default_country": DEFAULT_COUNTRY_CODE }))
+}
+
 async fn fetch_lastfm_chart(
     state: &SharedState,
     limit: u32,
     country: Option<&str>,
+    genre: Option<&'static crate::services::charts::curated::GenreEntry>,
 ) -> anyhow::Result<Vec<ChartEntryDto>> {
     let (http, db) = {
         let s = state.read().await;
@@ -9785,7 +9862,75 @@ async fn fetch_lastfm_chart(
     };
     let client = LastFmClient::load(http, &db)
         .ok_or_else(|| anyhow::anyhow!("Last.fm API key not configured"))?;
-    let tracks = client.get_top_chart(limit, country).await?;
+
+    let tracks = if let Some(genre) = genre {
+        // Genre tag — fan out to every Last.fm tag the curated entry maps to,
+        // merge, dedupe by normalised (artist, title), sum playcounts on dupes,
+        // sort desc by playcount, truncate. Single-tag entries skip the merge.
+        if genre.lastfm_tags.len() == 1 {
+            client.get_top_tracks_by_tag(genre.lastfm_tags[0], limit).await?
+        } else {
+            use futures::future::join_all;
+            // Overfetch per leg so dedup across overlapping tags doesn't shrink
+            // the merged list below the requested `limit`. Capped at Last.fm's
+            // per-call ceiling.
+            let fan_limit = limit.saturating_mul(2).min(100);
+            let calls = genre
+                .lastfm_tags
+                .iter()
+                .map(|tag| {
+                    let c = client.clone();
+                    let t = (*tag).to_string();
+                    async move { c.get_top_tracks_by_tag(&t, fan_limit).await }
+                });
+            let results = join_all(calls).await;
+            let mut merged: Vec<crate::metadata::lastfm::LastFmChartTrack> = Vec::new();
+            let mut by_key: HashMap<String, usize> = HashMap::new();
+            for res in results {
+                let list = match res {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!("tag fan-out leg failed: {}", e);
+                        continue;
+                    }
+                };
+                for t in list {
+                    let key = crate::services::radio::normalize_for_dedup(&t.artist, &t.title);
+                    if key.is_empty() {
+                        continue;
+                    }
+                    if let Some(&idx) = by_key.get(&key) {
+                        // Merge: sum playcounts/listeners; prefer the first non-empty
+                        // image and mbid (already populated on the existing entry).
+                        let existing: &mut crate::metadata::lastfm::LastFmChartTrack =
+                            &mut merged[idx];
+                        existing.playcount = match (existing.playcount, t.playcount) {
+                            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                            (a, b) => a.or(b),
+                        };
+                        existing.listeners = match (existing.listeners, t.listeners) {
+                            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                            (a, b) => a.or(b),
+                        };
+                        if existing.image_url.as_deref().unwrap_or("").is_empty() {
+                            existing.image_url = t.image_url;
+                        }
+                        if existing.mbid.is_none() {
+                            existing.mbid = t.mbid;
+                        }
+                    } else {
+                        by_key.insert(key, merged.len());
+                        merged.push(t);
+                    }
+                }
+            }
+            merged.sort_by(|a, b| b.playcount.unwrap_or(0).cmp(&a.playcount.unwrap_or(0)));
+            merged.truncate(limit as usize);
+            merged
+        }
+    } else {
+        client.get_top_chart(limit, country).await?
+    };
 
     // Resolve each (artist, title) to a local library track when present.
     // We do this in a single DB call by collecting all (artist, title) pairs

@@ -180,6 +180,16 @@ export interface ChartEntry {
 
 export type TrendingSource = 'lastfm' | 'tidal';
 
+export interface LastfmGenre {
+	key: string;
+	label: string;
+}
+
+export interface LastfmCountry {
+	code: string;
+	label: string;
+}
+
 export interface Album {
 	id: number;
 	tidal_id: number | null;
@@ -1066,14 +1076,35 @@ export const api = {
 		});
 	},
 
-	getTrending(opts: { source?: TrendingSource; limit?: number; country?: string } = {}) {
+	getTrending(opts: {
+		source?: TrendingSource;
+		limit?: number;
+		country?: string; // ISO alpha-2 (e.g. "AU") OR a Last.fm full name; backend canonicalises.
+		tag?: string;     // canonical curated genre key (e.g. "hip-hop"); mutually exclusive with country.
+	} = {}) {
 		const params: Record<string, string> = {};
 		if (opts.source) params.source = opts.source;
 		if (opts.limit != null) params.limit = String(opts.limit);
 		if (opts.country) params.country = opts.country;
-		return fetchApi<{ source: string; limit: number; country: string | null; tracks: ChartEntry[] }>(
-			'/api/charts',
-			params,
+		if (opts.tag) params.tag = opts.tag;
+		return fetchApi<{
+			source: string;
+			limit: number;
+			country: string | null;
+			tag: string | null;
+			tracks: ChartEntry[];
+		}>('/api/charts', params);
+	},
+
+	getLastfmGenres() {
+		return fetchApi<{ genres: LastfmGenre[]; default_genre: string }>(
+			'/api/charts/lastfm/genres',
+		);
+	},
+
+	getLastfmCountries() {
+		return fetchApi<{ countries: LastfmCountry[]; default_country: string }>(
+			'/api/charts/lastfm/countries',
 		);
 	},
 

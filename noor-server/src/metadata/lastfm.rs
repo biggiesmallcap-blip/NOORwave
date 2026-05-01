@@ -385,78 +385,28 @@ impl LastFmClient {
         all_params.extend(params.into_iter().map(|(k, v)| (k, v)));
 
         let payload = self.get_json(&all_params).await?;
-        let tracks_value = payload
-            .get("tracks")
-            .and_then(|v| v.get("track"));
-        let arr = value_as_array(tracks_value);
+        Ok(parse_chart_tracks(&payload, limit as usize))
+    }
 
-        let mut out = Vec::new();
-        for entry in arr.into_iter().take(limit as usize) {
-            let title = match entry.get("name").and_then(Value::as_str) {
-                Some(s) if !s.trim().is_empty() => s.trim().to_string(),
-                _ => continue,
-            };
-            let artist_name = entry
-                .get("artist")
-                .and_then(|a| a.get("name").or_else(|| a.get("#text")))
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            if artist_name.is_empty() {
-                continue;
-            }
-            let mbid = entry
-                .get("mbid")
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            // Pick the largest non-empty image. Last.fm returns an array of
-            // {size, #text} objects; sizes go small → extralarge.
-            let image_url = entry
-                .get("image")
-                .and_then(Value::as_array)
-                .and_then(|images| {
-                    let mut candidate: Option<&str> = None;
-                    let priority = ["mega", "extralarge", "large", "medium", "small"];
-                    for size in priority {
-                        for img in images {
-                            let s = img.get("size").and_then(Value::as_str);
-                            let url = img.get("#text").and_then(Value::as_str);
-                            if s == Some(size) {
-                                if let Some(u) = url {
-                                    if !u.trim().is_empty() {
-                                        candidate = Some(u);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if candidate.is_some() {
-                            break;
-                        }
-                    }
-                    candidate.map(|s| s.to_string())
-                });
-
-            let listeners = entry
-                .get("listeners")
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
-            let playcount = entry
-                .get("playcount")
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
-
-            out.push(LastFmChartTrack {
-                artist: artist_name,
-                title,
-                mbid,
-                image_url,
-                listeners,
-                playcount,
-            });
-        }
-
-        Ok(out)
+    /// Fetch top tracks for a Last.fm tag (genre).
+    ///
+    /// `tag` is the raw Last.fm tag string (e.g. `"hip-hop"`, `"hip hop"`).
+    /// Curated genre keys may fan out to multiple tags — that fan-out happens
+    /// at the call site, not here.
+    pub async fn get_top_tracks_by_tag(
+        &self,
+        tag: &str,
+        limit: u32,
+    ) -> Result<Vec<LastFmChartTrack>> {
+        let limit = limit.clamp(1, 100);
+        let payload = self
+            .get_json(&[
+                ("method", "tag.gettoptracks".to_string()),
+                ("tag", tag.to_string()),
+                ("limit", limit.to_string()),
+            ])
+            .await?;
+        Ok(parse_chart_tracks(&payload, limit as usize))
     }
 
     async fn similar_track_queries(&self, artist: &str, track: &str) -> Result<Vec<String>> {
@@ -648,6 +598,84 @@ fn extract_artist_queries(value: &Value, limit: usize) -> Vec<String> {
         .map(str::to_string)
         .take(limit)
         .collect()
+}
+
+/// Parse a Last.fm `tracks → track[]` (or `toptracks → track[]`) payload into
+/// `LastFmChartTrack`s. Shared by `chart.gettoptracks`, `geo.gettoptracks`,
+/// and `tag.gettoptracks` — they all return the same shape.
+pub(crate) fn parse_chart_tracks(payload: &Value, limit: usize) -> Vec<LastFmChartTrack> {
+    let tracks_value = payload
+        .get("tracks")
+        .and_then(|v| v.get("track"))
+        .or_else(|| payload.get("toptracks").and_then(|v| v.get("track")));
+    let arr = value_as_array(tracks_value);
+
+    let mut out = Vec::new();
+    for entry in arr.into_iter().take(limit) {
+        let title = match entry.get("name").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => continue,
+        };
+        let artist_name = entry
+            .get("artist")
+            .and_then(|a| a.get("name").or_else(|| a.get("#text")))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if artist_name.is_empty() {
+            continue;
+        }
+        let mbid = entry
+            .get("mbid")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // Pick the largest non-empty image. Last.fm returns an array of
+        // {size, #text} objects; sizes go small → extralarge.
+        let image_url = entry
+            .get("image")
+            .and_then(Value::as_array)
+            .and_then(|images| {
+                let mut candidate: Option<&str> = None;
+                let priority = ["mega", "extralarge", "large", "medium", "small"];
+                for size in priority {
+                    for img in images {
+                        let s = img.get("size").and_then(Value::as_str);
+                        let url = img.get("#text").and_then(Value::as_str);
+                        if s == Some(size) {
+                            if let Some(u) = url {
+                                if !u.trim().is_empty() {
+                                    candidate = Some(u);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if candidate.is_some() {
+                        break;
+                    }
+                }
+                candidate.map(|s| s.to_string())
+            });
+
+        let listeners = entry
+            .get("listeners")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+        let playcount = entry
+            .get("playcount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+
+        out.push(LastFmChartTrack {
+            artist: artist_name,
+            title,
+            mbid,
+            image_url,
+            listeners,
+            playcount,
+        });
+    }
+    out
 }
 
 fn value_as_array(value: Option<&Value>) -> Vec<&Value> {

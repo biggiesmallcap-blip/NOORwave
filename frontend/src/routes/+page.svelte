@@ -7,87 +7,20 @@
 		authFetch,
 		type RSSFeedItem,
 		type HomePickTrack,
-		type ChartEntry,
-		type TrendingSource,
-		type TidalPlayable,
 	} from '$lib/api/client';
+	import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
 	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying, startSongRadio, playTrackNow, playTidalTrackNow, playerError } from '$lib/stores/player';
+	import { currentTrack, currentTrackFeatures, isPlaying, playTrackNow } from '$lib/stores/player';
 	import { camelotFamily } from '$lib/utils/camelot';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
-	const TRENDING_SOURCE_KEY = 'noor.trending.source';
-	function loadTrendingSource(): TrendingSource {
-		if (typeof localStorage === 'undefined') return 'lastfm';
-		const v = localStorage.getItem(TRENDING_SOURCE_KEY);
-		return v === 'tidal' ? 'tidal' : 'lastfm';
-	}
-	function saveTrendingSource(s: TrendingSource) {
-		if (typeof localStorage === 'undefined') return;
-		try {
-			localStorage.setItem(TRENDING_SOURCE_KEY, s);
-		} catch {
-			/* ignore */
-		}
-	}
-
 	// Home page data
 	let releases = $state<RSSFeedItem[]>([]);
-	let picks = $state<HomePickTrack[]>([]);
 	let genrePicks = $state<HomePickTrack[]>([]);
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
-
-	// Trending shelf (Phase 5)
-	let trending = $state<ChartEntry[]>([]);
-	let trendingSource = $state<TrendingSource>(loadTrendingSource());
-	let trendingLoading = $state(false);
-
-	async function loadTrending() {
-		trendingLoading = true;
-		try {
-			const data = await api.getTrending({ source: trendingSource, limit: 12 });
-			trending = data.tracks ?? [];
-		} catch (e) {
-			console.error('Failed to load trending:', e);
-			trending = [];
-		} finally {
-			trendingLoading = false;
-		}
-	}
-
-	function setTrendingSource(s: TrendingSource) {
-		if (s === trendingSource) return;
-		trendingSource = s;
-		saveTrendingSource(s);
-		void loadTrending();
-	}
-
-	async function playTrendingTidalTrack(tp: TidalPlayable): Promise<void> {
-		if (tp.tidal_id !== 0) return playTidalTrackNow(tp);
-		const q = [tp.artist_name, tp.title].filter(Boolean).join(' ');
-		try {
-			const results = await api.searchTidal(q, 1);
-			const hit = results.tracks[0];
-			if (!hit) {
-				playerError.set({ message: "Couldn't find that track on Tidal." });
-				return;
-			}
-			return playTidalTrackNow({
-				tidal_id: hit.tidal_id,
-				title: hit.title,
-				artist_name: hit.artist_name,
-				album_title: hit.album_title,
-				artwork_url: hit.artwork_url ?? tp.artwork_url,
-				duration_ms: hit.duration_ms,
-				artist_tidal_id: null,
-			});
-		} catch {
-			playerError.set({ message: "Couldn't find that track on Tidal." });
-		}
-	}
 
 	// Status data
 	let status = $state<{ name: string; version: string; status: string } | null>(null);
@@ -135,7 +68,6 @@
 		loadPicks();
 		loadArticles();
 		loadNews();
-		void loadTrending();
 	}
 
 	// Phase 5B — back/forward state via SvelteKit snapshot
@@ -165,11 +97,9 @@
 		sectionsLoading.picks = true;
 		try {
 			const data = await api.getHomePicks();
-			picks = data.top_picks ?? [];
 			genrePicks = data.genre_variety ?? [];
 		} catch (e) {
 			console.error('Failed to load picks:', e);
-			picks = [];
 			genrePicks = [];
 		} finally {
 			sectionsLoading.picks = false;
@@ -358,74 +288,22 @@
 			{/if}
 		</section>
 
-		<!-- Trending Section (Phase 5) -->
+		<!-- Unified Trending shelf (Worldwide / Country / Genre / Tidal) -->
 		<section class="discovery-section">
-			<div class="section-header">
-				<div class="section-title-group">
-					<p class="eyebrow">Now moving</p>
-					<h2>Trending</h2>
-				</div>
-				<div class="trending-controls">
-					<div class="chip-group" role="tablist" aria-label="Trending source">
-						<button
-							type="button"
-							class="chip"
-							class:active={trendingSource === 'lastfm'}
-							onclick={() => setTrendingSource('lastfm')}
-							role="tab"
-							aria-selected={trendingSource === 'lastfm'}>Last.fm</button
-						>
-						<button
-							type="button"
-							class="chip"
-							class:active={trendingSource === 'tidal'}
-							onclick={() => setTrendingSource('tidal')}
-							role="tab"
-							aria-selected={trendingSource === 'tidal'}>Tidal</button
-						>
-					</div>
-					{#if trendingLoading}
-						<span class="loading-indicator">Loading...</span>
-					{/if}
-				</div>
-			</div>
+			<TrendingShelf limit={12} />
 
-			{#if trending.length > 0}
-				<div class="picks-grid">
-					<div class="picks-subsection">
-						<div class="trending-grid">
-							{#each trending.slice(0, 12) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
-								<TrendingCard
-									{entry}
-									index={i}
-									onTrack={(t) => void playTrackNow(t.id)}
-									onTidal={(tp) => void playTrendingTidalTrack(tp)}
-								/>
-							{/each}
-						</div>
-					</div>
-
-					{#if genrePicks.length > 0}
-						<div class="picks-subsection">
-							<h3 class="subsection-title">Genre variety</h3>
-							<div class="genre-pills">
-								{#each genrePicks as pick, i (`${pick.id}-${i}`)}
-									<div class="genre-pill glass-tile">
-										<span class="genre-name">{pick.genre}</span>
-										<span class="genre-track">{pick.title}</span>
-									</div>
-								{/each}
+			{#if genrePicks.length > 0}
+				<div class="picks-subsection">
+					<h3 class="subsection-title">Genre variety</h3>
+					<div class="genre-pills">
+						{#each genrePicks as pick, i (`${pick.id}-${i}`)}
+							<div class="genre-pill glass-tile">
+								<span class="genre-name">{pick.genre}</span>
+								<span class="genre-track">{pick.title}</span>
 							</div>
-						</div>
-					{/if}
+						{/each}
+					</div>
 				</div>
-			{:else if !trendingLoading}
-				<EmptyState
-					title="No trending tracks"
-					copy={trendingSource === 'tidal'
-						? 'Tidal editorial chart is unavailable. Try Last.fm.'
-						: 'Last.fm chart is unavailable.'}
-				/>
 			{/if}
 		</section>
 

@@ -2,8 +2,8 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type ChartEntry, type TrendingSource } from '$lib/api/client'
-  import TrendingCard from '$lib/components/TrendingCard.svelte'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist } from '$lib/api/client'
+  import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum, playTidalPlaylist } from '$lib/stores/player'
@@ -79,35 +79,8 @@
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
 
-  // Phase 5 — Trending shelf (shown when query is empty)
-  const TRENDING_SOURCE_KEY = 'noor.trending.source'
-  function loadTrendingSource(): TrendingSource {
-    if (typeof localStorage === 'undefined') return 'lastfm'
-    const v = localStorage.getItem(TRENDING_SOURCE_KEY)
-    return v === 'tidal' ? 'tidal' : 'lastfm'
-  }
-  let trending = $state<ChartEntry[]>([])
-  let trendingSource = $state<TrendingSource>(loadTrendingSource())
-  let trendingLoading = $state(false)
-  async function loadTrending() {
-    trendingLoading = true
-    try {
-      const data = await api.getTrending({ source: trendingSource, limit: 25 })
-      trending = data.tracks ?? []
-    } catch {
-      trending = []
-    } finally {
-      trendingLoading = false
-    }
-  }
-  function setTrendingSource(s: TrendingSource) {
-    if (s === trendingSource) return
-    trendingSource = s
-    if (typeof localStorage !== 'undefined') {
-      try { localStorage.setItem(TRENDING_SOURCE_KEY, s) } catch { /* ignore */ }
-    }
-    void loadTrending()
-  }
+  // Trending shelf is encapsulated in <TrendingShelf /> below; shown only when
+  // the query is empty (inside the existing {#if !query.trim()} branch).
 
   const parsedQuery = $derived(parseQuery(query))
   const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
@@ -128,7 +101,6 @@
       const { playlists } = await api.getPlaylists()
       localPlaylists = playlists
     } catch { /* ignore */ }
-    void loadTrending()
   })
 
   function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
@@ -573,22 +545,16 @@
   type SearchSnapshot = {
     query: string
     filterMode: FilterMode
-    trendingSource: TrendingSource
     scrollY: number
   }
   export const snapshot: Snapshot<SearchSnapshot> = {
     capture: () => ({
       query,
       filterMode,
-      trendingSource,
       scrollY: typeof window !== 'undefined' ? window.scrollY : 0
     }),
     restore: (saved) => {
       filterMode = saved.filterMode
-      if (saved.trendingSource !== trendingSource) {
-        trendingSource = saved.trendingSource
-        void loadTrending()
-      }
       if (typeof saved.query === 'string' && saved.query.trim()) {
         query = saved.query
         pendingRestoreScroll = saved.scrollY
@@ -712,49 +678,10 @@
     {/if}
 
     <section class="results-section">
-      <div class="trending-head">
-        <h3 class="section-label">Trending</h3>
-        <div class="chip-group" role="tablist" aria-label="Trending source">
-          <button
-            type="button"
-            class="chip"
-            class:active={trendingSource === 'lastfm'}
-            onclick={() => setTrendingSource('lastfm')}
-            role="tab"
-            aria-selected={trendingSource === 'lastfm'}>Last.fm</button>
-          <button
-            type="button"
-            class="chip"
-            class:active={trendingSource === 'tidal'}
-            onclick={() => setTrendingSource('tidal')}
-            role="tab"
-            aria-selected={trendingSource === 'tidal'}>Tidal</button>
-        </div>
-        {#if trendingLoading}
-          <span class="trending-loading">Loading…</span>
-        {/if}
-      </div>
-      {#if trending.length > 0}
-        <div class="trending-grid">
-          {#each trending.slice(0, 25) as entry, i (`${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
-            <TrendingCard
-              {entry}
-              index={i}
-              onTrack={(t) => void playTrackNow(t.id)}
-              onTidal={(tp) => void playTidalTrackNow(tp)}
-            />
-          {/each}
-        </div>
-      {:else if !trendingLoading}
-        <p class="search-hint">
-          {trendingSource === 'tidal'
-            ? 'Tidal editorial chart unavailable. Try Last.fm.'
-            : 'Last.fm chart unavailable.'}
-        </p>
-      {/if}
+      <TrendingShelf limit={25} />
     </section>
 
-    {#if recent.length === 0 && trending.length === 0}
+    {#if recent.length === 0}
       <p class="search-hint">Start typing to search Tidal's full catalogue</p>
     {/if}
   {:else if loading}
@@ -1477,53 +1404,6 @@
     letter-spacing: 1.5px;
     color: var(--accent);
     margin-bottom: 14px;
-  }
-  .trending-head {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-  .trending-head .section-label { margin-bottom: 0; }
-  .trending-loading {
-    font-size: 0.78rem;
-    color: var(--text-muted);
-    font-style: italic;
-  }
-  .chip-group {
-    display: inline-flex;
-    gap: 4px;
-    padding: 2px;
-    background: rgba(255, 255, 255, 0.04);
-    border-radius: 999px;
-  }
-  .chip {
-    background: transparent;
-    border: none;
-    color: var(--text-muted, #888);
-    font: inherit;
-    font-size: 0.75rem;
-    font-weight: 500;
-    padding: 4px 10px;
-    border-radius: 999px;
-    cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
-  }
-  .chip:hover { color: var(--text, #fff); }
-  .chip.active {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text, #fff);
-  }
-  .trending-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 14px;
-  }
-  @media (max-width: 720px) {
-    .trending-grid {
-      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-      gap: 10px;
-    }
   }
   /* Artists */
   .artists-row {
