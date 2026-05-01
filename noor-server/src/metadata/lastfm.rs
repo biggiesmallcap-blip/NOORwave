@@ -230,6 +230,138 @@ impl LastFmClient {
         Ok(out)
     }
 
+    /// Like `track_get_similar`, but if the API returns no similar tracks for the
+    /// (artist, title) pair, falls back to `artist.getsimilar` and pulls top tracks
+    /// from each related artist. Used by Song Radio so obscure seeds still generate
+    /// candidates — track-level recall is sparse for indie/local artists, but
+    /// artist-level recall is much denser.
+    ///
+    /// Fallback match scores are derived from the artist similarity, attenuated by
+    /// 0.85 to reflect that the relationship to the seed is one step removed.
+    pub async fn track_get_similar_with_artist_fallback(
+        &self,
+        artist: &str,
+        title: &str,
+        limit: usize,
+    ) -> Result<Vec<LastFmSimilarTrack>> {
+        let direct = self.track_get_similar(artist, title, limit).await?;
+        if !direct.is_empty() {
+            return Ok(direct);
+        }
+
+        let similar_artists = self.fetch_similar_artists(artist, 8).await.unwrap_or_default();
+        if similar_artists.is_empty() {
+            tracing::info!(artist, title, "lastfm.track_get_similar fallback: no similar artists either");
+            return Ok(Vec::new());
+        }
+
+        const TRACKS_PER_ARTIST: usize = 3;
+        let mut out: Vec<LastFmSimilarTrack> = Vec::new();
+        for (similar_artist, artist_match) in similar_artists {
+            if out.len() >= limit {
+                break;
+            }
+            // One slow artist shouldn't kill the whole fallback.
+            let top = self
+                .fetch_artist_top_tracks(&similar_artist, TRACKS_PER_ARTIST)
+                .await
+                .unwrap_or_default();
+            let attenuated = (artist_match * 0.85).clamp(0.0, 1.0);
+            for top_title in top.into_iter().take(TRACKS_PER_ARTIST) {
+                if out.len() >= limit {
+                    break;
+                }
+                out.push(LastFmSimilarTrack {
+                    artist: similar_artist.clone(),
+                    title: top_title,
+                    mbid: None,
+                    match_score: attenuated,
+                });
+            }
+        }
+
+        tracing::info!(
+            artist,
+            title,
+            fallback_count = out.len(),
+            "lastfm.track_get_similar artist-fallback"
+        );
+
+        Ok(out)
+    }
+
+    /// Fetch similar artists by name with their match scores.
+    /// Internal helper for `track_get_similar_with_artist_fallback`.
+    async fn fetch_similar_artists(
+        &self,
+        artist: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>> {
+        let payload = self
+            .get_json(&[
+                ("method", "artist.getsimilar".to_string()),
+                ("artist", artist.to_string()),
+                ("limit", limit.min(50).to_string()),
+            ])
+            .await?;
+
+        let arr = value_as_array(
+            payload.get("similarartists").and_then(|v| v.get("artist")),
+        );
+
+        let mut out = Vec::new();
+        for entry in arr.into_iter().take(limit) {
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let match_score = entry
+                .get("match")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| entry.get("match").and_then(Value::as_f64))
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            out.push((name, match_score));
+        }
+        Ok(out)
+    }
+
+    /// Fetch top track titles for an artist (Last.fm popularity-ordered).
+    /// Internal helper for `track_get_similar_with_artist_fallback`.
+    async fn fetch_artist_top_tracks(
+        &self,
+        artist: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let payload = self
+            .get_json(&[
+                ("method", "artist.gettoptracks".to_string()),
+                ("artist", artist.to_string()),
+                ("limit", limit.min(50).to_string()),
+            ])
+            .await?;
+
+        let arr = value_as_array(
+            payload.get("toptracks").and_then(|v| v.get("track")),
+        );
+
+        let mut out = Vec::new();
+        for entry in arr.into_iter().take(limit) {
+            if let Some(name) = entry.get("name").and_then(Value::as_str) {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch top global or geo chart tracks from Last.fm.
     ///
     /// When `country` is `Some`, calls `geo.getTopTracks` with that country

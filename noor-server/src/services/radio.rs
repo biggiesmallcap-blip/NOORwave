@@ -177,7 +177,7 @@ pub async fn orchestrate_song(
     let lastfm_results: Vec<RadioCandidate> =
         if let (Some(client), Some(artist)) = (lastfm, seed_meta.artist_name.as_deref()) {
             let lfm = client
-                .track_get_similar(artist, &seed_meta.title, lfm_target.max(20))
+                .track_get_similar_with_artist_fallback(artist, &seed_meta.title, lfm_target.max(20))
                 .await;
             if let Err(ref e) = lfm {
                 tracing::warn!(seed_track_id, artist, title = %seed_meta.title, error = %e, "orchestrate_song: Last.fm track_get_similar failed");
