@@ -136,8 +136,11 @@ pub async fn orchestrate_song(
             RadioBlend::Mixed => 0.30,
             RadioBlend::Adventurous => 0.50,
         };
-        crate::services::learning::radio_from_neighbors(db, seed_track_id, &excl, lib_target as i64, creativity)
-            .ok()
+        let lib = crate::services::learning::radio_from_neighbors(db, seed_track_id, &excl, lib_target as i64, creativity);
+        if let Err(ref e) = lib {
+            tracing::warn!(seed_track_id, error = %e, "orchestrate_song: library/embedding source errored");
+        }
+        lib.ok()
             .flatten()
             .unwrap_or_default()
             .into_iter()
@@ -166,12 +169,20 @@ pub async fn orchestrate_song(
     };
 
     // ── Last.fm source ────────────────────────────────────────────────────────
+    if lastfm.is_none() {
+        tracing::info!(seed_track_id, "orchestrate_song: no Last.fm client (no API key configured)");
+    } else if seed_meta.artist_name.is_none() {
+        tracing::info!(seed_track_id, "orchestrate_song: seed has no artist_name; Last.fm source skipped");
+    }
     let lastfm_results: Vec<RadioCandidate> =
         if let (Some(client), Some(artist)) = (lastfm, seed_meta.artist_name.as_deref()) {
-            client
+            let lfm = client
                 .track_get_similar(artist, &seed_meta.title, lfm_target.max(20))
-                .await
-                .unwrap_or_default()
+                .await;
+            if let Err(ref e) = lfm {
+                tracing::warn!(seed_track_id, artist, title = %seed_meta.title, error = %e, "orchestrate_song: Last.fm track_get_similar failed");
+            }
+            lfm.unwrap_or_default()
                 .into_iter()
                 .take(lfm_target * 2)
                 .map(|hit| RadioCandidate {
@@ -206,8 +217,13 @@ pub async fn orchestrate_song(
             .unwrap_or_default()
     };
 
+    let lib_count = library_results.len();
+    let lfm_count = lastfm_results.len();
+    let eng_count = engine_results.len();
+
     // ── Combine + blend ───────────────────────────────────────────────────────
     let mut combined = combine_with_dedup(library_results, lastfm_results, engine_results);
+    let combined_count = combined.len();
 
     // Snapshot pre-affinity scores so the reason-string suffix can
     // record the affinity multiplier per candidate. Keyed by
@@ -236,6 +252,7 @@ pub async fn orchestrate_song(
     let jaccard_by_key = compute_genre_jaccard(db, seed_track_id, &combined);
 
     apply_taste_signals(&mut combined, &taste, &resolver);
+    let post_taste_count = combined.len();
 
     // Snapshot post-affinity / pre-genre scores so the reason suffix
     // can attribute the affinity contribution and the genre
@@ -258,6 +275,7 @@ pub async fn orchestrate_song(
     // reject. Lastfm candidates pass through untouched (no genre data
     // for tracks outside the library).
     apply_genre_signals(&mut combined, &jaccard_by_key, blend);
+    let post_genre_count = combined.len();
 
     // Reason-string enrichment: append a JSON suffix carrying the
     // structured breakdown that the frontend tooltip parses. Best
@@ -270,6 +288,19 @@ pub async fn orchestrate_song(
     );
 
     let ordered = blend_interleave(combined, blend, limit);
+
+    tracing::info!(
+        seed_track_id,
+        blend = ?blend,
+        lib_count,
+        lfm_count,
+        eng_count,
+        combined_count,
+        post_taste_count,
+        post_genre_count,
+        final_count = ordered.len(),
+        "orchestrate_song: candidate funnel"
+    );
 
     Ok(RadioQueue {
         session_id: new_session_id(),

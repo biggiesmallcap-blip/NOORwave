@@ -174,6 +174,7 @@ impl LastFmClient {
             .get("similartracks")
             .and_then(|v| v.get("track"));
         let arr = value_as_array(tracks_value);
+        let raw_count = arr.len();
 
         let mut out = Vec::new();
         for entry in arr.into_iter().take(limit) {
@@ -217,6 +218,14 @@ impl LastFmClient {
                 match_score,
             });
         }
+
+        tracing::info!(
+            artist,
+            title,
+            raw_count,
+            parsed_count = out.len(),
+            "lastfm.track_get_similar"
+        );
 
         Ok(out)
     }
