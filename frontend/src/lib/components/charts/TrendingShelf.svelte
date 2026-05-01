@@ -34,11 +34,14 @@
 	}
 	let { limit = 12 }: Props = $props();
 
+	// `tidal` is intentionally absent — the editorial-chart endpoint returns
+	// 404 ("not confirmed" in the Tidal client warning), so exposing the tab
+	// would always render an empty state. Add it back here when that endpoint
+	// is sorted; the store/type/backend route still accept the value.
 	const MODES: { id: TrendingMode; label: string }[] = [
 		{ id: 'worldwide', label: 'Worldwide' },
 		{ id: 'country', label: 'Country' },
 		{ id: 'genre', label: 'Genre' },
-		{ id: 'tidal', label: 'Tidal' },
 	];
 
 	let countries = $state<LastfmCountry[]>([]);
@@ -46,10 +49,17 @@
 	let curatedLoaded = $state(false);
 
 	let tracks = $state<ChartEntry[]>([]);
-	let loading = $state(false);
+	// Default to loading=true so first render doesn't briefly paint the empty
+	// state before the on-mount fetch flips it on.
+	let loading = $state(true);
 	let error = $state(false);
 
 	onMount(() => {
+		// If a stale 'tidal' mode is in localStorage from the legacy migration,
+		// nudge to a working mode so the user doesn't open to an empty shelf.
+		if (!MODES.some((m) => m.id === $selectedTrendingMode)) {
+			selectedTrendingMode.set('worldwide');
+		}
 		void loadCurated();
 	});
 
@@ -93,6 +103,8 @@
 	});
 
 	async function load(mode: TrendingMode, country: string, genre: string) {
+		// Keep `tracks` populated while we fetch — replacing only when new data
+		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
 		error = false;
 		try {
@@ -167,14 +179,16 @@
 					</button>
 				{/each}
 			</div>
-			{#if loading}
-				<span class="loading-indicator">Loading…</span>
-			{/if}
+			<!-- Always-rendered, fixed-width slot — flips opacity instead of mounting/unmounting,
+			     so the chip group doesn't reflow when fetches start/finish. -->
+			<span class="loading-indicator" class:visible={loading} aria-hidden={!loading}>Loading…</span>
 		</div>
 	</div>
 
-	{#if $selectedTrendingMode === 'country' && countries.length > 0}
-		<div class="chip-row" role="tablist" aria-label="Country">
+	<!-- Always-rendered subrow; content swaps by mode. Reserves stable vertical
+	     space so the grid below doesn't jump when modes change. -->
+	<div class="chip-row" role="tablist" aria-label={$selectedTrendingMode === 'genre' ? 'Genre' : 'Country'}>
+		{#if $selectedTrendingMode === 'country' && countries.length > 0}
 			{#each countries as c (c.code)}
 				<button
 					type="button"
@@ -187,9 +201,7 @@
 					{c.label}
 				</button>
 			{/each}
-		</div>
-	{:else if $selectedTrendingMode === 'genre' && genres.length > 0}
-		<div class="chip-row" role="tablist" aria-label="Genre">
+		{:else if $selectedTrendingMode === 'genre' && genres.length > 0}
 			{#each genres as g (g.key)}
 				<button
 					type="button"
@@ -202,12 +214,12 @@
 					{g.label}
 				</button>
 			{/each}
-		</div>
-	{/if}
+		{/if}
+	</div>
 
 	{#if tracks.length > 0}
 		<div class="trending-grid">
-			{#each tracks.slice(0, limit) as entry, i (`${$selectedTrendingMode}-${$selectedCountry}-${$selectedGenre}-${i}-${entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? i}`)}
+			{#each tracks.slice(0, limit) as entry, i (entry.local_track?.id ?? entry.tidal_playable?.tidal_id ?? `idx-${i}`)}
 				<TrendingCard {entry} index={i} {onTrack} onTidal={playChartTidalTrack} />
 			{/each}
 		</div>
@@ -267,7 +279,8 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		flex-wrap: wrap;
+		flex-wrap: nowrap; /* keeps chip-group + loading slot on a single line */
+		min-width: 0;
 	}
 
 	.chip-group {
@@ -302,6 +315,9 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 6px;
+		/* Reserves one row of chip height even when worldwide mode renders no
+		   chips, so switching modes doesn't shift the grid below. */
+		min-height: 28px;
 	}
 
 	.chip.secondary {
@@ -315,6 +331,14 @@
 		font-size: 0.78rem;
 		color: var(--text-muted);
 		font-style: italic;
+		/* Reserve the slot so the chip group never reflows when loading toggles. */
+		min-width: 60px;
+		opacity: 0;
+		transition: opacity 0.18s ease;
+		pointer-events: none;
+	}
+	.loading-indicator.visible {
+		opacity: 1;
 	}
 
 	.trending-grid {
