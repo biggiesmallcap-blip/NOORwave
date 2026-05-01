@@ -35,11 +35,14 @@
 
 Your entire TIDAL library, synced locally and always fast.
 
-- Full library sync (tracks, albums, artists, playlists) with real-time WebSocket progress
+- Full library sync (tracks, albums, artists, playlists) with real-time WebSocket progress; daily auto-sync with metadata tracking
+- **Server-side FTS search** — SQLite FTS5 with prefix-weighted ranking; no preload-all, scales past 10k artists without freezing the UI; sort column applies to results
 - Home view: top artist hero card, recently played artist carousel, recently added album shelf, recent tracks
 - **Trending shelf** — unified Last.fm + TIDAL chart cards with country and genre scopes, lazy artwork backfill for missing covers, 6-hour shared cache so navigation between pages doesn't refetch
-- Artist pages: blurred-artwork hero, full TIDAL discography (Albums / Singles & EPs), in-library flags, out-of-library cards linking to TIDAL preview
+- Artist pages (Spotify/Apple-style): blurred-artwork hero, full TIDAL discography (Albums / Singles & EPs), in-library flags, out-of-library cards linking to TIDAL preview, filter input, Tidal album play overlay
 - Album pages: track table, hover-reveal actions, equalizer bar on active row, "More by" shelf
+- **Universal track-row hover cluster** — same right-click and inline action menu on every track surface (queue, library, search, discover, playlists, artist/album pages, now-playing)
+- **Duplicate detection** page with ISRC matching + title/duration fallback (UI under active polish)
 - Bulk operations: add/remove favorites, manage playlists at scale
 - Decade strip filter, tile/list toggle, scroll position memory across back-navigation
 
@@ -80,12 +83,16 @@ Recent searches auto-save as clickable chips.
 
 ### Playback
 
-- Lossless hi-fi streaming via TIDAL with automatic token refresh
+- Lossless hi-fi streaming via TIDAL with automatic token refresh, **MPEG-DASH segmented streaming** for high-bitrate sources
+- **WASAPI exclusive-mode bit-perfect output** (Windows) with quality live-apply; user-selectable preferred TIDAL quality
+- Audio device enumeration + live device switching (`DeviceSwap` rebuilds the output stream); sample rate follows source on track transition
 - Gapless playback: NearEnd event fires 15 s before track end, triggering pre-buffer engine swap for zero-gap transitions
 - BPM-aligned crossfade snap and per-track fade-in / fade-out
 - Four shuffle modes: off, true (Fisher-Yates), weighted (boosts favorites + never-played), genre-spread (prevents consecutive same-genre runs)
 - Automix: automatic queue continuation with Camelot + BPM + energy harmonic multipliers; harmonic match indicators on every queue row
 - Now-playing panel shows Camelot wheel key, BPM badge, and full queue
+- **Queue redesign**: drag-to-reorder, expanded layout (slim artwork + compact transport), `Q` hotkey to toggle, total-duration formatter, save-as-playlist, clear-with-undo (`Z` within 6 s)
+- **Toast-based player error UX** with retry, manual close, and 6 s auto-dismiss
 
 ---
 
@@ -109,10 +116,24 @@ Recent searches auto-save as clickable chips.
 - Force-directed canvas of your library positioned by learned audio similarity
 - Hyperspace search: type a mood or reference and fly to the matching cluster
 - Nebula halos mark previously explored regions
-- **Song Radio**: plays outward from any track using learned neighbor embeddings; creativity slider controls exploration vs. exploitation
+- **Hover tooltip card** with track preview, audio metric chips, and quick actions
+- **Hybrid auto-seed + lock pill**: pin a seed track to keep the canvas focused while you drift
+- **Last.fm node resolution state machine** — external recommendations resolve to TIDAL on demand with shimmer / resolved / unavailable states
+- **Song Radio**: plays outward from any track using learned neighbor embeddings; creativity slider controls exploration vs. exploitation; honours `seed_tidal_id` for non-library tracks
 - Feedback (like, dislike, queue, save) feeds back into the model
 - **Prompt Explore**: steer the engine with natural language — mood, reference artist, DJ style
-- Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress and cancel button
+- Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress, **cancel button**, and CPU/heat warning card
+
+### Radio orchestration
+
+The thing that picks the next track when Automix or Song Radio is running.
+
+- **Canonical TasteVector** powering both Automix and Song Radio — single scoring model so the two surfaces agree on what "similar" means
+- **Genre coherence scoring** via weighted Jaccard against the seed's genre set
+- **Engine slot** filled from precomputed `track_similarity` pairs to keep latency low
+- **Reason plumbing** through the queue with structured suffix — every queued track carries a human-readable "why is this here?" string
+- **Pending Last.fm rows** — non-library Last.fm radio results queue immediately as pending placeholders and resolve to TIDAL playables in a background pool at play time; aggressive GC keeps the table clean
+- Diagnostic harness available as a permanent debug tool for evaluating candidate funnel quality
 
 ---
 
@@ -121,24 +142,28 @@ Recent searches auto-save as clickable chips.
 - Rule-based smart playlists with AND/OR logic: genre, artist, date range, quality tier, play count, BPM, key, Camelot, energy, danceability, instrumental-only, sample-data presence
 - DSP audio analysis runs passively during playback: BPM, key, Camelot, LUFS, energy, danceability, beat strength, spectral centroid, stereo width
 - Duplicate detection via ISRC matching with title/duration fallback
-- MusicBrainz enrichment (ISRC-first + title fallback, rate-limited)
-- Last.fm genre pipeline: closed taxonomy + hierarchy-aware merge
+- MusicBrainz enrichment (ISRC-first + title fallback, rate-limited); portable MusicBrainz snapshot for offline transfer between installs
+- Last.fm genre pipeline: closed taxonomy, orphan-node fix, hierarchy-aware merge; `artist.getsimilar` fallback when track-level recall is empty
+- Spotify auth + genre enrichment; auto-migrate legacy tokens
+- TIDAL session health: pre-request backoff gate, `/api/tidal/status` endpoint, play events fired to `ec.tidal.com`, auto-refresh on 401, `audio_active` flag
 - ACRCloud fingerprint sample recognition *(placeholder — not fully functional)*
-- Analytics: listen history, top tracks/artists, genre heatmap, activity graph, completion rate, skip patterns
+- Analytics page (recently reimagined): listen history, top tracks/artists, genre heatmap, activity graph, completion rate, skip patterns
+- Automix page (recently reimagined): full surface for tuning the harmonic mixing engine
 
 ---
 
 ### UI & Access
 
-- Five GLSL shader wallpapers: Aurora, Chrome, Grid, Nebula, Topo — sidebar and now-playing panel float as glass tiles over them
+- Five GLSL shader wallpapers: Aurora, Chrome, Grid, Nebula, Topo — sidebar and now-playing panel float as glass tiles over them, with a **wallpaper palette system** (Nebula / Verdant / desat variants)
 - **Quiet Mode** — fullscreen "just listen" overlay launched from a button on the now-playing artwork. Large artwork + transport, blurred backdrop, body-scroll lock, embedded `⌘K` search pill. Esc cascade is deterministic across the three overlays (action menu → palette → quiet mode).
-- 6-digit PIN auth: auto-submits on the sixth digit, numeric keyboard on mobile; local browser auto-connects
-- LAN access: run on one machine, open from any browser on the network
+- 6-digit PIN auth: auto-submits on the sixth digit, numeric keyboard on mobile; local browser auto-connects; legacy tokens auto-migrate on startup
+- LAN access: run on one machine, open from any browser on the network; every raw `fetch()` carries the auth header
 - WebSocket-driven: playback state, sync progress, queue, training progress push instantly without polling
-- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat · `⌘K` / `Ctrl+K` command palette
-- **Tauri desktop app**: system tray menu (network toggle, restart, exit), global media key shortcuts, native window management
-- Audio device enumeration and switching; sample rate follows source on track transition
+- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat · `Q` toggle queue · `⌘K` / `Ctrl+K` command palette · `Z` undo clear-queue (within 6 s)
+- **Tauri desktop app**: system tray menu (network toggle, restart, exit), global media key shortcuts, native window management, **GitHub-releases auto-updater**
+- Audio device enumeration and live switching; sample rate follows source on track transition
 - WASAPI exclusive-mode bit-perfect output (Windows)
+- Dedicated **TIDAL catalogue search** page (`/search`) and TIDAL artist/album profile pages (`/tidal/artists/[id]`, `/tidal/albums/[id]`) for browsing outside your library
 
 ---
 
@@ -272,7 +297,9 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 ## Roadmap
 
 <details>
-<summary>What's already shipped ✓</summary>
+<summary>What's already shipped ✓ (full list)</summary>
+
+**Foundation**
 
 - [x] Discovery engine with embedding-based learning
 - [x] Similar Radio with creativity and context controls
@@ -282,39 +309,113 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Genre Galaxy visualization with heat, co-occurrence, cohort, and evolution views
 - [x] Genre Mix: randomised entry point, seed blend builder
 - [x] Discovery Sound Space with hyperspace search and nebula halos
-- [x] 6-digit PIN auth with auto-setup for local browsers
-- [x] Automix harmonic mixing (Camelot + BPM + energy multipliers)
-- [x] Artist and album pages with TIDAL discography
-- [x] Shader wallpapers with glass UI overlay
-- [x] DSP-powered smart playlist rules
-- [x] Ctrl+K command palette with slash commands
+- [x] DSP-powered smart playlist rules (Phase 4 complete)
 - [x] Power filter syntax in search
-- [x] Tauri desktop app with tray menu and media keys
-- [x] Last.fm genre pipeline (closed taxonomy + hierarchy-aware merge)
-- [x] WASAPI exclusive-mode bit-perfect output (v0.1.7)
-- [x] Pending-queue UX polish: spinner artwork + radio loading toast (v0.1.8)
-- [x] Manual purge of orphan `tidal_stream` tracks (v0.1.8)
+- [x] Last.fm genre pipeline (closed taxonomy, orphan-node fix, hierarchy-aware merge)
+- [x] MusicBrainz enrichment (ISRC-first + title fallback, rate-limited); portable snapshot transfer
+- [x] Sync metadata tracking + daily auto-sync
+
+**Auth, distribution, infrastructure**
+
+- [x] 6-digit PIN auth with auto-setup for local browsers; legacy-token auto-migration
+- [x] Auth header attached to every raw `fetch()` call
+- [x] LAN access — open from any device on the network
+- [x] Tauri desktop app: system tray (network toggle, restart, exit), global media key shortcuts, native window management
+- [x] **GitHub Releases auto-updater** (Tauri shell)
+- [x] GitHub Actions release workflow; portable `dist/NOORwave/` Windows build
+- [x] SvelteKit `adapter-static` — single bundle served by `noor-server`
+
+**Audio engine**
+
+- [x] WASAPI exclusive-mode bit-perfect output (Windows) with quality live-apply (v0.1.7)
+- [x] User-selectable preferred TIDAL quality
+- [x] **MPEG-DASH segmented streaming** + DASH XML manifest handling
+- [x] Audio device enumeration + `DeviceSwap` rebuild
+- [x] `audio_active` flag for output-state tracking
+- [x] TIDAL session health: pre-request backoff gate, status endpoint, play events to `ec.tidal.com`, auto-refresh on 401
+- [x] Crossfade gain sentinel + per-packet buffer flush (no double fade-in)
+
+**Player + queue**
+
+- [x] Automix harmonic mixing (Camelot + BPM + energy multipliers)
+- [x] Like button with local + TIDAL sync; optimistic hearts
+- [x] Queue redesign: drag-to-reorder, expanded layout (slim artwork + compact transport), `Q` hotkey, total-duration formatter, save-as-playlist, clear-with-undo (`Z` within 6 s)
+- [x] Toast-based player error UX with retry, manual close, 6 s auto-dismiss
+- [x] Surface radio reasons + shuffle mode labels + action microcopy on every queue row
+- [x] Stale `is_playing` cleared on server restart
+
+**Library + browsing**
+
+- [x] Server-side FTS5 search with prefix-weighted ranking; sort column applied to results
+- [x] Spotify/Apple-style artist + album pages with TIDAL discography, blurred-artwork hero, decade strip, tile/list toggle, scroll-position memory
+- [x] Filter input + Tidal album play overlay on artist pages
+- [x] Dedicated TIDAL catalogue search page (`/search`)
+- [x] `/tidal/artists/[id]` and `/tidal/albums/[id]` profile pages
 - [x] Trending shelf: unified Last.fm + TIDAL charts with country/genre scopes, lazy artwork backfill, 6-hour shared cache, stable shelf layout (v0.1.8)
+- [x] Duplicate-detection page (UI under polish)
+- [x] Reimagined Automix and Analytics pages
+
+**Track-row unification (Phase 1–7 frontend overhaul)**
+
+- [x] Universal `<TrackRow>` / `<TidalTrackRow>` components consumed by every track surface
+- [x] Inline action parity (right-click + hover cluster) across queue, library, search, discover, playlists, artist/album pages
+- [x] Right-click menus on all search sections + Tidal song-radio fallback
+
+**Discovery + radio**
+
+- [x] Discovery training with cancel-aware hot loop, Stop button, CPU/heat warning
+- [x] Hover tooltip card (`DiscoverHoverCard`) with audio metric chips
+- [x] Hybrid auto-seed + lock pill; `seed_track_id` drives external Tidal search
+- [x] Last.fm node resolution state machine — shimmer / resolved / unavailable
+- [x] `cohort` labels, `last_played` / `play_count` / `top_genre` enrichment, `skip_rate` + `completion_avg` aggregates on space nodes
+- [x] Reason tags + score components on edges
+- [x] Canonical TasteVector adopted by both Automix and Song Radio
+- [x] Genre coherence scoring via weighted Jaccard
+- [x] Engine slot filled from precomputed `track_similarity` pairs
+- [x] Radio reason plumbing through queue with structured suffix
+- [x] Pending Last.fm queue rows resolve to TIDAL at play time + background resolver pool + GC
+- [x] Radio diagnostic harness as a permanent debug tool
+- [x] Radio orchestration: prepend seed track, drop empty-candidates 422 path
+- [x] Radio routes ephemeral Tidal tracks to the Tidal-aware path
 - [x] Last.fm `artist.getsimilar` fallback when track-level recall is empty
-- [x] Radio orchestration: prepend seed track, drop empty-candidates 422 path, diagnostic tracing
-- [x] Quiet Mode — fullscreen now-playing overlay with embedded ⌘K search (v0.1.9)
-- [x] CommandPalette per-row action menus (Play / Queue / Radio / Go to artist|album), keyboard-driven (v0.1.9)
+- [x] Last.fm 8 s per-call timeout so a slow tag fetch can't hang the shelf
+
+**UI & accessibility**
+
+- [x] Quiet Mode — fullscreen now-playing overlay with embedded `⌘K` search (v0.1.9)
+- [x] `Ctrl+K` / `⌘K` command palette with slash commands and per-row action menus (Play / Queue / Radio / Go to artist|album), keyboard-driven (v0.1.9)
 - [x] Three-overlay Esc cascade (action menu → palette → quiet mode) with deterministic z-index ordering (v0.1.9)
 - [x] Extracted shared `NowPlayingMetadata` / `Progress` / `Transport` components consumed by desktop panel + mobile sheet + Quiet Mode (v0.1.9)
+- [x] Shader wallpapers with glass UI overlay; wallpaper palette system (Nebula / Verdant / desat variants); Google Fonts
+- [x] Pending-queue UX polish: spinner artwork + radio loading toast (v0.1.8)
+- [x] Manual purge of orphan `tidal_stream` tracks (v0.1.8)
+- [x] Codex typography + microcopy pass across pages
+- [x] Inline SVG brand mark + favicon
+
+**Playlists**
+
+- [x] Playlist shuffle, radio, and favorite buttons
+- [x] Add-to-playlist context menu on album and artist cards
+- [x] Bulk tracks-to-playlist endpoint
+- [x] TIDAL playlist search and tracks endpoints (playable inline from search results)
+- [x] Inline track-row migration on playlists page
 
 </details>
 
 **Up next:**
 
-- [ ] Gapless crossfade audio blend (audio-level mixing)
-- [ ] Duplicate detection UI
+- [ ] Gapless crossfade audio blend (audio-level mixing — pre-buffer engine swap already shipped)
+- [ ] Duplicate detection UI polish
 - [ ] Song Radio tuning (recommendation quality + diversity)
 - [ ] Genre Galaxy polish (interaction + rendering issues)
+- [ ] Shuffle genre-spread algorithm (currently not always respected)
+- [ ] Context-menu-on-scroll handling (menus dismiss on scroll)
 - [ ] YouTube Music integration
 - [ ] SoundCloud integration
-- [ ] Tauri auto-updater
 - [ ] Lyrics view inside Quiet Mode
 - [ ] Color-sampled dynamic backdrop tint in Quiet Mode
+- [ ] ACRCloud fingerprint recognition (currently placeholder)
+- [ ] Library-sync timeout / pagination resilience for very large libraries
 
 ---
 
