@@ -167,12 +167,17 @@
 		const seedNode = seedTrackId != null ? nodeMap.get(seedTrackId) : null;
 		const playingNode = currentTrackId != null ? nodeMap.get(currentTrackId) : null;
 
+		// Build route track ID set for edge filtering
+		const routeTrackIds = new Set(route.map((s) => s.trackId));
+		const hoveredId  = hoveredNode?.trackId  ?? null;
+		const selectedId = selectedNode?.trackId ?? null;
+
 		// ── Draw ──────────────────────────────────────────────────────────────
 		drawBackground(ctx, w, h, prefersReducedMotion);
 		drawVisitedRegions(ctx, regions, camera, w, h);
 		drawGenreNebulae(ctx, nodes, camera, w, h, lens);
-		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, lens);
-		drawNodes(ctx, nodes, camera, w, h, lens, hoveredNode?.trackId ?? null, selectedNode?.trackId ?? null, tick, prefersReducedMotion);
+		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, lens, seedTrackId, hoveredId, selectedId, routeTrackIds);
+		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, tick, prefersReducedMotion);
 
 		if (playingNode && !playingNode.isSeed) {
 			drawPlayingNode(ctx, playingNode, camera, w, h, tick, prefersReducedMotion);
@@ -181,7 +186,7 @@
 			drawSeedNode(ctx, seedNode, camera, w, h, isLocked, tick, prefersReducedMotion);
 		}
 
-		drawLabels(ctx, nodes, camera, w, h, hoveredNode?.trackId ?? null, camera.zoom);
+		drawLabels(ctx, nodes, camera, w, h, hoveredId, selectedId, camera.zoom);
 		drawRadioRoute(ctx, route, nodeMap, camera, w, h, camera.zoom, tick, prefersReducedMotion);
 
 		if (!prefersReducedMotion) {

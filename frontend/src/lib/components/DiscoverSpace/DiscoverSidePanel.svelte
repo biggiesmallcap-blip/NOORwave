@@ -1,15 +1,16 @@
 <script lang="ts">
 	import { lockSeed, setRadioRoute, discoverSpaceStore } from './discover_space_store';
-	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS } from './discover_space_story';
+	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
 	import { api, getApiBase, authFetch } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 
 	interface Props {
 		node: DiscoverTrackNode | null;
+		seedNode?: DiscoverTrackNode | null;
 		onAddToPlaylist?: (node: DiscoverTrackNode) => void;
 	}
-	let { node, onAddToPlaylist }: Props = $props();
+	let { node, seedNode = null, onAddToPlaylist }: Props = $props();
 
 	let isStartingRadio = $state(false);
 	let isHiding = $state(false);
@@ -196,10 +197,45 @@
 			Confidence: {Math.round(node.confidence * 100)}%.
 			Source: {SOURCE_LABELS[node.source]}.
 		</p>
+	{:else if seedNode}
+		<!-- Idle state: show anchor star context + instructions -->
+		<div class="panel-idle">
+			<div class="idle-anchor">
+				{#if seedNode.artworkUrl}
+					<img class="idle-artwork" src={seedNode.artworkUrl} alt="" aria-hidden="true" width="40" height="40" />
+				{:else}
+					<div class="idle-artwork-placeholder" aria-hidden="true"></div>
+				{/if}
+				<div class="idle-anchor-info">
+					<div class="idle-anchor-label">Anchor Star</div>
+					<div class="idle-anchor-title">{seedNode.title}</div>
+					<div class="idle-anchor-artist">{seedNode.artist}</div>
+				</div>
+			</div>
+
+			{#if seedNode.genres.length > 0}
+				<div class="idle-genres">
+					{#each seedNode.genres.slice(0, 3) as g}
+						<span class="idle-genre-tag">{g}</span>
+					{/each}
+				</div>
+			{/if}
+
+			<div class="idle-lens">
+				<span class="idle-lens-name">{LENS_LABELS[$discoverSpaceStore.lens]}</span>
+				<span class="idle-lens-desc">{LENS_DESCRIPTIONS[$discoverSpaceStore.lens]}</span>
+			</div>
+
+			<div class="idle-instructions">
+				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Hover a star to inspect it</div>
+				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Click a star to open its chart</div>
+				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Start radio here to trace a route</div>
+			</div>
+		</div>
 	{:else}
 		<div class="panel-empty">
 			<span class="panel-empty-icon" aria-hidden="true">◈</span>
-			<span>Click a star to explore it</span>
+			<span>Play something to seed the map</span>
 		</div>
 	{/if}
 </aside>
@@ -310,4 +346,53 @@
 		clip: rect(0, 0, 0, 0);
 		border: 0;
 	}
+
+	/* Idle state (seed selected but no node clicked) */
+	.panel-idle {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		padding: 4px 0;
+	}
+	.idle-anchor {
+		display: flex;
+		gap: 10px;
+		align-items: flex-start;
+	}
+	.idle-artwork {
+		width: 40px; height: 40px; border-radius: 5px; object-fit: cover; flex-shrink: 0;
+		box-shadow: 0 0 0 1px rgba(124,128,255,0.3), 0 0 10px rgba(124,128,255,0.15);
+	}
+	.idle-artwork-placeholder {
+		width: 40px; height: 40px; border-radius: 5px; flex-shrink: 0;
+		background: rgba(124,128,255,0.12);
+		border: 1px solid rgba(124,128,255,0.25);
+	}
+	.idle-anchor-info { flex: 1; min-width: 0; }
+	.idle-anchor-label {
+		font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.1em;
+		color: rgba(124,128,255,0.6); margin-bottom: 2px;
+	}
+	.idle-anchor-title { font-size: 0.88rem; font-weight: 600; color: rgba(255,255,255,0.9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.idle-anchor-artist { font-size: 0.75rem; color: rgba(255,255,255,0.45); }
+
+	.idle-genres { display: flex; flex-wrap: wrap; gap: 4px; }
+	.idle-genre-tag {
+		padding: 2px 7px; border-radius: 4px; font-size: 0.66rem;
+		background: rgba(80,180,100,0.1); color: rgba(120,200,140,0.8);
+	}
+
+	.idle-lens {
+		display: flex; flex-direction: column; gap: 3px;
+		padding: 8px 10px;
+		background: rgba(255,255,255,0.03);
+		border: 1px solid rgba(255,255,255,0.06);
+		border-radius: 6px;
+	}
+	.idle-lens-name { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(124,128,255,0.7); }
+	.idle-lens-desc { font-size: 0.74rem; color: rgba(255,255,255,0.42); line-height: 1.45; }
+
+	.idle-instructions { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; }
+	.idle-instr-row { font-size: 0.73rem; color: rgba(255,255,255,0.32); display: flex; align-items: flex-start; gap: 6px; line-height: 1.4; }
+	.idle-dot { flex-shrink: 0; color: rgba(124,128,255,0.45); font-size: 1rem; line-height: 1.1; }
 </style>

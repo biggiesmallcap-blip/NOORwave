@@ -105,13 +105,24 @@ export function adaptNode(
 	const inDegree = api.candidate_in_degree ?? 0;
 	const inDegreePctile = api.candidate_in_degree_percentile ?? 0;
 
-	// Prefer server-hinted position; fall back to deterministic placement.
-	const hintX = api.layout?.x;
-	const hintY = api.layout?.y;
-	const baseRadius = 300 + (1 - score) * 200;
-	const fallback = (hintX == null || hintY == null)
-		? deterministicInitialPosition(api.track_id, seedId ?? 0, baseRadius)
-		: null;
+	const isSeedNode = api.is_seed ?? api.track_id === seedId;
+
+	// Seed lives at the world origin; orbit stars use score-based initial radius
+	// so high-confidence matches start close and cold/distant ones orbit further out.
+	let initX = 0, initY = 0;
+	if (!isSeedNode) {
+		const hintX = api.layout?.x;
+		const hintY = api.layout?.y;
+		if (hintX != null && hintY != null) {
+			initX = hintX;
+			initY = hintY;
+		} else {
+			const baseRadius = 150 + (1 - score) * 250 + (isColdStart ? 120 : 0);
+			const pos = deterministicInitialPosition(api.track_id, seedId ?? 0, baseRadius);
+			initX = pos.x;
+			initY = pos.y;
+		}
+	}
 
 	return {
 		id: api.id ?? `track-${api.track_id}`,
@@ -138,15 +149,15 @@ export function adaptNode(
 		inDegreePctile,
 		primaryReason,
 		reasonTags,
-		isSeed: api.is_seed ?? api.track_id === seedId,
+		isSeed: isSeedNode,
 		isPlaying: api.track_id === currentTrackId,
 		inPlaylistBuilder: false,
 		isRouteOnly: false,
-		x: hintX ?? fallback!.x,
-		y: hintY ?? fallback!.y,
+		x: initX,
+		y: initY,
 		vx: 0,
 		vy: 0,
-		radius: api.layout?.radius_hint ?? (5 + score * 20),
+		radius: api.layout?.radius_hint ?? (isSeedNode ? 24 : 5 + score * 18),
 		layoutHint: api.layout,
 	};
 }

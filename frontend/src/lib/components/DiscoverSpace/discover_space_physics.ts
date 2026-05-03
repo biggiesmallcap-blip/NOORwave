@@ -182,6 +182,11 @@ export function applyForces(
 
 	// ── Integrate ──────────────────────────────────────────────────────────────
 	for (const node of nodes) {
+		if (node.isSeed) {
+			// Seed is the world anchor — pin it to the origin
+			node.x = 0; node.y = 0; node.vx = 0; node.vy = 0;
+			continue;
+		}
 		if (config.prefersReducedMotion) {
 			node.vx = 0;
 			node.vy = 0;

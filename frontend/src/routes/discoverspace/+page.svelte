@@ -29,6 +29,11 @@
 	// Track last-loaded seed to avoid refetching on every reactive tick
 	let lastLoadedSeedId = $state<number | null>(null);
 
+	// The seed node object (for the side panel idle state)
+	let anchorNode = $derived(
+		$discoverSpaceStore.nodes.find((n) => n.isSeed || n.trackId === resolvedSeedId) ?? null
+	);
+
 	// ── Interaction state ─────────────────────────────────────────────────────
 	let hoveredNode = $state<DiscoverTrackNode | null>(null);
 	let hoverX = $state(0);
@@ -241,6 +246,7 @@
 		<!-- Side panel -->
 		<DiscoverSidePanel
 			node={selectedNode}
+			seedNode={anchorNode}
 			onAddToPlaylist={handleAddToPlaylist}
 		/>
 	</div>

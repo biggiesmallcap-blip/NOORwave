@@ -77,6 +77,14 @@ export const LENS_LABELS = {
 	genre: 'Genre',
 };
 
+export const LENS_DESCRIPTIONS = {
+	energy:     'Node color shows physical intensity — blue is calm, orange is intense.',
+	reason:     'Color shows why each track connects: harmonic, behavioral, tempo, and more.',
+	confidence: 'Bright nodes are well-supported; dim/shimmering nodes are cold discoveries.',
+	source:     'Ring color shows where the track came from — library, Last.fm, or the engine.',
+	genre:      'Colors and clouds reveal sonic territories by genre family.',
+};
+
 export const SOURCE_LABELS = {
 	library: 'Your library',
 	lastfm: 'Last.fm',
