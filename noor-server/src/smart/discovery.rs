@@ -469,6 +469,10 @@ mod tests {
                 started_at: "2026-04-05T00:00:00Z".to_string(),
                 duration_listened_ms: 22_000,
                 completed: false,
+                session_id: None,
+                source: None,
+                position_in_session: None,
+                transition_from_track_id: None,
             }],
             top_artists: vec![AnalyticsTopArtist {
                 artist_id: 1,

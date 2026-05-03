@@ -169,7 +169,8 @@
 		return count;
 	}
 
-	function formatDuration(seconds: number): string {
+	function formatDuration(seconds: number | null | undefined): string {
+		if (seconds === null || seconds === undefined) return '—';
 		if (!isFinite(seconds) || seconds <= 0) return '—';
 		const total = Math.round(seconds);
 		const h = Math.floor(total / 3600);
@@ -254,6 +255,8 @@
 		void loadMbStatus();
 		void loadPortableSnapshot();
 		void loadDiscoveryStatus();
+		void loadDiscoveryIntensity();
+		void loadDiscoverySafety();
 		void loadAudioStats();
 		void syncAnalysisStatus();
 		void loadAudioOutput();
@@ -709,6 +712,83 @@
 	let discoveryIsRunning = $derived(
 		discoveryStatus?.latest_run?.status === 'running'
 	);
+
+	// Intensity tier + safety estimate. Both load once on mount and refresh
+	// after the intensity changes so the safety preview reflects the new
+	// setting before the user clicks Start.
+	let discoveryIntensity: 'max' | 'medium' | 'low' = $state('medium');
+	let discoverySafety: Awaited<ReturnType<typeof api.getDiscoverySafety>> | null = $state(null);
+	let intensityBusy = $state(false);
+
+	async function loadDiscoveryIntensity() {
+		try {
+			const r = await api.getDiscoveryIntensity();
+			discoveryIntensity = r.intensity;
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		}
+	}
+
+	async function loadDiscoverySafety() {
+		try {
+			discoverySafety = await api.getDiscoverySafety();
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		}
+	}
+
+	async function changeIntensity(next: 'max' | 'medium' | 'low') {
+		if (intensityBusy || next === discoveryIntensity) return;
+		intensityBusy = true;
+		try {
+			await api.setDiscoveryIntensity(next);
+			discoveryIntensity = next;
+			await loadDiscoverySafety();
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		} finally {
+			intensityBusy = false;
+		}
+	}
+
+	// Live ETA for an in-progress run. Uses the latest run's progress +
+	// started_at to derive elapsed seconds, then projects remaining time.
+	// Only valid while training is running and progress > 0.
+	let discoveryEtaSeconds: number | null = $derived.by(() => {
+		const r = discoveryStatus?.latest_run;
+		if (!r || r.status !== 'running' || !r.started_at) return null;
+		const startedMs = Date.parse(r.started_at);
+		if (Number.isNaN(startedMs)) return null;
+		const elapsed = (Date.now() - startedMs) / 1000;
+		const progress = Math.max(0.01, Math.min(0.99, r.progress ?? 0));
+		const total = elapsed / progress;
+		return Math.max(0, Math.round(total - elapsed));
+	});
+
+
+	const INTENSITY_PRESETS: Record<
+		'max' | 'medium' | 'low',
+		{ title: string; tagline: string; detail: string }
+	> = {
+		max: {
+			title: 'Max',
+			tagline: 'Best radio quality. Slowest training.',
+			detail:
+				'96-dim model with 64 neighbors per track and an 8-track context window. Cold tracks get full audio + metadata anchoring. Recommended for libraries under ~10k tracks or for overnight runs.',
+		},
+		medium: {
+			title: 'Medium',
+			tagline: 'Balanced. The default.',
+			detail:
+				'64-dim, 32 neighbors, 5-track window. Audio-proxy stage runs at smaller dimension. Indistinguishable from Max for most listening; ~50% of the wall-clock time.',
+		},
+		low: {
+			title: 'Low',
+			tagline: 'Fastest. Pure behavioral.',
+			detail:
+				'48-dim, 24 neighbors, 3-track window. Skips the audio-proxy stage entirely — cold tracks lose their metadata anchor, but the engine stays usable on modest hardware. Roughly 25% of Max’s time.',
+		},
+	};
 
 	async function startEnrichment() {
 		mbStatus = 'running';
@@ -1375,6 +1455,65 @@
 					</div>
 				</div>
 
+				<div class="intensity-block">
+					<div class="intensity-header">
+						<span class="intensity-eyebrow">Training intensity</span>
+						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
+					</div>
+					<div class="intensity-grid">
+						{#each (['max', 'medium', 'low'] as const) as tier (tier)}
+							<button
+								type="button"
+								class="intensity-option"
+								class:selected={discoveryIntensity === tier}
+								disabled={discoveryIsRunning || intensityBusy}
+								onclick={() => void changeIntensity(tier)}
+							>
+								<span class="intensity-title">{INTENSITY_PRESETS[tier].title}</span>
+								<span class="intensity-detail">{INTENSITY_PRESETS[tier].detail}</span>
+							</button>
+						{/each}
+					</div>
+					{#if discoverySafety}
+						{@const safety = discoverySafety}
+						<div
+							class="safety-panel"
+							class:safety-safe={safety.recommendation === 'safe'}
+							class:safety-moderate={safety.recommendation === 'moderate'}
+							class:safety-high={safety.recommendation === 'high_cost'}
+						>
+							<div class="safety-headline">
+								{#if safety.recommendation === 'safe'}
+									Safe to run — about {formatDuration(safety.estimated_seconds)} expected.
+								{:else if safety.recommendation === 'moderate'}
+									Moderate cost — about {formatDuration(safety.estimated_seconds)} expected.
+								{:else}
+									Heavy run — about {formatDuration(safety.estimated_seconds)} expected. Consider Medium or Low.
+								{/if}
+							</div>
+							<div class="safety-detail">
+								<span>{safety.track_count.toLocaleString()} tracks</span>
+								<span>·</span>
+								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
+								{#if safety.last_run_seconds !== null}
+									<span>·</span>
+									<span>last run {formatDuration(safety.last_run_seconds)}</span>
+								{/if}
+							</div>
+						</div>
+					{/if}
+					{#if discoveryIsRunning && discoveryEtaSeconds !== null}
+						<div class="eta-line">
+							Estimated time remaining: <strong>{formatDuration(discoveryEtaSeconds)}</strong>
+							{#if discoveryStatus?.latest_run?.progress !== undefined}
+								<span class="eta-progress">
+									({Math.round((discoveryStatus.latest_run.progress ?? 0) * 100)}% complete)
+								</span>
+							{/if}
+						</div>
+					{/if}
+				</div>
+
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning}>Incremental refresh</button>
 					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning}>Full retrain</button>
@@ -1685,6 +1824,132 @@
 </div>
 
 <style>
+	/* Discovery intensity selector + safety preview */
+	.intensity-block {
+		display: grid;
+		gap: 14px;
+		padding: 16px;
+		margin-bottom: 12px;
+		border-radius: 10px;
+		background: rgba(255, 255, 255, 0.02);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	.intensity-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.intensity-eyebrow {
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.intensity-tagline {
+		font-size: 0.85rem;
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	.intensity-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 10px;
+	}
+
+	.intensity-option {
+		display: grid;
+		gap: 8px;
+		text-align: left;
+		padding: 14px;
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid rgba(255, 255, 255, 0.07);
+		color: inherit;
+		cursor: pointer;
+		transition: background 0.15s ease, border-color 0.15s ease;
+	}
+
+	.intensity-option:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.05);
+		border-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.intensity-option:disabled {
+		cursor: not-allowed;
+		opacity: 0.55;
+	}
+
+	.intensity-option.selected {
+		background: rgba(110, 168, 255, 0.10);
+		border-color: rgba(110, 168, 255, 0.45);
+	}
+
+	.intensity-title {
+		font-weight: 600;
+		font-size: 0.95rem;
+	}
+
+	.intensity-detail {
+		font-size: 0.8rem;
+		line-height: 1.4;
+		color: var(--text-secondary);
+	}
+
+	.safety-panel {
+		display: grid;
+		gap: 4px;
+		padding: 10px 12px;
+		border-radius: 8px;
+		border-left: 3px solid;
+		font-size: 0.85rem;
+	}
+
+	.safety-panel.safety-safe {
+		background: rgba(75, 200, 130, 0.07);
+		border-left-color: rgba(75, 200, 130, 0.6);
+	}
+
+	.safety-panel.safety-moderate {
+		background: rgba(250, 200, 90, 0.07);
+		border-left-color: rgba(250, 200, 90, 0.6);
+	}
+
+	.safety-panel.safety-high {
+		background: rgba(240, 110, 90, 0.07);
+		border-left-color: rgba(240, 110, 90, 0.6);
+	}
+
+	.safety-headline {
+		font-weight: 500;
+	}
+
+	.safety-detail {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+	}
+
+	.eta-line {
+		font-size: 0.85rem;
+		color: var(--text-secondary);
+	}
+
+	.eta-progress {
+		opacity: 0.7;
+	}
+
+	@media (max-width: 720px) {
+		.intensity-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
 	.settings-page {
 		gap: 14px;
 	}

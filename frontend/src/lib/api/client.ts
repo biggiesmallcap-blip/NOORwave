@@ -1151,6 +1151,42 @@ export const api = {
 		});
 	},
 
+	getDiscoveryIntensity() {
+		return fetchApi<{
+			intensity: 'max' | 'medium' | 'low';
+			dimension: number;
+			top_k: number;
+			window_size: number;
+			include_audio_proxy: boolean;
+			available: Array<'max' | 'medium' | 'low'>;
+		}>('/api/discovery/train/intensity');
+	},
+
+	setDiscoveryIntensity(intensity: 'max' | 'medium' | 'low') {
+		return fetchApi<{ intensity: string }>('/api/discovery/train/intensity', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ intensity }),
+		});
+	},
+
+	getDiscoverySafety() {
+		return fetchApi<{
+			track_count: number;
+			intensity: 'max' | 'medium' | 'low';
+			estimated_seconds: number;
+			estimated_minutes: number;
+			estimated_ram_mb: number;
+			last_run_seconds: number | null;
+			recommendation: 'safe' | 'moderate' | 'high_cost';
+			params: {
+				dimension: number;
+				top_k: number;
+				window_size: number;
+				include_audio_proxy: boolean;
+			};
+		}>('/api/discovery/train/safety');
+	},
+
 	recordDiscoveryFeedback(
 		seed_track_id: number,
 		candidate_track_id: number,

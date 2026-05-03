@@ -8,6 +8,8 @@ mod updater;
 
 use sidecar::SidecarState;
 use std::sync::Arc;
+use std::time::Duration;
+use tauri::Manager;
 
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
@@ -36,10 +38,25 @@ fn main() {
             let handle = app.handle().clone();
             let _state2 = state_for_setup.clone();
 
-            // Check for updates in background; window already loaded.
+            // WebView2 on Windows occasionally paints a blank window on the
+            // FIRST navigation even when the URL responded successfully. Only
+            // a hard refresh (Ctrl+Shift+R) gets the renderer to actually paint.
+            // Reproducible across releases; manual reload is the only known
+            // reliable trigger. Force it once shortly after launch — the brief
+            // flicker is preferable to a permanently blank window.
+            let reload_handle = handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1200));
+                if let Some(win) = reload_handle.get_webview_window("main") {
+                    let _ = win.eval("location.reload();");
+                }
+            });
+
+            // Check for updates in background.
+            let update_handle = handle.clone();
             std::thread::spawn(move || {
                 if let Some(info) = updater::check() {
-                    tray::notify_update(&handle, &info.version, info.url);
+                    tray::notify_update(&update_handle, &info.version, info.url);
                 }
             });
 

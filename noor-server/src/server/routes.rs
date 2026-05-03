@@ -309,6 +309,11 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/train", post(start_discovery_training))
         .route("/api/discovery/train/status", get(get_discovery_training_status))
         .route("/api/discovery/train/stop", post(stop_discovery_training))
+        .route(
+            "/api/discovery/train/intensity",
+            get(get_discovery_intensity).post(set_discovery_intensity),
+        )
+        .route("/api/discovery/train/safety", get(get_discovery_safety))
         .route("/api/discovery/feedback", post(record_discovery_feedback))
         .route(
             "/api/discovery/presets",
@@ -1853,6 +1858,145 @@ async fn stop_discovery_training(
     let s = state.read().await;
     s.discovery_train_cancel.store(true, Ordering::Relaxed);
     Ok(Json(json!({ "status": "stopping" })))
+}
+
+async fn get_discovery_intensity(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::{DiscoveryIntensity, load_discovery_intensity};
+    let s = state.read().await;
+    let intensity = load_discovery_intensity(&s.db);
+    let params = intensity.params();
+    Ok(Json(json!({
+        "intensity": intensity.as_str(),
+        "dimension": params.dimension,
+        "top_k": params.top_k,
+        "window_size": params.window_size,
+        "include_audio_proxy": params.include_audio_proxy,
+        "available": [
+            DiscoveryIntensity::Max.as_str(),
+            DiscoveryIntensity::Medium.as_str(),
+            DiscoveryIntensity::Low.as_str(),
+        ],
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct IntensityRequest {
+    intensity: String,
+}
+
+async fn set_discovery_intensity(
+    State(state): State<SharedState>,
+    Json(payload): Json<IntensityRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::{
+        DiscoveryIntensity, set_discovery_intensity as save_intensity,
+    };
+    let s = state.read().await;
+    let parsed = DiscoveryIntensity::parse(&payload.intensity);
+    save_intensity(&s.db, parsed)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "intensity": parsed.as_str() })))
+}
+
+// Safety estimate: tells the UI how long training is expected to take and
+// how much memory it'll claim, derived from the current track count, the
+// active intensity tier, and the duration of the most recent successful run
+// (if any). Frontend uses this to gate the user with a "this'll take ~X min"
+// preview before they hit Start.
+async fn get_discovery_safety(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::load_discovery_intensity;
+    let s = state.read().await;
+
+    let (track_count, last_run_seconds): (i64, Option<f64>) = s
+        .db
+        .with_conn(|conn| {
+            let tracks: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tracks WHERE source IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            // Most recent finished run, in seconds. SQLite's strftime epoch
+            // gives integer seconds; subtraction is the wall-clock duration.
+            let last: Option<f64> = conn
+                .query_row(
+                    "SELECT (julianday(finished_at) - julianday(started_at)) * 86400.0
+                     FROM training_runs
+                     WHERE finished_at IS NOT NULL AND status = 'completed'
+                     ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            Ok((tracks, last))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let intensity = load_discovery_intensity(&s.db);
+    let params = intensity.params();
+
+    // Cost model: similarity_neighbors is O(n²) on track count. Constant
+    // factor scales roughly with `dim × top_k`. Calibrated against the
+    // observed Max-tier baseline of ~12 minutes for 30,000 tracks (~0.8μs
+    // per pair on a typical laptop). Final fudge factor includes I/O,
+    // co-occurrence build, and audio-proxy overhead.
+    let n = track_count as f64;
+    let pair_cost_ns = 800.0 * (params.dimension as f64 / 96.0) * (params.top_k as f64 / 64.0);
+    let neighbors_seconds = (n * n * pair_cost_ns) / 1.0e9;
+    let audio_seconds = if params.include_audio_proxy {
+        n * 0.0008
+    } else {
+        0.0
+    };
+    let behavioral_seconds = n * 0.001;
+    let estimated_seconds_model = neighbors_seconds + audio_seconds + behavioral_seconds;
+
+    // Prefer the actual last-run duration if we have one — it captures the
+    // user's real machine and library. Blend 70/30 with the model so we
+    // don't anchor too hard on a single noisy datapoint.
+    let estimated_seconds = match last_run_seconds {
+        Some(observed) if observed > 5.0 => 0.3 * estimated_seconds_model + 0.7 * observed,
+        _ => estimated_seconds_model,
+    };
+
+    // Peak RAM rough estimate: dim × N × 8 bytes for behavioral vectors,
+    // doubled for audio + fusion, plus the neighbor graph (top_k × N × 32).
+    let ram_mb = ((params.dimension as f64 * n * 8.0 * 3.0)
+        + (params.top_k as f64 * n * 32.0))
+        / (1024.0 * 1024.0);
+
+    // Safety classification: Green when the run is short or matches a known
+    // baseline. Yellow when we expect 5-20 min on a non-trivial library.
+    // Red when we predict over 20 min or RAM crosses 1.5 GB — these are the
+    // cases where the user should consider dropping intensity.
+    let recommendation = if estimated_seconds > 1200.0 || ram_mb > 1500.0 {
+        "high_cost"
+    } else if estimated_seconds > 300.0 {
+        "moderate"
+    } else {
+        "safe"
+    };
+
+    Ok(Json(json!({
+        "track_count": track_count,
+        "intensity": intensity.as_str(),
+        "estimated_seconds": estimated_seconds.round() as i64,
+        "estimated_minutes": (estimated_seconds / 60.0 * 10.0).round() / 10.0,
+        "estimated_ram_mb": ram_mb.round() as i64,
+        "last_run_seconds": last_run_seconds.map(|s| s.round() as i64),
+        "recommendation": recommendation,
+        "params": {
+            "dimension": params.dimension,
+            "top_k": params.top_k,
+            "window_size": params.window_size,
+            "include_audio_proxy": params.include_audio_proxy,
+        },
+    })))
 }
 
 async fn record_discovery_feedback(
@@ -8098,7 +8242,13 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
     match state.active_listen_session.as_mut() {
         Some(session) if session.track_id == track.id => session.resume(now),
         _ => {
-            state.active_listen_session = Some(player::ActiveListenSession::start(track.id, now));
+            let source = state
+                .db
+                .with_conn(|conn| Ok(player::lookup_current_listen_source(conn)))
+                .unwrap_or(crate::db::models::ListenSource::Unknown);
+            let prior = state.live_listen_session.as_ref();
+            state.active_listen_session =
+                Some(player::ActiveListenSession::start(track.id, now, source, prior));
         }
     }
 }
@@ -8408,8 +8558,14 @@ async fn sync_session_after_snapshot(
 
         if snapshot.state.is_playing {
             if let Some(track) = snapshot.state.current_track.as_ref() {
-                state.active_listen_session =
-                    Some(player::ActiveListenSession::start(track.id, now));
+                let source = state
+                    .db
+                    .with_conn(|conn| Ok(player::lookup_current_listen_source(conn)))
+                    .unwrap_or(crate::db::models::ListenSource::Unknown);
+                let prior = state.live_listen_session.as_ref();
+                state.active_listen_session = Some(player::ActiveListenSession::start(
+                    track.id, now, source, prior,
+                ));
             }
         } else if snapshot.state.current_track.is_none() {
             state.active_listen_session = None;
@@ -8448,15 +8604,30 @@ fn flush_active_listen_session_locked(
     if track_id <= 0 {
         return Ok(None);
     }
+    let session_id = session.session_id.clone();
+    let source = session.source;
+    let position_in_session = session.position_in_session;
+    let transition_from_track_id = session.transition_from_track_id;
     let completed = state.db.with_conn(|conn| {
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)
         })?;
         let completed = player::is_completed_listen(&track, listened_ms);
-        queries::record_listen_history(conn, track_id, &started_at, listened_ms, completed)?;
+        queries::record_listen_history(
+            conn,
+            track_id,
+            &started_at,
+            listened_ms,
+            completed,
+            Some(&session_id),
+            Some(source),
+            Some(position_in_session),
+            transition_from_track_id,
+        )?;
         queries::increment_track_play_summary(conn, track_id, &started_at, completed)?;
         Ok(completed)
     })?;
+    state.live_listen_session = Some(session.to_live_session(now));
 
     tracing::info!(
         target: "noor.playback.history",
@@ -10310,6 +10481,7 @@ mod tests {
             current_stream_display: None,
             pending_stream_display: None,
             active_listen_session: None,
+            live_listen_session: None,
             external_playback_track: None,
             ephemeral_tidal_track: None,
             tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -10381,6 +10553,7 @@ mod tests {
             current_stream_display: None,
             pending_stream_display: None,
             active_listen_session: None,
+            live_listen_session: None,
             external_playback_track: None,
             ephemeral_tidal_track: None,
             tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),

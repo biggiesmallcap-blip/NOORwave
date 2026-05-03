@@ -132,6 +132,57 @@ pub struct AnalyticsOverview {
     pub favorite_tracks: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenSource {
+    Manual,
+    Radio,
+    Playlist,
+    Album,
+    Artist,
+    Search,
+    Automix,
+    Unknown,
+}
+
+impl ListenSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ListenSource::Manual => "manual",
+            ListenSource::Radio => "radio",
+            ListenSource::Playlist => "playlist",
+            ListenSource::Album => "album",
+            ListenSource::Artist => "artist",
+            ListenSource::Search => "search",
+            ListenSource::Automix => "automix",
+            ListenSource::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<ListenSource> {
+        match raw {
+            "manual" => Some(ListenSource::Manual),
+            "radio" => Some(ListenSource::Radio),
+            "playlist" => Some(ListenSource::Playlist),
+            "album" => Some(ListenSource::Album),
+            "artist" => Some(ListenSource::Artist),
+            "search" => Some(ListenSource::Search),
+            "automix" => Some(ListenSource::Automix),
+            "unknown" => Some(ListenSource::Unknown),
+            _ => None,
+        }
+    }
+
+    // Backfilled rows have unknown provenance, so the trainer downweights edges
+    // supported only by them. Live-recorded rows count at full strength.
+    pub fn confidence_multiplier(self) -> f64 {
+        match self {
+            ListenSource::Unknown => 0.5,
+            _ => 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenHistoryEntry {
     pub id: i64,
@@ -143,6 +194,14 @@ pub struct ListenHistoryEntry {
     pub started_at: String,
     pub duration_listened_ms: i64,
     pub completed: bool,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub source: Option<ListenSource>,
+    #[serde(default)]
+    pub position_in_session: Option<i32>,
+    #[serde(default)]
+    pub transition_from_track_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +446,18 @@ pub struct DiscoveryRadioResult {
     pub reason_tags: Vec<String>,
     pub model_key: Option<String>,
     pub source_mode: String,
+    // Tier 1 diagnostics surfaced from the neighbor row. None when read from a
+    // pre-Tier-1 model that was trained before MIGRATION_022.
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub support_count: i64,
+    #[serde(default)]
+    pub candidate_in_degree: i64,
+    #[serde(default)]
+    pub candidate_in_degree_percentile: f64,
+    #[serde(default)]
+    pub primary_reason: Option<String>,
 }
 
 // ─── Audio DSP Features ─────────────────────────────────────────────────────

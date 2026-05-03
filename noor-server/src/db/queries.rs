@@ -1192,15 +1192,25 @@ pub fn record_listen_history(
     started_at: &str,
     duration_listened_ms: i64,
     completed: bool,
+    session_id: Option<&str>,
+    source: Option<ListenSource>,
+    position_in_session: Option<i32>,
+    transition_from_track_id: Option<i64>,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO listen_history
+            (track_id, started_at, duration_listened_ms, completed,
+             session_id, source, position_in_session, transition_from_track_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             track_id,
             started_at,
             duration_listened_ms.max(0),
-            completed as i32
+            completed as i32,
+            session_id,
+            source.map(|s| s.as_str()),
+            position_in_session,
+            transition_from_track_id,
         ],
     )?;
     Ok(())
@@ -1227,7 +1237,8 @@ pub fn increment_track_play_summary(
 pub fn get_recent_listens(conn: &Connection, limit: i64) -> Result<Vec<ListenHistoryEntry>> {
     let mut stmt = conn.prepare(
         "SELECT lh.id, lh.track_id, t.title, a.name, al.title, al.artwork_url,
-                lh.started_at, COALESCE(lh.duration_listened_ms, 0), lh.completed
+                lh.started_at, COALESCE(lh.duration_listened_ms, 0), lh.completed,
+                lh.session_id, lh.source, lh.position_in_session, lh.transition_from_track_id
          FROM listen_history lh
          JOIN tracks t ON lh.track_id = t.id
          LEFT JOIN artists a ON t.artist_id = a.id
@@ -1238,6 +1249,7 @@ pub fn get_recent_listens(conn: &Connection, limit: i64) -> Result<Vec<ListenHis
 
     let listens = stmt
         .query_map(params![limit], |row| {
+            let source_raw: Option<String> = row.get(10)?;
             Ok(ListenHistoryEntry {
                 id: row.get(0)?,
                 track_id: row.get(1)?,
@@ -1248,6 +1260,10 @@ pub fn get_recent_listens(conn: &Connection, limit: i64) -> Result<Vec<ListenHis
                 started_at: row.get(6)?,
                 duration_listened_ms: row.get(7)?,
                 completed: row.get(8)?,
+                session_id: row.get(9)?,
+                source: source_raw.as_deref().and_then(ListenSource::parse),
+                position_in_session: row.get(11)?,
+                transition_from_track_id: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2641,6 +2657,35 @@ pub struct EmbeddingNeighborRow {
     pub audio_score: f64,
     pub metadata_score: f64,
     pub reason_json: Option<String>,
+    pub confidence: f64,
+    pub support_count: i64,
+    pub candidate_in_degree: i64,
+    pub candidate_in_degree_percentile: f64,
+    pub play_count_seed: i64,
+    pub play_count_candidate: i64,
+    pub primary_reason: Option<String>,
+}
+
+// Trainer write payload. Replaces the 9-tuple that replace_track_neighbors used
+// to take — at 16 fields, named struct fields are necessary for any chance at
+// not mixing up arguments.
+#[derive(Debug, Clone)]
+pub struct NeighborWriteRow {
+    pub track_id: i64,
+    pub neighbor_track_id: i64,
+    pub rank: i32,
+    pub score: f64,
+    pub behavioral_score: f64,
+    pub audio_score: f64,
+    pub metadata_score: f64,
+    pub reason_json: Option<String>,
+    pub primary_reason: Option<String>,
+    pub confidence: f64,
+    pub support_count: i64,
+    pub candidate_in_degree: i64,
+    pub candidate_in_degree_percentile: f64,
+    pub play_count_seed: i64,
+    pub play_count_candidate: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2898,10 +2943,86 @@ pub fn replace_track_audio_features(
     Ok(())
 }
 
+// Per-reason held-out hit-rate row, mirroring the structure emitted by the
+// trainer. Kept as a separate struct on the queries side so the trainer module
+// doesn't need to depend on rusqlite param plumbing.
+pub struct ReasonHitRateRow {
+    pub primary_reason: String,
+    pub impressions: i64,
+    pub hits: i64,
+    pub hit_rate: f64,
+    pub mean_rank: Option<f64>,
+    pub mrr_contribution: f64,
+    pub insufficient_data: bool,
+}
+
+// Replaces all per-reason hit-rate rows for a model. Wrapped in a transaction
+// so a partial replacement can't leave stale rows from a prior training run.
+pub fn replace_discovery_diagnostics(
+    conn: &Connection,
+    model_id: i64,
+    rates: &[ReasonHitRateRow],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM discovery_diagnostics WHERE model_id = ?1",
+        params![model_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO discovery_diagnostics
+             (model_id, primary_reason, impressions, hits, hit_rate,
+              mean_rank, mrr_contribution, insufficient_data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for r in rates {
+            stmt.execute(params![
+                model_id,
+                r.primary_reason,
+                r.impressions,
+                r.hits,
+                r.hit_rate,
+                r.mean_rank,
+                r.mrr_contribution,
+                r.insufficient_data as i32,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn get_per_reason_hit_rates(
+    conn: &Connection,
+    model_id: i64,
+) -> Result<Vec<ReasonHitRateRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT primary_reason, impressions, hits, hit_rate,
+                mean_rank, mrr_contribution, insufficient_data
+         FROM discovery_diagnostics
+         WHERE model_id = ?1
+         ORDER BY impressions DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![model_id], |row| {
+            Ok(ReasonHitRateRow {
+                primary_reason: row.get(0)?,
+                impressions: row.get(1)?,
+                hits: row.get(2)?,
+                hit_rate: row.get(3)?,
+                mean_rank: row.get(4)?,
+                mrr_contribution: row.get(5)?,
+                insufficient_data: row.get::<_, i32>(6)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn replace_track_neighbors(
     conn: &Connection,
     model_id: i64,
-    neighbors: &[(i64, i64, i32, f64, f64, f64, f64, Option<String>)],
+    neighbors: &[NeighborWriteRow],
 ) -> Result<()> {
     // Single transaction: ~2M+ INSERTs auto-committing one-by-one is what makes
     // training appear to hang. Batching also makes the DELETE+INSERT atomic so a
@@ -2914,20 +3035,30 @@ pub fn replace_track_neighbors(
     {
         let mut stmt = tx.prepare(
             "INSERT INTO track_neighbors
-             (track_id, neighbor_track_id, model_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (track_id, neighbor_track_id, model_id, rank, score,
+              behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
+              confidence, support_count, candidate_in_degree, candidate_in_degree_percentile,
+              play_count_seed, play_count_candidate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?;
-        for (track_id, neighbor_track_id, rank, score, behavioral_score, audio_score, metadata_score, reason_json) in neighbors {
+        for n in neighbors {
             stmt.execute(params![
-                track_id,
-                neighbor_track_id,
+                n.track_id,
+                n.neighbor_track_id,
                 model_id,
-                rank,
-                score,
-                behavioral_score,
-                audio_score,
-                metadata_score,
-                reason_json
+                n.rank,
+                n.score,
+                n.behavioral_score,
+                n.audio_score,
+                n.metadata_score,
+                n.reason_json,
+                n.primary_reason,
+                n.confidence,
+                n.support_count,
+                n.candidate_in_degree,
+                n.candidate_in_degree_percentile,
+                n.play_count_seed,
+                n.play_count_candidate,
             ])?;
         }
     }
@@ -2943,7 +3074,10 @@ pub fn get_track_neighbors(
     exclude_ids: &[i64],
 ) -> Result<Vec<EmbeddingNeighborRow>> {
     let sql = "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.best_quality,
-                      n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
+                      n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json,
+                      n.confidence, n.support_count, n.candidate_in_degree,
+                      n.candidate_in_degree_percentile, n.play_count_seed, n.play_count_candidate,
+                      n.primary_reason
                FROM track_neighbors n
                JOIN tracks t ON t.id = n.neighbor_track_id
                LEFT JOIN artists a ON a.id = t.artist_id
@@ -2967,6 +3101,13 @@ pub fn get_track_neighbors(
                 audio_score: row.get(9)?,
                 metadata_score: row.get(10)?,
                 reason_json: row.get(11)?,
+                confidence: row.get(12)?,
+                support_count: row.get(13)?,
+                candidate_in_degree: row.get(14)?,
+                candidate_in_degree_percentile: row.get(15)?,
+                play_count_seed: row.get(16)?,
+                play_count_candidate: row.get(17)?,
+                primary_reason: row.get(18)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

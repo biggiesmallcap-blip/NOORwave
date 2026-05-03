@@ -68,6 +68,17 @@ pub struct RadioCandidate {
     pub reason: String,
     /// 0..1 source-native score, normalized for cross-source comparison.
     pub similarity_score: f64,
+    /// Tier 1 diagnostics carried from the neighbor row. `None` for non-library
+    /// candidates (Last.fm, engine table) — they have no neighbor metadata.
+    /// Read by Tier 2 flag-gated steps; ignored when flags are off.
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub candidate_in_degree_percentile: Option<f64>,
+    #[serde(default)]
+    pub support_count: Option<i64>,
+    #[serde(default)]
+    pub primary_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +110,16 @@ pub async fn orchestrate_song(
     limit: usize,
     exclude_track_ids: &[i64],
 ) -> Result<RadioQueue> {
+    // Load Tier 2 feature flags. The kill-switch short-circuits to a path
+    // *equivalent* to the legacy pipeline; in this validation-gate stage there
+    // are no behavior changes after it yet, so the kill-switch is currently a
+    // no-op semantically. It exists so steps 7-9 can flip behaviors on without
+    // touching the entry-point logic, and so an operator can revert to legacy
+    // by flipping a single config row.
+    let flags = db
+        .with_conn(|conn| Ok(crate::services::radio_config::load_radio_flags(conn)))
+        .unwrap_or(crate::services::radio_config::RadioFlags::all_off());
+
     let exclude_set: HashSet<i64> = exclude_track_ids.iter().copied().collect();
     let id = seed_track_id;
     let seed_meta = db
@@ -163,6 +184,10 @@ pub async fn orchestrate_song(
                     source: RadioSource::Library,
                     reason,
                     similarity_score: n.similarity_score,
+                    confidence: Some(n.confidence),
+                    candidate_in_degree_percentile: Some(n.candidate_in_degree_percentile),
+                    support_count: Some(n.support_count),
+                    primary_reason: n.primary_reason,
                 }
             })
             .collect()
@@ -198,6 +223,10 @@ pub async fn orchestrate_song(
                     source: RadioSource::Lastfm,
                     reason: format!("Last.fm match {:.2}", hit.match_score),
                     similarity_score: hit.match_score.clamp(0.0, 1.0),
+                    confidence: None,
+                    candidate_in_degree_percentile: None,
+                    support_count: None,
+                    primary_reason: None,
                 })
                 .collect()
         } else {
@@ -224,6 +253,32 @@ pub async fn orchestrate_song(
     // ── Combine + blend ───────────────────────────────────────────────────────
     let mut combined = combine_with_dedup(library_results, lastfm_results, engine_results);
     let combined_count = combined.len();
+
+    // Source-score normalization: only runs when the flag is on. Library cosine
+    // scores live in a tighter range than Last.fm match scores, and engine
+    // similarity scores have their own scale — direct weighted blending was
+    // implicitly favoring whichever source had the widest dynamic range.
+    // Normalization is a hybrid of percentile-clipping and rank-norm so neither
+    // outliers nor near-degenerate distributions dominate.
+    if flags.score_normalization_enabled {
+        normalize_source_scores(&mut combined);
+    }
+
+    // Candidate-quality penalties (confidence + hub). These shape the score
+    // *before* taste/genre/affinity signals fire, treating "is this edge well-
+    // supported by the data?" and "is this candidate a hub appearing for every
+    // seed?" as more fundamental questions than "does the user prefer this
+    // artist?". Both are soft penalties — score multipliers, never hard drops —
+    // because the underlying confidence formula is heuristic and a hard floor
+    // could quietly remove cold-start library tracks.
+    let profile_for_penalties = crate::services::radio_config::RadioProfile::from_blend(blend);
+    let mut hub_penalty_total = 0.0_f64;
+    if flags.confidence_penalty_enabled {
+        apply_confidence_penalty(&mut combined, profile_for_penalties.min_confidence);
+    }
+    if flags.hub_penalty_enabled {
+        hub_penalty_total = apply_hub_penalty(&mut combined, profile_for_penalties.hub_penalty);
+    }
 
     // Snapshot pre-affinity scores so the reason-string suffix can
     // record the affinity multiplier per candidate. Keyed by
@@ -287,7 +342,25 @@ pub async fn orchestrate_song(
         &jaccard_by_key,
     );
 
-    let ordered = blend_interleave(combined, blend, limit);
+    // Final selection: either the constraint-based diversity re-ranker (when
+    // the flag is on) or the legacy weighted-interleave path. Both consume
+    // the same `combined` candidate list; only the slot-fill logic differs.
+    let mut rerank_counters = RerankCounters::default();
+    let ordered = if flags.diversity_rerank_enabled {
+        let primary_genres = primary_genres_for_candidates(db, &combined);
+        diversity_rerank(
+            combined,
+            &profile_for_penalties,
+            blend,
+            limit,
+            &primary_genres,
+            &taste.recent_track_ids,
+            flags.source_quota_bonus_enabled,
+            &mut rerank_counters,
+        )
+    } else {
+        blend_interleave(combined, blend, limit)
+    };
 
     tracing::info!(
         seed_track_id,
@@ -301,6 +374,64 @@ pub async fn orchestrate_song(
         final_count = ordered.len(),
         "orchestrate_song: candidate funnel"
     );
+
+    // Diagnostics: record what the new pipeline produced. Skipped when
+    // use_legacy_pipeline is true so legacy bypass leaves no trace, matching
+    // the plan's "kill-switch produces no row" contract. avg_confidence and
+    // avg_candidate_in_degree_pct sample only library candidates that carry
+    // those fields; non-library lanes contribute nothing to the average.
+    if !flags.use_legacy_pipeline {
+        let profile = crate::services::radio_config::RadioProfile::from_blend(blend);
+        let mut diag = crate::services::radio_config::RadioDiagnosticsRow {
+            seed_track_id: Some(seed_track_id),
+            profile_name: profile.name().to_string(),
+            creativity: profile.creativity,
+            queue_size: ordered.len() as i64,
+            target_library_weight: lib_w,
+            target_lastfm_weight: lfm_w,
+            target_engine_weight: eng_w,
+            hub_penalty_total,
+            same_artist_penalties: rerank_counters.same_artist_penalties,
+            same_album_penalties: rerank_counters.same_album_penalties,
+            genre_saturation_penalties: rerank_counters.genre_saturation_penalties,
+            repetition_skips: rerank_counters.repetition_skips,
+            penalty_relaxations: rerank_counters.penalty_relaxations,
+            flags,
+            ..Default::default()
+        };
+        let mut conf_sum = 0.0;
+        let mut conf_n = 0;
+        let mut hub_sum = 0.0;
+        let mut hub_n = 0;
+        for cand in &ordered {
+            diag.count_source(cand.source);
+            if let Some(c) = cand.confidence {
+                conf_sum += c;
+                conf_n += 1;
+            }
+            if let Some(h) = cand.candidate_in_degree_percentile {
+                hub_sum += h;
+                hub_n += 1;
+            }
+        }
+        diag.avg_confidence = if conf_n > 0 {
+            Some(conf_sum / conf_n as f64)
+        } else {
+            None
+        };
+        diag.avg_candidate_in_degree_pct = if hub_n > 0 {
+            Some(hub_sum / hub_n as f64)
+        } else {
+            None
+        };
+
+        if let Err(err) = db.with_conn(|conn| {
+            crate::services::radio_config::log_radio_diagnostics(conn, &diag)
+        }) {
+            // Diagnostics failures should never break a radio request — log and move on.
+            tracing::warn!(seed_track_id, error = %err, "failed to log radio diagnostics");
+        }
+    }
 
     Ok(RadioQueue {
         session_id: new_session_id(),
@@ -523,6 +654,10 @@ fn engine_results_from_track_similarity(
                 ts.genre_proximity
             ),
             similarity_score: ts.similarity_score,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
         })
         .take(target)
         .collect();
@@ -605,6 +740,127 @@ fn combine_with_dedup(
         }
     }
     out
+}
+
+// Per-source hybrid normalization. The two halves rein in different failure
+// modes: percentile-clipping (p10-p90) drops outliers without compressing the
+// bulk; rank-norm guarantees a fair mapping when the score distribution is
+// degenerate (all scores nearly equal, e.g. a Last.fm result with everything
+// at match=1.0). Half-and-half so neither dominates.
+//
+// Skipped when N < 5 because both halves get noisy: rank-norm of 4 elements
+// produces only 4 distinct values, and p10/p90 quantiles aren't meaningful.
+// In that regime, the legacy raw-score behavior is preferable.
+fn normalize_source_scores(candidates: &mut [RadioCandidate]) {
+    use std::collections::HashMap;
+    // Bucket candidates by source. We'll compute the normalization parameters
+    // per source then walk the candidates once more applying them.
+    let mut by_source: HashMap<RadioSource, Vec<usize>> = HashMap::new();
+    for (idx, c) in candidates.iter().enumerate() {
+        by_source.entry(c.source).or_default().push(idx);
+    }
+
+    for (_source, indices) in by_source.iter() {
+        let n = indices.len();
+        if n < 5 {
+            continue;
+        }
+        if n == 1 {
+            candidates[indices[0]].similarity_score = 1.0;
+            continue;
+        }
+        // Sort indices descending by raw score. Position-in-sorted-order maps
+        // to rank: best-ranked = 0 → rank_norm 1.0, worst-ranked = N-1 → 0.0.
+        let mut sorted = indices.clone();
+        sorted.sort_by(|&a, &b| {
+            candidates[b]
+                .similarity_score
+                .partial_cmp(&candidates[a].similarity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // p10 and p90 from the same set of raw scores (in any order).
+        let mut raw_scores: Vec<f64> =
+            indices.iter().map(|&i| candidates[i].similarity_score).collect();
+        raw_scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p10 = percentile(&raw_scores, 0.10);
+        let p90 = percentile(&raw_scores, 0.90);
+        let pct_range = p90 - p10;
+        let degenerate = pct_range < 1e-6;
+
+        let n_minus_1 = (n as f64) - 1.0;
+        for (sorted_idx, &cand_idx) in sorted.iter().enumerate() {
+            let rank_norm = 1.0 - (sorted_idx as f64) / n_minus_1;
+            let raw = candidates[cand_idx].similarity_score;
+            let pct_clipped = if degenerate {
+                0.5
+            } else {
+                ((raw - p10) / pct_range).clamp(0.0, 1.0)
+            };
+            candidates[cand_idx].similarity_score = 0.5 * pct_clipped + 0.5 * rank_norm;
+        }
+    }
+}
+
+// Soft confidence penalty: library candidates with confidence below the
+// threshold get a 0.75 score multiplier. Soft, not a hard drop, because the
+// confidence formula is heuristic and we don't want to silently lose cold-
+// start tracks (which floor at 0.25). Lastfm + engine candidates pass through
+// unchanged — they have no confidence value, and a None should not behave the
+// same as "0.0 confidence".
+fn apply_confidence_penalty(candidates: &mut [RadioCandidate], min_confidence: f64) {
+    const PENALTY_MULTIPLIER: f64 = 0.75;
+    for cand in candidates.iter_mut() {
+        if let Some(conf) = cand.confidence {
+            if conf < min_confidence {
+                cand.similarity_score *= PENALTY_MULTIPLIER;
+            }
+        }
+    }
+}
+
+// Hub penalty: tracks that appear as a neighbor for many seeds (high in-degree
+// percentile) get downweighted. Library candidates only — Lastfm + engine have
+// no in-degree data. Returns the cumulative penalty magnitude (sum of (1 -
+// multiplier) over all penalized candidates) for diagnostics.
+//
+// The 1/(1 + k*pct) shape gives a smooth slope: pct=0 → multiplier 1.0 (no
+// penalty), pct=1 → 1/(1+k). With hub_penalty=0.35 (Mixed default), top-hub
+// gets 0.74×, mid-hub (pct=0.5) gets 0.85×.
+fn apply_hub_penalty(candidates: &mut [RadioCandidate], hub_penalty: f64) -> f64 {
+    if hub_penalty <= 0.0 {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for cand in candidates.iter_mut() {
+        if let Some(pct) = cand.candidate_in_degree_percentile {
+            let multiplier = 1.0 / (1.0 + hub_penalty * pct);
+            total += 1.0 - multiplier;
+            cand.similarity_score *= multiplier;
+        }
+    }
+    total
+}
+
+// Linear-interpolated percentile of an already-ascending-sorted slice. q is in
+// [0, 1]. Avoids pulling in a full statistics dep just for two values.
+fn percentile(sorted_asc: &[f64], q: f64) -> f64 {
+    if sorted_asc.is_empty() {
+        return 0.0;
+    }
+    if sorted_asc.len() == 1 {
+        return sorted_asc[0];
+    }
+    let q = q.clamp(0.0, 1.0);
+    let pos = q * (sorted_asc.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        sorted_asc[lo]
+    } else {
+        let frac = pos - lo as f64;
+        sorted_asc[lo] * (1.0 - frac) + sorted_asc[hi] * frac
+    }
 }
 
 /// Returns the higher-priority numeric for tie-breaking. Order is
@@ -981,6 +1237,272 @@ fn blend_interleave(candidates: Vec<RadioCandidate>, blend: RadioBlend, limit: u
     out
 }
 
+// Counters tallied by diversity_rerank for the radio_diagnostics row. Each
+// counts how many *picks* triggered the corresponding penalty, not how many
+// candidates were considered — so a value of 3 means 3 of the final queue's
+// slots had to push through that penalty to be placed.
+#[derive(Debug, Clone, Default)]
+struct RerankCounters {
+    same_artist_penalties: i64,
+    same_album_penalties: i64,
+    genre_saturation_penalties: i64,
+    repetition_skips: i64,
+    penalty_relaxations: i64,
+}
+
+// Pulls one primary genre token per candidate track. "Primary" = the root of
+// the most-frequently-occurring genre path — `Electronic > House > Deep House`
+// becomes "electronic". Lowercased so saturation-counting is case-insensitive.
+fn primary_genres_for_candidates(
+    db: &Database,
+    candidates: &[RadioCandidate],
+) -> HashMap<i64, String> {
+    let ids: Vec<i64> = candidates
+        .iter()
+        .map(|c| c.track_id)
+        .filter(|id| *id > 0)
+        .collect();
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let paths_by_track = match db
+        .with_conn(move |conn| crate::db::queries::get_genres_for_tracks(conn, &ids))
+    {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::debug!(
+                "radio: primary-genre lookup failed ({err:#}); diversity rerank will skip genre saturation"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut out = HashMap::with_capacity(paths_by_track.len());
+    for (track_id, paths) in paths_by_track {
+        let mut counts: HashMap<String, i32> = HashMap::new();
+        for path in &paths {
+            let root = path
+                .split(" > ")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if !root.is_empty() {
+                *counts.entry(root).or_default() += 1;
+            }
+        }
+        if let Some((root, _)) = counts.into_iter().max_by_key(|(_, c)| *c) {
+            out.insert(track_id, root);
+        }
+    }
+    out
+}
+
+// Tracks which penalties fired during a single (candidate, queue) scoring.
+// Used by diversity_rerank to increment the diagnostic counters once per
+// final pick (not per scoring-attempt — we don't want relaxation passes to
+// double-count).
+#[derive(Debug, Default, Clone, Copy)]
+struct PenaltyHits {
+    artist: bool,
+    album: bool,
+    genre_saturation: bool,
+}
+
+// Score a single candidate against the running queue with optional penalty
+// dimensions disabled (for the relaxation pass). Returns (penalized_score,
+// hit_flags). Lower is worse; a negative score means every penalty bit landed.
+fn score_candidate_for_slot(
+    cand: &RadioCandidate,
+    queue: &[RadioCandidate],
+    profile: &crate::services::radio_config::RadioProfile,
+    primary_genres: &HashMap<i64, String>,
+    drop_artist: bool,
+    drop_album: bool,
+    drop_genre: bool,
+) -> (f64, PenaltyHits) {
+    let mut score = cand.similarity_score;
+    let mut hits = PenaltyHits::default();
+    let weight = profile.diversity_weight;
+
+    if !drop_artist && profile.same_artist_penalty > 0.0 && weight > 0.0 {
+        let lo = queue.len().saturating_sub(5);
+        if queue[lo..]
+            .iter()
+            .any(|q| q.artist_name.eq_ignore_ascii_case(&cand.artist_name))
+        {
+            score -= profile.same_artist_penalty * weight;
+            hits.artist = true;
+        }
+    }
+
+    if !drop_album && profile.same_album_penalty > 0.0 && weight > 0.0 {
+        if let Some(my_album) = cand.album_title.as_deref() {
+            let lo = queue.len().saturating_sub(8);
+            if queue[lo..].iter().any(|q| {
+                q.album_title
+                    .as_deref()
+                    .map(|a| a.eq_ignore_ascii_case(my_album))
+                    .unwrap_or(false)
+            }) {
+                score -= profile.same_album_penalty * weight;
+                hits.album = true;
+            }
+        }
+    }
+
+    if !drop_genre && profile.genre_saturation_penalty > 0.0 && weight > 0.0 {
+        if let Some(my_genre) = primary_genres.get(&cand.track_id) {
+            let lo = queue.len().saturating_sub(10);
+            let count = queue[lo..]
+                .iter()
+                .filter(|q| {
+                    primary_genres
+                        .get(&q.track_id)
+                        .map(|g| g == my_genre)
+                        .unwrap_or(false)
+                })
+                .count();
+            // Threshold: penalty fires only above 3 in the last 10. Saturating
+            // sub avoids underflow for counts < 3.
+            let excess = count.saturating_sub(3) as f64;
+            if excess > 0.0 {
+                score -= profile.genre_saturation_penalty * weight * excess;
+                hits.genre_saturation = true;
+            }
+        }
+    }
+
+    (score, hits)
+}
+
+// Constraint-based greedy slot-fill replacing blend_interleave. At each slot,
+// scores every eligible candidate against the queue-so-far, applies penalties,
+// optionally biases toward under-quota sources, and picks the argmax. If the
+// best score after penalties is non-positive, relaxes one dimension at a time
+// (genre → album → artist) until something positive emerges.
+//
+// Hard skips: tracks in `recent_track_ids` (skipped or recently-played) are
+// dropped from the eligible pool entirely. If the pool empties before the
+// queue fills, the function returns short — the caller logs `repetition_skips`
+// in diagnostics. No fallback to a wider candidate pool here; the orchestrator
+// upstream can decide whether that's acceptable.
+fn diversity_rerank(
+    candidates: Vec<RadioCandidate>,
+    profile: &crate::services::radio_config::RadioProfile,
+    blend: RadioBlend,
+    limit: usize,
+    primary_genres: &HashMap<i64, String>,
+    recent_track_ids: &HashSet<i64>,
+    apply_source_quota: bool,
+    counters: &mut RerankCounters,
+) -> Vec<RadioCandidate> {
+    let target_size = limit.min(candidates.len());
+    let mut available = candidates;
+    let mut queue: Vec<RadioCandidate> = Vec::with_capacity(target_size);
+    let mut source_counts: HashMap<RadioSource, i64> = HashMap::new();
+    let (lib_w, lfm_w, eng_w) = blend.weights();
+    const SOURCE_QUOTA_BONUS: f64 = 1.05;
+
+    while queue.len() < target_size && !available.is_empty() {
+        // Filter to eligible: not in recent_track_ids. Track-id 0 (lastfm rows)
+        // pass the filter regardless since they're not in the library set.
+        let eligible_indices: Vec<usize> = (0..available.len())
+            .filter(|&i| {
+                let c = &available[i];
+                c.track_id == 0 || !recent_track_ids.contains(&c.track_id)
+            })
+            .collect();
+        if eligible_indices.is_empty() {
+            counters.repetition_skips += (target_size - queue.len()) as i64;
+            break;
+        }
+
+        // Try with full penalties first; relax progressively if every score
+        // comes out non-positive.
+        let mut chosen: Option<(usize, PenaltyHits)> = None;
+        let mut relaxation_used = false;
+        let relaxation_steps = [
+            (false, false, false), // full penalties
+            (false, false, true),  // drop genre_saturation
+            (false, true, true),   // drop album too
+            (true, true, true),    // drop artist too — no penalties left
+        ];
+
+        for (step_idx, &(drop_artist, drop_album, drop_genre)) in
+            relaxation_steps.iter().enumerate()
+        {
+            let mut best: Option<(usize, f64, PenaltyHits)> = None;
+
+            for &idx in &eligible_indices {
+                let cand = &available[idx];
+                let (mut score, hits) = score_candidate_for_slot(
+                    cand,
+                    &queue,
+                    profile,
+                    primary_genres,
+                    drop_artist,
+                    drop_album,
+                    drop_genre,
+                );
+                if apply_source_quota {
+                    let target_for_source = match cand.source {
+                        RadioSource::Library => lib_w,
+                        RadioSource::Lastfm => lfm_w,
+                        RadioSource::Engine => eng_w,
+                    } * (queue.len() as f64);
+                    let actual = *source_counts.get(&cand.source).unwrap_or(&0) as f64;
+                    if actual < target_for_source {
+                        score *= SOURCE_QUOTA_BONUS;
+                    }
+                }
+                if best
+                    .map(|(_, b_score, _)| score > b_score)
+                    .unwrap_or(true)
+                {
+                    best = Some((idx, score, hits));
+                }
+            }
+
+            match best {
+                Some((idx, score, hits)) if score > 0.0 || step_idx == relaxation_steps.len() - 1 => {
+                    chosen = Some((idx, hits));
+                    if step_idx > 0 {
+                        relaxation_used = true;
+                    }
+                    break;
+                }
+                Some(_) => {
+                    // Score still <= 0; advance to next relaxation step.
+                    continue;
+                }
+                None => break,
+            }
+        }
+
+        let Some((pick_idx, hits)) = chosen else {
+            counters.repetition_skips += (target_size - queue.len()) as i64;
+            break;
+        };
+        if relaxation_used {
+            counters.penalty_relaxations += 1;
+        }
+        if hits.artist {
+            counters.same_artist_penalties += 1;
+        }
+        if hits.album {
+            counters.same_album_penalties += 1;
+        }
+        if hits.genre_saturation {
+            counters.genre_saturation_penalties += 1;
+        }
+        let cand = available.swap_remove(pick_idx);
+        *source_counts.entry(cand.source).or_default() += 1;
+        queue.push(cand);
+    }
+
+    queue
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,6 +1530,461 @@ mod tests {
         let a = normalize_for_dedup("Sigur  Rós", "Hoppípolla");
         let b = normalize_for_dedup("sigurrós", "hoppípolla");
         assert_eq!(a, b);
+    }
+
+    fn make_cand(source: RadioSource, idx: i64, score: f64) -> RadioCandidate {
+        RadioCandidate {
+            track_id: idx,
+            tidal_track_id: None,
+            title: format!("t{idx}"),
+            artist_name: format!("a{idx}"),
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library: source == RadioSource::Library,
+            source,
+            reason: String::new(),
+            similarity_score: score,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        }
+    }
+
+    #[test]
+    fn normalize_skips_when_source_has_fewer_than_five() {
+        // 3-candidate source: function should leave scores untouched.
+        let mut cands: Vec<RadioCandidate> = (0..3)
+            .map(|i| make_cand(RadioSource::Library, i, 0.10 + 0.20 * i as f64))
+            .collect();
+        let originals: Vec<f64> = cands.iter().map(|c| c.similarity_score).collect();
+        normalize_source_scores(&mut cands);
+        let after: Vec<f64> = cands.iter().map(|c| c.similarity_score).collect();
+        assert_eq!(originals, after);
+    }
+
+    #[test]
+    fn normalize_top_candidate_lands_at_one_after_blend() {
+        // Library has 5 distinct, well-spread scores. The top one's
+        // rank_norm = 1.0; with non-degenerate p10/p90 spread the
+        // top's score sits between (0.5*1.0 + 0.5*1.0) = 1.0.
+        let scores = [0.10, 0.30, 0.50, 0.70, 0.90];
+        let mut cands: Vec<RadioCandidate> = scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| make_cand(RadioSource::Library, i as i64, s))
+            .collect();
+        normalize_source_scores(&mut cands);
+        let top = cands.iter().fold(0.0_f64, |max, c| max.max(c.similarity_score));
+        assert!((top - 1.0).abs() < 1e-6, "top candidate normalized to {}", top);
+        let bottom = cands
+            .iter()
+            .fold(f64::INFINITY, |min, c| min.min(c.similarity_score));
+        assert!(bottom < 0.05, "bottom candidate normalized to {}", bottom);
+    }
+
+    #[test]
+    fn normalize_handles_degenerate_spread_via_neutral_pct() {
+        // All five Last.fm scores equal — p90 == p10, hits the guard.
+        // Resulting normalized scores should all be 0.5*0.5 + 0.5*rank_norm,
+        // which still produces distinct values from the rank component.
+        let mut cands: Vec<RadioCandidate> = (0..5)
+            .map(|i| make_cand(RadioSource::Lastfm, i, 1.0))
+            .collect();
+        normalize_source_scores(&mut cands);
+        // Top = 0.5*0.5 + 0.5*1.0 = 0.75. Bottom = 0.5*0.5 + 0.5*0.0 = 0.25.
+        let top = cands
+            .iter()
+            .fold(0.0_f64, |max, c| max.max(c.similarity_score));
+        let bottom = cands
+            .iter()
+            .fold(f64::INFINITY, |min, c| min.min(c.similarity_score));
+        assert!((top - 0.75).abs() < 1e-6, "top = {}", top);
+        assert!((bottom - 0.25).abs() < 1e-6, "bottom = {}", bottom);
+    }
+
+    #[test]
+    fn confidence_penalty_only_hits_library_below_threshold() {
+        let mut cands = vec![
+            // Below threshold — gets penalty
+            {
+                let mut c = make_cand(RadioSource::Library, 1, 1.0);
+                c.confidence = Some(0.30);
+                c
+            },
+            // At threshold — passes through (strict <, not <=)
+            {
+                let mut c = make_cand(RadioSource::Library, 2, 1.0);
+                c.confidence = Some(0.40);
+                c
+            },
+            // No confidence (lastfm) — passes through regardless
+            make_cand(RadioSource::Lastfm, 3, 1.0),
+        ];
+        apply_confidence_penalty(&mut cands, 0.40);
+        assert!((cands[0].similarity_score - 0.75).abs() < 1e-9);
+        assert!((cands[1].similarity_score - 1.0).abs() < 1e-9);
+        assert!((cands[2].similarity_score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hub_penalty_scales_with_percentile() {
+        let mut cands = vec![
+            // pct=0 → multiplier=1.0 (no penalty)
+            {
+                let mut c = make_cand(RadioSource::Library, 1, 1.0);
+                c.candidate_in_degree_percentile = Some(0.0);
+                c
+            },
+            // pct=1.0 → multiplier=1/(1+0.5) = 0.667
+            {
+                let mut c = make_cand(RadioSource::Library, 2, 1.0);
+                c.candidate_in_degree_percentile = Some(1.0);
+                c
+            },
+            // No percentile data → passes through
+            make_cand(RadioSource::Lastfm, 3, 1.0),
+        ];
+        let total = apply_hub_penalty(&mut cands, 0.5);
+        assert!((cands[0].similarity_score - 1.0).abs() < 1e-9);
+        let expected_top = 1.0 / 1.5;
+        assert!((cands[1].similarity_score - expected_top).abs() < 1e-9);
+        assert!((cands[2].similarity_score - 1.0).abs() < 1e-9);
+        let expected_total = (1.0 - 1.0) + (1.0 - expected_top);
+        assert!((total - expected_total).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hub_penalty_zero_is_noop() {
+        let mut cands = vec![{
+            let mut c = make_cand(RadioSource::Library, 1, 0.7);
+            c.candidate_in_degree_percentile = Some(0.9);
+            c
+        }];
+        let total = apply_hub_penalty(&mut cands, 0.0);
+        assert!((cands[0].similarity_score - 0.7).abs() < 1e-9);
+        assert_eq!(total, 0.0);
+    }
+
+    fn make_cand_full(
+        source: RadioSource,
+        track_id: i64,
+        artist: &str,
+        title: &str,
+        album: Option<&str>,
+        score: f64,
+    ) -> RadioCandidate {
+        RadioCandidate {
+            track_id,
+            tidal_track_id: None,
+            title: title.to_string(),
+            artist_name: artist.to_string(),
+            album_title: album.map(|s| s.to_string()),
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library: source == RadioSource::Library,
+            source,
+            reason: String::new(),
+            similarity_score: score,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        }
+    }
+
+    #[test]
+    fn diversity_rerank_spaces_same_artist() {
+        // Five candidates by "A" with high scores, then one each by B and C
+        // with lower scores. With same_artist_penalty active, the rerank
+        // should not place A back-to-back even though A has the best raw scores.
+        let cands = vec![
+            make_cand_full(RadioSource::Library, 1, "A", "t1", None, 0.95),
+            make_cand_full(RadioSource::Library, 2, "A", "t2", None, 0.94),
+            make_cand_full(RadioSource::Library, 3, "B", "t3", None, 0.50),
+            make_cand_full(RadioSource::Library, 4, "C", "t4", None, 0.40),
+        ];
+        let profile = crate::services::radio_config::RadioProfile {
+            same_artist_penalty: 0.5,
+            same_album_penalty: 0.0,
+            genre_saturation_penalty: 0.0,
+            diversity_weight: 1.0,
+            ..crate::services::radio_config::RadioProfile::mixed()
+        };
+        let mut counters = RerankCounters::default();
+        let queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Mixed,
+            4,
+            &HashMap::new(),
+            &HashSet::new(),
+            false,
+            &mut counters,
+        );
+        // First slot is a top-A. Second slot should be B (score 0.50) instead
+        // of A2 (0.94 - 0.5 = 0.44).
+        assert_eq!(queue[0].artist_name, "A");
+        assert_eq!(queue[1].artist_name, "B", "second slot should not be same artist");
+    }
+
+    #[test]
+    fn diversity_rerank_hard_skips_recent_tracks() {
+        let cands = vec![
+            make_cand_full(RadioSource::Library, 1, "A", "t1", None, 0.95),
+            make_cand_full(RadioSource::Library, 2, "B", "t2", None, 0.40),
+        ];
+        let mut recent = HashSet::new();
+        recent.insert(1);
+        let profile = crate::services::radio_config::RadioProfile::mixed();
+        let mut counters = RerankCounters::default();
+        let queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Mixed,
+            2,
+            &HashMap::new(),
+            &recent,
+            false,
+            &mut counters,
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].track_id, 2);
+        assert_eq!(counters.repetition_skips, 1);
+    }
+
+    #[test]
+    fn diversity_rerank_relaxes_when_all_scores_negative() {
+        // Only one candidate, an artist match against the queue, with a
+        // crushing penalty. Without relaxation it'd score below zero and never
+        // be picked. With relaxation, the penalty drops and it gets picked.
+        let mut counters = RerankCounters::default();
+        let queue_already = vec![make_cand_full(
+            RadioSource::Library,
+            10,
+            "Solo",
+            "first",
+            None,
+            0.5,
+        )];
+        let mut cands = vec![make_cand_full(
+            RadioSource::Library,
+            11,
+            "Solo",
+            "second",
+            None,
+            0.05,
+        )];
+        let profile = crate::services::radio_config::RadioProfile {
+            same_artist_penalty: 0.5,
+            diversity_weight: 1.0,
+            ..crate::services::radio_config::RadioProfile::mixed()
+        };
+        // Manually invoke the inner machinery: pre-populate queue, then call
+        // the rerank with a one-candidate pool. (Easier than coaxing the full
+        // function into emitting the same setup.)
+        cands.extend(queue_already.clone().into_iter());
+        let queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Mixed,
+            2,
+            &HashMap::new(),
+            &HashSet::new(),
+            false,
+            &mut counters,
+        );
+        // Both got placed; the second slot relaxed past the artist penalty.
+        assert_eq!(queue.len(), 2);
+        assert!(counters.penalty_relaxations >= 1);
+    }
+
+    #[test]
+    fn diversity_rerank_genre_saturation_steers_toward_jazz_when_electronic_floods() {
+        // 5 electronic candidates + 1 jazz. With genre threshold of 3 in last
+        // 10, the first 4 electronic slots fill freely (the 4th is the slot
+        // where excess just becomes 1). When the 5th slot evaluates, the
+        // remaining electronic would score below jazz, so jazz gets picked.
+        let cands: Vec<RadioCandidate> = (1..=6)
+            .map(|i| {
+                make_cand_full(
+                    RadioSource::Library,
+                    i,
+                    &format!("artist{i}"),
+                    &format!("t{i}"),
+                    None,
+                    0.5,
+                )
+            })
+            .collect();
+        let mut primary_genres = HashMap::new();
+        for i in 1..=5 {
+            primary_genres.insert(i, "electronic".to_string());
+        }
+        primary_genres.insert(6, "jazz".to_string());
+        let profile = crate::services::radio_config::RadioProfile {
+            genre_saturation_penalty: 1.0,
+            same_artist_penalty: 0.0,
+            same_album_penalty: 0.0,
+            diversity_weight: 1.0,
+            ..crate::services::radio_config::RadioProfile::mixed()
+        };
+        let mut counters = RerankCounters::default();
+        let queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Mixed,
+            5,
+            &primary_genres,
+            &HashSet::new(),
+            false,
+            &mut counters,
+        );
+        let jazz_index = queue.iter().position(|c| c.track_id == 6);
+        assert!(
+            jazz_index.is_some(),
+            "jazz candidate should be selected when electronic saturates"
+        );
+    }
+
+    #[test]
+    fn diversity_rerank_counter_fires_when_penalty_applies_to_chosen() {
+        // No alternative genre — every candidate is electronic. Once the queue
+        // has 4+ electronic, every remaining pick triggers the saturation
+        // penalty, so the counter increments on subsequent slots.
+        let cands: Vec<RadioCandidate> = (1..=6)
+            .map(|i| {
+                make_cand_full(
+                    RadioSource::Library,
+                    i,
+                    &format!("artist{i}"),
+                    &format!("t{i}"),
+                    None,
+                    0.5,
+                )
+            })
+            .collect();
+        let primary_genres: HashMap<i64, String> =
+            (1..=6).map(|i| (i, "electronic".to_string())).collect();
+        let profile = crate::services::radio_config::RadioProfile {
+            genre_saturation_penalty: 0.1,
+            same_artist_penalty: 0.0,
+            same_album_penalty: 0.0,
+            diversity_weight: 1.0,
+            ..crate::services::radio_config::RadioProfile::mixed()
+        };
+        let mut counters = RerankCounters::default();
+        let _queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Mixed,
+            6,
+            &primary_genres,
+            &HashSet::new(),
+            false,
+            &mut counters,
+        );
+        assert!(
+            counters.genre_saturation_penalties >= 2,
+            "expected ≥2 penalty applications by slot 6 with all-electronic, got {}",
+            counters.genre_saturation_penalties,
+        );
+    }
+
+    #[test]
+    fn diversity_rerank_source_quota_bonus_promotes_underrepresented_source() {
+        // 3 library candidates, 3 lastfm candidates, identical raw scores.
+        // With Familiar blend (lib=0.60, lfm=0.30, eng=0.10) and the bonus
+        // enabled, library should get 60% target → seed picks tilt library
+        // until the quota balances. Specifically: slot 2 has lib_count=1,
+        // target=0.60×1=0.60, actual=1 ≥ target → no bonus. lfm count=0,
+        // target=0.30×1=0.30, actual=0 < target → +5%. So slot 2 should be lfm.
+        let mut cands = Vec::new();
+        for i in 1..=3 {
+            cands.push(make_cand_full(
+                RadioSource::Library,
+                i,
+                &format!("la{i}"),
+                "t",
+                None,
+                0.5,
+            ));
+        }
+        for i in 100..=102 {
+            cands.push(make_cand_full(
+                RadioSource::Lastfm,
+                0,
+                &format!("fa{i}"),
+                "t",
+                None,
+                0.5,
+            ));
+        }
+        let profile = crate::services::radio_config::RadioProfile {
+            same_artist_penalty: 0.0,
+            same_album_penalty: 0.0,
+            genre_saturation_penalty: 0.0,
+            diversity_weight: 1.0,
+            ..crate::services::radio_config::RadioProfile::familiar()
+        };
+        let mut counters = RerankCounters::default();
+        let queue = diversity_rerank(
+            cands,
+            &profile,
+            RadioBlend::Familiar,
+            6,
+            &HashMap::new(),
+            &HashSet::new(),
+            true, // quota bonus on
+            &mut counters,
+        );
+        // Final mix should reflect blend weights: with 6 slots and
+        // (0.60, 0.30, 0.10), library ≈ 3-4 slots, lastfm ≈ 2 slots.
+        let lib_count = queue.iter().filter(|c| c.source == RadioSource::Library).count();
+        let lfm_count = queue.iter().filter(|c| c.source == RadioSource::Lastfm).count();
+        assert!(
+            (3..=4).contains(&lib_count),
+            "expected ~3-4 library slots with source quota, got {lib_count}",
+        );
+        assert!(
+            lfm_count >= 1,
+            "lastfm should be present in queue under quota bonus, got {lfm_count}",
+        );
+    }
+
+    #[test]
+    fn normalize_isolates_per_source() {
+        // Library scores are tightly clustered around 0.7, lastfm around 0.3.
+        // Without normalization, library's narrow band would lose to lastfm's
+        // wider one in any rank-mixing step. After normalization, each source's
+        // top should map to ~1.0 independent of the other.
+        let mut cands: Vec<RadioCandidate> = Vec::new();
+        let lib_scores = [0.65, 0.68, 0.70, 0.72, 0.75];
+        for (i, &s) in lib_scores.iter().enumerate() {
+            cands.push(make_cand(RadioSource::Library, 100 + i as i64, s));
+        }
+        let lfm_scores = [0.10, 0.20, 0.30, 0.40, 0.50];
+        for (i, &s) in lfm_scores.iter().enumerate() {
+            cands.push(make_cand(RadioSource::Lastfm, 200 + i as i64, s));
+        }
+
+        normalize_source_scores(&mut cands);
+
+        let lib_top = cands
+            .iter()
+            .filter(|c| c.source == RadioSource::Library)
+            .map(|c| c.similarity_score)
+            .fold(0.0_f64, f64::max);
+        let lfm_top = cands
+            .iter()
+            .filter(|c| c.source == RadioSource::Lastfm)
+            .map(|c| c.similarity_score)
+            .fold(0.0_f64, f64::max);
+        assert!((lib_top - 1.0).abs() < 1e-6);
+        assert!((lfm_top - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1072,6 +2049,10 @@ mod radio_phase2_tests {
             source,
             reason: format!("test {source:?}"),
             similarity_score: score,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
         }
     }
 
@@ -1972,6 +2953,10 @@ mod radio_diagnostic_harness {
                 source: RadioSource::Library,
                 reason: format!("library similarity {:.2}", n.similarity_score),
                 similarity_score: n.similarity_score,
+                confidence: Some(n.confidence),
+                candidate_in_degree_percentile: Some(n.candidate_in_degree_percentile),
+                support_count: Some(n.support_count),
+                primary_reason: n.primary_reason,
             })
             .collect()
         };
@@ -2000,6 +2985,10 @@ mod radio_diagnostic_harness {
                     source: RadioSource::Lastfm,
                     reason: format!("Last.fm match {:.2}", hit.match_score),
                     similarity_score: hit.match_score.clamp(0.0, 1.0),
+                    confidence: None,
+                    candidate_in_degree_percentile: None,
+                    support_count: None,
+                    primary_reason: None,
                 })
                 .collect()
         } else {

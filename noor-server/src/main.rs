@@ -48,6 +48,7 @@ pub struct AppState {
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
+    pub live_listen_session: Option<playback::player::LiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
     pub ephemeral_tidal_track: Option<db::models::Track>,
     /// Cancellation flag for in-flight TIDAL device code login polling.
@@ -284,6 +285,7 @@ async fn main() -> Result<()> {
         current_stream_display: None,
         pending_stream_display: None,
         active_listen_session: None,
+        live_listen_session: None,
         external_playback_track: None,
         ephemeral_tidal_track: None,
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),

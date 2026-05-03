@@ -58,9 +58,18 @@ pub struct TrainerInput {
     pub window_size: usize,
     pub min_count: usize,
     pub top_k: usize,
+    // When false, the audio-proxy stage is skipped entirely. Drives the Low
+    // intensity tier — the cold-start penalty is real but the wall-clock
+    // savings are too. Fusion still runs over whatever embeddings exist.
+    #[serde(default = "default_include_audio_proxy")]
+    pub include_audio_proxy: bool,
     pub tracks: Vec<EmbeddingTrackRow>,
     pub sequences: Vec<TrainerSequenceGroup>,
     pub heldout_pairs: Vec<(i64, i64)>,
+}
+
+fn default_include_audio_proxy() -> bool {
+    true
 }
 
 // ── Output types ──────────────────────────────────────────────────────────────
@@ -83,6 +92,15 @@ pub struct TrainerNeighbor {
     pub audio_score: f64,
     pub metadata_score: f64,
     pub reason_tags: Vec<String>,
+    pub primary_reason: Option<String>,
+    pub confidence: f64,
+    pub support_count: i64,
+    pub play_count_seed: i64,
+    pub play_count_candidate: i64,
+    // Filled in by a second pass (compute_in_degree) after neighbor lists are
+    // built — left at 0.0 / 0 in the inner per-pair loop.
+    pub candidate_in_degree: i64,
+    pub candidate_in_degree_percentile: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +110,30 @@ pub struct TrainerOutput {
     pub fusion_embeddings: HashMap<i64, Vec<f64>>,
     pub neighbors: Vec<TrainerNeighbor>,
     pub metrics: HashMap<String, f64>,
+    pub reason_hit_rates: Vec<ReasonHitRate>,
 }
+
+// Per-reason held-out hit-rate breakdown. `insufficient_data = true` means the
+// row is informational only — its hit_rate is too noisy to trust because we
+// haven't yet seen enough impressions of this reason to draw a conclusion.
+// Used downstream to surface which reason tags are predictive vs. cosmetic, so
+// the next iteration of the metadata bonus weights can be calibrated to data.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReasonHitRate {
+    pub primary_reason: String,
+    pub impressions: i64,
+    pub hits: i64,
+    pub hit_rate: f64,
+    pub mean_rank: Option<f64>,
+    pub mrr_contribution: f64,
+    pub insufficient_data: bool,
+}
+
+// Threshold below which a reason's hit_rate is considered too noisy to act on.
+// Picked empirically: at 20 impressions, a single hit/miss flip changes the
+// observed rate by 5 percentage points — fine-grained enough to compare reasons
+// directionally without rare tags ("punk_lullabye") looking miraculous off n=2.
+pub const MIN_REASON_IMPRESSIONS: i64 = 20;
 
 // ── Core math utilities ───────────────────────────────────────────────────────
 
@@ -180,7 +221,31 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
 
 // ── Stage 1: Behavioral embeddings (co-occurrence + hash projection) ──────────
 
-fn build_behavioral_embeddings(input: &TrainerInput) -> HashMap<i64, Vec<f64>> {
+// Helper: cheap atomic check used inside hot loops. Inlined call sites should
+// keep the branch predictor happy when cancel stays false (the common case).
+#[inline]
+fn cancel_requested(cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> bool {
+    cancel
+        .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+// Returns (behavioral embeddings, raw co-occurrence counts).
+// The count map is later used to derive support_count and confidence per edge —
+// the embedding alone discards this signal because hashed projection collapses
+// many co-occurrences into shared buckets.
+//
+// `cancel` is honored at two granularities: every 64 sequences during the
+// co-occurrence build, and every iteration of the parallel hash-projection
+// stage. When cancel fires the function returns partial state; the caller's
+// `bail_if_cancelled` is responsible for recognizing that and aborting.
+fn build_behavioral_embeddings(
+    input: &TrainerInput,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> (
+    HashMap<i64, Vec<f64>>,
+    HashMap<i64, HashMap<i64, i64>>,
+) {
     let dim = input.dimension;
     let window = input.window_size;
     let min_count = input.min_count;
@@ -201,10 +266,21 @@ fn build_behavioral_embeddings(input: &TrainerInput) -> HashMap<i64, Vec<f64>> {
         .collect();
 
     // Build co-occurrence scores: track_id -> { other_track_id -> weighted_score }
+    // Plus raw counts for support/confidence computation downstream.
     let mut co: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
-    for source in &input.sequences {
+    let mut co_count: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
+    let mut sequences_seen: usize = 0;
+    'outer: for source in &input.sequences {
         let weight = source.weight;
         for sequence in &source.sequences {
+            // Cancel check every 64 sequences keeps the atomic-load cost out
+            // of the inner triple-nested loop while still feeling responsive
+            // (a typical sequence is short enough that 64 of them process in
+            // well under a second).
+            sequences_seen += 1;
+            if sequences_seen.is_multiple_of(64) && cancel_requested(cancel) {
+                break 'outer;
+            }
             let filtered: Vec<i64> = sequence
                 .iter()
                 .copied()
@@ -216,6 +292,7 @@ fn build_behavioral_embeddings(input: &TrainerInput) -> HashMap<i64, Vec<f64>> {
                 let left = i.saturating_sub(window);
                 let right = (i + window + 1).min(len);
                 let entry = co.entry(track_id).or_default();
+                let count_entry = co_count.entry(track_id).or_default();
                 for j in left..right {
                     if i == j {
                         continue;
@@ -223,17 +300,28 @@ fn build_behavioral_embeddings(input: &TrainerInput) -> HashMap<i64, Vec<f64>> {
                     let other = filtered[j];
                     let distance = (i as isize - j as isize).unsigned_abs();
                     *entry.entry(other).or_default() += weight / (distance as f64).max(1.0);
+                    *count_entry.entry(other).or_default() += 1;
                 }
             }
         }
     }
 
-    // Hash-project each track's neighbor scores into a dense vector
-    co.into_par_iter()
+    if cancel_requested(cancel) {
+        return (HashMap::new(), co_count);
+    }
+
+    // Hash-project each track's neighbor scores into a dense vector. Cancel is
+    // checked once per outer track via `find_any` semantics — if any worker
+    // sees the flag, downstream `bail_if_cancelled` will catch it; this pass
+    // just stops accumulating work as fast as it can.
+    let embeddings = co
+        .into_par_iter()
         .map(|(track_id, neighbors)| {
+            if cancel_requested(cancel) {
+                return (track_id, Vec::new());
+            }
             let mut vec = vec![0.0f64; dim];
             for (&other, &score) in &neighbors {
-                // Use a deterministic hash for the (track_id, other) pair
                 let key = format!("{track_id}:{other}");
                 let digest = Sha256::digest(key.as_bytes());
                 let limit = usize::min(32, dim * 2);
@@ -245,18 +333,26 @@ fn build_behavioral_embeddings(input: &TrainerInput) -> HashMap<i64, Vec<f64>> {
             }
             (track_id, normalize(&vec).0)
         })
-        .collect()
+        .collect();
+    (embeddings, co_count)
 }
 
 // ── Stage 2: Audio proxy features (hashed metadata) ───────────────────────────
 
+// Parallel + cancel-aware. Each track's audio-proxy vector is independent, so
+// rayon parallelism is a free win that also makes the cancel check land
+// quickly (workers stop accepting new tracks the moment the flag flips).
 fn build_audio_proxy_features(
     tracks: &[EmbeddingTrackRow],
     dim: usize,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> HashMap<i64, TrainerAudioFeature> {
     tracks
-        .iter()
-        .map(|track| {
+        .par_iter()
+        .filter_map(|track| {
+            if cancel_requested(cancel) {
+                return None;
+            }
             let clip_duration = 20_000i64;
             let duration = track.duration_ms.unwrap_or(0);
             let clip_start = if duration >= 90_000 {
@@ -266,7 +362,7 @@ fn build_audio_proxy_features(
             };
             let tokens = metadata_tokens(track);
             let vec = hashed_projection(&tokens, dim);
-            (
+            Some((
                 track.track_id,
                 TrainerAudioFeature {
                     vector: vec,
@@ -274,7 +370,7 @@ fn build_audio_proxy_features(
                     clip_duration_ms: clip_duration,
                     feature_version: "metadata-audio-proxy-v1".to_string(),
                 },
-            )
+            ))
         })
         .collect()
 }
@@ -331,11 +427,20 @@ struct TrackMeta {
     camelot_key: Option<String>,
 }
 
+// Sigmoid: 1 / (1 + e^-x). Used to map log1p(support_count) into [0, 1] for
+// behavioral confidence; the -1.5 shift means an edge needs ~5 supporting events
+// before crossing 0.5 confidence, which matches the heuristic in the plan.
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
+}
+
 fn similarity_neighbors(
     tracks: &[EmbeddingTrackRow],
     behavioral: &HashMap<i64, Vec<f64>>,
     audio: &HashMap<i64, TrainerAudioFeature>,
     fusion: &HashMap<i64, Vec<f64>>,
+    co_count: &HashMap<i64, HashMap<i64, i64>>,
+    play_counts: &HashMap<i64, i64>,
     top_k: usize,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -426,8 +531,16 @@ fn similarity_neighbors(
             let vector = fusion_vecs[idx];
             let b_current = behavioral_vecs[idx];
             let a_current = audio_vecs[idx];
+            let seed_co_counts = co_count.get(&meta.track_id);
+            let play_count_seed = play_counts.get(&meta.track_id).copied().unwrap_or(0);
 
-            let mut scores: Vec<(i64, f64, f64, f64, f64, Vec<String>)> = Vec::new();
+            // Per-pair candidate row: includes the new fields except in-degree
+            // (filled in by the second pass). primary_reason here is the tag
+            // with the largest contribution to this edge's score.
+            #[allow(clippy::type_complexity)]
+            let mut scores: Vec<(
+                i64, f64, f64, f64, f64, Vec<String>, Option<String>, f64, i64, i64,
+            )> = Vec::new();
 
             for (other_idx, other_vector) in fusion_vecs.iter().enumerate() {
                 if idx == other_idx {
@@ -451,12 +564,18 @@ fn similarity_neighbors(
                 let other_meta = &track_metas[other_idx];
                 let mut metadata_score = 0.0f64;
                 let mut reason_tags = Vec::new();
+                // Track per-tag contribution magnitudes so we can pick a
+                // primary_reason as argmax. Behavioral/audio contributions are
+                // the cosine score itself (capped to a sensible band) so they
+                // can compete with metadata-bonus magnitudes on equal footing.
+                let mut contributions: Vec<(&'static str, f64)> = Vec::with_capacity(8);
 
                 // Artist affinity
                 if let (Some(cur), Some(oth)) = (&meta.artist_lower, &other_meta.artist_lower) {
                     if cur == oth {
                         metadata_score += 0.2;
                         reason_tags.push("artist_affinity".to_string());
+                        contributions.push(("artist_affinity", 0.2));
                     }
                 }
 
@@ -467,6 +586,7 @@ fn similarity_neighbors(
                 {
                     metadata_score += 0.18;
                     reason_tags.push("genre_branch".to_string());
+                    contributions.push(("genre_branch", 0.18));
                 }
 
                 // Album context
@@ -474,6 +594,7 @@ fn similarity_neighbors(
                     if cur == oth {
                         metadata_score += 0.12;
                         reason_tags.push("album_context".to_string());
+                        contributions.push(("album_context", 0.12));
                     }
                 }
 
@@ -483,9 +604,11 @@ fn similarity_neighbors(
                     if diff <= 3.0 {
                         metadata_score += 0.15;
                         reason_tags.push("bpm_match".to_string());
+                        contributions.push(("bpm_match", 0.15));
                     } else if diff <= 8.0 {
                         metadata_score += 0.08;
                         reason_tags.push("bpm_match".to_string());
+                        contributions.push(("bpm_match", 0.08));
                     }
                 }
 
@@ -494,6 +617,7 @@ fn similarity_neighbors(
                     if a_key == b_key {
                         metadata_score += 0.14;
                         reason_tags.push("harmonic_match".to_string());
+                        contributions.push(("harmonic_match", 0.14));
                     } else {
                         // Adjacent keys on the wheel (±1 number, same or relative suffix)
                         let parse_key = |k: &str| -> Option<(i64, String)> {
@@ -507,9 +631,11 @@ fn similarity_neighbors(
                             if wheel_diff <= 1 && asuf == bsuf {
                                 metadata_score += 0.10;
                                 reason_tags.push("harmonic_match".to_string());
+                                contributions.push(("harmonic_match", 0.10));
                             } else if an == bn && asuf != bsuf {
                                 metadata_score += 0.08;
                                 reason_tags.push("harmonic_match".to_string());
+                                contributions.push(("harmonic_match", 0.08));
                             }
                         }
                     }
@@ -521,19 +647,58 @@ fn similarity_neighbors(
                     if diff <= 0.1 {
                         metadata_score += 0.08;
                         reason_tags.push("energy_match".to_string());
+                        contributions.push(("energy_match", 0.08));
                     }
                 }
 
                 if behavioral_score > 0.35 {
                     reason_tags.push("behavioral".to_string());
+                    contributions.push(("behavioral", behavioral_score));
                 }
                 if audio_score > 0.35 {
                     reason_tags.push("audio_texture".to_string());
+                    contributions.push(("audio_texture", audio_score));
                 }
 
                 let total_score = score + metadata_score;
                 reason_tags.sort();
                 reason_tags.dedup();
+
+                let primary_reason = contributions
+                    .iter()
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(k, _)| k.to_string());
+
+                let support_count = seed_co_counts
+                    .and_then(|m| m.get(&other_meta.track_id))
+                    .copied()
+                    .unwrap_or(0);
+
+                // Confidence: behavioral evidence dominates, with metadata-only
+                // edges getting a 0.25 floor and fused edges floored at 0.4.
+                // The sigmoid+log1p shape means support=0 → 0, support=1 → 0.27,
+                // support=5 → 0.51, support=20 → 0.78, support=100 → 0.95.
+                let behavioral_confidence = if support_count > 0 {
+                    sigmoid((support_count as f64).ln_1p() - 1.5).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let has_audio = !a_current.is_empty()
+                    && !a_other.is_empty()
+                    && audio_score > 0.0;
+                let confidence = if support_count > 0 && has_audio {
+                    behavioral_confidence.max(0.4)
+                } else if support_count > 0 {
+                    behavioral_confidence
+                } else {
+                    0.25
+                };
+
+                let play_count_candidate = play_counts
+                    .get(&other_meta.track_id)
+                    .copied()
+                    .unwrap_or(0);
+
                 scores.push((
                     other_meta.track_id,
                     total_score,
@@ -541,6 +706,10 @@ fn similarity_neighbors(
                     audio_score,
                     metadata_score,
                     reason_tags,
+                    primary_reason,
+                    confidence,
+                    support_count,
+                    play_count_candidate,
                 ));
             }
 
@@ -549,21 +718,87 @@ fn similarity_neighbors(
                 .into_iter()
                 .take(top_k)
                 .enumerate()
-                .map(|(rank, (oid, total_score, bs, as_, ms, tags))| TrainerNeighbor {
-                    track_id: meta.track_id,
-                    neighbor_track_id: oid,
-                    rank: (rank + 1) as i32,
-                    score: total_score,
-                    behavioral_score: bs,
-                    audio_score: as_,
-                    metadata_score: ms,
-                    reason_tags: tags,
-                })
+                .map(
+                    |(
+                        rank,
+                        (
+                            oid,
+                            total_score,
+                            bs,
+                            as_,
+                            ms,
+                            tags,
+                            primary,
+                            conf,
+                            support,
+                            play_count_candidate,
+                        ),
+                    )| TrainerNeighbor {
+                        track_id: meta.track_id,
+                        neighbor_track_id: oid,
+                        rank: (rank + 1) as i32,
+                        score: total_score,
+                        behavioral_score: bs,
+                        audio_score: as_,
+                        metadata_score: ms,
+                        reason_tags: tags,
+                        primary_reason: primary,
+                        confidence: conf,
+                        support_count: support,
+                        play_count_seed,
+                        play_count_candidate,
+                        candidate_in_degree: 0,
+                        candidate_in_degree_percentile: 0.0,
+                    },
+                )
                 .collect::<Vec<_>>()
         })
         .collect();
 
     neighbor_chunks.into_iter().flatten().collect()
+}
+
+// Second pass over the assembled neighbor graph: counts how many seeds list
+// each track as a neighbor (its in-degree) and computes percentile with average
+// rank for ties — a track tied with k others all share the mean of their would-be
+// positions, so percentile tuning in the radio re-ranker is stable across libraries
+// of different sizes. Tracks never appearing as a neighbor are absent from
+// `neighbors` entirely, so they're ignored here; they keep the zero defaults.
+fn compute_in_degree(neighbors: &mut [TrainerNeighbor]) {
+    if neighbors.is_empty() {
+        return;
+    }
+    let mut counts: HashMap<i64, i64> = HashMap::new();
+    for n in neighbors.iter() {
+        *counts.entry(n.neighbor_track_id).or_default() += 1;
+    }
+
+    let mut ordered: Vec<(i64, i64)> = counts.iter().map(|(&id, &c)| (id, c)).collect();
+    ordered.sort_by_key(|&(_, c)| c);
+    let n = ordered.len() as f64;
+
+    let mut percentile_map: HashMap<i64, f64> = HashMap::new();
+    let mut i = 0;
+    while i < ordered.len() {
+        let cur_count = ordered[i].1;
+        let mut j = i;
+        while j < ordered.len() && ordered[j].1 == cur_count {
+            j += 1;
+        }
+        // Average rank over the tied group [i..j) using 0-indexed positions.
+        let avg_rank = (i + j - 1) as f64 / 2.0;
+        let pct = if n > 0.0 { avg_rank / n } else { 0.0 };
+        for k in i..j {
+            percentile_map.insert(ordered[k].0, pct);
+        }
+        i = j;
+    }
+
+    for nb in neighbors.iter_mut() {
+        let id = nb.neighbor_track_id;
+        nb.candidate_in_degree = counts.get(&id).copied().unwrap_or(0);
+        nb.candidate_in_degree_percentile = percentile_map.get(&id).copied().unwrap_or(0.0);
+    }
 }
 
 // ── Stage 5: Evaluation ───────────────────────────────────────────────────────
@@ -613,6 +848,80 @@ fn evaluate(
     ])
 }
 
+// Buckets each top-20 prediction by its primary_reason and tracks impressions /
+// hits / mean rank / MRR per bucket. The output tells you, e.g., "of all the
+// edges we surfaced because of `harmonic_match`, 6% of them were the actual
+// next track in held-out data" — directly answering whether the hardcoded
+// metadata bonus weights match their actual predictive value.
+fn compute_reason_hit_rates(
+    neighbors: &[TrainerNeighbor],
+    heldout_pairs: &[(i64, i64)],
+) -> Vec<ReasonHitRate> {
+    if heldout_pairs.is_empty() || neighbors.is_empty() {
+        return Vec::new();
+    }
+
+    // Group neighbors by seed, in the order the trainer emitted them.
+    // similarity_neighbors sorts by score descending and assigns rank, then
+    // flatten preserves that order — so position-in-vec equals (rank - 1).
+    let mut grouped: HashMap<i64, Vec<(i64, Option<String>)>> = HashMap::new();
+    for n in neighbors {
+        grouped
+            .entry(n.track_id)
+            .or_default()
+            .push((n.neighbor_track_id, n.primary_reason.clone()));
+    }
+
+    // (impressions, hits, rank_sum_for_hits, mrr_contribution)
+    let mut acc: HashMap<String, (i64, i64, f64, f64)> = HashMap::new();
+
+    for &(source, target) in heldout_pairs {
+        let Some(ranked) = grouped.get(&source) else { continue; };
+        for (idx, (nid, primary)) in ranked.iter().take(20).enumerate() {
+            let key = primary
+                .clone()
+                .unwrap_or_else(|| "unspecified".to_string());
+            let entry = acc.entry(key).or_insert((0, 0, 0.0, 0.0));
+            entry.0 += 1;
+            if *nid == target {
+                entry.1 += 1;
+                let rank = (idx + 1) as f64;
+                entry.2 += rank;
+                entry.3 += 1.0 / rank;
+            }
+        }
+    }
+
+    let mut out: Vec<ReasonHitRate> = acc
+        .into_iter()
+        .map(|(reason, (impressions, hits, rank_sum, mrr))| {
+            let hit_rate = if impressions > 0 {
+                hits as f64 / impressions as f64
+            } else {
+                0.0
+            };
+            let mean_rank = if hits > 0 {
+                Some(rank_sum / hits as f64)
+            } else {
+                None
+            };
+            ReasonHitRate {
+                primary_reason: reason,
+                impressions,
+                hits,
+                hit_rate,
+                mean_rank,
+                mrr_contribution: mrr,
+                insufficient_data: impressions < MIN_REASON_IMPRESSIONS,
+            }
+        })
+        .collect();
+    // Stable, descending by impressions — most-evidence reasons surface first
+    // when an operator skims the table.
+    out.sort_by(|a, b| b.impressions.cmp(&a.impressions));
+    out
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /// Run the full discovery training pipeline in Rust.
@@ -636,8 +945,18 @@ pub fn run_discovery_training(
         ));
     }
 
-    // Stage 1
-    let behavioral = build_behavioral_embeddings(&input);
+    // Stage 1 — also returns raw co-occurrence counts for support/confidence.
+    let (behavioral, co_count) = build_behavioral_embeddings(&input, cancel);
+    if cancel_requested(cancel) {
+        return TrainerOutput {
+            behavioral_embeddings: HashMap::new(),
+            audio_features: HashMap::new(),
+            fusion_embeddings: HashMap::new(),
+            neighbors: Vec::new(),
+            metrics: HashMap::new(),
+            reason_hit_rates: Vec::new(),
+        };
+    }
 
     if let Some(tx) = progress_tx {
         let _ = tx.send(TrainingProgressUpdate::stage_only(
@@ -647,8 +966,31 @@ pub fn run_discovery_training(
         ));
     }
 
-    // Stage 2
-    let audio = build_audio_proxy_features(&tracks, dim);
+    // Stage 2 — skipped entirely on Low intensity. Fuse_embeddings handles an
+    // empty audio map by falling back to behavioral-only vectors, so the
+    // pipeline still produces a graph; cold tracks just have less to anchor on.
+    let audio = if input.include_audio_proxy {
+        build_audio_proxy_features(&tracks, dim, cancel)
+    } else {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(TrainingProgressUpdate::stage_only(
+                "audio",
+                "Skipping audio-proxy stage (Low intensity)",
+                0.55,
+            ));
+        }
+        HashMap::new()
+    };
+    if cancel_requested(cancel) {
+        return TrainerOutput {
+            behavioral_embeddings: behavioral,
+            audio_features: audio,
+            fusion_embeddings: HashMap::new(),
+            neighbors: Vec::new(),
+            metrics: HashMap::new(),
+            reason_hit_rates: Vec::new(),
+        };
+    }
 
     if let Some(tx) = progress_tx {
         let _ = tx.send(TrainingProgressUpdate::stage_only(
@@ -669,11 +1011,39 @@ pub fn run_discovery_training(
         ));
     }
 
-    // Stage 4 — the bottleneck, now parallelized
-    let neighbors = similarity_neighbors(&tracks, &behavioral, &audio, &fusion, top_k, progress_tx, cancel);
+    let play_counts: HashMap<i64, i64> = tracks
+        .iter()
+        .map(|t| (t.track_id, t.play_count as i64))
+        .collect();
 
-    // Stage 5
+    // Stage 4 — the bottleneck, now parallelized
+    let mut neighbors = similarity_neighbors(
+        &tracks,
+        &behavioral,
+        &audio,
+        &fusion,
+        &co_count,
+        &play_counts,
+        top_k,
+        progress_tx,
+        cancel,
+    );
+
+    // Stage 4b — second pass: hub-detection. Counts how many seeds each
+    // candidate appears for, then assigns percentile (avg-rank for ties) so the
+    // radio re-ranker can apply a hub penalty in [0, 1] regardless of library size.
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(TrainingProgressUpdate::stage_only(
+            "in_degree",
+            &format!("Computing in-degree for {} edges", neighbors.len()),
+            0.95,
+        ));
+    }
+    compute_in_degree(&mut neighbors);
+
+    // Stage 5 — recall/MRR overall, plus per-reason hit-rate breakdown.
     let mut metrics = evaluate(&neighbors, &input.heldout_pairs);
+    let reason_hit_rates = compute_reason_hit_rates(&neighbors, &input.heldout_pairs);
 
     let playable = tracks.len() as f64;
     let embedded = fusion.len() as f64;
@@ -717,6 +1087,7 @@ pub fn run_discovery_training(
         fusion_embeddings: fusion,
         neighbors,
         metrics,
+        reason_hit_rates,
     }
 }
 
@@ -782,12 +1153,16 @@ mod tests {
     fn similarity_neighbors_aborts_when_cancel_flag_set() {
         let (tracks, behavioral, audio, fusion) = make_test_input(200, 32);
         let cancel = Arc::new(AtomicBool::new(true));
+        let co_count = HashMap::new();
+        let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
             &tracks,
             &behavioral,
             &audio,
             &fusion,
+            &co_count,
+            &play_counts,
             10,
             None,
             Some(&cancel),
@@ -804,12 +1179,16 @@ mod tests {
     fn similarity_neighbors_runs_normally_without_cancel() {
         let (tracks, behavioral, audio, fusion) = make_test_input(50, 32);
         let cancel = Arc::new(AtomicBool::new(false));
+        let co_count = HashMap::new();
+        let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
             &tracks,
             &behavioral,
             &audio,
             &fusion,
+            &co_count,
+            &play_counts,
             10,
             None,
             Some(&cancel),
@@ -817,5 +1196,177 @@ mod tests {
 
         // 50 tracks × top_k=10, all vectors identical → every track has 10 neighbors
         assert_eq!(result.len(), 500, "expected 50*10 = 500 neighbor rows");
+    }
+
+    #[test]
+    fn confidence_floors_for_metadata_only_edges() {
+        // No co_count entries → every edge is "pure metadata", confidence = 0.25.
+        let (tracks, behavioral, audio, fusion) = make_test_input(20, 16);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let co_count = HashMap::new();
+        let play_counts = HashMap::new();
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &co_count,
+            &play_counts,
+            5,
+            None,
+            Some(&cancel),
+        );
+
+        assert!(!result.is_empty());
+        assert!(
+            result.iter().all(|n| (n.confidence - 0.25).abs() < 1e-6),
+            "all metadata-only edges should sit at the 0.25 confidence floor",
+        );
+        assert!(result.iter().all(|n| n.support_count == 0));
+    }
+
+    #[test]
+    fn confidence_grows_with_support() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(10, 16);
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Edge from track 0 → track 1 has 50 supporting events; everyone else has 0.
+        let mut co_count: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
+        co_count.entry(tracks[0].track_id).or_default().insert(tracks[1].track_id, 50);
+        let play_counts = HashMap::new();
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &co_count,
+            &play_counts,
+            5,
+            None,
+            Some(&cancel),
+        );
+
+        let strongly_supported = result
+            .iter()
+            .find(|n| n.track_id == tracks[0].track_id && n.neighbor_track_id == tracks[1].track_id)
+            .expect("edge present");
+        assert!(
+            strongly_supported.confidence > 0.7,
+            "expected strong-evidence edge confidence > 0.7, got {}",
+            strongly_supported.confidence,
+        );
+        assert_eq!(strongly_supported.support_count, 50);
+    }
+
+    #[test]
+    fn reason_hit_rates_bucket_by_primary_reason() {
+        let mk = |seed: i64, neighbor: i64, primary: &str| TrainerNeighbor {
+            track_id: seed,
+            neighbor_track_id: neighbor,
+            rank: 1,
+            score: 0.0,
+            behavioral_score: 0.0,
+            audio_score: 0.0,
+            metadata_score: 0.0,
+            reason_tags: vec![primary.to_string()],
+            primary_reason: Some(primary.to_string()),
+            confidence: 0.0,
+            support_count: 0,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: 0.0,
+        };
+        // Seed 1 has neighbors [10 behavioral, 20 harmonic_match, 30 behavioral].
+        // Held-out target for seed 1 is 10 → behavioral hits, harmonic misses.
+        let neighbors = vec![
+            mk(1, 10, "behavioral"),
+            mk(1, 20, "harmonic_match"),
+            mk(1, 30, "behavioral"),
+        ];
+        let heldout = vec![(1, 10)];
+        let rates = compute_reason_hit_rates(&neighbors, &heldout);
+
+        let beh = rates.iter().find(|r| r.primary_reason == "behavioral").unwrap();
+        assert_eq!(beh.impressions, 2);
+        assert_eq!(beh.hits, 1);
+        assert!((beh.hit_rate - 0.5).abs() < 1e-9);
+
+        let harm = rates.iter().find(|r| r.primary_reason == "harmonic_match").unwrap();
+        assert_eq!(harm.impressions, 1);
+        assert_eq!(harm.hits, 0);
+        assert_eq!(harm.hit_rate, 0.0);
+    }
+
+    #[test]
+    fn reason_hit_rates_flag_insufficient_data() {
+        // 1 impression < MIN_REASON_IMPRESSIONS (20) → insufficient_data = true.
+        let mk = |seed: i64, neighbor: i64, primary: &str| TrainerNeighbor {
+            track_id: seed,
+            neighbor_track_id: neighbor,
+            rank: 1,
+            score: 0.0,
+            behavioral_score: 0.0,
+            audio_score: 0.0,
+            metadata_score: 0.0,
+            reason_tags: vec![primary.to_string()],
+            primary_reason: Some(primary.to_string()),
+            confidence: 0.0,
+            support_count: 0,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: 0.0,
+        };
+        let neighbors = vec![mk(1, 10, "rare_tag")];
+        let heldout = vec![(1, 10)];
+        let rates = compute_reason_hit_rates(&neighbors, &heldout);
+        assert!(rates[0].insufficient_data);
+    }
+
+    #[test]
+    fn compute_in_degree_uses_average_rank_for_ties() {
+        // Hand-rolled neighbor list: candidate A has in-degree 1, B has 1, C has 3.
+        let mk = |track_id: i64, neighbor_id: i64| TrainerNeighbor {
+            track_id,
+            neighbor_track_id: neighbor_id,
+            rank: 1,
+            score: 0.0,
+            behavioral_score: 0.0,
+            audio_score: 0.0,
+            metadata_score: 0.0,
+            reason_tags: vec![],
+            primary_reason: None,
+            confidence: 0.0,
+            support_count: 0,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: 0.0,
+        };
+        let mut neighbors = vec![
+            mk(1, 100), // A
+            mk(2, 200), // B
+            mk(3, 300), // C
+            mk(4, 300), // C
+            mk(5, 300), // C
+        ];
+        compute_in_degree(&mut neighbors);
+
+        let pct_a = neighbors.iter().find(|n| n.neighbor_track_id == 100).unwrap().candidate_in_degree_percentile;
+        let pct_b = neighbors.iter().find(|n| n.neighbor_track_id == 200).unwrap().candidate_in_degree_percentile;
+        let pct_c = neighbors.iter().find(|n| n.neighbor_track_id == 300).unwrap().candidate_in_degree_percentile;
+
+        // 3 distinct tracks, ranks: A,B share count 1 (avg 0.5), C alone at count 3 (rank 2).
+        // percentile = avg_rank / N where N=3.
+        assert!((pct_a - 0.5 / 3.0).abs() < 1e-9, "A pct = {}", pct_a);
+        assert!((pct_b - 0.5 / 3.0).abs() < 1e-9, "B pct = {}", pct_b);
+        assert!((pct_c - 2.0 / 3.0).abs() < 1e-9, "C pct = {}", pct_c);
+
+        let in_a = neighbors.iter().find(|n| n.neighbor_track_id == 100).unwrap().candidate_in_degree;
+        let in_c = neighbors.iter().find(|n| n.neighbor_track_id == 300).unwrap().candidate_in_degree;
+        assert_eq!(in_a, 1);
+        assert_eq!(in_c, 3);
     }
 }

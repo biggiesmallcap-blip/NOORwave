@@ -23,6 +23,12 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_019,
     MIGRATION_020,
     MIGRATION_021,
+    MIGRATION_022,
+    MIGRATION_023,
+    MIGRATION_024,
+    MIGRATION_025,
+    MIGRATION_026,
+    MIGRATION_027,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -624,6 +630,123 @@ DROP TABLE _queue_v019;
 
 CREATE INDEX idx_queue_position ON queue(position);
 CREATE INDEX idx_queue_pending  ON queue(track_id, pending_at);
+"#;
+
+// Discovery + Radio Tier 1: confidence, support, in-degree, play-count columns on neighbor edges.
+// Defaults are 0/0.0 so existing rows remain valid until next training run repopulates them.
+const MIGRATION_022: &str = r#"
+ALTER TABLE track_neighbors ADD COLUMN confidence REAL NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN support_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN candidate_in_degree INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN candidate_in_degree_percentile REAL NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN play_count_seed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN play_count_candidate INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_candidate_in_degree_pct
+    ON track_neighbors(candidate_in_degree_percentile);
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_confidence
+    ON track_neighbors(confidence);
+"#;
+
+// Discovery + Radio Tier 1: session/source/position/transition context on listen_history.
+// All columns nullable: backfill populates historical rows; live writes populate new rows.
+const MIGRATION_023: &str = r#"
+ALTER TABLE listen_history ADD COLUMN session_id TEXT;
+ALTER TABLE listen_history ADD COLUMN source TEXT;
+ALTER TABLE listen_history ADD COLUMN position_in_session INTEGER;
+ALTER TABLE listen_history ADD COLUMN transition_from_track_id INTEGER;
+
+CREATE INDEX IF NOT EXISTS idx_listen_history_session_position
+    ON listen_history(session_id, position_in_session);
+CREATE INDEX IF NOT EXISTS idx_listen_history_source_started
+    ON listen_history(source, started_at);
+CREATE INDEX IF NOT EXISTS idx_listen_history_transition_from
+    ON listen_history(transition_from_track_id);
+"#;
+
+// Discovery + Radio Tier 1: primary_reason on track_neighbors (argmax of reason_json weights).
+// Null until the next training run promotes existing reason_json arrays.
+const MIGRATION_024: &str = r#"
+ALTER TABLE track_neighbors ADD COLUMN primary_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_track_neighbors_primary_reason
+    ON track_neighbors(primary_reason);
+"#;
+
+// Discovery + Radio Tier 2: radio_diagnostics table + initial feature-flag values.
+// All five behavior flags + the kill-switch default to "false". orchestrate_song
+// runs the new pipeline with all behavior gated off, producing legacy-equivalent output
+// until an operator flips a flag in server_config.
+const MIGRATION_025: &str = r#"
+CREATE TABLE IF NOT EXISTS radio_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    seed_track_id INTEGER,
+    profile_name TEXT NOT NULL,
+    creativity REAL NOT NULL,
+    queue_size INTEGER NOT NULL,
+    target_library_weight REAL,
+    target_lastfm_weight REAL,
+    target_engine_weight REAL,
+    actual_library_count INTEGER NOT NULL DEFAULT 0,
+    actual_lastfm_count INTEGER NOT NULL DEFAULT 0,
+    actual_engine_count INTEGER NOT NULL DEFAULT 0,
+    avg_confidence REAL,
+    avg_candidate_in_degree_pct REAL,
+    same_artist_penalties INTEGER NOT NULL DEFAULT 0,
+    same_album_penalties INTEGER NOT NULL DEFAULT 0,
+    genre_saturation_penalties INTEGER NOT NULL DEFAULT 0,
+    repetition_skips INTEGER NOT NULL DEFAULT 0,
+    penalty_relaxations INTEGER NOT NULL DEFAULT 0,
+    hub_penalty_total REAL NOT NULL DEFAULT 0,
+    normalization_enabled INTEGER NOT NULL,
+    confidence_penalty_enabled INTEGER NOT NULL,
+    hub_penalty_enabled INTEGER NOT NULL,
+    diversity_rerank_enabled INTEGER NOT NULL,
+    source_quota_bonus_enabled INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_diagnostics_created_at
+    ON radio_diagnostics(created_at);
+CREATE INDEX IF NOT EXISTS idx_radio_diagnostics_seed
+    ON radio_diagnostics(seed_track_id);
+
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_use_legacy_pipeline', 'false');
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_score_normalization_enabled', 'false');
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_confidence_penalty_enabled', 'false');
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_hub_penalty_enabled', 'false');
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_diversity_rerank_enabled', 'false');
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('radio_source_quota_bonus_enabled', 'false');
+"#;
+
+// Discovery training intensity. Three preset tiers + an explicit kill-switch
+// for the audio-proxy stage. The intensity key drives trainer params at
+// runtime; the audio-proxy flag lets `low` skip a stage entirely without
+// requiring a separate config row read.
+const MIGRATION_027: &str = r#"
+INSERT OR IGNORE INTO server_config (key, value) VALUES ('discovery_intensity', 'medium');
+"#;
+
+// Discovery + Radio Tier 1: per-reason held-out hit-rate diagnostics.
+// One row per (model_id, primary_reason) emitted by the trainer's eval block.
+// Tags below the impressions threshold are still recorded so we can see the
+// "insufficient data" tail rather than only the headline numbers.
+const MIGRATION_026: &str = r#"
+CREATE TABLE IF NOT EXISTS discovery_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    primary_reason TEXT NOT NULL,
+    impressions INTEGER NOT NULL,
+    hits INTEGER NOT NULL,
+    hit_rate REAL NOT NULL,
+    mean_rank REAL,
+    mrr_contribution REAL NOT NULL DEFAULT 0,
+    insufficient_data INTEGER NOT NULL DEFAULT 0,
+    computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_diagnostics_model
+    ON discovery_diagnostics(model_id, primary_reason);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

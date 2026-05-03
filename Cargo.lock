@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "noor-app"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "open",
  "reqwest 0.12.28",

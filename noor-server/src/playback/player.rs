@@ -59,7 +59,27 @@ pub struct ActiveListenSession {
     pub started_at: DateTime<Utc>,
     pub accumulated_ms: i64,
     pub resumed_at: Option<DateTime<Utc>>,
+    // Multi-track session context, captured at session start so it survives flush.
+    pub session_id: String,
+    pub source: crate::db::models::ListenSource,
+    pub position_in_session: i32,
+    pub transition_from_track_id: Option<i64>,
 }
+
+// Tracks the rolling state of the user's current listening session across multiple
+// tracks. A session continues across tracks if the gap between flush time and the
+// next track's start is under SESSION_GAP_THRESHOLD; otherwise a new session_id
+// is minted. Lives on AppState; updated in flush_active_listen_session_locked
+// after every successful listen_history write.
+#[derive(Debug, Clone)]
+pub struct LiveListenSession {
+    pub session_id: String,
+    pub last_track_id: i64,
+    pub last_finished_at: DateTime<Utc>,
+    pub position: i32,
+}
+
+const SESSION_GAP_MINUTES: i64 = 30;
 
 pub const AUTOMIX_MIN_UPCOMING: usize = 8;
 const AUTOMIX_BATCH_SIZE: usize = 12;
@@ -144,15 +164,68 @@ impl PreparedPlaybackJob {
 }
 
 impl ActiveListenSession {
-    pub fn start(track_id: i64, now: DateTime<Utc>) -> Self {
+    pub fn start(
+        track_id: i64,
+        now: DateTime<Utc>,
+        source: crate::db::models::ListenSource,
+        prior: Option<&LiveListenSession>,
+    ) -> Self {
+        let (session_id, position, transition_from) = match prior {
+            Some(ls) if (now - ls.last_finished_at).num_minutes() < SESSION_GAP_MINUTES => {
+                (ls.session_id.clone(), ls.position + 1, Some(ls.last_track_id))
+            }
+            _ => (uuid::Uuid::new_v4().to_string(), 0, None),
+        };
         Self {
             track_id,
             started_at: now,
             accumulated_ms: 0,
             resumed_at: Some(now),
+            session_id,
+            source,
+            position_in_session: position,
+            transition_from_track_id: transition_from,
         }
     }
 
+    pub fn to_live_session(&self, finished_at: DateTime<Utc>) -> LiveListenSession {
+        LiveListenSession {
+            session_id: self.session_id.clone(),
+            last_track_id: self.track_id,
+            last_finished_at: finished_at,
+            position: self.position_in_session,
+        }
+    }
+}
+
+// Reads the queue.source string of the currently-playing queue item and maps it
+// to a ListenSource. Returns Unknown if no current queue item or the source
+// label isn't one we recognize — those rows still get written, they just count
+// at half confidence in the trainer.
+pub fn lookup_current_listen_source(conn: &Connection) -> crate::db::models::ListenSource {
+    use crate::db::models::ListenSource;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT q.source FROM playback_state ps
+             JOIN queue q ON q.id = ps.current_queue_item_id
+             WHERE ps.id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    match raw.as_deref() {
+        Some("user") | Some("library") | Some("playback") => ListenSource::Manual,
+        Some("radio") => ListenSource::Radio,
+        Some("playlist") => ListenSource::Playlist,
+        Some("album") => ListenSource::Album,
+        Some("artist") => ListenSource::Artist,
+        Some("search") => ListenSource::Search,
+        Some("automix") => ListenSource::Automix,
+        _ => ListenSource::Unknown,
+    }
+}
+
+impl ActiveListenSession {
     pub fn pause(&mut self, now: DateTime<Utc>) {
         if let Some(resumed_at) = self.resumed_at.take() {
             self.accumulated_ms += (now - resumed_at).num_milliseconds().max(0);

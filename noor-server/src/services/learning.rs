@@ -24,6 +24,105 @@ const MODEL_KEY: &str = "discovery-fusion-v1";
 const MODEL_DIMENSION: i32 = 96;
 const MODEL_TOP_K: usize = 64;
 
+// Training intensity tier. Drives the cost/quality knobs the user picked in
+// settings. Higher tiers train a richer model at the cost of CPU time and
+// peak RAM; lower tiers stay responsive on weaker hardware. Persisted as a
+// string in `server_config["discovery_intensity"]` so it survives restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryIntensity {
+    Max,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IntensityParams {
+    pub dimension: i32,
+    pub top_k: usize,
+    pub window_size: usize,
+    pub include_audio_proxy: bool,
+}
+
+impl DiscoveryIntensity {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "max" => DiscoveryIntensity::Max,
+            "low" => DiscoveryIntensity::Low,
+            _ => DiscoveryIntensity::Medium,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscoveryIntensity::Max => "max",
+            DiscoveryIntensity::Medium => "medium",
+            DiscoveryIntensity::Low => "low",
+        }
+    }
+
+    // Cost/quality trade-offs per tier:
+    //   Max    — 96-dim fused, top-64 neighbors, 8-track context window. The
+    //            full model. Best radio quality; on a 30k-track library this
+    //            is the ~6-12 minute run that motivated the safeguards.
+    //   Medium — 64-dim, top-32, window 5. Roughly 50% of Max's wall time.
+    //            Indistinguishable in subjective radio quality for libraries
+    //            under ~20k tracks; the default.
+    //   Low    — 48-dim, top-24, window 3, **skips the audio-proxy stage**.
+    //            Pure behavioral co-occurrence. Trains in roughly a quarter
+    //            of Max's time. Picks degrade for cold tracks (no metadata
+    //            contribution to fusion), but the engine stays usable on
+    //            modest hardware.
+    pub fn params(self) -> IntensityParams {
+        match self {
+            DiscoveryIntensity::Max => IntensityParams {
+                dimension: 96,
+                top_k: 64,
+                window_size: 8,
+                include_audio_proxy: true,
+            },
+            DiscoveryIntensity::Medium => IntensityParams {
+                dimension: 64,
+                top_k: 32,
+                window_size: 5,
+                include_audio_proxy: true,
+            },
+            DiscoveryIntensity::Low => IntensityParams {
+                dimension: 48,
+                top_k: 24,
+                window_size: 3,
+                include_audio_proxy: false,
+            },
+        }
+    }
+}
+
+pub fn load_discovery_intensity(db: &Database) -> DiscoveryIntensity {
+    db.with_conn(|conn| {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'discovery_intensity'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(raw)
+    })
+    .ok()
+    .flatten()
+    .map(|s| DiscoveryIntensity::parse(&s))
+    .unwrap_or(DiscoveryIntensity::Medium)
+}
+
+pub fn set_discovery_intensity(db: &Database, intensity: DiscoveryIntensity) -> Result<()> {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('discovery_intensity', ?1)",
+            rusqlite::params![intensity.as_str()],
+        )?;
+        Ok(())
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveLearningModel {
     pub model_id: i64,
@@ -39,12 +138,15 @@ pub async fn start_training(
     rebuild_audio: bool,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
+    let intensity = load_discovery_intensity(&db);
+    let intensity_params = intensity.params();
     let (model, run) = db.with_conn(|conn| {
         let config_json = serde_json::json!({
             "mode": if full_mode { "full" } else { "incremental" },
             "rebuild_audio": rebuild_audio,
-            "dimension": MODEL_DIMENSION,
-            "top_k": MODEL_TOP_K,
+            "dimension": intensity_params.dimension,
+            "top_k": intensity_params.top_k,
+            "intensity": intensity.as_str(),
             "trainer": "rust",
         })
         .to_string();
@@ -52,7 +154,7 @@ pub async fn start_training(
             conn,
             MODEL_KEY,
             "fusion",
-            MODEL_DIMENSION,
+            intensity_params.dimension,
             "training",
             Some(&config_json),
         )?;
@@ -81,8 +183,26 @@ pub async fn start_training(
         queries::update_training_run_progress(conn, run.id, "corpus", "running", 0.05, None, 0)
     })?;
 
-    // Build trainer input directly from DB (no JSON round-trip)
-    let input = db.with_conn(build_trainer_input)?;
+    // Backfill listen_history columns added in MIGRATION_023, exactly once per
+    // database lifetime. The trainer is the natural trigger — sequence-aware
+    // features depend on session_id and transition_from_track_id, so we do
+    // this before the corpus build runs.
+    if let Some(report) = db
+        .with_conn(|conn| crate::services::listen_history_backfill::run_if_needed(conn))?
+    {
+        tracing::info!(
+            target: "noor.discovery.training",
+            rows_updated = report.rows_updated,
+            sessions_created = report.sessions_created,
+            already_populated = report.already_populated,
+            "backfilled listen_history columns",
+        );
+    }
+
+    // Build trainer input directly from DB (no JSON round-trip). The intensity
+    // tier overrides dimension / top_k / window_size and decides whether to
+    // include the audio-proxy stage (Low skips it).
+    let input = db.with_conn(|conn| build_trainer_input(conn, intensity_params))?;
 
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
@@ -174,28 +294,33 @@ pub async fn start_training(
         .neighbors
         .iter()
         .map(|neighbor| {
-            let reason_json = serde_json::to_string(
-                &neighbor
-                    .reason_tags
-                    .iter()
-                    .map(|key| DiscoveryNeighborReason {
-                        key: key.clone(),
-                        label: reason_label(key).to_string(),
-                        weight: 1.0,
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .ok();
-            (
-                neighbor.track_id,
-                neighbor.neighbor_track_id,
-                neighbor.rank,
-                neighbor.score,
-                neighbor.behavioral_score,
-                neighbor.audio_score,
-                neighbor.metadata_score,
+            let reason_objects = neighbor
+                .reason_tags
+                .iter()
+                .map(|key| DiscoveryNeighborReason {
+                    key: key.clone(),
+                    label: reason_label(key).to_string(),
+                    weight: 1.0,
+                })
+                .collect::<Vec<_>>();
+            let reason_json = serde_json::to_string(&reason_objects).ok();
+            queries::NeighborWriteRow {
+                track_id: neighbor.track_id,
+                neighbor_track_id: neighbor.neighbor_track_id,
+                rank: neighbor.rank,
+                score: neighbor.score,
+                behavioral_score: neighbor.behavioral_score,
+                audio_score: neighbor.audio_score,
+                metadata_score: neighbor.metadata_score,
                 reason_json,
-            )
+                primary_reason: neighbor.primary_reason.clone(),
+                confidence: neighbor.confidence,
+                support_count: neighbor.support_count,
+                candidate_in_degree: neighbor.candidate_in_degree,
+                candidate_in_degree_percentile: neighbor.candidate_in_degree_percentile,
+                play_count_seed: neighbor.play_count_seed,
+                play_count_candidate: neighbor.play_count_candidate,
+            }
         })
         .collect::<Vec<_>>();
     if bail_if_cancelled("neighbors")? {
@@ -205,6 +330,25 @@ pub async fn start_training(
         queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
         queries::replace_track_neighbors(conn, model.id, &neighbors)
     })?;
+
+    // Persist per-reason hit-rate diagnostics. The trainer's primary_reason
+    // tags drive these rows; the next iteration of metadata-bonus tuning reads
+    // them to decide whether harmonic_match's 0.14 weight is justified or
+    // whether genre_branch should outrank it.
+    let reason_rows: Vec<queries::ReasonHitRateRow> = output
+        .reason_hit_rates
+        .iter()
+        .map(|r| queries::ReasonHitRateRow {
+            primary_reason: r.primary_reason.clone(),
+            impressions: r.impressions,
+            hits: r.hits,
+            hit_rate: r.hit_rate,
+            mean_rank: r.mean_rank,
+            mrr_contribution: r.mrr_contribution,
+            insufficient_data: r.insufficient_data,
+        })
+        .collect();
+    db.with_conn(|conn| queries::replace_discovery_diagnostics(conn, model.id, &reason_rows))?;
 
     let metrics_json = serde_json::to_string(&output.metrics)?;
     let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
@@ -291,6 +435,11 @@ pub fn radio_from_neighbors(
                     reason_tags: reasons,
                     model_key: Some(active.model_key.clone()),
                     source_mode: "embedding".to_string(),
+                    confidence: neighbor.confidence,
+                    support_count: neighbor.support_count,
+                    candidate_in_degree: neighbor.candidate_in_degree,
+                    candidate_in_degree_percentile: neighbor.candidate_in_degree_percentile,
+                    primary_reason: neighbor.primary_reason,
                 }
             })
             .collect::<Vec<_>>();
@@ -425,7 +574,10 @@ pub fn inject_query_seeds_from_neighbors(
     })
 }
 
-fn build_trainer_input(conn: &rusqlite::Connection) -> Result<TrainerInput> {
+fn build_trainer_input(
+    conn: &rusqlite::Connection,
+    intensity: IntensityParams,
+) -> Result<TrainerInput> {
     let tracks = queries::get_embedding_track_rows(conn)?;
     let transition_sequences = queries::get_playback_transition_sequences(conn)?;
     let listen_sequences = queries::get_listen_history_sequences(conn, 45)?;
@@ -455,10 +607,11 @@ fn build_trainer_input(conn: &rusqlite::Connection) -> Result<TrainerInput> {
 
     Ok(TrainerInput {
         seed: 13,
-        dimension: MODEL_DIMENSION as usize,
-        window_size: 8,
+        dimension: intensity.dimension as usize,
+        window_size: intensity.window_size,
         min_count: 1,
-        top_k: MODEL_TOP_K,
+        top_k: intensity.top_k,
+        include_audio_proxy: intensity.include_audio_proxy,
         tracks,
         sequences: vec![
             TrainerSequenceGroup { label: "playback_transitions".to_string(), weight: 1.6, sequences: transition_sequences },
