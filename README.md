@@ -123,7 +123,11 @@ Recent searches auto-save as clickable chips.
 - **Song Radio**: plays outward from any track using learned neighbor embeddings; creativity slider controls exploration vs. exploitation; honours `seed_tidal_id` for non-library tracks
 - Feedback (like, dislike, queue, save) feeds back into the model
 - **Prompt Explore**: steer the engine with natural language — mood, reference artist, DJ style
-- Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress, **cancel button**, and CPU/heat warning card
+- Embedding pipeline trains on transitions, playlists, albums, genres, and listen sessions; incremental refresh + full retrain with live progress
+- **Training intensity tiers** — Max (96d / 64 neighbors / 8-track window), Medium (64d / 32 / 5), Low (48d / 24 / 3, audio-proxy stage skipped). Pick once in Settings; the engine remembers
+- **Real Stop** — cancel checks live inside every long-running trainer stage, so the Stop button responds within ~1s instead of waiting for the current stage to finish
+- **Safety preview** — track count + active intensity → expected wall time + peak RAM + green/amber/red recommendation, blended 70/30 with your last successful run's actual duration
+- **Live ETA** — derived from the run's progress + start time, refreshed every WebSocket tick
 
 ### Radio orchestration
 
@@ -133,6 +137,9 @@ The thing that picks the next track when Automix or Song Radio is running.
 - **Genre coherence scoring** via weighted Jaccard against the seed's genre set
 - **Engine slot** filled from precomputed `track_similarity` pairs to keep latency low
 - **Reason plumbing** through the queue with structured suffix — every queued track carries a human-readable "why is this here?" string
+- **Per-edge diagnostics** — every neighbor row carries `confidence`, `support_count`, `candidate_in_degree` (+ percentile), `primary_reason`, plus `play_count_seed`/`candidate`. Per-reason held-out hit-rate persisted to `discovery_diagnostics` so metadata-bonus weights can be calibrated against real predictive value
+- **Tier 2 re-ranker (flag-gated)** — source-score normalization (rank + percentile-clipped hybrid), soft confidence penalty, hub penalty using in-degree percentile, constraint-based diversity rerank (artist / album spacing, genre saturation, recent-track skip, penalty relaxation pass), soft source-quota bonus. Each behavior independently toggleable; one-flip kill-switch reverts to the legacy interleave path with no deploy
+- **`radio_diagnostics` table** — every queue records target-vs-actual source mix, penalty counts, average confidence + hub percentile, and which flags were active
 - **Pending Last.fm rows** — non-library Last.fm radio results queue immediately as pending placeholders and resolve to TIDAL playables in a background pool at play time; aggressive GC keeps the table clean
 - Diagnostic harness available as a permanent debug tool for evaluating candidate funnel quality
 
@@ -370,6 +377,14 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 
 **Discovery + radio**
 
+- [x] Training intensity tiers — Max / Medium / Low — with audio-proxy skip on Low (v0.1.13)
+- [x] Mid-stage cancel inside trainer hot loops; Stop button responds within ~1s (v0.1.13)
+- [x] Live ETA + safety preview endpoint (track-count-aware cost model, blended with last run's duration) (v0.1.13)
+- [x] Per-edge confidence, support, in-degree percentile, primary_reason on neighbor table (v0.1.13)
+- [x] Per-reason held-out hit-rate diagnostics persisted to `discovery_diagnostics` (v0.1.13)
+- [x] Listen history session_id / source / position / transition_from columns + idempotent backfill (v0.1.13)
+- [x] Radio Tier 2 — source-score normalization, confidence + hub penalties, constraint-based diversity rerank, source quota bonus (all flag-gated) + `radio_diagnostics` table (v0.1.13)
+- [x] Radio kill-switch flag for one-flip rollback to legacy interleave (v0.1.13)
 - [x] Discovery training with cancel-aware hot loop, Stop button, CPU/heat warning
 - [x] Hover tooltip card (`DiscoverHoverCard`) with audio metric chips
 - [x] Hybrid auto-seed + lock pill; `seed_track_id` drives external Tidal search
@@ -413,7 +428,8 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 
 - [ ] Gapless crossfade audio blend (audio-level mixing — pre-buffer engine swap already shipped)
 - [ ] Duplicate detection UI polish
-- [ ] Song Radio tuning (recommendation quality + diversity)
+- [ ] Tune `RadioProfile` defaults from accumulated `radio_diagnostics` (Tier 2 surgery shipped behind flags)
+- [ ] Learned edge scorer to replace hardcoded metadata bonuses (uses `discovery_diagnostics` per-reason hit-rates)
 - [ ] Genre Galaxy polish (interaction + rendering issues)
 - [ ] Shuffle genre-spread algorithm (currently not always respected)
 - [ ] Context-menu-on-scroll handling (menus dismiss on scroll)
