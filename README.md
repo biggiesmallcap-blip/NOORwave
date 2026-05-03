@@ -22,8 +22,8 @@
     <td width="33%"><img src="docs/assets/screenshot-search.png" width="100%" alt="Search"/><br/><sub><b>Search</b> — top result card, power filters, queue</sub></td>
   </tr>
   <tr>
-    <td width="33%"><img src="docs/assets/screenshot-genre-galaxy.png" width="100%" alt="Genre Galaxy"/><br/><sub><b>Genre Galaxy</b> — force-directed genre cosmos</sub></td>
-    <td width="33%"><img src="docs/assets/screenshot-discover.png" width="100%" alt="Discover"/><br/><sub><b>Discover</b> — learned audio similarity canvas</sub></td>
+    <td width="33%"><img src="docs/assets/screenshot-analytics.png" width="100%" alt="Analytics"/><br/><sub><b>Analytics</b> — listening trends, top artists, deep stats</sub></td>
+    <td width="33%"><img src="docs/assets/screenshot-automix.png" width="100%" alt="AutoMix"/><br/><sub><b>AutoMix</b> — radio-style endless queue with intensity tiers</sub></td>
     <td width="33%" align="center"><br/><br/><sub>more screenshots coming</sub></td>
   </tr>
 </table>
