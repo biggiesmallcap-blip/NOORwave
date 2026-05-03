@@ -17,9 +17,9 @@
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/assets/screenshot-home.png" width="100%" alt="Home"/><br/><sub><b>Home</b> — daily picks, new releases, now playing</sub></td>
-    <td width="33%"><img src="docs/assets/screenshot-library.png" width="100%" alt="Library"/><br/><sub><b>Library</b> — top artist hero, carousels, recent tracks</sub></td>
-    <td width="33%"><img src="docs/assets/screenshot-search.png" width="100%" alt="Search"/><br/><sub><b>Search</b> — top result card, power filters, queue</sub></td>
+    <td width="33%"><img src="docs/assets/screenshot-home.png?v=2" width="100%" alt="Home"/><br/><sub><b>Home</b> — daily picks, new releases, now playing</sub></td>
+    <td width="33%"><img src="docs/assets/screenshot-library.png?v=2" width="100%" alt="Library"/><br/><sub><b>Library</b> — top artist hero, carousels, recent tracks</sub></td>
+    <td width="33%"><img src="docs/assets/screenshot-search.png?v=2" width="100%" alt="Search"/><br/><sub><b>Search</b> — top result card, power filters, queue</sub></td>
   </tr>
   <tr>
     <td width="33%"><img src="docs/assets/screenshot-analytics.png" width="100%" alt="Analytics"/><br/><sub><b>Analytics</b> — listening trends, top artists, deep stats</sub></td>
