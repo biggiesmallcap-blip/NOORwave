@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { discoverSpaceStore } from './discover_space_store';
-	import { applyForces, findNodeNear } from './discover_space_physics';
+	import { applyForces, kineticEnergy, findNodeNear } from './discover_space_physics';
 	import {
+		worldToCanvas,
 		drawBackground,
+		drawOrbitRings,
 		drawVisitedRegions,
 		drawGenreNebulae,
 		drawEdges,
@@ -12,6 +14,7 @@
 		drawPlayingNode,
 		drawLabels,
 		drawRadioRoute,
+		drawSelectionRipple,
 		drawWarpStreaks,
 	} from './discover_space_renderer';
 	import type { DiscoverTrackNode, Camera } from './discover_space_types';
@@ -40,7 +43,7 @@
 
 	let canvas: HTMLCanvasElement | undefined = $state();
 	let rafId = 0;
-	let tick = 0;
+	let tick = 0;         // animation clock (drives halo breathing, playing pulse)
 
 	// Camera
 	let camera: Camera = { x: 0, y: 0, zoom: 0.7 };
@@ -52,6 +55,15 @@
 	let panStart = { x: 0, y: 0, cx: 0, cy: 0 };
 	let hoveredNode: DiscoverTrackNode | null = $state(null);
 	let selectedNode: DiscoverTrackNode | null = $state(null);
+
+	// Physics settling — stops mutating node positions once kinetic energy drops
+	let simulationSettled = false;
+	let lastNodeCount = 0;
+
+	// Selection ripple (one-shot ring on node click)
+	let rippleNode: DiscoverTrackNode | null = null;
+	let rippleStartTick = 0;
+	const RIPPLE_TICKS = 45; // ≈ 750ms at 60fps
 
 	// Warp animation state
 	let warpProgress = 0;
@@ -153,37 +165,67 @@
 		const route = state.radioRoute;
 		const regions = state.visitedRegions;
 
-		// Physics tick (skip when warping for visual consistency)
-		if (!isWarping) {
-			applyForces(nodes, edges, tick, {
-				genreLensActive: lens === 'genre',
-				prefersReducedMotion,
-			});
-			tick++;
+		// Restart physics when node set changes (new load, search, route nodes)
+		if (nodes.length !== lastNodeCount) {
+			lastNodeCount = nodes.length;
+			simulationSettled = false;
 		}
 
-		// Build node map for O(1) lookup
-		const nodeMap = new Map(nodes.map((n) => [n.trackId, n]));
+		// Physics: run until kinetic energy drops below threshold, then stop
+		if (!isWarping) {
+			if (!simulationSettled) {
+				applyForces(nodes, edges, { genreLensActive: lens === 'genre', prefersReducedMotion });
+				if (prefersReducedMotion || kineticEnergy(nodes) < 0.002) {
+					simulationSettled = true;
+					for (const n of nodes) { n.vx = 0; n.vy = 0; }
+				}
+			}
+			tick++; // animation clock always advances for halo/pulse animations
+		}
+
+		// Build lookups
+		const nodeMap  = new Map(nodes.map((n) => [n.trackId, n]));
 		const seedNode = seedTrackId != null ? nodeMap.get(seedTrackId) : null;
 		const playingNode = currentTrackId != null ? nodeMap.get(currentTrackId) : null;
 
-		// Build route track ID set for edge filtering
 		const routeTrackIds = new Set(route.map((s) => s.trackId));
 		const hoveredId  = hoveredNode?.trackId  ?? null;
 		const selectedId = selectedNode?.trackId ?? null;
 
+		// Connected-to-hovered set for focus-opacity dimming
+		const connectedIds = new Set<number>();
+		if (hoveredId !== null) {
+			for (const edge of edges) {
+				if (edge.fromTrackId === hoveredId) connectedIds.add(edge.toTrackId);
+				if (edge.toTrackId   === hoveredId) connectedIds.add(edge.fromTrackId);
+			}
+		}
+
 		// ── Draw ──────────────────────────────────────────────────────────────
 		drawBackground(ctx, w, h, prefersReducedMotion);
 		drawVisitedRegions(ctx, regions, camera, w, h);
+		// Orbit rings behind everything — visual guide for distance tiers
+		if (seedNode) drawOrbitRings(ctx, camera, w, h);
 		drawGenreNebulae(ctx, nodes, camera, w, h, lens);
 		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, lens, seedTrackId, hoveredId, selectedId, routeTrackIds);
-		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, tick, prefersReducedMotion);
+		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, connectedIds, tick, prefersReducedMotion);
 
 		if (playingNode && !playingNode.isSeed) {
 			drawPlayingNode(ctx, playingNode, camera, w, h, tick, prefersReducedMotion);
 		}
 		if (seedNode) {
 			drawSeedNode(ctx, seedNode, camera, w, h, isLocked, tick, prefersReducedMotion);
+		}
+
+		// Selection ripple (one-shot, 750ms)
+		if (rippleNode) {
+			const progress = (tick - rippleStartTick) / RIPPLE_TICKS;
+			if (progress < 1) {
+				const [rx, ry] = worldToCanvas(rippleNode.x, rippleNode.y, camera, w, h);
+				drawSelectionRipple(ctx, rx, ry, Math.max(3, rippleNode.radius * camera.zoom), progress);
+			} else {
+				rippleNode = null;
+			}
 		}
 
 		drawLabels(ctx, nodes, camera, w, h, hoveredId, selectedId, camera.zoom);
@@ -247,6 +289,9 @@
 			if (hit) {
 				selectedNode = hit;
 				onSelectNode?.(hit);
+				// One-shot selection ripple
+				rippleNode = hit;
+				rippleStartTick = tick;
 			} else {
 				selectedNode = null;
 			}

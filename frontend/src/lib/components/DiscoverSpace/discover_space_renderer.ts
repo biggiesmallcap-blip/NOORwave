@@ -108,6 +108,19 @@ function nodeColor(node: DiscoverTrackNode, lens: DiscoverLens): string {
 	}
 }
 
+// ─── Focus opacity (hover dimming) ───────────────────────────────────────────
+
+function focusOpacity(
+	trackId: number,
+	hoveredId: number | null,
+	connectedIds: Set<number>
+): number {
+	if (!hoveredId) return 1.0;
+	if (trackId === hoveredId) return 1.0;
+	if (connectedIds.has(trackId)) return 0.85;
+	return 0.38;
+}
+
 // ─── Camera transform helpers ─────────────────────────────────────────────────
 
 export function worldToCanvas(
@@ -164,6 +177,57 @@ export function drawBackground(
 		ctx.fillStyle = `rgba(180,180,220,${0.1 + Math.sin(particleT + p.phase) * 0.05})`;
 		ctx.fill();
 	}
+	ctx.restore();
+}
+
+// ─── Orbit rings (static decorative rings around the Anchor Star) ─────────────
+
+export function drawOrbitRings(
+	ctx: CanvasRenderingContext2D,
+	camera: Camera,
+	cw: number,
+	ch: number
+): void {
+	// Seed is always at world origin (0,0)
+	const [sx, sy] = worldToCanvas(0, 0, camera, cw, ch);
+	// Radii chosen to match the three initial-orbit tiers in the adapter
+	const rings = [
+		{ r: 190, alpha: 0.09 },  // near orbit  (high-score library)
+		{ r: 350, alpha: 0.06 },  // related field (mid-score)
+		{ r: 540, alpha: 0.04 },  // deep signal   (cold-start / external)
+	];
+	ctx.save();
+	ctx.strokeStyle = 'rgba(124,128,255,1)';
+	ctx.lineWidth = 0.8;
+	ctx.setLineDash([6, 14]);
+	for (const ring of rings) {
+		ctx.globalAlpha = ring.alpha;
+		ctx.beginPath();
+		ctx.arc(sx, sy, ring.r * camera.zoom, 0, Math.PI * 2);
+		ctx.stroke();
+	}
+	ctx.setLineDash([]);
+	ctx.restore();
+}
+
+// ─── Selection ripple (one-shot ring on click) ────────────────────────────────
+
+export function drawSelectionRipple(
+	ctx: CanvasRenderingContext2D,
+	sx: number,
+	sy: number,
+	r: number,
+	progress: number // 0..1
+): void {
+	const rippleR = r + progress * 55;
+	const alpha   = (1 - progress) * 0.55;
+	ctx.save();
+	ctx.globalAlpha = alpha;
+	ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+	ctx.lineWidth = Math.max(0.5, 2 - progress * 1.5);
+	ctx.beginPath();
+	ctx.arc(sx, sy, rippleR, 0, Math.PI * 2);
+	ctx.stroke();
 	ctx.restore();
 }
 
@@ -328,12 +392,13 @@ export function drawNodes(
 	lens: DiscoverLens,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
+	connectedIds: Set<number>,
 	t: number,
 	prefersReducedMotion: boolean
 ): void {
 	for (const node of nodes) {
 		if (node.isSeed || node.isPlaying) continue;
-		drawSingleNode(ctx, node, camera, cw, ch, lens, hoveredTrackId, selectedTrackId, t, prefersReducedMotion);
+		drawSingleNode(ctx, node, camera, cw, ch, lens, hoveredTrackId, selectedTrackId, connectedIds, t, prefersReducedMotion);
 	}
 }
 
@@ -346,6 +411,7 @@ function drawSingleNode(
 	lens: DiscoverLens,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
+	connectedIds: Set<number>,
 	t: number,
 	prefersReducedMotion: boolean
 ): void {
@@ -354,13 +420,16 @@ function drawSingleNode(
 	const isHovered  = node.trackId === hoveredTrackId;
 	const isSelected = node.trackId === selectedTrackId;
 	const col = nodeColor(node, lens);
-	const coreAlpha = node.isColdStart ? 0.55 : 0.90;
+	// Focus opacity: dim non-connected nodes when something is hovered
+	const fo = focusOpacity(node.trackId, hoveredTrackId, connectedIds);
+	const coreAlpha = (node.isColdStart ? 0.55 : 0.90) * fo;
 
 	ctx.save();
 
-	// 1. Soft outer star glow — intensity scales with confidence
-	const glowR = r * 2.8;
-	const glowStrength = 0.09 + node.confidence * 0.16;
+	// 1. Soft outer star glow (slow breathe at 5.2s period when settled)
+	const breathe = prefersReducedMotion ? 1 : 1 + Math.sin(t * 0.02 + node.trackId * 0.1) * 0.025;
+	const glowR = r * 2.8 * breathe;
+	const glowStrength = (0.09 + node.confidence * 0.16) * fo;
 	const glowGrad = ctx.createRadialGradient(sx, sy, r * 0.4, sx, sy, glowR);
 	glowGrad.addColorStop(0, `rgba(180,185,255,${glowStrength})`);
 	glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -369,9 +438,9 @@ function drawSingleNode(
 	ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
 	ctx.fill();
 
-	// 2. Cold-start shimmer ring (pulsing outline)
+	// 2. Cold-start shimmer ring (very slow pulse)
 	if (node.isColdStart && !prefersReducedMotion) {
-		const shimmer = 0.12 + Math.sin(t * 0.04 + node.trackId) * 0.07;
+		const shimmer = (0.10 + Math.sin(t * 0.02 + node.trackId) * 0.05) * fo;
 		ctx.strokeStyle = `rgba(180,180,210,${shimmer})`;
 		ctx.lineWidth = 1;
 		ctx.beginPath();
@@ -386,7 +455,7 @@ function drawSingleNode(
 	ctx.arc(sx, sy, r, 0, Math.PI * 2);
 	ctx.fill();
 
-	// 4. Specular highlight (star lit from upper-left)
+	// 4. Specular highlight
 	const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
 	specGrad.addColorStop(0, 'rgba(255,255,255,0.70)');
 	specGrad.addColorStop(0.45, 'rgba(255,255,255,0.12)');
@@ -397,7 +466,7 @@ function drawSingleNode(
 	ctx.fill();
 
 	// 5. Thin source ring
-	ctx.globalAlpha = 0.55;
+	ctx.globalAlpha = 0.55 * fo;
 	const ringCol = node.source === 'library' ? '#6080e0'
 		: node.source === 'lastfm' ? '#e04060'
 		: node.source === 'engine' ? '#50c070'
@@ -408,7 +477,7 @@ function drawSingleNode(
 	ctx.arc(sx, sy, r + Math.max(1, 1.5 * camera.zoom), 0, Math.PI * 2);
 	ctx.stroke();
 
-	ctx.globalAlpha = 1;
+	ctx.globalAlpha = fo;
 
 	// 6. Playlist ring (gold)
 	if (node.inPlaylistBuilder) {
@@ -419,8 +488,9 @@ function drawSingleNode(
 		ctx.stroke();
 	}
 
-	// 7. Hover / selected ring
+	// 7. Hover / selected ring (always full opacity — visual selection feedback)
 	if (isHovered || isSelected) {
+		ctx.globalAlpha = 1;
 		ctx.strokeStyle = isSelected ? 'rgba(255,255,255,0.90)' : 'rgba(255,255,255,0.50)';
 		ctx.lineWidth = isSelected ? 2 : 1;
 		ctx.beginPath();
@@ -518,10 +588,11 @@ export function drawPlayingNode(
 	ctx.save();
 
 	if (!prefersReducedMotion) {
+		// Two offset rings at 3200ms period — slow, breathing pulse
 		for (let i = 0; i < 2; i++) {
-			const phase = (t * 0.04 + i * Math.PI) % (Math.PI * 2);
-			const pulseR = r * (1.8 + Math.sin(phase) * 0.7);
-			ctx.strokeStyle = `rgba(180,160,255,${0.38 - i * 0.12})`;
+			const phase = t * 0.033 + i * Math.PI;
+			const pulseR = r * (1.7 + Math.sin(phase) * 0.5);
+			ctx.strokeStyle = `rgba(180,160,255,${0.35 - i * 0.10})`;
 			ctx.lineWidth = 1.5;
 			ctx.beginPath();
 			ctx.arc(sx, sy, pulseR, 0, Math.PI * 2);

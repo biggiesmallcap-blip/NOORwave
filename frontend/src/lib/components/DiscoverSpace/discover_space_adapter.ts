@@ -107,8 +107,9 @@ export function adaptNode(
 
 	const isSeedNode = api.is_seed ?? api.track_id === seedId;
 
-	// Seed lives at the world origin; orbit stars use score-based initial radius
-	// so high-confidence matches start close and cold/distant ones orbit further out.
+	// Seed lives at the world origin; orbit stars use score-based initial radius.
+	// Radii are tuned to match the three static orbit rings in the renderer:
+	//   near ≈190px (high-score library), mid ≈350px, deep ≈540px (cold/external).
 	let initX = 0, initY = 0;
 	if (!isSeedNode) {
 		const hintX = api.layout?.x;
@@ -117,8 +118,11 @@ export function adaptNode(
 			initX = hintX;
 			initY = hintY;
 		} else {
-			const baseRadius = 150 + (1 - score) * 250 + (isColdStart ? 120 : 0);
-			const pos = deterministicInitialPosition(api.track_id, seedId ?? 0, baseRadius);
+			let radius = 160 + (1 - score) * 320;
+			if (source === 'lastfm' || source === 'engine') radius += 80;
+			if (isColdStart) radius += 120;
+			if (conf < 0.4) radius += 80;
+			const pos = deterministicInitialPosition(api.track_id, seedId ?? 0, radius);
 			initX = pos.x;
 			initY = pos.y;
 		}
