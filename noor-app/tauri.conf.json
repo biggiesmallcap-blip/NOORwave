@@ -2,15 +2,12 @@
   "productName": "NOORwave",
   "version": "0.1.11",
   "identifier": "com.noorwave.app",
-  "build": {
-    "frontendDist": "./splash"
-  },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "NOORwave",
-        "url": "index.html",
+        "url": "http://127.0.0.1:3334",
         "width": 1280,
         "height": 800,
         "visible": true,

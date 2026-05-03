@@ -8,7 +8,6 @@ mod updater;
 
 use sidecar::SidecarState;
 use std::sync::Arc;
-use tauri::Manager;
 
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
@@ -19,8 +18,13 @@ fn main() {
     let cfg = config::load();
     let state = SidecarState::new(cfg.host_mode);
 
-    // Spawn noor-server immediately, then wait for it in setup.
+    // Spawn noor-server FIRST, then block briefly until it answers /api/ping
+    // BEFORE Tauri opens the webview. This avoids the WebView2 cold-start
+    // race entirely: by the time the window's initial URL is hit, the
+    // server is already serving, so there's no connection-refused failure
+    // to cache and no need for a splash + post-ready re-navigate.
     sidecar::spawn_server(&state);
+    sidecar::wait_for_ready(&state);
 
     let state_for_setup = state.clone();
 
@@ -29,29 +33,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![open_external])
         .manage(state.clone() as Arc<SidecarState>)
         .setup(move |app| {
-            // Wait for server on a background thread so we don't block setup.
             let handle = app.handle().clone();
-            let state2 = state_for_setup.clone();
-            std::thread::spawn(move || {
-                sidecar::wait_for_ready(&state2);
-                if let Some(win) = handle.get_webview_window("main") {
-                    // Navigate explicitly now that the server is confirmed ready.
-                    // WebView2 may have cached a connection-refused failure from
-                    // the initial load attempt while the server was starting up.
-                    if let Ok(url) = "http://127.0.0.1:3334".parse() {
-                        let _ = win.navigate(url);
-                    }
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            let _state2 = state_for_setup.clone();
 
-                // Check for updates in background after app is visible.
-                let update_handle = handle.clone();
-                std::thread::spawn(move || {
-                    if let Some(info) = updater::check() {
-                        tray::notify_update(&update_handle, &info.version, info.url);
-                    }
-                });
+            // Check for updates in background; window already loaded.
+            std::thread::spawn(move || {
+                if let Some(info) = updater::check() {
+                    tray::notify_update(&handle, &info.version, info.url);
+                }
             });
 
             tray::setup_tray(app)?;
