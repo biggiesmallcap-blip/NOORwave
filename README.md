@@ -32,9 +32,8 @@
 
 ## Features
 
-### Library
-
-Your entire TIDAL library, synced locally and always fast.
+<details>
+<summary><strong>Library</strong> — your entire TIDAL library, synced locally and always fast</summary>
 
 - Full library sync (tracks, albums, artists, playlists) with real-time WebSocket progress; daily auto-sync with metadata tracking
 - **Server-side FTS search** — SQLite FTS5 with prefix-weighted ranking; no preload-all, scales past 10k artists without freezing the UI; sort column applies to results
@@ -47,11 +46,10 @@ Your entire TIDAL library, synced locally and always fast.
 - Bulk operations: add/remove favorites, manage playlists at scale
 - Decade strip filter, tile/list toggle, scroll position memory across back-navigation
 
----
+</details>
 
-### Search & Command
-
-Search understands plain text, power filters, and intent in the same bar.
+<details>
+<summary><strong>Search & Command</strong> — plain text, power filters, and intent in one bar</summary>
 
 **Power filter syntax** — combine freely:
 
@@ -80,9 +78,10 @@ bpm:120-140 genre:house energy:>0.7
 
 Recent searches auto-save as clickable chips.
 
----
+</details>
 
-### Playback
+<details>
+<summary><strong>Playback</strong> — lossless hi-fi, gapless, harmonic Automix</summary>
 
 - Lossless hi-fi streaming via TIDAL with automatic token refresh, **MPEG-DASH segmented streaming** for high-bitrate sources
 - **WASAPI exclusive-mode bit-perfect output** (Windows) with quality live-apply; user-selectable preferred TIDAL quality
@@ -95,9 +94,10 @@ Recent searches auto-save as clickable chips.
 - **Queue redesign**: drag-to-reorder, expanded layout (slim artwork + compact transport), `Q` hotkey to toggle, total-duration formatter, save-as-playlist, clear-with-undo (`Z` within 6 s)
 - **Toast-based player error UX** with retry, manual close, and 6 s auto-dismiss
 
----
+</details>
 
-### Genre Galaxy
+<details>
+<summary><strong>Genre Galaxy</strong> — force-directed cosmos of your taxonomy ⚠️ in polish</summary>
 
 > ⚠️ Live but needs polish — several interaction and rendering issues under active work.
 
@@ -108,9 +108,10 @@ Recent searches auto-save as clickable chips.
 - **Seed Mix Builder**: blend multiple genres, interleave their tracks, and play
 - Four view modes: Heat, Co-occurrence, Cohort, Evolution. Auto-drift pans the canvas
 
----
+</details>
 
-### Discover / Sound Space
+<details>
+<summary><strong>Discover / Sound Space</strong> — learned similarity canvas + Song Radio + intensity-tiered training</summary>
 
 > ⚠️ Work in progress — functional but incomplete. UI and model quality still evolving.
 
@@ -129,9 +130,10 @@ Recent searches auto-save as clickable chips.
 - **Safety preview** — track count + active intensity → expected wall time + peak RAM + green/amber/red recommendation, blended 70/30 with your last successful run's actual duration
 - **Live ETA** — derived from the run's progress + start time, refreshed every WebSocket tick
 
-### Radio orchestration
+</details>
 
-The thing that picks the next track when Automix or Song Radio is running.
+<details>
+<summary><strong>Radio orchestration</strong> — the thing that picks the next track when Automix or Song Radio is running</summary>
 
 - **Canonical TasteVector** powering both Automix and Song Radio — single scoring model so the two surfaces agree on what "similar" means
 - **Genre coherence scoring** via weighted Jaccard against the seed's genre set
@@ -143,9 +145,10 @@ The thing that picks the next track when Automix or Song Radio is running.
 - **Pending Last.fm rows** — non-library Last.fm radio results queue immediately as pending placeholders and resolve to TIDAL playables in a background pool at play time; aggressive GC keeps the table clean
 - Diagnostic harness available as a permanent debug tool for evaluating candidate funnel quality
 
----
+</details>
 
-### Smart Features
+<details>
+<summary><strong>Smart Features</strong> — DSP analysis, smart playlists, MusicBrainz + Spotify enrichment</summary>
 
 - Rule-based smart playlists with AND/OR logic: genre, artist, date range, quality tier, play count, BPM, key, Camelot, energy, danceability, instrumental-only, sample-data presence
 - DSP audio analysis runs passively during playback: BPM, key, Camelot, LUFS, energy, danceability, beat strength, spectral centroid, stereo width
@@ -158,9 +161,10 @@ The thing that picks the next track when Automix or Song Radio is running.
 - Analytics page (recently reimagined): listen history, top tracks/artists, genre heatmap, activity graph, completion rate, skip patterns
 - Automix page (recently reimagined): full surface for tuning the harmonic mixing engine
 
----
+</details>
 
-### UI & Access
+<details>
+<summary><strong>UI & Access</strong> — shaders, Quiet Mode, LAN access, keyboard, Tauri desktop</summary>
 
 - Five GLSL shader wallpapers: Aurora, Chrome, Grid, Nebula, Topo — sidebar and now-playing panel float as glass tiles over them, with a **wallpaper palette system** (Nebula / Verdant / desat variants)
 - **Quiet Mode** — fullscreen "just listen" overlay launched from a button on the now-playing artwork. Large artwork + transport, blurred backdrop, body-scroll lock, embedded `⌘K` search pill. Esc cascade is deterministic across the three overlays (action menu → palette → quiet mode).
@@ -172,6 +176,8 @@ The thing that picks the next track when Automix or Song Radio is running.
 - Audio device enumeration and live switching; sample rate follows source on track transition
 - WASAPI exclusive-mode bit-perfect output (Windows)
 - Dedicated **TIDAL catalogue search** page (`/search`) and TIDAL artist/album profile pages (`/tidal/artists/[id]`, `/tidal/albums/[id]`) for browsing outside your library
+
+</details>
 
 ---
 
