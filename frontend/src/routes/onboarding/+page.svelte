@@ -107,16 +107,8 @@
 
 		{#if step === 0}
 			<div class="step welcome">
-				<svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true">
-					<rect width="1024" height="1024" rx="224" fill="#2C3E50"/>
-					<g fill="none" stroke="#FFFFFF" stroke-width="14">
-						<circle cx="384" cy="512" r="180"/>
-						<circle cx="384" cy="512" r="74"/>
-						<circle cx="640" cy="512" r="180"/>
-						<circle cx="640" cy="512" r="74"/>
-					</g>
-				</svg>
-				<h1>Welcome to NOORwave</h1>
+				<img class="wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
+				<h1>Welcome.</h1>
 				<p class="lede">A quiet, focused way to listen to your TIDAL library — with smart radio, trending shelves, and the kind of metadata you'd actually trust.</p>
 				<button class="btn btn-primary" onclick={() => (step = 1)}>Get started</button>
 				<button class="link" onclick={skipAll} disabled={completing}>Skip for now — set up later in Settings</button>
@@ -228,9 +220,11 @@
 		justify-content: center;
 		text-align: center;
 	}
-	.welcome .mark {
-		width: 72px;
-		height: 72px;
+	.welcome .wordmark {
+		display: block;
+		width: 240px;
+		height: auto;
+		margin: 0 auto 0.5rem;
 		filter: drop-shadow(0 8px 24px rgba(120, 150, 220, 0.15));
 	}
 	.step h1, .step h2 {

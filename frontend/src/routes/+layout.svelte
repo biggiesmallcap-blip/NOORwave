@@ -880,7 +880,7 @@
 {:else if authReady && !onboardingChecked}
 	<div class="onboarding-check">
 		<svg class="check-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true">
-			<rect width="1024" height="1024" rx="224" fill="#2C3E50"/>
+			<rect width="1024" height="1024" rx="224" fill="#0B1220"/>
 			<g fill="none" stroke="#FFFFFF" stroke-width="14">
 				<circle cx="384" cy="512" r="180"/>
 				<circle cx="384" cy="512" r="74"/>
