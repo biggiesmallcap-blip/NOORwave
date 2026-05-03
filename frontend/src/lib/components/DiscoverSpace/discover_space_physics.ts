@@ -4,17 +4,26 @@
 import type { DiscoverTrackNode, DiscoverEdge } from './discover_space_types';
 
 // Force constants — tuned for calm, underwater feel
-const REPULSION              = 1600;  // node-node push (reduced to avoid flinging)
+const REPULSION              = 1600;  // node-node push
 const ATTRACTION             = 0.002; // edge spring pull
-const ANCHOR_GRAVITY         = 0.004; // pull toward seed (at world origin)
+const ANCHOR_GRAVITY         = 0.0002; // pull toward seed — low so nodes orbit at 200–400px, not 76px
 const GENRE_CENTROID_STRENGTH = 0.005;
 
 const DAMPING   = 0.82;   // heavy damping — damps 86% velocity in 10 ticks
 const MAX_SPEED = 1.2;    // world-units/tick cap — prevents layout-update lurches
 
+// Switch between pairwise direct repulsion and grid-bucketed repulsion.
+const DIRECT_REPULSION_THRESHOLD = 80;
+
 // ─── Spatial grid ─────────────────────────────────────────────────────────────
 
 interface SpatialCell { nodes: DiscoverTrackNode[]; }
+
+// Cached grid for hit-testing. The grid is rebuilt whenever physics ticks
+// (positions move) and reused across pointermove events while settled.
+let _cachedGrid: Map<string, SpatialCell> | null = null;
+let _cachedGridNodes: DiscoverTrackNode[] | null = null;
+let _cachedGridCellSize = 0;
 
 function buildSpatialGrid(nodes: DiscoverTrackNode[], cellSize: number): Map<string, SpatialCell> {
 	const grid = new Map<string, SpatialCell>();
@@ -27,6 +36,21 @@ function buildSpatialGrid(nodes: DiscoverTrackNode[], cellSize: number): Map<str
 		cell.nodes.push(node);
 	}
 	return grid;
+}
+
+function getOrBuildGrid(nodes: DiscoverTrackNode[], cellSize: number): Map<string, SpatialCell> {
+	if (_cachedGrid && _cachedGridNodes === nodes && _cachedGridCellSize === cellSize) {
+		return _cachedGrid;
+	}
+	_cachedGrid = buildSpatialGrid(nodes, cellSize);
+	_cachedGridNodes = nodes;
+	_cachedGridCellSize = cellSize;
+	return _cachedGrid;
+}
+
+function invalidateGridCache(): void {
+	_cachedGrid = null;
+	_cachedGridNodes = null;
 }
 
 function applyGridRepulsion(nodes: DiscoverTrackNode[], grid: Map<string, SpatialCell>, cellSize: number): void {
@@ -43,8 +67,10 @@ function applyGridRepulsion(nodes: DiscoverTrackNode[], grid: Map<string, Spatia
 					const ddy = other.y - node.y;
 					const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
 					const force = REPULSION / (dist * dist);
-					node.vx -= (ddx / dist) * force * 0.5;
-					node.vy -= (ddy / dist) * force * 0.5;
+					// Asymmetric per-pair (visited twice — once from each end), so
+					// the net force matches the symmetric direct path below.
+					node.vx -= (ddx / dist) * force;
+					node.vy -= (ddy / dist) * force;
 				}
 			}
 		}
@@ -110,8 +136,8 @@ export function applyForces(
 	if (nodes.length === 0) return;
 
 	// ── Repulsion ──────────────────────────────────────────────────────────────
-	if (nodes.length > 100) {
-		const grid = buildSpatialGrid(nodes, 120);
+	if (nodes.length > DIRECT_REPULSION_THRESHOLD) {
+		const grid = getOrBuildGrid(nodes, 120);
 		applyGridRepulsion(nodes, grid, 120);
 	} else {
 		applyDirectRepulsion(nodes);
@@ -165,8 +191,9 @@ export function applyForces(
 		} else {
 			node.vx *= DAMPING;
 			node.vy *= DAMPING;
-			// Velocity clamp: prevent layout-update lurches
-			const speed = Math.hypot(node.vx, node.vy);
+			// Velocity clamp: prevent layout-update lurches. Explicit sqrt is
+			// faster than Math.hypot in V8 (Math.hypot pays for overflow handling).
+			const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
 			if (speed > MAX_SPEED) {
 				node.vx = (node.vx / speed) * MAX_SPEED;
 				node.vy = (node.vy / speed) * MAX_SPEED;
@@ -175,15 +202,18 @@ export function applyForces(
 		node.x += node.vx;
 		node.y += node.vy;
 	}
+
+	// Positions moved → invalidate hit-test grid (rebuilt lazily on next use).
+	invalidateGridCache();
 }
 
 // ─── Hover hit-testing ────────────────────────────────────────────────────────
 
-export function findNodeAtPoint(
+function findNodeLinear(
 	nodes: DiscoverTrackNode[],
 	worldX: number,
 	worldY: number,
-	hitRadius = 20
+	hitRadius: number
 ): DiscoverTrackNode | null {
 	let best: DiscoverTrackNode | null = null;
 	let bestDist = Infinity;
@@ -201,11 +231,13 @@ export function findNodeNear(
 	nodes: DiscoverTrackNode[],
 	worldX: number,
 	worldY: number,
-	hitRadius = 24
+	hitRadius = 32
 ): DiscoverTrackNode | null {
-	if (nodes.length < 80) return findNodeAtPoint(nodes, worldX, worldY, hitRadius);
+	if (nodes.length < DIRECT_REPULSION_THRESHOLD) {
+		return findNodeLinear(nodes, worldX, worldY, hitRadius);
+	}
 	const cellSize = 80;
-	const grid = buildSpatialGrid(nodes, cellSize);
+	const grid = getOrBuildGrid(nodes, cellSize);
 	const cx = Math.floor(worldX / cellSize);
 	const cy = Math.floor(worldY / cellSize);
 	let best: DiscoverTrackNode | null = null;

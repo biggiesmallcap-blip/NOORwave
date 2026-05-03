@@ -1,8 +1,9 @@
 // Store for the DiscoverSpace visualization. Colocated here (not in lib/stores/)
 // to keep all DiscoverSpace code together.
 
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { getApiBase, authFetch } from '$lib/api/client';
+import { currentTrack } from '$lib/stores/player';
 import { adaptResponse } from './discover_space_adapter';
 import type {
 	DiscoverTrackNode,
@@ -27,6 +28,7 @@ interface DiscoverSpaceState {
 	activeSeedId: number | null;
 	activeSeedSource: 'locked' | 'playing' | null;
 	lastDiagnostics: ApiDiscoveryResponse['diagnostics'] | null;
+	refreshProgress: { stage: string; progress: number } | null;
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -42,6 +44,7 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	activeSeedId: null,
 	activeSeedSource: null,
 	lastDiagnostics: null,
+	refreshProgress: null,
 });
 
 export async function loadSpace(
@@ -51,14 +54,20 @@ export async function loadSpace(
 	seedSource: 'locked' | 'playing' | null,
 	currentTrackId: number | null
 ): Promise<void> {
-	discoverSpaceStore.update((s) => ({
-		...s,
-		loading: true,
-		error: null,
-		mode,
-		activeSeedId: seedTrackId ?? null,
-		activeSeedSource: seedSource,
-	}));
+	discoverSpaceStore.update((s) => {
+		// When the active seed changes, drop any in-flight refresh progress —
+		// otherwise stale ws messages from the previous seed leave the spinner stuck.
+		const seedChanged = s.activeSeedId !== (seedTrackId ?? null);
+		return {
+			...s,
+			loading: true,
+			error: null,
+			mode,
+			activeSeedId: seedTrackId ?? null,
+			activeSeedSource: seedSource,
+			refreshProgress: seedChanged ? null : s.refreshProgress,
+		};
+	});
 
 	try {
 		const apiBase = getApiBase();
@@ -132,6 +141,25 @@ export function setRadioRoute(steps: DiscoverRouteStep[], ghostNodes?: DiscoverT
 			nodes: newNodes.length > 0 ? [...s.nodes, ...newNodes] : s.nodes,
 		};
 	});
+}
+
+export function setRefreshProgress(seedTrackId: number, stage: string, progress: number): void {
+	const s = get(discoverSpaceStore);
+	if (s.activeSeedId === seedTrackId) {
+		discoverSpaceStore.update((st) => ({ ...st, refreshProgress: { stage, progress } }));
+	}
+}
+
+/// Called by the WebSocket handler when the backend finishes a per-seed neighbor
+/// refresh. If the active seed matches, reload the map so new edges appear.
+/// The backend's refreshed_seeds set prevents a second refresh from spawning.
+export function handleDiscoverySpaceRefreshed(seedTrackId: number): void {
+	const s = get(discoverSpaceStore);
+	if (s.activeSeedId === seedTrackId) {
+		discoverSpaceStore.update((st) => ({ ...st, refreshProgress: null }));
+		const track = get(currentTrack);
+		loadSpace(s.mode, seedTrackId, undefined, s.activeSeedSource, track?.id ?? null);
+	}
 }
 
 export function clearRadioRoute(): void {

@@ -13,7 +13,6 @@ import type {
 
 // ─── Design constants ─────────────────────────────────────────────────────────
 
-// Edge color per reason (solid reference colors — alpha applied separately)
 const EDGE_COLORS: Record<string, string> = {
 	harmonic:   '#b4a0ff',
 	behavioral: '#64b4ff',
@@ -26,7 +25,14 @@ const EDGE_COLORS: Record<string, string> = {
 	unknown:    '#787888',
 };
 
-// Genre-family nebula background: RGB tuples, opacity applied per-draw
+// Distinct source ring colors — visible against both artwork and star fills
+const SOURCE_RING: Record<string, string> = {
+	library: '#40c8a8',  // teal
+	lastfm:  '#c060e8',  // purple
+	engine:  '#4090e0',  // blue
+	mixed:   '#e09040',  // amber
+};
+
 const NEBULA_RGB: Record<string, [number, number, number]> = {
 	ambient:     [40,  80, 200],
 	pop:         [240, 80, 160],
@@ -57,14 +63,10 @@ function nebulaRgb(genre: string): [number, number, number] {
 	return [80, 80, 120];
 }
 
-// ─── Genre family colors (solid, for Genre lens node rendering) ───────────────
-
-export function energyColor(energy: number): string {
+function energyColor(energy: number): string {
 	const e = Math.max(0, Math.min(1, energy));
-	const h = 240 - e * 200; // blue → orange
-	const s = 60 + e * 30;
-	const l = 45 + e * 15;
-	return `hsl(${h},${s}%,${l}%)`;
+	const h = 240 - e * 200;
+	return `hsl(${h},${60 + e * 30}%,${45 + e * 15}%)`;
 }
 
 function genreFamilyColor(genre: string): string {
@@ -90,49 +92,99 @@ function genreFamilyColor(genre: string): string {
 
 function nodeColor(node: DiscoverTrackNode, lens: DiscoverLens): string {
 	switch (lens) {
-		case 'energy':
-			return energyColor(node.energy ?? 0.5);
-		case 'reason':
-			return EDGE_COLORS[node.primaryReason] ?? EDGE_COLORS.unknown!;
-		case 'confidence':
-			return `hsl(220,${30 + node.confidence * 50}%,${30 + node.confidence * 30}%)`;
-		case 'source':
-			return node.source === 'library' ? 'hsl(230,65%,60%)'
-				 : node.source === 'lastfm'  ? 'hsl(350,65%,55%)'
-				 : node.source === 'engine'  ? 'hsl(145,50%,50%)'
-				 : 'hsl(280,45%,55%)';
-		case 'genre':
-			return genreFamilyColor(node.genres[0] ?? node.topGenre ?? '');
-		default:
-			return energyColor(node.energy ?? 0.5);
+		case 'energy':     return energyColor(node.energy ?? 0.5);
+		case 'reason':     return EDGE_COLORS[node.primaryReason] ?? EDGE_COLORS.unknown!;
+		case 'confidence': return `hsl(220,${30 + node.confidence * 50}%,${30 + node.confidence * 30}%)`;
+		case 'source':     return SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
+		case 'genre':      return genreFamilyColor(node.genres[0] ?? node.topGenre ?? '');
+		default:           return energyColor(node.energy ?? 0.5);
 	}
 }
 
-// ─── Focus opacity (hover dimming) ───────────────────────────────────────────
-
-function focusOpacity(
-	trackId: number,
-	hoveredId: number | null,
-	connectedIds: Set<number>
-): number {
+function focusOpacity(trackId: number, hoveredId: number | null, connectedIds: Set<number>): number {
 	if (!hoveredId) return 1.0;
 	if (trackId === hoveredId) return 1.0;
 	if (connectedIds.has(trackId)) return 0.85;
 	return 0.38;
 }
 
-// ─── Camera transform helpers ─────────────────────────────────────────────────
+// ─── Camera transform ─────────────────────────────────────────────────────────
+// Hot-loop callers (per-edge, per-node, per-label) inline the math directly to
+// avoid a fresh 2-tuple allocation every call (~1k+/frame at 60fps). This
+// exported helper is kept for cold paths (selection ripple, route overlay).
 
-export function worldToCanvas(
-	wx: number, wy: number, camera: Camera, cw: number, ch: number
-): [number, number] {
+export function worldToCanvas(wx: number, wy: number, camera: Camera, cw: number, ch: number): [number, number] {
 	return [
 		cw / 2 + (wx - camera.x) * camera.zoom,
 		ch / 2 + (wy - camera.y) * camera.zoom,
 	];
 }
 
-// ─── Background + slow particles ─────────────────────────────────────────────
+// ─── Artwork image cache ──────────────────────────────────────────────────────
+
+const imgCache = new Map<string, HTMLImageElement | 'loading' | 'error'>();
+
+function getCachedImage(url: string): HTMLImageElement | null {
+	const cached = imgCache.get(url);
+	if (cached instanceof HTMLImageElement) return cached;
+	if (cached === 'loading' || cached === 'error') return null;
+	imgCache.set(url, 'loading');
+	const img = new Image();
+	img.onload = () => imgCache.set(url, img);
+	img.onerror = () => imgCache.set(url, 'error');
+	img.src = url;
+	return null;
+}
+
+// Zoom-gated: which nodes earn artwork rendering
+function shouldShowArtwork(
+	node: DiscoverTrackNode,
+	zoom: number,
+	hoveredId: number | null,
+	selectedId: number | null,
+	routeTrackIds: Set<number>
+): boolean {
+	if (!node.artworkUrl) return false;
+	// Priority nodes always get artwork
+	if (node.isSeed || node.isPlaying) return true;
+	if (node.trackId === hoveredId || node.trackId === selectedId) return true;
+	if (routeTrackIds.has(node.trackId)) return true;
+	// Zoom-gated for regular nodes
+	if (zoom >= 1.3) return true;
+	if (zoom >= 0.85 && node.score >= 0.55) return true;
+	if (zoom >= 0.55 && node.score >= 0.76) return true;
+	return false;
+}
+
+// Draws artwork image clipped to a circle with an edge vignette so rings stay legible
+function drawArtworkFill(
+	ctx: CanvasRenderingContext2D,
+	img: HTMLImageElement,
+	sx: number, sy: number, r: number,
+	alpha: number
+): void {
+	ctx.save();
+	ctx.globalAlpha = alpha;
+	ctx.beginPath();
+	ctx.arc(sx, sy, r, 0, Math.PI * 2);
+	ctx.clip();
+	// Cover-fit
+	const ar = img.naturalWidth / (img.naturalHeight || 1);
+	let dw = r * 2, dh = r * 2;
+	if (ar > 1) dw = dh * ar; else dh = dw / ar;
+	ctx.drawImage(img, sx - dw / 2, sy - dh / 2, dw, dh);
+	// Edge vignette — darkens rim so source/status rings read clearly
+	const vg = ctx.createRadialGradient(sx, sy, r * 0.45, sx, sy, r);
+	vg.addColorStop(0, 'rgba(0,0,0,0)');
+	vg.addColorStop(1, 'rgba(0,0,0,0.42)');
+	ctx.fillStyle = vg;
+	ctx.beginPath();
+	ctx.arc(sx, sy, r, 0, Math.PI * 2);
+	ctx.fill();
+	ctx.restore();
+}
+
+// ─── Background + particles ───────────────────────────────────────────────────
 
 const PARTICLE_COUNT = 80;
 const particles = Array.from({ length: PARTICLE_COUNT }, () => ({
@@ -145,16 +197,10 @@ const particles = Array.from({ length: PARTICLE_COUNT }, () => ({
 }));
 let particleT = 0;
 
-export function drawBackground(
-	ctx: CanvasRenderingContext2D,
-	w: number,
-	h: number,
-	prefersReducedMotion: boolean
-): void {
+export function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number, prefersReducedMotion: boolean): void {
 	ctx.fillStyle = '#0a0a14';
 	ctx.fillRect(0, 0, w, h);
 
-	// Radial vignette
 	const grad = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7);
 	grad.addColorStop(0, 'rgba(20,15,50,0.0)');
 	grad.addColorStop(1, 'rgba(5,5,15,0.6)');
@@ -168,10 +214,11 @@ export function drawBackground(
 	for (const p of particles) {
 		p.x += Math.cos(p.angle) * p.speed;
 		p.y += Math.sin(p.angle) * p.speed;
-		if (Math.abs(p.x) > 2200) p.x *= -1;
-		if (Math.abs(p.y) > 2200) p.y *= -1;
-		const sx = w / 2 + (p.x % w);
-		const sy = h / 2 + (p.y % h);
+		// Wrap into [-w/2, w/2) / [-h/2, h/2) so screen position stays bounded.
+		const wx = ((p.x % w) + w) % w - w / 2;
+		const wy = ((p.y % h) + h) % h - h / 2;
+		const sx = w / 2 + wx;
+		const sy = h / 2 + wy;
 		ctx.beginPath();
 		ctx.arc(sx, sy, p.r, 0, Math.PI * 2);
 		ctx.fillStyle = `rgba(180,180,220,${0.1 + Math.sin(particleT + p.phase) * 0.05})`;
@@ -180,21 +227,15 @@ export function drawBackground(
 	ctx.restore();
 }
 
-// ─── Orbit rings (static decorative rings around the Anchor Star) ─────────────
+// ─── Orbit rings ──────────────────────────────────────────────────────────────
 
-export function drawOrbitRings(
-	ctx: CanvasRenderingContext2D,
-	camera: Camera,
-	cw: number,
-	ch: number
-): void {
-	// Seed is always at world origin (0,0)
-	const [sx, sy] = worldToCanvas(0, 0, camera, cw, ch);
-	// Radii chosen to match the three initial-orbit tiers in the adapter
+export function drawOrbitRings(ctx: CanvasRenderingContext2D, camera: Camera, cw: number, ch: number): void {
+	const sx = cw / 2 + (0 - camera.x) * camera.zoom;
+	const sy = ch / 2 + (0 - camera.y) * camera.zoom;
 	const rings = [
-		{ r: 190, alpha: 0.09 },  // near orbit  (high-score library)
-		{ r: 350, alpha: 0.06 },  // related field (mid-score)
-		{ r: 540, alpha: 0.04 },  // deep signal   (cold-start / external)
+		{ r: 190, alpha: 0.09 },
+		{ r: 350, alpha: 0.06 },
+		{ r: 540, alpha: 0.04 },
 	];
 	ctx.save();
 	ctx.strokeStyle = 'rgba(124,128,255,1)';
@@ -210,19 +251,17 @@ export function drawOrbitRings(
 	ctx.restore();
 }
 
-// ─── Selection ripple (one-shot ring on click) ────────────────────────────────
+// ─── Selection ripple ─────────────────────────────────────────────────────────
 
 export function drawSelectionRipple(
 	ctx: CanvasRenderingContext2D,
-	sx: number,
-	sy: number,
+	sx: number, sy: number,
 	r: number,
-	progress: number // 0..1
+	progress: number
 ): void {
 	const rippleR = r + progress * 55;
-	const alpha   = (1 - progress) * 0.55;
 	ctx.save();
-	ctx.globalAlpha = alpha;
+	ctx.globalAlpha = (1 - progress) * 0.55;
 	ctx.strokeStyle = 'rgba(255,255,255,0.9)';
 	ctx.lineWidth = Math.max(0.5, 2 - progress * 1.5);
 	ctx.beginPath();
@@ -237,11 +276,11 @@ export function drawVisitedRegions(
 	ctx: CanvasRenderingContext2D,
 	regions: VisitedRegion[],
 	camera: Camera,
-	cw: number,
-	ch: number
+	cw: number, ch: number
 ): void {
 	for (const region of regions) {
-		const [sx, sy] = worldToCanvas(region.centroid.x, region.centroid.y, camera, cw, ch);
+		const sx = cw / 2 + (region.centroid.x - camera.x) * camera.zoom;
+		const sy = ch / 2 + (region.centroid.y - camera.y) * camera.zoom;
 		const sr = region.centroid.radius * camera.zoom;
 		const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
 		grad.addColorStop(0, 'rgba(100,100,200,0.08)');
@@ -251,7 +290,6 @@ export function drawVisitedRegions(
 		ctx.beginPath();
 		ctx.arc(sx, sy, sr, 0, Math.PI * 2);
 		ctx.fill();
-
 		if (camera.zoom > 0.5) {
 			ctx.save();
 			ctx.fillStyle = 'rgba(160,160,200,0.35)';
@@ -266,34 +304,78 @@ export function drawVisitedRegions(
 
 // ─── Genre nebulae ────────────────────────────────────────────────────────────
 
+interface NebulaCluster { genre: string; cx: number; cy: number; r: number; count: number; }
+
+// Cached cluster geometry — invalidated when the node identity-tuple or
+// topology changes. Recomputing every frame allocates a Map + per-genre arrays
+// and does two reduce-passes per group; stable nodes don't need that.
+let _nebulaCacheKey: string | null = null;
+let _nebulaCache: NebulaCluster[] = [];
+
+function nebulaCacheKey(nodes: DiscoverTrackNode[]): string {
+	// Cheap fingerprint: count + first/last id + length-based bucket of total positions.
+	if (nodes.length === 0) return '0';
+	const first = nodes[0]!;
+	const last = nodes[nodes.length - 1]!;
+	return `${nodes.length}:${first.trackId}:${last.trackId}`;
+}
+
+function buildNebulaClusters(nodes: DiscoverTrackNode[]): NebulaCluster[] {
+	const groups = new Map<string, { sx: number; sy: number; count: number; maxD2: number; cxApprox: number; cyApprox: number }>();
+	// First pass: centroids
+	for (const node of nodes) {
+		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
+		const e = groups.get(key);
+		if (e) { e.sx += node.x; e.sy += node.y; e.count += 1; }
+		else groups.set(key, { sx: node.x, sy: node.y, count: 1, maxD2: 0, cxApprox: 0, cyApprox: 0 });
+	}
+	for (const e of groups.values()) {
+		e.cxApprox = e.sx / e.count;
+		e.cyApprox = e.sy / e.count;
+	}
+	// Second pass: radius
+	for (const node of nodes) {
+		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
+		const e = groups.get(key)!;
+		const dx = node.x - e.cxApprox;
+		const dy = node.y - e.cyApprox;
+		const d2 = dx * dx + dy * dy;
+		if (d2 > e.maxD2) e.maxD2 = d2;
+	}
+	const out: NebulaCluster[] = [];
+	for (const [genre, e] of groups) {
+		if (e.count < 2) continue;
+		const r = Math.max(80, Math.sqrt(e.maxD2) * 1.3);
+		out.push({ genre, cx: e.cxApprox, cy: e.cyApprox, r, count: e.count });
+	}
+	return out;
+}
+
+export function invalidateNebulaCache(): void {
+	_nebulaCacheKey = null;
+	_nebulaCache = [];
+}
+
 export function drawGenreNebulae(
 	ctx: CanvasRenderingContext2D,
 	nodes: DiscoverTrackNode[],
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	lens: DiscoverLens
 ): void {
-	const groups = new Map<string, { x: number; y: number }[]>();
-	for (const node of nodes) {
-		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
-		const arr = groups.get(key) ?? [];
-		arr.push({ x: node.x, y: node.y });
-		groups.set(key, arr);
+	const key = nebulaCacheKey(nodes);
+	if (key !== _nebulaCacheKey) {
+		_nebulaCache = buildNebulaClusters(nodes);
+		_nebulaCacheKey = key;
 	}
-
 	const baseOpacity = lens === 'genre' ? 0.28 : 0.13;
 
-	for (const [genre, positions] of groups) {
-		if (positions.length < 2) continue;
-		const cx = positions.reduce((s, p) => s + p.x, 0) / positions.length;
-		const cy = positions.reduce((s, p) => s + p.y, 0) / positions.length;
-		const maxDist = Math.max(...positions.map((p) => Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2)));
-		const r = Math.max(80, maxDist * 1.3);
-		const [sx, sy] = worldToCanvas(cx, cy, camera, cw, ch);
-		const sr = r * camera.zoom;
+	for (const cluster of _nebulaCache) {
+		const sx = cw / 2 + (cluster.cx - camera.x) * camera.zoom;
+		const sy = ch / 2 + (cluster.cy - camera.y) * camera.zoom;
+		const sr = cluster.r * camera.zoom;
 
-		const [nr, ng, nb] = nebulaRgb(genre);
+		const [nr, ng, nb] = nebulaRgb(cluster.genre);
 		const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
 		grad.addColorStop(0,   `rgba(${nr},${ng},${nb},${baseOpacity})`);
 		grad.addColorStop(0.5, `rgba(${nr},${ng},${nb},${baseOpacity * 0.45})`);
@@ -303,81 +385,121 @@ export function drawGenreNebulae(
 		ctx.arc(sx, sy, sr, 0, Math.PI * 2);
 		ctx.fill();
 
-		// Genre label (only with ≥ 3 nodes and enough zoom)
-		if (camera.zoom > 0.55 && positions.length >= 3) {
+		if (camera.zoom > 0.55 && cluster.count >= 3) {
 			ctx.save();
 			ctx.fillStyle = `rgba(${nr},${ng},${nb},${Math.min(0.6, baseOpacity * 3.5)})`;
 			ctx.font = `${Math.max(9, Math.min(13, 10 * camera.zoom))}px system-ui, sans-serif`;
 			ctx.textAlign = 'center';
 			ctx.textBaseline = 'middle';
-			ctx.fillText(genre, sx, sy);
+			ctx.fillText(cluster.genre, sx, sy);
 			ctx.restore();
 		}
 	}
 }
 
 // ─── Edges ────────────────────────────────────────────────────────────────────
+//
+// Three tiers:
+//   strong  weight >= 0.72 — always shown, soft glow, thicker
+//   medium  weight >= 0.45 — shown at normal zoom
+//   weak    below 0.45     — shown only on hover / select / seed / route focus
 
 export function drawEdges(
 	ctx: CanvasRenderingContext2D,
 	edges: DiscoverEdge[],
 	nodeMap: Map<number, DiscoverTrackNode>,
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	zoom: number,
-	lens: DiscoverLens,
 	seedTrackId: number | null,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
 	routeTrackIds: Set<number>
 ): void {
-	for (const edge of edges) {
-		const from = nodeMap.get(edge.fromTrackId);
-		const to   = nodeMap.get(edge.toTrackId);
-		if (!from || !to) continue;
+	// Two-pass: strong edges first (glow), then the rest
+	for (let pass = 0; pass < 2; pass++) {
+		const drawingStrong = pass === 0;
 
-		// Visibility filter: skip low-weight edges unless they're meaningful
-		const connectsSeed     = edge.fromTrackId === seedTrackId || edge.toTrackId === seedTrackId;
-		const connectsHovered  = hoveredTrackId !== null && (edge.fromTrackId === hoveredTrackId  || edge.toTrackId === hoveredTrackId);
-		const connectsSelected = selectedTrackId !== null && (edge.fromTrackId === selectedTrackId || edge.toTrackId === selectedTrackId);
-		const isRouteEdge      = routeTrackIds.has(edge.fromTrackId) && routeTrackIds.has(edge.toTrackId);
+		for (const edge of edges) {
+			const from = nodeMap.get(edge.fromTrackId);
+			const to   = nodeMap.get(edge.toTrackId);
+			if (!from || !to) continue;
 
-		if (!connectsSeed && !connectsHovered && !connectsSelected && !isRouteEdge && edge.weight <= 0.45) continue;
+			const isStrong   = edge.weight >= 0.72;
+			const isMedium   = edge.weight >= 0.45;
 
-		const [x1, y1] = worldToCanvas(from.x, from.y, camera, cw, ch);
-		const [x2, y2] = worldToCanvas(to.x, to.y, camera, cw, ch);
+			if (drawingStrong !== isStrong) continue;
 
-		const isHighlighted = connectsHovered || connectsSelected;
-		// Base alpha: highlighted > seed > normal; also scales with zoom (edges fade at low zoom)
-		const baseAlpha = isHighlighted ? 0.65 : connectsSeed ? 0.32 : 0.18;
-		const alpha = baseAlpha * (0.35 + edge.confidence * 0.65) * Math.min(1, zoom * 1.4);
-		const thickness = 0.4 + edge.weight * (isHighlighted ? 3.0 : 1.8);
-		const col = EDGE_COLORS[edge.reason] ?? EDGE_COLORS.unknown!;
+			const connectsSeed     = edge.fromTrackId === seedTrackId || edge.toTrackId === seedTrackId;
+			const connectsHovered  = hoveredTrackId !== null && (edge.fromTrackId === hoveredTrackId  || edge.toTrackId === hoveredTrackId);
+			const connectsSelected = selectedTrackId !== null && (edge.fromTrackId === selectedTrackId || edge.toTrackId === selectedTrackId);
+			const isRouteEdge      = routeTrackIds.has(edge.fromTrackId) && routeTrackIds.has(edge.toTrackId);
 
-		ctx.save();
-		ctx.globalAlpha = alpha;
-		ctx.strokeStyle = col;
-		ctx.lineWidth = thickness;
-		ctx.beginPath();
+			// Visibility: strong always shown; medium shown at mid+ zoom; weak only on focus
+			if (isStrong) {
+				// always visible
+			} else if (isMedium) {
+				if (!connectsSeed && !connectsHovered && !connectsSelected && !isRouteEdge && zoom < 0.5) continue;
+			} else {
+				if (!connectsSeed && !connectsHovered && !connectsSelected && !isRouteEdge) continue;
+			}
 
-		if (edge.reason === 'harmonic') {
-			const mx = (x1 + x2) / 2 + (y2 - y1) * 0.15;
-			const my = (y1 + y2) / 2 - (x2 - x1) * 0.15;
-			ctx.moveTo(x1, y1);
-			ctx.quadraticCurveTo(mx, my, x2, y2);
-		} else if (edge.reason === 'bpm') {
-			ctx.setLineDash([3 * Math.max(0.5, camera.zoom), 4 * Math.max(0.5, camera.zoom)]);
-			ctx.moveTo(x1, y1);
-			ctx.lineTo(x2, y2);
-		} else {
-			ctx.moveTo(x1, y1);
-			ctx.lineTo(x2, y2);
+			const x1 = cw / 2 + (from.x - camera.x) * camera.zoom;
+			const y1 = ch / 2 + (from.y - camera.y) * camera.zoom;
+			const x2 = cw / 2 + (to.x   - camera.x) * camera.zoom;
+			const y2 = ch / 2 + (to.y   - camera.y) * camera.zoom;
+
+			const isHighlighted = connectsHovered || connectsSelected;
+			const col = EDGE_COLORS[edge.reason] ?? EDGE_COLORS.unknown!;
+
+			let baseAlpha: number;
+			let thickness: number;
+
+			if (isStrong) {
+				baseAlpha = isHighlighted ? 0.85 : connectsSeed ? 0.60 : 0.42;
+				thickness = 1.0 + edge.weight * (isHighlighted ? 3.5 : 2.5);
+			} else if (isMedium) {
+				baseAlpha = isHighlighted ? 0.65 : connectsSeed ? 0.32 : 0.18;
+				thickness = 0.4 + edge.weight * (isHighlighted ? 3.0 : 1.8);
+			} else {
+				baseAlpha = isHighlighted ? 0.45 : connectsSeed ? 0.22 : 0.12;
+				thickness = 0.3 + edge.weight * 1.2;
+			}
+
+			const alpha = baseAlpha * (0.35 + edge.confidence * 0.65) * Math.min(1, zoom * 1.4);
+
+			ctx.save();
+			ctx.globalAlpha = alpha;
+			ctx.strokeStyle = col;
+			ctx.lineWidth = thickness;
+
+			// Glow on strong edges: draw a wider, blurred shadow pass
+			if (isStrong) {
+				ctx.shadowColor = col;
+				ctx.shadowBlur = isHighlighted ? 14 : 8;
+			}
+
+			ctx.beginPath();
+			if (edge.reason === 'harmonic' || isStrong) {
+				// Slight curve on harmonic and strong edges for elegance
+				const mx = (x1 + x2) / 2 + (y2 - y1) * 0.12;
+				const my = (y1 + y2) / 2 - (x2 - x1) * 0.12;
+				ctx.moveTo(x1, y1);
+				ctx.quadraticCurveTo(mx, my, x2, y2);
+			} else if (edge.reason === 'bpm') {
+				ctx.setLineDash([3 * Math.max(0.5, zoom), 4 * Math.max(0.5, zoom)]);
+				ctx.moveTo(x1, y1);
+				ctx.lineTo(x2, y2);
+			} else {
+				ctx.moveTo(x1, y1);
+				ctx.lineTo(x2, y2);
+			}
+
+			ctx.stroke();
+			ctx.shadowBlur = 0;
+			ctx.setLineDash([]);
+			ctx.restore();
 		}
-
-		ctx.stroke();
-		ctx.setLineDash([]);
-		ctx.restore();
 	}
 }
 
@@ -387,18 +509,18 @@ export function drawNodes(
 	ctx: CanvasRenderingContext2D,
 	nodes: DiscoverTrackNode[],
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	lens: DiscoverLens,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
 	connectedIds: Set<number>,
 	t: number,
-	prefersReducedMotion: boolean
+	prefersReducedMotion: boolean,
+	routeTrackIds: Set<number>
 ): void {
 	for (const node of nodes) {
 		if (node.isSeed || node.isPlaying) continue;
-		drawSingleNode(ctx, node, camera, cw, ch, lens, hoveredTrackId, selectedTrackId, connectedIds, t, prefersReducedMotion);
+		drawSingleNode(ctx, node, camera, cw, ch, lens, hoveredTrackId, selectedTrackId, connectedIds, t, prefersReducedMotion, routeTrackIds);
 	}
 }
 
@@ -406,95 +528,120 @@ function drawSingleNode(
 	ctx: CanvasRenderingContext2D,
 	node: DiscoverTrackNode,
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	lens: DiscoverLens,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
 	connectedIds: Set<number>,
 	t: number,
-	prefersReducedMotion: boolean
+	prefersReducedMotion: boolean,
+	routeTrackIds: Set<number>
 ): void {
-	const [sx, sy] = worldToCanvas(node.x, node.y, camera, cw, ch);
-	const r = Math.max(3, node.radius * camera.zoom);
+	const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
+	const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
+	const r = Math.max(4, node.radius * camera.zoom);
 	const isHovered  = node.trackId === hoveredTrackId;
 	const isSelected = node.trackId === selectedTrackId;
-	const col = nodeColor(node, lens);
-	// Focus opacity: dim non-connected nodes when something is hovered
 	const fo = focusOpacity(node.trackId, hoveredTrackId, connectedIds);
-	const coreAlpha = (node.isColdStart ? 0.55 : 0.90) * fo;
+
+	const withArtwork = shouldShowArtwork(node, camera.zoom, hoveredTrackId, selectedTrackId, routeTrackIds);
+	const img = withArtwork && node.artworkUrl ? getCachedImage(node.artworkUrl) : null;
 
 	ctx.save();
 
-	// 1. Soft outer star glow (slow breathe at 5.2s period when settled)
+	// 1. Soft outer glow (behind everything)
 	const breathe = prefersReducedMotion ? 1 : 1 + Math.sin(t * 0.02 + node.trackId * 0.1) * 0.025;
-	const glowR = r * 2.8 * breathe;
+	const glowR = r * (img ? 2.2 : 2.8) * breathe;
 	const glowStrength = (0.09 + node.confidence * 0.16) * fo;
+	const glowCol = img ? 'rgba(220,220,255,' : 'rgba(180,185,255,';
 	const glowGrad = ctx.createRadialGradient(sx, sy, r * 0.4, sx, sy, glowR);
-	glowGrad.addColorStop(0, `rgba(180,185,255,${glowStrength})`);
+	glowGrad.addColorStop(0, `${glowCol}${glowStrength})`);
 	glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
 	ctx.fillStyle = glowGrad;
 	ctx.beginPath();
 	ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
 	ctx.fill();
 
-	// 2. Cold-start shimmer ring (very slow pulse)
-	if (node.isColdStart && !prefersReducedMotion) {
-		const shimmer = (0.10 + Math.sin(t * 0.02 + node.trackId) * 0.05) * fo;
-		ctx.strokeStyle = `rgba(180,180,210,${shimmer})`;
-		ctx.lineWidth = 1;
+	if (img) {
+		// ── Artwork rendering path ─────────────────────────────────────
+		// Use a slightly larger effective radius for artwork readability
+		const ar = Math.max(r, 10);
+		const artAlpha = (node.isColdStart ? 0.60 : 0.92) * fo;
+		drawArtworkFill(ctx, img, sx, sy, ar, artAlpha);
+
+		// Source ring (outside clip, over artwork)
+		const ringCol = SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
+		const ringW = Math.max(1.2, 2.0 * Math.min(1, camera.zoom));
+		const ringAlpha = (node.isColdStart ? 0.45 : 0.80) * fo;
+		ctx.globalAlpha = ringAlpha;
+		ctx.strokeStyle = ringCol;
+		ctx.lineWidth = ringW;
 		ctx.beginPath();
-		ctx.arc(sx, sy, r + Math.min(4, 4 * camera.zoom), 0, Math.PI * 2);
+		ctx.arc(sx, sy, ar + ringW, 0, Math.PI * 2);
+		ctx.stroke();
+
+	} else {
+		// ── Star fallback rendering path ───────────────────────────────
+		const col = nodeColor(node, lens);
+		const coreAlpha = (node.isColdStart ? 0.55 : 0.90) * fo;
+
+		// Cold-start shimmer ring
+		if (node.isColdStart && !prefersReducedMotion) {
+			const shimmer = (0.10 + Math.sin(t * 0.02 + node.trackId) * 0.05) * fo;
+			ctx.strokeStyle = `rgba(180,180,210,${shimmer})`;
+			ctx.lineWidth = 1;
+			ctx.beginPath();
+			ctx.arc(sx, sy, r + Math.min(4, 4 * camera.zoom), 0, Math.PI * 2);
+			ctx.stroke();
+		}
+
+		// Core fill
+		ctx.globalAlpha = coreAlpha;
+		ctx.fillStyle = col;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
+
+		// Specular highlight
+		const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
+		specGrad.addColorStop(0, 'rgba(255,255,255,0.70)');
+		specGrad.addColorStop(0.45, 'rgba(255,255,255,0.12)');
+		specGrad.addColorStop(1, 'rgba(0,0,0,0)');
+		ctx.fillStyle = specGrad;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
+
+		// Thin source ring
+		const ringCol = SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
+		ctx.globalAlpha = (node.isColdStart ? 0.35 : 0.55) * fo;
+		ctx.strokeStyle = ringCol;
+		ctx.lineWidth = Math.max(0.5, 1.0 * camera.zoom);
+		ctx.beginPath();
+		ctx.arc(sx, sy, r + Math.max(1, 1.5 * camera.zoom), 0, Math.PI * 2);
 		ctx.stroke();
 	}
 
-	// 3. Filled core
-	ctx.globalAlpha = coreAlpha;
-	ctx.fillStyle = col;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
-
-	// 4. Specular highlight
-	const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
-	specGrad.addColorStop(0, 'rgba(255,255,255,0.70)');
-	specGrad.addColorStop(0.45, 'rgba(255,255,255,0.12)');
-	specGrad.addColorStop(1, 'rgba(0,0,0,0)');
-	ctx.fillStyle = specGrad;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
-
-	// 5. Thin source ring
-	ctx.globalAlpha = 0.55 * fo;
-	const ringCol = node.source === 'library' ? '#6080e0'
-		: node.source === 'lastfm' ? '#e04060'
-		: node.source === 'engine' ? '#50c070'
-		: '#a080c0';
-	ctx.strokeStyle = ringCol;
-	ctx.lineWidth = Math.max(0.5, 1.0 * camera.zoom);
-	ctx.beginPath();
-	ctx.arc(sx, sy, r + Math.max(1, 1.5 * camera.zoom), 0, Math.PI * 2);
-	ctx.stroke();
+	// ── Status rings (same for both paths) ────────────────────────────────────
 
 	ctx.globalAlpha = fo;
 
-	// 6. Playlist ring (gold)
+	// Playlist ring (gold)
 	if (node.inPlaylistBuilder) {
 		ctx.strokeStyle = 'rgba(255,200,50,0.9)';
-		ctx.lineWidth = 1.5;
+		ctx.lineWidth = 1.8;
 		ctx.beginPath();
-		ctx.arc(sx, sy, r + Math.max(3, 3.5 * camera.zoom), 0, Math.PI * 2);
+		ctx.arc(sx, sy, (img ? Math.max(r, 10) : r) + Math.max(3.5, 4.5 * camera.zoom), 0, Math.PI * 2);
 		ctx.stroke();
 	}
 
-	// 7. Hover / selected ring (always full opacity — visual selection feedback)
+	// Hover / selected ring (full opacity, always on top)
 	if (isHovered || isSelected) {
 		ctx.globalAlpha = 1;
-		ctx.strokeStyle = isSelected ? 'rgba(255,255,255,0.90)' : 'rgba(255,255,255,0.50)';
-		ctx.lineWidth = isSelected ? 2 : 1;
+		ctx.strokeStyle = isSelected ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.52)';
+		ctx.lineWidth = isSelected ? 2.2 : 1.2;
 		ctx.beginPath();
-		ctx.arc(sx, sy, r + Math.max(3.5, 4 * camera.zoom), 0, Math.PI * 2);
+		ctx.arc(sx, sy, (img ? Math.max(r, 10) : r) + Math.max(4, 5 * camera.zoom), 0, Math.PI * 2);
 		ctx.stroke();
 	}
 
@@ -507,18 +654,19 @@ export function drawSeedNode(
 	ctx: CanvasRenderingContext2D,
 	node: DiscoverTrackNode,
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	isLocked: boolean,
 	t: number,
 	prefersReducedMotion: boolean
 ): void {
-	const [sx, sy] = worldToCanvas(node.x, node.y, camera, cw, ch);
-	const r = Math.max(8, node.radius * camera.zoom);
+	const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
+	const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
+	const r = Math.max(10, node.radius * camera.zoom);
+	const img = node.artworkUrl ? getCachedImage(node.artworkUrl) : null;
 
 	ctx.save();
 
-	// Pulsing outer halo
+	// White-violet outer halo
 	if (!prefersReducedMotion) {
 		const pulseR = r * (3.2 + Math.sin(t * 0.025) * 0.5);
 		const haloGrad = ctx.createRadialGradient(sx, sy, r, sx, sy, pulseR);
@@ -530,42 +678,57 @@ export function drawSeedNode(
 		ctx.arc(sx, sy, pulseR, 0, Math.PI * 2);
 		ctx.fill();
 
-		// Secondary heartbeat ring
+		// Heartbeat ring
 		const ring2R = r * (1.8 + Math.sin(t * 0.04) * 0.4);
-		ctx.strokeStyle = `rgba(140,150,255,${0.32 + Math.sin(t * 0.04) * 0.14})`;
-		ctx.lineWidth = 1.5;
+		ctx.strokeStyle = `rgba(200,210,255,${0.38 + Math.sin(t * 0.04) * 0.16})`;
+		ctx.lineWidth = 1.8;
 		ctx.beginPath();
 		ctx.arc(sx, sy, ring2R, 0, Math.PI * 2);
 		ctx.stroke();
 	}
 
-	// Core gradient
-	const seedGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.3, 0, sx, sy, r);
-	seedGrad.addColorStop(0, '#d0d8ff');
-	seedGrad.addColorStop(0.5, '#7080f0');
-	seedGrad.addColorStop(1, '#3848c8');
-	ctx.fillStyle = seedGrad;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
+	if (img) {
+		drawArtworkFill(ctx, img, sx, sy, r, 0.95);
 
-	// Specular highlight
-	const specGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.35, 0, sx, sy, r);
-	specGrad.addColorStop(0, 'rgba(255,255,255,0.80)');
-	specGrad.addColorStop(0.4, 'rgba(255,255,255,0.12)');
-	specGrad.addColorStop(1, 'rgba(0,0,0,0)');
-	ctx.fillStyle = specGrad;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
+		// Heavy white-violet seed border
+		ctx.strokeStyle = isLocked ? 'rgba(220,200,255,0.95)' : 'rgba(180,190,255,0.85)';
+		ctx.lineWidth = Math.max(2.5, 3 * Math.min(1, camera.zoom));
+		ctx.beginPath();
+		ctx.arc(sx, sy, r + 2, 0, Math.PI * 2);
+		ctx.stroke();
+	} else {
+		// Star fallback
+		const seedGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.3, 0, sx, sy, r);
+		seedGrad.addColorStop(0, '#d0d8ff');
+		seedGrad.addColorStop(0.5, '#7080f0');
+		seedGrad.addColorStop(1, '#3848c8');
+		ctx.fillStyle = seedGrad;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
 
-	// Lock icon
+		const specGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.35, 0, sx, sy, r);
+		specGrad.addColorStop(0, 'rgba(255,255,255,0.80)');
+		specGrad.addColorStop(0.4, 'rgba(255,255,255,0.12)');
+		specGrad.addColorStop(1, 'rgba(0,0,0,0)');
+		ctx.fillStyle = specGrad;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
+
+		ctx.strokeStyle = isLocked ? 'rgba(220,200,255,0.9)' : 'rgba(160,180,255,0.7)';
+		ctx.lineWidth = 2;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r + 2, 0, Math.PI * 2);
+		ctx.stroke();
+	}
+
 	if (isLocked) {
-		ctx.fillStyle = 'rgba(255,255,255,0.9)';
-		ctx.font = `${Math.max(10, r * 0.9)}px system-ui`;
+		ctx.fillStyle = 'rgba(255,255,255,0.92)';
+		ctx.font = `${Math.max(10, r * 0.75)}px system-ui`;
 		ctx.textAlign = 'center';
 		ctx.textBaseline = 'middle';
-		ctx.fillText('🔒', sx, sy);
+		ctx.fillText('🔒', sx + r * 0.55, sy - r * 0.55);
 	}
 
 	ctx.restore();
@@ -577,46 +740,58 @@ export function drawPlayingNode(
 	ctx: CanvasRenderingContext2D,
 	node: DiscoverTrackNode,
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	t: number,
 	prefersReducedMotion: boolean
 ): void {
-	const [sx, sy] = worldToCanvas(node.x, node.y, camera, cw, ch);
-	const r = Math.max(6, node.radius * camera.zoom);
+	const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
+	const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
+	const r = Math.max(7, node.radius * camera.zoom);
+	const img = node.artworkUrl ? getCachedImage(node.artworkUrl) : null;
 
 	ctx.save();
 
+	// Lavender playing pulse rings
 	if (!prefersReducedMotion) {
-		// Two offset rings at 3200ms period — slow, breathing pulse
 		for (let i = 0; i < 2; i++) {
 			const phase = t * 0.033 + i * Math.PI;
 			const pulseR = r * (1.7 + Math.sin(phase) * 0.5);
-			ctx.strokeStyle = `rgba(180,160,255,${0.35 - i * 0.10})`;
-			ctx.lineWidth = 1.5;
+			ctx.strokeStyle = `rgba(180,160,255,${0.38 - i * 0.12})`;
+			ctx.lineWidth = 1.6;
 			ctx.beginPath();
 			ctx.arc(sx, sy, pulseR, 0, Math.PI * 2);
 			ctx.stroke();
 		}
 	}
 
-	const playGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.3, 0, sx, sy, r);
-	playGrad.addColorStop(0, '#f0ecff');
-	playGrad.addColorStop(0.5, '#b4a0f0');
-	playGrad.addColorStop(1, '#7060c0');
-	ctx.fillStyle = playGrad;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
+	if (img) {
+		drawArtworkFill(ctx, img, sx, sy, r, 0.95);
 
-	const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
-	specGrad.addColorStop(0, 'rgba(255,255,255,0.75)');
-	specGrad.addColorStop(0.4, 'rgba(255,255,255,0.10)');
-	specGrad.addColorStop(1, 'rgba(0,0,0,0)');
-	ctx.fillStyle = specGrad;
-	ctx.beginPath();
-	ctx.arc(sx, sy, r, 0, Math.PI * 2);
-	ctx.fill();
+		// Lavender playing border
+		ctx.strokeStyle = 'rgba(200,180,255,0.90)';
+		ctx.lineWidth = Math.max(2, 2.5 * Math.min(1, camera.zoom));
+		ctx.beginPath();
+		ctx.arc(sx, sy, r + 2, 0, Math.PI * 2);
+		ctx.stroke();
+	} else {
+		const playGrad = ctx.createRadialGradient(sx - r * 0.3, sy - r * 0.3, 0, sx, sy, r);
+		playGrad.addColorStop(0, '#f0ecff');
+		playGrad.addColorStop(0.5, '#b4a0f0');
+		playGrad.addColorStop(1, '#7060c0');
+		ctx.fillStyle = playGrad;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
+
+		const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
+		specGrad.addColorStop(0, 'rgba(255,255,255,0.75)');
+		specGrad.addColorStop(0.4, 'rgba(255,255,255,0.10)');
+		specGrad.addColorStop(1, 'rgba(0,0,0,0)');
+		ctx.fillStyle = specGrad;
+		ctx.beginPath();
+		ctx.arc(sx, sy, r, 0, Math.PI * 2);
+		ctx.fill();
+	}
 
 	ctx.restore();
 }
@@ -627,15 +802,13 @@ export function drawLabels(
 	ctx: CanvasRenderingContext2D,
 	nodes: DiscoverTrackNode[],
 	camera: Camera,
-	cw: number,
-	ch: number,
+	cw: number, ch: number,
 	hoveredTrackId: number | null,
 	selectedTrackId: number | null,
 	zoom: number
 ): void {
 	const isHighZoom = zoom >= 1.15;
 	const isMidZoom  = zoom >= 0.70;
-	// Score thresholds gate which non-priority nodes show labels
 	const scoreThreshold = isHighZoom ? 0.65 : 0.82;
 	const maxLen = isHighZoom ? 28 : 18;
 	const baseFontSize = Math.max(9, Math.min(13, 11 * zoom));
@@ -656,12 +829,13 @@ export function drawLabels(
 
 		if (!showLabel) continue;
 
-		const [sx, sy] = worldToCanvas(node.x, node.y, camera, cw, ch);
-		const r = Math.max(3, node.radius * zoom);
+		const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
+		const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
+		const r = Math.max(4, node.radius * zoom);
 		const raw = node.title;
 		const label = raw.length > maxLen ? raw.slice(0, maxLen - 1) + '…' : raw;
 
-		ctx.shadowColor = 'rgba(0,0,0,0.85)';
+		ctx.shadowColor = 'rgba(0,0,0,0.88)';
 		ctx.shadowBlur = 4;
 		ctx.fillStyle = node.isSeed           ? 'rgba(255,255,255,0.98)'
 			: node.isPlaying                   ? 'rgba(220,200,255,0.95)'
@@ -688,18 +862,18 @@ export function drawRadioRoute(
 	route: DiscoverRouteStep[],
 	nodeMap: Map<number, DiscoverTrackNode>,
 	camera: Camera,
-	cw: number,
-	ch: number,
-	zoom: number,
-	t: number,
-	prefersReducedMotion: boolean
+	cw: number, ch: number,
+	zoom: number
 ): void {
 	if (route.length < 2) return;
 
 	const positions: Array<[number, number]> = [];
 	for (const step of route) {
 		const node = nodeMap.get(step.trackId);
-		if (node) positions.push(worldToCanvas(node.x, node.y, camera, cw, ch));
+		if (node) positions.push([
+			cw / 2 + (node.x - camera.x) * camera.zoom,
+			ch / 2 + (node.y - camera.y) * camera.zoom,
+		]);
 	}
 	if (positions.length < 2) return;
 
@@ -732,7 +906,7 @@ export function drawRadioRoute(
 	ctx.restore();
 }
 
-// ─── Warp streaks (hyperspace animation) ─────────────────────────────────────
+// ─── Warp streaks ─────────────────────────────────────────────────────────────
 
 export function drawWarpStreaks(
 	ctx: CanvasRenderingContext2D,

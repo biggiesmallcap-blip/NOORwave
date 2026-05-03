@@ -5,6 +5,7 @@ import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/st
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
 import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
 import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
+import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 
 export const wsConnected = writable(false);
 
@@ -22,12 +23,14 @@ export type WsMessage =
 	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
 	| { type: 'audio_analysis_complete'; analyzed: number }
 	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
-	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number };
+	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number }
+	| { type: 'discovery_space_refresh_progress'; seed_track_id: number; stage: string; progress: number }
+	| { type: 'discovery_space_refreshed'; seed_track_id: number };
 
 export const wsMessages = writable<WsMessage[]>([]);
 
 let socket: WebSocket | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout>;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
 function getWebSocketUrl(): string {
 	const apiUrl = new URL(getApiBase());
@@ -42,7 +45,9 @@ function getWebSocketUrl(): string {
 }
 
 export function connectWebSocket() {
-	if (socket?.readyState === WebSocket.OPEN) return;
+	// Skip if a socket is already up OR currently connecting — avoids creating
+	// a second socket while the first is mid-handshake.
+	if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
 
 	socket = new WebSocket(getWebSocketUrl());
 
@@ -97,6 +102,12 @@ export function connectWebSocket() {
 			if (data?.type === 'acrcloud_scan_complete') {
 				handleAcrCloudComplete(data);
 			}
+			if (data?.type === 'discovery_space_refresh_progress') {
+				setRefreshProgress(data.seed_track_id, data.stage, data.progress);
+			}
+			if (data?.type === 'discovery_space_refreshed') {
+				handleDiscoverySpaceRefreshed(data.seed_track_id);
+			}
 		} catch {}
 	};
 
@@ -115,4 +126,5 @@ export function disconnectWebSocket() {
 	clearTimeout(reconnectTimer);
 	socket?.close();
 	socket = null;
+	wsConnected.set(false);
 }

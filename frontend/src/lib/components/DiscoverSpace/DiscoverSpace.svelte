@@ -16,6 +16,7 @@
 		drawRadioRoute,
 		drawSelectionRipple,
 		drawWarpStreaks,
+		invalidateNebulaCache,
 	} from './discover_space_renderer';
 	import type { DiscoverTrackNode, Camera } from './discover_space_types';
 	import { addVisitedRegion } from './discover_space_store';
@@ -44,6 +45,10 @@
 	let canvas: HTMLCanvasElement | undefined = $state();
 	let rafId = 0;
 	let tick = 0;         // animation clock (drives halo breathing, playing pulse)
+	// Tracked separately from the main RAF so warp / camera animations get
+	// cancelled on unmount instead of running their closures past teardown.
+	let auxRafId = 0;
+	let alive = true;
 
 	// Camera
 	let camera: Camera = { x: 0, y: 0, zoom: 0.7 };
@@ -103,12 +108,13 @@
 			const warpStart = performance.now();
 			await new Promise<void>((res) => {
 				function warpTick() {
+					if (!alive) { res(); return; }
 					const elapsed = performance.now() - warpStart;
 					warpProgress = Math.min(1, elapsed / 400);
-					if (warpProgress < 1) requestAnimationFrame(warpTick);
+					if (warpProgress < 1) auxRafId = requestAnimationFrame(warpTick);
 					else res();
 				}
-				requestAnimationFrame(warpTick);
+				auxRafId = requestAnimationFrame(warpTick);
 			});
 
 			// T+700: results arrive (fetched by parent via store)
@@ -135,15 +141,16 @@
 		const startTime = performance.now();
 		return new Promise((res) => {
 			function step() {
+				if (!alive) { res(); return; }
 				const t = Math.min(1, (performance.now() - startTime) / durationMs);
 				const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 				if (target.x != null) camera.x = start.x + (target.x - start.x) * ease;
 				if (target.y != null) camera.y = start.y + (target.y - start.y) * ease;
 				if (target.zoom != null) camera.zoom = start.zoom + (target.zoom - start.zoom) * ease;
-				if (t < 1) requestAnimationFrame(step);
+				if (t < 1) auxRafId = requestAnimationFrame(step);
 				else res();
 			}
-			requestAnimationFrame(step);
+			auxRafId = requestAnimationFrame(step);
 		});
 	}
 
@@ -155,8 +162,11 @@
 
 		const ctx = canvas.getContext('2d');
 		if (!ctx) return;
-		const w = canvas.width;
-		const h = canvas.height;
+		// Use CSS pixel dimensions — ctx.scale(dpr, dpr) makes the drawing space CSS pixels,
+		// so w/h must be CSS sizes (not physical/DPR-scaled) for worldToCanvas to be correct.
+		const dpr = window.devicePixelRatio || 1;
+		const w = canvas.width / dpr;
+		const h = canvas.height / dpr;
 
 		const state = $discoverSpaceStore;
 		const nodes = state.nodes;
@@ -175,6 +185,10 @@
 		if (!isWarping) {
 			if (!simulationSettled) {
 				applyForces(nodes, edges, { genreLensActive: lens === 'genre', prefersReducedMotion });
+				// Centroids are cached by node-set identity; positions move while
+				// settling so we drop the cache each tick. Once settled, the
+				// cache stays valid for free.
+				invalidateNebulaCache();
 				if (prefersReducedMotion || kineticEnergy(nodes) < 0.002) {
 					simulationSettled = true;
 					for (const n of nodes) { n.vx = 0; n.vy = 0; }
@@ -207,8 +221,8 @@
 		// Orbit rings behind everything — visual guide for distance tiers
 		if (seedNode) drawOrbitRings(ctx, camera, w, h);
 		drawGenreNebulae(ctx, nodes, camera, w, h, lens);
-		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, lens, seedTrackId, hoveredId, selectedId, routeTrackIds);
-		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, connectedIds, tick, prefersReducedMotion);
+		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, seedTrackId, hoveredId, selectedId, routeTrackIds);
+		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, connectedIds, tick, prefersReducedMotion, routeTrackIds);
 
 		if (playingNode && !playingNode.isSeed) {
 			drawPlayingNode(ctx, playingNode, camera, w, h, tick, prefersReducedMotion);
@@ -229,7 +243,7 @@
 		}
 
 		drawLabels(ctx, nodes, camera, w, h, hoveredId, selectedId, camera.zoom);
-		drawRadioRoute(ctx, route, nodeMap, camera, w, h, camera.zoom, tick, prefersReducedMotion);
+		drawRadioRoute(ctx, route, nodeMap, camera, w, h, camera.zoom);
 
 		if (!prefersReducedMotion) {
 			drawWarpStreaks(ctx, warpProgress, w, h);
@@ -248,11 +262,14 @@
 
 	function canvasToWorld(ex: number, ey: number): { x: number; y: number } {
 		const rect = canvas!.getBoundingClientRect();
-		const px = (ex - rect.left) * (canvas!.width / rect.width);
-		const py = (ey - rect.top) * (canvas!.height / rect.height);
+		// Use CSS pixel coordinates throughout — canvas.width is DPR-scaled physical pixels,
+		// but ctx.scale(dpr, dpr) means drawing happens in CSS-pixel space.
+		const dpr = window.devicePixelRatio || 1;
+		const cssW = canvas!.width / dpr;
+		const cssH = canvas!.height / dpr;
 		return {
-			x: (px - canvas!.width / 2) / camera.zoom + camera.x,
-			y: (py - canvas!.height / 2) / camera.zoom + camera.y,
+			x: (ex - rect.left - cssW / 2) / camera.zoom + camera.x,
+			y: (ey - rect.top - cssH / 2) / camera.zoom + camera.y,
 		};
 	}
 
@@ -270,8 +287,8 @@
 		if (hit !== hoveredNode) {
 			hoveredNode = hit;
 			canvas.style.cursor = hit ? 'pointer' : 'grab';
-			const rect = canvas.getBoundingClientRect();
-			onHoverNode?.(hit, e.clientX - rect.left, e.clientY - rect.top);
+			// Pass viewport coordinates — hover card uses position:fixed and needs viewport origin
+			onHoverNode?.(hit, e.clientX, e.clientY);
 		}
 
 		if (!isPanning) return;
@@ -338,7 +355,9 @@
 	});
 
 	onDestroy(() => {
+		alive = false;
 		cancelAnimationFrame(rafId);
+		cancelAnimationFrame(auxRafId);
 		resizeObserver?.disconnect();
 		delete (window as any).__discoverSpaceHyperspaceSearch;
 	});

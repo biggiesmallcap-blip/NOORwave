@@ -2270,6 +2270,28 @@ async fn compute_radio_similarity(
 
 // ─── Discovery Sound Space ───────────────────────────────────────────────
 
+/// Stable synthetic id for an external (Last.fm) candidate that has no resolved
+/// Tidal id. Negative i64 keyed off `artist|title` so multiple unresolved hits
+/// don't all collapse onto the same `track-0` node on the canvas. Hash collisions
+/// are negligible at the ~60-candidate scale of a single radio request.
+///
+/// TODO(option 2): Replace this with real Tidal-search resolution in `radio.rs`
+/// before the candidate leaves the orchestrator — that would also let
+/// `DiscoverSidePanel.resolveExternalPlayable` go away. Needs an artist+title →
+/// tidal_id cache (in-memory or a small SQLite table) to avoid hammering the
+/// Tidal API on every discovery request.
+fn synthetic_external_track_id(artist: &str, title: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    artist.hash(&mut h);
+    "|".hash(&mut h);
+    title.hash(&mut h);
+    // Force into the negative i64 range so it can't collide with library ids
+    // (always positive) or with the legacy `0` placeholder.
+    -(((h.finish() & 0x7FFF_FFFF_FFFF_FFFF) | 1) as i64)
+}
+
 #[derive(Debug, Deserialize)]
 struct DiscoverySpaceRequest {
     mode: Option<String>,
@@ -2415,7 +2437,12 @@ async fn get_discovery_space(
                 .tracks
                 .into_iter()
                 .map(|c| SpaceTrack {
-                    track_id: if c.is_in_library { c.track_id } else { c.tidal_track_id.unwrap_or(c.track_id) },
+                    track_id: if c.is_in_library {
+                        c.track_id
+                    } else {
+                        c.tidal_track_id
+                            .unwrap_or_else(|| synthetic_external_track_id(&c.artist_name, &c.title))
+                    },
                     title: c.title,
                     artist_name: c.artist_name,
                     album_title: c.album_title,
@@ -2537,9 +2564,12 @@ async fn get_discovery_space(
     }
 
     // ── 2. Fill remainder from most-played library tracks ────────────────────
+    // Only fill when browsing without a seed. In seed mode the radio candidates
+    // ARE the map — padding with unrelated most-played tracks creates a cloud of
+    // disconnected blue dots with no edges and falsely-cold-start labels.
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
-    if remaining > 0 {
+    if remaining > 0 && seed_id == 0 {
         let fallback = state_guard.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.source
@@ -2855,33 +2885,16 @@ async fn get_discovery_space(
         metadata_score: f64,
     }
 
-    let is_external_seed_mode = seed_id > 0
-        && prompt.is_empty()
-        && space_tracks.iter().any(|t| !t.is_in_library);
-
-    let typed_edges: Vec<FullEdge> = if is_external_seed_mode {
-        space_tracks
+    // Library↔library edges come from `track_neighbors`. We always run this
+    // query when there's more than one library track in the result set so the
+    // map shows the full neighbor graph, regardless of whether external tracks
+    // are present.
+    let mut typed_edges: Vec<FullEdge> = {
+        let track_id_set: HashSet<i64> = space_tracks
             .iter()
-            .filter(|t| !t.is_in_library)
-            .map(|t| {
-                let reason = ds::normalize_reason("external_match");
-                FullEdge {
-                    from_track_id: seed_id,
-                    to_track_id: t.track_id,
-                    weight: t.similarity_score,
-                    confidence: t.confidence,
-                    primary_reason: reason.to_string(),
-                    reason_tags: vec![reason.to_string()],
-                    source: ds::normalize_source(&t.source).to_string(),
-                    support_count: Some(t.support_count),
-                    behavioral_score: 0.0,
-                    audio_score: 0.0,
-                    metadata_score: t.similarity_score,
-                }
-            })
-            .collect()
-    } else {
-        let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+            .filter(|t| t.is_in_library)
+            .map(|t| t.track_id)
+            .collect();
         if track_id_set.len() > 1 {
             let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
             state_guard.db.with_conn(|conn| {
@@ -2950,6 +2963,28 @@ async fn get_discovery_space(
         }
     };
 
+    // External (non-library) tracks aren't in `track_neighbors`, so synthesize
+    // a seed→external edge per external track. This runs alongside the library
+    // edges above so users see both their library graph and the external links.
+    if seed_id > 0 && prompt.is_empty() {
+        for t in space_tracks.iter().filter(|t| !t.is_in_library) {
+            let reason = ds::normalize_reason("external_match");
+            typed_edges.push(FullEdge {
+                from_track_id: seed_id,
+                to_track_id: t.track_id,
+                weight: t.similarity_score,
+                confidence: t.confidence,
+                primary_reason: reason.to_string(),
+                reason_tags: vec![reason.to_string()],
+                source: ds::normalize_source(&t.source).to_string(),
+                support_count: Some(t.support_count),
+                behavioral_score: 0.0,
+                audio_score: 0.0,
+                metadata_score: t.similarity_score,
+            });
+        }
+    }
+
     // ── 5. Score normalization (per source group) ─────────────────────────────
     let score_candidates: Vec<ds::ScoreCandidate> = space_tracks.iter().map(|t| {
         ds::ScoreCandidate {
@@ -2999,7 +3034,10 @@ async fn get_discovery_space(
         .enumerate()
         .map(|(i, t)| {
             let norm_score = norm_scores.get(&t.track_id).copied().unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
-            let is_cold_start = t.support_count == 0;
+            // Library tracks are only truly cold-start if confidence is very low —
+            // support_count may be 0 simply because the neighbor table hasn't been
+            // calculated yet, which doesn't mean there's no behavioral data.
+            let is_cold_start = !t.is_in_library && (t.support_count == 0 || t.confidence < 0.3);
             let normalized_source = ds::normalize_source(&t.source);
             let cluster_key = t.genres.first().or(t.top_genre.as_ref()).map(|s| s.as_str()).unwrap_or("unknown");
 
@@ -3151,6 +3189,37 @@ async fn get_discovery_space(
         "hub_suppressed_count": prune_result.hub_suppressed_count,
         "low_confidence_edge_dropped_count": prune_result.low_confidence_edge_dropped_count,
     });
+
+    // ── 11. Background seed-neighbor refresh (DiscoverSpace only) ────────────
+    // Fire-and-forget: computes embedding similarity for this seed, writes to
+    // track_neighbors, then sends DiscoverySpaceRefreshed so the map auto-reloads.
+    // `refreshed_seeds` is a TTL'd map keyed by (seed_id → model_id, instant) so
+    // entries expire and re-training invalidates them automatically.
+    if seed_id > 0 && prompt.is_empty() {
+        let guard = state.read().await;
+        // Best-effort: read current model_id outside the spawned task so we can
+        // skip the spawn entirely when this seed is fresh under the same model.
+        let active_model_id: Option<i64> = guard
+            .db
+            .with_conn(|conn| Ok(crate::db::queries::get_active_embedding_model(conn)?.map(|m| m.id)))
+            .unwrap_or(None);
+        let already_fresh = match active_model_id {
+            Some(mid) => crate::services::neighbor_refresh::is_seed_fresh(
+                &guard.refreshed_seeds, seed_id, mid,
+            ),
+            None => true, // no model → nothing to do anyway
+        };
+        if !already_fresh {
+            let db2 = guard.db.clone();
+            let tx = guard.event_tx.clone();
+            let refreshed = Arc::clone(&guard.refreshed_seeds);
+            let cache = Arc::clone(&guard.embedding_cache);
+            drop(guard);
+            tokio::spawn(crate::services::neighbor_refresh::refresh_seed_neighbors(
+                db2, tx, seed_id, refreshed, cache,
+            ));
+        }
+    }
 
     Ok(Json(json!({
         "tracks": track_nodes,

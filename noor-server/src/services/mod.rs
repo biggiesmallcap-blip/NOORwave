@@ -8,6 +8,7 @@ pub mod lastfm;
 pub mod learning;
 pub mod listen_history_backfill;
 pub mod musicbrainz;
+pub mod neighbor_refresh;
 pub mod radio;
 pub mod radio_config;
 pub mod rss_feeds;

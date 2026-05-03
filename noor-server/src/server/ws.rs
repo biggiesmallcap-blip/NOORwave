@@ -104,6 +104,16 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "scanned": scanned,
                         "matches_found": matches_found
                     }),
+                    AppEvent::DiscoverySpaceRefreshProgress { seed_track_id, stage, progress } => json!({
+                        "type": "discovery_space_refresh_progress",
+                        "seed_track_id": seed_track_id,
+                        "stage": stage,
+                        "progress": progress,
+                    }),
+                    AppEvent::DiscoverySpaceRefreshed { seed_track_id } => json!({
+                        "type": "discovery_space_refreshed",
+                        "seed_track_id": seed_track_id,
+                    }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;
@@ -111,7 +121,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
             }
             // Keepalive ping
             _ = ping_ticker.tick() => {
-                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
             }

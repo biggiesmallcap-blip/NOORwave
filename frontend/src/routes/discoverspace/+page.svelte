@@ -241,6 +241,20 @@
 			<div class="canvas-overlay bottom-center">
 				<DiscoverTrainingStrip />
 			</div>
+
+			<!-- Seed refresh progress pill (top-right while computing) -->
+			{#if $discoverSpaceStore.refreshProgress !== null}
+				{@const rp = $discoverSpaceStore.refreshProgress}
+				<div class="canvas-overlay top-right">
+					<div class="refresh-pill">
+						<span class="refresh-spinner" aria-hidden="true"></span>
+						<span class="refresh-label">
+							{#if rp.stage === 'loading'}Loading embeddings{:else if rp.stage === 'computing'}Computing similarity{:else if rp.stage === 'saving'}Saving connections{:else}{rp.stage}{/if}
+						</span>
+						<span class="refresh-pct">{Math.round(rp.progress * 100)}%</span>
+					</div>
+				</div>
+			{/if}
 		</div>
 
 		<!-- Side panel -->
@@ -421,12 +435,38 @@
 		pointer-events: auto;
 	}
 	.canvas-overlay.top-left { top: 12px; left: 12px; }
+	.canvas-overlay.top-right { top: 12px; right: 12px; }
 	.canvas-overlay.bottom-right { bottom: 12px; right: 12px; }
 	.canvas-overlay.bottom-center {
 		bottom: 12px;
 		left: 50%;
 		transform: translateX(-50%);
 	}
+
+	.refresh-pill {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 5px 10px 5px 8px;
+		border-radius: 999px;
+		background: rgba(10, 10, 30, 0.82);
+		border: 1px solid rgba(124, 128, 255, 0.3);
+		backdrop-filter: blur(6px);
+		font-size: 0.72rem;
+		color: rgba(255, 255, 255, 0.7);
+		white-space: nowrap;
+	}
+	.refresh-spinner {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		border: 1.5px solid rgba(124, 128, 255, 0.25);
+		border-top-color: rgba(124, 128, 255, 1);
+		animation: spin 0.8s linear infinite;
+		flex-shrink: 0;
+	}
+	.refresh-label { color: rgba(200, 200, 255, 0.85); }
+	.refresh-pct { color: rgba(124, 128, 255, 0.9); font-weight: 600; margin-left: 2px; }
 
 	.empty-state {
 		position: absolute;

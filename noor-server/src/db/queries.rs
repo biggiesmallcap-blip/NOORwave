@@ -3066,6 +3066,53 @@ pub fn replace_track_neighbors(
     Ok(())
 }
 
+/// Replace neighbor rows for a single seed track only — used by the background
+/// per-seed refresh so it doesn't wipe every other track's neighbors.
+pub fn replace_seed_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    seed_id: i64,
+    rows: &[NeighborWriteRow],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM track_neighbors WHERE model_id = ?1 AND track_id = ?2",
+        params![model_id, seed_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO track_neighbors
+             (track_id, neighbor_track_id, model_id, rank, score,
+              behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
+              confidence, support_count, candidate_in_degree, candidate_in_degree_percentile,
+              play_count_seed, play_count_candidate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )?;
+        for n in rows {
+            stmt.execute(params![
+                n.track_id,
+                n.neighbor_track_id,
+                model_id,
+                n.rank,
+                n.score,
+                n.behavioral_score,
+                n.audio_score,
+                n.metadata_score,
+                n.reason_json,
+                n.primary_reason,
+                n.confidence,
+                n.support_count,
+                n.candidate_in_degree,
+                n.candidate_in_degree_percentile,
+                n.play_count_seed,
+                n.play_count_candidate,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_track_neighbors(
     conn: &Connection,
     model_id: i64,

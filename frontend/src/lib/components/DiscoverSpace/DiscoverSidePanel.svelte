@@ -2,7 +2,7 @@
 	import { lockSeed, setRadioRoute, discoverSpaceStore } from './discover_space_store';
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
-	import { api, getApiBase, authFetch } from '$lib/api/client';
+	import { api, getApiBase, authFetch, type TidalPlayable } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 
 	interface Props {
@@ -15,28 +15,88 @@
 	let isStartingRadio = $state(false);
 	let isHiding = $state(false);
 
+	function nodeAsTidalPlayable(): TidalPlayable {
+		return {
+			tidal_id: node!.trackId,
+			title: node!.title,
+			artist_name: node!.artist,
+			album_title: node!.albumTitle ?? null,
+			artwork_url: node!.artworkUrl ?? null,
+			duration_ms: node!.durationMs ?? null,
+		};
+	}
+
+	// Last.fm radio candidates arrive with `tidal_id: 0` (radio.rs sets track_id=0
+	// for non-library hits and never resolves a Tidal id). Search Tidal first so
+	// the play endpoint gets a real id.
+	async function resolveExternalPlayable(tp: TidalPlayable): Promise<TidalPlayable | null> {
+		if (tp.tidal_id > 0) return tp;
+		const q = [tp.artist_name, tp.title].filter(Boolean).join(' ');
+		if (!q) return null;
+		const results = await api.searchTidal(q, 1);
+		const hit = results.tracks[0];
+		if (!hit) return null;
+		return {
+			tidal_id: hit.tidal_id,
+			title: hit.title,
+			artist_name: hit.artist_name,
+			album_title: hit.album_title,
+			artwork_url: hit.artwork_url ?? tp.artwork_url,
+			duration_ms: hit.duration_ms,
+			artist_tidal_id: null,
+		};
+	}
+
 	async function handlePlayNow() {
 		if (!node) return;
 		try {
-			const { playTrackNow } = await import('$lib/stores/player');
-			await playTrackNow(node.trackId);
-		} catch { /* existing toast pattern */ }
+			if (node.isInLibrary) {
+				await api.playTrack(node.trackId);
+				return;
+			}
+			const resolved = await resolveExternalPlayable(nodeAsTidalPlayable());
+			if (!resolved) {
+				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				return;
+			}
+			const { playTidalTrackNow } = await import('$lib/stores/player');
+			await playTidalTrackNow(resolved);
+		} catch {
+			showToast('Could not play track', 'error');
+		}
 	}
 
 	async function handlePlayNext() {
 		if (!node) return;
 		try {
-			const { playTrackNext } = await import('$lib/stores/player');
-			await playTrackNext(node.trackId);
-		} catch { /* silent */ }
+			if (node.isInLibrary) {
+				const { playTrackNext } = await import('$lib/stores/player');
+				await playTrackNext(node.trackId);
+				return;
+			}
+			const resolved = await resolveExternalPlayable(nodeAsTidalPlayable());
+			if (!resolved) {
+				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				return;
+			}
+			const { playTidalTrackNext } = await import('$lib/stores/player');
+			await playTidalTrackNext(resolved);
+		} catch {
+			showToast('Could not queue track', 'error');
+		}
 	}
 
 	async function handleStartRadioHere() {
 		if (!node || isStartingRadio) return;
 		isStartingRadio = true;
 		try {
-			const { startSongRadio } = await import('$lib/stores/player');
-			await startSongRadio(node.trackId);
+			if (node.isInLibrary) {
+				const { startSongRadio } = await import('$lib/stores/player');
+				await startSongRadio(node.trackId);
+			} else {
+				const { startTidalSongRadio } = await import('$lib/stores/player');
+				await startTidalSongRadio(nodeAsTidalPlayable());
+			}
 		} catch {
 			showToast(ERROR_TOASTS.radioRouteFailed, 'error');
 		} finally {
@@ -57,7 +117,6 @@
 	async function handleHideFromRadio() {
 		if (!node || isHiding) return;
 		isHiding = true;
-		// Optimistic: mark hidden locally (node remains visible but dimmed in canvas)
 		try {
 			const apiBase = getApiBase();
 			await authFetch(`${apiBase}/api/discovery/feedback`, {
@@ -66,7 +125,6 @@
 				body: JSON.stringify({ track_id: node.trackId, action: 'dismiss' }),
 			});
 		} catch {
-			// Roll back optimistic
 			showToast(ERROR_TOASTS.hideFailed, 'error');
 		} finally {
 			isHiding = false;
