@@ -46,6 +46,48 @@ pub fn regenerate_server_token(conn: &Connection) -> Result<String> {
     Ok(token)
 }
 
+/// First-run onboarding flag. When the row is missing, treat an existing
+/// `service_auth` TIDAL row as implicit completion and persist the flag —
+/// this keeps users upgrading from earlier versions out of the onboarding
+/// flow they've effectively already done.
+pub fn get_onboarding_complete(conn: &Connection) -> Result<bool> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key='onboarding_complete'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(value) = stored {
+        return Ok(value == "1");
+    }
+
+    let has_tidal: bool = conn
+        .query_row(
+            "SELECT 1 FROM service_auth WHERE service='tidal' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+
+    if has_tidal {
+        set_onboarding_complete(conn)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+pub fn set_onboarding_complete(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES ('onboarding_complete', '1')",
+        [],
+    )?;
+    Ok(())
+}
+
 fn generate_readable_token() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 4];
@@ -3674,6 +3716,49 @@ mod tests {
     use super::*;
     use crate::db::schema;
     use rusqlite::Connection;
+
+    fn read_onboarding_value(conn: &Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM server_config WHERE key='onboarding_complete'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .expect("query server_config")
+    }
+
+    #[test]
+    fn onboarding_unset_no_tidal_returns_false() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        assert!(!get_onboarding_complete(&conn).expect("read flag"));
+        assert!(read_onboarding_value(&conn).is_none(), "must not write a row when nothing implies completion");
+    }
+
+    #[test]
+    fn onboarding_unset_with_tidal_writes_flag_and_returns_true() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO service_auth (service, user_id) VALUES ('tidal', 'u-123')",
+            [],
+        )
+        .expect("seed tidal auth");
+
+        assert!(get_onboarding_complete(&conn).expect("read flag"));
+        assert_eq!(read_onboarding_value(&conn).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn onboarding_flag_present_returns_true_without_tidal() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        set_onboarding_complete(&conn).expect("set flag");
+
+        assert!(get_onboarding_complete(&conn).expect("read flag"));
+        assert_eq!(read_onboarding_value(&conn).as_deref(), Some("1"));
+    }
 
     #[test]
     fn discovery_presets_round_trip_mode() {

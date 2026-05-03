@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
     middleware::Next,
     response::{Json, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde_json::json;
 use std::net::SocketAddr;
@@ -56,6 +56,8 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let public_base = Router::new()
         .route("/api/ping", get(ping_handler))
         .route("/api/setup/token", get(setup_token_handler))
+        .route("/api/setup/onboarding", get(onboarding_status_handler))
+        .route("/api/setup/onboarding/complete", post(onboarding_complete_handler))
         .with_state(state.clone());
 
     let public = match www_dir {
@@ -92,17 +94,53 @@ async fn ping_handler() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok", "name": "NOOR" }))
 }
 
+/// Shared loopback gate for the unauthenticated /api/setup/* endpoints. Keeps
+/// the three handlers from drifting on what counts as "local-only".
+fn require_loopback(addr: SocketAddr) -> Result<(), StatusCode> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
 /// Returns the server token ONLY for requests arriving from loopback (127.0.0.1 / ::1).
 /// Lets the frontend auto-configure on the local machine without needing the terminal.
 async fn setup_token_handler(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !addr.ip().is_loopback() {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    require_loopback(addr)?;
     let token = state.read().await.server_token.clone();
     Ok(Json(json!({ "token": token })))
+}
+
+async fn onboarding_status_handler(
+    State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_loopback(addr)?;
+    let complete = state
+        .read()
+        .await
+        .db
+        .with_conn(crate::db::queries::get_onboarding_complete)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "complete": complete })))
+}
+
+async fn onboarding_complete_handler(
+    State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_loopback(addr)?;
+    state
+        .read()
+        .await
+        .db
+        .with_conn(crate::db::queries::set_onboarding_complete)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "complete": true })))
 }
 
 async fn require_token(

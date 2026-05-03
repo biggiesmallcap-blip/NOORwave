@@ -10,6 +10,11 @@ use sidecar::SidecarState;
 use std::sync::Arc;
 use tauri::Manager;
 
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    open::that(url).map_err(|e| e.to_string())
+}
+
 fn main() {
     let cfg = config::load();
     let state = SidecarState::new(cfg.host_mode);
@@ -21,6 +26,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![open_external])
         .manage(state.clone() as Arc<SidecarState>)
         .setup(move |app| {
             // Wait for server on a background thread so we don't block setup.

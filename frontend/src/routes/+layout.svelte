@@ -2,6 +2,7 @@
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
 	import {
 		currentTrack,
@@ -67,6 +68,8 @@
 
 	// ─── Auth gate ───────────────────────────────────────────────
 	let authReady = $state(false);
+	let onboardingChecked = $state(false);
+	let isOnboardingRoute = $derived(page.url.pathname.startsWith('/onboarding'));
 	let showConnect = $state(false);
 	let connectTokenInput = $state('');
 	let connectError = $state('');
@@ -235,6 +238,7 @@
 			authReady = true;
 			connectWebSocket();
 			void refreshPlaybackState();
+			void checkOnboarding();
 		}
 
 		// Listen for 401 responses from any API call. On loopback the backend
@@ -244,6 +248,7 @@
 		window.addEventListener('noor:unauthorized', () => {
 			clearStoredToken();
 			authReady = false;
+			onboardingChecked = false;
 			void tryAutoSetup();
 		});
 
@@ -378,6 +383,26 @@
 		authReady = true;
 		connectWebSocket();
 		void refreshPlaybackState();
+		void checkOnboarding();
+	}
+
+	// Redirects to /onboarding when the server reports first-run state. Fails
+	// open: a transient error must not trap the user on a "Checking setup…"
+	// screen — they land on home and the next session re-checks.
+	async function checkOnboarding() {
+		try {
+			const { getApiBase } = await import('$lib/api/client');
+			const resp = await fetch(`${getApiBase()}/api/setup/onboarding`);
+			if (!resp.ok) throw new Error(`onboarding check failed: ${resp.status}`);
+			const { complete } = await resp.json();
+			onboardingChecked = true;
+			if (!complete && !page.url.pathname.startsWith('/onboarding')) {
+				await goto('/onboarding', { replaceState: true });
+			}
+		} catch (err) {
+			console.warn('onboarding check failed', err);
+			onboardingChecked = true;
+		}
 	}
 
 	function applyTheme(t: 'dark' | 'light') {
@@ -850,6 +875,22 @@
 <QuietMode />
 <QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
 
+{#if isOnboardingRoute}
+	{@render children()}
+{:else if authReady && !onboardingChecked}
+	<div class="onboarding-check">
+		<svg class="check-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true">
+			<rect width="1024" height="1024" rx="224" fill="#2C3E50"/>
+			<g fill="none" stroke="#FFFFFF" stroke-width="14">
+				<circle cx="384" cy="512" r="180"/>
+				<circle cx="384" cy="512" r="74"/>
+				<circle cx="640" cy="512" r="180"/>
+				<circle cx="640" cy="512" r="74"/>
+			</g>
+		</svg>
+		<p>Checking setup…</p>
+	</div>
+{:else}
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
@@ -1576,8 +1617,39 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <style>
+	.onboarding-check {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 18px;
+		background: radial-gradient(circle at 50% 35%, #1a1f2e 0%, #0a0d14 65%, #05070b 100%);
+		color: #8b93a7;
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		z-index: 50;
+	}
+	.onboarding-check .check-mark {
+		width: 72px;
+		height: 72px;
+		opacity: 0.85;
+		animation: noor-check-pulse 1.8s ease-in-out infinite;
+	}
+	.onboarding-check p {
+		margin: 0;
+		font-size: 13px;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+	}
+	@keyframes noor-check-pulse {
+		0%, 100% { opacity: 0.85; transform: scale(1); }
+		50%      { opacity: 1;    transform: scale(1.04); }
+	}
+
 	.wallpaper-layer {
 		position: fixed;
 		inset: 0;
