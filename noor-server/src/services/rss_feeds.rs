@@ -277,11 +277,14 @@ impl FeedAggregator {
 
     fn truncate_desc(s: &str, max: usize) -> String {
         let stripped = html_cleaner::clean_html(s);
-        if stripped.len() > max {
-            format!("{}…", &stripped[..max.min(stripped.len())])
-        } else {
-            stripped
+        if stripped.len() <= max {
+            return stripped;
         }
+        let mut end = max;
+        while end > 0 && !stripped.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &stripped[..end])
     }
 
     /// Fetch all feeds for a category (articles or news)
@@ -345,19 +348,6 @@ impl FeedAggregator {
             .collect()
     }
 
-    /// Get new releases (AllMusic weekly new releases)
-    pub async fn get_new_releases(&self) -> Vec<FeedItem> {
-        let cache_key = "allmusic_all";
-        let all_items = self.get_cached_or_fetch(cache_key, ALLMUSIC_FEEDS.to_vec()).await;
-        
-        // Filter for album releases (typically "Artist - Album" format)
-        all_items.into_iter()
-            .filter(|item| {
-                item.title.contains(" - ") || item.title.contains(": ")
-            })
-            .take(15)
-            .collect()
-    }
     /// Get music news (aggregated from multiple sources)
     pub async fn get_news(&self) -> Vec<FeedItem> {
         let cache_key = "music_news";

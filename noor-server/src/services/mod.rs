@@ -1,6 +1,7 @@
 pub mod acrcloud;
 pub mod audio_analysis;
 pub mod charts;
+pub mod crypto;
 pub mod discovery;
 pub mod discovery_trainer;
 pub mod lastfm;

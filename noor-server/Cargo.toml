@@ -39,6 +39,7 @@ rustfft = "6"
 num-complex = "0.4"
 hmac = "0.12"
 sha1 = "0.10"
+md5 = "0.7"
 
 # Utilities
 tracing = "0.1"

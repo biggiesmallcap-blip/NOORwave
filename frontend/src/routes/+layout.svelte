@@ -910,19 +910,8 @@
 	</header>
 
 	<aside class="sidebar">
-		<a href="/" class="brand" aria-label="NOOR home">
-			<span class="brand-mark">
-				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
-					<circle cx="384" cy="512" r="180"/>
-					<circle cx="384" cy="512" r="74"/>
-					<circle cx="640" cy="512" r="180"/>
-					<circle cx="640" cy="512" r="74"/>
-				</svg>
-			</span>
-			<div class="brand-text">
-				<span class="brand-name">NOOR</span>
-				<span class="brand-sub">Music command center</span>
-			</div>
+		<a href="/" class="brand" aria-label="NOORwave home">
+			<img class="brand-splash" src="/mark-animated-dark.svg" alt="NOORwave" />
 		</a>
 
 		<nav class="nav" aria-label="Primary">
@@ -1735,42 +1724,18 @@
 	.brand {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		justify-content: center;
 		padding: 4px 6px 18px;
 	}
 
-	.brand-mark {
-		width: 34px;
-		height: 34px;
-		border-radius: 10px;
-		background: var(--accent-soft);
-		border: 1px solid var(--accent-line);
-		color: var(--accent-strong);
-		display: grid;
-		place-items: center;
-		flex-shrink: 0;
-	}
-
-	.brand-mark svg {
-		width: 70%;
-		height: 70%;
-	}
-
-	.brand-text {
-		display: flex;
-		flex-direction: column;
-		min-width: 0;
-	}
-
-	.brand-name {
-		font-family: var(--font-display);
-		font-size: 1.08rem;
-		letter-spacing: 0.03em;
-	}
-
-	.brand-sub {
-		color: var(--text-secondary);
-		font-size: 0.77rem;
+	/* Animated NOORwave OO mark — replaces the small icon + "NOOR /
+	   Music command center" stack. The SVG is 320x160 (2:1) so it sits
+	   cleanly in the sidebar header without pushing nav items down. */
+	.brand-splash {
+		display: block;
+		width: 100%;
+		max-width: 100px;
+		height: auto;
 	}
 
 	.nav {
