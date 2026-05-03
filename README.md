@@ -1,4 +1,5 @@
-<h1 align="center">NOOR</h1>
+<h1 align="center"><img width="1600" height="560" alt="image" src="https://github.com/user-attachments/assets/0426b93c-d112-433f-864e-91fe1d05ae03" />
+</h1>
 
 <p align="center">A power-user music command center for TIDAL</p>
 
