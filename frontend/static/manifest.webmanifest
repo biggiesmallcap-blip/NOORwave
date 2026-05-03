@@ -1,0 +1,11 @@
+{
+  "name": "NOORwave",
+  "short_name": "NOORwave",
+  "background_color": "#0B1220",
+  "theme_color": "#0B1220",
+  "display": "standalone",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
