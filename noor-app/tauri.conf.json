@@ -1,6 +1,6 @@
 {
   "productName": "NOORwave",
-  "version": "0.1.7",
+  "version": "0.1.11",
   "identifier": "com.noorwave.app",
   "build": {
     "frontendDist": "./splash"
