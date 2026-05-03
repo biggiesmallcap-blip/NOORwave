@@ -174,7 +174,8 @@
 				{ path: '/search', label: 'Search', icon: '⌕' },
 				{ path: '/genres', label: 'Genre Galaxy', icon: '✦' },
 				{ path: '/playlists', label: 'Playlists', icon: '☰' },
-				{ path: '/discover', label: 'Discover', icon: '✦' }
+				{ path: '/discover', label: 'Discover', icon: '✦' },
+				{ path: '/discoverspace', label: 'Discover Space', icon: '◈' }
 			]
 		},
 		{
