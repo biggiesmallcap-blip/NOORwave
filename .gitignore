@@ -12,6 +12,29 @@ noor.db-shm
 .env
 .noor_secret
 
+# Secrets — defensive patterns
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.secret
+secrets/
+*credentials*.json
+.npmrc
+!frontend/.npmrc
+.yarnrc.yml
+.aws/
+.kube/
+
+# OS / IDE noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
 # Local agent / design tooling — not shared
 .claude/settings.json
 .claude/skills/
