@@ -30,7 +30,7 @@ const CANDIDATES_FOR_GETINFO: usize = 30;
 const CONCURRENT_REQUESTS: usize = 8;
 const RECENT_WINDOW_DAYS: i64 = 90;
 const RESULT_CAP: usize = 15;
-const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const CACHE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseItem {

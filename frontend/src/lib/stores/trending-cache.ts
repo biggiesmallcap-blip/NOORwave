@@ -8,7 +8,7 @@ import type { ChartEntry } from '$lib/api/client';
 /// Module-level so all TrendingShelf instances on the page share the same
 /// cache. Cleared on hard reload (which is the explicit "refresh" gesture).
 
-const TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const MAX_ENTRIES = 32;
 
 interface CacheEntry {
