@@ -36,10 +36,11 @@
 		moveQueueItem,
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
-		saveQueueAsPlaylist
+		saveQueueAsPlaylist,
+		playTidalTrackNext
 	} from '$lib/stores/player';
 	import { get } from 'svelte/store';
-	import type { QueueItem, Track } from '$lib/api/client';
+	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
@@ -529,16 +530,40 @@
 		return buildTrackMenu(track, options);
 	}
 
+	function queueItemTidalPlayable(item: QueueItemType): TidalPlayable | null {
+		return trackToTidalPlayable(item.track);
+	}
+
+	function isEphemeralQueueItem(item: QueueItemType): boolean {
+		return item.id < 0 && queueItemTidalPlayable(item) != null;
+	}
+
+	async function handleQueuePlayNext(item: QueueItemType, event: MouseEvent) {
+		event.stopPropagation();
+		const tidal = queueItemTidalPlayable(item);
+		if (tidal && item.id < 0) {
+			await playTidalTrackNext(tidal);
+			return;
+		}
+		await handleQueueMoveNext(item.id, event);
+	}
+
 	function openQueueRowMenu(item: QueueItemType, event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
-		const items = pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
+		const tidal = queueItemTidalPlayable(item);
+		const items = tidal
+			? buildTidalTrackMenu(tidal)
+			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openContextMenu(event, items, item.track.title);
 	}
 
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
 		event.stopPropagation();
-		const items = pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
+		const tidal = queueItemTidalPlayable(item);
+		const items = tidal
+			? buildTidalTrackMenu(tidal)
+			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
 	}
 
@@ -1246,14 +1271,15 @@
 									>⋯</button>
 									<button
 										class="queue-action icon"
-										aria-label="Play next"
-										title="Play next"
-										onclick={(event) => void handleQueueMoveNext(item.id, event)}
+										aria-label={isEphemeralQueueItem(item) ? 'Promote to play next' : 'Play next'}
+										title={isEphemeralQueueItem(item) ? 'Add this TIDAL mix track as next in the queue' : 'Play next'}
+										onclick={(event) => void handleQueuePlayNext(item, event)}
 									>↑</button>
 									<button
 										class="queue-action icon remove"
 										aria-label="Remove from queue"
-										title="Remove from queue"
+										title={isEphemeralQueueItem(item) ? 'TIDAL mix rows cannot be removed yet' : 'Remove from queue'}
+										disabled={isEphemeralQueueItem(item)}
 										onclick={(event) => void handleQueueRemove(item.id, event)}
 									>×</button>
 								</div>
@@ -1576,12 +1602,15 @@
 									>⋯</button>
 									<button
 										class="queue-action icon"
-										aria-label="Play next"
-										onclick={(e) => void handleQueueMoveNext(item.id, e)}
+										aria-label={isEphemeralQueueItem(item) ? 'Promote to play next' : 'Play next'}
+										title={isEphemeralQueueItem(item) ? 'Add this TIDAL mix track as next in the queue' : 'Play next'}
+										onclick={(e) => void handleQueuePlayNext(item, e)}
 									>↑</button>
 									<button
 										class="queue-action icon remove"
 										aria-label="Remove from queue"
+										title={isEphemeralQueueItem(item) ? 'TIDAL mix rows cannot be removed yet' : 'Remove from queue'}
+										disabled={isEphemeralQueueItem(item)}
 										onclick={(e) => void handleQueueRemove(item.id, e)}
 									>×</button>
 								</div>
@@ -2811,6 +2840,17 @@
 	.queue-action:hover {
 		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
 		border-color: color-mix(in srgb, var(--instrument-border) 82%, transparent);
+	}
+
+	.queue-action:disabled {
+		cursor: not-allowed;
+		opacity: 0.45;
+	}
+
+	.queue-action:disabled:hover {
+		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
+		border-color: color-mix(in srgb, var(--instrument-border) 56%, transparent);
+		color: var(--text-primary);
 	}
 
 	.queue-action.icon {
