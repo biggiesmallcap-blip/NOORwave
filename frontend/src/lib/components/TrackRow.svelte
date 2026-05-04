@@ -12,6 +12,7 @@
 		startSongRadio,
 		toggleTrackFavorite
 	} from '$lib/stores/player';
+	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 
 	export type TrackRowVariant = 'numbered' | 'indexed' | 'art' | 'compact';
 
@@ -50,10 +51,30 @@
 		onSelect?: (e: MouseEvent | KeyboardEvent) => void;
 	} = $props();
 
+	let playable = $derived(canPlayTrack(track));
+	let playableLabel = $derived(getPlayableLabel(track));
+	let rowInteractive = $derived(playable || onSelect !== undefined);
+
+	function handleRowClick(e: MouseEvent) {
+		if (onSelect) {
+			onSelect(e);
+			return;
+		}
+		if (playable) onRowClick();
+	}
+
+	function handleRowDoubleClick() {
+		if (playable) onRowClick();
+	}
+
 	function handleKeyDown(e: KeyboardEvent) {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
-			onRowClick();
+			if (onSelect) {
+				onSelect(e);
+				return;
+			}
+			if (playable) onRowClick();
 		}
 	}
 
@@ -73,16 +94,19 @@
 
 	function handleAddToQueue(e: MouseEvent) {
 		e.stopPropagation();
+		if (!playable) return;
 		void addTrackToQueue(track.id);
 	}
 
 	function handleSongRadio(e: MouseEvent) {
 		e.stopPropagation();
+		if (!playable) return;
 		void startSongRadio(track.id);
 	}
 
 	async function handleHeart(e: MouseEvent) {
 		e.stopPropagation();
+		if (!playable) return;
 		try {
 			await toggleTrackFavorite(track.id, track.is_favorite ?? false);
 		} catch {
@@ -99,10 +123,13 @@
 		class="track-row numbered"
 		class:active={isCurrent}
 		class:selected
+		class:disabled={!rowInteractive}
 		role="button"
-		tabindex="0"
-		onclick={(e) => (onSelect ? onSelect(e) : onRowClick())}
-		ondblclick={() => onRowClick()}
+		tabindex={rowInteractive ? 0 : -1}
+		aria-disabled={!rowInteractive}
+		title={rowInteractive ? track.title : playableLabel}
+		onclick={handleRowClick}
+		ondblclick={handleRowDoubleClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -127,13 +154,15 @@
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
 				class="row-btn"
 				aria-label="Start song radio"
-				title="Start song radio"
+				title={playable ? 'Start song radio' : playableLabel}
+				disabled={!playable}
 				onclick={handleSongRadio}
 			>◎</button>
 			<button
@@ -146,7 +175,8 @@
 				class="row-btn heart"
 				class:on={track.is_favorite}
 				aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-				title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={playable ? (track.is_favorite ? 'Remove from favourites' : 'Add to favourites') : playableLabel}
+				disabled={!playable}
 				onclick={handleHeart}
 			>{track.is_favorite ? '♥' : '♡'}</button>
 		</div>
@@ -160,10 +190,13 @@
 		class="track-row indexed"
 		class:active={isCurrent}
 		class:selected
+		class:disabled={!rowInteractive}
 		role="button"
-		tabindex="0"
-		onclick={(e) => (onSelect ? onSelect(e) : onRowClick())}
-		ondblclick={() => onRowClick()}
+		tabindex={rowInteractive ? 0 : -1}
+		aria-disabled={!rowInteractive}
+		title={rowInteractive ? track.title : playableLabel}
+		onclick={handleRowClick}
+		ondblclick={handleRowDoubleClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -207,13 +240,15 @@
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
 				class="row-btn"
 				aria-label="Start song radio"
-				title="Start song radio"
+				title={playable ? 'Start song radio' : playableLabel}
+				disabled={!playable}
 				onclick={handleSongRadio}
 			>◎</button>
 			<button
@@ -226,7 +261,8 @@
 				class="row-btn heart"
 				class:on={track.is_favorite}
 				aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-				title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={playable ? (track.is_favorite ? 'Remove from favourites' : 'Add to favourites') : playableLabel}
+				disabled={!playable}
 				onclick={handleHeart}
 			>{track.is_favorite ? '♥' : '♡'}</button>
 		</div>
@@ -240,10 +276,13 @@
 		class="track-row art"
 		class:active={isCurrent}
 		class:selected
+		class:disabled={!rowInteractive}
 		role="button"
-		tabindex="0"
-		onclick={(e) => (onSelect ? onSelect(e) : onRowClick())}
-		ondblclick={() => onRowClick()}
+		tabindex={rowInteractive ? 0 : -1}
+		aria-disabled={!rowInteractive}
+		title={rowInteractive ? track.title : playableLabel}
+		onclick={handleRowClick}
+		ondblclick={handleRowDoubleClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -265,13 +304,15 @@
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
 				class="row-btn"
 				aria-label="Start song radio"
-				title="Start song radio"
+				title={playable ? 'Start song radio' : playableLabel}
+				disabled={!playable}
 				onclick={handleSongRadio}
 			>◎</button>
 			<button
@@ -284,7 +325,8 @@
 				class="row-btn heart"
 				class:on={track.is_favorite}
 				aria-label={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-				title={track.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+				title={playable ? (track.is_favorite ? 'Remove from favourites' : 'Add to favourites') : playableLabel}
+				disabled={!playable}
 				onclick={handleHeart}
 			>{track.is_favorite ? '♥' : '♡'}</button>
 		</div>
@@ -298,10 +340,13 @@
 		class="track-row compact"
 		class:active={isCurrent}
 		class:selected
+		class:disabled={!rowInteractive}
 		role="button"
-		tabindex="0"
-		onclick={(e) => (onSelect ? onSelect(e) : onRowClick())}
-		ondblclick={() => onRowClick()}
+		tabindex={rowInteractive ? 0 : -1}
+		aria-disabled={!rowInteractive}
+		title={rowInteractive ? track.title : playableLabel}
+		onclick={handleRowClick}
+		ondblclick={handleRowDoubleClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -330,6 +375,11 @@
 	.track-row.active { background: var(--accent-soft); }
 	.track-row.active .title { color: var(--accent-strong); }
 	.track-row.selected { background: var(--accent-soft); }
+	.track-row.disabled {
+		cursor: default;
+		opacity: 0.62;
+	}
+	.track-row.disabled:hover { background: transparent; }
 
 	/* ── numbered (artist popular list) ─────────────────────────── */
 	.track-row.numbered {
@@ -522,6 +572,16 @@
 	.row-btn:hover {
 		background: var(--bg-hover);
 		color: var(--text-primary);
+	}
+
+	.row-btn:disabled {
+		cursor: default;
+		opacity: 0.45;
+	}
+
+	.row-btn:disabled:hover {
+		background: transparent;
+		color: var(--text-secondary);
 	}
 
 	.row-btn.heart.on { color: var(--accent); }

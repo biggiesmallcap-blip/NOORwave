@@ -5,6 +5,7 @@
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { currentTrack, isPlaying } from '$lib/stores/player';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 
 	let {
 		entry,
@@ -15,7 +16,7 @@
 		entry: ChartEntry;
 		index: number;
 		onTrack: (t: Track) => void;
-		onTidal: (t: TidalPlayable) => void;
+		onTidal: (t: TidalPlayable) => void | Promise<void>;
 	} = $props();
 
 	let local = $derived(entry.local_track);
@@ -51,7 +52,21 @@
 	let inLibrary = $derived(local !== null);
 	let qualityClass = $derived(qualityClassFor(local?.best_quality));
 	let qualityLabel = $derived(qualityLabelFor(local?.best_quality));
-	let isCurrent = $derived(local !== null && $currentTrack?.id === local.id);
+	let playableTarget = $derived(local ?? tidal ?? null);
+	let playable = $derived(playableTarget !== null && canPlayTrack(playableTarget));
+	let unresolved = $derived(local === null && tidal !== null && tidal.tidal_id <= 0);
+	let actionable = $derived(playable || unresolved);
+	let resolving = $state(false);
+	let actionLabel = $derived.by(() => {
+		if (resolving) return 'Resolving on TIDAL...';
+		if (unresolved) return 'Resolve on TIDAL';
+		return playableTarget ? getPlayableLabel(playableTarget) : 'Unavailable';
+	});
+	let isCurrent = $derived(
+		local !== null
+			? $currentTrack?.id === local.id
+			: tidal?.tidal_id != null && tidal.tidal_id > 0 && $currentTrack?.tidal_id === tidal.tidal_id
+	);
 
 	function qualityClassFor(q: string | null | undefined): string | null {
 		if (!q) return null;
@@ -80,15 +95,23 @@
 		return colors[Math.abs(h) % colors.length];
 	}
 
-	function play() {
+	async function play() {
+		if (!actionable || resolving) return;
 		if (local) onTrack(local);
-		else if (tidal) onTidal(tidal);
+		else if (tidal) {
+			resolving = unresolved;
+			try {
+				await onTidal(tidal);
+			} finally {
+				resolving = false;
+			}
+		}
 	}
 
 	function handleKey(e: KeyboardEvent) {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
-			play();
+			void play();
 		}
 	}
 
@@ -112,12 +135,17 @@
 <article
 	class="trending-card"
 	class:active={isCurrent}
+	class:disabled={!actionable}
+	class:unresolved
+	class:resolving
 	role="button"
-	tabindex="0"
-	onclick={play}
+	tabindex={actionable ? 0 : -1}
+	aria-disabled={!actionable}
+	aria-label="{actionLabel}: {title}"
+	onclick={() => void play()}
 	onkeydown={handleKey}
 	oncontextmenu={handleContext}
-	title={title}
+	title={actionable ? title : actionLabel}
 	use:lazyTidalArt={{
 		enabled: needsLazyFetch,
 		query: { artist: artistName, title },
@@ -136,7 +164,11 @@
 		<span class="rank" aria-label="Chart position {index + 1}">{index + 1}</span>
 
 		<div class="play-overlay" aria-hidden="true">
-			{#if isCurrent && $isPlaying}
+			{#if resolving}
+				<span class="mini-spinner"></span>
+			{:else if !playable}
+				<span class="play-state-label">{actionLabel}</span>
+			{:else if isCurrent && $isPlaying}
 				<svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor">
 					<rect x="3" y="2.5" width="3.5" height="11" rx="1" />
 					<rect x="9.5" y="2.5" width="3.5" height="11" rx="1" />
@@ -210,6 +242,21 @@
 		background: rgba(125, 200, 175, 0.06);
 	}
 
+	.trending-card.disabled {
+		cursor: default;
+		opacity: 0.68;
+	}
+
+	.trending-card.disabled:hover,
+	.trending-card.disabled:focus-visible {
+		background: none;
+		border-color: transparent;
+	}
+
+	.trending-card.unresolved {
+		border-color: rgba(255, 255, 255, 0.06);
+	}
+
 	.art-wrap {
 		position: relative;
 		aspect-ratio: 1 / 1;
@@ -268,8 +315,39 @@
 	}
 
 	.trending-card:hover .play-overlay,
-	.trending-card.active .play-overlay {
+	.trending-card.active .play-overlay,
+	.trending-card.unresolved .play-overlay,
+	.trending-card.resolving .play-overlay {
 		opacity: 1;
+	}
+
+	.trending-card.disabled .play-overlay {
+		opacity: 1;
+	}
+
+	.play-state-label {
+		max-width: calc(100% - 20px);
+		padding: 5px 8px;
+		border-radius: 6px;
+		background: rgba(0, 0, 0, 0.58);
+		color: rgba(255, 255, 255, 0.9);
+		font-size: 11px;
+		font-weight: 700;
+		line-height: 1.2;
+		text-align: center;
+	}
+
+	.mini-spinner {
+		width: 22px;
+		height: 22px;
+		border: 2px solid rgba(255, 255, 255, 0.28);
+		border-top-color: #fff;
+		border-radius: 50%;
+		animation: card-spin 0.8s linear infinite;
+	}
+
+	@keyframes card-spin {
+		to { transform: rotate(360deg); }
 	}
 
 	.meta {

@@ -3,6 +3,16 @@ import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 import { tidalStatus } from '$lib/stores/tidal';
 
 export type UnavailableReason = 'missing-source' | 'tidal-only-not-authed';
+type TrackLike = {
+	id: number;
+	title: string;
+	artist_name?: string | null;
+	album_title?: string | null;
+	artwork_url?: string | null;
+	duration_ms?: number | null;
+	tidal_id?: number | null;
+	artist_tidal_id?: number | null;
+};
 
 export type PlayableTrack =
 	| { kind: 'library'; track: Track; track_id: number }
@@ -24,11 +34,11 @@ function hasKind(input: unknown): input is PlayableTrack {
 	);
 }
 
-function isQueueItem(input: Track | TidalPlayable | QueueItem): input is QueueItem {
+function isQueueItem(input: TrackLike | TidalPlayable | QueueItem): input is QueueItem {
 	return 'track' in input && 'position' in input;
 }
 
-function isTrack(input: Track | TidalPlayable): input is Track {
+function isTrack(input: TrackLike | TidalPlayable): input is TrackLike {
 	return 'id' in input;
 }
 
@@ -51,37 +61,37 @@ export function fromQueueItem(item: QueueItem): PlayableTrack {
 	return toPlayableTrack(item.track);
 }
 
-export function toPlayableTrack(input: Track | TidalPlayable | QueueItem | PlayableTrack): PlayableTrack {
+export function toPlayableTrack(input: TrackLike | TidalPlayable | QueueItem | PlayableTrack): PlayableTrack {
 	if (hasKind(input)) return input;
 	if (isQueueItem(input)) return fromQueueItem(input);
 	if (isTrack(input)) {
 		if (input.id > 0) {
-			return { kind: 'library', track: input, track_id: input.id };
+			return { kind: 'library', track: input as Track, track_id: input.id };
 		}
 		if ((input.tidal_id ?? 0) > 0) {
 			return fromTidalPlayable({
 				tidal_id: input.tidal_id ?? 0,
 				title: input.title,
-				artist_name: input.artist_name,
-				album_title: input.album_title,
-				artwork_url: input.artwork_url,
-				duration_ms: input.duration_ms,
+				artist_name: input.artist_name ?? null,
+				album_title: input.album_title ?? null,
+				artwork_url: input.artwork_url ?? null,
+				duration_ms: input.duration_ms ?? null,
 				artist_tidal_id: input.artist_tidal_id ?? null
 			});
 		}
-		return { kind: 'unavailable', reason: 'missing-source', track: input, label: input.title };
+		return { kind: 'unavailable', reason: 'missing-source', track: input as Track, label: input.title };
 	}
 	return fromTidalPlayable(input);
 }
 
-export function canPlayTrack(input: Track | TidalPlayable | QueueItem | PlayableTrack): boolean {
+export function canPlayTrack(input: TrackLike | TidalPlayable | QueueItem | PlayableTrack): boolean {
 	const playable = toPlayableTrack(input);
 	if (playable.kind === 'library') return true;
 	if (playable.kind === 'tidal') return get(tidalStatus) === 'connected';
 	return false;
 }
 
-export function getPlayableLabel(input: Track | TidalPlayable | QueueItem | PlayableTrack): string {
+export function getPlayableLabel(input: TrackLike | TidalPlayable | QueueItem | PlayableTrack): string {
 	const playable = toPlayableTrack(input);
 	switch (playable.kind) {
 		case 'library':
