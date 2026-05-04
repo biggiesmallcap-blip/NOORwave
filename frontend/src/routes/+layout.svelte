@@ -1145,6 +1145,7 @@
 					{/if}
 				</button>
 				<div class="queue-header-actions">
+					<div class="queue-action-group discovery-radio-controls" role="group" aria-label="Discovery and radio controls">
 					<button
 						class="queue-icon-btn queue-automix-btn"
 						class:active={$automixEnabled}
@@ -1164,6 +1165,8 @@
 							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
 						</svg>
 					</button>
+					</div>
+					<div class="queue-action-group queue-tools-controls" role="group" aria-label="Queue tools">
 					<button
 						class="queue-icon-btn queue-help-btn"
 						type="button"
@@ -1181,6 +1184,8 @@
 						onclick={openSaveQueue}
 						disabled={upcomingQueue.length === 0 && !$currentTrack}
 					>＋</button>
+					</div>
+					<div class="queue-action-group cleanup-controls" role="group" aria-label="Cleanup controls">
 					<button
 						class="queue-icon-btn queue-clear-btn"
 						type="button"
@@ -1189,6 +1194,8 @@
 						onclick={() => void handleClearQueue()}
 						disabled={upcomingQueue.length === 0}
 					>⌫</button>
+					</div>
+					<div class="queue-action-group queue-display-controls" role="group" aria-label="Queue display controls">
 					<button
 						class="queue-icon-btn queue-expand-btn"
 						type="button"
@@ -1197,6 +1204,7 @@
 						aria-expanded={queueExpanded}
 						onclick={toggleQueueExpanded}
 					>▲</button>
+					</div>
 				</div>
 			</div>
 
@@ -2507,8 +2515,23 @@
 	.queue-header-actions {
 		display: flex;
 		align-items: center;
-		gap: 4px;
+		gap: 8px;
 		flex-shrink: 0;
+	}
+
+	.queue-action-group {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.queue-action-group + .queue-action-group::before {
+		content: '';
+		width: 1px;
+		height: 22px;
+		margin-right: 2px;
+		background: var(--border-subtle, rgba(255, 255, 255, 0.08));
 	}
 
 	.queue-automix-btn.active {
