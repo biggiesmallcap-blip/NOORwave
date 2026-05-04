@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" role="img" aria-label="NoorWave mark (animated)">
+  <title>NoorWave animated mark</title>
+  <desc>Animated OO mark on transparent background. The right ring carries a pulsing waveform, the inner aqua ring breathes, and a soft sonar ring radiates outward once per 2-second loop. Sized for inline menu/header use.</desc>
+
+  <!-- LEFT RING (idle / silence state — never animates) -->
+  <g transform="translate(96, 80)">
+    <circle r="60" fill="none" stroke="#0B1220" stroke-width="5"/>
+    <circle r="46" fill="none" stroke="#22E0D6" stroke-width="4"/>
+    <circle r="30" fill="none" stroke="#0B1220" stroke-width="3.5"/>
+  </g>
+
+  <!-- RIGHT RING (active / signal state with animations) -->
+  <g transform="translate(224, 80)">
+
+    <!-- Sonar ping: ring expanding outward and fading once per cycle -->
+    <circle r="60" fill="none" stroke="#22E0D6">
+      <animate attributeName="r"
+               values="60;90"
+               dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="opacity"
+               values="0.5;0"
+               dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="stroke-width"
+               values="2.5;0.3"
+               dur="2s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Outer ring (static) -->
+    <circle r="60" fill="none" stroke="#0B1220" stroke-width="5"/>
+
+    <!-- Middle aqua ring with subtle breathing -->
+    <circle r="46" fill="none" stroke="#22E0D6">
+      <animate attributeName="stroke-width"
+               values="4;5;4"
+               dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="opacity"
+               values="1;0.85;1"
+               dur="2s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Inner ring (static) -->
+    <circle r="30" fill="none" stroke="#0B1220" stroke-width="3.5"/>
+
+    <!-- Animated waveform inside the inner ring -->
+    <path stroke="#22E0D6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <animate attributeName="d"
+               values="M -18 0 Q -13 -10, -8 -2 T 8 2 T 18 -3;
+                       M -18 0 Q -13 -3, -8 3 T 8 -3 T 18 2;
+                       M -18 0 Q -13 -8, -8 1 T 8 -6 T 18 -1;
+                       M -18 0 Q -13 -5, -8 -1 T 8 4 T 18 -2;
+                       M -18 0 Q -13 -10, -8 -2 T 8 2 T 18 -3"
+               keyTimes="0;0.25;0.5;0.75;1"
+               dur="2s" repeatCount="indefinite"
+               calcMode="spline"
+               keySplines="0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1"/>
+    </path>
+  </g>
+</svg>

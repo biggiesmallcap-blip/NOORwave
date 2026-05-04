@@ -704,9 +704,53 @@ export interface RSSFeedItem {
 	category: string;
 }
 
-export interface HomeReleasesResponse {
-	releases: RSSFeedItem[];
+/// Last.fm-API-sourced new release. Different shape than `RSSFeedItem`:
+/// no description/category (Last.fm doesn't supply them).
+export interface ReleaseItem {
+	title: string;
+	link: string;
+	author: string;
+	image_url: string | null;
 	source: string;
+	published_at: string | null;
+}
+
+export interface HomeReleasesResponse {
+	releases: ReleaseItem[];
+	source: string;
+}
+
+export interface TidalMix {
+	id: string;
+	title: string;
+	sub_title?: string | null;
+	image_url?: string | null;
+	mix_type?: string | null;
+}
+
+export interface TidalMixesResponse {
+	mixes: TidalMix[];
+	source: string;
+}
+
+export interface LastfmStatus {
+	configured: boolean;
+	enrichment: boolean;
+	scrobbling: boolean;
+	scrobble_available: boolean;
+	user: string | null;
+}
+
+export interface LastfmAuthStartResponse {
+	status: 'awaiting' | 'error';
+	auth_url?: string;
+	message?: string;
+}
+
+export interface LastfmAuthCompleteResponse {
+	status: 'connected' | 'not_yet_authorized' | 'error';
+	user?: string;
+	message?: string;
 }
 
 export interface HomePickTrack {
@@ -899,13 +943,19 @@ async function fetchApi<T>(
 }
 
 export const api = {
-	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0, favoriteOnly = true) {
+	// `favoriteOnly` is legacy: server-side it currently means "library tracks"
+	// (liked tracks ∪ tracks from favorited albums). Use `likedOnly` for a strict
+	// filter on tracks the user has actually liked. likedOnly takes precedence
+	// over favoriteOnly server-side.
+	// TODO: drop the favoriteOnly default once all call sites pass it explicitly.
+	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0, favoriteOnly = true, likedOnly = false) {
 		return fetchApi<{ tracks: Track[]; total: number }>('/api/tracks', {
 			sort_by: sortBy,
 			sort_dir: sortDir,
 			limit: String(limit),
 			offset: String(offset),
 			favorite_only: String(favoriteOnly),
+			liked_only: String(likedOnly),
 		});
 	},
 
@@ -1570,6 +1620,62 @@ export const api = {
 
 	getHomeNews() {
 		return fetchApi<HomeNewsResponse>('/api/home/news');
+	},
+
+	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────
+	// 503 here means TIDAL isn't connected — the YourMixesShelf surfaces a
+	// connect prompt rather than an error toast.
+	getTidalMixes() {
+		return fetchApi<TidalMixesResponse>('/api/tidal/mixes');
+	},
+
+	// Mix track list — used to queue + play a mix when a card is clicked.
+	getTidalMixTracks(mixId: string) {
+		return fetchApi<{ tracks: TidalDiscographyTrack[] }>(
+			`/api/tidal/mixes/${encodeURIComponent(mixId)}/tracks`
+		);
+	},
+
+	// Play the first track of a mix immediately and queue the rest as
+	// pending ephemeral tracks (server auto-advances on track-end).
+	playTidalMix(tracks: TidalPlayable[]) {
+		return fetchApi<void>('/api/tidal/play-mix', undefined, {
+			method: 'POST',
+			body: JSON.stringify({
+				tracks: tracks.map((t) => ({
+					tidal_track_id: t.tidal_id,
+					title: t.title,
+					artist_name: t.artist_name ?? null,
+					album_title: t.album_title ?? null,
+					artwork_url: t.artwork_url ?? null,
+					duration_ms: t.duration_ms ?? null,
+				})),
+			}),
+		});
+	},
+
+	// ─── Last.fm scrobble auth (server-side web-auth flow) ────────────────
+	getLastfmStatus() {
+		return fetchApi<LastfmStatus>('/api/lastfm/status');
+	},
+
+	// 501 here means LASTFM_API_SECRET isn't configured on the server.
+	lastfmAuthStart() {
+		return fetchApi<LastfmAuthStartResponse>('/api/lastfm/auth/start', undefined, {
+			method: 'POST',
+		});
+	},
+
+	lastfmAuthComplete() {
+		return fetchApi<LastfmAuthCompleteResponse>('/api/lastfm/auth/complete', undefined, {
+			method: 'POST',
+		});
+	},
+
+	lastfmAuthDisconnect() {
+		return fetchApi<{ status: string }>('/api/lastfm/auth/disconnect', undefined, {
+			method: 'POST',
+		});
 	},
 
 	// ─── Audio Analysis ───────────────────────────────────────────────

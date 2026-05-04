@@ -946,6 +946,66 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	}
 }
 
+/// Play a TIDAL mix by id — fetches the mix's track list and sends the WHOLE
+/// list to the server's `/api/tidal/play-mix` endpoint. The server starts the
+/// first track immediately and queues the rest behind it so playback
+/// auto-advances through the mix without a per-track round trip.
+export async function playTidalMix(mixId: string): Promise<void> {
+	if (!assertOnline()) return;
+	playerError.set(null);
+	try {
+		const { tracks } = await api.getTidalMixTracks(mixId);
+		if (tracks.length === 0) {
+			showToast('Mix has no tracks', 'error');
+			return;
+		}
+		// Optimistically reflect the first track in the now-playing UI so
+		// there's no flicker before the server's PlaybackStateChanged event
+		// arrives. Server will overwrite with authoritative data on Started.
+		const first = tracks[0];
+		currentTrack.set({
+			id: -first.tidal_id,
+			title: first.title,
+			artist_id: -1,
+			artist_name: first.artist_name ?? null,
+			artist_tidal_id: null,
+			album_id: null,
+			album_title: first.album_title ?? null,
+			disc_number: null,
+			track_number: null,
+			duration_ms: first.duration_ms,
+			isrc: null,
+			tidal_id: first.tidal_id,
+			best_quality: 'LOSSLESS',
+			best_source: 'tidal',
+			fidelity_score: 0,
+			is_favorite: false,
+			play_count: 0,
+			last_played_at: null,
+			date_added: null,
+			source: 'tidal_ephemeral',
+			artwork_url: first.artwork_url,
+		});
+		isPlaying.set(true);
+
+		await api.playTidalMix(
+			tracks.map((t) => ({
+				tidal_id: t.tidal_id,
+				title: t.title,
+				artist_name: t.artist_name ?? null,
+				album_title: t.album_title ?? null,
+				artwork_url: t.artwork_url,
+				duration_ms: t.duration_ms,
+			})),
+		);
+		noteSuccess();
+		showToast(`Playing mix (${tracks.length} tracks queued)`, 'success');
+	} catch (error) {
+		setError('play that Tidal mix', error, () => playTidalMix(mixId));
+		showToast(`Mix playback failed`, 'error');
+	}
+}
+
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
