@@ -48,13 +48,14 @@
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
+	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
 	import QuietMode from '$lib/components/QuietMode.svelte';
 	import { openQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
-	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -139,6 +140,7 @@
 	});
 	let nowPlayingOpen = $state(false);
 	let moreOpen = $state(false);
+	let shortcutHelpOpen = $state(false);
 
 	// Phase 2b: queue-row "why is this here" tooltip. Tracks the
 	// reason string of the currently-hovered row plus the cursor
@@ -276,7 +278,26 @@
 		return target.isContentEditable;
 	}
 
+	function shortcutsBlocked(): boolean {
+		return showConnect || nowPlayingOpen || moreOpen || get(commandPaletteOpen) || get(contextMenu).open;
+	}
+
+	function openShortcutHelp() {
+		shortcutHelpOpen = true;
+	}
+
+	function closeShortcutHelp() {
+		shortcutHelpOpen = false;
+	}
+
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (shortcutHelpOpen) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				closeShortcutHelp();
+			}
+			return;
+		}
 		// Cmd/Ctrl+K → open command palette
 		if ((event.ctrlKey || event.metaKey) && event.key === 'k') {
 			event.preventDefault();
@@ -285,6 +306,15 @@
 		}
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (isTypingTarget(event.target)) return;
+
+		if (event.key === '?' || (event.key === '/' && event.shiftKey)) {
+			if (shortcutsBlocked()) return;
+			event.preventDefault();
+			openShortcutHelp();
+			return;
+		}
+
+		if (shortcutsBlocked()) return;
 
 		if (event.key === 'q' || event.key === 'Q') {
 			event.preventDefault();
@@ -893,6 +923,7 @@
 <Toast />
 <CommandPalette />
 <QuietMode />
+<ShortcutHelp open={shortcutHelpOpen} onClose={closeShortcutHelp} />
 <QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
 
 {#if isOnboardingRoute}
@@ -1125,6 +1156,15 @@
 							<path d="M7.5 1a6.5 6.5 0 1 0 0 13A6.5 6.5 0 0 0 7.5 1zm0 1a5.5 5.5 0 1 1 0 11A5.5 5.5 0 0 1 7.5 2zM7 4.5V7H4.5a.5.5 0 0 0 0 1H7v2.5a.5.5 0 0 0 1 0V8h2.5a.5.5 0 0 0 0-1H8V4.5a.5.5 0 0 0-1 0z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
 						</svg>
 					</button>
+					<button
+						class="queue-icon-btn queue-help-btn"
+						type="button"
+						title="Keyboard shortcuts"
+						aria-label="Keyboard shortcuts"
+						aria-haspopup="dialog"
+						aria-expanded={shortcutHelpOpen}
+						onclick={openShortcutHelp}
+					>?</button>
 					<button
 						class="queue-icon-btn queue-save-btn"
 						type="button"
