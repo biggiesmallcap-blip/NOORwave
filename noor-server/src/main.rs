@@ -6,6 +6,7 @@ mod playback;
 mod server;
 mod services;
 mod smart;
+mod tags;
 
 use anyhow::Result;
 use rusqlite::OptionalExtension;

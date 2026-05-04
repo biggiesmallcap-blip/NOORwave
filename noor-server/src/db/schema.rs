@@ -29,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_025,
     MIGRATION_026,
     MIGRATION_027,
+    MIGRATION_028,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -747,6 +748,28 @@ CREATE TABLE IF NOT EXISTS discovery_diagnostics (
 
 CREATE INDEX IF NOT EXISTS idx_discovery_diagnostics_model
     ON discovery_diagnostics(model_id, primary_reason);
+"#;
+
+const MIGRATION_028: &str = r#"
+CREATE TABLE IF NOT EXISTS track_context_tags (
+    track_id       INTEGER NOT NULL,
+    tag            TEXT    NOT NULL,
+    normalized_tag TEXT    NOT NULL,
+    context        TEXT    NOT NULL,
+    source         TEXT    NOT NULL,
+    confidence     REAL    NOT NULL DEFAULT 0.5,
+    PRIMARY KEY (track_id, normalized_tag, context, source),
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_tags_track
+    ON track_context_tags(track_id);
+
+CREATE INDEX IF NOT EXISTS idx_context_tags_context
+    ON track_context_tags(context);
+
+CREATE INDEX IF NOT EXISTS idx_context_tags_lookup
+    ON track_context_tags(normalized_tag, context, confidence DESC);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

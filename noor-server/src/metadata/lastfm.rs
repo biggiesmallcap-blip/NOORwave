@@ -20,6 +20,7 @@ pub struct LastFmTrackSignals {
 pub struct LastFmSimilarTrack {
     pub artist: String,
     pub title: String,
+    #[allow(dead_code)]
     pub mbid: Option<String>,
     /// Last.fm `match` field — 0..1 confidence score from collaborative filtering.
     pub match_score: f64,
@@ -74,12 +75,19 @@ impl LastFmClient {
         Self { http, api_key }
     }
 
-    pub async fn artist_top_tags(&self, artist: &str) -> anyhow::Result<Vec<String>> {
-        self.artist_tags(artist).await
+    pub async fn artist_top_tags(
+        &self,
+        artist: &str,
+    ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
+        self.artist_tags_with_counts(artist).await
     }
 
-    pub async fn track_top_tags(&self, artist: &str, track: &str) -> anyhow::Result<Vec<String>> {
-        self.track_tags(artist, track).await
+    pub async fn track_top_tags(
+        &self,
+        artist: &str,
+        track: &str,
+    ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
+        self.track_tags_with_counts(artist, track).await
     }
 
     pub async fn connection_queries(&self, seed: &DiscoveryCandidateSeed) -> Result<Vec<String>> {
@@ -170,9 +178,7 @@ impl LastFmClient {
             ])
             .await?;
 
-        let tracks_value = payload
-            .get("similartracks")
-            .and_then(|v| v.get("track"));
+        let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
         let arr = value_as_array(tracks_value);
         let raw_count = arr.len();
 
@@ -249,9 +255,16 @@ impl LastFmClient {
             return Ok(direct);
         }
 
-        let similar_artists = self.fetch_similar_artists(artist, 8).await.unwrap_or_default();
+        let similar_artists = self
+            .fetch_similar_artists(artist, 8)
+            .await
+            .unwrap_or_default();
         if similar_artists.is_empty() {
-            tracing::info!(artist, title, "lastfm.track_get_similar fallback: no similar artists either");
+            tracing::info!(
+                artist,
+                title,
+                "lastfm.track_get_similar fallback: no similar artists either"
+            );
             return Ok(Vec::new());
         }
 
@@ -305,9 +318,7 @@ impl LastFmClient {
             ])
             .await?;
 
-        let arr = value_as_array(
-            payload.get("similarartists").and_then(|v| v.get("artist")),
-        );
+        let arr = value_as_array(payload.get("similarartists").and_then(|v| v.get("artist")));
 
         let mut out = Vec::new();
         for entry in arr.into_iter().take(limit) {
@@ -333,11 +344,7 @@ impl LastFmClient {
 
     /// Fetch top track titles for an artist (Last.fm popularity-ordered).
     /// Internal helper for `track_get_similar_with_artist_fallback`.
-    async fn fetch_artist_top_tracks(
-        &self,
-        artist: &str,
-        limit: usize,
-    ) -> Result<Vec<String>> {
+    async fn fetch_artist_top_tracks(&self, artist: &str, limit: usize) -> Result<Vec<String>> {
         let payload = self
             .get_json(&[
                 ("method", "artist.gettoptracks".to_string()),
@@ -346,9 +353,7 @@ impl LastFmClient {
             ])
             .await?;
 
-        let arr = value_as_array(
-            payload.get("toptracks").and_then(|v| v.get("track")),
-        );
+        let arr = value_as_array(payload.get("toptracks").and_then(|v| v.get("track")));
 
         let mut out = Vec::new();
         for entry in arr.into_iter().take(limit) {
@@ -474,6 +479,22 @@ impl LastFmClient {
         ))
     }
 
+    async fn artist_tags_with_counts(&self, artist: &str) -> Result<Vec<(String, Option<u32>)>> {
+        let payload = self
+            .get_json(&[
+                ("method", "artist.gettoptags".to_string()),
+                ("artist", artist.to_string()),
+            ])
+            .await?;
+        Ok(extract_tags_with_counts(
+            payload
+                .get("toptags")
+                .and_then(|value| value.get("tag"))
+                .unwrap_or(&Value::Null),
+            50,
+        ))
+    }
+
     async fn track_tags(&self, artist: &str, track: &str) -> Result<Vec<String>> {
         let payload = self
             .get_json(&[
@@ -488,6 +509,27 @@ impl LastFmClient {
                 .and_then(|value| value.get("tag"))
                 .unwrap_or(&Value::Null),
             5,
+        ))
+    }
+
+    async fn track_tags_with_counts(
+        &self,
+        artist: &str,
+        track: &str,
+    ) -> Result<Vec<(String, Option<u32>)>> {
+        let payload = self
+            .get_json(&[
+                ("method", "track.gettoptags".to_string()),
+                ("artist", artist.to_string()),
+                ("track", track.to_string()),
+            ])
+            .await?;
+        Ok(extract_tags_with_counts(
+            payload
+                .get("toptags")
+                .and_then(|value| value.get("tag"))
+                .unwrap_or(&Value::Null),
+            50,
         ))
     }
 
@@ -596,6 +638,28 @@ fn extract_tags(value: &Value, limit: usize) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn extract_tags_with_counts(value: &Value, limit: usize) -> Vec<(String, Option<u32>)> {
+    value_as_array(Some(value))
+        .into_iter()
+        .filter_map(|tag| {
+            let name = tag.get("name").and_then(Value::as_str)?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let count = tag
+                .get("count")
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                })
+                .map(|n| n as u32);
+            Some((name, count))
+        })
+        .take(limit)
+        .collect()
+}
+
 fn extract_artist_queries(value: &Value, limit: usize) -> Vec<String> {
     value_as_array(Some(value))
         .into_iter()
@@ -666,12 +730,16 @@ pub(crate) fn parse_chart_tracks(payload: &Value, limit: usize) -> Vec<LastFmCha
                 candidate.map(|s| s.to_string())
             });
 
-        let listeners = entry
-            .get("listeners")
-            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
-        let playcount = entry
-            .get("playcount")
-            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+        let listeners = entry.get("listeners").and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+        });
+        let playcount = entry.get("playcount").and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+        });
 
         out.push(LastFmChartTrack {
             artist: artist_name,
@@ -772,7 +840,8 @@ mod track_get_similar_tests {
             r#"{"similartracks":{"track":[
                 {"name":"X","match":0.5,"artist":{"name":"Y"}}
             ]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
         let arr = value_as_array(tracks_value);
         let entry = arr[0];
@@ -793,7 +862,8 @@ mod track_get_similar_tests {
                 {"name":"Legit","match":"0.5","artist":{"name":"Real"}},
                 {"name":"Bad","match":"0.5","artist":{"name":""}}
             ]}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let tracks_value = payload.get("similartracks").and_then(|v| v.get("track"));
         let arr = value_as_array(tracks_value);
         assert_eq!(arr.len(), 2);

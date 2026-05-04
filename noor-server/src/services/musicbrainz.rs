@@ -106,17 +106,34 @@ pub fn mark_checked(conn: &Connection, track_id: i64) -> Result<()> {
 pub fn write_genres(
     conn: &Connection,
     track_id: i64,
-    genre_names: &[String],
-    confidence: f64,
+    genre_tags: &[(String, Option<u32>)],
 ) -> Result<usize> {
     // Always mark as checked first so we never re-query this track.
     mark_checked(conn, track_id)?;
 
-    let genre_names = crate::genre::builder::collect_clear_genres(genre_names);
+    use crate::genre::scorer::{TagInput, TagLevel, TagSource, score_genre_tags};
+    use crate::tags::context::{TagContext, classify_tag_context};
+
+    let catalog = crate::genre::builder::embedded_builder().catalog();
+    let mut inputs = Vec::new();
+    for (name, count) in genre_tags {
+        let is_known = catalog.resolve_single(name).is_some();
+        let classified = classify_tag_context(name, is_known);
+        if classified.context == TagContext::Genre {
+            inputs.push(TagInput {
+                name: name.clone(),
+                source: TagSource::MusicBrainzTag,
+                level: TagLevel::Recording,
+                count: *count,
+            });
+        }
+    }
+
+    let result = score_genre_tags(&inputs, 0.2);
 
     let mut inserted = 0;
-    for name in &genre_names {
-        let normalized = name.trim().to_ascii_lowercase();
+    for scored in &result.genres {
+        let normalized = scored.canonical.trim().to_ascii_lowercase();
         let genre_id: Option<i64> = conn
             .query_row(
                 "SELECT id FROM genres WHERE slug = ?1 OR LOWER(name) = ?1 LIMIT 1",
@@ -129,7 +146,7 @@ pub fn write_genres(
             let n = conn.execute(
                 "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence)
                  VALUES (?1, ?2, 'musicbrainz', ?3)",
-                params![track_id, gid, confidence],
+                params![track_id, gid, scored.score],
             )?;
             inserted += n;
         }
@@ -141,7 +158,10 @@ pub fn write_genres(
 
 /// Fetch genre tags for a single ISRC from MusicBrainz.
 /// Uses the search endpoint with inc=tags (release-groups is a lookup-only inc).
-pub async fn fetch_genres_by_isrc(client: &reqwest::Client, isrc: &str) -> Result<Vec<String>> {
+pub async fn fetch_genres_by_isrc(
+    client: &reqwest::Client,
+    isrc: &str,
+) -> Result<Vec<(String, Option<u32>)>> {
     let url = format!("{MB_API_BASE}/recording?fmt=json&query=isrc:{isrc}&inc=tags&limit=1");
     let resp = client
         .get(&url)
@@ -165,7 +185,7 @@ pub async fn fetch_genres_by_title(
     client: &reqwest::Client,
     artist: &str,
     title: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, Option<u32>)>> {
     // Escape Lucene special characters in artist/title to avoid parse errors.
     let safe_artist = lucene_escape(artist);
     let safe_title = lucene_escape(title);
@@ -190,7 +210,7 @@ pub async fn fetch_genres_by_title(
     Ok(extract_tags(data))
 }
 
-fn extract_tags(data: MbRecordingSearch) -> Vec<String> {
+fn extract_tags(data: MbRecordingSearch) -> Vec<(String, Option<u32>)> {
     let Some(rec) = data.recordings.into_iter().next() else {
         return vec![];
     };
@@ -200,9 +220,14 @@ fn extract_tags(data: MbRecordingSearch) -> Vec<String> {
     tags.sort_by(|a, b| b.0.cmp(&a.0));
     let mut seen = std::collections::HashSet::new();
     tags.into_iter()
-        .filter_map(|(_, name)| {
+        .filter_map(|(count, name)| {
             let key = name.to_ascii_lowercase();
-            if seen.insert(key) { Some(name) } else { None }
+            if seen.insert(key) {
+                let count = if count > 0 { Some(count as u32) } else { None };
+                Some((name, count))
+            } else {
+                None
+            }
         })
         .take(5)
         .collect()
@@ -230,6 +255,7 @@ fn lucene_escape(s: &str) -> String {
 pub struct EnrichmentProgress {
     pub processed: usize,
     pub total: usize,
+    #[allow(dead_code)]
     pub genres_assigned: usize,
 }
 
@@ -616,11 +642,10 @@ pub async fn run_enrichment(
                 continue;
             };
 
-            let confidence = if track.isrc.is_some() { 0.85 } else { 0.55 };
             let inserted = {
                 let g = state.read().await;
                 // write_genres calls mark_checked internally, so it's always recorded.
-                g.db.with_conn(|conn| write_genres(conn, track.id, &genres, confidence))?
+                g.db.with_conn(|conn| write_genres(conn, track.id, &genres))?
             };
             genres_assigned += inserted;
             processed += 1;

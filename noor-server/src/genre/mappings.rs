@@ -43,6 +43,7 @@ pub struct GenreResolution {
 }
 
 impl GenreResolution {
+    #[allow(dead_code)]
     pub fn is_clear(&self) -> bool {
         self.canonical_name().is_some()
     }
@@ -176,6 +177,7 @@ impl GenreCatalog {
             .and_then(|entry| entry.paths.first().map(Vec::as_slice))
     }
 
+    #[allow(dead_code)]
     pub fn paths_for(&self, name: &str) -> Option<&[Vec<String>]> {
         self.entry(name).map(|entry| entry.paths.as_slice())
     }
@@ -264,7 +266,12 @@ impl GenreCatalog {
         self.best_fuzzy_match(&normalized)
     }
 
-    fn match_for_name(&self, canonical_name: &str, kind: MatchKind, score: f64) -> Option<GenreMatch> {
+    fn match_for_name(
+        &self,
+        canonical_name: &str,
+        kind: MatchKind,
+        score: f64,
+    ) -> Option<GenreMatch> {
         let entry = self.entry(canonical_name)?;
         let primary_path = entry
             .paths
@@ -320,9 +327,7 @@ impl GenreCatalog {
 
         // Require at least one shared token to avoid purely character-level matches.
         let candidate_tokens: Vec<&str> = best_norm.split_whitespace().collect();
-        let shares_token = input_tokens
-            .iter()
-            .any(|t| candidate_tokens.contains(t));
+        let shares_token = input_tokens.iter().any(|t| candidate_tokens.contains(t));
         if !shares_token {
             return None;
         }
@@ -342,9 +347,13 @@ impl GenreCatalog {
 }
 
 pub fn normalize_key(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
+    let expanded = value.trim().to_ascii_lowercase().replace('&', " and ");
+    let no_apostrophes = expanded
+        .replace('\'', "")
+        .replace('\u{2019}', "")
+        .replace('\u{2018}', "");
+
+    no_apostrophes
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
         .collect::<String>()
@@ -414,13 +423,25 @@ fn path_string(path: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GenreCatalog, slugify};
+    use super::{GenreCatalog, normalize_key, slugify};
 
     #[test]
     fn slugify_normalizes_names() {
         assert_eq!(slugify("Drum and Bass"), "drum-and-bass");
         assert_eq!(slugify("Post-Punk"), "post-punk");
         assert_eq!(slugify("Hi-NRG"), "hi-nrg");
+    }
+
+    #[test]
+    fn normalize_key_handles_ampersand() {
+        assert_eq!(normalize_key("r&b"), "r and b");
+        assert_eq!(normalize_key("drum & bass"), "drum and bass");
+    }
+
+    #[test]
+    fn normalize_key_strips_apostrophes() {
+        assert_eq!(normalize_key("don't stop"), "dont stop");
+        assert_eq!(normalize_key("rock \u{2019}n\u{2019} roll"), "rock n roll");
     }
 
     #[test]
@@ -432,6 +453,21 @@ mod tests {
             catalog
                 .descendants_of("Electronic")
                 .contains(&"House".to_string())
+        );
+    }
+
+    #[test]
+    fn aliases_resolve_correctly() {
+        let catalog = GenreCatalog::from_embedded();
+        assert_eq!(
+            catalog
+                .resolve_single("ambient techno")
+                .map(|m| m.canonical_name),
+            Some("Ambient Techno".to_string())
+        );
+        assert_eq!(
+            catalog.resolve_single("r&b").map(|m| m.canonical_name),
+            Some("Rhythm and Blues".to_string())
         );
     }
 }
