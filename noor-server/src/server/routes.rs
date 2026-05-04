@@ -8139,9 +8139,84 @@ async fn resolve_pending_current_queue_item(
         .flatten()
 }
 
+async fn advance_ephemeral_next_if_needed(
+    state: &SharedState,
+) -> Result<Option<Json<Value>>, (StatusCode, Json<Value>)> {
+    let has_ephemeral = {
+        let state_guard = state.read().await;
+        state_guard.ephemeral_tidal_track.is_some()
+    };
+    if !has_ephemeral {
+        return Ok(None);
+    }
+
+    let next = {
+        let state_guard = state.read().await;
+        state_guard.pending_tidal_mix_queue.lock().unwrap().pop_front()
+    };
+
+    if let Some(next) = next {
+        start_ephemeral_tidal_playback(state, next).await?;
+        let snapshot = {
+            let state_guard = state.read().await;
+            state_guard
+                .db
+                .with_conn(player::load_snapshot)
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "status": "playback_state_update_failed",
+                            "message": "Failed to load playback state after advancing TIDAL queue.",
+                        })),
+                    )
+                })?
+        };
+        let snapshot = overlay_snapshot_with_external_track(state, snapshot).await;
+        return Ok(Some(Json(json!({
+            "state": snapshot.state,
+            "queue": snapshot.queue
+        }))));
+    }
+
+    {
+        let mut state_guard = state.write().await;
+        state_guard.ephemeral_tidal_track = None;
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.active_track_id = None;
+        }
+        state_guard
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0
+                     WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_update_failed",
+                        "message": "Failed to clear TIDAL playback state before advancing queue.",
+                    })),
+                )
+            })?;
+    }
+
+    Ok(None)
+}
+
 async fn next_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if let Some(response) = advance_ephemeral_next_if_needed(&state).await? {
+        return Ok(response);
+    }
+
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
         let state = state.read().await;
@@ -9835,7 +9910,12 @@ async fn start_ephemeral_tidal_playback(
             .db
             .with_conn(|conn| {
                 conn.execute(
-                    "UPDATE playback_state SET current_track_id = NULL, position_ms = 0, is_playing = 1 WHERE id = 1",
+                    "UPDATE playback_state
+                     SET current_track_id = NULL,
+                         current_queue_item_id = NULL,
+                         position_ms = 0,
+                         is_playing = 1
+                     WHERE id = 1",
                     [],
                 )?;
                 player::load_snapshot(conn)

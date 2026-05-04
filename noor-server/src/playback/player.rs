@@ -658,16 +658,15 @@ pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackS
             .and_then(|idx| queue_items.get(idx))
             .or_else(|| queue_items.first()),
         _ => {
-            let next = current_index
+            current_index
                 .and_then(|idx| queue_items.get(idx + 1))
                 .or_else(|| {
-                    if repeat_mode == "all" {
+                    if current_index.is_none() || repeat_mode == "all" {
                         queue_items.first()
                     } else {
                         None
                     }
-                });
-            next
+                })
         }
     };
 
@@ -1818,6 +1817,30 @@ mod tests {
         let expected_qid = q.iter().find(|i| i.track.id == 1).unwrap().id;
         assert_eq!(state.current_queue_item_id, Some(expected_qid));
         assert!(state.is_playing);
+    }
+
+    #[test]
+    fn next_track_starts_first_queue_item_when_no_current_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, current_queue_item_id = NULL, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = next_track(&conn, false).unwrap();
+
+        assert_eq!(snapshot.state.current_track.as_ref().map(|t| t.id), Some(2));
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            snapshot.queue.first().map(|item| item.id)
+        );
+        assert!(snapshot.state.is_playing);
     }
 
     #[test]

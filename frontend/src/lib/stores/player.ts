@@ -761,25 +761,21 @@ export async function shuffleArtist(artistId: number) {
 	}
 }
 
+async function startSongRadioFromLibraryTrack(seedTrackId: number) {
+	const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
+	await playFirstRadioItem(result.first_playable);
+}
+
 export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
 	playerError.set(null);
 	// Server-side fallback (artist.getsimilar when track-level recall is empty)
 	// can take a few seconds. Surface a loading toast so the user knows the
 	// click registered. Dismissed before the success/error toast lands.
-	const loadingToastId = showToast('Starting Song Radio…', 'info', 8000);
+	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
 	try {
-		const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
-		const { first_playable } = result;
+		await startSongRadioFromLibraryTrack(seedTrackId);
 
-		if (first_playable.type === 'library' && first_playable.track_id != null) {
-			// First queue item is a resolved library track — play it directly.
-			await playTrackNow(first_playable.track_id);
-		} else {
-			// All radio results are pending (no library tracks). Advance to the
-			// first queue item; the server-side lazy resolver fires on next_track.
-			await playNextTrack();
-		}
 		dismissToast(loadingToastId);
 		showToast('Song Radio started', 'success');
 	} catch (error) {
@@ -1126,6 +1122,7 @@ export async function playTidalMix(mixId: string): Promise<void> {
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
 	// Last.fm chart entries that didn't resolve locally arrive with the
 	// placeholder `tidal_id: 0` (see ChartTidalPlayable in routes.rs). Resolve
 	// to a real Tidal id via search first — otherwise the import fallback
@@ -1134,6 +1131,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (track.tidal_id <= 0) {
 		const q = [track.artist_name, track.title].filter(Boolean).join(' ');
 		if (!q) {
+			dismissToast(loadingToastId);
 			showToast(`Couldn't find "${trackLabel(track)}" on Tidal`, 'info');
 			return;
 		}
@@ -1141,6 +1139,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			const results = await api.searchTidal(q, 1);
 			const hit = results.tracks[0];
 			if (!hit) {
+				dismissToast(loadingToastId);
 				showToast(`Couldn't find "${trackLabel(track)}" on Tidal`, 'info');
 				return;
 			}
@@ -1154,6 +1153,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 				artist_tidal_id: null,
 			};
 		} catch (error) {
+			dismissToast(loadingToastId);
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			return;
 		}
@@ -1164,6 +1164,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		const radioIds = tracks.map((t) => t.track_id);
 		if (radioIds.length > 0) {
 			await loadQueueAndPlay(radioIds);
+			dismissToast(loadingToastId);
 			showToast(`Radio from ${trackLabel(track)}`, 'success');
 			playerError.set(null);
 			return;
@@ -1172,6 +1173,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		// 404 = track not yet in library index — fall through to silent import.
 		// Any other error is a real failure.
 		if (!(error instanceof ApiError && error.status === 404)) {
+			dismissToast(loadingToastId);
 			setError('start Tidal radio', error, () => startTidalSongRadio(track));
 			showToast(`Radio failed`, 'error');
 			return;
@@ -1182,10 +1184,13 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	// so the radio engine can use it as a seed, then run song radio from the resulting local ID.
 	try {
 		const { local_id } = await api.importTidalTrackForRadio(track);
-		await startSongRadio(local_id);
+		await startSongRadioFromLibraryTrack(local_id);
+		dismissToast(loadingToastId);
+		showToast(`Radio from ${trackLabel(track)}`, 'success');
 		playerError.set(null);
-	} catch {
+	} catch (error) {
+		dismissToast(loadingToastId);
+		setError('start Tidal radio', error, () => startTidalSongRadio(track));
 		showToast(`No radio results for "${trackLabel(track)}"`, 'info');
-		playerError.set(null);
 	}
 }
