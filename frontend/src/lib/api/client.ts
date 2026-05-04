@@ -1574,7 +1574,7 @@ export const api = {
 	},
 
 	clearQueue() {
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/clear', undefined, {
+		return fetchApi<{ queue: QueueItem[]; playback_state?: PlaybackState }>('/api/playback/queue/clear', undefined, {
 			method: 'POST',
 			body: JSON.stringify({}),
 		});

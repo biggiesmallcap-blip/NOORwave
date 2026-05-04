@@ -523,6 +523,7 @@ export async function clearQueue(): Promise<QueueItem[]> {
 	try {
 		const result = await api.clearQueue();
 		playbackQueue.set(result.queue);
+		if (result.playback_state) applyState(result.playback_state);
 		playerError.set(null);
 		// Offer undo via toast.
 		const restorable = before.filter(
