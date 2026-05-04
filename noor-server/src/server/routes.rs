@@ -11709,50 +11709,7 @@ mod tests {
         })
         .expect("seeded");
 
-        let (event_tx, _) = tokio::sync::broadcast::channel(16);
-        let app = api_routes(Arc::new(tokio::sync::RwLock::new(crate::AppState {
-            db,
-            event_tx,
-            http_client: reqwest::Client::new(),
-            tidal_tokens: None,
-            spotify_tokens: None,
-            playback_runtime: None,
-            playback_runtime_info: None,
-            current_stream_display: None,
-            pending_stream_display: None,
-            active_listen_session: None,
-            live_listen_session: None,
-            external_playback_track: None,
-            ephemeral_tidal_track: None,
-            tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(
-                reqwest::Client::new(),
-            )),
-            acrcloud_client: None,
-            analysis_tx: None,
-            audio_analysis_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            audio_analysis_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            acrcloud_scan_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            acrcloud_daily_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            spotify_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            spotify_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            lastfm_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            lastfm_enrich_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            lastfm_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            master_key: crate::services::crypto::MasterKey::load_or_generate(
-                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
-            )
-            .expect("test master key"),
-            lastfm_api_secret: None,
-            server_token: String::new(),
-            audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })));
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))));
 
         let response = app
             .oneshot(
@@ -11781,15 +11738,11 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    /// Build a minimal test app backed by a fresh in-memory database.
-    async fn build_test_app() -> Router {
-        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
-        let db = Database::open(&db_path).expect("db opened");
-        db.run_migrations().expect("migrations");
-        db.with_conn(|conn| schema::run_migrations(conn))
-            .expect("schema migrations");
+    /// Build a fresh `AppState` backed by `db`. Single source of truth for test
+    /// initializers — when `crate::AppState` gains a field, add it here once.
+    fn fresh_test_state(db: Database) -> crate::AppState {
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
-        api_routes(Arc::new(tokio::sync::RwLock::new(crate::AppState {
+        crate::AppState {
             db,
             event_tx,
             http_client: reqwest::Client::new(),
@@ -11824,14 +11777,30 @@ mod tests {
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::load_or_generate(
                 &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
             )
             .expect("test master key"),
+            pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })))
+            spotify_public_stats_enabled: false,
+        }
+    }
+
+    /// Build a minimal test app backed by a fresh in-memory database.
+    async fn build_test_app() -> Router {
+        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&db_path).expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
+        api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
     }
 
     #[tokio::test]
