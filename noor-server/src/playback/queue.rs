@@ -916,7 +916,12 @@ mod tests {
             }
             for item in &q_after[1..] {
                 assert!(item.is_pending);
-                assert!(item.track.artist_name.as_ref().is_some_and(|a| !a.is_empty()));
+                assert!(
+                    item.track
+                        .artist_name
+                        .as_ref()
+                        .is_some_and(|a| !a.is_empty())
+                );
             }
             // Positions stay contiguous.
             for (idx, item) in q_after.iter().enumerate() {

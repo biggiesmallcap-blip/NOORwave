@@ -452,9 +452,7 @@ pub fn reconcile_after_track_delete(
 
     let new_current_row: Option<&(i64, Option<i64>, i32)> = if let Some(cp) = current_pos {
         rows.iter()
-            .find(|(id, tid, p)| {
-                *p > cp && is_survivor(tid) && Some(*id) != current_qid
-            })
+            .find(|(id, tid, p)| *p > cp && is_survivor(tid) && Some(*id) != current_qid)
             .or_else(|| {
                 rows.iter()
                     .find(|(id, tid, _)| is_survivor(tid) && Some(*id) != current_qid)
@@ -508,8 +506,7 @@ pub fn reconcile_after_track_delete(
 
     if queue_changed {
         let surviving_ids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
+            let mut stmt = tx.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
             stmt.query_map([], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -1787,8 +1784,7 @@ mod tests {
         // Suppression on — must return the 2 existing items, never call the
         // extension path (which would otherwise touch tables not present in
         // this minimal test schema and panic).
-        let suppressed =
-            ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, true).unwrap();
+        let suppressed = ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, true).unwrap();
         assert_eq!(
             suppressed.len(),
             2,

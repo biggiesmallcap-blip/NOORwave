@@ -620,7 +620,8 @@ pub fn resolve_group(
     // current_queue_item_id to the next surviving row, or stops playback if
     // no survivor exists. Hand-rolled `DELETE FROM queue` here would leave
     // playback_state.current_track_id pointing at a row we're about to drop.
-    let reconcile = crate::playback::player::reconcile_after_track_delete(conn, &removed_track_ids)?;
+    let reconcile =
+        crate::playback::player::reconcile_after_track_delete(conn, &removed_track_ids)?;
 
     // Remove non-preferred tracks from the DB.
     // Must clean up dependent rows explicitly since FKs lack ON DELETE CASCADE.
