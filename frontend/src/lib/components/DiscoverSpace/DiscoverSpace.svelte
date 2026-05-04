@@ -325,28 +325,46 @@
 	// ── Resize observer ───────────────────────────────────────────────────────
 
 	let resizeObserver: ResizeObserver | null = null;
+	let dprCleanup: (() => void) | null = null;
+
+	function applyCanvasSize(width: number, height: number) {
+		if (!canvas) return;
+		const dpr = window.devicePixelRatio || 1;
+		canvas.width = width * dpr;
+		canvas.height = height * dpr;
+		const ctx = canvas.getContext('2d');
+		if (ctx) ctx.scale(dpr, dpr);
+	}
 
 	onMount(() => {
 		if (!canvas) return;
 
-		const dpr = window.devicePixelRatio || 1;
 		resizeObserver = new ResizeObserver((entries) => {
 			const entry = entries[0];
 			if (!entry || !canvas) return;
 			const { width, height } = entry.contentRect;
-			canvas.width = width * dpr;
-			canvas.height = height * dpr;
-			const ctx = canvas.getContext('2d');
-			if (ctx) ctx.scale(dpr, dpr);
+			applyCanvasSize(width, height);
 		});
 		resizeObserver.observe(canvas.parentElement!);
 
 		// Initial size
 		const rect = canvas.parentElement!.getBoundingClientRect();
-		canvas.width = rect.width * dpr;
-		canvas.height = rect.height * dpr;
-		const ctx = canvas.getContext('2d');
-		if (ctx) ctx.scale(dpr, dpr);
+		applyCanvasSize(rect.width, rect.height);
+
+		// Re-size when moving between monitors with different DPR (Windows doesn't
+		// always fire a layout resize when DPI changes, so we watch for it directly).
+		function watchDpr() {
+			const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+			function onChange() {
+				const r = canvas!.parentElement!.getBoundingClientRect();
+				applyCanvasSize(r.width, r.height);
+				mq.removeEventListener('change', onChange);
+				watchDpr();
+			}
+			mq.addEventListener('change', onChange);
+			dprCleanup = () => mq.removeEventListener('change', onChange);
+		}
+		watchDpr();
 
 		// Expose hyperspace search to page via window (same pattern as existing /discover)
 		(window as any).__discoverSpaceHyperspaceSearch = runHyperspaceSearch;
@@ -359,6 +377,7 @@
 		cancelAnimationFrame(rafId);
 		cancelAnimationFrame(auxRafId);
 		resizeObserver?.disconnect();
+		dprCleanup?.();
 		delete (window as any).__discoverSpaceHyperspaceSearch;
 	});
 </script>
