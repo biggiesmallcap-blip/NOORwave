@@ -6242,7 +6242,6 @@ async fn overlay_snapshot_with_external_track_and_position(
     // now that has no DB record.
     if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
         snapshot.state.current_track = Some(ephemeral.clone());
-        snapshot.state.is_playing = true;
     } else if snapshot.state.current_track.is_none() {
         if let Some(track) = state_guard.external_playback_track.as_ref() {
             snapshot.state.current_track = Some(track.clone());
