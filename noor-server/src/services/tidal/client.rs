@@ -321,6 +321,14 @@ impl TidalClient {
 
     // ─── Artist Discography ────────────────────────────────
 
+    pub async fn get_track(&self, track_id: i64) -> Result<TidalTrack> {
+        let url = format!(
+            "{}/tracks/{}?countryCode={}",
+            TIDAL_API_URL, track_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
     pub async fn get_artist_albums(
         &self,
         artist_id: i64,

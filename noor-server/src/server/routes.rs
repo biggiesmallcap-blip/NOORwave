@@ -10,8 +10,9 @@ use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
 use crate::services::spotify;
 use crate::services::tidal::{
-    auth as tidal_auth, client::TidalClient, import as tidal_import, mutations as tidal_mutations,
-    stream as tidal_stream,
+    auth as tidal_auth,
+    client::{TidalClient, TidalSearchTrack, TidalTrack},
+    import as tidal_import, mutations as tidal_mutations, stream as tidal_stream,
 };
 use crate::smart::discovery as discovery_engine;
 use crate::smart::external_discovery as external_discovery_engine;
@@ -168,6 +169,27 @@ pub struct QueueRemoveRequest {
 pub struct QueueMoveRequest {
     item_id: i64,
     new_pos: i32,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueExternalKind {
+    Library,
+    Tidal,
+    External,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueExternalRequest {
+    kind: QueueExternalKind,
+    #[serde(default)]
+    track_id: Option<i64>,
+    #[serde(default)]
+    tidal_id: Option<i64>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,6 +434,8 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/queue/remove", post(remove_queue_track))
         .route("/api/playback/queue/move", post(move_queue_track))
         .route("/api/playback/queue/clear", post(clear_queue_route))
+        .route("/api/queue/play_next", post(queue_play_next))
+        .route("/api/queue/append", post(queue_append))
         .route(
             "/api/playlists/from-queue",
             post(create_playlist_from_queue),
@@ -6045,6 +6069,73 @@ fn score_tidal_candidate(
     SCORE_W_ARTIST * a + SCORE_W_TITLE * t
 }
 
+fn import_metadata_from_search_track(t: TidalSearchTrack) -> tidal_import::ImportTrackMetadata {
+    tidal_import::ImportTrackMetadata {
+        tidal_id: t.id,
+        title: t.title,
+        artist_name: t.artist_name.unwrap_or_default(),
+        artist_tidal_id: t.artist_id,
+        artist_picture: t.artist_picture,
+        album_title: t.album_title,
+        album_tidal_id: t.album_id,
+        album_artwork_url: t.artwork_url,
+        duration_ms: Some(t.duration * 1000),
+    }
+}
+
+fn import_metadata_from_tidal_track(t: TidalTrack) -> tidal_import::ImportTrackMetadata {
+    let album_title = t.album.as_ref().map(|album| album.title.clone());
+    let album_tidal_id = t.album.as_ref().map(|album| album.id);
+    let album_artwork_url = t
+        .album
+        .as_ref()
+        .and_then(|album| TidalClient::get_artwork_url(&album.cover, 640));
+    tidal_import::ImportTrackMetadata {
+        tidal_id: t.id,
+        title: t.title,
+        artist_name: t.artist.name,
+        artist_tidal_id: Some(t.artist.id),
+        artist_picture: t.artist.picture,
+        album_title,
+        album_tidal_id,
+        album_artwork_url,
+        duration_ms: Some(t.duration * 1000),
+    }
+}
+
+async fn find_pending_tidal_match(
+    client: &TidalClient,
+    pending_artist: &str,
+    pending_title: &str,
+    tidal_id_hint: Option<i64>,
+) -> anyhow::Result<Option<(f64, tidal_import::ImportTrackMetadata)>> {
+    if let Some(tidal_id) = tidal_id_hint.filter(|id| *id > 0) {
+        let track = client.get_track(tidal_id).await?;
+        return Ok(Some((1.0, import_metadata_from_tidal_track(track))));
+    }
+
+    let query = format!("{} {}", pending_artist, pending_title);
+    let results = client.search(&query, 5).await?;
+    let best = results
+        .into_iter()
+        .filter_map(|t| {
+            let s = score_tidal_candidate(
+                t.artist_name.as_deref().unwrap_or(""),
+                &t.title,
+                pending_artist,
+                pending_title,
+            );
+            if s >= MATCH_QUALITY_THRESHOLD {
+                Some((s, t))
+            } else {
+                None
+            }
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(best.map(|(score, track)| (score, import_metadata_from_search_track(track))))
+}
+
 /// Atomically promote a pending queue row to a resolved library row.
 ///
 /// Returns `true` iff this caller won the promotion race (queue row had
@@ -6087,20 +6178,20 @@ async fn resolve_pending_row(
     queue_item_id: i64,
     event_tx: tokio::sync::broadcast::Sender<AppEvent>,
 ) {
-    let row: Option<(String, String)> = db
+    let row: Option<(String, String, Option<i64>)> = db
         .with_conn(move |conn| {
             Ok(conn
                 .query_row(
-                    "SELECT pending_artist, pending_title FROM queue
+                    "SELECT pending_artist, pending_title, tidal_id_hint FROM queue
                      WHERE id = ?1 AND track_id IS NULL AND pending_at IS NOT NULL",
                     rusqlite::params![queue_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?)
         })
         .unwrap_or(None);
 
-    let (pending_artist, pending_title) = match row {
+    let (pending_artist, pending_title, tidal_id_hint) = match row {
         Some(r) => r,
         None => return,
     };
@@ -6129,34 +6220,19 @@ async fn resolve_pending_row(
     };
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let query = format!("{} {}", pending_artist, pending_title);
-    let results = match client.search(&query, 5).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal search failed");
-            release(&db, queue_item_id);
-            return;
-        }
-    };
-
-    let best = results
-        .into_iter()
-        .filter_map(|t| {
-            let s = score_tidal_candidate(
-                t.artist_name.as_deref().unwrap_or(""),
-                &t.title,
-                &pending_artist,
-                &pending_title,
-            );
-            if s >= MATCH_QUALITY_THRESHOLD {
-                Some((s, t))
-            } else {
-                None
+    let resolved =
+        match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
+                release(&db, queue_item_id);
+                return;
             }
-        })
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        };
 
-    let (score, tidal_track) = match best {
+    let (score, metadata) = match resolved {
         Some(p) => p,
         None => {
             tracing::debug!(
@@ -6170,22 +6246,7 @@ async fn resolve_pending_row(
         }
     };
 
-    let tidal_id = tidal_track.id;
-    let imported = crate::services::tidal::import::import_track_from_metadata(
-        &db,
-        crate::services::tidal::import::ImportTrackMetadata {
-            tidal_id,
-            title: tidal_track.title,
-            artist_name: tidal_track.artist_name.unwrap_or_default(),
-            artist_tidal_id: tidal_track.artist_id,
-            artist_picture: tidal_track.artist_picture,
-            album_title: tidal_track.album_title,
-            album_tidal_id: tidal_track.album_id,
-            album_artwork_url: tidal_track.artwork_url,
-            duration_ms: Some(tidal_track.duration * 1000),
-        },
-    )
-    .await;
+    let imported = crate::services::tidal::import::import_track_from_metadata(&db, metadata).await;
 
     let local_id = match imported {
         Ok(imp) => imp.local_id,
@@ -6227,16 +6288,21 @@ async fn resolve_pending_current_queue_item(
         s.db.clone()
     };
 
-    let (queue_item_id, pending_artist, pending_title): (i64, String, String) = db
+    let (queue_item_id, pending_artist, pending_title, tidal_id_hint): (
+        i64,
+        String,
+        String,
+        Option<i64>,
+    ) = db
         .with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT q.id, q.pending_artist, q.pending_title
+                    "SELECT q.id, q.pending_artist, q.pending_title, q.tidal_id_hint
                  FROM playback_state ps
                  JOIN queue q ON q.id = ps.current_queue_item_id
                  WHERE ps.id = 1 AND q.track_id IS NULL AND q.pending_at IS NOT NULL",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?)
         })
@@ -6280,33 +6346,18 @@ async fn resolve_pending_current_queue_item(
     };
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let query = format!("{} {}", pending_artist, pending_title);
-    let results = match client.search(&query, 5).await {
-        Ok(r) => r,
-        Err(_) => {
-            release_lock(&db, queue_item_id);
-            return None;
-        }
-    };
-
-    let best = results
-        .into_iter()
-        .filter_map(|t| {
-            let s = score_tidal_candidate(
-                t.artist_name.as_deref().unwrap_or(""),
-                &t.title,
-                &pending_artist,
-                &pending_title,
-            );
-            if s >= MATCH_QUALITY_THRESHOLD {
-                Some((s, t))
-            } else {
-                None
+    let resolved =
+        match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                release_lock(&db, queue_item_id);
+                return None;
             }
-        })
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        };
 
-    let (score, tidal_track) = match best {
+    let (score, metadata) = match resolved {
         Some(pair) => pair,
         None => {
             release_lock(&db, queue_item_id);
@@ -6314,23 +6365,7 @@ async fn resolve_pending_current_queue_item(
         }
     };
 
-    let tidal_id = tidal_track.id;
-    let duration_ms = Some(tidal_track.duration * 1000);
-    let imported = crate::services::tidal::import::import_track_from_metadata(
-        &db,
-        crate::services::tidal::import::ImportTrackMetadata {
-            tidal_id,
-            title: tidal_track.title,
-            artist_name: tidal_track.artist_name.unwrap_or_default(),
-            artist_tidal_id: tidal_track.artist_id,
-            artist_picture: tidal_track.artist_picture,
-            album_title: tidal_track.album_title,
-            album_tidal_id: tidal_track.album_id,
-            album_artwork_url: tidal_track.artwork_url,
-            duration_ms,
-        },
-    )
-    .await;
+    let imported = crate::services::tidal::import::import_track_from_metadata(&db, metadata).await;
 
     let local_id = match imported {
         Ok(imp) => imp.local_id,
@@ -6820,6 +6855,187 @@ async fn add_queue_track(
             Ok(Json(json!({ "queue": queue })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn queue_external_insert<'a>(
+    payload: &'a QueueExternalRequest,
+    source: &'a str,
+) -> Result<queue::ExternalTrackInsert<'a>, String> {
+    let positive = |value: Option<i64>, field: &str| {
+        value
+            .filter(|id| *id > 0)
+            .ok_or_else(|| format!("{field} must be a positive id"))
+    };
+    let non_empty = |value: &'a Option<String>, field: &str| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{field} must not be empty"))
+    };
+
+    match payload.kind {
+        QueueExternalKind::Library => Ok(queue::ExternalTrackInsert {
+            artist: payload.artist.as_deref().unwrap_or(""),
+            title: payload.title.as_deref().unwrap_or(""),
+            source,
+            reason: None,
+            tidal_id_hint: None,
+            local_track_id: Some(positive(payload.track_id, "track_id")?),
+        }),
+        QueueExternalKind::Tidal => Ok(queue::ExternalTrackInsert {
+            artist: non_empty(&payload.artist, "artist")?,
+            title: non_empty(&payload.title, "title")?,
+            source,
+            reason: None,
+            tidal_id_hint: Some(positive(payload.tidal_id, "tidal_id")?),
+            local_track_id: None,
+        }),
+        QueueExternalKind::External => Ok(queue::ExternalTrackInsert {
+            artist: non_empty(&payload.artist, "artist")?,
+            title: non_empty(&payload.title, "title")?,
+            source,
+            reason: None,
+            tidal_id_hint: None,
+            local_track_id: None,
+        }),
+    }
+}
+
+fn current_queue_position(conn: &rusqlite::Connection) -> anyhow::Result<Option<i32>> {
+    let by_queue_item: Option<i32> = conn
+        .query_row(
+            "SELECT q.position
+             FROM playback_state ps
+             JOIN queue q ON q.id = ps.current_queue_item_id
+             WHERE ps.id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if by_queue_item.is_some() {
+        return Ok(by_queue_item);
+    }
+
+    Ok(conn
+        .query_row(
+            "SELECT q.position
+             FROM playback_state ps
+             JOIN queue q ON q.track_id = ps.current_track_id
+             WHERE ps.id = 1 AND ps.current_track_id IS NOT NULL
+             ORDER BY q.position ASC, q.id ASC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
+    let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
+        let s = state.read().await;
+        if let Some(t) = s.tidal_tokens.clone() {
+            Some(t)
+        } else {
+            drop(s);
+            load_persisted_tidal_tokens(state).await.ok().flatten()
+        }
+    };
+
+    let Some(tokens) = tokens_opt else {
+        return;
+    };
+
+    let (db, event_tx) = {
+        let s = state.read().await;
+        (s.db.clone(), s.event_tx.clone())
+    };
+    tokio::spawn(async move {
+        resolve_pending_row(db, tokens, queue_item_id, event_tx).await;
+    });
+}
+
+async fn queue_append(
+    State(state): State<SharedState>,
+    Json(payload): Json<QueueExternalRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let insert = queue_external_insert(&payload, "user_queue").map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": message })),
+        )
+    })?;
+
+    let (queue, inserted) = {
+        let state_guard = state.read().await;
+        state_guard
+            .user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let event_tx = state_guard.event_tx.clone();
+        state_guard
+            .db
+            .with_conn(|conn| {
+                let inserted = queue::append_external_track(conn, &insert)?;
+                let queue = queue::load_queue(conn)?;
+                let _ = event_tx.send(AppEvent::QueueUpdated);
+                Ok((queue, inserted))
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to append queue item" })),
+                )
+            })?
+    };
+
+    if let queue::InsertResult::Pending { queue_id } = inserted {
+        spawn_pending_queue_resolver(&state, queue_id).await;
+    }
+
+    Ok(Json(json!({ "queue": queue })))
+}
+
+async fn queue_play_next(
+    State(state): State<SharedState>,
+    Json(payload): Json<QueueExternalRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let insert = queue_external_insert(&payload, "user_play_next").map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": message })),
+        )
+    })?;
+
+    let (queue, inserted) = {
+        let state_guard = state.read().await;
+        state_guard
+            .user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let event_tx = state_guard.event_tx.clone();
+        state_guard
+            .db
+            .with_conn(|conn| {
+                let inserted = match current_queue_position(conn)? {
+                    Some(position) => queue::insert_external_track_after(conn, &insert, position)?,
+                    None => queue::append_external_track(conn, &insert)?,
+                };
+                let queue = queue::load_queue(conn)?;
+                let _ = event_tx.send(AppEvent::QueueUpdated);
+                Ok((queue, inserted))
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to insert queue item" })),
+                )
+            })?
+    };
+
+    if let queue::InsertResult::Pending { queue_id } = inserted {
+        spawn_pending_queue_resolver(&state, queue_id).await;
+    }
+
+    Ok(Json(json!({ "queue": queue })))
 }
 
 async fn replace_playback_queue(
@@ -11867,6 +12083,211 @@ mod tests {
         db.with_conn(|conn| schema::run_migrations(conn))
             .expect("schema migrations");
         api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
+    }
+
+    fn fresh_migrated_db() -> (Database, std::path::PathBuf) {
+        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&db_path).expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
+        (db, db_path)
+    }
+
+    fn seed_basic_tracks(db: &Database) {
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, duration_ms, source, fidelity_score
+                 ) VALUES
+                    (1, 'First Track', 1, 180000, 'tidal_stream', 0),
+                    (2, 'Second Track', 1, 180000, 'tidal_stream', 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed tracks");
+    }
+
+    #[tokio::test]
+    async fn queue_append_library_track_returns_updated_queue() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue/append")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"library","track_id":1,"artist":"Seed Artist","title":"First Track"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().unwrap().len(), 1);
+        assert_eq!(body["queue"][0]["track"]["id"], 1);
+        assert_eq!(body["queue"][0]["is_pending"], false);
+
+        let source: String = db
+            .with_conn(|conn| {
+                Ok(conn.query_row("SELECT source FROM queue WHERE track_id = 1", [], |row| {
+                    row.get(0)
+                })?)
+            })
+            .unwrap();
+        assert_eq!(source, "user_queue");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn queue_play_next_tidal_inserts_pending_row_after_current_with_hint() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        let current_qid: i64 = db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                    [],
+                )?;
+                let qid = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                    rusqlite::params![qid],
+                )?;
+                Ok(qid)
+            })
+            .unwrap();
+        assert!(current_qid > 0);
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue/play_next")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"tidal","tidal_id":777,"artist":"External Artist","title":"External Title"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().unwrap().len(), 3);
+        assert_eq!(body["queue"][1]["is_pending"], true);
+        assert_eq!(body["queue"][1]["track"]["title"], "External Title");
+
+        let pending: (i32, String, String, String, Option<i64>) = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT position, source, pending_artist, pending_title, tidal_id_hint
+                     FROM queue WHERE track_id IS NULL",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )?)
+            })
+            .unwrap();
+        assert_eq!(pending, (1, "user_play_next".into(), "External Artist".into(), "External Title".into(), Some(777)));
+
+        let shifted_pos: i32 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT position FROM queue WHERE track_id = 2",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(shifted_pos, 2);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn queue_append_external_track_creates_pending_row_without_hint() {
+        let (db, db_path) = fresh_migrated_db();
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue/append")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"external","artist":"Aphex Twin","title":"Xtal"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().unwrap().len(), 1);
+        assert_eq!(body["queue"][0]["is_pending"], true);
+        assert_eq!(body["queue"][0]["track"]["artist_name"], "Aphex Twin");
+        assert_eq!(body["queue"][0]["track"]["title"], "Xtal");
+
+        let hint: Option<i64> = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT tidal_id_hint FROM queue WHERE track_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(hint, None);
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
