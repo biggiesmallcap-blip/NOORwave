@@ -5,7 +5,7 @@
 
 <p align="center">A power-user music command center for TIDAL</p>
 
-<p align="center">Local sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Learning discovery engine</p>
+<p align="center">Local sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -83,6 +83,8 @@ bpm:120-140 genre:house energy:>0.7
 
 Recent searches auto-save as clickable chips.
 
+**Search filter grids** — clicking a single-category pill (Artists / Albums / Tracks / Playlists) expands to a multi-row grid instead of a cramped carousel; **All** keeps the horizontal overview carousels.
+
 </details>
 
 <details>
@@ -155,6 +157,8 @@ Recent searches auto-save as clickable chips.
 <details>
 <summary><strong>Smart Features</strong> — DSP analysis, smart playlists, MusicBrainz + Spotify enrichment</summary>
 
+- **Sportify anonymous Spotify proxy** — browse and play any Spotify playlist natively without a Spotify subscription; Spotify→TIDAL track resolution with local metadata caching (tracks, albums, artists, playlists) and a negative-cache to avoid repeated lookup failures; DB migrations 031-032
+- **Spotify playlist view** (`/spotify-playlist/[id]`) — full track list with lazy TIDAL artwork resolution, playback via resolved TIDAL IDs, and inline save-to-library actions
 - Rule-based smart playlists with AND/OR logic: genre, artist, date range, quality tier, play count, BPM, key, Camelot, energy, danceability, instrumental-only, sample-data presence
 - DSP audio analysis runs passively during playback: BPM, key, Camelot, LUFS, energy, danceability, beat strength, spectral centroid, stereo width
 - Duplicate detection via ISRC matching with title/duration fallback
@@ -176,7 +180,7 @@ Recent searches auto-save as clickable chips.
 - 6-digit PIN auth: auto-submits on the sixth digit, numeric keyboard on mobile; local browser auto-connects; legacy tokens auto-migrate on startup
 - LAN access: run on one machine, open from any browser on the network; every raw `fetch()` carries the auth header
 - WebSocket-driven: playback state, sync progress, queue, training progress push instantly without polling
-- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat · `Q` toggle queue · `⌘K` / `Ctrl+K` command palette · `Z` undo clear-queue (within 6 s)
+- Global keyboard shortcuts: `Space` play/pause · `← →` seek · `↑ ↓` volume · `L` like · `S` shuffle · `R` repeat · `Q` toggle queue · `⌘K` / `Ctrl+K` command palette · `Z` undo clear-queue (within 6 s) · `?` shortcuts help popover
 - **Tauri desktop app**: system tray menu (network toggle, restart, exit), global media key shortcuts, native window management, **GitHub-releases auto-updater**
 - Audio device enumeration and live switching; sample rate follows source on track transition
 - WASAPI exclusive-mode bit-perfect output (Windows)
@@ -368,6 +372,10 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Toast-based player error UX with retry, manual close, 6 s auto-dismiss
 - [x] Surface radio reasons + shuffle mode labels + action microcopy on every queue row
 - [x] Stale `is_playing` cleared on server restart
+- [x] External TIDAL queue actions (play next / append) for non-library tracks (v0.1.17)
+- [x] Unified playability states across all song cards (search, discover, trending) (v0.1.17)
+- [x] Song radio loading toast with proper dismiss on all paths; ephemeral TIDAL queue advance on next_track (v0.1.17)
+- [x] Automix suspend for 60 s after manual queue clear (v0.1.17)
 
 **Library + browsing**
 
@@ -376,6 +384,7 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Filter input + Tidal album play overlay on artist pages
 - [x] Dedicated TIDAL catalogue search page (`/search`)
 - [x] `/tidal/artists/[id]` and `/tidal/albums/[id]` profile pages
+- [x] Search filter grids — single-category pills expand to multi-row grids (Artists 130px, Albums/Tracks/Playlists 180px) (v0.1.17)
 - [x] Trending shelf: unified Last.fm + TIDAL charts with country/genre scopes, lazy artwork backfill, 6-hour shared cache, stable shelf layout (v0.1.8)
 - [x] Duplicate-detection page (UI under polish)
 - [x] Reimagined Automix and Analytics pages
@@ -385,6 +394,7 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Universal `<TrackRow>` / `<TidalTrackRow>` components consumed by every track surface
 - [x] Inline action parity (right-click + hover cluster) across queue, library, search, discover, playlists, artist/album pages
 - [x] Right-click menus on all search sections + Tidal song-radio fallback
+- [x] Keyboard shortcut help popover (`?` key) (v0.1.17)
 
 **Discovery + radio**
 
@@ -432,6 +442,8 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Bulk tracks-to-playlist endpoint
 - [x] TIDAL playlist search and tracks endpoints (playable inline from search results)
 - [x] Inline track-row migration on playlists page
+- [x] Sportify — anonymous Spotify metadata proxy; Spotify→TIDAL resolution with local caching; DB migrations 031-032 (v0.1.17)
+- [x] Spotify playlist view (`/spotify-playlist`) — browse and play any Spotify playlist via TIDAL resolution (v0.1.17)
 
 </details>
 
