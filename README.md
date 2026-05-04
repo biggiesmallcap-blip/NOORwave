@@ -198,7 +198,7 @@ Recent searches auto-save as clickable chips.
 
 ## Getting Started
 
-### Prerequisites
+### Prerequisites for developers (building from source)
 
 - [Rust](https://rustup.rs/) stable toolchain (install via `rustup`)
 - Node.js 18+ and npm
