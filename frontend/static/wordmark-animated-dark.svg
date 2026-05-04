@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 280" role="img" aria-label="NoorWave animated wordmark">
+  <title>NoorWave wordmark — animated</title>
+  <desc>Full NoorWave wordmark with a continuous wave flowing through both Os in perfect sync. 3-second loop. Transparent background.</desc>
+
+  <defs>
+    <clipPath id="wmInnerOO">
+      <circle cx="245" cy="140" r="12"/>
+      <circle cx="316" cy="140" r="12"/>
+    </clipPath>
+  </defs>
+
+  <text x="130" y="178"
+        font-family="Inter, Manrope, system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="100" font-weight="800" fill="#F5F7F9">N</text>
+
+  <circle cx="245" cy="140" r="32" fill="none" stroke="#F5F7F9" stroke-width="3.6"/>
+  <circle cx="245" cy="140" r="23" fill="none" stroke="#22E0D6" stroke-width="2.6">
+    <animate attributeName="stroke-width" values="2.6;3.0;2.6" dur="3s" repeatCount="indefinite"
+             calcMode="spline" keyTimes="0;0.5;1" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+  </circle>
+  <circle cx="245" cy="140" r="14" fill="none" stroke="#F5F7F9" stroke-width="2"/>
+
+  <circle cx="316" cy="140" r="32" fill="none" stroke="#F5F7F9" stroke-width="3.6"/>
+  <circle cx="316" cy="140" r="23" fill="none" stroke="#22E0D6" stroke-width="2.6">
+    <animate attributeName="stroke-width" values="2.6;3.0;2.6" dur="3s" repeatCount="indefinite"
+             calcMode="spline" keyTimes="0;0.5;1" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+  </circle>
+  <circle cx="316" cy="140" r="14" fill="none" stroke="#F5F7F9" stroke-width="2"/>
+
+  <text x="356" y="178"
+        font-family="Inter, Manrope, system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="100" font-weight="800" fill="#F5F7F9">R</text>
+
+  <text x="425" y="178"
+        font-family="Inter, Manrope, system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="100" font-weight="200" fill="#F5F7F9" letter-spacing="-2">wave</text>
+
+  <line x1="200" y1="220" x2="270" y2="220" stroke="#22E0D6" stroke-width="1.4"/>
+  <line x1="490" y1="220" x2="560" y2="220" stroke="#22E0D6" stroke-width="1.4"/>
+  <text x="380" y="225" text-anchor="middle"
+        font-family="Inter, Manrope, system-ui, sans-serif"
+        font-size="13" font-weight="500" fill="#22E0D6" letter-spacing="3">PURE SOUND  ·  PERFECT FLOW</text>
+
+  <g clip-path="url(#wmInnerOO)">
+    <path d="M 184.5 140 Q 188.50 135, 192.50 140 Q 196.50 145, 200.50 140 Q 204.50 135, 208.50 140 Q 212.50 145, 216.50 140 Q 220.50 135, 224.50 140 Q 228.50 145, 232.50 140 Q 236.50 135, 240.50 140 Q 244.50 145, 248.50 140 Q 252.50 135, 256.50 140 Q 260.50 145, 264.50 140 Q 268.50 135, 272.50 140 Q 276.50 145, 280.50 140 Q 284.50 135, 288.50 140 Q 292.50 145, 296.50 140 Q 300.50 135, 304.50 140 Q 308.50 145, 312.50 140 Q 316.50 135, 320.50 140 Q 324.50 145, 328.50 140 Q 332.50 135, 336.50 140 Q 340.50 145, 344.50 140 Q 348.50 135, 352.50 140 Q 356.50 145, 360.50 140 Q 364.50 135, 368.50 140 Q 372.50 145, 376.50 140"
+          stroke="#22E0D6" stroke-width="1.8" fill="none"
+          stroke-linecap="round" stroke-linejoin="round">
+      <animateTransform attributeName="transform" type="translate"
+                        from="0 0" to="-16 0"
+                        dur="3s" repeatCount="indefinite"/>
+    </path>
+  </g>
+</svg>

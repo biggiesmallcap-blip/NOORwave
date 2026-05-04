@@ -151,7 +151,7 @@
 <div class="page-shell home-page animate-in">
 	{#if error}
 		<section class="page-header">
-			<img class="page-wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
+			<img class="page-wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
 		</section>
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
@@ -160,7 +160,7 @@
 		</EmptyState>
 	{:else}
 		<section class="page-header">
-			<img class="page-wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
+			<img class="page-wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
 		</section>
 
 		<!-- Mobile quick-nav (hidden on desktop) -->

@@ -107,7 +107,7 @@
 
 		{#if step === 0}
 			<div class="step welcome">
-				<img class="wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
+				<img class="wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
 				<h1>Welcome.</h1>
 				<p class="lede">A quiet, focused way to listen to your TIDAL library — with smart radio, trending shelves, and the kind of metadata you'd actually trust.</p>
 				<button class="btn btn-primary" onclick={() => (step = 1)}>Get started</button>
@@ -222,9 +222,9 @@
 	}
 	.welcome .wordmark {
 		display: block;
-		width: 240px;
+		width: clamp(360px, 56vw, 560px);
 		height: auto;
-		margin: 0 auto 0.5rem;
+		margin: 0 auto 1rem;
 		filter: drop-shadow(0 8px 24px rgba(120, 150, 220, 0.15));
 	}
 	.step h1, .step h2 {
