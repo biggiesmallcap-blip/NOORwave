@@ -1,3 +1,5 @@
+import type { PlayableTrack } from '$lib/player/playable';
+
 // All TypeScript types for the DiscoverSpace visualization.
 
 export type DiscoverSource = 'library' | 'lastfm' | 'engine' | 'mixed';
@@ -26,6 +28,7 @@ export interface DiscoverTrackNode {
 	albumTitle?: string;
 	artworkUrl?: string;
 	durationMs?: number;
+	playable: PlayableTrack;
 
 	// Source
 	source: DiscoverSource;

@@ -3,6 +3,7 @@
 	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
 	import { api, getApiBase, authFetch, type TidalPlayable } from '$lib/api/client';
+	import { canPlayTrack, getPlayableLabel, type PlayableTrack } from '$lib/player/playable';
 	import { showToast } from '$lib/stores/toast';
 
 	interface Props {
@@ -14,93 +15,147 @@
 
 	let isStartingRadio = $state(false);
 	let isHiding = $state(false);
+	let resolvingAction = $state<'play-now' | 'play-next' | 'radio' | null>(null);
 
-	function nodeAsTidalPlayable(): TidalPlayable {
-		return {
-			tidal_id: node!.trackId,
-			title: node!.title,
-			artist_name: node!.artist,
-			album_title: node!.albumTitle ?? null,
-			artwork_url: node!.artworkUrl ?? null,
-			duration_ms: node!.durationMs ?? null,
-		};
+	function nodeFallbackPlayable(): PlayableTrack | null {
+		if (!node) return null;
+		return node.playable;
 	}
 
-	// Last.fm radio candidates arrive with `tidal_id: 0` (radio.rs sets track_id=0
-	// for non-library hits and never resolves a Tidal id). Search Tidal first so
-	// the play endpoint gets a real id.
-	async function resolveExternalPlayable(tp: TidalPlayable): Promise<TidalPlayable | null> {
-		if (tp.tidal_id > 0) return tp;
-		const q = [tp.artist_name, tp.title].filter(Boolean).join(' ');
+	function updateNodePlayable(playable: PlayableTrack) {
+		if (!node) return;
+		const trackId = node.trackId;
+		node.playable = playable;
+		discoverSpaceStore.update((state) => ({
+			...state,
+			nodes: state.nodes.map((n) => (n.trackId === trackId ? { ...n, playable } : n)),
+		}));
+	}
+
+	function pendingToSearchQuery(playable: Extract<PlayableTrack, { kind: 'pending-lastfm' }>): string {
+		return [playable.artist, playable.title].filter(Boolean).join(' ');
+	}
+
+	async function resolveExternalPlayable(playable: PlayableTrack): Promise<PlayableTrack | null> {
+		if (playable.kind === 'library' || playable.kind === 'tidal') return playable;
+		if (playable.kind === 'unavailable') return null;
+		const q = pendingToSearchQuery(playable);
 		if (!q) return null;
 		const results = await api.searchTidal(q, 1);
 		const hit = results.tracks[0];
-		if (!hit) return null;
-		return {
+		if (!hit || hit.tidal_id <= 0) return null;
+		const resolved: PlayableTrack = {
+			kind: 'tidal',
 			tidal_id: hit.tidal_id,
-			title: hit.title,
-			artist_name: hit.artist_name,
-			album_title: hit.album_title,
-			artwork_url: hit.artwork_url ?? tp.artwork_url,
-			duration_ms: hit.duration_ms,
-			artist_tidal_id: null,
+			track: {
+				tidal_id: hit.tidal_id,
+				title: hit.title,
+				artist_name: hit.artist_name,
+				album_title: hit.album_title,
+				artwork_url: hit.artwork_url ?? node?.artworkUrl ?? null,
+				duration_ms: hit.duration_ms,
+				artist_tidal_id: hit.artist_id ?? null,
+				album_tidal_id: hit.album_tidal_id ?? null,
+			},
 		};
+		updateNodePlayable(resolved);
+		return resolved;
+	}
+
+	function resolvedTidalTrack(playable: PlayableTrack): TidalPlayable | null {
+		if (playable.kind !== 'tidal') return null;
+		if (!canPlayTrack(playable)) {
+			showToast(getPlayableLabel(playable), 'error');
+			return null;
+		}
+		return playable.track;
 	}
 
 	async function handlePlayNow() {
 		if (!node) return;
+		resolvingAction = 'play-now';
 		try {
-			if (node.isInLibrary) {
-				await api.playTrack(node.trackId);
-				return;
-			}
-			const resolved = await resolveExternalPlayable(nodeAsTidalPlayable());
-			if (!resolved) {
+			const basePlayable = nodeFallbackPlayable();
+			if (!basePlayable) return;
+			const playable = await resolveExternalPlayable(basePlayable);
+			if (!playable) {
 				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
 				return;
 			}
+			if (playable.kind === 'library') {
+				await api.playTrack(playable.track_id);
+				return;
+			}
+			const tidal = resolvedTidalTrack(playable);
+			if (!tidal) {
+				return;
+			}
 			const { playTidalTrackNow } = await import('$lib/stores/player');
-			await playTidalTrackNow(resolved);
+			await playTidalTrackNow(tidal);
 		} catch {
 			showToast('Could not play track', 'error');
+		} finally {
+			resolvingAction = null;
 		}
 	}
 
 	async function handlePlayNext() {
 		if (!node) return;
+		resolvingAction = 'play-next';
 		try {
-			if (node.isInLibrary) {
-				const { playTrackNext } = await import('$lib/stores/player');
-				await playTrackNext(node.trackId);
-				return;
-			}
-			const resolved = await resolveExternalPlayable(nodeAsTidalPlayable());
-			if (!resolved) {
+			const basePlayable = nodeFallbackPlayable();
+			if (!basePlayable) return;
+			const playable = await resolveExternalPlayable(basePlayable);
+			if (!playable) {
 				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
 				return;
 			}
+			if (playable.kind === 'library') {
+				const { playTrackNext } = await import('$lib/stores/player');
+				await playTrackNext(playable.track_id);
+				return;
+			}
+			const tidal = resolvedTidalTrack(playable);
+			if (!tidal) {
+				return;
+			}
 			const { playTidalTrackNext } = await import('$lib/stores/player');
-			await playTidalTrackNext(resolved);
+			await playTidalTrackNext(tidal);
 		} catch {
 			showToast('Could not queue track', 'error');
+		} finally {
+			resolvingAction = null;
 		}
 	}
 
 	async function handleStartRadioHere() {
 		if (!node || isStartingRadio) return;
 		isStartingRadio = true;
+		resolvingAction = 'radio';
 		try {
-			if (node.isInLibrary) {
-				const { startSongRadio } = await import('$lib/stores/player');
-				await startSongRadio(node.trackId);
-			} else {
-				const { startTidalSongRadio } = await import('$lib/stores/player');
-				await startTidalSongRadio(nodeAsTidalPlayable());
+			const basePlayable = nodeFallbackPlayable();
+			if (!basePlayable) return;
+			const playable = await resolveExternalPlayable(basePlayable);
+			if (!playable) {
+				showToast(`Couldn't find "${node.title}" on Tidal`, 'error');
+				return;
 			}
+			if (playable.kind === 'library') {
+				const { startSongRadio } = await import('$lib/stores/player');
+				await startSongRadio(playable.track_id);
+				return;
+			}
+			const tidal = resolvedTidalTrack(playable);
+			if (!tidal) {
+				return;
+			}
+			const { startTidalSongRadio } = await import('$lib/stores/player');
+			await startTidalSongRadio(tidal);
 		} catch {
 			showToast(ERROR_TOASTS.radioRouteFailed, 'error');
 		} finally {
 			isStartingRadio = false;
+			resolvingAction = null;
 		}
 	}
 
@@ -213,19 +268,32 @@
 
 		<!-- Action stack -->
 		<div class="actions" role="group" aria-label="Track actions">
-			<button class="action-btn primary" onclick={handlePlayNow} aria-label="Play {node.title} now">
-				{SIDE_PANEL_ACTIONS.playNow}
+			<button
+				class="action-btn primary"
+				onclick={handlePlayNow}
+				disabled={resolvingAction !== null}
+				aria-busy={resolvingAction === 'play-now'}
+				aria-label="Play {node.title} now"
+			>
+				{#if resolvingAction === 'play-now'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else}{SIDE_PANEL_ACTIONS.playNow}{/if}
 			</button>
-			<button class="action-btn" onclick={handlePlayNext} aria-label="Play {node.title} next">
-				{SIDE_PANEL_ACTIONS.playNext}
+			<button
+				class="action-btn"
+				onclick={handlePlayNext}
+				disabled={resolvingAction !== null}
+				aria-busy={resolvingAction === 'play-next'}
+				aria-label="Play {node.title} next"
+			>
+				{#if resolvingAction === 'play-next'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else}{SIDE_PANEL_ACTIONS.playNext}{/if}
 			</button>
 			<button
 				class="action-btn"
 				onclick={handleStartRadioHere}
-				disabled={isStartingRadio}
+				disabled={isStartingRadio || resolvingAction !== null}
+				aria-busy={resolvingAction === 'radio'}
 				aria-label="Start radio from {node.title}"
 			>
-				{isStartingRadio ? 'Starting…' : SIDE_PANEL_ACTIONS.startRadioHere}
+				{#if resolvingAction === 'radio'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else if isStartingRadio}Starting...{:else}{SIDE_PANEL_ACTIONS.startRadioHere}{/if}
 			</button>
 			<button class="action-btn" onclick={handleLockAsAnchor} aria-label="Lock {node.title} as seed anchor">
 				{$discoverSpaceStore.lockedSeedId === node.trackId ? '🔒 Locked' : SIDE_PANEL_ACTIONS.lockAsAnchor}
@@ -393,6 +461,20 @@
 	.action-btn.destructive { color: rgba(255,100,100,0.6); }
 	.action-btn.destructive:hover:not(:disabled) { color: rgba(255,100,100,0.9); }
 	.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.button-spinner {
+		display: inline-block;
+		width: 0.75rem;
+		height: 0.75rem;
+		margin-right: 6px;
+		border: 2px solid rgba(255,255,255,0.2);
+		border-top-color: rgba(255,255,255,0.75);
+		border-radius: 999px;
+		vertical-align: -1px;
+		animation: button-spin 0.8s linear infinite;
+	}
+	@keyframes button-spin {
+		to { transform: rotate(360deg); }
+	}
 
 	.sr-only {
 		position: absolute;

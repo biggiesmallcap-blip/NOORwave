@@ -11,6 +11,8 @@ import type {
 	ApiDiscoveryNode,
 	ApiDiscoveryEdge,
 } from './discover_space_types';
+import type { TidalPlayable, Track } from '$lib/api/client';
+import type { PlayableTrack } from '$lib/player/playable';
 
 // ─── Deterministic initial layout ────────────────────────────────────────────
 
@@ -83,6 +85,74 @@ function normalizeSource(raw?: string): DiscoverSource {
 	}
 }
 
+function apiNodeToLibraryTrack(api: ApiDiscoveryNode): Track {
+	return {
+		id: api.track_id,
+		title: api.title,
+		artist_id: 0,
+		artist_name: api.artist_name,
+		artist_tidal_id: null,
+		album_id: null,
+		album_title: api.album_title ?? null,
+		disc_number: null,
+		track_number: null,
+		duration_ms: api.duration_ms ?? null,
+		isrc: null,
+		tidal_id: null,
+		best_quality: null,
+		best_source: null,
+		fidelity_score: 0,
+		is_favorite: false,
+		play_count: 0,
+		last_played_at: null,
+		date_added: null,
+		source: 'library',
+		artwork_url: api.artwork_url ?? null,
+		bpm: api.bpm ?? null,
+		key_signature: api.camelot_key ?? null,
+		camelot_key: api.camelot_key ?? null,
+		energy: api.energy ?? null,
+		danceability: api.danceability ?? null,
+		is_instrumental: null,
+		samples_analyzed: null,
+	};
+}
+
+function apiNodeToTidalPlayable(api: ApiDiscoveryNode): TidalPlayable {
+	return {
+		tidal_id: api.track_id,
+		title: api.title,
+		artist_name: api.artist_name,
+		album_title: api.album_title ?? null,
+		artwork_url: api.artwork_url ?? null,
+		duration_ms: api.duration_ms ?? null,
+		artist_tidal_id: null,
+	};
+}
+
+function playableFromApiNode(api: ApiDiscoveryNode): PlayableTrack {
+	if (api.is_in_library && api.track_id > 0) {
+		return {
+			kind: 'library',
+			track: apiNodeToLibraryTrack(api),
+			track_id: api.track_id,
+		};
+	}
+	if (api.track_id > 0) {
+		return {
+			kind: 'tidal',
+			track: apiNodeToTidalPlayable(api),
+			tidal_id: api.track_id,
+		};
+	}
+	return {
+		kind: 'pending-lastfm',
+		artist: api.artist_name,
+		title: api.title,
+		reason: api.primary_reason ?? api.reason_tags?.[0] ?? null,
+	};
+}
+
 // ─── Node adapter ─────────────────────────────────────────────────────────────
 
 export function adaptNode(
@@ -136,6 +206,7 @@ export function adaptNode(
 		albumTitle: api.album_title,
 		artworkUrl: api.artwork_url,
 		durationMs: api.duration_ms,
+		playable: playableFromApiNode(api),
 		source,
 		isInLibrary: api.is_in_library,
 		isColdStart,
@@ -223,6 +294,12 @@ export function makeGhostNode(
 		trackId,
 		title,
 		artist,
+		playable: {
+			kind: 'pending-lastfm',
+			artist,
+			title,
+			reason,
+		},
 		source: 'engine',
 		isInLibrary: false,
 		isColdStart: true,
