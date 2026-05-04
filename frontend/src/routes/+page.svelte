@@ -3,31 +3,24 @@
 	import type { Snapshot } from './$types';
 	import {
 		api,
-		getApiBase,
-		authFetch,
+		ApiError,
 		type RSSFeedItem,
+		type ReleaseItem,
 		type HomePickTrack,
 	} from '$lib/api/client';
 	import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
-	import { wsConnected } from '$lib/api/ws';
-	import { currentTrack, currentTrackFeatures, isPlaying, playTrackNow } from '$lib/stores/player';
-	import { camelotFamily } from '$lib/utils/camelot';
-	import StateBadge from '$lib/components/ui/StateBadge.svelte';
+	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
 	// Home page data
-	let releases = $state<RSSFeedItem[]>([]);
+	let releases = $state<ReleaseItem[]>([]);
+	let releasesNotConfigured = $state(false);
 	let genrePicks = $state<HomePickTrack[]>([]);
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
 
-	// Status data
-	let status = $state<{ name: string; version: string; status: string } | null>(null);
-	let tidalStatus = $state<'connected' | 'disconnected' | 'unknown'>('unknown');
-
 	// Loading states
-	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let sectionsLoading = $state({
 		releases: true,
@@ -41,29 +34,8 @@
 	});
 
 	async function loadHome() {
-		loading = false; // Show page immediately, sections load independently
 		error = null;
-
-		try {
-			// Load status quickly
-			status = await api.getStatus();
-
-			// Load TIDAL status
-			try {
-				const tidalResponse = await authFetch(`${getApiBase()}/api/tidal/status`);
-				if (!tidalResponse.ok) throw new Error(`Server returned ${tidalResponse.status}`);
-				const tidalData = await tidalResponse.json();
-				tidalStatus = tidalData.connected ? 'connected' : 'disconnected';
-			} catch {
-				tidalStatus = 'unknown';
-			}
-		} catch {
-			error = 'NOOR could not reach the local server.';
-			loading = false;
-			return;
-		}
-
-		// Load all sections in parallel (don't await, let them populate as they finish)
+		// Load all sections in parallel — each handles its own error state.
 		loadReleases();
 		loadPicks();
 		loadArticles();
@@ -82,12 +54,20 @@
 
 	async function loadReleases() {
 		sectionsLoading.releases = true;
+		releasesNotConfigured = false;
 		try {
 			const data = await api.getHomeReleases();
 			releases = data.releases ?? [];
 		} catch (e) {
-			console.error('Failed to load releases:', e);
-			releases = [];
+			if (e instanceof ApiError && e.status === 503) {
+				// Backend signals "Last.fm not configured" via 503 so we can
+				// render a connect prompt instead of a generic error.
+				releasesNotConfigured = true;
+				releases = [];
+			} else {
+				console.error('Failed to load releases:', e);
+				releases = [];
+			}
 		} finally {
 			sectionsLoading.releases = false;
 		}
@@ -171,8 +151,7 @@
 <div class="page-shell home-page animate-in">
 	{#if error}
 		<section class="page-header">
-			<p class="eyebrow">NOOR</p>
-			<h1 class="display-face">Music command center</h1>
+			<img class="page-wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
 		</section>
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
@@ -181,20 +160,7 @@
 		</EmptyState>
 	{:else}
 		<section class="page-header">
-			<p class="eyebrow">NOOR</p>
-			<h1 class="display-face">Music command center</h1>
-			<div class="system-badges">
-				{#if status}
-					<StateBadge label={`Server v${status?.version}`} tone="success" />
-				{:else}
-					<StateBadge label="Loading..." tone="muted" />
-				{/if}
-				<StateBadge
-					label={tidalStatus === 'connected' ? 'TIDAL connected' : tidalStatus === 'disconnected' ? 'TIDAL offline' : 'TIDAL unknown'}
-					tone={tidalStatus === 'connected' ? 'active' : tidalStatus === 'disconnected' ? 'muted' : 'warning'}
-				/>
-				<StateBadge label={$wsConnected ? 'WS live' : 'WS offline'} tone={$wsConnected ? 'success' : 'muted'} />
-			</div>
+			<img class="page-wordmark" src="/wordmark-dark.svg" alt="NOORwave" />
 		</section>
 
 		<!-- Mobile quick-nav (hidden on desktop) -->
@@ -217,79 +183,12 @@
 			</a>
 		</nav>
 
-		{#if $currentTrack}
-			<section class="glass-panel now-playing-bar">
-				<div class="np-left">
-					{#if $currentTrack.artwork_url}
-						<img class="np-art" src={$currentTrack.artwork_url} alt="" />
-					{:else}
-						<div class="np-art placeholder">♫</div>
-					{/if}
-					<div class="np-meta">
-						<p class="eyebrow">{$isPlaying ? 'Now playing' : 'Paused'}</p>
-						<h3>{$currentTrack.title}</h3>
-						<span>{$currentTrack.artist_name ?? 'Unknown artist'}</span>
-						{#if $currentTrackFeatures}
-							<div class="now-playing-dsp">
-								{#if $currentTrackFeatures.camelot_key}
-									<span
-										class="camelot-badge camelot-{camelotFamily(
-											$currentTrackFeatures.camelot_key
-										)} camelot-letter-{$currentTrackFeatures.camelot_key.slice(-1).toUpperCase()}"
-									>
-										{$currentTrackFeatures.camelot_key}
-									</span>
-								{/if}
-								{#if $currentTrackFeatures.bpm}
-									<span class="bpm-label">{$currentTrackFeatures.bpm.toFixed(1)} BPM</span>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			</section>
-		{/if}
 
-		<!-- New Releases Section -->
-		<section class="discovery-section">
-			<div class="section-header">
-				<div class="section-title-group">
-					<p class="eyebrow">AllMusic</p>
-					<h2>New releases</h2>
-				</div>
-				{#if sectionsLoading.releases}
-					<span class="loading-indicator">Loading...</span>
-				{/if}
-			</div>
-
-			{#if releases.length > 0}
-				<div class="horizontal-scroll">
-					{#each releases.slice(0, 12) as release (release.link)}
-						<a class="release-card glass-tile" href={release.link} target="_blank" rel="noopener">
-							{#if release.image_url}
-								<img class="release-art" src={release.image_url} alt="" />
-							{:else}
-								<div class="release-art placeholder">💿</div>
-							{/if}
-							<div class="release-info">
-								<h3 class="release-title">{release.title}</h3>
-								{#if release.author}
-									<p class="release-artist">{release.author}</p>
-								{/if}
-								<span class="release-source" style="color: {getSourceColor(release.source)}">
-									{release.source}
-								</span>
-							</div>
-						</a>
-					{/each}
-				</div>
-			{:else}
-				<EmptyState title="No new releases found" copy="AllMusic feed is currently unavailable." />
-			{/if}
-		</section>
+		<!-- Your Mixes (TIDAL) — replaces the prime above-Trending slot. -->
+		<YourMixesShelf />
 
 		<!-- Unified Trending shelf (Worldwide / Country / Genre / Tidal) -->
-		<section class="discovery-section">
+		<section class="discovery-section" data-section="trending">
 			<TrendingShelf limit={12} />
 
 			{#if genrePicks.length > 0}
@@ -304,6 +203,46 @@
 						{/each}
 					</div>
 				</div>
+			{/if}
+		</section>
+
+		<!-- New Releases (now below Trending, sourced from Last.fm JSON API). -->
+		<section class="discovery-section" data-section="new-releases">
+			<div class="section-header">
+				<div class="section-title-group">
+					<p class="eyebrow">Last.fm</p>
+					<h2>New releases</h2>
+				</div>
+				{#if sectionsLoading.releases}
+					<span class="loading-indicator">Loading...</span>
+				{/if}
+			</div>
+
+			{#if releases.length > 0}
+				<div class="horizontal-scroll">
+					{#each releases.slice(0, 12) as release (release.link || `${release.author}-${release.title}`)}
+						<a class="release-card glass-tile" href={release.link} target="_blank" rel="noopener">
+							{#if release.image_url}
+								<img class="release-art" src={release.image_url} alt="" />
+							{:else}
+								<div class="release-art placeholder">💿</div>
+							{/if}
+							<div class="release-info">
+								<h3 class="release-title">{release.title}</h3>
+								{#if release.author}
+									<p class="release-artist">{release.author}</p>
+								{/if}
+							</div>
+						</a>
+					{/each}
+				</div>
+			{:else if releasesNotConfigured}
+				<EmptyState
+					title="Connect Last.fm to see new releases"
+					copy="Last.fm powers the new-releases shelf. Add your API key in Settings → Sources → Last.fm."
+				/>
+			{:else if !sectionsLoading.releases}
+				<EmptyState title="No new releases found" copy="Last.fm did not return any recent albums." />
 			{/if}
 		</section>
 
@@ -394,124 +333,19 @@
 	.page-header {
 		display: flex;
 		flex-direction: column;
+		align-items: center;
 		gap: 8px;
 		padding-top: 4px;
 	}
 
-	.page-header h1 {
-		max-width: 16ch;
-		font-size: clamp(2rem, 3.4vw, 3.2rem);
-		line-height: 1.02;
+	/* Brand wordmark in the page header — replaces the old title + status
+	   badges. Centered, sized to feel like a hero rather than a label. */
+	.page-wordmark {
+		width: clamp(320px, 42vw, 640px);
+		height: auto;
+		display: block;
+		margin: 0 auto;
 	}
-
-	.system-badges {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
-		margin-top: 8px;
-	}
-
-	/* Now playing bar */
-	.now-playing-bar {
-		padding: 16px 20px;
-		display: flex;
-		align-items: center;
-		gap: 16px;
-	}
-
-	.np-left {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-	}
-
-	.np-art {
-		width: 52px;
-		height: 52px;
-		border-radius: 8px;
-		object-fit: cover;
-		flex-shrink: 0;
-	}
-
-	.np-art.placeholder {
-		background: var(--accent-soft);
-		display: grid;
-		place-items: center;
-		color: var(--accent-strong);
-		font-size: 1.2rem;
-	}
-
-	.np-meta {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.np-meta h3 {
-		font-size: 0.95rem;
-		font-weight: 700;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		margin: 0;
-	}
-
-	.np-meta span {
-		font-size: 0.8rem;
-		color: var(--text-muted);
-	}
-
-	/* Now-playing DSP badge row */
-	.now-playing-dsp {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-top: 3px;
-	}
-
-	.camelot-badge {
-		font-size: 10px;
-		font-weight: 700;
-		padding: 2px 6px;
-		border-radius: 4px;
-		letter-spacing: 0.02em;
-		color: #111;
-		background: rgba(255, 255, 255, 0.65);
-		line-height: 1;
-	}
-
-	.bpm-label {
-		font-size: 11px;
-		opacity: 0.55;
-		font-variant-numeric: tabular-nums;
-	}
-
-	/* Camelot wheel colors — B variants are vivid, A variants are desaturated. */
-	.camelot-1.camelot-letter-B  { background: #ff6b6b; color: #fff; }
-	.camelot-1.camelot-letter-A  { background: #d18b8b; color: #201010; }
-	.camelot-2.camelot-letter-B  { background: #ff9f43; color: #fff; }
-	.camelot-2.camelot-letter-A  { background: #c99a6e; color: #201810; }
-	.camelot-3.camelot-letter-B  { background: #ffd43b; color: #201a00; }
-	.camelot-3.camelot-letter-A  { background: #c8b36a; color: #1a1500; }
-	.camelot-4.camelot-letter-B  { background: #ffee58; color: #1c1a00; }
-	.camelot-4.camelot-letter-A  { background: #c7bf7a; color: #1a1800; }
-	.camelot-5.camelot-letter-B  { background: #a8e063; color: #0d1a05; }
-	.camelot-5.camelot-letter-A  { background: #9eb37a; color: #101a0c; }
-	.camelot-6.camelot-letter-B  { background: #4caf50; color: #fff; }
-	.camelot-6.camelot-letter-A  { background: #7fa080; color: #0c1a0d; }
-	.camelot-7.camelot-letter-B  { background: #26a69a; color: #fff; }
-	.camelot-7.camelot-letter-A  { background: #6fa39d; color: #081b19; }
-	.camelot-8.camelot-letter-B  { background: #00bcd4; color: #001e23; }
-	.camelot-8.camelot-letter-A  { background: #6ba8b3; color: #0a1c20; }
-	.camelot-9.camelot-letter-B  { background: #3b82f6; color: #fff; }
-	.camelot-9.camelot-letter-A  { background: #7e97c1; color: #0e162a; }
-	.camelot-10.camelot-letter-B { background: #6366f1; color: #fff; }
-	.camelot-10.camelot-letter-A { background: #8a8bc2; color: #14142a; }
-	.camelot-11.camelot-letter-B { background: #a855f7; color: #fff; }
-	.camelot-11.camelot-letter-A { background: #a58bc0; color: #1a1224; }
-	.camelot-12.camelot-letter-B { background: #ec4899; color: #fff; }
-	.camelot-12.camelot-letter-A { background: #c78aa5; color: #2a0f1d; }
 
 	/* Discovery sections */
 	.discovery-section {

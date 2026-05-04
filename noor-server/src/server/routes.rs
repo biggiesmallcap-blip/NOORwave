@@ -41,9 +41,12 @@ pub struct ListParams {
     sort_dir: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
-    // Despite the name, `favorite_only=true` means "library tracks" = liked ∪ tracks from
-    // favorited albums. For a strict "user explicitly liked" filter, use `liked_only` instead.
+    // Legacy naming: despite "favorite_only", this means "library tracks" =
+    // tracks where tracks.is_favorite=1 OR the parent album has albums.is_favorite=1.
+    // For a strict "user explicitly liked this track" filter, use `liked_only` instead.
     favorite_only: Option<bool>,
+    // Strict filter: tracks where tracks.is_favorite=1 only. Takes precedence
+    // over `favorite_only` when both are set.
     liked_only: Option<bool>,
     // DSP filter params
     bpm_min: Option<f64>,
@@ -429,6 +432,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/lastfm/config", post(lastfm_save_config))
         .route("/api/lastfm/config", axum::routing::delete(lastfm_clear_config))
         .route("/api/lastfm/status", get(lastfm_status))
+        // Last.fm scrobble auth (server-side flow — `LASTFM_API_SECRET` env required)
+        .route("/api/lastfm/auth/start", post(lastfm_auth_start))
+        .route("/api/lastfm/auth/complete", post(lastfm_auth_complete))
+        .route("/api/lastfm/auth/disconnect", post(lastfm_auth_disconnect))
         .route("/api/library/enrich/lastfm", post(start_lastfm_enrichment))
         .route("/api/library/enrich/lastfm/stop", post(stop_lastfm_enrichment))
         .route("/api/library/enrich/lastfm/status", get(get_lastfm_enrichment_status))
@@ -452,6 +459,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/picks", get(get_home_picks))
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
+        // TIDAL "Your Mixes" — drives the home Your Mixes shelf above Trending.
+        .route("/api/tidal/mixes", get(get_tidal_mixes))
+        .route("/api/tidal/mixes/{id}/tracks", get(get_tidal_mix_tracks))
+        .route("/api/tidal/play-mix", post(play_tidal_mix))
         // Trending / charts (Phase 5)
         .route("/api/charts", get(get_charts))
         .route("/api/charts/lastfm/genres", get(list_lastfm_genres))
@@ -4296,6 +4307,57 @@ async fn overlay_snapshot_with_external_track_and_position(
             snapshot.state.current_track = Some(track.clone());
         }
     }
+    // Surface the pending TIDAL mix queue (auto-advance items behind the
+    // currently-playing ephemeral track) into the visible queue so UP NEXT
+    // shows the rest of the mix instead of "empty".
+    let pending = state_guard
+        .pending_tidal_mix_queue
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    drop(state_guard);
+    if !pending.is_empty() {
+        let start_position = snapshot.queue.iter().map(|q| q.position).max().unwrap_or(-1) + 1;
+        for (offset, p) in pending.into_iter().enumerate() {
+            let track = crate::db::models::Track {
+                id: -p.tidal_track_id,
+                title: p.title,
+                artist_id: 0,
+                artist_name: p.artist_name,
+                album_id: None,
+                album_title: p.album_title,
+                disc_number: None,
+                track_number: None,
+                duration_ms: p.duration_ms,
+                isrc: None,
+                tidal_id: Some(p.tidal_track_id),
+                ytmusic_id: None,
+                soundcloud_id: None,
+                best_quality: Some("LOSSLESS".to_string()),
+                best_source: Some("tidal".to_string()),
+                fidelity_score: 0,
+                is_favorite: false,
+                play_count: 0,
+                last_played_at: None,
+                date_added: None,
+                source: "tidal_ephemeral".to_string(),
+                artwork_url: p.artwork_url,
+            };
+            // Negative ids for both queue id + track id so the frontend can
+            // tell these are in-memory placeholders and skip remove/reorder
+            // until proper ephemeral-queue management ships.
+            snapshot.queue.push(crate::db::models::QueueItem {
+                id: -(offset as i64 + 1),
+                track,
+                position: start_position + offset as i32,
+                source: "tidal_mix".to_string(),
+                reason: None,
+                is_pending: false,
+            });
+        }
+    }
     snapshot
 }
 
@@ -5151,14 +5213,17 @@ async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<V
 }
 
 async fn get_playback_queue(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let queue = queue::load_queue(conn)?;
-            Ok(Json(json!({ "queue": queue })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(player::load_snapshot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    // Reuse the overlay so the pending TIDAL mix queue + any external/ephemeral
+    // current-track shows up here, matching what /api/playback/state returns.
+    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    Ok(Json(json!({ "queue": snapshot.queue })))
 }
 
 async fn play_track(
@@ -7096,9 +7161,78 @@ async fn play_tidal_ephemeral(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Fresh single-track play wipes any pending mix queue — the user is
+    // explicitly choosing a different track, so the previously-queued mix
+    // continuation is no longer the user's intent.
+    {
+        let s = state.read().await;
+        s.pending_tidal_mix_queue.lock().unwrap().clear();
+    }
+    let track = crate::PendingEphemeralTidalTrack {
+        tidal_track_id: body.tidal_track_id,
+        title: body.title,
+        artist_name: body.artist_name,
+        album_title: body.album_title,
+        artwork_url: body.artwork_url,
+        duration_ms: body.duration_ms,
+    };
+    start_ephemeral_tidal_playback(&state, track).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PlayTidalMixRequest {
+    tracks: Vec<PlayTidalRequest>,
+}
+
+/// Play the first track immediately and stash the rest in the pending
+/// ephemeral queue so `handle_runtime_finished` can advance through them.
+/// Used by the home Your Mixes shelf when a tile is clicked.
+async fn play_tidal_mix(
+    State(state): State<SharedState>,
+    Json(body): Json<PlayTidalMixRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.tracks.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Mix has no tracks" })),
+        ));
+    }
+
+    let mut iter = body.tracks.into_iter().map(|t| crate::PendingEphemeralTidalTrack {
+        tidal_track_id: t.tidal_track_id,
+        title: t.title,
+        artist_name: t.artist_name,
+        album_title: t.album_title,
+        artwork_url: t.artwork_url,
+        duration_ms: t.duration_ms,
+    });
+    let first = iter.next().expect("non-empty per check above");
+    let rest: Vec<crate::PendingEphemeralTidalTrack> = iter.collect();
+
+    // Replace any existing pending queue with this mix's continuation.
+    {
+        let s = state.read().await;
+        let mut q = s.pending_tidal_mix_queue.lock().unwrap();
+        q.clear();
+        q.extend(rest);
+    }
+
+    start_ephemeral_tidal_playback(&state, first).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Resolve a TIDAL stream URL and start ephemeral playback. Shared by the
+/// single-track entry point (`play_tidal_ephemeral`), the mix entry point
+/// (`play_tidal_mix`), and the auto-advance hook (`handle_runtime_finished`)
+/// when stepping through a queued mix.
+async fn start_ephemeral_tidal_playback(
+    state: &SharedState,
+    track: crate::PendingEphemeralTidalTrack,
+) -> Result<(), (StatusCode, Json<Value>)> {
     // Resolve TIDAL tokens (same pattern as tidal_search)
     let tokens = {
-        let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
+        let persisted = load_persisted_tidal_tokens(state).await.map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
         })?;
         let s = state.read().await;
@@ -7117,7 +7251,7 @@ async fn play_tidal_ephemeral(
         let s = state.read().await;
         s.http_client.clone()
     };
-    let stream_req = tidal_stream::StreamRequest::new(body.tidal_track_id, "LOSSLESS");
+    let stream_req = tidal_stream::StreamRequest::new(track.tidal_track_id, "LOSSLESS");
     let stream_info = match tidal_stream::resolve_stream(
         &http_client,
         &tokens.access_token,
@@ -7127,7 +7261,7 @@ async fn play_tidal_ephemeral(
     {
         Ok(info) => info,
         Err(e) if e.is_session_expired() => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+            let refreshed = recover_tidal_session(state, &http_client, &tokens)
                 .await
                 .map_err(|re| (
                     StatusCode::BAD_GATEWAY,
@@ -7152,17 +7286,17 @@ async fn play_tidal_ephemeral(
 
     // Build a synthetic Track with a negative id to avoid any DB collision
     let synthetic = crate::db::models::Track {
-        id: -body.tidal_track_id,
-        title: body.title.clone(),
+        id: -track.tidal_track_id,
+        title: track.title.clone(),
         artist_id: 0,
-        artist_name: body.artist_name.clone(),
+        artist_name: track.artist_name.clone(),
         album_id: None,
-        album_title: body.album_title.clone(),
+        album_title: track.album_title.clone(),
         disc_number: None,
         track_number: None,
-        duration_ms: body.duration_ms,
+        duration_ms: track.duration_ms,
         isrc: None,
-        tidal_id: Some(body.tidal_track_id),
+        tidal_id: Some(track.tidal_track_id),
         ytmusic_id: None,
         soundcloud_id: None,
         best_quality: Some("LOSSLESS".to_string()),
@@ -7173,16 +7307,16 @@ async fn play_tidal_ephemeral(
         last_played_at: None,
         date_added: None,
         source: "tidal_ephemeral".to_string(),
-        artwork_url: body.artwork_url.clone(),
+        artwork_url: track.artwork_url.clone(),
     };
 
     // Build the playback job and start it via the runtime
-    let crossfade_ms = current_crossfade_ms(&state).await;
+    let crossfade_ms = current_crossfade_ms(state).await;
     let job = player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None);
-    let runtime_handle = ensure_playback_runtime_for_track(&state, &synthetic).await?;
+    let runtime_handle = ensure_playback_runtime_for_track(state, &synthetic).await?;
     runtime_handle.play(job).map_err(|e| {
         let message = format!("Failed to start host audio playback: {e}");
-        report_playback_failure(&state, &message);
+        report_playback_failure(state, &message);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": message })),
@@ -7220,9 +7354,9 @@ async fn play_tidal_ephemeral(
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
         snapshot
     };
-    sync_session_after_snapshot(&state, &snapshot, Some(player::ListenSessionEndReason::Replaced)).await;
+    sync_session_after_snapshot(state, &snapshot, Some(player::ListenSessionEndReason::Replaced)).await;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(())
 }
 
 async fn tidal_artist_profile(
@@ -8331,6 +8465,33 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             .unwrap_or(false)
     };
     if external_finished {
+        // Auto-advance through any queued ephemeral mix continuation before
+        // tearing down. Pop the next track out of the pending queue and start
+        // it; if the queue is empty, fall through to the existing teardown.
+        let next = {
+            let s = state.read().await;
+            s.pending_tidal_mix_queue.lock().unwrap().pop_front()
+        };
+        if let Some(next) = next {
+            // Clear the previous ephemeral track marker so the new one's
+            // PlaybackStateChanged + Started events overwrite cleanly.
+            {
+                let mut state_guard = state.write().await;
+                state_guard.external_playback_track = None;
+            }
+            if let Err((status, body)) = start_ephemeral_tidal_playback(&state, next).await {
+                tracing::warn!(
+                    "Failed to advance ephemeral mix queue ({status}): {} — clearing remaining queue",
+                    body.0
+                );
+                let s = state.read().await;
+                s.pending_tidal_mix_queue.lock().unwrap().clear();
+                // Fall through to teardown so the UI doesn't get stuck on a
+                // ghost track.
+            } else {
+                return Ok(());
+            }
+        }
         {
             let mut state_guard = state.write().await;
             state_guard.external_playback_track = None;
@@ -8799,21 +8960,24 @@ async fn sync_session_after_snapshot(
     snapshot: &player::PlaybackSnapshot,
     end_reason: Option<player::ListenSessionEndReason>,
 ) {
-    let flushed_track_id = {
+    // Capture both the flush outcome and a "now playing" payload (if a new
+    // track just started) inside the write lock, then dispatch the Last.fm
+    // calls outside the lock so the spawned tasks never contend with us.
+    let (flushed_track_id, scrobble_completed_payload, now_playing_payload) = {
         let mut state = state.write().await;
         let now = chrono::Utc::now();
 
-        let flushed_track_id = if let Some(reason) = end_reason {
+        let outcome = if let Some(reason) = end_reason {
             flush_active_listen_session_locked(&mut state, now, reason)
                 .map_err(|err| {
                     error!("failed to flush listen session: {err}");
                 })
-                .ok()
-                .flatten()
+                .unwrap_or(FlushOutcome { flushed_track_id: None, scrobble_completed: None })
         } else {
-            None
+            FlushOutcome { flushed_track_id: None, scrobble_completed: None }
         };
 
+        let mut now_playing: Option<(String, String, Option<String>, Option<i64>, String)> = None;
         if snapshot.state.is_playing {
             if let Some(track) = snapshot.state.current_track.as_ref() {
                 let source = state
@@ -8824,12 +8988,19 @@ async fn sync_session_after_snapshot(
                 state.active_listen_session = Some(player::ActiveListenSession::start(
                     track.id, now, source, prior,
                 ));
+                now_playing = Some((
+                    track.artist_name.clone().unwrap_or_default(),
+                    track.title.clone(),
+                    track.album_title.clone(),
+                    track.duration_ms,
+                    track.source.clone(),
+                ));
             }
         } else if snapshot.state.current_track.is_none() {
             state.active_listen_session = None;
         }
 
-        flushed_track_id
+        (outcome.flushed_track_id, outcome.scrobble_completed, now_playing)
     };
 
     if let Some(track_id) = flushed_track_id {
@@ -8838,15 +9009,54 @@ async fn sync_session_after_snapshot(
             .event_tx
             .send(AppEvent::ListenHistoryUpdated { track_id });
     }
+
+    // Fire-and-forget Last.fm scrobbles. Helpers no-op when source != tidal,
+    // when LASTFM_API_SECRET is unset, or when no session_key is stored.
+    if let Some((artist, title, album, duration_ms, listened_ms, started_at_unix, source)) =
+        scrobble_completed_payload
+    {
+        if !artist.is_empty() && !title.is_empty() {
+            crate::services::lastfm::scrobble::spawn_scrobble_completed(
+                state.clone(),
+                artist,
+                title,
+                album,
+                duration_ms,
+                listened_ms,
+                started_at_unix,
+                &source,
+            );
+        }
+    }
+    if let Some((artist, title, album, duration_ms, source)) = now_playing_payload {
+        if !artist.is_empty() && !title.is_empty() {
+            crate::services::lastfm::scrobble::spawn_now_playing(
+                state.clone(),
+                artist,
+                title,
+                album,
+                duration_ms,
+                &source,
+            );
+        }
+    }
+}
+
+struct FlushOutcome {
+    flushed_track_id: Option<i64>,
+    /// (artist, title, album, duration_ms, listened_ms, started_at_unix, source).
+    /// `None` when there's nothing eligible to consider for a scrobble call.
+    /// The actual eligibility + source filter happens in the scrobble helper.
+    scrobble_completed: Option<(String, String, Option<String>, i64, i64, i64, String)>,
 }
 
 fn flush_active_listen_session_locked(
     state: &mut crate::AppState,
     now: chrono::DateTime<chrono::Utc>,
     _reason: player::ListenSessionEndReason,
-) -> anyhow::Result<Option<i64>> {
+) -> anyhow::Result<FlushOutcome> {
     let Some(mut session) = state.active_listen_session.take() else {
-        return Ok(None);
+        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
     };
 
     session.pause(now);
@@ -8854,19 +9064,20 @@ fn flush_active_listen_session_locked(
     // Skip sessions shorter than 5 seconds to avoid spurious near-zero entries
     // from rapid track changes or accidental clicks.
     if listened_ms < 5_000 {
-        return Ok(None);
+        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
     }
 
     let started_at = session.started_at.to_rfc3339();
+    let started_at_unix = session.started_at.timestamp();
     let track_id = session.track_id;
     if track_id <= 0 {
-        return Ok(None);
+        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
     }
     let session_id = session.session_id.clone();
     let source = session.source;
     let position_in_session = session.position_in_session;
     let transition_from_track_id = session.transition_from_track_id;
-    let completed = state.db.with_conn(|conn| {
+    let (completed, scrobble_payload) = state.db.with_conn(|conn| {
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)
         })?;
@@ -8883,7 +9094,19 @@ fn flush_active_listen_session_locked(
             transition_from_track_id,
         )?;
         queries::increment_track_play_summary(conn, track_id, &started_at, completed)?;
-        Ok(completed)
+        // Capture the fields needed for a Last.fm scrobble. The scrobble
+        // helper itself does the source filter + eligibility check + silent
+        // no-op when scrobbling isn't configured.
+        let payload = (
+            track.artist_name.clone().unwrap_or_default(),
+            track.title.clone(),
+            track.album_title.clone(),
+            track.duration_ms.unwrap_or(0),
+            listened_ms,
+            started_at_unix,
+            track.source.clone(),
+        );
+        Ok((completed, payload))
     })?;
     state.live_listen_session = Some(session.to_live_session(now));
 
@@ -8895,7 +9118,10 @@ fn flush_active_listen_session_locked(
         "flushed listen session"
     );
 
-    Ok(Some(track_id))
+    Ok(FlushOutcome {
+        flushed_track_id: Some(track_id),
+        scrobble_completed: Some(scrobble_payload),
+    })
 }
 
 async fn clear_tidal_session(state: &SharedState) -> anyhow::Result<()> {
@@ -9094,13 +9320,252 @@ pub struct SyncStats {
 async fn get_home_releases(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let aggregator = state.read().await.rss_aggregator.clone();
-    let releases = aggregator.get_new_releases().await;
-    
+    use crate::services::lastfm;
+
+    // Pull api_key from the existing Last.fm credentials row. If Last.fm
+    // isn't configured, we 503 so the frontend renders the connect/empty
+    // state instead of falling back to the old AllMusic RSS feed.
+    let (http, api_key) = {
+        let s = state.read().await;
+        let api_key = s
+            .db
+            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+            .ok()
+            .flatten()
+            .map(|c| c.api_key);
+        (s.http_client.clone(), api_key)
+    };
+    let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    match lastfm::releases::fetch_new_releases_cached(&http, &api_key).await {
+        Ok(releases) => Ok(Json(json!({
+            "releases": releases,
+            "source": "lastfm_api",
+        }))),
+        Err(e) => {
+            tracing::warn!("Last.fm new-releases pipeline failed: {e}");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
+}
+
+// ─── TIDAL: Your Mixes ───────────────────────────────────────────────────────
+
+/// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
+/// Master Mix, etc) for the home page Your Mixes shelf.
+///
+/// 503 when TIDAL is disconnected so the frontend can render its connect prompt.
+async fn get_tidal_mixes(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let tokens = state.read().await.tidal_tokens.clone();
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let mixes = client.get_my_mixes().await.map_err(|e| {
+        tracing::warn!("TIDAL get_my_mixes failed: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
+    Ok(Json(json!({ "mixes": mixes, "source": "tidal" })))
+}
+
+/// Returns the playable tracks inside a TIDAL mix. Frontend calls this when
+/// the user clicks a mix card on the home Your Mixes shelf, then queues +
+/// plays the first track via the existing TIDAL playback path.
+async fn get_tidal_mix_tracks(
+    State(state): State<SharedState>,
+    Path(mix_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tokens = state.read().await.tidal_tokens.clone();
+    let Some(tokens) = tokens else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
+        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
+    })?;
+
+    // Reuse the same shape `getTidalAlbumTracks` returns so the frontend's
+    // `playTidalTrackNow` consumer can reuse its existing track-mapping.
+    let tracks: Vec<Value> = items
+        .into_iter()
+        .map(|t| {
+            let artwork = t
+                .album
+                .as_ref()
+                .and_then(|al| al.cover.as_ref())
+                .and_then(|c| {
+                    crate::services::tidal::client::TidalClient::get_artwork_url(
+                        &Some(c.clone()),
+                        160,
+                    )
+                });
+            json!({
+                "tidal_id": t.id,
+                "title": t.title,
+                "duration_ms": t.duration * 1000,
+                "track_number": t.track_number,
+                "disc_number": t.volume_number,
+                "artist_name": t.artist.name,
+                "artist_tidal_id": t.artist.id,
+                "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                "artwork_url": artwork,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "tracks": tracks })))
+}
+
+// ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────
+
+/// Reasoning lives in `services/lastfm/scrobble.rs` and the plan file. Short
+/// version: the user goes Settings → "Connect Last.fm account" → we open
+/// `https://www.last.fm/api/auth/?api_key=...&token=...` in a new tab → user
+/// clicks "Yes, allow access" → returns to NOORwave → "I've authorized" button
+/// fires /complete → we redeem the token for a session_key (encrypted on disk).
+
+async fn lastfm_auth_start(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+
+    let (http, api_secret, api_key) = {
+        let s = state.read().await;
+        let api_key = s
+            .db
+            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+            .ok()
+            .flatten()
+            .map(|c| c.api_key);
+        (s.http_client.clone(), s.lastfm_api_secret.clone(), api_key)
+    };
+    let Some(api_secret) = api_secret else {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    };
+    let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Save a Last.fm API key first."
+        })));
+    };
+
+    let token = match lastfm::scrobble::get_token(&http, &api_key, &api_secret).await {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Json(json!({
+                "status": "error",
+                "message": format!("auth.getToken failed: {e}")
+            })));
+        }
+    };
+
+    // Stash the pending token server-side so /complete doesn't have to trust
+    // the client to round-trip it.
+    let stash_result = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            lastfm::auth::set_pending_token(conn, &token)?;
+            Ok(())
+        });
+    if let Err(e) = stash_result {
+        tracing::warn!("Failed to stash Last.fm pending_token: {e}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let auth_url = format!(
+        "https://www.last.fm/api/auth/?api_key={}&token={}",
+        urlencoding::encode(&api_key),
+        urlencoding::encode(&token)
+    );
     Ok(Json(json!({
-        "releases": releases,
-        "source": "allmusic_rss"
+        "status": "awaiting",
+        "auth_url": auth_url,
     })))
+}
+
+async fn lastfm_auth_complete(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+
+    let (http, api_secret, api_key, pending_token, master_key) = {
+        let s = state.read().await;
+        let creds = s
+            .db
+            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+            .ok()
+            .flatten();
+        (
+            s.http_client.clone(),
+            s.lastfm_api_secret.clone(),
+            creds.as_ref().map(|c| c.api_key.clone()),
+            creds.and_then(|c| c.pending_token),
+            s.master_key.clone(),
+        )
+    };
+    let Some(api_secret) = api_secret else {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    };
+    let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Last.fm API key not configured."
+        })));
+    };
+    let Some(token) = pending_token else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "No pending auth — call /api/lastfm/auth/start first."
+        })));
+    };
+
+    let session = match lastfm::scrobble::get_session(&http, &api_key, &api_secret, &token).await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            // Don't drop the pending_token on a "not yet authorized" error —
+            // the user might just need a few more seconds in the browser.
+            // The user can retry by clicking the button again.
+            return Ok(Json(json!({
+                "status": "not_yet_authorized",
+                "message": format!("auth.getSession failed: {e}")
+            })));
+        }
+    };
+
+    let persist_result = state.read().await.db.with_conn(|conn| {
+        lastfm::auth::save_session_key(conn, &master_key, &session.session_key, &session.user_name)?;
+        Ok(())
+    });
+    if let Err(e) = persist_result {
+        tracing::warn!("Failed to persist Last.fm session: {e}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(json!({
+        "status": "connected",
+        "user": session.user_name,
+    })))
+}
+
+async fn lastfm_auth_disconnect(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::lastfm;
+    let _ = state.read().await.db.with_conn(|conn| {
+        lastfm::auth::clear_session(conn)?;
+        Ok(())
+    });
+    Ok(Json(json!({"status": "disconnected"})))
 }
 
 /// Get daily picks curated from user's library using learning model
@@ -9113,7 +9578,7 @@ async fn get_home_picks(
     // Get top tracks from listening history with variety
     let picks = db.with_conn(|conn| {
         // Fetch recent top tracks that aren't played in last 7 days (rediscovery)
-        let tracks = queries::get_tracks(conn, "play_count", "desc", 20, 0, false)?;
+        let tracks = queries::get_tracks(conn, "play_count", "desc", 20, 0, false, false)?;
         
         // Get tracks from different genres for variety
         let mut genre_tracks = conn.prepare(
@@ -9494,7 +9959,7 @@ async fn lastfm_save_config(
                         body_text.chars().take(200).collect::<String>())
                 })));
             }
-            let creds = lastfm::auth::LastFmCredentials { api_key };
+            let creds = lastfm::auth::LastFmCredentials { api_key, ..Default::default() };
             let _ = state.read().await.db.with_conn(|conn| {
                 lastfm::auth::save_credentials(conn, &creds)?;
                 Ok(())
@@ -9514,18 +9979,30 @@ async fn lastfm_save_config(
 
 async fn lastfm_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
-    let configured = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
-            Ok(lastfm::auth::load_credentials(conn)
-                .ok()
-                .flatten()
-                .is_some())
-        })
+    let (creds, has_secret) = {
+        let s = state.read().await;
+        let creds = s
+            .db
+            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+            .ok()
+            .flatten();
+        (creds, s.lastfm_api_secret.is_some())
+    };
+    let enrichment = creds
+        .as_ref()
+        .map(|c| !c.api_key.is_empty())
         .unwrap_or(false);
-    Ok(Json(json!({"configured": configured})))
+    let user = creds.as_ref().and_then(|c| c.session_user.clone());
+    let scrobbling = enrichment && has_secret && user.is_some();
+    Ok(Json(json!({
+        // Legacy field kept for backward compat with any existing caller of
+        // /api/lastfm/status — equivalent to `enrichment`.
+        "configured": enrichment,
+        "enrichment": enrichment,
+        "scrobbling": scrobbling,
+        "scrobble_available": has_secret,
+        "user": user,
+    })))
 }
 
 async fn lastfm_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -10761,6 +11238,11 @@ mod tests {
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            master_key: crate::services::crypto::MasterKey::load_or_generate(
+                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
+            )
+            .expect("test master key"),
+            lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })));
@@ -10833,6 +11315,11 @@ mod tests {
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            master_key: crate::services::crypto::MasterKey::load_or_generate(
+                &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
+            )
+            .expect("test master key"),
+            lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })))

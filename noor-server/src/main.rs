@@ -36,6 +36,20 @@ pub struct StreamDisplayInfo {
     pub bit_depth: Option<i32>,
 }
 
+/// One slot in the pending ephemeral TIDAL queue (e.g. rest of a TIDAL mix
+/// after the first track started). Just metadata — stream URL is resolved
+/// lazily when this slot is promoted to the active track, since TIDAL stream
+/// URLs expire after ~30 min and a long mix could outlive an upfront resolve.
+#[derive(Debug, Clone)]
+pub struct PendingEphemeralTidalTrack {
+    pub tidal_track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub artwork_url: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
 /// Shared application state accessible by all modules
 pub struct AppState {
     pub db: db::Database,
@@ -88,6 +102,21 @@ pub struct AppState {
     /// Cached embedding load (per model) for the seed-refresh path.
     /// Avoids full table scans when several seeds are refreshed in sequence.
     pub embedding_cache: Arc<tokio::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
+    /// Symmetric key used to encrypt service secrets (currently only the
+    /// Last.fm scrobble session_key — see `services/crypto.rs`).
+    pub master_key: services::crypto::MasterKey,
+    /// Pending ephemeral TIDAL tracks queued behind the currently-playing
+    /// ephemeral track (e.g. the rest of a TIDAL mix the user clicked into).
+    /// Auto-advanced by `handle_runtime_finished` when the active ephemeral
+    /// track ends. Cleared on explicit stop or when the user starts a
+    /// different ephemeral track (`play_tidal_ephemeral` clears before
+    /// queuing). Stream URLs resolved lazily at advance time — TIDAL
+    /// stream URLs expire (~30 min) so pre-resolving the whole mix is wasteful.
+    pub pending_tidal_mix_queue: Arc<std::sync::Mutex<std::collections::VecDeque<PendingEphemeralTidalTrack>>>,
+    /// Last.fm app shared secret, loaded once from `LASTFM_API_SECRET` env at
+    /// boot. `None` disables every scrobble auth + scrobble call (endpoints
+    /// return HTTP 501). Never serialized into responses, never logged.
+    pub lastfm_api_secret: Option<String>,
     /// Shared bearer token for network auth
     pub server_token: String,
     /// `true` only while the CPAL callback is actively draining samples (set by the
@@ -233,6 +262,22 @@ async fn main() -> Result<()> {
     info!("Database initialized");
     info!("Genre taxonomy loaded: {} genres", genre_count);
 
+    // Load (or generate) the master key used to encrypt service secrets.
+    // Lives next to noor.db so it travels with the install.
+    let master_key = services::crypto::MasterKey::load_or_generate(
+        &services::crypto::secret_dir_for_db(&db_path),
+    )?;
+
+    // Last.fm shared app secret. Optional: when missing, all scrobble auth +
+    // scrobble endpoints return 501 and the rest of the app keeps working.
+    // Never round-tripped through the UI, never logged.
+    let lastfm_api_secret = std::env::var("LASTFM_API_SECRET").ok().filter(|s| !s.is_empty());
+    if lastfm_api_secret.is_some() {
+        info!("Last.fm scrobbling enabled (LASTFM_API_SECRET present)");
+    } else {
+        info!("Last.fm scrobbling disabled (set LASTFM_API_SECRET to enable)");
+    }
+
     // Event bus for real-time state sync
     let (event_tx, _) = broadcast::channel(256);
 
@@ -319,6 +364,9 @@ async fn main() -> Result<()> {
         discovery_train_cancel: Arc::new(AtomicBool::new(false)),
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        master_key,
+        pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        lastfm_api_secret,
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),
     }));

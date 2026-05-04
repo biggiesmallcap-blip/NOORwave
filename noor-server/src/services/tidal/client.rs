@@ -440,6 +440,220 @@ impl TidalClient {
             .collect())
     }
 
+    /// Fetch the authenticated user's "My Mixes" page from TIDAL.
+    ///
+    /// Endpoint: `pages/my_collection_my_mixes` — undocumented private API
+    /// used by the TIDAL web client. Stable enough in practice, but if TIDAL
+    /// breaks the shape we surface an empty list with a `warn` rather than
+    /// erroring the whole home page (acceptable risk per plan).
+    ///
+    /// Response shape: `{ rows: [{ modules: [{ pagedList: { items: [...] } }] }] }`
+    /// where each item is a mix `{ id, title, subTitle, mixType, images: {...} }`.
+    pub async fn get_my_mixes(&self) -> Result<Vec<TidalMix>> {
+        let url = format!(
+            "{}/pages/my_collection_my_mixes?countryCode={}&deviceType=BROWSER&locale=en_US",
+            TIDAL_API_URL, self.country_code
+        );
+        let payload: serde_json::Value = match self.get_json(&url).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!("TIDAL my_mixes fetch failed: {}", err);
+                return Ok(Vec::new());
+            }
+        };
+        let mixes = Self::parse_my_mixes(&payload);
+        if mixes.is_empty() {
+            // Surface the actual response shape so we can debug why parsing
+            // returned nothing (vs. the user genuinely having no mixes).
+            // Top-level keys + rows[].modules summary, no nested item dump.
+            let top_keys: Vec<&str> = payload
+                .as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let rows_summary: Vec<String> = payload
+                .get("rows")
+                .and_then(serde_json::Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .enumerate()
+                        .map(|(i, row)| {
+                            let modules = row
+                                .get("modules")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|m| {
+                                    m.iter()
+                                        .map(|module| {
+                                            let kind = module
+                                                .get("type")
+                                                .and_then(serde_json::Value::as_str)
+                                                .unwrap_or("?");
+                                            let item_count = module
+                                                .get("pagedList")
+                                                .and_then(|p| p.get("items"))
+                                                .and_then(serde_json::Value::as_array)
+                                                .map(|a| a.len())
+                                                .unwrap_or(0);
+                                            format!("{kind}({item_count})")
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                })
+                                .unwrap_or_else(|| "no-modules".into());
+                            format!("row{i}=[{modules}]")
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            tracing::warn!(
+                target: "noor.tidal.mixes",
+                "parse_my_mixes returned 0 — top_keys={:?}, rows_summary={:?}, raw_len={}",
+                top_keys,
+                rows_summary,
+                payload.to_string().len()
+            );
+        }
+        Ok(mixes)
+    }
+
+    /// Fetch the items inside a TIDAL mix. The endpoint is the only public
+    /// way to play a mix server-side, since mixes don't have a stable track
+    /// set we could import once.
+    pub async fn get_mix_tracks(&self, mix_id: &str) -> Result<Vec<TidalTrack>> {
+        let url = format!(
+            "{}/mixes/{}/items?countryCode={}&limit=100",
+            TIDAL_API_URL, mix_id, self.country_code
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_mix_track_items(&payload))
+    }
+
+    fn parse_mix_track_items(payload: &serde_json::Value) -> Vec<TidalTrack> {
+        let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|wrapper| {
+                // Some endpoints return `{ item: TidalTrack, type: "track" }`,
+                // others return the track directly. Try both.
+                let item = wrapper.get("item").unwrap_or(wrapper);
+                serde_json::from_value::<TidalTrack>(item.clone()).ok()
+            })
+            .collect()
+    }
+
+    fn parse_my_mixes(payload: &serde_json::Value) -> Vec<TidalMix> {
+        let mut out = Vec::new();
+
+        // Shape 1 (web client): rows[].modules[].pagedList.items[]
+        if let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) {
+            for row in rows {
+                let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for module in modules {
+                    // Try pagedList.items first, then plain items[].
+                    let items = module
+                        .get("pagedList")
+                        .and_then(|p| p.get("items"))
+                        .and_then(serde_json::Value::as_array)
+                        .or_else(|| {
+                            module.get("items").and_then(serde_json::Value::as_array)
+                        });
+                    let Some(items) = items else { continue };
+                    for item in items {
+                        if let Some(mix) = Self::parse_mix_item(item) {
+                            out.push(mix);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Shape 2 (older TIDAL): top-level items[]
+        if out.is_empty() {
+            if let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
+                for item in items {
+                    if let Some(mix) = Self::parse_mix_item(item) {
+                        out.push(mix);
+                    }
+                }
+            }
+        }
+
+        // Shape 3 (some regions): top-level mixes[]
+        if out.is_empty() {
+            if let Some(items) = payload.get("mixes").and_then(serde_json::Value::as_array) {
+                for item in items {
+                    if let Some(mix) = Self::parse_mix_item(item) {
+                        out.push(mix);
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    fn parse_mix_item(item: &serde_json::Value) -> Option<TidalMix> {
+        let obj = item.as_object()?;
+        // TIDAL mix ids are short alphanumeric strings, not numeric like tracks.
+        let id = obj.get("id")?.as_str()?.to_string();
+        let title = obj.get("title")?.as_str()?.to_string();
+        let sub_title = obj
+            .get("subTitle")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let mix_type = obj
+            .get("mixType")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let image_url = Self::pick_mix_image(obj.get("images"));
+        Some(TidalMix {
+            id,
+            title,
+            sub_title,
+            image_url,
+            mix_type,
+        })
+    }
+
+    /// TIDAL mix `images` ships in two shapes depending on the page version:
+    ///   1. dict keyed by size: `{"SQUARE": {"url": "..."}, "MEDIUM": {...}}`
+    ///   2. dict keyed by image kind: `{"640": {"imageId": "..."}, ...}`
+    ///   3. flat array: `[{"url": "..."}]`
+    /// We accept all three. For shape 2 we feed `imageId` through the standard
+    /// `resources.tidal.com` artwork builder.
+    fn pick_mix_image(images: Option<&serde_json::Value>) -> Option<String> {
+        let images = images?;
+        // Shape 1 / 2: object
+        if let Some(obj) = images.as_object() {
+            // Prefer SQUARE > MEDIUM > LARGE > whatever-comes-first
+            for key in ["SQUARE", "MEDIUM", "LARGE"] {
+                if let Some(v) = obj.get(key) {
+                    if let Some(u) = direct_url_or_image_id(v) {
+                        return Some(u);
+                    }
+                }
+            }
+            for v in obj.values() {
+                if let Some(u) = direct_url_or_image_id(v) {
+                    return Some(u);
+                }
+            }
+        }
+        // Shape 3: array
+        if let Some(arr) = images.as_array() {
+            for v in arr {
+                if let Some(u) = direct_url_or_image_id(v) {
+                    return Some(u);
+                }
+            }
+        }
+        None
+    }
+
     fn parse_search_track(value: serde_json::Value) -> Option<TidalSearchTrack> {
         let object = value.as_object()?;
         let id = object.get("id")?.as_i64()?;
@@ -561,4 +775,111 @@ impl TidalClient {
 pub struct FavoriteItem<T> {
     pub item: T,
     pub created: Option<String>,
+}
+
+/// One TIDAL mix card (Daily Discovery, My Mix #N, Master Mix, etc).
+/// Returned by [`TidalClient::get_my_mixes`].
+#[derive(Debug, Clone, Serialize)]
+pub struct TidalMix {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    /// e.g. `"DAILY_DISCOVERY"`, `"PERSONAL"`, `"MASTER_ARTIST"`. Free-form
+    /// — TIDAL adds new types over time. Used for icon/category hints in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix_type: Option<String>,
+}
+
+/// Pull a renderable URL out of the various shapes TIDAL returns for an
+/// `images` entry: direct `url`, or an `imageId` we can route through the
+/// standard `resources.tidal.com` artwork builder.
+fn direct_url_or_image_id(v: &serde_json::Value) -> Option<String> {
+    if let Some(u) = v
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(u.to_string());
+    }
+    if let Some(id) = v
+        .get("imageId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(TidalClient::artwork_url(id, 640));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Round-trip the documented `pages/my_collection_my_mixes` shape through
+    /// the parser. Asserts: every mix has non-empty id/title/image_url, the
+    /// mix_type passes through, and rows/modules nesting is walked.
+    #[test]
+    fn parse_my_mixes_extracts_full_set() {
+        let payload = json!({
+            "rows": [
+                {
+                    "modules": [
+                        {
+                            "pagedList": {
+                                "items": [
+                                    {
+                                        "id": "0123abcd",
+                                        "title": "My Daily Discovery",
+                                        "subTitle": "Updated daily",
+                                        "mixType": "DAILY_DISCOVERY",
+                                        "images": {
+                                            "SQUARE": { "url": "https://img.tidal.com/sq.jpg" },
+                                            "MEDIUM": { "url": "https://img.tidal.com/md.jpg" }
+                                        }
+                                    },
+                                    {
+                                        "id": "0456beef",
+                                        "title": "My Mix 1",
+                                        "subTitle": "From your loved tracks",
+                                        "mixType": "PERSONAL",
+                                        "images": {
+                                            "640": { "imageId": "abc-def-ghi" }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        let mixes = TidalClient::parse_my_mixes(&payload);
+        assert_eq!(mixes.len(), 2, "expected 2 mixes parsed from fixture");
+        assert!(mixes.iter().all(|m| !m.id.is_empty()));
+        assert!(mixes.iter().all(|m| !m.title.is_empty()));
+        assert!(
+            mixes.iter().all(|m| m.image_url.as_deref().is_some_and(|u| !u.is_empty())),
+            "every mix must surface an image url"
+        );
+        assert_eq!(mixes[0].mix_type.as_deref(), Some("DAILY_DISCOVERY"));
+        assert_eq!(mixes[0].image_url.as_deref(), Some("https://img.tidal.com/sq.jpg"));
+        // Shape-2 imageId routed through the resources.tidal.com builder.
+        assert!(
+            mixes[1].image_url.as_deref().unwrap().starts_with("https://resources.tidal.com/images/abc/def/ghi/"),
+            "imageId should be routed through artwork_url; got {:?}",
+            mixes[1].image_url
+        );
+    }
+
+    /// An empty / malformed payload must yield an empty list, not panic.
+    #[test]
+    fn parse_my_mixes_handles_missing_rows() {
+        assert!(TidalClient::parse_my_mixes(&json!({})).is_empty());
+        assert!(TidalClient::parse_my_mixes(&json!({"rows": []})).is_empty());
+        assert!(TidalClient::parse_my_mixes(&json!({"rows": [{"modules": []}]})).is_empty());
+    }
 }
