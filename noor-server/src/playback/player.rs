@@ -363,6 +363,156 @@ pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapsh
     load_snapshot(conn)
 }
 
+/// What changed during reconciliation. Callers use this to decide which
+/// `AppEvent`s to broadcast and whether to stop the audio runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileOutcome {
+    /// At least one queue row was deleted.
+    pub queue_changed: bool,
+    /// `playback_state.current_track_id` was updated (advanced or cleared).
+    pub current_changed: bool,
+    /// `is_playing` was set to 0 because no surviving track exists. Caller
+    /// should also stop the audio runtime to release the output device.
+    pub stopped_playback: bool,
+    /// The new current track ID. `None` means playback was cleared.
+    pub new_current_track_id: Option<i64>,
+}
+
+/// Reconcile the queue and playback state with a set of just-deleted tracks.
+///
+/// Run inside a single transaction so the queue and playback_state never
+/// drift. Behavior:
+/// 1. Delete queue rows pointing at any of `deleted_track_ids`. Pending rows
+///    (track_id IS NULL) are unaffected — Last.fm radio neighbors don't
+///    reference local track IDs.
+/// 2. If the current track is in the deleted set, advance `current_track_id`
+///    and `current_queue_item_id` to the next surviving queue row. The next
+///    survivor is preferred from "after the current position"; if none
+///    exists there, fall back to the first surviving row globally.
+/// 3. If no survivor exists, clear current_*, set is_playing = 0, and signal
+///    `stopped_playback` so the caller can also stop the audio runtime.
+/// 4. Renormalise positions to be contiguous starting at 0.
+pub fn reconcile_after_track_delete(
+    conn: &Connection,
+    deleted_track_ids: &[i64],
+) -> Result<ReconcileOutcome> {
+    if deleted_track_ids.is_empty() {
+        return Ok(ReconcileOutcome::default());
+    }
+
+    let deleted_set: HashSet<i64> = deleted_track_ids.iter().copied().collect();
+    let tx = conn.unchecked_transaction()?;
+
+    // Snapshot the queue before deletion so we can pick the next survivor by
+    // position — `current_queue_item_id` would be invalid after deletion.
+    let rows: Vec<(i64, Option<i64>, i32)> = {
+        let mut stmt =
+            tx.prepare("SELECT id, track_id, position FROM queue ORDER BY position ASC, id ASC")?;
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let (current_track_id, current_qid): (Option<i64>, Option<i64>) = tx.query_row(
+        "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let current_pos = current_qid.and_then(|cqid| {
+        rows.iter()
+            .find(|(id, _, _)| *id == cqid)
+            .map(|(_, _, p)| *p)
+    });
+
+    let is_survivor = |tid: &Option<i64>| -> bool {
+        match tid {
+            None => true,
+            Some(t) => !deleted_set.contains(t),
+        }
+    };
+
+    let new_current_row: Option<&(i64, Option<i64>, i32)> = if let Some(cp) = current_pos {
+        rows.iter()
+            .find(|(id, tid, p)| {
+                *p > cp && is_survivor(tid) && Some(*id) != current_qid
+            })
+            .or_else(|| {
+                rows.iter()
+                    .find(|(id, tid, _)| is_survivor(tid) && Some(*id) != current_qid)
+            })
+    } else {
+        None
+    };
+
+    // Apply deletion now that survivor selection is decided.
+    let placeholders = (1..=deleted_track_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let delete_sql = format!("DELETE FROM queue WHERE track_id IN ({})", placeholders);
+    let deleted = tx.execute(
+        &delete_sql,
+        rusqlite::params_from_iter(deleted_track_ids.iter()),
+    )?;
+    let queue_changed = deleted > 0;
+
+    let mut current_changed = false;
+    let mut stopped_playback = false;
+    let mut new_current_track_id = current_track_id;
+
+    if let Some(ctid) = current_track_id {
+        if deleted_set.contains(&ctid) {
+            current_changed = true;
+            if let Some((qid, tid, _)) = new_current_row.copied() {
+                tx.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = ?1, current_queue_item_id = ?2, position_ms = 0
+                     WHERE id = 1",
+                    params![tid, qid],
+                )?;
+                new_current_track_id = tid;
+            } else {
+                tx.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = NULL,
+                         current_queue_item_id = NULL,
+                         position_ms = 0,
+                         is_playing = 0
+                     WHERE id = 1",
+                    [],
+                )?;
+                stopped_playback = true;
+                new_current_track_id = None;
+            }
+        }
+    }
+
+    if queue_changed {
+        let surviving_ids: Vec<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM queue ORDER BY position ASC, id ASC")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (idx, qid) in surviving_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE queue SET position = ?1 WHERE id = ?2",
+                params![idx as i32, qid],
+            )?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(ReconcileOutcome {
+        queue_changed,
+        current_changed,
+        stopped_playback,
+        new_current_track_id,
+    })
+}
+
 pub fn pause(conn: &Connection) -> Result<PlaybackSnapshot> {
     conn.execute("UPDATE playback_state SET is_playing = 0 WHERE id = 1", [])?;
     load_snapshot(conn)
@@ -1300,7 +1450,8 @@ mod tests {
                 pending_at       TIMESTAMP,
                 resolving_at     TIMESTAMP,
                 resolved_at      TIMESTAMP,
-                tidal_match_score REAL
+                tidal_match_score REAL,
+                tidal_id_hint    INTEGER
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
@@ -1588,6 +1739,122 @@ mod tests {
         assert!(queue_items.len() > 2);
     }
 
+    #[test]
+    fn reconcile_advances_current_when_deleted() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let queue_after_seed = queue::load_queue(&conn).unwrap();
+        // Mark t1 as current.
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_after_seed[0].id],
+        )
+        .unwrap();
+
+        let outcome = reconcile_after_track_delete(&conn, &[1]).unwrap();
+        assert!(outcome.queue_changed);
+        assert!(outcome.current_changed);
+        assert!(!outcome.stopped_playback);
+        assert_eq!(outcome.new_current_track_id, Some(2));
+
+        let state = load_state(&conn).unwrap();
+        assert_eq!(state.current_track.as_ref().map(|t| t.id), Some(2));
+        assert!(state.is_playing);
+
+        let remaining = queue::load_queue(&conn).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].position, 0);
+        assert_eq!(remaining[1].position, 1);
+    }
+
+    #[test]
+    fn reconcile_stops_playback_when_no_survivors() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let q = queue::load_queue(&conn).unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![q[0].id],
+        )
+        .unwrap();
+
+        let outcome = reconcile_after_track_delete(&conn, &[1]).unwrap();
+        assert!(outcome.queue_changed);
+        assert!(outcome.current_changed);
+        assert!(outcome.stopped_playback);
+        assert_eq!(outcome.new_current_track_id, None);
+
+        let state = load_state(&conn).unwrap();
+        assert!(state.current_track.is_none());
+        assert!(!state.is_playing);
+    }
+
+    #[test]
+    fn reconcile_skips_pending_rows() {
+        let conn = conn();
+        // Seed: one library row (track 1, current) followed by a pending row.
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (NULL, 1, 'radio_pending', 'Pending Artist', 'Pending Title', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let q = queue::load_queue(&conn).unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![q[0].id],
+        )
+        .unwrap();
+
+        let outcome = reconcile_after_track_delete(&conn, &[1]).unwrap();
+        assert!(outcome.current_changed);
+        assert!(!outcome.stopped_playback);
+        // Pending rows always survive — they don't reference local track IDs.
+        assert_eq!(outcome.new_current_track_id, None);
+
+        let remaining = queue::load_queue(&conn).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].is_pending);
+    }
+
+    #[test]
+    fn reconcile_noop_when_current_not_in_deleted_set() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let q = queue::load_queue(&conn).unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![q[0].id],
+        )
+        .unwrap();
+
+        // Delete track 3 — current (track 1) is unaffected.
+        let outcome = reconcile_after_track_delete(&conn, &[3]).unwrap();
+        assert!(outcome.queue_changed);
+        assert!(!outcome.current_changed);
+        assert!(!outcome.stopped_playback);
+        assert_eq!(outcome.new_current_track_id, Some(1));
+
+        let state = load_state(&conn).unwrap();
+        assert_eq!(state.current_track.as_ref().map(|t| t.id), Some(1));
+    }
+
     /// Build an isolated DB fixture with the full surface
     /// `build_automix_extension` needs (the standard `conn()` helper
     /// above lacks `embedding_models`, `track_embeddings`, and
@@ -1632,7 +1899,8 @@ mod tests {
                 pending_at       TIMESTAMP,
                 resolving_at     TIMESTAMP,
                 resolved_at      TIMESTAMP,
-                tidal_match_score REAL
+                tidal_match_score REAL,
+                tidal_id_hint    INTEGER
             );
             CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL, parent_id INTEGER);
             CREATE TABLE track_genres (
