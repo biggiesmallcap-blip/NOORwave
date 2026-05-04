@@ -173,6 +173,16 @@ export interface TidalPlayable {
  * component accordingly. `image_url` is a fallback artwork preview from the
  * source API and is only useful when neither resolution gave us artwork.
  */
+export interface QueueExternalRequest {
+	kind: 'library' | 'tidal' | 'external';
+	track_id?: number;
+	tidal_id?: number;
+	artist: string;
+	title: string;
+	album_title?: string | null;
+	duration_ms?: number | null;
+}
+
 export interface ChartEntry {
 	local_track: Track | null;
 	tidal_playable: TidalPlayable | null;
@@ -1518,6 +1528,20 @@ export const api = {
 		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue/add', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ track_id: trackId }),
+		});
+	},
+
+	queuePlayNext(req: QueueExternalRequest) {
+		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next', undefined, {
+			method: 'POST',
+			body: JSON.stringify(req),
+		});
+	},
+
+	queueAppend(req: QueueExternalRequest) {
+		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append', undefined, {
+			method: 'POST',
+			body: JSON.stringify(req),
 		});
 	},
 

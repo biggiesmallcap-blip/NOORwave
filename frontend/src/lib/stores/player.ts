@@ -912,14 +912,39 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	}
 }
 
-// TODO(v2): true queue insertion for ephemeral tracks requires backend queue support
-export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
-	await playTidalTrackNow(track);
+function tidalQueueRequest(track: TidalPlayable) {
+	return {
+		kind: 'tidal' as const,
+		tidal_id: track.tidal_id,
+		artist: track.artist_name ?? 'Unknown Artist',
+		title: track.title,
+		album_title: track.album_title,
+		duration_ms: track.duration_ms
+	};
 }
 
-// TODO(v2): true queue insertion for ephemeral tracks requires backend queue support
+export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
+	playerError.set(null);
+	try {
+		const result = await api.queuePlayNext(tidalQueueRequest(track));
+		playbackQueue.set(result.queue);
+		noteSuccess();
+		showToast(`Queued next: ${trackLabel(track)}`, 'success');
+	} catch (error) {
+		setError('queue that Tidal track next', error, () => playTidalTrackNext(track));
+	}
+}
+
 export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> {
-	await playTidalTrackNow(track);
+	playerError.set(null);
+	try {
+		const result = await api.queueAppend(tidalQueueRequest(track));
+		playbackQueue.set(result.queue);
+		noteSuccess();
+		showToast(`Added to queue: ${trackLabel(track)}`, 'success');
+	} catch (error) {
+		setError('add that Tidal track to queue', error, () => addTidalTrackToQueue(track));
+	}
 }
 
 export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
