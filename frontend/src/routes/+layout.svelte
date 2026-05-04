@@ -1,6 +1,6 @@
 <script lang="ts">
 	import '../app.css';
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
@@ -233,6 +233,13 @@
 		one: 'one'
 	};
 
+	function handleUnauthorized() {
+		clearStoredToken();
+		authReady = false;
+		onboardingChecked = false;
+		void tryAutoSetup();
+	}
+
 	onMount(() => {
 		// Show connect screen if no token is stored
 		if (!getStoredToken()) {
@@ -248,12 +255,7 @@
 		// will hand us a fresh token via /api/setup/token, so retry auto-setup
 		// before falling back to the PIN modal — keeps local launches silent
 		// even if the stored token is stale (e.g. server regenerated).
-		window.addEventListener('noor:unauthorized', () => {
-			clearStoredToken();
-			authReady = false;
-			onboardingChecked = false;
-			void tryAutoSetup();
-		});
+		window.addEventListener('noor:unauthorized', handleUnauthorized);
 
 		const storedTheme = localStorage.getItem('noor-theme');
 		if (storedTheme === 'light' || storedTheme === 'dark') {
@@ -269,6 +271,10 @@
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			unsubPalette();
 		};
+	});
+
+	onDestroy(() => {
+		window.removeEventListener('noor:unauthorized', handleUnauthorized);
 	});
 
 	function isTypingTarget(target: EventTarget | null): boolean {
