@@ -1,6 +1,9 @@
 <script lang="ts">
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
 
 	type Stream = {
 		audio_quality?: string | null;
@@ -36,18 +39,47 @@
 		<p class="np-eyebrow">{eyebrow}</p>
 		<h2 class="np-title">{track?.title ?? 'Nothing queued'}</h2>
 		{#if track?.artist_id && track.artist_id > 0}
-			<a class="np-artist np-link" href="/artists/{track.artist_id}">
+			<a
+				class="np-artist np-link"
+				href="/artists/{track.artist_id}"
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, buildArtistMenu({ id: track.artist_id, name: track.artist_name ?? '' }, { isLocal: true }), track.artist_name ?? undefined);
+				}}
+			>
 				{track.artist_name ?? 'Unknown artist'}
 			</a>
 		{:else if track?.artist_tidal_id}
-			<a class="np-artist np-link" href="/tidal/artists/{track.artist_tidal_id}">
+			<a
+				class="np-artist np-link"
+				href="/tidal/artists/{track.artist_tidal_id}"
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, buildArtistMenu({ tidal_id: track.artist_tidal_id, name: track.artist_name ?? '' }, { isLocal: false }), track.artist_name ?? undefined);
+				}}
+			>
 				{track.artist_name ?? 'Unknown artist'}
 			</a>
 		{:else}
 			<p class="np-artist">{track?.artist_name ?? 'Choose a track to begin playback.'}</p>
 		{/if}
 		{#if track?.album_id}
-			<a class="np-album np-link" href="/albums/{track.album_id}">
+			<a
+				class="np-album np-link"
+				href="/albums/{track.album_id}"
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, buildAlbumMenu({
+						id: track.album_id,
+						title: track.album_title ?? '',
+						artist_id: track.artist_id,
+						artist_name: track.artist_name,
+					}, { isLocal: true }), track.album_title ?? undefined);
+				}}
+			>
 				{track.album_title ?? 'Unknown album'}
 			</a>
 		{:else}

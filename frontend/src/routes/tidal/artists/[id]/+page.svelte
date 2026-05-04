@@ -2,6 +2,8 @@
   import { page } from '$app/state'
   import { api, type TidalArtistProfile, type TidalDiscographyTrack } from '$lib/api/client'
   import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
+  import { openContextMenu } from '$lib/stores/context_menu'
+  import { buildAlbumMenu } from '$lib/player/album_menu'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -103,7 +105,21 @@
         <h3 class="section-label">Albums</h3>
         <div class="albums-grid">
           {#each filteredAlbums as album (album.tidal_id)}
-            <a class="grid-card" href={`/tidal/albums/${album.tidal_id}`}>
+            <a
+              class="grid-card"
+              href={`/tidal/albums/${album.tidal_id}`}
+              oncontextmenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                openContextMenu(e, buildAlbumMenu({
+                  tidal_id: album.tidal_id,
+                  local_id: album.local_id,
+                  title: album.title,
+                  artist_name: album.artist_name,
+                  in_library: album.in_library,
+                }, { isLocal: album.in_library && album.local_id != null }), album.title)
+              }}
+            >
               <div
                 class="grid-art"
                 style={album.artwork_url ? `background-image: url('${album.artwork_url}')` : ''}

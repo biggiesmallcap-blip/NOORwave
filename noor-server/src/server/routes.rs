@@ -283,6 +283,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists", get(get_artists))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
         .route("/api/artists/{id}/discography", get(get_artist_discography))
+        .route("/api/artists/{id}/spotify-stats", get(get_artist_spotify_stats))
         .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
         .route("/api/tidal/albums/{id}/import", post(import_tidal_album))
         .route(
@@ -802,16 +803,26 @@ async fn get_artist_discography(
 
     let albums_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS"));
     let eps_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("EPSANDSINGLES"));
+    let compilations_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("COMPILATIONS"));
+    let live_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("LIVE"));
     let top_fut = client.get_artist_top_tracks(tidal_artist_id, 10, 0);
 
-    let (albums_res, eps_res, top_res) = tokio::join!(albums_fut, eps_fut, top_fut);
+    let (albums_res, eps_res, comps_res, live_res, top_res) =
+        tokio::join!(albums_fut, eps_fut, compilations_fut, live_fut, top_fut);
 
+    // TIDAL can return the same release under multiple filters (e.g. an album
+    // re-issue tagged both ALBUMS and COMPILATIONS). Dedupe by tidal_id while
+    // preserving the order of first appearance.
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
-    if let Ok(r) = albums_res {
-        all_albums.extend(r.items);
-    }
-    if let Ok(r) = eps_res {
-        all_albums.extend(r.items);
+    for res in [albums_res, eps_res, comps_res, live_res] {
+        if let Ok(r) = res {
+            for item in r.items {
+                if seen.insert(item.id) {
+                    all_albums.push(item);
+                }
+            }
+        }
     }
 
     let tidal_album_ids: Vec<i64> = all_albums.iter().map(|a| a.id).collect();
@@ -875,6 +886,60 @@ async fn get_artist_discography(
         "top_tracks": top_tracks_payload,
         "available": true
     })))
+}
+
+async fn get_artist_spotify_stats(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Json<Value> {
+    let (enabled, artist_name, isrc_pairs) = {
+        let s = state.read().await;
+        let enabled = s.spotify_public_stats_enabled;
+        if !enabled {
+            return Json(json!({ "monthly_listeners": null, "tracks": [] }));
+        }
+        let pairs = s
+            .db
+            .with_conn(|conn| queries::get_artist_tracks(conn, id))
+            .map(|tracks| {
+                let mut sorted = tracks
+                    .into_iter()
+                    .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.is_empty()))
+                    .collect::<Vec<_>>();
+                sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+                sorted.truncate(10);
+                sorted
+                    .into_iter()
+                    .map(|t| (t.isrc.unwrap_or_default(), t.title))
+                    .collect::<Vec<(String, String)>>()
+            })
+            .unwrap_or_default();
+        let artist_name = pairs
+            .first()
+            .map(|_| String::new())
+            .unwrap_or_default();
+        // Re-look up the artist's display name (any track's artist_name works
+        // — they all share artist_id=id by construction).
+        let name = s
+            .db
+            .with_conn(|conn| queries::get_artist_tracks(conn, id))
+            .ok()
+            .and_then(|ts| ts.first().and_then(|t| t.artist_name.clone()))
+            .unwrap_or(artist_name);
+        (enabled, name, pairs)
+    };
+
+    let result = crate::services::spotify_public::fetch_artist_stats(
+        enabled,
+        &artist_name,
+        &isrc_pairs,
+    )
+    .await;
+
+    Json(json!({
+        "monthly_listeners": result.monthly_listeners,
+        "tracks": result.tracks,
+    }))
 }
 
 async fn get_tidal_album_tracks(

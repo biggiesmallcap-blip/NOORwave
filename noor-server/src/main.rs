@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
+#[cfg(not(feature = "spotify-public"))]
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct PlaybackRuntimeState {
@@ -130,6 +132,12 @@ pub struct AppState {
     /// Lets `get_playback_state` return `is_playing: false` during the buffering phase
     /// so the frontend doesn't show a running counter with no audio.
     pub audio_active: Arc<AtomicBool>,
+    /// Public Spotify stats (anonymous GraphQL) toggle. Read once from
+    /// `NOOR_SPOTIFY_PUBLIC_STATS` at startup. When false, the stats endpoint
+    /// returns empty fields and never hits Spotify. The feature also requires
+    /// the `spotify-public` cargo feature; without it the env var is ignored
+    /// and we log one warning at startup.
+    pub spotify_public_stats_enabled: bool,
 }
 
 /// Events broadcast across the application
@@ -308,6 +316,28 @@ async fn main() -> Result<()> {
     let lastfm_api_secret = std::env::var("LASTFM_API_SECRET")
         .ok()
         .filter(|s| !s.is_empty());
+
+    // Public Spotify stats are gated on (a) the env var being set and (b) the
+    // `spotify-public` cargo feature being compiled in. The feature pulls in
+    // `rquest` (Chrome TLS fingerprint) which we don't want in lean builds.
+    let env_spotify_public = std::env::var("NOOR_SPOTIFY_PUBLIC_STATS")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    #[cfg(feature = "spotify-public")]
+    let spotify_public_stats_enabled = env_spotify_public;
+    #[cfg(not(feature = "spotify-public"))]
+    let spotify_public_stats_enabled = {
+        if env_spotify_public {
+            warn!(
+                "NOOR_SPOTIFY_PUBLIC_STATS=1 but binary built without `spotify-public` cargo feature; ignoring"
+            );
+        }
+        false
+    };
+    if spotify_public_stats_enabled {
+        info!("Public Spotify stats enabled (anonymous GraphQL)");
+    }
     if lastfm_api_secret.is_some() {
         info!("Last.fm scrobbling enabled (LASTFM_API_SECRET present)");
     } else {
@@ -406,6 +436,7 @@ async fn main() -> Result<()> {
         lastfm_api_secret,
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),
+        spotify_public_stats_enabled,
     }));
 
     // Check for auto-sync daily services and trigger sync if needed

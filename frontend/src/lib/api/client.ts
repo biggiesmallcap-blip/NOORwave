@@ -70,6 +70,11 @@ export interface Track {
 	samples_analyzed?: number | null;
 }
 
+export interface SpotifyArtistStats {
+	monthly_listeners: number | null;
+	tracks: { isrc: string; title: string; playcount: number | null }[];
+}
+
 export interface TidalDiscographyAlbum {
 	tidal_id: number;
 	local_id: number | null;
@@ -991,6 +996,10 @@ export const api = {
 			available: boolean;
 			reason?: string;
 		}>(`/api/artists/${id}/discography`);
+	},
+
+	getArtistSpotifyStats(id: number) {
+		return fetchApi<SpotifyArtistStats>(`/api/artists/${id}/spotify-stats`);
 	},
 
 	getTidalAlbumTracks(tidalAlbumId: number) {

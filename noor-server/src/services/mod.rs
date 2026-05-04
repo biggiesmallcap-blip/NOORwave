@@ -14,4 +14,5 @@ pub mod radio;
 pub mod radio_config;
 pub mod rss_feeds;
 pub mod spotify;
+pub mod spotify_public;
 pub mod tidal;

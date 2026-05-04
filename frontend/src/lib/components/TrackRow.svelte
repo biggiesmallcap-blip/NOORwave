@@ -6,6 +6,7 @@
 		type BuildTrackMenuOptions,
 		type MenuTrack
 	} from '$lib/player/track_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import {
 		addTrackToQueue,
 		startSongRadio,
@@ -188,6 +189,11 @@
 						class="sub link"
 						href="/artists/{track.artist_id}"
 						onclick={(e) => e.stopPropagation()}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							openContextMenu(e, buildArtistMenu({ id: track.artist_id, name: track.artist_name ?? '' }, { isLocal: true }), track.artist_name ?? undefined);
+						}}
 					>{track.artist_name}</a>
 				{:else}
 					<span class="sub">{track.artist_name}</span>

@@ -14,6 +14,9 @@
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -199,7 +202,15 @@
 					<p class="eyebrow">Album</p>
 					<h1 class="hero-title display-face">{h.title}</h1>
 					<p class="hero-sub">
-						<a href="/artists/{h.artist_id}" class="hero-link">{h.artist_name}</a>
+						<a
+							href="/artists/{h.artist_id}"
+							class="hero-link"
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								openContextMenu(e, buildArtistMenu({ id: h.artist_id, name: h.artist_name }, { isLocal: true }), h.artist_name);
+							}}
+						>{h.artist_name}</a>
 						<span class="dot">·</span>
 						<span>{h.track_count} {h.track_count === 1 ? 'song' : 'songs'}</span>
 						<span class="dot">·</span>
@@ -281,12 +292,33 @@
 				<div class="more-head">
 					<h2 class="more-title">More by {h.artist_name}</h2>
 					{#if h.artist_id != null}
-						<a class="show-all" href="/artists/{h.artist_id}">Show all</a>
+						<a
+							class="show-all"
+							href="/artists/{h.artist_id}"
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								openContextMenu(e, buildArtistMenu({ id: h.artist_id, name: h.artist_name }, { isLocal: true }), h.artist_name);
+							}}
+						>Show all</a>
 					{/if}
 				</div>
 				<div class="album-grid">
 					{#each otherAlbums as album (album.id)}
-						<a class="album-card" href="/albums/{album.id}">
+						<a
+							class="album-card"
+							href="/albums/{album.id}"
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								openContextMenu(e, buildAlbumMenu({
+									id: album.id,
+									title: album.title,
+									artist_id: h.artist_id,
+									artist_name: h.artist_name,
+								}, { isLocal: true }), album.title);
+							}}
+						>
 							<div class="album-card-art-wrap">
 								{#if album.artwork_url}
 									<img class="album-card-art" src={album.artwork_url} alt="" />

@@ -11,19 +11,21 @@
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track, type TidalDiscographyAlbum } from '$lib/api/client';
+	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
+	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
-	import { openContextMenu, type MenuItem } from '$lib/stores/context_menu';
+	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { parseQuery } from '$lib/search/query_parser';
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
-	import { playAlbum as playAlbumStore, shuffleAlbum, startAlbumRadio, startArtistRadio } from '$lib/stores/player';
 	import { goto } from '$app/navigation';
 	import { showToast } from '$lib/stores/toast';
 
@@ -47,50 +49,28 @@
 			}));
 	}
 
-	function buildLocalAlbumMenu(album: { id: number; title: string }): MenuItem[] {
-		return [
-			{ label: 'Play album', icon: '▶', onSelect: () => void playAlbumStore(album.id) },
-			{ label: 'Shuffle album', icon: '⤮', onSelect: () => void shuffleAlbum(album.id) },
-			{ separator: true, label: '' },
-			{ label: 'Album radio', icon: '◉', onSelect: () => void startAlbumRadio(album.id) },
-			{ separator: true, label: '' },
-			{ label: 'Open album', icon: '↗', onSelect: () => void goto(`/albums/${album.id}`) },
-			{ separator: true, label: '' },
-			{
-				label: 'Add to playlist',
-				icon: '＋',
-				submenu: buildAddToPlaylistSubmenu(async () => {
-					const { tracks: t } = await api.getAlbumTracks(album.id);
-					return t.map(tr => tr.id);
-				}),
-			},
-		];
-	}
-
-	function buildLocalArtistMenu(artistId: number): MenuItem[] {
-		return [
-			{ label: 'Open artist', icon: '↗', onSelect: () => void goto(`/artists/${artistId}`) },
-			{ separator: true, label: '' },
-			{ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artistId) },
-			{ separator: true, label: '' },
-			{
-				label: 'Add to playlist',
-				icon: '＋',
-				submenu: buildAddToPlaylistSubmenu(async () => {
-					const { tracks: t } = await api.getArtistTracks(artistId);
-					return t.map(tr => tr.id);
-				}),
-			},
-		];
-	}
-
 	function handleHomeArtistContextMenu(e: MouseEvent, artistId: number) {
-		openContextMenu(e, buildLocalArtistMenu(artistId));
+		const card = artists.find(a => a.id === artistId);
+		const artist = card ?? { id: artistId, tidal_id: null, name: '' };
+		openContextMenu(e, buildArtistMenu(artist, {
+			isLocal: true,
+			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+				const { tracks: t } = await api.getArtistTracks(artistId);
+				return t.map(tr => tr.id);
+			}),
+		}), artist.name);
 	}
 
 	function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number) {
 		const card = recentAlbums.find(a => a.id === albumId);
-		openContextMenu(e, buildLocalAlbumMenu({ id: albumId, title: card?.title ?? '' }));
+		const album = card ?? { id: albumId, title: '' };
+		openContextMenu(e, buildAlbumMenu(album, {
+			isLocal: true,
+			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+				const { tracks: t } = await api.getAlbumTracks(albumId);
+				return t.map(tr => tr.id);
+			}),
+		}), album.title);
 	}
 
 	const PAGE_SIZE = 100;
@@ -105,7 +85,6 @@
 	let batchBusy = $state<'playlist' | 'genre' | 'delete' | null>(null);
 	let pendingUndoTrackIds = $state<number[]>([]);
 	let albumActionBusyId = $state<number | null>(null);
-	let activeAlbumMenuId = $state<number | null>(null);
 	let activeTrackMenuId = $state<number | null>(null);
 	let searchBusy = $state(false);
 	let searchError = $state<string | null>(null);
@@ -116,13 +95,7 @@
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
-	let expandedArtistId = $state<number | null>(null);
 	let failedArtistImages = $state(new Set<number>());
-	let artistTracksById = $state<Record<number, Track[]>>({});
-	let artistTracksLoadingId = $state<number | null>(null);
-	let artistDiscographyById = $state<Record<number, TidalDiscographyAlbum[]>>({});
-	let artistDiscographyLoadingId = $state<number | null>(null);
-	let importingAlbumTidalId = $state<number | null>(null);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -245,67 +218,6 @@
 		} finally {
 			artistsLoading = false;
 		}
-	}
-
-	async function toggleArtist(artist: Artist) {
-		if (expandedArtistId === artist.id) {
-			expandedArtistId = null;
-			return;
-		}
-		expandedArtistId = artist.id;
-		if (!artistTracksById[artist.id]) {
-			artistTracksLoadingId = artist.id;
-			try {
-				const data = await api.getArtistTracks(artist.id);
-				artistTracksById = { ...artistTracksById, [artist.id]: data.tracks };
-			} catch (err) {
-				console.error('Failed to load artist tracks:', err);
-				artistTracksById = { ...artistTracksById, [artist.id]: [] };
-			} finally {
-				artistTracksLoadingId = null;
-			}
-		}
-		if (!artistDiscographyById[artist.id] && artist.tidal_id) {
-			artistDiscographyLoadingId = artist.id;
-			try {
-				const data = await api.getArtistDiscography(artist.id);
-				if (data.available) {
-					artistDiscographyById = { ...artistDiscographyById, [artist.id]: data.albums };
-				}
-			} catch {
-				// Discography is best-effort; don't show an error
-			} finally {
-				artistDiscographyLoadingId = null;
-			}
-		}
-	}
-
-	async function importAlbum(tidalAlbumId: number, artistId: number) {
-		if (importingAlbumTidalId !== null) return;
-		importingAlbumTidalId = tidalAlbumId;
-		try {
-			await api.importTidalAlbum(tidalAlbumId);
-			// Mark album as in-library in local discography state
-			const albums = artistDiscographyById[artistId];
-			if (albums) {
-				artistDiscographyById = {
-					...artistDiscographyById,
-					[artistId]: albums.map(a => a.tidal_id === tidalAlbumId ? { ...a, in_library: true } : a),
-				};
-			}
-		} catch (err) {
-			console.error('Failed to import album:', err);
-		} finally {
-			importingAlbumTidalId = null;
-		}
-	}
-
-	async function playArtist(artist: Artist, event: MouseEvent) {
-		event.stopPropagation();
-		const tracks = artistTracksById[artist.id];
-		if (!tracks || tracks.length === 0) return;
-		await api.replacePlaybackQueue(tracks.map((t) => t.id));
-		await playTrackNow(tracks[0].id);
 	}
 
 	async function playTrack(track: typeof $tracks[0]) {
@@ -452,10 +364,30 @@
 		updateTrackSelection(trackId, additive, range);
 	}
 
-	function handleAlbumCardClick(albumId: number, event: MouseEvent) {
+	function handleAlbumCardClick(album: Album, event: MouseEvent) {
 		const additive = event.ctrlKey || event.metaKey;
 		const range = event.shiftKey;
-		updateAlbumSelection(albumId, additive, range);
+		if (additive || range) {
+			updateAlbumSelection(album.id, additive, range);
+			return;
+		}
+		void openAlbumDetail(album);
+	}
+
+	async function removeAlbumFromLibrary(albumId: number) {
+		albums.update((list) => list.filter((a) => a.id !== albumId));
+		searchResults = {
+			tracks: searchResults.tracks,
+			albums: searchResults.albums.filter((a) => a.id !== albumId),
+			artists: searchResults.artists,
+		};
+		try {
+			await api.batchDelete([], [albumId]);
+			batchMessage = `Removed album from your library.`;
+		} catch (error) {
+			batchError = `Failed to remove album: ${error}`;
+			void loadAlbums();
+		}
 	}
 
 	function handleTrackRowKeydown(trackId: number, event: KeyboardEvent) {
@@ -577,19 +509,11 @@
 	}
 
 	function closeMenus() {
-		activeAlbumMenuId = null;
 		activeTrackMenuId = null;
-	}
-
-	function toggleAlbumMenu(albumId: number, event: MouseEvent) {
-		event.stopPropagation();
-		activeTrackMenuId = null;
-		activeAlbumMenuId = activeAlbumMenuId === albumId ? null : albumId;
 	}
 
 	function toggleTrackMenu(trackId: number, event: MouseEvent) {
 		event.stopPropagation();
-		activeAlbumMenuId = null;
 		activeTrackMenuId = activeTrackMenuId === trackId ? null : trackId;
 	}
 
@@ -603,12 +527,6 @@
 		event.stopPropagation();
 		closeMenus();
 		updateTrackSelection(trackId);
-	}
-
-	function selectAlbumFromMenu(albumId: number, event: MouseEvent) {
-		event.stopPropagation();
-		closeMenus();
-		updateAlbumSelection(albumId);
 	}
 
 	async function runLibrarySearch(query: string) {
@@ -1068,7 +986,6 @@
 		sortDir: 'asc' | 'desc'
 		viewMode: 'grid' | 'list'
 		activeDecade: number | null
-		expandedArtistId: number | null
 		scrollY: number
 	}
 	export const snapshot: Snapshot<LibrarySnapshot> = {
@@ -1079,7 +996,6 @@
 			sortDir: get(sortDir),
 			viewMode: get(viewMode),
 			activeDecade,
-			expandedArtistId,
 			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
 		}),
 		restore: (saved) => {
@@ -1092,7 +1008,6 @@
 			if (saved.sortDir === 'asc' || saved.sortDir === 'desc') sortDir.set(saved.sortDir)
 			if (saved.viewMode === 'grid' || saved.viewMode === 'list') viewMode.set(saved.viewMode)
 			activeDecade = saved.activeDecade
-			expandedArtistId = saved.expandedArtistId
 			if (typeof saved.scrollY === 'number') pendingRestoreScroll = saved.scrollY
 		}
 	}
@@ -1363,8 +1278,18 @@
 					role="button"
 					tabindex="0"
 					aria-pressed={$selectedAlbumIds.has(album.id)}
-					onclick={(event) => handleAlbumCardClick(album.id, event)}
-					oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(event, buildLocalAlbumMenu(album)); }}
+					onclick={(event) => handleAlbumCardClick(album, event)}
+					oncontextmenu={(event) => {
+						event.preventDefault();
+						event.stopPropagation();
+						openContextMenu(event, buildAlbumMenu(album, {
+							isLocal: true,
+							addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+								const { tracks: t } = await api.getAlbumTracks(album.id);
+								return t.map(tr => tr.id);
+							}),
+						}), album.title);
+					}}
 					onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
 					use:lazyTidalArt={{
 						enabled: !album.artwork_url && !lazyArt[albumKey],
@@ -1404,25 +1329,27 @@
 						</div>
 					</div>
 					<div class="album-actions">
-						<button class="menu-trigger" aria-label="Album actions" onclick={(event) => toggleAlbumMenu(album.id, event)}>
+						<button
+							class="menu-trigger"
+							aria-label="Album actions"
+							onclick={(event) => {
+								event.preventDefault();
+								event.stopPropagation();
+								openMenuAtElement(event.currentTarget, buildAlbumMenu(album, {
+									isLocal: true,
+									includeSelect: true,
+									includeRemove: true,
+									onSelect: () => updateAlbumSelection(album.id, false, false),
+									onRemove: () => void removeAlbumFromLibrary(album.id),
+									addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+										const { tracks: t } = await api.getAlbumTracks(album.id);
+										return t.map(tr => tr.id);
+									}),
+								}), album.title);
+							}}
+						>
 							⋯
 						</button>
-						{#if activeAlbumMenuId === album.id}
-							<div class="item-menu" role="menu" tabindex="-1" onmousedown={(event) => event.stopPropagation()}>
-								<button class="menu-item" onclick={(event) => void playAlbum(album.id, event)}>
-									{albumActionBusyId === album.id ? 'Working...' : 'Play Album'}
-								</button>
-								<button class="menu-item" onclick={(event) => void queueAlbum(album.id, event)}>
-									Queue Album
-								</button>
-								<button class="menu-item" onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); closeMenus(); }}>
-									View Details
-								</button>
-								<button class="menu-item secondary" onclick={(event) => selectAlbumFromMenu(album.id, event)}>
-									Select Album
-								</button>
-							</div>
-						{/if}
 					</div>
 				</div>
 			{/each}
@@ -1474,16 +1401,13 @@
 					{@const artistImg = baseArtistImg ?? lazyArt[artistKey] ?? null}
 					<button
 						class="artist-card"
-						class:expanded={expandedArtistId === artist.id}
-						onclick={() => void toggleArtist(artist)}
+						onclick={() => void goto(`/artists/${artist.id}`)}
 						oncontextmenu={(e) => {
 							e.preventDefault();
-							openContextMenu(e, [
-								{ label: 'Open artist page', icon: '→', onSelect: () => void goto(`/artists/${artist.id}`) },
-								{ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artist.id) },
-							], artist.name);
+							e.stopPropagation();
+							openContextMenu(e, buildArtistMenu(artist, { isLocal: true, hideOpen: true }), artist.name);
 						}}
-						title="Expand {artist.name}"
+						title="Open {artist.name}"
 						use:lazyTidalArt={{
 							enabled: !baseArtistImg && !lazyArt[artistKey],
 							query: { artist: artist.name },
@@ -1504,96 +1428,6 @@
 
 			{#if filteredArtists.length === 0}
 				<EmptyState title="No artists match" copy={`Nothing in your library matches "${q}". Try a different search.`} />
-			{/if}
-
-			{#if expandedArtistId !== null}
-				{@const expandedArtist = artists.find(a => a.id === expandedArtistId) ?? searchResults.artists.find(a => a.id === expandedArtistId)}
-				{#if expandedArtist}
-					<div class="artist-panel glass-panel">
-						<div class="artist-panel-header">
-							<div class="artist-panel-identity">
-								{#if expandedArtist.photo_url}
-									<img class="artist-panel-photo" src={expandedArtist.photo_url} alt={expandedArtist.name} />
-								{:else}
-									<div class="artist-panel-photo placeholder">{expandedArtist.name.charAt(0).toUpperCase()}</div>
-								{/if}
-								<div>
-									<h3>{expandedArtist.name}</h3>
-									{#if artistTracksById[expandedArtist.id]}
-										<span class="artist-panel-count">{artistTracksById[expandedArtist.id].length} tracks</span>
-									{/if}
-								</div>
-							</div>
-							<div class="artist-panel-actions">
-								{#if artistTracksById[expandedArtist.id]?.length}
-									<button class="btn btn-primary btn-sm" onclick={(e) => void playArtist(expandedArtist, e)}>Play all</button>
-								{/if}
-								<button class="btn btn-glass btn-sm" onclick={() => expandedArtistId = null}>Close</button>
-							</div>
-						</div>
-
-						{#if (artistDiscographyById[expandedArtist.id]?.filter(a => !a.in_library).length ?? 0) > 0}
-							<div class="artist-discography-section">
-								<p class="artist-discography-label">Also on Tidal</p>
-								<div class="artist-discography-row">
-									{#each artistDiscographyById[expandedArtist.id].filter(a => !a.in_library) as album (album.tidal_id)}
-										<div class="discography-card">
-											{#if album.artwork_url}
-												<img class="discography-art" src={album.artwork_url} alt={album.title} loading="lazy" />
-											{:else}
-												<div class="discography-art placeholder">♫</div>
-											{/if}
-											<p class="discography-title">{album.title}</p>
-											{#if album.release_date}
-												<p class="discography-year">{album.release_date.slice(0, 4)}</p>
-											{/if}
-											<button
-												class="btn btn-glass btn-xs"
-												disabled={importingAlbumTidalId === album.tidal_id}
-												onclick={() => void importAlbum(album.tidal_id, expandedArtist.id)}
-											>{importingAlbumTidalId === album.tidal_id ? 'Adding…' : '+ Add'}</button>
-										</div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-
-						{#if artistTracksLoadingId === expandedArtist.id}
-							<p class="artist-panel-loading">Loading tracks…</p>
-						{:else if (artistTracksById[expandedArtist.id]?.length ?? 0) === 0}
-							<p class="artist-panel-loading">No tracks found.</p>
-						{:else}
-							<div class="artist-track-list">
-								{#each artistTracksById[expandedArtist.id] as track (track.id)}
-									<div
-										class="artist-track-row"
-										role="button"
-										tabindex="0"
-										onclick={() => void playTrackNow(track.id)}
-										onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-									>
-										{#if track.artwork_url}
-											<img class="artist-track-art" src={track.artwork_url} alt="" loading="lazy" />
-										{:else}
-											<div class="artist-track-art placeholder">♫</div>
-										{/if}
-										<div class="artist-track-meta">
-											<span class="artist-track-title">{track.title}</span>
-											{#if track.album_title}
-												<span class="artist-track-album">{track.album_title}</span>
-											{/if}
-										</div>
-										{#if track.best_quality}
-											<span class="quality-badge {getQualityClass(track.best_quality)}">{track.best_quality.replace(/_/g, ' ')}</span>
-										{/if}
-										<span class="artist-track-dur">{formatDuration(track.duration_ms)}</span>
-										<button class="queue-btn" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
-									</div>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/if}
 			{/if}
 		{/if}
 
@@ -1857,67 +1691,12 @@
 
 <!-- ─── Album Detail Modal ─────────────────────── -->
 {#if expandedAlbumId !== null && detailAlbum}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div
-		class="modal-backdrop"
-		onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}
-	>
-		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={detailAlbum.title}>
-			<div class="modal-topbar">
-				<button class="modal-close" aria-label="Close" onclick={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}>✕</button>
-			</div>
-
-			<div class="detail-album-hero">
-				{#if detailAlbum.artwork_url}
-					<img class="detail-album-art" src={detailAlbum.artwork_url} alt={detailAlbum.title} />
-				{:else}
-					<div class="detail-album-art placeholder">♫</div>
-				{/if}
-				<div class="detail-album-info">
-					<h2>{detailAlbum.title}</h2>
-					<p class="detail-artist">{detailAlbum.artist_name ?? 'Unknown Artist'}</p>
-					<div class="detail-meta-row">
-						{#if detailAlbum.year}<span class="detail-chip">{detailAlbum.year}</span>{/if}
-						{#if detailAlbum.release_type}<span class="detail-chip">{detailAlbum.release_type}</span>{/if}
-						{#if detailAlbum.track_count}<span class="detail-chip">{detailAlbum.track_count} tracks</span>{/if}
-						<span class="detail-chip">{detailAlbum.source}</span>
-					</div>
-					<div class="detail-actions">
-						<button class="btn btn-primary" onclick={(e) => void playAlbum(detailAlbum!.id, e)}>▶ Play All</button>
-						<button class="btn btn-glass" onclick={(e) => void queueAlbum(detailAlbum!.id, e)}>+ Queue All</button>
-					</div>
-				</div>
-			</div>
-
-			{#if detailAlbumLoading}
-				<div class="detail-loading"><div class="spinner spinner-sm"></div><span>Loading tracks…</span></div>
-			{:else if detailAlbumTracksList.length === 0}
-				<EmptyState title="No tracks synced yet" copy="Run a TIDAL sync to populate this album's tracks." />
-			{:else}
-				<div class="detail-track-list">
-					{#each detailAlbumTracksList as track, i (track.id)}
-						<div
-							class="detail-track-row"
-							class:playing={$currentTrack?.id === track.id}
-							role="button"
-							tabindex="0"
-							onclick={() => void playTrackNow(track.id)}
-							onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-						>
-							<span class="detail-track-num">{i + 1}</span>
-							{#if track.artwork_url}
-								<img class="detail-track-art" src={track.artwork_url} alt="" loading="lazy" />
-							{/if}
-							<span class="detail-track-title">{track.title}</span>
-							<span class="detail-track-artist">{track.artist_name ?? ''}</span>
-							<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
-							<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
-						</div>
-					{/each}
-				</div>
-			{/if}
-		</div>
-	</div>
+	<AlbumDetailPopup
+		album={detailAlbum}
+		tracks={detailAlbumTracksList}
+		loading={detailAlbumLoading}
+		onClose={() => { expandedAlbumId = null; detailAlbum = null; detailAlbumTracksList = []; }}
+	/>
 {/if}
 
 <!-- ─── Track Detail Modal ─────────────────────── -->

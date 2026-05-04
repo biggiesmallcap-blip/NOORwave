@@ -4,6 +4,16 @@ version = "0.1.12"
 edition = "2024"
 description = "NOOR — Multi-service music library manager + hi-fi player"
 
+[features]
+# Public Spotify stats via private GraphQL (anonymous tokens). Off by default —
+# the feature compiles in the spotify_public module and route handler. Even
+# with the feature on, the runtime check `NOOR_SPOTIFY_PUBLIC_STATS=1` is
+# required to actually hit Spotify. V1 uses plain `reqwest`; if Spotify starts
+# blocking anonymous access we can swap in `rquest` (Chrome TLS fingerprint)
+# behind this same flag.
+default = []
+spotify-public = []
+
 [dependencies]
 # Web server
 axum = { version = "0.8", features = ["ws"] }

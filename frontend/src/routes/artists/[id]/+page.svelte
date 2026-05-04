@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { api, type Track, type TidalDiscographyAlbum } from '$lib/api/client';
+	import { api, type Track, type TidalDiscographyAlbum, type SpotifyArtistStats } from '$lib/api/client';
 	import {
 		playArtist,
 		shuffleArtist,
@@ -16,6 +16,8 @@
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
 
 	let artistId = $derived(Number(page.params.id));
 
@@ -26,6 +28,22 @@
 	let tidalAlbums = $state<TidalDiscographyAlbum[]>([]);
 	let tidalLoading = $state(false);
 	let tidalAvailable = $state(false);
+
+	let spotifyStats = $state<SpotifyArtistStats | null>(null);
+	let playcountByIsrc = $derived.by(() => {
+		const map = new Map<string, number>();
+		for (const t of spotifyStats?.tracks ?? []) {
+			if (t.playcount != null) map.set(t.isrc, t.playcount);
+		}
+		return map;
+	});
+
+	function formatStreamCount(n: number): string {
+		if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+		if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+		return n.toString();
+	}
 
 	// Phase 5B — back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
@@ -61,12 +79,23 @@
 		}
 	}
 
+	async function loadSpotifyStats() {
+		try {
+			spotifyStats = await api.getArtistSpotifyStats(artistId);
+		} catch (err) {
+			console.error('Failed to load Spotify stats', err);
+			spotifyStats = null;
+		}
+	}
+
 	$effect(() => {
 		artistId;
 		tidalAlbums = [];
 		tidalAvailable = false;
+		spotifyStats = null;
 		void load();
 		void loadDiscography();
+		void loadSpotifyStats();
 	});
 
 	let header = $derived(() => {
@@ -79,9 +108,14 @@
 		};
 	});
 
+	let showAllPopular = $state(false);
 	let popular = $derived(
-		[...tracks].sort((a, b) => b.play_count - a.play_count).slice(0, 5)
+		[...tracks]
+			.sort((a, b) => b.play_count - a.play_count)
+			.slice(0, showAllPopular ? Infinity : 10)
 	);
+	let popularMaxPlays = $derived(popular[0]?.play_count ?? 1);
+	let totalPopularCandidates = $derived(tracks.length);
 
 	let libraryAlbumMap = $derived.by(() => {
 		const map = new Map<number, { id: number; title: string; artwork_url: string | null; count: number }>();
@@ -108,23 +142,26 @@
 		return Number.isFinite(y) ? y : null;
 	}
 
-	function isAlbum(a: TidalDiscographyAlbum): boolean {
+	type DiscoCategory = 'album' | 'ep_single' | 'compilation' | 'live';
+	function categorize(a: TidalDiscographyAlbum): DiscoCategory {
 		const type = (a.release_type ?? '').toUpperCase();
-		if (type === 'ALBUM') return true;
-		if (type === 'SINGLE' || type === 'EP') return false;
-		return (a.number_of_tracks ?? 0) >= 3;
+		if (type === 'COMPILATION') return 'compilation';
+		if (type === 'LIVE') return 'live';
+		if (type === 'SINGLE' || type === 'EP') return 'ep_single';
+		if (type === 'ALBUM') return 'album';
+		return (a.number_of_tracks ?? 0) >= 3 ? 'album' : 'ep_single';
 	}
 
-	let tidalFullAlbums = $derived(
-		[...tidalAlbums]
-			.filter(isAlbum)
-			.sort((a, b) => (releaseYear(b.release_date) ?? 0) - (releaseYear(a.release_date) ?? 0))
-	);
-	let tidalSinglesEPs = $derived(
-		[...tidalAlbums]
-			.filter((a) => !isAlbum(a))
-			.sort((a, b) => (releaseYear(b.release_date) ?? 0) - (releaseYear(a.release_date) ?? 0))
-	);
+	function sortByDate(list: TidalDiscographyAlbum[]): TidalDiscographyAlbum[] {
+		return [...list].sort(
+			(a, b) => (releaseYear(b.release_date) ?? 0) - (releaseYear(a.release_date) ?? 0)
+		);
+	}
+
+	let tidalFullAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'album')));
+	let tidalSinglesEPs = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'ep_single')));
+	let tidalCompilations = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'compilation')));
+	let tidalLiveAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'live')));
 
 	// Fallback (used when TIDAL unavailable): group library tracks into albums.
 	let fallbackAlbums = $derived.by(() => {
@@ -218,6 +255,31 @@
 			? tidalSinglesEPs.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
 			: tidalSinglesEPs
 	);
+
+	const filteredTidalCompilations = $derived(
+		filterQuery
+			? tidalCompilations.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
+			: tidalCompilations
+	);
+
+	const filteredTidalLiveAlbums = $derived(
+		filterQuery
+			? tidalLiveAlbums.filter((a) => a.title.toLowerCase().includes(filterQuery.toLowerCase()))
+			: tidalLiveAlbums
+	);
+
+	function discographyAlbumMenu(album: TidalDiscographyAlbum, artistName: string) {
+		return buildAlbumMenu(
+			{
+				local_id: album.local_id,
+				tidal_id: album.tidal_id,
+				title: album.title,
+				artist_name: artistName,
+				in_library: album.in_library,
+			},
+			{ isLocal: album.in_library && album.local_id != null }
+		);
+	}
 </script>
 
 <div class="artist-page">
@@ -252,6 +314,10 @@
 				<h1 class="hero-title display-face">{h.name}</h1>
 				<p class="hero-sub">
 					{h.track_count.toLocaleString()} {h.track_count === 1 ? 'song' : 'songs'} in your library
+					{#if spotifyStats?.monthly_listeners != null}
+						<span class="dot">·</span>
+						<span class="hero-listeners">{formatStreamCount(spotifyStats.monthly_listeners)} monthly listeners</span>
+					{/if}
 				</p>
 			</div>
 		</header>
@@ -307,21 +373,86 @@
 				<h2 class="section-title">Popular</h2>
 				<ol class="popular-list">
 					{#each filteredPopular as track, idx (track.id)}
-						<TrackRow
-							{track}
-							variant="numbered"
-							index={idx}
-							isCurrent={$currentTrack?.id === track.id}
-							isPlaying={$isPlaying}
-							showArtist={false}
-							showPlayCount={true}
-							onRowClick={() => void playArtist(artistId, track.id)}
-							menuOptions={{ hideArtistActions: true }}
-						/>
+						{@const streamCount = track.isrc ? playcountByIsrc.get(track.isrc) : undefined}
+						<div class="popular-row-wrap">
+							<div
+								class="pop-bar"
+								style="width: {Math.max(4, ((track.play_count ?? 0) / popularMaxPlays) * 100)}%"
+							></div>
+							<TrackRow
+								{track}
+								variant="numbered"
+								index={idx}
+								isCurrent={$currentTrack?.id === track.id}
+								isPlaying={$isPlaying}
+								showArtist={false}
+								showPlayCount={true}
+								onRowClick={() => void playArtist(artistId, track.id)}
+								menuOptions={{ hideArtistActions: true }}
+							/>
+							{#if streamCount != null}
+								<span class="stream-badge" title="{streamCount.toLocaleString()} streams on Spotify">
+									{formatStreamCount(streamCount)}
+								</span>
+							{/if}
+						</div>
 					{/each}
 				</ol>
+				{#if !showAllPopular && totalPopularCandidates > 10}
+					<button class="show-all-btn" onclick={() => (showAllPopular = true)}>
+						Show all {totalPopularCandidates}
+					</button>
+				{:else if showAllPopular && totalPopularCandidates > 10}
+					<button class="show-all-btn" onclick={() => (showAllPopular = false)}>
+						Show fewer
+					</button>
+				{/if}
 			</section>
 		{/if}
+
+		{#snippet discographyCard(album: TidalDiscographyAlbum, kind: DiscoCategory)}
+			{@const year = releaseYear(album.release_date)}
+			{@const kindLabel = kind === 'album' ? 'Album'
+				: kind === 'compilation' ? 'Compilation'
+				: kind === 'live' ? 'Live'
+				: (album.release_type ?? '').toUpperCase() === 'EP' ? 'EP' : 'Single'}
+			<a
+				class="grid-card"
+				class:not-in-library={!album.in_library}
+				href={album.local_id != null ? `/albums/${album.local_id}` : `/tidal/albums/${album.tidal_id}`}
+				oncontextmenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openContextMenu(e, discographyAlbumMenu(album, h.name), album.title);
+				}}
+			>
+				<div class="grid-art-wrap">
+					{#if album.artwork_url}
+						<img class="grid-art" src={album.artwork_url} alt="" />
+					{:else}
+						<div class="grid-art placeholder">♫</div>
+					{/if}
+					{#if !album.in_library}
+						<span class="badge-new">TIDAL</span>
+						<button
+							class="art-play-overlay"
+							onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
+							aria-label="Play {album.title}"
+						>▶</button>
+					{:else if album.local_id != null}
+						<button
+							class="art-play-overlay"
+							onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
+							aria-label="Play {album.title}"
+						>▶</button>
+					{/if}
+				</div>
+				<p class="grid-title">{album.title}</p>
+				<p class="grid-sub">
+					{#if year}{year} · {/if}{kindLabel}{#if album.in_library} · In library{/if}
+				</p>
+			</a>
+		{/snippet}
 
 		{#if tidalAvailable}
 			{#if filteredTidalFullAlbums.length > 0}
@@ -332,38 +463,7 @@
 					</div>
 					<div class="card-row">
 						{#each filteredTidalFullAlbums as album (album.tidal_id)}
-							{@const year = releaseYear(album.release_date)}
-							<a
-								class="grid-card"
-								class:not-in-library={!album.in_library}
-								href={album.local_id != null ? `/albums/${album.local_id}` : `/tidal/albums/${album.tidal_id}`}
-							>
-								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
-									{:else}
-										<div class="grid-art placeholder">♫</div>
-									{/if}
-									{#if !album.in_library}
-										<span class="badge-new">TIDAL</span>
-										<button
-											class="art-play-overlay"
-											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
-											aria-label="Play {album.title}"
-										>▶</button>
-									{:else if album.local_id != null}
-										<button
-											class="art-play-overlay"
-											onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
-									{/if}
-								</div>
-								<p class="grid-title">{album.title}</p>
-								<p class="grid-sub">
-									{#if year}{year} · {/if}Album{#if album.in_library} · In library{/if}
-								</p>
-							</a>
+							{@render discographyCard(album, 'album')}
 						{/each}
 					</div>
 				</section>
@@ -377,38 +477,35 @@
 					</div>
 					<div class="card-row">
 						{#each filteredTidalSinglesEPs as album (album.tidal_id)}
-							{@const year = releaseYear(album.release_date)}
-							<a
-								class="grid-card"
-								class:not-in-library={!album.in_library}
-								href={album.local_id != null ? `/albums/${album.local_id}` : `/tidal/albums/${album.tidal_id}`}
-							>
-								<div class="grid-art-wrap">
-									{#if album.artwork_url}
-										<img class="grid-art" src={album.artwork_url} alt="" />
-									{:else}
-										<div class="grid-art placeholder">♫</div>
-									{/if}
-									{#if !album.in_library}
-										<span class="badge-new">TIDAL</span>
-										<button
-											class="art-play-overlay"
-											onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
-											aria-label="Play {album.title}"
-										>▶</button>
-									{:else if album.local_id != null}
-										<button
-											class="art-play-overlay"
-											onclick={(e) => onAlbumCardPlay({ id: album.local_id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
-									{/if}
-								</div>
-								<p class="grid-title">{album.title}</p>
-								<p class="grid-sub">
-									{#if year}{year} · {/if}{(album.release_type ?? '').toUpperCase() === 'EP' ? 'EP' : 'Single'}{#if album.in_library} · In library{/if}
-								</p>
-							</a>
+							{@render discographyCard(album, 'ep_single')}
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			{#if filteredTidalCompilations.length > 0}
+				<section class="section">
+					<div class="shelf-head">
+						<h2 class="section-title">Compilations</h2>
+						<span class="shelf-count">{filteredTidalCompilations.length}</span>
+					</div>
+					<div class="card-row">
+						{#each filteredTidalCompilations as album (album.tidal_id)}
+							{@render discographyCard(album, 'compilation')}
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			{#if filteredTidalLiveAlbums.length > 0}
+				<section class="section">
+					<div class="shelf-head">
+						<h2 class="section-title">Live</h2>
+						<span class="shelf-count">{filteredTidalLiveAlbums.length}</span>
+					</div>
+					<div class="card-row">
+						{#each filteredTidalLiveAlbums as album (album.tidal_id)}
+							{@render discographyCard(album, 'live')}
 						{/each}
 					</div>
 				</section>
@@ -824,5 +921,67 @@
 		.hero-title { font-size: 2.6rem; }
 		.actions-bar { padding: 12px 20px; }
 		.section { padding: 20px 20px 0; }
+	}
+
+	.popular-row-wrap {
+		position: relative;
+		border-radius: var(--radius-sm, 8px);
+		overflow: hidden;
+		isolation: isolate;
+	}
+
+	.pop-bar {
+		position: absolute;
+		inset-block: 0;
+		left: 0;
+		background: linear-gradient(90deg, var(--accent-soft, rgba(125, 99, 255, 0.18)) 0%, transparent 100%);
+		pointer-events: none;
+		transition: width 400ms ease;
+		z-index: 0;
+	}
+
+	.popular-row-wrap > :global(*:not(.pop-bar)) {
+		position: relative;
+		z-index: 1;
+	}
+
+	.show-all-btn {
+		margin: 12px auto 0;
+		display: block;
+		padding: 6px 16px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.09);
+		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+		font-size: 0.85rem;
+		cursor: pointer;
+		transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+	}
+	.show-all-btn:hover {
+		background: rgba(255, 255, 255, 0.11);
+		border-color: rgba(255, 255, 255, 0.16);
+		color: var(--text-primary, #fff);
+	}
+
+	.hero-listeners {
+		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+		font-variant-numeric: tabular-nums;
+	}
+
+	.stream-badge {
+		position: absolute;
+		right: 60px;
+		top: 50%;
+		transform: translateY(-50%);
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: rgba(30, 215, 96, 0.14);
+		border: 1px solid rgba(30, 215, 96, 0.32);
+		color: rgba(30, 215, 96, 0.95);
+		font-size: 0.72rem;
+		font-variant-numeric: tabular-nums;
+		font-weight: 600;
+		pointer-events: none;
+		z-index: 2;
 	}
 </style>

@@ -5,8 +5,10 @@
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
+  import { buildAlbumMenu } from '$lib/player/album_menu'
+  import { buildArtistMenu } from '$lib/player/artist_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
-  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, startArtistRadio, startAlbumRadio, shuffleAlbum, playTidalPlaylist } from '$lib/stores/player'
+  import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
   import { formatDuration } from '$lib/stores/library'
   import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
@@ -346,34 +348,29 @@
     return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
   }
 
-  function buildAlbumMenu(album: TidalSearchAlbum): MenuItem[] {
-    const items: MenuItem[] = [
-      { label: 'Play album', icon: '▶', onSelect: () => void playTidalAlbum(album.tidal_id) },
-    ]
-    if (album.in_library && album.local_id != null) {
-      items.push({ label: 'Shuffle album', icon: '⤮', onSelect: () => void shuffleAlbum(album.local_id!) })
-      items.push({ label: 'Album radio', icon: '◉', onSelect: () => void startAlbumRadio(album.local_id!) })
-      items.push({ separator: true, label: '' })
-      items.push({ label: 'Open in library', icon: '→', onSelect: () => void goto(`/albums/${album.local_id}`) })
-    } else {
-      items.push({ separator: true, label: '' })
-      items.push({ label: 'Open on Tidal', icon: '→', onSelect: () => void goto(`/tidal/albums/${album.tidal_id}`) })
-    }
-    return items
+  function albumMenuItems(album: TidalSearchAlbum): MenuItem[] {
+    return buildAlbumMenu(
+      {
+        local_id: album.local_id,
+        tidal_id: album.tidal_id,
+        title: album.title,
+        artist_name: album.artist_name,
+        in_library: album.in_library,
+      },
+      { isLocal: album.in_library && album.local_id != null }
+    )
   }
 
-  function buildArtistMenu(artist: TidalSearchArtist): MenuItem[] {
-    const href = artist.in_library && artist.local_id != null
-      ? `/artists/${artist.local_id}`
-      : `/tidal/artists/${artist.tidal_id}`
-    const items: MenuItem[] = [
-      { label: artist.in_library ? 'Open in library' : 'Open artist', icon: '→', onSelect: () => void goto(href) },
-    ]
-    if (artist.in_library && artist.local_id != null) {
-      items.push({ separator: true, label: '' })
-      items.push({ label: 'Artist radio', icon: '◉', onSelect: () => void startArtistRadio(artist.local_id!) })
-    }
-    return items
+  function artistMenuItems(artist: TidalSearchArtist): MenuItem[] {
+    return buildArtistMenu(
+      {
+        local_id: artist.local_id,
+        tidal_id: artist.tidal_id,
+        name: artist.name,
+        in_library: artist.in_library,
+      },
+      { isLocal: artist.in_library && artist.local_id != null }
+    )
   }
 
   function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
@@ -767,7 +764,7 @@
           style={top.kind === 'artist' && artistBg && !topArtistImageFailed ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
-          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? buildAlbumMenu(top.entry) : buildArtistMenu(top.entry)) }}
+          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry)) }}
         >
           {#if top.kind === 'artist'}
             {#if artistBg && !topArtistImageFailed}
@@ -819,7 +816,7 @@
               href={artist.in_library && artist.local_id != null
                 ? `/artists/${artist.local_id}`
                 : `/tidal/artists/${artist.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildArtistMenu(artist)) }}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, artistMenuItems(artist)) }}
             >
               <div class="avatar-wrap">
                 {#if artist.artwork_url && !failedArtistImages.has(artist.tidal_id)}
@@ -856,7 +853,7 @@
               href={album.in_library && album.local_id != null
                 ? `/albums/${album.local_id}`
                 : `/tidal/albums/${album.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildAlbumMenu(album)) }}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, albumMenuItems(album)) }}
             >
               <div class="art-wrap">
                 {#if album.artwork_url}

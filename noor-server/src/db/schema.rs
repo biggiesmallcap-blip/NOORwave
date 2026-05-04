@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_026,
     MIGRATION_027,
     MIGRATION_028,
+    MIGRATION_029,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -770,6 +771,41 @@ CREATE INDEX IF NOT EXISTS idx_context_tags_context
 
 CREATE INDEX IF NOT EXISTS idx_context_tags_lookup
     ON track_context_tags(normalized_tag, context, confidence DESC);
+"#;
+
+// Public Spotify stats cache. Three positive caches + one negative cache. All
+// `*_at` columns hold unix epoch seconds. Stats tables have a 7-day TTL
+// (handler logic), the ISRC→track mapping is permanent (Spotify track IDs
+// don't change), and the negative cache rate-limits repeated misses for 24h.
+const MIGRATION_029: &str = r#"
+CREATE TABLE IF NOT EXISTS spotify_isrc_map (
+    isrc             TEXT PRIMARY KEY,
+    spotify_track_id TEXT NOT NULL,
+    resolved_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spotify_track_stats (
+    spotify_track_id TEXT PRIMARY KEY,
+    playcount        INTEGER NOT NULL,
+    fetched_at       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_track_stats_fetched_at
+    ON spotify_track_stats(fetched_at);
+
+CREATE TABLE IF NOT EXISTS spotify_artist_stats (
+    spotify_artist_id TEXT PRIMARY KEY,
+    monthly_listeners INTEGER NOT NULL,
+    fetched_at        INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_artist_stats_fetched_at
+    ON spotify_artist_stats(fetched_at);
+
+CREATE TABLE IF NOT EXISTS spotify_null_cache (
+    isrc      TEXT PRIMARY KEY,
+    cached_at INTEGER NOT NULL
+);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -3,6 +3,8 @@
 	import { api, type TidalDiscographyTrack } from '$lib/api/client';
 	import { playTidalAlbum } from '$lib/stores/player';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 
 	function trackAsPlayable(t: TidalDiscographyTrack) {
 		return {
@@ -48,6 +50,7 @@
 		return {
 			title: first.album_title ?? 'Album',
 			artist_name: first.artist_name ?? 'Unknown artist',
+			artist_tidal_id: first.artist_tidal_id ?? null,
 			artwork_url: first.artwork_url,
 			track_count: tracks.length,
 			total_ms: totalMs
@@ -90,7 +93,22 @@
 					<p class="eyebrow">Album · TIDAL preview</p>
 					<h1 class="hero-title display-face">{h.title}</h1>
 					<p class="hero-sub">
-						<span class="hero-link">{h.artist_name}</span>
+						{#if h.artist_tidal_id != null}
+							<a
+								class="hero-link"
+								href="/tidal/artists/{h.artist_tidal_id}"
+								oncontextmenu={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									openContextMenu(e, buildArtistMenu({
+										tidal_id: h.artist_tidal_id,
+										name: h.artist_name,
+									}, { isLocal: false }), h.artist_name);
+								}}
+							>{h.artist_name}</a>
+						{:else}
+							<span class="hero-link">{h.artist_name}</span>
+						{/if}
 						<span class="dot">·</span>
 						<span>{h.track_count} songs</span>
 						<span class="dot">·</span>
