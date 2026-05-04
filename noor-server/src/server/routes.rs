@@ -12111,6 +12111,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_queue_returns_snapshot_and_preserves_current() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        let current_qid: i64 = db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, duration_ms, source, fidelity_score
+                     ) VALUES (3, 'Third Track', 1, 180000, 'tidal_stream', 0)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                    [],
+                )?;
+                let qid = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (track_id, position, source) VALUES (3, 2, 'user')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                     WHERE id = 1",
+                    rusqlite::params![qid],
+                )?;
+                Ok(qid)
+            })
+            .unwrap();
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/queue/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let queue = body["queue"].as_array().expect("queue array");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["id"], current_qid);
+        assert_eq!(queue[0]["track"]["id"], 1);
+        assert_eq!(body["playback_state"]["current_track"]["id"], 1);
+        assert_eq!(body["playback_state"]["current_queue_item_id"], current_qid);
+
+        let persisted_queue_count: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(persisted_queue_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn queue_append_library_track_returns_updated_queue() {
         let (db, db_path) = fresh_migrated_db();
         seed_basic_tracks(&db);
