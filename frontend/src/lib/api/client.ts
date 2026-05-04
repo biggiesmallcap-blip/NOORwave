@@ -1,5 +1,3 @@
-import type { DiscoverySpaceMeta } from '$lib/components/Discover/discover.types';
-
 const API_BASE = 'http://localhost:3334';
 
 export function getApiBase(): string {
@@ -1794,10 +1792,6 @@ export const api = {
 		return fetchApi<{ token: string }>('/api/server/token/regenerate', undefined, {
 			method: 'POST',
 		});
-	},
-
-	getDiscoverySpaceMeta() {
-		return fetchApi<DiscoverySpaceMeta>('/api/discovery/space/meta');
 	},
 
 	getVibeTracksForTrack(trackId: number) {

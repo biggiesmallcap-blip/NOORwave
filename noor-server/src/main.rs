@@ -95,6 +95,13 @@ pub struct AppState {
     /// Discovery training cancel flag — flipped to true by POST /api/discovery/train/stop,
     /// reset to false at the start of each training run.
     pub discovery_train_cancel: Arc<AtomicBool>,
+    /// Seeds already refreshed this session, with model_id + timestamp.
+    /// Entries expire after `REFRESH_TTL` or whenever the active model_id changes,
+    /// so re-training or long sessions don't pin stale neighbor data.
+    pub refreshed_seeds: Arc<std::sync::Mutex<std::collections::HashMap<i64, services::neighbor_refresh::RefreshEntry>>>,
+    /// Cached embedding load (per model) for the seed-refresh path.
+    /// Avoids full table scans when several seeds are refreshed in sequence.
+    pub embedding_cache: Arc<tokio::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
@@ -145,6 +152,9 @@ pub enum AppEvent {
     // ACRCloud events
     AcrCloudScanProgress { scanned: u32, total: u32, matches_found: u32 },
     AcrCloudScanComplete { scanned: u32, matches_found: u32 },
+    // DiscoverSpace per-seed background refresh progress + complete
+    DiscoverySpaceRefreshProgress { seed_track_id: i64, stage: String, progress: f32 },
+    DiscoverySpaceRefreshed { seed_track_id: i64 },
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -352,6 +362,8 @@ async fn main() -> Result<()> {
         lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         discovery_train_cancel: Arc::new(AtomicBool::new(false)),
+        refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
         master_key,
         pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         lastfm_api_secret,

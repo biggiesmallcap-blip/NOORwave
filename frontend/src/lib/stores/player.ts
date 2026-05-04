@@ -1009,6 +1009,38 @@ export async function playTidalMix(mixId: string): Promise<void> {
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
+	// Last.fm chart entries that didn't resolve locally arrive with the
+	// placeholder `tidal_id: 0` (see ChartTidalPlayable in routes.rs). Resolve
+	// to a real Tidal id via search first — otherwise the import fallback
+	// below collides on `WHERE tidal_id = 0` and seeds radio from whatever
+	// unrelated track happens to already hold that placeholder row.
+	if (track.tidal_id <= 0) {
+		const q = [track.artist_name, track.title].filter(Boolean).join(' ');
+		if (!q) {
+			showToast(`Couldn't find "${trackLabel(track)}" on Tidal`, 'info');
+			return;
+		}
+		try {
+			const results = await api.searchTidal(q, 1);
+			const hit = results.tracks[0];
+			if (!hit) {
+				showToast(`Couldn't find "${trackLabel(track)}" on Tidal`, 'info');
+				return;
+			}
+			track = {
+				tidal_id: hit.tidal_id,
+				title: hit.title,
+				artist_name: hit.artist_name,
+				album_title: hit.album_title,
+				artwork_url: hit.artwork_url ?? track.artwork_url,
+				duration_ms: hit.duration_ms,
+				artist_tidal_id: null,
+			};
+		} catch (error) {
+			setError('start Tidal radio', error, () => startTidalSongRadio(track));
+			return;
+		}
+	}
 	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
 	try {
 		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });

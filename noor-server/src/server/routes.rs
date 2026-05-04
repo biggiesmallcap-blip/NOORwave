@@ -6,6 +6,7 @@ use crate::playback::{player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
 };
+use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
     auth as tidal_auth, client::TidalClient, import as tidal_import,
@@ -2285,6 +2286,28 @@ async fn compute_radio_similarity(
 
 // ─── Discovery Sound Space ───────────────────────────────────────────────
 
+/// Stable synthetic id for an external (Last.fm) candidate that has no resolved
+/// Tidal id. Negative i64 keyed off `artist|title` so multiple unresolved hits
+/// don't all collapse onto the same `track-0` node on the canvas. Hash collisions
+/// are negligible at the ~60-candidate scale of a single radio request.
+///
+/// TODO(option 2): Replace this with real Tidal-search resolution in `radio.rs`
+/// before the candidate leaves the orchestrator — that would also let
+/// `DiscoverSidePanel.resolveExternalPlayable` go away. Needs an artist+title →
+/// tidal_id cache (in-memory or a small SQLite table) to avoid hammering the
+/// Tidal API on every discovery request.
+fn synthetic_external_track_id(artist: &str, title: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    artist.hash(&mut h);
+    "|".hash(&mut h);
+    title.hash(&mut h);
+    // Force into the negative i64 range so it can't collide with library ids
+    // (always positive) or with the legacy `0` placeholder.
+    -(((h.finish() & 0x7FFF_FFFF_FFFF_FFFF) | 1) as i64)
+}
+
 #[derive(Debug, Deserialize)]
 struct DiscoverySpaceRequest {
     mode: Option<String>,
@@ -2335,6 +2358,13 @@ async fn get_discovery_space(
         is_in_library: bool,
         radio_source: Option<String>,  // "library" | "lastfm" | "engine"
         radio_reason: Option<String>,
+        // v1.5 fields
+        confidence: f64,
+        support_count: i64,
+        primary_reason: String,
+        reason_tags: Vec<String>,
+        genres: Vec<String>,
+        in_degree_pctile: f64,
     }
 
     // ── 1. Decide track set based on inputs ──────────────────────────────────
@@ -2392,6 +2422,12 @@ async fn get_discovery_space(
                 is_in_library: true,
                 radio_source: None,
                 radio_reason: None,
+                confidence: 1.0,
+                support_count: 0,
+                primary_reason: "unknown".to_string(),
+                reason_tags: vec![],
+                genres: vec![],
+                in_degree_pctile: 0.5,
             }).collect::<Vec<_>>())
         }).unwrap_or_default()
     } else if seed_id > 0 {
@@ -2417,7 +2453,12 @@ async fn get_discovery_space(
                 .tracks
                 .into_iter()
                 .map(|c| SpaceTrack {
-                    track_id: if c.is_in_library { c.track_id } else { c.tidal_track_id.unwrap_or(c.track_id) },
+                    track_id: if c.is_in_library {
+                        c.track_id
+                    } else {
+                        c.tidal_track_id
+                            .unwrap_or_else(|| synthetic_external_track_id(&c.artist_name, &c.title))
+                    },
                     title: c.title,
                     artist_name: c.artist_name,
                     album_title: c.album_title,
@@ -2451,6 +2492,16 @@ async fn get_discovery_space(
                         crate::services::radio::RadioSource::Engine => "engine".to_string(),
                     }),
                     radio_reason: Some(c.reason),
+                    confidence: c.confidence.unwrap_or(if c.is_in_library { 1.0 } else { 0.5 }),
+                    support_count: c.support_count.unwrap_or(0),
+                    primary_reason: ds::normalize_reason(
+                        c.primary_reason.as_deref().unwrap_or("")
+                    ).to_string(),
+                    reason_tags: c.primary_reason.as_deref()
+                        .map(|r| vec![ds::normalize_reason(r).to_string()])
+                        .unwrap_or_default(),
+                    genres: vec![],
+                    in_degree_pctile: c.candidate_in_degree_percentile.unwrap_or(0.5),
                 })
                 .collect()
         } else {
@@ -2517,15 +2568,24 @@ async fn get_discovery_space(
                     is_in_library: true,
                     radio_source: None,
                     radio_reason: None,
+                    confidence: 1.0,
+                    support_count: 0,
+                    primary_reason: "unknown".to_string(),
+                    reason_tags: vec![],
+                    genres: vec![],
+                    in_degree_pctile: 0.5,
                 });
             }
         }
     }
 
     // ── 2. Fill remainder from most-played library tracks ────────────────────
+    // Only fill when browsing without a seed. In seed mode the radio candidates
+    // ARE the map — padding with unrelated most-played tracks creates a cloud of
+    // disconnected blue dots with no edges and falsely-cold-start labels.
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
-    if remaining > 0 {
+    if remaining > 0 && seed_id == 0 {
         let fallback = state_guard.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.source
@@ -2581,6 +2641,12 @@ async fn get_discovery_space(
                     is_in_library: true,
                     radio_source: None,
                     radio_reason: None,
+                    confidence: 1.0,
+                    support_count: 0,
+                    primary_reason: "unknown".to_string(),
+                    reason_tags: vec![],
+                    genres: vec![],
+                    in_degree_pctile: 0.5,
                 });
             }
         }
@@ -2755,8 +2821,9 @@ async fn get_discovery_space(
         if ids_csv.is_empty() {
             // No library tracks present (pure external response) — nothing to enrich.
         } else {
-            type GenreRow = (String, Option<String>, Option<f64>);
-            let genre_map: std::collections::HashMap<i64, GenreRow> = state_guard.db.with_conn(|conn| {
+            // genre_map: track_id → (top_name, top_source, top_conf, all_names)
+            type GenreEntry = (String, Option<String>, Option<f64>, Vec<String>);
+            let genre_map: std::collections::HashMap<i64, GenreEntry> = state_guard.db.with_conn(|conn| {
                 let sql = format!(
                     "SELECT tg.track_id, g.name, tg.source, tg.confidence
                      FROM track_genres tg
@@ -2773,19 +2840,21 @@ async fn get_discovery_space(
                         row.get::<_, Option<f64>>(3)?,
                     ))
                 })?;
-                let mut map = std::collections::HashMap::new();
+                let mut map: std::collections::HashMap<i64, GenreEntry> = std::collections::HashMap::new();
                 for r in rows {
                     let (id, name, source, conf) = r?;
-                    map.entry(id).or_insert((name, source, conf));
+                    let entry = map.entry(id).or_insert_with(|| (name.clone(), source.clone(), conf, vec![]));
+                    entry.3.push(name);
                 }
                 Ok(map)
             }).unwrap_or_default();
 
             for t in &mut space_tracks {
-                if let Some((name, source, conf)) = genre_map.get(&t.track_id) {
+                if let Some((name, source, conf, all_genres)) = genre_map.get(&t.track_id) {
                     t.top_genre = Some(name.clone());
                     t.top_genre_source = source.clone();
                     t.top_genre_confidence = *conf;
+                    t.genres = all_genres.clone();
                 }
             }
         }
@@ -2815,38 +2884,40 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 4. Build edges ───────────────────────────────────────────────────────
-    // Seed-based external mode: radial spokes from seed → each external candidate.
-    // Otherwise: pull from the pre-computed neighbor graph (Phase 1 behavior).
-    let is_external_seed_mode = seed_id > 0
-        && prompt.is_empty()
-        && space_tracks.iter().any(|t| !t.is_in_library);
+    // ── 4. Build typed edges (v1.5) ──────────────────────────────────────────
+    // Typed to feed the pruner and serialized after pruning. Old callers receive
+    // extra fields they can ignore; all existing fields are preserved.
+    struct FullEdge {
+        from_track_id: i64,
+        to_track_id: i64,
+        weight: f64,
+        confidence: f64,
+        primary_reason: String,
+        reason_tags: Vec<String>,
+        source: String,
+        support_count: Option<i64>,
+        behavioral_score: f64,
+        audio_score: f64,
+        metadata_score: f64,
+    }
 
-    let edges: Vec<Value> = if is_external_seed_mode {
-        space_tracks
+    // Library↔library edges come from `track_neighbors`. We always run this
+    // query when there's more than one library track in the result set so the
+    // map shows the full neighbor graph, regardless of whether external tracks
+    // are present.
+    let mut typed_edges: Vec<FullEdge> = {
+        let track_id_set: HashSet<i64> = space_tracks
             .iter()
-            .filter(|t| !t.is_in_library)
-            .map(|t| {
-                json!({
-                    "from_id": seed_id,
-                    "to_id": t.track_id,
-                    "type": "behavioural",
-                    "weight": t.similarity_score,
-                    "reason_tags": ["external_match"],
-                    "behavioral_score": 0.0,
-                    "audio_score": 0.0,
-                    "metadata_score": t.similarity_score,
-                })
-            })
-            .collect()
-    } else {
-        let track_id_set: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+            .filter(|t| t.is_in_library)
+            .map(|t| t.track_id)
+            .collect();
         if track_id_set.len() > 1 {
             let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
             state_guard.db.with_conn(|conn| {
                 let sql = format!(
                     "SELECT n.track_id, n.neighbor_track_id, n.score,
-                            n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json
+                            n.behavioral_score, n.audio_score, n.metadata_score,
+                            n.reason_json, n.confidence, n.support_count
                      FROM track_neighbors n
                      WHERE n.track_id IN ({ids_csv}) AND n.neighbor_track_id IN ({ids_csv})
                      ORDER BY n.score DESC
@@ -2862,6 +2933,8 @@ async fn get_discovery_space(
                         row.get::<_, f64>(4)?,
                         row.get::<_, f64>(5)?,
                         row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<f64>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
                     ))
                 })?;
                 let mut result = Vec::new();
@@ -2870,12 +2943,12 @@ async fn get_discovery_space(
             })
             .unwrap_or_default()
             .into_iter()
-            .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json)| {
+            .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json, confidence, support_count)| {
                 let parsed: Vec<Value> = reason_json
                     .as_deref()
                     .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
                     .unwrap_or_default();
-                let tags: Vec<String> = parsed
+                let raw_tags: Vec<String> = parsed
                     .iter()
                     .filter_map(|v| {
                         v.get("key")
@@ -2884,29 +2957,21 @@ async fn get_discovery_space(
                             .map(|s| s.to_string())
                     })
                     .collect();
-
-                let edge_type = if tags.iter().any(|t| t == "genre_branch") && audio > 0.4 {
-                    "harmonic"
-                } else if behavioral > 0.4 {
-                    "behavioural"
-                } else if tags.iter().any(|t| t == "artist_affinity") {
-                    "genre"
-                } else if metadata > 0.3 {
-                    "bpm_match"
-                } else {
-                    "behavioural"
-                };
-
-                json!({
-                    "from_id": from_id,
-                    "to_id": to_id,
-                    "type": edge_type,
-                    "weight": score.clamp(0.0, 1.0),
-                    "reason_tags": tags,
-                    "behavioral_score": behavioral,
-                    "audio_score": audio,
-                    "metadata_score": metadata,
-                })
+                let reason_tags = ds::normalize_reason_tags(&raw_tags);
+                let primary_reason = reason_tags.first().cloned().unwrap_or_else(|| "unknown".to_string());
+                FullEdge {
+                    from_track_id: from_id,
+                    to_track_id: to_id,
+                    weight: score.clamp(0.0, 1.0),
+                    confidence: confidence.unwrap_or(0.5),
+                    primary_reason,
+                    reason_tags,
+                    source: "library".to_string(),
+                    support_count,
+                    behavioral_score: behavioral,
+                    audio_score: audio,
+                    metadata_score: metadata,
+                }
             })
             .collect()
         } else {
@@ -2914,12 +2979,84 @@ async fn get_discovery_space(
         }
     };
 
-    // ── 5. Build spatial layout ──────────────────────────────────────────────
+    // External (non-library) tracks aren't in `track_neighbors`, so synthesize
+    // a seed→external edge per external track. This runs alongside the library
+    // edges above so users see both their library graph and the external links.
+    if seed_id > 0 && prompt.is_empty() {
+        for t in space_tracks.iter().filter(|t| !t.is_in_library) {
+            let reason = ds::normalize_reason("external_match");
+            typed_edges.push(FullEdge {
+                from_track_id: seed_id,
+                to_track_id: t.track_id,
+                weight: t.similarity_score,
+                confidence: t.confidence,
+                primary_reason: reason.to_string(),
+                reason_tags: vec![reason.to_string()],
+                source: ds::normalize_source(&t.source).to_string(),
+                support_count: Some(t.support_count),
+                behavioral_score: 0.0,
+                audio_score: 0.0,
+                metadata_score: t.similarity_score,
+            });
+        }
+    }
+
+    // ── 5. Score normalization (per source group) ─────────────────────────────
+    let score_candidates: Vec<ds::ScoreCandidate> = space_tracks.iter().map(|t| {
+        ds::ScoreCandidate {
+            track_id: t.track_id,
+            raw_score: t.similarity_score,
+            source: ds::normalize_source(&t.source).to_string(),
+        }
+    }).collect();
+    let norm_scores = ds::normalize_scores_by_source(&score_candidates);
+
+    // ── 6. Within-set in-degree stats ────────────────────────────────────────
+    let prune_edges: Vec<ds::PruneEdge> = typed_edges.iter().map(|e| ds::PruneEdge {
+        from_track_id: e.from_track_id,
+        to_track_id: e.to_track_id,
+        weight: e.weight,
+        confidence: e.confidence,
+        primary_reason: e.primary_reason.clone(),
+    }).collect();
+    let track_ids_for_deg: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
+    let in_deg_stats = ds::compute_in_degree_stats(&track_ids_for_deg, &prune_edges);
+    for t in &mut space_tracks {
+        if let Some((_, pctile)) = in_deg_stats.get(&t.track_id) {
+            t.in_degree_pctile = *pctile;
+        }
+    }
+
+    // ── 7. Graph pruning ──────────────────────────────────────────────────────
+    let prune_nodes: Vec<ds::PruneNode> = space_tracks.iter().map(|t| ds::PruneNode {
+        track_id: t.track_id,
+        score: norm_scores.get(&t.track_id).copied().unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0)),
+        confidence: t.confidence,
+        source: ds::normalize_source(&t.source).to_string(),
+        is_seed: t.track_id == seed_id,
+        primary_reason: t.primary_reason.clone(),
+        in_degree_pctile: t.in_degree_pctile,
+    }).collect();
+    let prune_result = ds::prune_graph(prune_nodes, prune_edges, seed_id, &ds::PruneConfig::default());
+    let surviving_ids: HashSet<i64> = prune_result.node_ids.iter().copied().collect();
+
+    // Filter space_tracks to survivors; preserve original order.
+    space_tracks.retain(|t| surviving_ids.contains(&t.track_id));
+
+    // ── 8. Serialize nodes with v1.5 fields ──────────────────────────────────
     let total = space_tracks.len().max(1);
     let track_nodes: Vec<Value> = space_tracks
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(i, t)| {
+            let norm_score = norm_scores.get(&t.track_id).copied().unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
+            // Library tracks are only truly cold-start if confidence is very low —
+            // support_count may be 0 simply because the neighbor table hasn't been
+            // calculated yet, which doesn't mean there's no behavioral data.
+            let is_cold_start = !t.is_in_library && (t.support_count == 0 || t.confidence < 0.3);
+            let normalized_source = ds::normalize_source(&t.source);
+            let cluster_key = t.genres.first().or(t.top_genre.as_ref()).map(|s| s.as_str()).unwrap_or("unknown");
+
             let (x, y) = match mode.as_str() {
                 "energy_arc" => {
                     let energy = t.energy.unwrap_or(0.5);
@@ -2949,7 +3086,15 @@ async fn get_discovery_space(
                 }
             };
             let node_radius = 5.0 + t.similarity_score * 20.0 + t.energy.unwrap_or(0.5) * 5.0;
-            json!({
+            let in_deg = in_deg_stats.get(&t.track_id).map(|(d, _)| *d as i64).unwrap_or(0);
+            let layout_obj = json!({
+                "x": x, "y": y,
+                "radius_hint": node_radius,
+                "cluster_key": cluster_key,
+                "distance_from_seed": (1.0 - norm_score).clamp(0.0, 1.0),
+            });
+            // Build node object in two halves to avoid json! macro recursion limit.
+            let mut node_obj = json!({
                 "track_id": t.track_id,
                 "title": t.title,
                 "artist_name": t.artist_name,
@@ -2974,23 +3119,131 @@ async fn get_discovery_space(
                 "last_played_at": t.last_played_at,
                 "play_count": t.play_count,
                 "is_in_library": t.is_in_library,
-                "source": t.source,
+                "source": normalized_source,
                 "radio_source": t.radio_source,
                 "radio_reason": t.radio_reason,
-                "x": x,
-                "y": y,
-                "vx": 0.0,
-                "vy": 0.0,
+                "x": x, "y": y, "vx": 0.0, "vy": 0.0,
                 "radius": node_radius,
                 "opacity": 0.0,
+            });
+            let v15 = json!({
+                "id": format!("track-{}", t.track_id),
+                "score": norm_score,
+                "raw_score": t.similarity_score,
+                "confidence": t.confidence,
+                "support_count": t.support_count,
+                "is_cold_start": is_cold_start,
+                "primary_reason": t.primary_reason,
+                "reason_tags": t.reason_tags,
+                "genres": t.genres,
+                "is_seed": t.track_id == seed_id,
+                "candidate_in_degree": in_deg,
+                "candidate_in_degree_percentile": t.in_degree_pctile,
+                "layout": layout_obj,
+            });
+            if let (Some(obj), Some(ext)) = (node_obj.as_object_mut(), v15.as_object()) {
+                obj.extend(ext.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            node_obj
+        })
+        .collect();
+
+    // ── 9. Serialize edges with v1.5 fields ──────────────────────────────────
+    let edge_nodes: Vec<Value> = typed_edges
+        .iter()
+        .filter(|e| surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id))
+        .map(|e| {
+            let edge_id = format!("{}-{}-{}", e.from_track_id, e.to_track_id, e.primary_reason);
+            json!({
+                // ── Existing fields ──
+                "from_id": e.from_track_id,
+                "to_id": e.to_track_id,
+                "type": &e.primary_reason,
+                "weight": e.weight,
+                "reason_tags": &e.reason_tags,
+                "behavioral_score": e.behavioral_score,
+                "audio_score": e.audio_score,
+                "metadata_score": e.metadata_score,
+                // ── v1.5 fields ──
+                "id": edge_id,
+                "from_track_id": e.from_track_id,
+                "to_track_id": e.to_track_id,
+                "reason": &e.primary_reason,
+                "primary_reason": &e.primary_reason,
+                "confidence": e.confidence,
+                "source": &e.source,
+                "support_count": e.support_count,
             })
         })
         .collect();
 
+    // ── 10. Diagnostics ───────────────────────────────────────────────────────
+    let mut source_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut reason_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut conf_sum = 0.0f64;
+    let mut pctile_sum = 0.0f64;
+    for node in &track_nodes {
+        let src = node["source"].as_str().unwrap_or("engine").to_string();
+        *source_counts.entry(src).or_insert(0) += 1;
+        let reason = node["primary_reason"].as_str().unwrap_or("unknown").to_string();
+        *reason_counts.entry(reason).or_insert(0) += 1;
+        conf_sum += node["confidence"].as_f64().unwrap_or(0.5);
+        pctile_sum += node["candidate_in_degree_percentile"].as_f64().unwrap_or(0.0);
+    }
+    let n_nodes = track_nodes.len().max(1) as f64;
+    let diagnostics = json!({
+        "node_count": track_nodes.len(),
+        "edge_count": edge_nodes.len(),
+        "source_counts": source_counts,
+        "reason_counts": reason_counts,
+        "avg_confidence": conf_sum / n_nodes,
+        "avg_in_degree_percentile": pctile_sum / n_nodes,
+        "raw_candidate_count": prune_result.raw_node_count,
+        "raw_edge_count": prune_result.raw_edge_count,
+        "pruned_node_count": prune_result.pruned_node_count,
+        "pruned_edge_count": prune_result.pruned_edge_count,
+        "hub_suppressed_count": prune_result.hub_suppressed_count,
+        "low_confidence_edge_dropped_count": prune_result.low_confidence_edge_dropped_count,
+    });
+
+    // ── 11. Background seed-neighbor refresh (DiscoverSpace only) ────────────
+    // Fire-and-forget: computes embedding similarity for this seed, writes to
+    // track_neighbors, then sends DiscoverySpaceRefreshed so the map auto-reloads.
+    // `refreshed_seeds` is a TTL'd map keyed by (seed_id → model_id, instant) so
+    // entries expire and re-training invalidates them automatically.
+    if seed_id > 0 && prompt.is_empty() {
+        let guard = state.read().await;
+        // Best-effort: read current model_id outside the spawned task so we can
+        // skip the spawn entirely when this seed is fresh under the same model.
+        let active_model_id: Option<i64> = guard
+            .db
+            .with_conn(|conn| Ok(crate::db::queries::get_active_embedding_model(conn)?.map(|m| m.id)))
+            .unwrap_or(None);
+        let already_fresh = match active_model_id {
+            Some(mid) => crate::services::neighbor_refresh::is_seed_fresh(
+                &guard.refreshed_seeds, seed_id, mid,
+            ),
+            None => true, // no model → nothing to do anyway
+        };
+        if !already_fresh {
+            let db2 = guard.db.clone();
+            let tx = guard.event_tx.clone();
+            let refreshed = Arc::clone(&guard.refreshed_seeds);
+            let cache = Arc::clone(&guard.embedding_cache);
+            drop(guard);
+            tokio::spawn(crate::services::neighbor_refresh::refresh_seed_neighbors(
+                db2, tx, seed_id, refreshed, cache,
+            ));
+        }
+    }
+
     Ok(Json(json!({
         "tracks": track_nodes,
+        "edges": edge_nodes,
         "artists": [],
-        "edges": edges,
+        "diagnostics": diagnostics,
+        "seed_track_id": if seed_id > 0 { Some(seed_id) } else { None },
+        "generated_at": chrono::Utc::now().to_rfc3339(),
     })))
 }
 

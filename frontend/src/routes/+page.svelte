@@ -169,8 +169,8 @@
 				<span class="quick-nav-icon">♫</span>
 				<span class="quick-nav-label">Library</span>
 			</a>
-			<a href="/discover" class="quick-nav-tile">
-				<span class="quick-nav-icon">✦</span>
+			<a href="/discoverspace" class="quick-nav-tile">
+				<span class="quick-nav-icon">◈</span>
 				<span class="quick-nav-label">Discover</span>
 			</a>
 			<a href="/genres" class="quick-nav-tile">

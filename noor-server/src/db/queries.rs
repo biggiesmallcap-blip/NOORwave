@@ -110,6 +110,25 @@ pub struct DspFilters {
     pub instrumental_only: bool,
 }
 
+// Single source of truth for the favorite/liked WHERE predicate.
+// Used by both get_tracks_with_dsp and get_track_count so they cannot drift.
+//
+// `favorite_only` is legacy naming: it currently means "library tracks" =
+// tracks where tracks.is_favorite=1 OR the parent album has albums.is_favorite=1.
+// `liked_only` is the strict "user explicitly liked this track" filter.
+// liked_only takes precedence over favorite_only.
+//
+// All callers must alias the tracks table as `t` for this predicate to apply.
+fn favorite_predicate(favorite_only: bool, liked_only: bool) -> Option<&'static str> {
+    if liked_only {
+        Some("t.is_favorite = 1")
+    } else if favorite_only {
+        Some("(t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))")
+    } else {
+        None
+    }
+}
+
 pub fn get_tracks(
     conn: &Connection,
     sort_by: &str,
@@ -117,8 +136,9 @@ pub fn get_tracks(
     limit: i64,
     offset: i64,
     favorite_only: bool,
+    liked_only: bool,
 ) -> Result<Vec<Track>> {
-    get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, &DspFilters::default())
+    get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, liked_only, &DspFilters::default())
 }
 
 pub fn get_tracks_with_dsp(
@@ -128,6 +148,7 @@ pub fn get_tracks_with_dsp(
     limit: i64,
     offset: i64,
     favorite_only: bool,
+    liked_only: bool,
     dsp: &DspFilters,
 ) -> Result<Vec<Track>> {
     let has_dsp = dsp.bpm_min.is_some() || dsp.bpm_max.is_some()
@@ -136,7 +157,7 @@ pub fn get_tracks_with_dsp(
 
     let order_col = match sort_by {
         "title" => "t.title",
-        "artist" => "a.name",
+        "artist" => "a_artists.name",
         "album" => "al.title",
         "year" => "al.year",
         "date_added" => "t.date_added",
@@ -152,11 +173,8 @@ pub fn get_tracks_with_dsp(
     let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
 
     let mut conditions = Vec::new();
-    if favorite_only {
-        conditions.push(
-            "(t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))"
-                .to_string(),
-        );
+    if let Some(pred) = favorite_predicate(favorite_only, liked_only) {
+        conditions.push(pred.to_string());
     }
 
     let join_clause = if has_dsp {
@@ -215,14 +233,14 @@ pub fn get_tracks_with_dsp(
     Ok(tracks)
 }
 
-pub fn get_track_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
-    let filter = if favorite_only {
-        " WHERE is_favorite = 1 OR album_id IN (SELECT id FROM albums WHERE is_favorite = 1)"
-    } else {
-        ""
+pub fn get_track_count(conn: &Connection, favorite_only: bool, liked_only: bool) -> Result<i64> {
+    // FROM tracks t alias is required so favorite_predicate's "t."-prefixed SQL applies.
+    let filter = match favorite_predicate(favorite_only, liked_only) {
+        Some(pred) => format!(" WHERE {pred}"),
+        None => String::new(),
     };
     Ok(
-        conn.query_row(&format!("SELECT COUNT(*) FROM tracks{filter}"), [], |row| {
+        conn.query_row(&format!("SELECT COUNT(*) FROM tracks t{filter}"), [], |row| {
             row.get(0)
         })?,
     )
@@ -3066,6 +3084,53 @@ pub fn replace_track_neighbors(
     Ok(())
 }
 
+/// Replace neighbor rows for a single seed track only — used by the background
+/// per-seed refresh so it doesn't wipe every other track's neighbors.
+pub fn replace_seed_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    seed_id: i64,
+    rows: &[NeighborWriteRow],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM track_neighbors WHERE model_id = ?1 AND track_id = ?2",
+        params![model_id, seed_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO track_neighbors
+             (track_id, neighbor_track_id, model_id, rank, score,
+              behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
+              confidence, support_count, candidate_in_degree, candidate_in_degree_percentile,
+              play_count_seed, play_count_candidate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )?;
+        for n in rows {
+            stmt.execute(params![
+                n.track_id,
+                n.neighbor_track_id,
+                model_id,
+                n.rank,
+                n.score,
+                n.behavioral_score,
+                n.audio_score,
+                n.metadata_score,
+                n.reason_json,
+                n.primary_reason,
+                n.confidence,
+                n.support_count,
+                n.candidate_in_degree,
+                n.candidate_in_degree_percentile,
+                n.play_count_seed,
+                n.play_count_candidate,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_track_neighbors(
     conn: &Connection,
     model_id: i64,
@@ -4058,6 +4123,93 @@ mod tests {
         // [3, 3] — track 3 now present, duplicate in input → 0 added
         let added_dup_present = add_tracks_to_playlist(&conn, 1, &[3, 3]).unwrap();
         assert_eq!(added_dup_present, 0);
+    }
+
+    // ─── liked_only vs favorite_only regression ───────────────────────────
+    //
+    // Bug being guarded: favorite_only=true used to silently mean "library tracks"
+    // (liked tracks ∪ tracks from favorited albums), so saved-album tracks leaked
+    // into what the UI presented as "liked". liked_only must be strict.
+    fn seed_album_with_one_liked_track(conn: &Connection) {
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Brooks & Dunn')", []).unwrap();
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, is_favorite, source)
+             VALUES (1, '#1s ... and then some', 1, 1, 'tidal')",
+            [],
+        ).unwrap();
+        // Three tracks in the favorited album; only "Neon Blue" has tracks.is_favorite = 1.
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source)
+             VALUES (1, 'Neon Blue', 1, 1, 200000, 101, 'LOSSLESS', 'tidal', 10, 1, 'tidal')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source)
+             VALUES (2, 'Brand New Man', 1, 1, 180000, 102, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source)
+             VALUES (3, 'Boot Scootin Boogie', 1, 1, 198000, 103, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        ).unwrap();
+    }
+
+    #[test]
+    fn liked_only_excludes_album_favorited_tracks() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        let tracks = get_tracks(&conn, "title", "asc", 100, 0, false, true).expect("liked tracks");
+        assert_eq!(tracks.len(), 1, "liked_only must return only truly-liked tracks");
+        assert_eq!(tracks[0].title, "Neon Blue");
+
+        let count = get_track_count(&conn, false, true).expect("liked count");
+        assert_eq!(count, 1, "count must match liked-only data query");
+    }
+
+    #[test]
+    fn favorite_only_preserves_legacy_union_behavior() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        let tracks = get_tracks(&conn, "title", "asc", 100, 0, true, false).expect("library tracks");
+        assert_eq!(tracks.len(), 3, "favorite_only must keep returning all tracks from favorited albums");
+
+        let count = get_track_count(&conn, true, false).expect("library count");
+        assert_eq!(count, 3, "count must match favorite_only data query");
+    }
+
+    #[test]
+    fn liked_only_takes_precedence_over_favorite_only() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        let tracks = get_tracks(&conn, "title", "asc", 100, 0, true, true).expect("strict tracks");
+        assert_eq!(tracks.len(), 1, "liked_only must override favorite_only");
+        assert_eq!(tracks[0].title, "Neon Blue");
+
+        let count = get_track_count(&conn, true, true).expect("strict count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn no_filter_returns_everything() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        let tracks = get_tracks(&conn, "title", "asc", 100, 0, false, false).expect("all tracks");
+        assert_eq!(tracks.len(), 3);
+
+        let count = get_track_count(&conn, false, false).expect("all count");
+        assert_eq!(count, 3);
     }
 }
 

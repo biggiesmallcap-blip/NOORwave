@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// An article or news item from an RSS feed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ impl FeedAggregator {
 
     /// Fetch and parse a single RSS feed
     async fn fetch_feed(&self, source: &FeedSource) -> anyhow::Result<Vec<FeedItem>> {
-        info!(url = %source.url, "Fetching RSS feed");
+        debug!(url = %source.url, "Fetching RSS feed");
         
         let resp = self
             .http_client
@@ -297,7 +297,7 @@ impl FeedAggregator {
             .map(|source| async move {
                 match self.fetch_feed(&source).await {
                     Ok(items) => {
-                        info!(source = %source.name, count = items.len(), "Fetched RSS feed");
+                        debug!(source = %source.name, count = items.len(), "Fetched RSS feed");
                         Some(items)
                     }
                     Err(e) => {

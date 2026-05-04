@@ -203,6 +203,16 @@ pub async fn import_track_from_metadata(
     conn_pool: &crate::db::Database,
     meta: ImportTrackMetadata,
 ) -> Result<ImportedTrack> {
+    // Reject the chart-placeholder `tidal_id = 0`: the lookup below would
+    // collide with the (UNIQUE) row already holding that value and return an
+    // unrelated library track, which then gets used as a radio seed. Callers
+    // must resolve a real Tidal id before importing.
+    if meta.tidal_id <= 0 {
+        anyhow::bail!(
+            "import_track_from_metadata: tidal_id must be > 0 (got {})",
+            meta.tidal_id
+        );
+    }
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
 

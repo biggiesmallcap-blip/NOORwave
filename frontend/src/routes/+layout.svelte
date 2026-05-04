@@ -174,7 +174,7 @@
 				{ path: '/search', label: 'Search', icon: '⌕' },
 				{ path: '/genres', label: 'Genre Galaxy', icon: '✦' },
 				{ path: '/playlists', label: 'Playlists', icon: '☰' },
-				{ path: '/discover', label: 'Discover', icon: '✦' }
+				{ path: '/discoverspace', label: 'Discover', icon: '◈' }
 			]
 		},
 		{
@@ -813,11 +813,11 @@
 		<div class="connect-panel glass-panel">
 			<div class="connect-brand">
 				<span class="connect-brand-mark">
-					<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
+					<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" aria-hidden="true">
 						<circle cx="384" cy="512" r="180"/>
 						<circle cx="384" cy="512" r="74"/>
 						<circle cx="640" cy="512" r="180"/>
-						<circle cx="640" cy="512" r="74"/>
+						<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
 					</svg>
 				</span>
 				<span class="connect-brand-name">NOOR</span>
@@ -885,7 +885,7 @@
 				<circle cx="384" cy="512" r="180"/>
 				<circle cx="384" cy="512" r="74"/>
 				<circle cx="640" cy="512" r="180"/>
-				<circle cx="640" cy="512" r="74"/>
+				<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
 			</g>
 		</svg>
 		<p>Checking setup…</p>
@@ -895,11 +895,11 @@
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">
-				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" aria-hidden="true">
+				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" aria-hidden="true">
 					<circle cx="384" cy="512" r="180"/>
 					<circle cx="384" cy="512" r="74"/>
 					<circle cx="640" cy="512" r="180"/>
-					<circle cx="640" cy="512" r="74"/>
+					<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
 				</svg>
 			</span>
 			<span class="mobile-brand-name">NOOR</span>
@@ -1358,12 +1358,12 @@
 			<span class="mobile-tab-label">Genres</span>
 		</a>
 		<a
-			href="/discover"
+			href="/discoverspace"
 			class="mobile-tab"
-			class:active={isNavItemActive('/discover')}
-			aria-current={isNavItemActive('/discover') ? 'page' : undefined}
+			class:active={isNavItemActive('/discoverspace')}
+			aria-current={isNavItemActive('/discoverspace') ? 'page' : undefined}
 		>
-			<span class="mobile-tab-icon">✦</span>
+			<span class="mobile-tab-icon">◈</span>
 			<span class="mobile-tab-label">Discover</span>
 		</a>
 		<button
