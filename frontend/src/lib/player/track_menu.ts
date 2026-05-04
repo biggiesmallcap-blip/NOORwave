@@ -2,7 +2,6 @@ import { goto } from '$app/navigation';
 import type { MenuItem } from '$lib/stores/context_menu';
 import {
 	addTrackToQueue,
-	clearQueue,
 	playAlbum,
 	playTrackNext,
 	removeTrackFromQueue,
@@ -152,13 +151,6 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 			}
 		});
 	}
-
-	items.push({
-		label: 'Clear all upcoming',
-		icon: '⌫',
-		danger: true,
-		onSelect: () => void clearQueue()
-	});
 
 	return items;
 }
