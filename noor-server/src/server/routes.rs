@@ -3619,6 +3619,10 @@ async fn radio_start(
 
     let (db, lastfm) = {
         let g = state.read().await;
+        // User-driven radio start; reset post-clear suppression so the
+        // freshly-built queue gets normal automix gating downstream.
+        g.user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
@@ -5593,6 +5597,13 @@ async fn play_track(
     }
 
     let previous_track_id = current_playback_track_id(&state).await;
+    // User-driven play; reset the post-clear suppression so automix
+    // re-engages naturally instead of waiting out the 60s window.
+    {
+        let g = state.read().await;
+        g.user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     let track = {
         let state_guard = state.read().await;
         state_guard
@@ -5767,8 +5778,10 @@ async fn play_track(
             g.event_tx.clone()
         };
         tokio::spawn(async move {
+            // play_track resets `user_cleared_at` to 0 above, so the
+            // suppression window cannot apply to this user-driven fill.
             let result = bg_db.with_conn(|conn| {
-                player::ensure_automix_queue_depth(conn, player::AUTOMIX_MIN_UPCOMING)
+                player::ensure_automix_queue_depth(conn, player::AUTOMIX_MIN_UPCOMING, false)
             });
             if result.is_ok() {
                 let _ = bg_tx.send(AppEvent::QueueUpdated);
@@ -6406,9 +6419,10 @@ async fn next_track(
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
         let state = state.read().await;
+        let cleared = recently_cleared(&state);
         state
             .db
-            .with_conn(|conn| player::next_track(conn))
+            .with_conn(|conn| player::next_track(conn, cleared))
             .map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -6437,7 +6451,8 @@ async fn next_track(
                     // Unresolvable: advance one more step to skip the dead row.
                     if let Ok(next_snapshot) = {
                         let s = state.read().await;
-                        s.db.with_conn(|conn| player::next_track(conn))
+                        let cleared = recently_cleared(&s);
+                        s.db.with_conn(|conn| player::next_track(conn, cleared))
                     } {
                         snapshot = next_snapshot;
                     }
@@ -6835,6 +6850,10 @@ async fn add_queue_track(
     Json(payload): Json<PlaybackTrackRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
+    // User-driven enqueue; clear the post-clear suppression window.
+    state
+        .user_cleared_at
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     state
         .db
         .with_conn(|conn| {
@@ -6943,6 +6962,17 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
             // existing consumers keep reading `queue`, new ones read
             // `playback_state`.
             let snapshot = player::load_snapshot(conn)?;
+            // Stamp now() so `ensure_automix_queue_depth` suppresses refill
+            // for ~60s; otherwise automix would immediately repopulate the
+            // queue and negate the user's manual clear (current_track is
+            // still set, which is the only gate the helper checks).
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            state
+                .user_cleared_at
+                .store(now_secs, std::sync::atomic::Ordering::Relaxed);
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
             Ok(Json(json!({
                 "queue": snapshot.queue,
@@ -8844,7 +8874,10 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
             return Ok(());
         }
 
-        let next = state_guard.db.with_conn(player::peek_next_track)?;
+        let cleared = recently_cleared(&state_guard);
+        let next = state_guard
+            .db
+            .with_conn(|conn| player::peek_next_track(conn, cleared))?;
         let handle = state_guard
             .playback_runtime
             .as_ref()
@@ -9011,6 +9044,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
 
     let snapshot = {
         let state_guard = state.read().await;
+        let cleared = recently_cleared(&state_guard);
         state_guard.db.with_conn(|conn| {
             let current_track_id = player::current_track_id(conn)?;
             let current_state = player::load_state(conn)?;
@@ -9018,7 +9052,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
                 return Ok(None);
             }
 
-            let snapshot = player::next_track(conn)?;
+            let snapshot = player::next_track(conn, cleared)?;
             Ok(Some(snapshot))
         })?
     };
@@ -9384,6 +9418,23 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
     }
 
     Ok(())
+}
+
+/// True when the user manually cleared the queue within the last 60 seconds.
+/// `ensure_automix_queue_depth` reads this so an immediately-following automix
+/// pass doesn't refill the queue and visually negate the user's clear.
+fn recently_cleared(state: &crate::AppState) -> bool {
+    let cleared_at = state
+        .user_cleared_at
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if cleared_at == 0 {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    now - cleared_at < 60
 }
 
 async fn current_playback_track_id(state: &SharedState) -> Option<i64> {
@@ -11845,6 +11896,7 @@ mod tests {
             lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             spotify_public_stats_enabled: false,
         }
     }

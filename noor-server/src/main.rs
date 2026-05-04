@@ -132,6 +132,12 @@ pub struct AppState {
     /// Lets `get_playback_state` return `is_playing: false` during the buffering phase
     /// so the frontend doesn't show a running counter with no audio.
     pub audio_active: Arc<AtomicBool>,
+    /// Epoch seconds of the most recent manual queue clear, or 0 if never.
+    /// Read by `ensure_automix_queue_depth` to suppress auto-refill for ~60s
+    /// after a user-initiated clear so the user doesn't see automix
+    /// instantly negate their action. Reset on any new user-driven play
+    /// (play_track, radio_start, etc.) so automix re-engages naturally.
+    pub user_cleared_at: Arc<std::sync::atomic::AtomicI64>,
     /// Public Spotify stats (anonymous GraphQL) toggle. Read once from
     /// `NOOR_SPOTIFY_PUBLIC_STATS` at startup. When false, the stats endpoint
     /// returns empty fields and never hits Spotify. The feature also requires
@@ -436,6 +442,7 @@ async fn main() -> Result<()> {
         lastfm_api_secret,
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),
+        user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         spotify_public_stats_enabled,
     }));
 

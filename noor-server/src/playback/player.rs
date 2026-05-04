@@ -623,7 +623,7 @@ pub fn set_crossfade_ms(conn: &Connection, crossfade_ms: i32) -> Result<()> {
     Ok(())
 }
 
-pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
+pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackSnapshot> {
     let repeat_mode: String = conn.query_row(
         "SELECT repeat_mode FROM playback_state WHERE id = 1",
         [],
@@ -635,7 +635,7 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING)?;
+    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING, recently_cleared)?;
     if queue_items.is_empty() {
         conn.execute(
             "UPDATE playback_state SET current_track_id = NULL, current_queue_item_id = NULL, is_playing = 0, position_ms = 0 WHERE id = 1",
@@ -792,14 +792,14 @@ pub fn current_track_id(conn: &Connection) -> Result<Option<i64>> {
 
 /// Returns the track that would play next **without** advancing the queue or
 /// mutating any playback state. Used for gapless pre-buffering.
-pub fn peek_next_track(conn: &Connection) -> Result<Option<Track>> {
+pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Option<Track>> {
     let (current_track_id, repeat_mode): (Option<i64>, String) = conn.query_row(
         "SELECT current_track_id, repeat_mode FROM playback_state WHERE id = 1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING)?;
+    let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING, recently_cleared)?;
     if queue_items.is_empty() {
         return Ok(None);
     }
@@ -884,11 +884,20 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
 pub fn ensure_automix_queue_depth(
     conn: &Connection,
     target_upcoming: usize,
+    recently_cleared: bool,
 ) -> Result<Vec<QueueItem>> {
     let state = load_state(conn)?;
     let queue_items = queue::load_queue(conn)?;
 
     if !state.automix_enabled || state.repeat_mode == "one" {
+        return Ok(queue_items);
+    }
+
+    // User just manually cleared the queue (within the suppression window);
+    // refilling now would instantly negate that action. Caller resets the
+    // window on any new user-driven play, so this only suppresses while the
+    // user is actively in the "I cleared, I'm done" state.
+    if recently_cleared {
         return Ok(queue_items);
     }
 
@@ -1727,7 +1736,7 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = next_track(&conn).unwrap();
+        let snapshot = next_track(&conn, false).unwrap();
 
         assert_eq!(snapshot.state.current_track.unwrap().id, 3);
         assert!(snapshot.queue.len() > 2);
@@ -1747,13 +1756,54 @@ mod tests {
         )
         .unwrap();
 
-        let next = peek_next_track(&conn)
+        let next = peek_next_track(&conn, false)
             .unwrap()
             .expect("generated automix track");
 
         assert_eq!(next.id, 3);
         let queue_items = queue::load_queue(&conn).unwrap();
         assert!(queue_items.len() > 2);
+    }
+
+    #[test]
+    fn ensure_automix_queue_depth_suppresses_refill_when_recently_cleared() {
+        // Same setup as `next_track_extends_queue_when_automix_is_enabled`:
+        // two tracks queued, automix on, current = 2. The non-suppressed
+        // refill path is already covered by that sibling test; here we
+        // verify the new gate alone — that with `recently_cleared = true`
+        // the helper short-circuits before any extension work and returns
+        // the existing queue unmodified.
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, position_ms = 0, is_playing = 1, automix_enabled = 1, shuffle_mode = 'off'
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        // Suppression on — must return the 2 existing items, never call the
+        // extension path (which would otherwise touch tables not present in
+        // this minimal test schema and panic).
+        let suppressed =
+            ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, true).unwrap();
+        assert_eq!(
+            suppressed.len(),
+            2,
+            "suppressed call must not extend the queue"
+        );
+        assert!(
+            !suppressed.iter().any(|item| item.source == "automix"),
+            "suppressed call must not append automix rows"
+        );
+        let stored = queue::load_queue(&conn).unwrap();
+        assert_eq!(
+            stored.len(),
+            2,
+            "DB queue must be untouched while suppressed"
+        );
     }
 
     #[test]
