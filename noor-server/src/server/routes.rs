@@ -6914,9 +6914,16 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                     queue::clear_queue(conn)?;
                 }
             }
-            let queue = queue::load_queue(conn)?;
+            // Return the full PlaybackSnapshot ({state, queue}) so the UI can
+            // refresh both at once — additive over the prior `{queue}` shape:
+            // existing consumers keep reading `queue`, new ones read
+            // `playback_state`.
+            let snapshot = player::load_snapshot(conn)?;
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": queue })))
+            Ok(Json(json!({
+                "queue": snapshot.queue,
+                "playback_state": snapshot.state,
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
