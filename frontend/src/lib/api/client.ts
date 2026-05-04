@@ -1242,8 +1242,8 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({
 				tidal_id: track.tidal_id,
-				title: track.title,
-				artist_name: track.artist_name,
+				title: track.title || 'Unknown title',
+				artist_name: track.artist_name || 'Unknown artist',
 				artist_tidal_id: track.artist_tidal_id ?? null,
 				album_title: track.album_title,
 				album_tidal_id: track.album_tidal_id ?? null,

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount, onDestroy } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
+  import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
   import {
     api,
     type SpotifyPlaylistDetail,
@@ -36,6 +37,8 @@
   let saving = $state(false);
   let saveResult = $state<string | null>(null);
   let saveErr = $state<string | null>(null);
+  let requestedSpotifyId = $state('');
+  let lazyArt = $state<Record<string, string>>({});
 
   // Lazy-tail status polling. Stops on full resolution, on hard timeout, or
   // when the user navigates away.
@@ -97,6 +100,7 @@
     pendingIds = [];
     saveResult = null;
     saveErr = null;
+    lazyArt = {};
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
@@ -118,15 +122,23 @@
     }
   }
 
-  onMount(() => {
-    void load(spotifyId);
-  });
-
   $effect(() => {
-    // Reload if the user navigates between two Spotify playlists.
-    if (detail && detail.spotifyId !== spotifyId) {
+    // Drive loading from the route param itself. This also recovers if an
+    // earlier load got stuck before `detail` was populated.
+    const id = spotifyId.trim();
+    if (!id) {
       clearPoll();
-      void load(spotifyId);
+      requestedSpotifyId = '';
+      detail = null;
+      pendingIds = [];
+      loading = false;
+      error = 'Missing Spotify playlist ID';
+      return;
+    }
+    if (id !== requestedSpotifyId) {
+      requestedSpotifyId = id;
+      clearPoll();
+      void load(id);
     }
   });
 
@@ -160,6 +172,7 @@
 
   function asTidalPlayable(t: SpotifyPlaylistTrack): TidalPlayable | null {
     if (!isPlayable(t) || !t.tidal.id) return null;
+    const artwork = artworkForTrack(t);
     return {
       tidal_id: t.tidal.id,
       title: t.title ?? '',
@@ -167,9 +180,22 @@
       artist_tidal_id: null,
       album_title: t.album ?? null,
       album_tidal_id: null,
-      artwork_url: t.thumbnail ?? null,
+      artwork_url: artwork,
       duration_ms: t.durationMs ?? null,
     };
+  }
+
+  function trackKey(t: SpotifyPlaylistTrack, i: number): string {
+    return `${t.spotifyId ?? 'missing'}:${i}`;
+  }
+
+  function artworkForTrack(t: SpotifyPlaylistTrack, i?: number): string | null {
+    if (t.thumbnail) return t.thumbnail;
+    if (i !== undefined) return lazyArt[trackKey(t, i)] ?? null;
+    if (!t.spotifyId) return null;
+    const prefix = `${t.spotifyId}:`;
+    const hit = Object.entries(lazyArt).find(([key]) => key.startsWith(prefix));
+    return hit?.[1] ?? null;
   }
 
   function playableSpotifyTracks(): SpotifyPlaylistTrack[] {
@@ -374,8 +400,10 @@
     </header>
 
     <ol class="tracks">
-      {#each detail.tracks as t, i (t.spotifyId ?? `idx:${i}`)}
+      {#each detail.tracks as t, i (`${t.spotifyId ?? 'missing'}:${i}`)}
         {@const playable = isPlayable(t)}
+        {@const rowKey = trackKey(t, i)}
+        {@const artwork = artworkForTrack(t, i)}
         <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -392,10 +420,15 @@
           onclick={() => void play(t)}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void play(t))}
           oncontextmenu={(e) => handleRowContextMenu(e, t)}
+          use:lazyTidalArt={{
+            enabled: !artwork && !!t.primaryArtist,
+            query: { artist: t.primaryArtist, title: t.title },
+            onResolve: (url) => (lazyArt[rowKey] = url),
+          }}
         >
           <span class="rank">{i + 1}</span>
-          {#if t.thumbnail}
-            <div class="thumb" style="background-image:url('{t.thumbnail}')"></div>
+          {#if artwork}
+            <div class="thumb" style="background-image:url('{artwork}')"></div>
           {:else}
             <div class="thumb fallback">♫</div>
           {/if}

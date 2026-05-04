@@ -177,7 +177,8 @@ export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
 		{
 			label: 'Song radio',
 			icon: '◉',
-			hint: 'Start from this song',
+			disabled: !playable,
+			hint: playable ? 'Start from this song' : playableLabel,
 			onSelect: () => void startTidalSongRadio(track),
 		},
 		SEPARATOR,
