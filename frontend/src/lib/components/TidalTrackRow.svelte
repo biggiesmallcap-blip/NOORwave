@@ -8,6 +8,7 @@
 		playTidalTrackNow
 	} from '$lib/stores/player';
 	import type { TidalPlayable } from '$lib/api/client';
+	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 
 	export type TidalTrackRowVariant = 'numbered' | 'indexed' | 'art' | 'compact';
 
@@ -35,7 +36,11 @@
 		onRowClick?: () => void;
 	} = $props();
 
+	const playable = $derived(canPlayTrack(track));
+	const playableLabel = $derived(getPlayableLabel(track));
+
 	function defaultClick() {
+		if (!playable) return;
 		void playTidalTrackNow(track);
 	}
 
@@ -67,11 +72,13 @@
 
 	function handlePlay(e: MouseEvent) {
 		e.stopPropagation();
+		if (!playable) return;
 		void playTidalTrackNow(track);
 	}
 
 	function handleAddToQueue(e: MouseEvent) {
 		e.stopPropagation();
+		if (!playable) return;
 		void addTidalTrackToQueue(track);
 	}
 
@@ -88,10 +95,12 @@
 	<li
 		class="track-row numbered"
 		class:active={isCurrent}
+		class:disabled={!playable}
 		role="button"
-		tabindex="0"
+		tabindex={playable ? 0 : -1}
+		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => void playTidalTrackNow(track)}
+		ondblclick={() => playable && void playTidalTrackNow(track)}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -116,13 +125,15 @@
 			<button
 				class="row-btn"
 				aria-label="Play {track.title}"
-				title="Play now"
+				title={playableLabel}
+				disabled={!playable}
 				onclick={handlePlay}
 			>▶</button>
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
@@ -146,10 +157,12 @@
 	<li
 		class="track-row indexed"
 		class:active={isCurrent}
+		class:disabled={!playable}
 		role="button"
-		tabindex="0"
+		tabindex={playable ? 0 : -1}
+		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => void playTidalTrackNow(track)}
+		ondblclick={() => playable && void playTidalTrackNow(track)}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -172,13 +185,15 @@
 			<button
 				class="row-btn"
 				aria-label="Play {track.title}"
-				title="Play now"
+				title={playableLabel}
+				disabled={!playable}
 				onclick={handlePlay}
 			>▶</button>
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
@@ -202,10 +217,12 @@
 	<li
 		class="track-row art"
 		class:active={isCurrent}
+		class:disabled={!playable}
 		role="button"
-		tabindex="0"
+		tabindex={playable ? 0 : -1}
+		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => void playTidalTrackNow(track)}
+		ondblclick={() => playable && void playTidalTrackNow(track)}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -227,13 +244,15 @@
 			<button
 				class="row-btn"
 				aria-label="Play {track.title}"
-				title="Play now"
+				title={playableLabel}
+				disabled={!playable}
 				onclick={handlePlay}
 			>▶</button>
 			<button
 				class="row-btn"
 				aria-label="Add to queue"
-				title="Add to queue"
+				title={playable ? 'Add to queue' : playableLabel}
+				disabled={!playable}
 				onclick={handleAddToQueue}
 			>＋</button>
 			<button
@@ -258,10 +277,12 @@
 	<li
 		class="track-row compact"
 		class:active={isCurrent}
+		class:disabled={!playable}
 		role="button"
-		tabindex="0"
+		tabindex={playable ? 0 : -1}
+		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => void playTidalTrackNow(track)}
+		ondblclick={() => playable && void playTidalTrackNow(track)}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -289,6 +310,10 @@
 	.track-row:hover { background: var(--bg-hover); }
 	.track-row.active { background: var(--accent-soft); }
 	.track-row.active .title { color: var(--accent-strong); }
+	.track-row.disabled {
+		cursor: default;
+		opacity: 0.62;
+	}
 
 	.track-row.numbered {
 		grid-template-columns: 32px 42px 1fr 60px auto;
@@ -458,5 +483,13 @@
 	.row-btn:hover {
 		background: var(--bg-hover);
 		color: var(--text-primary);
+	}
+	.row-btn:disabled {
+		cursor: not-allowed;
+		opacity: 0.45;
+	}
+	.row-btn:disabled:hover {
+		background: transparent;
+		color: var(--text-secondary);
 	}
 </style>

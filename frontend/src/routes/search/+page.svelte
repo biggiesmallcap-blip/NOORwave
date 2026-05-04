@@ -15,6 +15,7 @@
   import { parseIntent } from '$lib/search/intent'
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
+  import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -385,6 +386,14 @@
       })
     }
     return buildTidalTrackMenu(toPlayable(track))
+  }
+
+  function canPlaySearchTrack(track: TidalSearchTrack): boolean {
+    return canPlayTrack(toPlayable(track))
+  }
+
+  function playableSearchLabel(track: TidalSearchTrack): string {
+    return getPlayableLabel(toPlayable(track))
   }
 
   // ─── Keyboard navigation ────────────────────────────────────────────────
@@ -948,12 +957,14 @@
             <li
               class="track-row"
               class:cursor={cursor === idx}
+              class:disabled={!canPlaySearchTrack(track)}
               data-cursor-idx={idx}
               role="button"
-              tabindex="0"
-              onclick={() => void playTidalTrackNow(toPlayable(track))}
+              tabindex={canPlaySearchTrack(track) ? 0 : -1}
+              aria-disabled={!canPlaySearchTrack(track)}
+              onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
               onmouseenter={() => { cursor = idx }}
-              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void playTidalTrackNow(toPlayable(track)))}
+              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
             >
               {#if track.artwork_url}
@@ -998,14 +1009,16 @@
               <div class="row-actions">
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void playTidalTrackNow(toPlayable(track)) }}
-                  title="Play now"
+                  disabled={!canPlaySearchTrack(track)}
+                  onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)) }}
+                  title={playableSearchLabel(track)}
                   aria-label="Play {track.title}"
                 >▶</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); void addTidalTrackToQueue(toPlayable(track)) }}
-                  title="Add to queue"
+                  disabled={!canPlaySearchTrack(track)}
+                  onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void addTidalTrackToQueue(toPlayable(track)) }}
+                  title={canPlaySearchTrack(track) ? 'Add to queue' : playableSearchLabel(track)}
                   aria-label="Queue {track.title}"
                 >＋</button>
                 <button
@@ -1585,6 +1598,10 @@
     gap: 2px;
   }
   .track-row:hover { background: var(--bg-hover); }
+  .track-row.disabled {
+    cursor: default;
+    opacity: 0.62;
+  }
   .track-row.cursor {
     background: var(--bg-hover);
     box-shadow: inset 2px 0 0 var(--accent);
@@ -1641,6 +1658,11 @@
   }
   .track-row:hover .row-btn { opacity: 1; }
   .row-btn:hover { color: var(--text-primary); }
+  .row-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .row-btn:disabled:hover { color: var(--text-tertiary); }
   .discovery-section { opacity: 0.9; }
   .discovery-section .section-label { color: var(--text-muted); }
   .top-result-card.artist-hero {

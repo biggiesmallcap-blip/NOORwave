@@ -16,6 +16,7 @@ import {
 	startTidalSongRadio,
 } from '$lib/stores/player';
 import type { TidalPlayable } from '$lib/api/client';
+import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 
 // Narrow shape so the builder can accept a Track, a QueueItem.track, or a
 // DiscoveryRadioResult mapped through `mapRadioToMenuTrack`. We avoid a hard
@@ -163,15 +164,21 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 }
 
 export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
+	const playable = canPlayTrack(track);
+	const playableLabel = getPlayableLabel(track);
 	const items: MenuItem[] = [
 		{
 			label: 'Play next',
 			icon: '⤴',
+			disabled: !playable,
+			hint: playable ? undefined : playableLabel,
 			onSelect: () => void playTidalTrackNext(track),
 		},
 		{
 			label: 'Add to queue',
 			icon: '＋',
+			disabled: !playable,
+			hint: playable ? undefined : playableLabel,
 			onSelect: () => void addTidalTrackToQueue(track),
 		},
 		SEPARATOR,
@@ -205,6 +212,8 @@ export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
 	items.push({
 		label: 'Play now',
 		icon: '▶',
+		disabled: !playable,
+		hint: playable ? undefined : playableLabel,
 		onSelect: () => void playTidalTrackNow(track),
 	});
 
