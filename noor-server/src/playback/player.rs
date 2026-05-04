@@ -249,6 +249,10 @@ impl ActiveListenSession {
     }
 }
 
+/// Canonical "give me everything the UI needs to render the player" loader.
+/// Endpoints that mutate queue or playback_state should return this snapshot
+/// (or call back into it via `get_playback_state`) so the UI never has to
+/// stitch together partial responses. Returns `{state, queue}` together.
 pub fn load_snapshot(conn: &Connection) -> Result<PlaybackSnapshot> {
     let state = load_state(conn)?;
     let queue = queue::load_queue(conn)?;
