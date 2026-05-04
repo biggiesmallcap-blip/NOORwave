@@ -1,3 +1,4 @@
+pub mod radio_pipeline;
 pub mod routes;
 pub mod ws;
 

@@ -3585,6 +3585,8 @@ async fn radio_song(
         )
     })?;
 
+    // TODO(Task 12b): after frontend radio callers stop replacing this result
+    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
     Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
 }
 
@@ -3644,64 +3646,14 @@ async fn radio_start(
         )
     })?;
 
-    // Seed track leads the queue (matches the user's pick — like prepending it
-    // before recommendations). orchestrate_song already excludes the seed from
-    // its own results; the filter below is a defensive guard against duplicates.
-    let seed_id = payload.seed_track_id;
-    let (library_cands, pending_cands): (Vec<_>, Vec<_>) = radio_queue
-        .tracks
-        .into_iter()
-        .filter(|c| c.track_id != seed_id)
-        .partition(|c| c.is_in_library && c.track_id > 0);
-
     // Build queue atomically and collect pending row IDs for background tasks.
-    let (first_item, pending_item_ids) = db
+    let build = db
         .with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-
-            tx.execute("DELETE FROM queue", [])?;
-
-            let mut pos = 0i32;
-            tx.execute(
-                "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', NULL)",
-                rusqlite::params![seed_id, pos],
-            )?;
-            pos += 1;
-            for c in &library_cands {
-                tx.execute(
-                    "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', ?3)",
-                    rusqlite::params![c.track_id, pos, c.reason],
-                )?;
-                pos += 1;
-            }
-            for c in &pending_cands {
-                tx.execute(
-                    "INSERT INTO queue (track_id, position, source, reason,
-                                        pending_artist, pending_title, pending_at)
-                     VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'))",
-                    rusqlite::params![pos, c.reason, c.artist_name, c.title],
-                )?;
-                pos += 1;
-            }
-
-            tx.commit()?;
-
-            let first: Option<(i64, Option<i64>)> = conn
-                .query_row(
-                    "SELECT id, track_id FROM queue ORDER BY position ASC LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-
-            let pending_ids: Vec<i64> = conn
-                .prepare(
-                    "SELECT id FROM queue WHERE track_id IS NULL AND pending_at IS NOT NULL",
-                )?
-                .query_map([], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-
-            Ok((first, pending_ids))
+            Ok(crate::server::radio_pipeline::build_radio_queue_from_candidates(
+                conn,
+                payload.seed_track_id,
+                radio_queue.tracks,
+            )?)
         })
         .map_err(|e| {
             tracing::error!("radio_start: queue build failed: {e}");
@@ -3710,6 +3662,8 @@ async fn radio_start(
                 Json(json!({ "error": "failed to build queue" })),
             )
         })?;
+    let first_item = build.first_item;
+    let pending_item_ids = build.pending_item_ids;
 
     let first_playable = match first_item {
         Some((queue_item_id, Some(track_id))) => json!({
@@ -3812,6 +3766,8 @@ async fn radio_album(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // TODO(Task 12b): after frontend radio callers stop replacing this result
+    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
     Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
 }
 
@@ -3854,6 +3810,8 @@ async fn radio_artist(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // TODO(Task 12b): after frontend radio callers stop replacing this result
+    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
     Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
 }
 
