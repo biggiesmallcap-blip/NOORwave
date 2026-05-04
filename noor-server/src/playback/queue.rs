@@ -335,31 +335,63 @@ pub fn apply_shuffle(
         return Ok(queue_items);
     }
 
-    let mut locked_prefix = Vec::new();
-    let mut candidates = Vec::new();
-    // Use queue item id for split so pending rows (track.id == 0) are found correctly.
-    let split_index = current_queue_item_id.and_then(|qid| {
-        queue_items
-            .iter()
-            .position(|item| item.id == qid)
-            .map(|idx| idx + 1)
-    });
+    let split_index = current_queue_item_id
+        .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
 
-    for (idx, item) in queue_items.iter().cloned().enumerate() {
-        if split_index.is_some_and(|split| idx < split) {
-            locked_prefix.push(item.track);
-        } else {
-            candidates.push(item.track);
+    let locked_qids: Vec<i64> = queue_items[..split_index].iter().map(|i| i.id).collect();
+    let candidate_tracks: Vec<Track> = queue_items[split_index..]
+        .iter()
+        .map(|i| i.track.clone())
+        .collect();
+
+    let reordered_tracks = reorder_tracks(conn, &candidate_tracks, mode)?;
+
+    // Map shuffled tracks back to queue item IDs. Pending rows all share
+    // `track.id == 0`, so we route by track.id with a per-id FIFO of qids:
+    // the i-th pending row in the shuffled output gets the i-th pending
+    // qid from the candidate region. Library rows use the same machinery
+    // and handle the rare duplicate-track-id case as a side-effect.
+    use std::collections::VecDeque;
+    let mut qid_buckets: HashMap<i64, VecDeque<i64>> = HashMap::new();
+    for item in &queue_items[split_index..] {
+        qid_buckets
+            .entry(item.track.id)
+            .or_insert_with(VecDeque::new)
+            .push_back(item.id);
+    }
+    let mut shuffled_qids: Vec<i64> = Vec::with_capacity(reordered_tracks.len());
+    for t in &reordered_tracks {
+        if let Some(bucket) = qid_buckets.get_mut(&t.id) {
+            if let Some(qid) = bucket.pop_front() {
+                shuffled_qids.push(qid);
+            }
+        }
+    }
+    // Defensive: if reorder_tracks dropped any rows (it shouldn't), append
+    // remaining qids in their original order so the queue stays intact.
+    for (_id, bucket) in qid_buckets.iter_mut() {
+        while let Some(qid) = bucket.pop_front() {
+            shuffled_qids.push(qid);
         }
     }
 
-    let reordered = reorder_tracks(conn, &candidates, mode)?;
-    let final_tracks = locked_prefix
+    let final_qids: Vec<i64> = locked_qids
         .into_iter()
-        .chain(reordered)
-        .collect::<Vec<_>>();
+        .chain(shuffled_qids.into_iter())
+        .collect();
 
-    replace_queue(conn, &final_tracks, "playback")
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE queue SET position = ?1 WHERE id = ?2")?;
+        for (idx, qid) in final_qids.iter().enumerate() {
+            stmt.execute(params![idx as i32, qid])?;
+        }
+    }
+    tx.commit()?;
+
+    load_queue(conn)
 }
 
 fn reorder_tracks(conn: &Connection, tracks: &[Track], mode: ShuffleMode) -> Result<Vec<Track>> {
@@ -828,6 +860,69 @@ mod tests {
         assert_eq!(rows[0].track.title, "Track 1");
         assert!(!rows[0].is_pending);
         assert_eq!(rows[0].reason.as_deref(), Some("seeded"));
+    }
+
+    #[test]
+    fn apply_shuffle_preserves_pending_artist_title() {
+        let conn = conn();
+
+        // Seed: track 1 as current (locked prefix), then three pending rows.
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+            [],
+        )
+        .unwrap();
+        for (idx, (artist, title)) in [
+            ("Aphex Twin", "Xtal"),
+            ("Boards of Canada", "Roygbiv"),
+            ("Plaid", "Itsu"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, pending_artist, pending_title, pending_at)
+                 VALUES (NULL, ?1, 'radio_pending', ?2, ?3, datetime('now'))",
+                params![(idx as i32) + 1, artist, title],
+            )
+            .unwrap();
+        }
+        let q_before = load_queue(&conn).unwrap();
+        let current_qid = q_before[0].id;
+
+        // True shuffle the candidates (pending rows). Several runs because
+        // the shuffle may permute to the same order by chance — we assert
+        // the metadata invariant on every run.
+        for _ in 0..10 {
+            apply_shuffle(&conn, ShuffleMode::True, Some(current_qid)).unwrap();
+            let q_after = load_queue(&conn).unwrap();
+
+            assert_eq!(q_after.len(), 4);
+            // Locked prefix (current) is unchanged.
+            assert_eq!(q_after[0].id, current_qid);
+            assert_eq!(q_after[0].track.id, 1);
+
+            // Every pending row still carries its artist + title — the bug
+            // before was that they all blanked out after shuffle.
+            let pending_titles: Vec<String> = q_after[1..]
+                .iter()
+                .map(|item| item.track.title.clone())
+                .collect();
+            for title in ["Xtal", "Roygbiv", "Itsu"] {
+                assert!(
+                    pending_titles.iter().any(|t| t == title),
+                    "pending title {title:?} disappeared from queue after shuffle: {pending_titles:?}",
+                );
+            }
+            for item in &q_after[1..] {
+                assert!(item.is_pending);
+                assert!(item.track.artist_name.as_ref().is_some_and(|a| !a.is_empty()));
+            }
+            // Positions stay contiguous.
+            for (idx, item) in q_after.iter().enumerate() {
+                assert_eq!(item.position, idx as i32);
+            }
+        }
     }
 
     #[test]
