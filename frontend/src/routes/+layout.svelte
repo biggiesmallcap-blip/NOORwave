@@ -813,12 +813,7 @@
 		<div class="connect-panel glass-panel">
 			<div class="connect-brand">
 				<span class="connect-brand-mark">
-					<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" aria-hidden="true">
-						<circle cx="384" cy="512" r="180"/>
-						<circle cx="384" cy="512" r="74"/>
-						<circle cx="640" cy="512" r="180"/>
-						<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
-					</svg>
+					<img src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
 				</span>
 				<span class="connect-brand-name">NOOR</span>
 			</div>
@@ -879,15 +874,7 @@
 	{@render children()}
 {:else if authReady && !onboardingChecked}
 	<div class="onboarding-check">
-		<svg class="check-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true">
-			<rect width="1024" height="1024" rx="224" fill="#0B1220"/>
-			<g fill="none" stroke="#FFFFFF" stroke-width="14">
-				<circle cx="384" cy="512" r="180"/>
-				<circle cx="384" cy="512" r="74"/>
-				<circle cx="640" cy="512" r="180"/>
-				<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
-			</g>
-		</svg>
+		<img class="check-mark" src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
 		<p>Checking setup…</p>
 	</div>
 {:else}
@@ -895,12 +882,7 @@
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">
-				<svg viewBox="184 292 656 440" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" aria-hidden="true">
-					<circle cx="384" cy="512" r="180"/>
-					<circle cx="384" cy="512" r="74"/>
-					<circle cx="640" cy="512" r="180"/>
-					<path d="M 520 512 Q 580 412 640 512 T 760 512"/>
-				</svg>
+				<img src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
 			</span>
 			<span class="mobile-brand-name">NOOR</span>
 		</a>
@@ -1623,8 +1605,9 @@
 		z-index: 50;
 	}
 	.onboarding-check .check-mark {
-		width: 72px;
+		width: 144px;
 		height: 72px;
+		object-fit: contain;
 		opacity: 0.85;
 		animation: noor-check-pulse 1.8s ease-in-out infinite;
 	}
@@ -2897,20 +2880,17 @@
 		}
 
 		.mobile-brand-mark {
-			width: 28px;
+			width: 56px;
 			height: 28px;
-			border-radius: 8px;
-			background: var(--accent-soft);
-			border: 1px solid var(--accent-line);
-			color: var(--accent-strong);
 			display: grid;
 			place-items: center;
 			flex-shrink: 0;
 		}
 
-		.mobile-brand-mark svg {
-			width: 70%;
-			height: 70%;
+		.mobile-brand-mark img {
+			width: 100%;
+			height: 100%;
+			object-fit: contain;
 		}
 
 		.mobile-brand-name {
@@ -3483,19 +3463,17 @@
 	}
 
 	.connect-brand-mark {
-		width: 36px;
+		width: 72px;
 		height: 36px;
-		border-radius: 10px;
-		background: linear-gradient(135deg, #7c80ff, #b06aff);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: white;
 	}
 
-	.connect-brand-mark svg {
-		width: 70%;
-		height: 70%;
+	.connect-brand-mark img {
+		width: 100%;
+		height: 100%;
+		object-fit: contain;
 	}
 
 	.connect-brand-name {
