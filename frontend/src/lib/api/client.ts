@@ -146,6 +146,211 @@ export interface TidalSearchResults {
 	artists: TidalSearchArtist[];
 }
 
+/**
+ * Compact Spotify-playlist search result. Powers the Spotify section of
+ * /search and Ctrl+K. Click navigates to the ephemeral /spotify-playlist/{id}
+ * view, which fetches the full track listing and bulk-resolves to TIDAL.
+ */
+export interface SpotifyPlaylistSearchItem {
+	spotifyId: string;
+	title: string | null;
+	description: string | null;
+	thumbnail: string | null;
+	owner: string | null;
+	followers: number | null;
+	totalTracks: number | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+function pickString(obj: Record<string, unknown>, keys: string[]): string | null {
+	for (const key of keys) {
+		const value = obj[key];
+		if (typeof value === 'string' && value.trim()) return value;
+	}
+	return null;
+}
+
+function pickNumber(obj: Record<string, unknown>, keys: string[]): number | null {
+	for (const key of keys) {
+		const value = obj[key];
+		if (typeof value === 'number' && Number.isFinite(value)) return value;
+		if (typeof value === 'string') {
+			const parsed = Number(value);
+			if (Number.isFinite(parsed)) return parsed;
+		}
+	}
+	return null;
+}
+
+function pickBoolean(obj: Record<string, unknown>, keys: string[]): boolean | null {
+	for (const key of keys) {
+		const value = obj[key];
+		if (typeof value === 'boolean') return value;
+	}
+	return null;
+}
+
+function pickArray(obj: Record<string, unknown>, keys: string[]): unknown[] {
+	for (const key of keys) {
+		const value = obj[key];
+		if (Array.isArray(value)) return value;
+		const nested = asRecord(value);
+		if (nested && Array.isArray(nested.items)) return nested.items;
+	}
+	return [];
+}
+
+function playlistOwnerName(value: unknown): string | null {
+	if (typeof value === 'string' && value.trim()) return value;
+	const owner = asRecord(value);
+	return owner ? pickString(owner, ['display_name', 'displayName', 'name']) : null;
+}
+
+function normalizeSpotifyPlaylistSearchItem(raw: unknown): SpotifyPlaylistSearchItem | null {
+	const item = asRecord(raw);
+	if (!item) return null;
+	const spotifyId = pickString(item, ['spotifyId', 'spotify_id', 'id']);
+	if (!spotifyId) return null;
+	return {
+		spotifyId,
+		title: pickString(item, ['title', 'name']),
+		description: pickString(item, ['description']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		owner: playlistOwnerName(item.owner),
+		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
+		totalTracks: pickNumber(item, ['totalTracks', 'total_tracks', 'track_count', 'trackCount']),
+	};
+}
+
+function normalizeSpotifyTidalState(raw: unknown): SpotifyTidalState {
+	const item = asRecord(raw) ?? {};
+	const status = pickString(item, ['status']);
+	const allowed = ['pending', 'resolved', 'low_confidence', 'unresolved', 'error'] as const;
+	const normalizedStatus = allowed.includes(status as (typeof allowed)[number])
+		? (status as SpotifyTidalState['status'])
+		: 'pending';
+	return {
+		status: normalizedStatus,
+		id: pickNumber(item, ['id', 'tidal_id', 'tidalId']),
+		confidence: pickNumber(item, ['confidence']) ?? 0,
+		matchReason: pickString(item, ['matchReason', 'match_reason']),
+		fromCache: pickBoolean(item, ['fromCache', 'from_cache']) ?? false,
+	};
+}
+
+function normalizeArtistRefs(raw: unknown): { id: string | null; name: string | null }[] {
+	return Array.isArray(raw)
+		? raw
+				.map(asRecord)
+				.filter((artist): artist is Record<string, unknown> => artist !== null)
+				.map((artist) => ({
+					id: pickString(artist, ['id', 'spotifyId', 'spotify_id']),
+					name: pickString(artist, ['name']),
+				}))
+		: [];
+}
+
+function normalizeSpotifyPlaylistTrack(raw: unknown): SpotifyPlaylistTrack | null {
+	const item = asRecord(raw);
+	if (!item) return null;
+	return {
+		source: 'spotify',
+		spotifyId: pickString(item, ['spotifyId', 'spotify_id', 'id']),
+		type: 'track',
+		title: pickString(item, ['title', 'name']),
+		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
+		artists: normalizeArtistRefs(item.artists),
+		album: pickString(item, ['album', 'album_title', 'albumTitle']),
+		albumId: pickString(item, ['albumId', 'album_id']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		durationMs: pickNumber(item, ['durationMs', 'duration_ms']),
+		releaseDate: pickString(item, ['releaseDate', 'release_date']),
+		explicit: pickBoolean(item, ['explicit']),
+		trackNumber: pickNumber(item, ['trackNumber', 'track_number']),
+		discNumber: pickNumber(item, ['discNumber', 'disc_number']),
+		spotifyUrl: pickString(item, ['spotifyUrl', 'spotify_url', 'url']),
+		previewUrl: pickString(item, ['previewUrl', 'preview_url']),
+		playcount: pickNumber(item, ['playcount', 'play_count', 'playCount']),
+		popularity: pickNumber(item, ['popularity']),
+		isrc: pickString(item, ['isrc']),
+		tidal: normalizeSpotifyTidalState(item.tidal),
+	};
+}
+
+function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		source: 'spotify',
+		spotifyId: pickString(item, ['spotifyId', 'spotify_id', 'id']),
+		type: 'playlist',
+		title: pickString(item, ['title', 'name']),
+		description: pickString(item, ['description']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		owner: playlistOwnerName(item.owner),
+		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
+		totalTracks: pickNumber(item, ['totalTracks', 'total_tracks', 'track_count', 'trackCount']),
+		snapshotId: pickString(item, ['snapshotId', 'snapshot_id']),
+		tracks: pickArray(item, ['tracks', 'items'])
+			.map(normalizeSpotifyPlaylistTrack)
+			.filter((track): track is SpotifyPlaylistTrack => track !== null),
+	};
+}
+
+export interface SpotifyTidalState {
+	status: 'pending' | 'resolved' | 'low_confidence' | 'unresolved' | 'error';
+	id: number | null;
+	confidence: number;
+	matchReason: string | null;
+	fromCache: boolean;
+}
+
+export interface SpotifyPlaylistTrack {
+	source: 'spotify';
+	spotifyId: string | null;
+	type: 'track';
+	title: string | null;
+	primaryArtist: string | null;
+	artists: { id: string | null; name: string | null }[];
+	album: string | null;
+	albumId: string | null;
+	thumbnail: string | null;
+	durationMs: number | null;
+	releaseDate: string | null;
+	explicit: boolean | null;
+	trackNumber: number | null;
+	discNumber: number | null;
+	spotifyUrl: string | null;
+	previewUrl: string | null;
+	playcount: number | null;
+	popularity: number | null;
+	isrc: string | null;
+	tidal: SpotifyTidalState;
+}
+
+export interface SpotifyPlaylistDetail {
+	source: 'spotify';
+	spotifyId: string | null;
+	type: 'playlist';
+	title: string | null;
+	description: string | null;
+	thumbnail: string | null;
+	owner: string | null;
+	followers: number | null;
+	totalTracks: number | null;
+	snapshotId: string | null;
+	tracks: SpotifyPlaylistTrack[];
+}
+
+export interface ResolveStatusEntry {
+	spotifyId: string;
+	tidal: SpotifyTidalState;
+}
+
 export interface TidalArtistProfile {
 	artist_name: string | null;
 	top_tracks: TidalDiscographyTrack[];
@@ -1123,12 +1328,106 @@ export const api = {
 		});
 	},
 
-	searchTidalPlaylists(q: string, signal?: AbortSignal) {
+	searchTidalPlaylists(q: string, signal?: AbortSignal, opts?: { limit?: number; offset?: number }) {
+		const limit = opts?.limit ?? 20;
+		const offset = opts?.offset ?? 0;
 		return fetchApi<{ playlists: TidalSearchPlaylist[] }>(
-			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}`,
+			`/api/tidal/playlists/search?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`,
 			undefined,
 			{ signal },
 		);
+	},
+
+	/**
+	 * Search Spotify (via the Sportify proxy) for playlists. Best-effort —
+	 * the caller should swallow errors so a Sportify outage never breaks
+	 * /search or Ctrl+K rendering.
+	 */
+	/**
+	 * Fetch a Spotify-sourced playlist's full metadata + track list, with
+	 * each track stamped with its current TIDAL resolution state.
+	 */
+	getSpotifyPlaylist(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<{ playlist: SpotifyPlaylistDetail; pendingSpotifyIds: string[] }> {
+		return fetchApi<{ playlist?: unknown; pendingSpotifyIds?: unknown; pending_spotify_ids?: unknown }>(
+			`/api/discovery/sportify/playlist/${encodeURIComponent(spotifyId)}`,
+			undefined,
+			{ signal },
+		).then((res) => ({
+			playlist: normalizeSpotifyPlaylistDetail(res.playlist),
+			pendingSpotifyIds: [
+				...(Array.isArray(res.pendingSpotifyIds) ? res.pendingSpotifyIds : []),
+				...(Array.isArray(res.pending_spotify_ids) ? res.pending_spotify_ids : []),
+			].filter((id): id is string => typeof id === 'string' && id.length > 0),
+		}));
+	},
+
+	/**
+	 * Cache-only resolution status poll. Used by the ephemeral playlist view
+	 * to fill in lazy-tail tracks as the background resolver finishes them.
+	 */
+	getResolveTidalStatus(
+		spotifyIds: string[],
+		signal?: AbortSignal,
+	): Promise<{ entries: ResolveStatusEntry[] }> {
+		return fetchApi<{ entries: ResolveStatusEntry[] }>(
+			`/api/resolve/tidal/status`,
+			{ spotify_ids: spotifyIds.join(',') },
+			{ signal },
+		);
+	},
+
+	/**
+	 * Save the ephemeral Spotify playlist into the user's library. Imports
+	 * each resolved TIDAL track and creates a noor playlist; unresolved
+	 * rows are skipped (counts come back in the response).
+	 */
+	saveSpotifyPlaylist(spotifyId: string, name?: string) {
+		return fetchApi<{
+			playlist: Playlist;
+			added: number;
+			totalTracks: number;
+			resolvedCount: number;
+			unresolvedCount: number;
+			importFailures: number;
+		}>(`/api/spotify-playlist/save`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_id: spotifyId, name }),
+		});
+	},
+
+	async searchSpotifyPlaylists(
+		q: string,
+		limit = 12,
+		signal?: AbortSignal,
+		offset = 0,
+	): Promise<SpotifyPlaylistSearchItem[]> {
+		type Resp = { playlists?: unknown[]; spotify_playlists?: unknown[] };
+		const fromResponse = (res: Resp) =>
+			[...(res.playlists ?? []), ...(res.spotify_playlists ?? [])]
+				.map(normalizeSpotifyPlaylistSearchItem)
+				.filter((item): item is SpotifyPlaylistSearchItem => item !== null);
+
+		try {
+			const res = await fetchApi<Resp>(
+				`/api/discovery/sportify/search`,
+				{ q, type: 'playlist', limit: String(limit), offset: String(offset) },
+				{ signal },
+			);
+			const playlists = fromResponse(res);
+			if (playlists.length > 0 || offset > 0) return playlists;
+		} catch (error) {
+			if (signal?.aborted) throw error;
+		}
+
+		const fallback = await fetchApi<Resp>(
+			'/api/search',
+			{ q, limit: String(limit) },
+			{ signal },
+		);
+		return fromResponse(fallback);
 	},
 
 	getTidalPlaylistTracks(tidalUuid: string) {
@@ -1544,10 +1843,24 @@ export const api = {
 		});
 	},
 
+	queuePlayNextMany(items: QueueExternalRequest[]) {
+		return fetchApi<{ queue: QueueItem[] }>('/api/queue/play_next_many', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ items }),
+		});
+	},
+
 	queueAppend(req: QueueExternalRequest) {
 		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append', undefined, {
 			method: 'POST',
 			body: JSON.stringify(req),
+		});
+	},
+
+	queueAppendMany(items: QueueExternalRequest[]) {
+		return fetchApi<{ queue: QueueItem[] }>('/api/queue/append_many', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ items }),
 		});
 	},
 
@@ -1775,8 +2088,12 @@ export const api = {
 		});
 	},
 
-	searchTidal(q: string, limit = 20, signal?: AbortSignal): Promise<TidalSearchResults> {
-		return fetchApi<TidalSearchResults>('/api/tidal/search', { q, limit: String(limit) }, { signal });
+	searchTidal(q: string, limit = 20, signal?: AbortSignal, offset = 0): Promise<TidalSearchResults> {
+		return fetchApi<TidalSearchResults>(
+			'/api/tidal/search',
+			{ q, limit: String(limit), offset: String(offset) },
+			{ signal },
+		);
 	},
 
 	playTidalTrack(track: TidalPlayable): Promise<void> {

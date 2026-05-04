@@ -146,6 +146,13 @@ pub struct AppState {
     /// the `spotify-public` cargo feature; without it the env var is ignored
     /// and we log one warning at startup.
     pub spotify_public_stats_enabled: bool,
+    /// Sportify (anonymous Spotify metadata proxy) client used by the
+    /// `/api/discovery/sportify/*` discovery routes. Constructed once at boot.
+    pub sportify_client: Option<Arc<services::sportify::SportifyClient>>,
+    /// Cache TTL config for Sportify metadata + TIDAL resolution maps.
+    pub sportify_cache_config: services::sportify::cache::SportifyCacheConfig,
+    /// Eager-first-N + lazy-rest tunables for discovery list endpoints.
+    pub sportify_resolve_config: services::sportify::cache::SportifyResolveConfig,
 }
 
 /// Events broadcast across the application
@@ -208,6 +215,24 @@ pub enum AppEvent {
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
+
+/// Read an env var holding a number of days; fall back to `default` on
+/// missing or unparseable input. Returns the value in whole days as `i64`.
+fn parse_days_env(var: &str, default: i64) -> i64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(default)
+}
+
+fn parse_usize_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
 
 fn resolve_bind_addr(db: &db::Database) -> String {
     // NOOR_ADDR env var always wins (power-user override)
@@ -352,6 +377,46 @@ async fn main() -> Result<()> {
         info!("Last.fm scrobbling disabled (set LASTFM_API_SECRET to enable)");
     }
 
+    // Sportify (anonymous Spotify metadata proxy) — powers /discover. Default
+    // base URL ships in code; env var lets ops point at a self-hosted mirror.
+    let sportify_base_url = std::env::var("SPORTIFY_API_BASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://sportify.xcasper.space".to_string());
+    let sportify_client = match services::sportify::SportifyClient::new(
+        services::sportify::SportifyClientConfig {
+            base_url: sportify_base_url.clone(),
+            user_agent: format!(
+                "noor-server/{} (sportify discovery)",
+                env!("CARGO_PKG_VERSION")
+            ),
+        },
+    ) {
+        Ok(client) => {
+            info!("Sportify discovery client ready ({})", sportify_base_url);
+            Some(Arc::new(client))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to construct Sportify client: {}; /discover will be degraded", e);
+            None
+        }
+    };
+    let sportify_cache_config = services::sportify::cache::SportifyCacheConfig {
+        meta_ttl_secs: parse_days_env("DISCOVERY_CACHE_TTL_DAYS", 30) * 86_400,
+        resolve_ttl_secs: parse_days_env("RESOLVE_CACHE_TTL_DAYS", 30) * 86_400,
+        unresolved_retry_after_secs: parse_days_env("RESOLVE_RETRY_AFTER_DAYS", 7) * 86_400,
+    };
+    let sportify_resolve_config = services::sportify::cache::SportifyResolveConfig {
+        eager_n: parse_usize_env(
+            "RESOLVE_EAGER_N",
+            services::sportify::cache::DEFAULT_EAGER_N,
+        ),
+        bulk_concurrency: parse_usize_env(
+            "RESOLVE_BULK_CONCURRENCY",
+            services::sportify::cache::DEFAULT_BULK_CONCURRENCY,
+        ),
+    };
+
     // Event bus for real-time state sync
     let (event_tx, _) = broadcast::channel(256);
 
@@ -446,6 +511,9 @@ async fn main() -> Result<()> {
         audio_active: Arc::new(AtomicBool::new(false)),
         user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         spotify_public_stats_enabled,
+        sportify_client,
+        sportify_cache_config,
+        sportify_resolve_config,
     }));
 
     // Check for auto-sync daily services and trigger sync if needed

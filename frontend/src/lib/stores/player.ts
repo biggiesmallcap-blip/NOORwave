@@ -930,6 +930,33 @@ function tidalQueueRequest(track: TidalPlayable) {
 	};
 }
 
+function setOptimisticTidalTrack(track: TidalPlayable) {
+	currentTrack.set({
+		id: -track.tidal_id,
+		title: track.title,
+		artist_id: -1,
+		artist_name: track.artist_name,
+		artist_tidal_id: track.artist_tidal_id ?? null,
+		album_id: null,
+		album_title: track.album_title,
+		disc_number: null,
+		track_number: null,
+		duration_ms: track.duration_ms,
+		isrc: null,
+		tidal_id: track.tidal_id,
+		best_quality: 'LOSSLESS',
+		best_source: 'tidal',
+		fidelity_score: 0,
+		is_favorite: false,
+		play_count: 0,
+		last_played_at: null,
+		date_added: null,
+		source: 'tidal_ephemeral',
+		artwork_url: track.artwork_url,
+	});
+	isPlaying.set(true);
+}
+
 export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
 	playerError.set(null);
 	try {
@@ -942,6 +969,47 @@ export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
 	}
 }
 
+export async function playTidalTracksNow(tracks: TidalPlayable[], label = 'playlist'): Promise<void> {
+	if (!assertOnline()) return;
+	const playable = tracks.filter((track) => track.tidal_id > 0);
+	if (!playable.length) {
+		showToast('No playable tracks ready yet', 'info');
+		return;
+	}
+	playerError.set(null);
+	try {
+		setOptimisticTidalTrack(playable[0]);
+		await api.playTidalMix(playable);
+		noteSuccess();
+		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
+	} catch (error) {
+		setError('play those Tidal tracks', error, () => playTidalTracksNow(tracks, label));
+		showToast('Playback failed', 'error');
+	}
+}
+
+export async function shuffleTidalTracksNow(tracks: TidalPlayable[], label = 'playlist'): Promise<void> {
+	const shuffled = shuffleArray(tracks);
+	await playTidalTracksNow(shuffled, label);
+}
+
+export async function playTidalTracksNext(tracks: TidalPlayable[]): Promise<void> {
+	const playable = tracks.filter((track) => track.tidal_id > 0);
+	if (!playable.length) {
+		showToast('No playable tracks ready yet', 'info');
+		return;
+	}
+	playerError.set(null);
+	try {
+		const result = await api.queuePlayNextMany(playable.map(tidalQueueRequest));
+		playbackQueue.set(result.queue);
+		noteSuccess();
+		showToast(`Queued next: ${playable.length} tracks`, 'success');
+	} catch (error) {
+		setError('queue those Tidal tracks next', error, () => playTidalTracksNext(tracks));
+	}
+}
+
 export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> {
 	playerError.set(null);
 	try {
@@ -951,6 +1019,23 @@ export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> 
 		showToast(`Added to queue: ${trackLabel(track)}`, 'success');
 	} catch (error) {
 		setError('add that Tidal track to queue', error, () => addTidalTrackToQueue(track));
+	}
+}
+
+export async function addTidalTracksToQueue(tracks: TidalPlayable[]): Promise<void> {
+	const playable = tracks.filter((track) => track.tidal_id > 0);
+	if (!playable.length) {
+		showToast('No playable tracks ready yet', 'info');
+		return;
+	}
+	playerError.set(null);
+	try {
+		const result = await api.queueAppendMany(playable.map(tidalQueueRequest));
+		playbackQueue.set(result.queue);
+		noteSuccess();
+		showToast(`Added to queue: ${playable.length} tracks`, 'success');
+	} catch (error) {
+		setError('add those Tidal tracks to queue', error, () => addTidalTracksToQueue(tracks));
 	}
 }
 

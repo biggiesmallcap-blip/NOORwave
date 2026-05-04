@@ -32,6 +32,8 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_028,
     MIGRATION_029,
     MIGRATION_030,
+    MIGRATION_031,
+    MIGRATION_032,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -816,6 +818,97 @@ CREATE TABLE IF NOT EXISTS spotify_null_cache (
 // Existing rows have NULL; resolver falls back to artist+title search.
 const MIGRATION_030: &str = r#"
 ALTER TABLE queue ADD COLUMN tidal_id_hint INTEGER;
+"#;
+
+// Sportify (anonymous Spotify metadata proxy) discovery layer.
+// Four metadata caches keyed on Spotify IDs, plus the Spotify->TIDAL
+// resolution map and its negative-cache twin, plus a search-result cache.
+// World playcounts and monthly listeners go into the existing
+// spotify_track_stats / spotify_artist_stats tables (MIGRATION_029) — no
+// parallel sportify_*_stats tables, so the legacy artist page benefits too.
+const MIGRATION_031: &str = r#"
+CREATE TABLE IF NOT EXISTS sportify_track_meta (
+    spotify_track_id TEXT PRIMARY KEY,
+    payload          TEXT NOT NULL,
+    fetched_at       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_track_meta_fetched_at
+    ON sportify_track_meta(fetched_at);
+
+CREATE TABLE IF NOT EXISTS sportify_album_meta (
+    spotify_album_id TEXT PRIMARY KEY,
+    payload          TEXT NOT NULL,
+    fetched_at       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_album_meta_fetched_at
+    ON sportify_album_meta(fetched_at);
+
+CREATE TABLE IF NOT EXISTS sportify_artist_meta (
+    spotify_artist_id TEXT PRIMARY KEY,
+    payload           TEXT NOT NULL,
+    fetched_at        INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_artist_meta_fetched_at
+    ON sportify_artist_meta(fetched_at);
+
+CREATE TABLE IF NOT EXISTS sportify_playlist_meta (
+    spotify_playlist_id TEXT PRIMARY KEY,
+    payload             TEXT NOT NULL,
+    snapshot_id         TEXT,
+    fetched_at          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_playlist_meta_fetched_at
+    ON sportify_playlist_meta(fetched_at);
+
+CREATE TABLE IF NOT EXISTS sportify_track_map (
+    spotify_track_id TEXT PRIMARY KEY,
+    tidal_track_id   INTEGER NOT NULL,
+    confidence       REAL NOT NULL,
+    match_reason     TEXT,
+    resolved_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_track_map_tidal
+    ON sportify_track_map(tidal_track_id);
+
+CREATE TABLE IF NOT EXISTS sportify_unresolved (
+    spotify_track_id TEXT PRIMARY KEY,
+    last_attempt_at  INTEGER NOT NULL,
+    attempts         INTEGER NOT NULL DEFAULT 1,
+    reason           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_unresolved_last_attempt
+    ON sportify_unresolved(last_attempt_at);
+
+CREATE TABLE IF NOT EXISTS sportify_search_cache (
+    query_hash TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportify_search_cache_fetched_at
+    ON sportify_search_cache(fetched_at);
+"#;
+
+// Clear Sportify metadata + search caches. Initial release shipped with a
+// model that mismatched the upstream Sportify shape (track `title`/`artist`,
+// playlist `owner` string, flat `results` array). All four meta tables and
+// the search cache may hold rows that deserialized into all-None defaults.
+// Wipe them once so live re-fetches populate with the corrected models.
+// Resolution map (`sportify_track_map`) is preserved — those rows are TIDAL
+// ids and aren't affected by Sportify shape changes.
+const MIGRATION_032: &str = r#"
+DELETE FROM sportify_track_meta;
+DELETE FROM sportify_album_meta;
+DELETE FROM sportify_artist_meta;
+DELETE FROM sportify_playlist_meta;
+DELETE FROM sportify_search_cache;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

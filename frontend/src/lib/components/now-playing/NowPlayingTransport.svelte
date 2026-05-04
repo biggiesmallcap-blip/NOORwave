@@ -48,7 +48,11 @@
 		shuffleMode: string;
 		repeatMode: string;
 		favoritePending?: boolean;
-		onToggleFavorite: () => void;
+		/** Optional. When omitted, the inline favorite button is hidden — the
+		 * desktop now-playing surface mounts a separate favorite overlay on
+		 * the artwork, so the transport bar stays uncluttered. QuietMode
+		 * still uses the inline button. */
+		onToggleFavorite?: () => void;
 		onCycleShuffle: () => void;
 		onPrev: () => void;
 		onPlayPause: () => void;
@@ -71,22 +75,25 @@
 
 <div class="transport" aria-label="Playback controls">
 	<div class="transport-group transport-group-secondary" role="group" aria-label="Track and shuffle controls">
-		<button
-			class:active={track?.is_favorite}
-			class="tp-btn tp-like-btn"
-			title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-			aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-			onclick={onToggleFavorite}
-			disabled={favoritePending || !track}
-		>
-			{track?.is_favorite ? '♥' : '♡'}
-		</button>
+		{#if onToggleFavorite}
+			<button
+				class:active={track?.is_favorite}
+				class="tp-btn tp-like-btn"
+				title={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+				aria-label={track?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+				onclick={onToggleFavorite}
+				disabled={favoritePending || !track}
+			>
+				{track?.is_favorite ? '♥' : '♡'}
+			</button>
+		{/if}
 		<button
 			class:active={shuffleMode !== 'off'}
 			class="tp-btn tp-mode-btn"
 			title={SHUFFLE_LABELS[shuffleMode]}
 			aria-label={SHUFFLE_LABELS[shuffleMode]}
 			onclick={onCycleShuffle}
+			disabled={!track}
 		>
 			{SHUFFLE_ICONS[shuffleMode]}
 		</button>
@@ -122,17 +129,25 @@
 
 <style>
 	.transport {
-		display: flex;
+		display: grid;
+		grid-template-columns: 1fr auto 1fr;
 		align-items: center;
-		justify-content: center;
-		gap: 12px;
+		column-gap: 10px;
 	}
 
 	.transport-group {
 		position: relative;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
+	}
+
+	.transport > .transport-group-secondary:first-child {
+		justify-self: end;
+	}
+
+	.transport > .transport-group-secondary:last-child {
+		justify-self: start;
 	}
 
 	.transport-group + .transport-group::before {
@@ -144,13 +159,13 @@
 	}
 
 	.transport-group-playback {
-		gap: 10px;
+		gap: 8px;
 	}
 
 	.tp-btn,
 	.tp-play {
-		width: 36px;
-		height: 36px;
+		width: 32px;
+		height: 32px;
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
@@ -180,39 +195,16 @@
 		position: relative;
 	}
 
-	.tp-like-btn {
-		font-size: 18px;
-		color: var(--text-secondary);
-		transition:
-			transform var(--motion-fast),
-			background var(--motion-fast),
-			border-color var(--motion-fast),
-			color var(--motion-fast),
-			box-shadow var(--motion-fast);
-	}
-
-	.tp-like-btn:active {
-		transform: scale(0.92);
-	}
-
-	.tp-like-btn:disabled,
 	.tp-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
 
-	.tp-like-btn.active {
-		color: #ff4d6d;
-		background: color-mix(in srgb, #ff4d6d 15%, transparent);
-		border-color: color-mix(in srgb, #ff4d6d 40%, transparent);
-		box-shadow: 0 0 12px color-mix(in srgb, #ff4d6d 30%, transparent);
-	}
-
 	.tp-play {
 		background: var(--accent);
 		color: #fff;
-		width: 42px;
-		height: 42px;
+		width: 38px;
+		height: 38px;
 		box-shadow: 0 10px 26px var(--accent-glow);
 	}
 

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
@@ -19,6 +19,9 @@
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
+  // Backend caps `limit` at 50 (see tidal_search route). Use the cap as the
+  // page size so each round-trip pulls the maximum the upstream allows.
+  const SEARCH_PAGE_SIZE = 50
 
   function loadRecent(): string[] {
     if (typeof localStorage === 'undefined') return []
@@ -78,9 +81,23 @@
 
   let localPlaylists = $state<Playlist[]>([])
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
+  let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
+
+  // Infinite-scroll state. The combined Tidal endpoint shares one offset for
+  // tracks/albums/artists; playlists are paged separately because they hit a
+  // different endpoint. `lastQuery` lets `loadMore` re-query the same string
+  // without depending on the live `query` input (which may be mid-edit).
+  let tidalOffset = $state(0)
+  let tidalPlaylistOffset = $state(0)
+  let spotifyPlaylistOffset = $state(0)
+  let hasMoreTidal = $state(true)
+  let hasMoreTidalPlaylists = $state(true)
+  let hasMoreSpotifyPlaylists = $state(true)
+  let loadingMore = $state(false)
+  let lastQuery = $state('')
 
   // Trending shelf is encapsulated in <TrendingShelf /> below; shown only when
   // the query is empty (inside the existing {#if !query.trim()} branch).
@@ -134,6 +151,7 @@
       results = null
       audioResults = null
       tidalPlaylistResults = []
+      spotifyPlaylistResults = []
       loading = false
       error = null
       return
@@ -180,24 +198,53 @@
           audioResults = res.tracks
           results = null
           tidalPlaylistResults = []
+          spotifyPlaylistResults = []
         } else {
           audioResults = null
+          // Reset paging — every fresh query starts at offset 0.
+          tidalOffset = 0
+          tidalPlaylistOffset = 0
+          spotifyPlaylistOffset = 0
+          hasMoreTidal = true
+          hasMoreTidalPlaylists = true
+          hasMoreSpotifyPlaylists = true
+          lastQuery = q
           const cacheKey = q.toLowerCase()
           const cached = resultCache.get(cacheKey)
           if (cached) {
             results = cached
+            tidalOffset = SEARCH_PAGE_SIZE
+            // Cached page may already cap a category — assume more exists; the
+            // next load-more attempt will discover the truth and flip the flag.
           } else {
-            const fresh = await api.searchTidal(q, 20, signal)
+            const fresh = await api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0)
             results = fresh
             resultCache.set(cacheKey, fresh)
             if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
+            tidalOffset = SEARCH_PAGE_SIZE
+            // If the initial page came back short for ALL three categories,
+            // there's nothing left to load.
+            if (
+              fresh.tracks.length < SEARCH_PAGE_SIZE &&
+              fresh.albums.length < SEARCH_PAGE_SIZE &&
+              fresh.artists.length < SEARCH_PAGE_SIZE
+            ) {
+              hasMoreTidal = false
+            }
           }
-          try {
-            const { playlists } = await api.searchTidalPlaylists(q, signal)
-            tidalPlaylistResults = playlists
-          } catch {
-            tidalPlaylistResults = []
-          }
+          // TIDAL + Spotify playlist searches run in parallel. Either one
+          // failing leaves the other intact — Sportify is upstream and may
+          // break, but that should never block local + TIDAL results.
+          const [tidalRes, spotifyRes] = await Promise.allSettled([
+            api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
+            api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
+          ])
+          tidalPlaylistResults = tidalRes.status === 'fulfilled' ? tidalRes.value.playlists : []
+          spotifyPlaylistResults = spotifyRes.status === 'fulfilled' ? spotifyRes.value : []
+          tidalPlaylistOffset = tidalPlaylistResults.length
+          spotifyPlaylistOffset = spotifyPlaylistResults.length
+          if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+          if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
         }
         error = null
         pushRecent(q)
@@ -217,6 +264,98 @@
     onInput()
     inputEl?.focus()
   }
+
+  // Load the next page for whichever single-category pill is active. The
+  // combined Tidal endpoint covers tracks/albums/artists with a shared offset,
+  // so loading once advances all three; the Playlists pill triggers two
+  // independent fetches (TIDAL + Spotify) since they live on separate endpoints.
+  async function loadMore() {
+    if (loadingMore) return
+    if (!lastQuery.trim()) return
+    if (filterMode === 'all' || filterMode === 'library') return
+    if (audioResults !== null) return
+    const needsTidal =
+      (filterMode === 'tracks' || filterMode === 'albums' || filterMode === 'artists') &&
+      hasMoreTidal &&
+      results !== null
+    const needsPlaylists =
+      filterMode === 'playlists' && (hasMoreTidalPlaylists || hasMoreSpotifyPlaylists)
+    if (!needsTidal && !needsPlaylists) return
+
+    loadingMore = true
+    try {
+      if (needsTidal && results) {
+        const next = await api.searchTidal(lastQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
+        tidalOffset += SEARCH_PAGE_SIZE
+        // De-dupe by id — Tidal occasionally returns overlapping pages.
+        const seenTracks = new Set(results.tracks.map((t) => t.tidal_id))
+        const seenAlbums = new Set(results.albums.map((a) => a.tidal_id))
+        const seenArtists = new Set(results.artists.map((a) => a.tidal_id))
+        const newTracks = next.tracks.filter((t) => !seenTracks.has(t.tidal_id))
+        const newAlbums = next.albums.filter((a) => !seenAlbums.has(a.tidal_id))
+        const newArtists = next.artists.filter((a) => !seenArtists.has(a.tidal_id))
+        results = {
+          tracks: [...results.tracks, ...newTracks],
+          albums: [...results.albums, ...newAlbums],
+          artists: [...results.artists, ...newArtists],
+        }
+        if (
+          next.tracks.length < SEARCH_PAGE_SIZE &&
+          next.albums.length < SEARCH_PAGE_SIZE &&
+          next.artists.length < SEARCH_PAGE_SIZE
+        ) {
+          hasMoreTidal = false
+        }
+      }
+      if (needsPlaylists) {
+        const tasks: Promise<unknown>[] = []
+        if (hasMoreTidalPlaylists) {
+          tasks.push(
+            api
+              .searchTidalPlaylists(lastQuery, undefined, { limit: SEARCH_PAGE_SIZE, offset: tidalPlaylistOffset })
+              .then((r) => {
+                const seen = new Set(tidalPlaylistResults.map((p) => p.uuid))
+                const fresh = r.playlists.filter((p) => !seen.has(p.uuid))
+                tidalPlaylistResults = [...tidalPlaylistResults, ...fresh]
+                tidalPlaylistOffset += SEARCH_PAGE_SIZE
+                if (r.playlists.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+              })
+              .catch(() => { hasMoreTidalPlaylists = false }),
+          )
+        }
+        if (hasMoreSpotifyPlaylists) {
+          tasks.push(
+            api
+              .searchSpotifyPlaylists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyPlaylistOffset)
+              .then((items) => {
+                const seen = new Set(spotifyPlaylistResults.map((p) => p.spotifyId))
+                const fresh = items.filter((p) => !seen.has(p.spotifyId))
+                spotifyPlaylistResults = [...spotifyPlaylistResults, ...fresh]
+                spotifyPlaylistOffset += SEARCH_PAGE_SIZE
+                if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
+              })
+              .catch(() => { hasMoreSpotifyPlaylists = false }),
+          )
+        }
+        await Promise.allSettled(tasks)
+      }
+    } finally {
+      loadingMore = false
+    }
+  }
+
+  // IntersectionObserver on a sentinel below the result list. Fires loadMore
+  // whenever the sentinel scrolls into view — only if a single-category pill
+  // is active, which is the only mode where pagination is meaningful.
+  let infiniteSentinel = $state<HTMLDivElement | null>(null)
+  $effect(() => {
+    if (!infiniteSentinel) return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) void loadMore()
+    }, { rootMargin: '400px 0px' })
+    observer.observe(infiniteSentinel)
+    return () => observer.disconnect()
+  })
 
   const isEmpty = $derived(
     results !== null &&
@@ -263,12 +402,20 @@
   const showPlaylists = $derived(filterMode === 'all' || filterMode === 'playlists')
 
   const filteredPlaylists = $derived.by(() => {
-    if (!query.trim()) return { local: [] as Playlist[], tidal: [] as TidalSearchPlaylist[] }
+    if (!query.trim())
+      return {
+        local: [] as Playlist[],
+        tidal: [] as TidalSearchPlaylist[],
+        spotify: [] as SpotifyPlaylistSearchItem[],
+      }
     const q = query.trim().toLowerCase()
     const matched = localPlaylists.filter(p => p.name.toLowerCase().includes(q))
     const localNames = new Set(matched.map(p => p.name.toLowerCase()))
     const tidalOnly = tidalPlaylistResults.filter(tp => !localNames.has(tp.title.toLowerCase()))
-    return { local: matched, tidal: tidalOnly }
+    // Keep Spotify visible even when a TIDAL/local playlist has the same
+    // title. The source chip is the useful distinction on mixed-service search.
+    const spotifyOnly = spotifyPlaylistResults.filter(sp => sp.spotifyId)
+    return { local: matched, tidal: tidalOnly, spotify: spotifyOnly }
   })
 
   const isFilteredEmpty = $derived(
@@ -277,7 +424,7 @@
     sortedTracks.length === 0 &&
     sortedAlbums.length === 0 &&
     sortedArtists.length === 0 &&
-    !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0))
+    !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0 || filteredPlaylists.spotify.length > 0))
   )
 
   type TopResult =
@@ -372,6 +519,24 @@
       },
       { isLocal: artist.in_library && artist.local_id != null }
     )
+  }
+
+  function localPlaylistMenuItems(_playlist: Playlist): MenuItem[] {
+    return [
+      { label: 'Open playlist', icon: '↗', onSelect: () => void goto('/playlists') },
+    ]
+  }
+
+  function tidalPlaylistMenuItems(playlist: TidalSearchPlaylist): MenuItem[] {
+    return [
+      { label: 'Play', icon: '▶', onSelect: () => void playTidalPlaylist(playlist.uuid) },
+    ]
+  }
+
+  function spotifyPlaylistMenuItems(playlist: SpotifyPlaylistSearchItem): MenuItem[] {
+    return [
+      { label: 'Open', icon: '↗', onSelect: () => void goto(`/spotify-playlist/${playlist.spotifyId}`) },
+    ]
   }
 
   function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
@@ -817,7 +982,11 @@
     {#if sortedArtists.length > 0}
       <section class="results-section">
         <h3 class="section-label">Artists</h3>
-        <div class="artists-row" use:wheelToHorizontal>
+        <div
+          class="artists-row"
+          class:section-grid-artists={filterMode === 'artists'}
+          use:wheelToHorizontal
+        >
           {#each sortedArtists as artist (artist.tidal_id)}
             <a
               class="artist-card"
@@ -854,7 +1023,11 @@
     {#if sortedAlbums.length > 0}
       <section class="results-section">
         <h3 class="section-label">Albums</h3>
-        <div class="albums-row" use:wheelToHorizontal>
+        <div
+          class="albums-row"
+          class:section-grid-albums={filterMode === 'albums'}
+          use:wheelToHorizontal
+        >
           {#each sortedAlbums as album (album.tidal_id)}
             <a
               class="album-card"
@@ -891,15 +1064,20 @@
       </section>
     {/if}
 
-    {#if showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0)}
+    {#if showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0 || filteredPlaylists.spotify.length > 0)}
       <section class="results-section">
         <h3 class="section-label">Playlists</h3>
-        <div class="albums-row" use:wheelToHorizontal>
+        <div
+          class="albums-row"
+          class:section-grid-albums={filterMode === 'playlists'}
+          use:wheelToHorizontal
+        >
 
           {#each filteredPlaylists.local as playlist (playlist.id)}
             <a
               class="album-card in-library"
               href="/playlists"
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, localPlaylistMenuItems(playlist), playlist.name) }}
             >
               <div class="art-wrap">
                 <div class="album-art fallback" style="background: {letterColor(playlist.name)}">
@@ -919,6 +1097,7 @@
               tabindex="0"
               onclick={() => void playTidalPlaylist(playlist.uuid)}
               onkeydown={(e) => e.key === 'Enter' && void playTidalPlaylist(playlist.uuid)}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title) }}
             >
               <div class="art-wrap">
                 {#if playlist.square_image}
@@ -942,6 +1121,32 @@
             </div>
           {/each}
 
+          {#each filteredPlaylists.spotify as playlist (playlist.spotifyId)}
+            <a
+              class="album-card spotify-card"
+              href="/spotify-playlist/{playlist.spotifyId}"
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, spotifyPlaylistMenuItems(playlist), playlist.title ?? 'Spotify playlist') }}
+            >
+              <div class="art-wrap">
+                {#if playlist.thumbnail}
+                  <div
+                    class="album-art"
+                    style="background-image: url('{playlist.thumbnail}')"
+                  ></div>
+                {:else}
+                  <div class="album-art fallback" style="background: {letterColor(playlist.title ?? 'playlist')}">
+                    <span>♫</span>
+                  </div>
+                {/if}
+                <span class="source-chip" aria-label="Spotify">Spotify</span>
+              </div>
+              <p class="album-title">{playlist.title ?? 'Untitled playlist'}</p>
+              <p class="album-artist">
+                {#if playlist.owner}{playlist.owner} · {/if}{playlist.totalTracks ?? '?'} tracks
+              </p>
+            </a>
+          {/each}
+
         </div>
       </section>
     {/if}
@@ -949,6 +1154,112 @@
     {#if sortedTracks.length > 0}
       <section class="results-section">
         <h3 class="section-label">Tracks</h3>
+        {#if filterMode === 'tracks'}
+          <div class="search-track-table" role="list">
+            <div class="search-track-header">
+              <span class="col-num">#</span>
+              <span class="col-title">Title</span>
+              <span class="col-artist">Artist</span>
+              <span class="col-album">Album</span>
+              <span class="col-quality">Quality</span>
+              <span class="col-duration">Duration</span>
+              <span class="col-actions"></span>
+            </div>
+            {#each sortedTracks as track, idx (track.tidal_id)}
+              <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div
+                class="search-track-row"
+                class:cursor={cursor === idx}
+                class:disabled={!canPlaySearchTrack(track)}
+                class:in-library={track.in_library}
+                data-cursor-idx={idx}
+                role="button"
+                tabindex={canPlaySearchTrack(track) ? 0 : -1}
+                aria-disabled={!canPlaySearchTrack(track)}
+                onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
+                onmouseenter={() => { cursor = idx }}
+                onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
+                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
+              >
+                <span class="col-num">
+                  <span class="track-num-label">{idx + 1}</span>
+                  <button
+                    class="track-num-play"
+                    disabled={!canPlaySearchTrack(track)}
+                    onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)) }}
+                    aria-label="Play {track.title}"
+                  >▶</button>
+                </span>
+                <span class="col-title">
+                  {#if track.artwork_url}
+                    <span class="row-art" style={`background-image: url('${track.artwork_url}')`}></span>
+                  {:else}
+                    <span class="row-art fallback" style={`background: ${letterColor(track.title)}`}>♫</span>
+                  {/if}
+                  <span class="row-title-text">{track.title}</span>
+                  {#if track.in_library}<span class="lib-dot" aria-label="In your library"></span>{/if}
+                </span>
+                <span class="col-artist">
+                  {#if track.artist_name && track.artist_id != null}
+                    <a
+                      href={`/tidal/artists/${track.artist_id}`}
+                      class="subtitle-link"
+                      onclick={(e) => e.stopPropagation()}
+                    >{track.artist_name}</a>
+                  {:else if track.artist_name}
+                    {track.artist_name}
+                  {:else}
+                    —
+                  {/if}
+                </span>
+                <span class="col-album">
+                  {#if track.album_title && track.album_tidal_id != null}
+                    <a
+                      href={`/tidal/albums/${track.album_tidal_id}`}
+                      class="subtitle-link"
+                      onclick={(e) => e.stopPropagation()}
+                    >{track.album_title}</a>
+                  {:else if track.album_title}
+                    {track.album_title}
+                  {:else}
+                    —
+                  {/if}
+                </span>
+                <span class="col-quality">
+                  {#if track.audio_quality}
+                    <span class="quality-badge">{track.audio_quality.replace(/_/g, ' ')}</span>
+                  {:else}
+                    —
+                  {/if}
+                </span>
+                <span class="col-duration">{formatDuration(track.duration_ms)}</span>
+                <span class="col-actions">
+                  <button
+                    class="row-btn"
+                    disabled={!canPlaySearchTrack(track)}
+                    onclick={(e) => { e.stopPropagation(); canPlaySearchTrack(track) && void addTidalTrackToQueue(toPlayable(track)) }}
+                    title={canPlaySearchTrack(track) ? 'Add to queue' : playableSearchLabel(track)}
+                    aria-label="Queue {track.title}"
+                  >＋</button>
+                  <button
+                    class="row-btn"
+                    onclick={(e) => { e.stopPropagation(); void startTidalSongRadio(track) }}
+                    title="Song radio"
+                    aria-label="Start radio from {track.title}"
+                  >◎</button>
+                  <button
+                    class="row-btn"
+                    onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
+                    title="More options"
+                    aria-label="More options"
+                  >⋯</button>
+                </span>
+              </div>
+            {/each}
+          </div>
+        {:else}
         <ul class="tracks-list">
           {#each sortedTracks as track, idx (track.tidal_id)}
             <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
@@ -1037,6 +1348,7 @@
             </li>
           {/each}
         </ul>
+        {/if}
       </section>
     {/if}
 
@@ -1102,6 +1414,18 @@
           {/each}
         </ul>
       </section>
+    {/if}
+
+    {#if filterMode !== 'all' && filterMode !== 'library' && audioResults === null}
+      <div bind:this={infiniteSentinel} class="infinite-sentinel" aria-hidden="true">
+        {#if loadingMore}
+          <span class="infinite-spinner">Loading more…</span>
+        {:else if (
+          (filterMode === 'tracks' || filterMode === 'albums' || filterMode === 'artists') && !hasMoreTidal
+        ) || (filterMode === 'playlists' && !hasMoreTidalPlaylists && !hasMoreSpotifyPlaylists)}
+          <span class="infinite-end">— end of results —</span>
+        {/if}
+      </div>
     {/if}
 
   {/if}
@@ -1452,6 +1776,21 @@
     background: var(--accent);
     border: 2px solid var(--bg-base);
   }
+  .source-chip {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #1ed760;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+  }
+  .spotify-card { text-decoration: none; }
   .lib-dot {
     display: inline-block;
     width: 6px;
@@ -1686,4 +2025,158 @@
     width: 100px;
     height: 100px;
   }
+
+  /* Single-category grids — Trending/Library style. Override the carousel's
+     horizontal-scroll layout when the matching pill is active. */
+  .section-grid-albums {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 14px;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+  .section-grid-albums .album-card { width: 100%; }
+  .section-grid-albums .art-wrap { width: 100%; aspect-ratio: 1 / 1; }
+  .section-grid-albums .album-art {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: 1 / 1;
+  }
+
+  .section-grid-artists {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 14px;
+    overflow: visible;
+    justify-items: center;
+    padding-bottom: 0;
+  }
+
+  /* Library-style track table for the Tracks pill. Mirrors the visual rhythm
+     of the library tracks tab: compact header row, fixed-grid columns,
+     hoverable rows with inline play / queue / radio / menu actions. */
+  .search-track-table {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .search-track-header,
+  .search-track-row {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 2.2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 96px 64px 132px;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px;
+    border-radius: 4px;
+  }
+  .search-track-header {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-subtle);
+    padding-bottom: 8px;
+    margin-bottom: 4px;
+  }
+  .search-track-header .col-num { text-align: center; }
+  .search-track-row {
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .search-track-row:hover { background: var(--bg-hover); }
+  .search-track-row.cursor { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent); }
+  .search-track-row.disabled { cursor: default; opacity: 0.62; }
+  .search-track-row .col-num {
+    position: relative;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .search-track-row .track-num-label { display: inline; }
+  .search-track-row .track-num-play {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .search-track-row:hover .track-num-label { display: none; }
+  .search-track-row:hover .track-num-play { display: inline; }
+  .search-track-row .track-num-play:disabled { opacity: 0.4; cursor: not-allowed; }
+  .search-track-row .col-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .search-track-row .row-art {
+    width: 32px;
+    height: 32px;
+    border-radius: 3px;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--bg-raised);
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: rgba(255,255,255,0.5);
+  }
+  .search-track-row .row-title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .search-track-row.in-library .row-title-text { color: var(--text-primary); font-weight: 600; }
+  .search-track-row .col-artist,
+  .search-track-row .col-album {
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .search-track-row .col-quality .quality-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 99px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: rgba(125, 200, 175, 0.10);
+    color: var(--accent, #7dc8af);
+  }
+  .search-track-row .col-duration {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .search-track-row .col-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+  .search-track-row .col-actions .row-btn { opacity: 0; }
+  .search-track-row:hover .col-actions .row-btn { opacity: 1; }
+
+  .infinite-sentinel {
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 16px 0;
+  }
+  .infinite-spinner { font-style: italic; }
+  .infinite-end { letter-spacing: 0.04em; }
 </style>
