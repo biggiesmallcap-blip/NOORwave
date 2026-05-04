@@ -357,11 +357,24 @@ pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapsh
         queue::append_tracks(conn, std::slice::from_ref(&track), "playback")?;
     }
 
+    // Resolve to the actual queue row so the UI's "now playing" highlight
+    // points at the right row (not just any row sharing the same track_id).
+    let queue_item_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM queue WHERE track_id = ?1 ORDER BY position ASC, id ASC LIMIT 1",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
     conn.execute(
         "UPDATE playback_state
-         SET current_track_id = ?1, position_ms = 0, is_playing = 1
+         SET current_track_id = ?1,
+             current_queue_item_id = ?2,
+             position_ms = 0,
+             is_playing = 1
          WHERE id = 1",
-        params![track_id],
+        params![track_id, queue_item_id],
     )?;
 
     load_snapshot(conn)
@@ -1741,6 +1754,24 @@ mod tests {
         assert_eq!(next.id, 3);
         let queue_items = queue::load_queue(&conn).unwrap();
         assert!(queue_items.len() > 2);
+    }
+
+    #[test]
+    fn play_track_now_sets_current_queue_item_id() {
+        let conn = conn();
+        // Seed two queue rows pointing at the same track so the "lowest
+        // position" tiebreak is testable.
+        let tracks = load_tracks(&conn, &[1, 1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let q = queue::load_queue(&conn).unwrap();
+
+        play_track_now(&conn, 1).unwrap();
+        let state = load_state(&conn).unwrap();
+        assert_eq!(state.current_track.as_ref().map(|t| t.id), Some(1));
+        // Of the two rows pointing at track 1, the lowest-position one wins.
+        let expected_qid = q.iter().find(|i| i.track.id == 1).unwrap().id;
+        assert_eq!(state.current_queue_item_id, Some(expected_qid));
+        assert!(state.is_playing);
     }
 
     #[test]
