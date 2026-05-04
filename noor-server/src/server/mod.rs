@@ -57,15 +57,17 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         .route("/api/ping", get(ping_handler))
         .route("/api/setup/token", get(setup_token_handler))
         .route("/api/setup/onboarding", get(onboarding_status_handler))
-        .route("/api/setup/onboarding/complete", post(onboarding_complete_handler))
+        .route(
+            "/api/setup/onboarding/complete",
+            post(onboarding_complete_handler),
+        )
         .with_state(state.clone());
 
     let public = match www_dir {
         Some(www) => {
             let index_html = www.join("index.html");
-            public_base.fallback_service(
-                ServeDir::new(&www).not_found_service(ServeFile::new(index_html)),
-            )
+            public_base
+                .fallback_service(ServeDir::new(&www).not_found_service(ServeFile::new(index_html)))
         }
         None => public_base,
     };
@@ -86,7 +88,11 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let app = public.merge(protected).layer(cors);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -162,15 +168,13 @@ async fn require_token(
 
     // ?token=<token> — used by WebSocket upgrades (browsers can't set WS headers)
     let query_string = req.uri().query().unwrap_or("").to_owned();
-    let query_token: Option<&str> = query_string
-        .split('&')
-        .find_map(|part| {
-            let mut it = part.splitn(2, '=');
-            match (it.next(), it.next()) {
-                (Some("token"), Some(v)) => Some(v),
-                _ => None,
-            }
-        });
+    let query_token: Option<&str> = query_string.split('&').find_map(|part| {
+        let mut it = part.splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some("token"), Some(v)) => Some(v),
+            _ => None,
+        }
+    });
 
     let provided = header_token.or(query_token);
 

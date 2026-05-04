@@ -17,36 +17,122 @@ pub struct CountryEntry {
 }
 
 pub const CURATED_GENRES: &[GenreEntry] = &[
-    GenreEntry { key: "electronic",    label: "Electronic",    lastfm_tags: &["electronic"] },
-    GenreEntry { key: "rock",          label: "Rock",          lastfm_tags: &["rock"] },
-    GenreEntry { key: "pop",           label: "Pop",           lastfm_tags: &["pop"] },
-    GenreEntry { key: "hip-hop",       label: "Hip-Hop",       lastfm_tags: &["hip-hop", "hip hop"] },
-    GenreEntry { key: "rnb",           label: "R&B",           lastfm_tags: &["rnb", "r&b"] },
-    GenreEntry { key: "jazz",          label: "Jazz",          lastfm_tags: &["jazz"] },
-    GenreEntry { key: "metal",         label: "Metal",         lastfm_tags: &["metal"] },
-    GenreEntry { key: "folk",          label: "Folk",          lastfm_tags: &["folk"] },
-    GenreEntry { key: "soul",          label: "Soul",          lastfm_tags: &["soul"] },
-    GenreEntry { key: "punk",          label: "Punk",          lastfm_tags: &["punk"] },
-    GenreEntry { key: "indie",         label: "Indie",         lastfm_tags: &["indie"] },
-    GenreEntry { key: "classical",     label: "Classical",     lastfm_tags: &["classical"] },
-    GenreEntry { key: "drum-and-bass", label: "Drum and Bass", lastfm_tags: &["drum and bass", "dnb"] },
+    GenreEntry {
+        key: "electronic",
+        label: "Electronic",
+        lastfm_tags: &["electronic"],
+    },
+    GenreEntry {
+        key: "rock",
+        label: "Rock",
+        lastfm_tags: &["rock"],
+    },
+    GenreEntry {
+        key: "pop",
+        label: "Pop",
+        lastfm_tags: &["pop"],
+    },
+    GenreEntry {
+        key: "hip-hop",
+        label: "Hip-Hop",
+        lastfm_tags: &["hip-hop", "hip hop"],
+    },
+    GenreEntry {
+        key: "rnb",
+        label: "R&B",
+        lastfm_tags: &["rnb", "r&b"],
+    },
+    GenreEntry {
+        key: "jazz",
+        label: "Jazz",
+        lastfm_tags: &["jazz"],
+    },
+    GenreEntry {
+        key: "metal",
+        label: "Metal",
+        lastfm_tags: &["metal"],
+    },
+    GenreEntry {
+        key: "folk",
+        label: "Folk",
+        lastfm_tags: &["folk"],
+    },
+    GenreEntry {
+        key: "soul",
+        label: "Soul",
+        lastfm_tags: &["soul"],
+    },
+    GenreEntry {
+        key: "punk",
+        label: "Punk",
+        lastfm_tags: &["punk"],
+    },
+    GenreEntry {
+        key: "indie",
+        label: "Indie",
+        lastfm_tags: &["indie"],
+    },
+    GenreEntry {
+        key: "classical",
+        label: "Classical",
+        lastfm_tags: &["classical"],
+    },
+    GenreEntry {
+        key: "drum-and-bass",
+        label: "Drum and Bass",
+        lastfm_tags: &["drum and bass", "dnb"],
+    },
 ];
 
 // AU first — user is in AU; this also drives the default chip on Home/Search.
 pub const CURATED_COUNTRIES: &[CountryEntry] = &[
-    CountryEntry { code: "AU", lastfm_name: "Australia",      label: "Australia" },
-    CountryEntry { code: "US", lastfm_name: "United States",  label: "United States" },
-    CountryEntry { code: "GB", lastfm_name: "United Kingdom", label: "United Kingdom" },
-    CountryEntry { code: "JP", lastfm_name: "Japan",          label: "Japan" },
-    CountryEntry { code: "BR", lastfm_name: "Brazil",         label: "Brazil" },
-    CountryEntry { code: "DE", lastfm_name: "Germany",        label: "Germany" },
-    CountryEntry { code: "FR", lastfm_name: "France",         label: "France" },
-    CountryEntry { code: "CA", lastfm_name: "Canada",         label: "Canada" },
+    CountryEntry {
+        code: "AU",
+        lastfm_name: "Australia",
+        label: "Australia",
+    },
+    CountryEntry {
+        code: "US",
+        lastfm_name: "United States",
+        label: "United States",
+    },
+    CountryEntry {
+        code: "GB",
+        lastfm_name: "United Kingdom",
+        label: "United Kingdom",
+    },
+    CountryEntry {
+        code: "JP",
+        lastfm_name: "Japan",
+        label: "Japan",
+    },
+    CountryEntry {
+        code: "BR",
+        lastfm_name: "Brazil",
+        label: "Brazil",
+    },
+    CountryEntry {
+        code: "DE",
+        lastfm_name: "Germany",
+        label: "Germany",
+    },
+    CountryEntry {
+        code: "FR",
+        lastfm_name: "France",
+        label: "France",
+    },
+    CountryEntry {
+        code: "CA",
+        lastfm_name: "Canada",
+        label: "Canada",
+    },
 ];
 
 pub fn find_genre(key: &str) -> Option<&'static GenreEntry> {
     let needle = key.trim().to_ascii_lowercase();
-    CURATED_GENRES.iter().find(|g| g.key.eq_ignore_ascii_case(&needle))
+    CURATED_GENRES
+        .iter()
+        .find(|g| g.key.eq_ignore_ascii_case(&needle))
 }
 
 pub fn find_country_by_code(code: &str) -> Option<&'static CountryEntry> {
@@ -92,7 +178,10 @@ mod tests {
 
     #[test]
     fn country_or_name_canonicalises_to_iso() {
-        assert_eq!(find_country_by_code_or_name("AU").map(|c| c.code), Some("AU"));
+        assert_eq!(
+            find_country_by_code_or_name("AU").map(|c| c.code),
+            Some("AU")
+        );
         assert_eq!(
             find_country_by_code_or_name("Australia").map(|c| c.code),
             Some("AU")

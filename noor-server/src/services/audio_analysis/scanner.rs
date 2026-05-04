@@ -3,10 +3,10 @@ use crate::SharedState;
 use crate::db::queries;
 use futures::StreamExt;
 use rusqlite::OptionalExtension;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
 
 use super::AnalysisConfig;
@@ -131,10 +131,9 @@ pub async fn run_preview_scan(
 
         // ── 3. Decode to mono f32 (max 30 s) ─────────────────────────────────
         let cursor = std::io::Cursor::new(audio_bytes);
-        let decode_result = tokio::task::spawn_blocking(move || {
-            decode_source_to_mono_f32(Box::new(cursor), 30)
-        })
-        .await;
+        let decode_result =
+            tokio::task::spawn_blocking(move || decode_source_to_mono_f32(Box::new(cursor), 30))
+                .await;
 
         let (samples, sample_rate) = match decode_result {
             Ok(Ok(pair)) => pair,
@@ -188,11 +187,9 @@ pub async fn run_preview_scan(
 
     // Post-scan: let SQLite reoptimise the fingerprint_hashes index.
     let db_for_opt = state.read().await.db.clone();
-    tokio::task::spawn_blocking(move || {
-        super::fingerprint::optimize_after_bulk_scan(&db_for_opt)
-    })
-    .await
-    .ok();
+    tokio::task::spawn_blocking(move || super::fingerprint::optimize_after_bulk_scan(&db_for_opt))
+        .await
+        .ok();
 
     info!(
         "Preview scan complete. Analyzed {}/{} tracks ({} skipped).",
@@ -211,10 +208,7 @@ pub async fn run_local_scan(
     folder_path: std::path::PathBuf,
     config: AnalysisConfig,
 ) {
-    info!(
-        "Starting local audio analysis scan of {:?}",
-        folder_path
-    );
+    info!("Starting local audio analysis scan of {:?}", folder_path);
 
     // Walkdir for .flac, .mp3, .wav, .aiff
     // Match by tracks.file_path or fuzzy title+artist via strsim
@@ -356,7 +350,8 @@ pub fn decode_source_to_mono_f32(
         .ok_or_else(|| anyhow::anyhow!("no audio tracks found"))?;
 
     let codec_params = &track.codec_params;
-    let sample_rate = codec_params.sample_rate
+    let sample_rate = codec_params
+        .sample_rate
         .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
     let channels = codec_params.channels.unwrap_or_default();
     let num_channels = channels.count();

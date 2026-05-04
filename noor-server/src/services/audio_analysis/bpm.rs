@@ -58,18 +58,21 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     }
 
     // Step 4: Autocorrelation for BPM 60..=200
-    let mut corr: Vec<(i32, f64)> = (60..=200).map(|bpm| {
-        let lag = ((60.0 * sample_rate as f64) / (bpm as f64 * hop_size as f64)).round() as usize;
-        let lag = lag.min(num_onsets.saturating_sub(1));
-        if lag == 0 {
-            return (bpm, 0.0f64);
-        }
-        let mut sum = 0.0f64;
-        for n in 0..(num_onsets - lag) {
-            sum += onset[n] * onset[n + lag];
-        }
-        (bpm, sum)
-    }).collect();
+    let mut corr: Vec<(i32, f64)> = (60..=200)
+        .map(|bpm| {
+            let lag =
+                ((60.0 * sample_rate as f64) / (bpm as f64 * hop_size as f64)).round() as usize;
+            let lag = lag.min(num_onsets.saturating_sub(1));
+            if lag == 0 {
+                return (bpm, 0.0f64);
+            }
+            let mut sum = 0.0f64;
+            for n in 0..(num_onsets - lag) {
+                sum += onset[n] * onset[n + lag];
+            }
+            (bpm, sum)
+        })
+        .collect();
 
     // Step 5: Octave fold
     let orig_corr: std::collections::HashMap<i32, f64> =

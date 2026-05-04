@@ -43,6 +43,7 @@ pub struct DiscoveryCandidateSeed {
 
 #[async_trait]
 pub trait DiscoveryProvider: Send + Sync {
+    #[allow(dead_code)]
     fn capabilities(&self) -> DiscoveryProviderCapability;
 
     async fn search_tracks(

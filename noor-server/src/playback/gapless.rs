@@ -67,15 +67,18 @@ pub fn plan_from_stream(stream: Option<&StreamInfo>, settings: GaplessSettings) 
 }
 
 /// Convenience helper for callers that only have a crossfade value.
+#[allow(dead_code)]
 pub fn plan_from_crossfade(crossfade_ms: i32) -> GaplessPlan {
     plan_from_stream(None, GaplessSettings::new(true, crossfade_ms))
 }
 
 /// Clamp applied to any beat-aligned crossfade value (matches existing UI range).
+#[allow(dead_code)]
 const CROSSFADE_MAX_MS: u32 = 12_000;
 
 /// Quantise a crossfade duration to the nearest whole number of beats at the given BPM.
 /// If the BPM is outside a sane range, the original crossfade is returned unchanged.
+#[allow(dead_code)]
 pub fn align_crossfade_to_beat(crossfade_ms: u32, bpm: f64) -> u32 {
     if !(60.0..=220.0).contains(&bpm) {
         return crossfade_ms;
@@ -90,6 +93,7 @@ pub fn align_crossfade_to_beat(crossfade_ms: u32, bpm: f64) -> u32 {
 ///
 /// Fallback behaviour: if either track has no BPM (unanalyzed), the original
 /// `crossfade_ms` is used as-is. The final value is clamped to `0..=CROSSFADE_MAX_MS`.
+#[allow(dead_code)]
 pub fn build_gapless_plan(
     stream: Option<&StreamInfo>,
     settings: GaplessSettings,

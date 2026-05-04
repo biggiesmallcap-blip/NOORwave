@@ -1,6 +1,6 @@
 use super::models::*;
-use anyhow::Result;
 use crate::services::discovery::DiscoveryCandidateSeed;
+use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,7 +96,6 @@ fn generate_readable_token() -> String {
     format!("{:06}", n)
 }
 
-
 // ─── Tracks ───────────────────────────────────────────────
 
 /// Optional DSP filters for get_tracks_with_dsp()
@@ -138,7 +137,16 @@ pub fn get_tracks(
     favorite_only: bool,
     liked_only: bool,
 ) -> Result<Vec<Track>> {
-    get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, liked_only, &DspFilters::default())
+    get_tracks_with_dsp(
+        conn,
+        sort_by,
+        sort_dir,
+        limit,
+        offset,
+        favorite_only,
+        liked_only,
+        &DspFilters::default(),
+    )
 }
 
 pub fn get_tracks_with_dsp(
@@ -151,9 +159,12 @@ pub fn get_tracks_with_dsp(
     liked_only: bool,
     dsp: &DspFilters,
 ) -> Result<Vec<Track>> {
-    let has_dsp = dsp.bpm_min.is_some() || dsp.bpm_max.is_some()
-        || dsp.energy_min.is_some() || dsp.energy_max.is_some()
-        || dsp.key_signature.is_some() || dsp.instrumental_only;
+    let has_dsp = dsp.bpm_min.is_some()
+        || dsp.bpm_max.is_some()
+        || dsp.energy_min.is_some()
+        || dsp.energy_max.is_some()
+        || dsp.key_signature.is_some()
+        || dsp.instrumental_only;
 
     let order_col = match sort_by {
         "title" => "t.title",
@@ -239,11 +250,11 @@ pub fn get_track_count(conn: &Connection, favorite_only: bool, liked_only: bool)
         Some(pred) => format!(" WHERE {pred}"),
         None => String::new(),
     };
-    Ok(
-        conn.query_row(&format!("SELECT COUNT(*) FROM tracks t{filter}"), [], |row| {
-            row.get(0)
-        })?,
-    )
+    Ok(conn.query_row(
+        &format!("SELECT COUNT(*) FROM tracks t{filter}"),
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 // ─── Albums ───────────────────────────────────────────────
@@ -403,9 +414,7 @@ pub fn get_known_artist_tidal_ids(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql = format!(
-        "SELECT tidal_id, id FROM artists WHERE tidal_id IN ({placeholders})"
-    );
+    let sql = format!("SELECT tidal_id, id FROM artists WHERE tidal_id IN ({placeholders})");
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
@@ -427,9 +436,7 @@ pub fn get_known_album_tidal_ids(
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql = format!(
-        "SELECT tidal_id, id FROM albums WHERE tidal_id IN ({placeholders})"
-    );
+    let sql = format!("SELECT tidal_id, id FROM albums WHERE tidal_id IN ({placeholders})");
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
@@ -530,8 +537,7 @@ pub fn toggle_playlist_favorite(conn: &Connection, playlist_id: i64) -> Result<P
         "UPDATE playlists SET is_favorite = NOT is_favorite WHERE id = ?1",
         params![playlist_id],
     )?;
-    get_playlist(conn, playlist_id)?
-        .ok_or_else(|| anyhow::anyhow!("playlist not found"))
+    get_playlist(conn, playlist_id)?.ok_or_else(|| anyhow::anyhow!("playlist not found"))
 }
 
 /// Bulk-insert tracks into a playlist, skipping any already present.
@@ -547,9 +553,8 @@ pub fn add_tracks_to_playlist(
 
     // Find which tracks are already in the playlist
     let existing: std::collections::HashSet<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1")?;
         stmt.query_map(params![playlist_id], |row| row.get(0))?
             .collect::<Result<_, _>>()?
     };
@@ -844,6 +849,7 @@ pub fn get_genre_heat(conn: &Connection, days: i64) -> Result<Vec<GenreHeat>> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct GenreSummary {
     pub genre_id: i64,
     pub name: String,
@@ -854,6 +860,7 @@ pub struct GenreSummary {
     pub child_count: usize,
 }
 
+#[allow(dead_code)]
 pub fn get_genre_summary(conn: &Connection, genre_id: i64) -> Result<Option<GenreSummary>> {
     let mut stmt = conn.prepare(
         "WITH RECURSIVE selected_genres(id) AS (
@@ -901,6 +908,7 @@ pub fn get_genre_summary(conn: &Connection, genre_id: i64) -> Result<Option<Genr
     }
 }
 
+#[allow(dead_code)]
 pub fn get_genre_path(conn: &Connection, genre_id: i64) -> Result<Vec<Genre>> {
     let mut stmt = conn.prepare(
         "WITH RECURSIVE ancestry(id, name, slug, parent_id, depth) AS (
@@ -1031,6 +1039,7 @@ pub fn genre_exists(conn: &Connection, genre_id: i64) -> Result<bool> {
     Ok(exists)
 }
 
+#[allow(dead_code)]
 pub fn count_genre_tracks(
     conn: &Connection,
     genre_id: i64,
@@ -1493,19 +1502,26 @@ pub fn get_sync_info(conn: &Connection, service: &str) -> Result<Option<SyncInfo
         "SELECT service, last_sync_at, auto_sync_daily, last_sync_track_count, last_sync_album_count
          FROM sync_metadata WHERE service = ?1",
     )?;
-    let result = stmt.query_row([service], |row| {
-        Ok(SyncInfo {
-            service: row.get(0)?,
-            last_sync_at: row.get(1)?,
-            auto_sync_daily: row.get::<_, i64>(2)? != 0,
-            last_sync_track_count: row.get(3)?,
-            last_sync_album_count: row.get(4)?,
+    let result = stmt
+        .query_row([service], |row| {
+            Ok(SyncInfo {
+                service: row.get(0)?,
+                last_sync_at: row.get(1)?,
+                auto_sync_daily: row.get::<_, i64>(2)? != 0,
+                last_sync_track_count: row.get(3)?,
+                last_sync_album_count: row.get(4)?,
+            })
         })
-    }).optional()?;
+        .optional()?;
     Ok(result)
 }
 
-pub fn update_sync_timestamp(conn: &Connection, service: &str, track_count: i64, album_count: i64) -> Result<()> {
+pub fn update_sync_timestamp(
+    conn: &Connection,
+    service: &str,
+    track_count: i64,
+    album_count: i64,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO sync_metadata (service, last_sync_at, auto_sync_daily, last_sync_track_count, last_sync_album_count)
          VALUES (?1, datetime('now'), 0, ?2, ?3)
@@ -1587,19 +1603,16 @@ pub fn get_genre_co_occurrence(
         ORDER BY jaccard DESC, pc.co_count DESC",
     )?;
 
-    let rows = stmt.query_map(
-        params![min_count],
-        |row| {
-            Ok(GenreCoOccurrence {
-                genre_a_id: row.get(0)?,
-                genre_a_name: row.get(1)?,
-                genre_b_id: row.get(2)?,
-                genre_b_name: row.get(3)?,
-                co_listen_count: row.get(4)?,
-                jaccard: row.get(5)?,
-            })
-        },
-    )?;
+    let rows = stmt.query_map(params![min_count], |row| {
+        Ok(GenreCoOccurrence {
+            genre_a_id: row.get(0)?,
+            genre_a_name: row.get(1)?,
+            genre_b_id: row.get(2)?,
+            genre_b_name: row.get(3)?,
+            co_listen_count: row.get(4)?,
+            jaccard: row.get(5)?,
+        })
+    })?;
 
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -1756,14 +1769,14 @@ pub fn get_track_cohort_assignments(
     }
 
     // Pull all (track_id, genre_id) pairs for the requested tracks.
-    let ids_csv: String = track_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "SELECT track_id, genre_id FROM track_genres WHERE track_id IN ({ids_csv})"
-    );
+    let ids_csv: String = track_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT track_id, genre_id FROM track_genres WHERE track_id IN ({ids_csv})");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
 
     let mut assignments: std::collections::HashMap<i64, (String, String)> =
         std::collections::HashMap::new();
@@ -1854,10 +1867,6 @@ pub fn get_discovery_candidate_tracks(conn: &Connection, limit: i64) -> Result<V
     Ok(tracks)
 }
 
-pub fn get_tracks_excluding(conn: &Connection, excluded_track_ids: &[i64]) -> Result<Vec<Track>> {
-    get_tracks_excluding_with_limit(conn, excluded_track_ids, 0)
-}
-
 /// Variant with an optional LIMIT for automix candidate selection.
 /// When `max_candidates` > 0, only the top N tracks (by the default ordering) are returned,
 /// dramatically reducing memory usage for automix which would otherwise load all 32k tracks.
@@ -1931,8 +1940,13 @@ pub fn get_tidal_track_local_ids(
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
-    let rows = stmt.query_map(params, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-    for row in rows { let (tid, lid) = row?; map.insert(tid, lid); }
+    let rows = stmt.query_map(params, |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (tid, lid) = row?;
+        map.insert(tid, lid);
+    }
     Ok(map)
 }
 
@@ -1950,8 +1964,13 @@ pub fn get_artist_photos_by_tidal_ids(
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
-    let rows = stmt.query_map(params, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
-    for row in rows { let (tid, photo) = row?; map.insert(tid, photo); }
+    let rows = stmt.query_map(params, |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (tid, photo) = row?;
+        map.insert(tid, photo);
+    }
     Ok(map)
 }
 
@@ -2425,7 +2444,8 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     // ── Stage 1: candidate pairs ─────────────────────────────────────────────
     // Each INSERT must satisfy CHECK (track_a < track_b), ensured by `b.id > a.id`.
 
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         -- 1a: Same-album pairs (all combinations, not just min/max)
         INSERT OR IGNORE INTO track_similarity (track_a, track_b)
         SELECT a.id, b.id
@@ -2449,11 +2469,13 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
         GROUP BY a.track_id, b.track_id
         LIMIT 300000;
-    ")?;
+    ",
+    )?;
 
     // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
 
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         DROP TABLE IF EXISTS _co_listen;
         CREATE TEMP TABLE _co_listen AS
         SELECT
@@ -2485,12 +2507,14 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         JOIN albums al ON al.id = t.album_id
         WHERE al.year IS NOT NULL;
         CREATE INDEX _track_year_idx ON _track_year(track_id);
-    ")?;
+    ",
+    )?;
 
     // ── Stage 3: score each component ────────────────────────────────────────
 
     // co_album: 1.0 if same album
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET co_album_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
@@ -2499,10 +2523,13 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
               AND a.album_id IS NOT NULL
               AND a.album_id = b.album_id
         )
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // co_artist: 1.0 if same artist
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET co_artist_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
@@ -2511,7 +2538,9 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
               AND a.artist_id IS NOT NULL
               AND a.artist_id = b.artist_id
         )
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // genre_proximity: shared genres / max genres on any single track
     tx.execute("
@@ -2525,37 +2554,47 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ", [])?;
 
     // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET duration_proximity = COALESCE((
             SELECT 1.0 - MIN(CAST(ABS(a.duration_ms - b.duration_ms) AS REAL) / 180000.0, 1.0)
             FROM tracks a, tracks b
             WHERE a.id = track_similarity.track_a AND b.id = track_similarity.track_b
               AND a.duration_ms IS NOT NULL AND b.duration_ms IS NOT NULL
         ), 0)
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // co_listen: normalized co-occurrence count
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET co_listen_score = COALESCE((
             SELECT cl.n / NULLIF((SELECT MAX(n) FROM _co_listen), 0)
             FROM _co_listen cl
             WHERE cl.ta = track_similarity.track_a AND cl.tb = track_similarity.track_b
         ), 0)
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // era_proximity: 1 - |year_a - year_b| / 25, clamped 0-1. Zero when either year is unknown.
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET era_proximity = COALESCE((
             SELECT 1.0 - MIN(CAST(ABS(ya.year - yb.year) AS REAL) / 25.0, 1.0)
             FROM _track_year ya, _track_year yb
             WHERE ya.track_id = track_similarity.track_a
               AND yb.track_id = track_similarity.track_b
         ), 0)
-    ", [])?;
+    ",
+        [],
+    )?;
 
     // Final weighted score. era_proximity replaces some duration_proximity weight
     // because era is a stronger taste signal than song length.
-    tx.execute("
+    tx.execute(
+        "
         UPDATE track_similarity SET similarity_score =
             co_listen_score    * 0.30 +
             co_album_score     * 0.20 +
@@ -2563,17 +2602,21 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
             genre_proximity    * 0.15 +
             era_proximity      * 0.10 +
             duration_proximity * 0.05
-    ", [])?;
+    ",
+        [],
+    )?;
 
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         DROP TABLE IF EXISTS _co_listen;
         DROP TABLE IF EXISTS _genre_shared;
         DROP TABLE IF EXISTS _track_year;
-    ")?;
-
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0)
+    ",
     )?;
+
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| {
+        row.get(0)
+    })?;
 
     tx.commit()?;
     Ok(count as usize)
@@ -2635,11 +2678,11 @@ pub fn get_similar_tracks(
 
 /// Get similarity computation status
 pub fn get_similarity_computed_at(conn: &Connection) -> Result<Option<String>> {
-    Ok(conn.query_row(
-        "SELECT MAX(computed_at) FROM track_similarity",
-        [],
-        |row| row.get(0),
-    ).optional()?)
+    Ok(conn
+        .query_row("SELECT MAX(computed_at) FROM track_similarity", [], |row| {
+            row.get(0)
+        })
+        .optional()?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2904,6 +2947,7 @@ pub fn finish_training_run(conn: &Connection, run_id: i64, status: &str) -> Resu
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn fail_training_run(conn: &Connection, run_id: i64, error_text: &str) -> Result<()> {
     conn.execute(
         "UPDATE training_runs
@@ -3010,10 +3054,8 @@ pub fn replace_discovery_diagnostics(
     Ok(())
 }
 
-pub fn get_per_reason_hit_rates(
-    conn: &Connection,
-    model_id: i64,
-) -> Result<Vec<ReasonHitRateRow>> {
+#[allow(dead_code)]
+pub fn get_per_reason_hit_rates(conn: &Connection, model_id: i64) -> Result<Vec<ReasonHitRateRow>> {
     let mut stmt = conn.prepare(
         "SELECT primary_reason, impressions, hits, hit_rate,
                 mean_rank, mrr_contribution, insufficient_data
@@ -3138,7 +3180,8 @@ pub fn get_track_neighbors(
     limit: i64,
     exclude_ids: &[i64],
 ) -> Result<Vec<EmbeddingNeighborRow>> {
-    let sql = "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.best_quality,
+    let sql =
+        "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.best_quality,
                       n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json,
                       n.confidence, n.support_count, n.candidate_in_degree,
                       n.candidate_in_degree_percentile, n.play_count_seed, n.play_count_candidate,
@@ -3264,11 +3307,10 @@ pub fn get_discovery_status(conn: &Connection) -> Result<DiscoveryStatus> {
         )?,
         None => 0,
     };
-    let clip_cache_tracks: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM track_audio_features",
-        [],
-        |row| row.get(0),
-    )?;
+    let clip_cache_tracks: i64 =
+        conn.query_row("SELECT COUNT(*) FROM track_audio_features", [], |row| {
+            row.get(0)
+        })?;
     let coverage_ratio = if playable_tracks == 0 {
         0.0
     } else {
@@ -3302,7 +3344,13 @@ pub fn record_playback_transition(
         "INSERT INTO playback_transitions
          (from_track_id, to_track_id, transition_source, completed_prev, gap_ms)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![from_track_id, to_track_id, transition_source, completed_prev, gap_ms],
+        params![
+            from_track_id,
+            to_track_id,
+            transition_source,
+            completed_prev,
+            gap_ms
+        ],
     )?;
     Ok(())
 }
@@ -3320,7 +3368,14 @@ pub fn record_discovery_feedback(
         "INSERT INTO discovery_feedback
          (seed_track_id, candidate_track_id, action, surface, context_json, session_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![seed_track_id, candidate_track_id, action, surface, context_json, session_id],
+        params![
+            seed_track_id,
+            candidate_track_id,
+            action,
+            surface,
+            context_json,
+            session_id
+        ],
     )?;
     Ok(())
 }
@@ -3337,14 +3392,19 @@ pub fn get_playback_transition_sequences(conn: &Connection) -> Result<Vec<Vec<i6
     Ok(pairs.into_iter().map(|(a, b)| vec![a, b]).collect())
 }
 
-pub fn get_listen_history_sequences(conn: &Connection, session_window_minutes: i64) -> Result<Vec<Vec<i64>>> {
+pub fn get_listen_history_sequences(
+    conn: &Connection,
+    session_window_minutes: i64,
+) -> Result<Vec<Vec<i64>>> {
     let mut stmt = conn.prepare(
         "SELECT track_id, started_at
          FROM listen_history
          ORDER BY started_at ASC, id ASC",
     )?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut sequences = Vec::new();
@@ -3357,7 +3417,10 @@ pub fn get_listen_history_sequences(conn: &Connection, session_window_minutes: i
             if started_at.ends_with('Z') { "" } else { "Z" }
         ))
         .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&started_at, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc()))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(&started_at, "%Y-%m-%d %H:%M:%S")
+                .map(|dt| dt.and_utc())
+        })
         .ok();
         if let Some(prev) = previous_at {
             if let Some(next) = parsed {
@@ -3462,9 +3525,8 @@ pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
 }
 
 pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC")?;
     stmt.query_map([], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -3517,7 +3579,10 @@ pub fn upsert_audio_dsp_features(conn: &Connection, f: &AudioDspFeatures) -> Res
     Ok(())
 }
 
-pub fn get_audio_dsp_features(conn: &Connection, track_id: i64) -> Result<Option<AudioDspFeatures>> {
+pub fn get_audio_dsp_features(
+    conn: &Connection,
+    track_id: i64,
+) -> Result<Option<AudioDspFeatures>> {
     let mut stmt = conn.prepare(
         "SELECT track_id, bpm, key_signature, camelot_key, loudness_lufs,
                 energy, danceability, beat_strength, spectral_centroid, stereo_width,
@@ -3526,26 +3591,28 @@ pub fn get_audio_dsp_features(conn: &Connection, track_id: i64) -> Result<Option
          FROM audio_dsp_features
          WHERE track_id = ?1",
     )?;
-    let result = stmt.query_row(params![track_id], |row| {
-        Ok(AudioDspFeatures {
-            track_id: row.get(0)?,
-            bpm: row.get(1)?,
-            key_signature: row.get(2)?,
-            camelot_key: row.get(3)?,
-            loudness_lufs: row.get(4)?,
-            energy: row.get(5)?,
-            danceability: row.get(6)?,
-            beat_strength: row.get(7)?,
-            spectral_centroid: row.get(8)?,
-            stereo_width: row.get(9)?,
-            is_instrumental: row.get::<_, i32>(10)? != 0,
-            analysis_source: row.get(11)?,
-            analysis_offset_ms: row.get(12)?,
-            samples_analyzed: row.get(13)?,
-            analyzed_at: row.get(14)?,
-            analysis_version: row.get(15)?,
+    let result = stmt
+        .query_row(params![track_id], |row| {
+            Ok(AudioDspFeatures {
+                track_id: row.get(0)?,
+                bpm: row.get(1)?,
+                key_signature: row.get(2)?,
+                camelot_key: row.get(3)?,
+                loudness_lufs: row.get(4)?,
+                energy: row.get(5)?,
+                danceability: row.get(6)?,
+                beat_strength: row.get(7)?,
+                spectral_centroid: row.get(8)?,
+                stereo_width: row.get(9)?,
+                is_instrumental: row.get::<_, i32>(10)? != 0,
+                analysis_source: row.get(11)?,
+                analysis_offset_ms: row.get(12)?,
+                samples_analyzed: row.get(13)?,
+                analyzed_at: row.get(14)?,
+                analysis_version: row.get(15)?,
+            })
         })
-    }).optional()?;
+        .optional()?;
     Ok(result)
 }
 
@@ -3572,24 +3639,25 @@ pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<
 }
 
 pub fn get_audio_features_stats(conn: &Connection) -> Result<AudioFeaturesStats> {
-    let (total_analyzed, avg_bpm, avg_energy): (i64, Option<f64>, Option<f64>) =
-        conn.query_row(
-            "SELECT COUNT(*), AVG(bpm), AVG(energy) FROM audio_dsp_features",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+    let (total_analyzed, avg_bpm, avg_energy): (i64, Option<f64>, Option<f64>) = conn.query_row(
+        "SELECT COUNT(*), AVG(bpm), AVG(energy) FROM audio_dsp_features",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
 
     // Top key (most common)
-    let top_key: Option<String> = conn.query_row(
-        "SELECT key_signature
+    let top_key: Option<String> = conn
+        .query_row(
+            "SELECT key_signature
          FROM audio_dsp_features
          WHERE key_signature IS NOT NULL
          GROUP BY key_signature
          ORDER BY COUNT(*) DESC
          LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).optional()?;
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
 
     // Key distribution
     let mut stmt = conn.prepare(
@@ -3602,7 +3670,8 @@ pub fn get_audio_features_stats(conn: &Connection) -> Result<AudioFeaturesStats>
     let key_rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
-    let key_distribution: HashMap<String, i64> = key_rows.collect::<Result<Vec<_>, _>>()?
+    let key_distribution: HashMap<String, i64> = key_rows
+        .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .collect();
 
@@ -3619,7 +3688,17 @@ pub fn get_audio_features_stats(conn: &Connection) -> Result<AudioFeaturesStats>
 /// so a single scan populates the evaluation context for all rules at once.
 pub fn get_all_audio_dsp_features(
     conn: &Connection,
-) -> Result<Vec<(i64, Option<f64>, Option<String>, Option<String>, Option<f64>, Option<f64>, bool)>> {
+) -> Result<
+    Vec<(
+        i64,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        bool,
+    )>,
+> {
     let mut stmt = conn.prepare(
         "SELECT track_id, bpm, key_signature, camelot_key, energy, danceability, is_instrumental
          FROM audio_dsp_features",
@@ -3659,8 +3738,10 @@ pub fn get_track_ids_with_fingerprint(conn: &Connection) -> Result<Vec<i64>> {
 }
 
 pub fn count_audio_dsp_features(conn: &Connection) -> Result<i64> {
-    conn.query_row("SELECT COUNT(*) FROM audio_dsp_features", [], |row| row.get(0))
-        .map_err(Into::into)
+    conn.query_row("SELECT COUNT(*) FROM audio_dsp_features", [], |row| {
+        row.get(0)
+    })
+    .map_err(Into::into)
 }
 
 pub fn delete_all_audio_dsp_features(conn: &Connection) -> Result<()> {
@@ -3668,6 +3749,7 @@ pub fn delete_all_audio_dsp_features(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn get_genre_audio_metrics(conn: &Connection) -> Result<Vec<GenreAudioMetrics>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.name,
@@ -3694,6 +3776,7 @@ pub fn get_genre_audio_metrics(conn: &Connection) -> Result<Vec<GenreAudioMetric
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+#[allow(dead_code)]
 pub fn upsert_fingerprint(conn: &Connection, track_id: i64, fp: &AudioFingerprint) -> Result<()> {
     conn.execute(
         "INSERT INTO audio_fingerprints (track_id, hashes_blob, peak_count)
@@ -3706,7 +3789,12 @@ pub fn upsert_fingerprint(conn: &Connection, track_id: i64, fp: &AudioFingerprin
     Ok(())
 }
 
-pub fn insert_fingerprint_hashes(conn: &Connection, track_id: i64, hashes: &[(u32, u32)]) -> Result<()> {
+#[allow(dead_code)]
+pub fn insert_fingerprint_hashes(
+    conn: &Connection,
+    track_id: i64,
+    hashes: &[(u32, u32)],
+) -> Result<()> {
     if hashes.is_empty() {
         return Ok(());
     }
@@ -3750,11 +3838,7 @@ pub fn optimize_fingerprint_hashes(conn: &Connection) -> Result<()> {
 // ── Duplicate group helpers (fingerprint-driven dedup) ───────────────────────
 
 /// Find an existing duplicate_group that already contains BOTH `a` and `b` as members.
-pub fn find_duplicate_group_for_tracks(
-    conn: &Connection,
-    a: i64,
-    b: i64,
-) -> Result<Option<i64>> {
+pub fn find_duplicate_group_for_tracks(conn: &Connection, a: i64, b: i64) -> Result<Option<i64>> {
     conn.query_row(
         "SELECT ma.group_id
          FROM duplicate_members ma
@@ -3778,12 +3862,7 @@ pub fn create_duplicate_group(conn: &Connection) -> Result<i64> {
 }
 
 /// Insert a member into a duplicate_group. Idempotent (ON CONFLICT IGNORE).
-pub fn add_duplicate_member(
-    conn: &Connection,
-    gid: i64,
-    tid: i64,
-    preferred: bool,
-) -> Result<()> {
+pub fn add_duplicate_member(conn: &Connection, gid: i64, tid: i64, preferred: bool) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO duplicate_members (group_id, track_id, is_preferred)
          VALUES (?1, ?2, ?3)",
@@ -3868,11 +3947,7 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
         )
         .unwrap_or(0);
     let fingerprinted: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM audio_fingerprints",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM audio_fingerprints", [], |r| r.get(0))
         .unwrap_or(0);
 
     Ok(AudioFeaturesQuality {
@@ -3890,11 +3965,11 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
 /// Return the ids of all tracks whose stored analysis_version is not 'v1'
 /// (i.e. need to be re-analysed after an analysis-version bump).
 pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT track_id FROM audio_dsp_features WHERE analysis_version != 'v1'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT track_id FROM audio_dsp_features WHERE analysis_version != 'v1'")?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64, u32)>> {
@@ -3939,7 +4014,10 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
 
         assert!(!get_onboarding_complete(&conn).expect("read flag"));
-        assert!(read_onboarding_value(&conn).is_none(), "must not write a row when nothing implies completion");
+        assert!(
+            read_onboarding_value(&conn).is_none(),
+            "must not write a row when nothing implies completion"
+        );
     }
 
     #[test]
@@ -4095,14 +4173,17 @@ mod tests {
     fn test_add_tracks_to_playlist_deduplicates() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
             INSERT INTO artists (id, name) VALUES (1, 'Test Artist');
             INSERT INTO albums (id, title, artist_id) VALUES (1, 'Test Album', 1);
             INSERT INTO tracks (id, title, artist_id, album_id) VALUES (1, 'Track A', 1, 1);
             INSERT INTO tracks (id, title, artist_id, album_id) VALUES (2, 'Track B', 1, 1);
             INSERT INTO tracks (id, title, artist_id, album_id) VALUES (3, 'Track C', 1, 1);
             INSERT INTO playlists (id, name, is_smart, is_synced) VALUES (1, 'My Playlist', 0, 1);
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // First call adds both tracks
         let added = add_tracks_to_playlist(&conn, 1, &[1, 2]).unwrap();
@@ -4131,25 +4212,32 @@ mod tests {
     // (liked tracks ∪ tracks from favorited albums), so saved-album tracks leaked
     // into what the UI presented as "liked". liked_only must be strict.
     fn seed_album_with_one_liked_track(conn: &Connection) {
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Brooks & Dunn')", []).unwrap();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Brooks & Dunn')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO albums (id, title, artist_id, is_favorite, source)
              VALUES (1, '#1s ... and then some', 1, 1, 'tidal')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         // Three tracks in the favorited album; only "Neon Blue" has tracks.is_favorite = 1.
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
                                   best_quality, best_source, fidelity_score, is_favorite, source)
              VALUES (1, 'Neon Blue', 1, 1, 200000, 101, 'LOSSLESS', 'tidal', 10, 1, 'tidal')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
                                   best_quality, best_source, fidelity_score, is_favorite, source)
              VALUES (2, 'Brand New Man', 1, 1, 180000, 102, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
                                   best_quality, best_source, fidelity_score, is_favorite, source)
@@ -4165,7 +4253,11 @@ mod tests {
         seed_album_with_one_liked_track(&conn);
 
         let tracks = get_tracks(&conn, "title", "asc", 100, 0, false, true).expect("liked tracks");
-        assert_eq!(tracks.len(), 1, "liked_only must return only truly-liked tracks");
+        assert_eq!(
+            tracks.len(),
+            1,
+            "liked_only must return only truly-liked tracks"
+        );
         assert_eq!(tracks[0].title, "Neon Blue");
 
         let count = get_track_count(&conn, false, true).expect("liked count");
@@ -4178,8 +4270,13 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
         seed_album_with_one_liked_track(&conn);
 
-        let tracks = get_tracks(&conn, "title", "asc", 100, 0, true, false).expect("library tracks");
-        assert_eq!(tracks.len(), 3, "favorite_only must keep returning all tracks from favorited albums");
+        let tracks =
+            get_tracks(&conn, "title", "asc", 100, 0, true, false).expect("library tracks");
+        assert_eq!(
+            tracks.len(),
+            3,
+            "favorite_only must keep returning all tracks from favorited albums"
+        );
 
         let count = get_track_count(&conn, true, false).expect("library count");
         assert_eq!(count, 3, "count must match favorite_only data query");
@@ -4280,13 +4377,13 @@ pub struct AudioFilters {
     pub energy_max: Option<f64>,
     pub danceability_min: Option<f64>,
     pub danceability_max: Option<f64>,
-    pub key_signature: Option<String>,   // exact match
-    pub camelot_key: Option<String>,     // exact match
+    pub key_signature: Option<String>, // exact match
+    pub camelot_key: Option<String>,   // exact match
     pub year_min: Option<i64>,
     pub year_max: Option<i64>,
-    pub genre_ids: Vec<i64>,             // track must belong to at least one
-    pub track_type: Option<String>,      // placeholder, always "track"
-    pub is_instrumental: Option<bool>,   // true → vocal:false filter
+    pub genre_ids: Vec<i64>,           // track must belong to at least one
+    pub track_type: Option<String>,    // placeholder, always "track"
+    pub is_instrumental: Option<bool>, // true → vocal:false filter
 }
 
 #[derive(Debug, Serialize)]
@@ -4330,11 +4427,20 @@ pub struct BasicTrack {
     pub duration_ms: Option<i64>,
 }
 
-pub fn get_same_vibe_tracks(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<VibeTrack>> {
+pub fn get_same_vibe_tracks(
+    conn: &Connection,
+    track_id: i64,
+    limit: i64,
+) -> Result<Vec<VibeTrack>> {
     let src = conn.query_row(
         "SELECT d.bpm, d.camelot_key FROM audio_dsp_features d WHERE d.track_id = ?1",
         params![track_id],
-        |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<String>>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, Option<f64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
     );
     let (bpm, camelot_key) = match src {
         Ok(v) => v,
@@ -4351,9 +4457,17 @@ pub fn get_same_vibe_tracks(conn: &Connection, track_id: i64, limit: i64) -> Res
     let camelot_letter = camelot_key.chars().last().unwrap_or('A');
 
     let adjacent_nums: Vec<i64> = vec![
-        if camelot_num == 1 { 12 } else { camelot_num - 1 },
+        if camelot_num == 1 {
+            12
+        } else {
+            camelot_num - 1
+        },
         camelot_num,
-        if camelot_num == 12 { 1 } else { camelot_num + 1 },
+        if camelot_num == 12 {
+            1
+        } else {
+            camelot_num + 1
+        },
     ];
     let camelot_patterns: Vec<String> = adjacent_nums
         .iter()
@@ -4393,7 +4507,11 @@ pub fn get_same_vibe_tracks(conn: &Connection, track_id: i64, limit: i64) -> Res
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn get_underrated_tracks(conn: &Connection, artist_id: i64, limit: i64) -> Result<Vec<BasicTrack>> {
+pub fn get_underrated_tracks(
+    conn: &Connection,
+    artist_id: i64,
+    limit: i64,
+) -> Result<Vec<BasicTrack>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms
          FROM tracks t
@@ -4423,6 +4541,14 @@ pub fn search_with_audio_filters(
     limit: usize,
 ) -> Result<Vec<AudioSearchResult>> {
     let normalized = free_text.trim().to_ascii_lowercase();
+
+    if filters
+        .track_type
+        .as_deref()
+        .is_some_and(|track_type| track_type != "track")
+    {
+        return Ok(Vec::new());
+    }
 
     // Base SELECT — always JOIN audio_dsp_features so filter columns are available
     let mut sql = String::from(

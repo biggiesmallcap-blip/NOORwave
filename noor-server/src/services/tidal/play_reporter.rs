@@ -1,6 +1,6 @@
 use anyhow::Result;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -28,20 +28,38 @@ fn decode_jwt_claims(token: &str) -> Result<JwtClaims> {
 fn encode_sqs_batch(message_body: &str, headers_json: &str) -> String {
     let entry_id = Uuid::new_v4().to_string();
     [
-        format!("SendMessageBatchRequestEntry.1.Id={}", urlencoding::encode(&entry_id)),
-        format!("SendMessageBatchRequestEntry.1.MessageBody={}", urlencoding::encode(message_body)),
-        format!("SendMessageBatchRequestEntry.1.MessageAttribute.1.Name={}", urlencoding::encode("Name")),
+        format!(
+            "SendMessageBatchRequestEntry.1.Id={}",
+            urlencoding::encode(&entry_id)
+        ),
+        format!(
+            "SendMessageBatchRequestEntry.1.MessageBody={}",
+            urlencoding::encode(message_body)
+        ),
+        format!(
+            "SendMessageBatchRequestEntry.1.MessageAttribute.1.Name={}",
+            urlencoding::encode("Name")
+        ),
         format!(
             "SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.StringValue={}",
             urlencoding::encode("playback_session")
         ),
-        format!("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.DataType={}", urlencoding::encode("String")),
-        format!("SendMessageBatchRequestEntry.1.MessageAttribute.2.Name={}", urlencoding::encode("Headers")),
+        format!(
+            "SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.DataType={}",
+            urlencoding::encode("String")
+        ),
+        format!(
+            "SendMessageBatchRequestEntry.1.MessageAttribute.2.Name={}",
+            urlencoding::encode("Headers")
+        ),
         format!(
             "SendMessageBatchRequestEntry.1.MessageAttribute.2.Value.StringValue={}",
             urlencoding::encode(headers_json)
         ),
-        format!("SendMessageBatchRequestEntry.1.MessageAttribute.2.Value.DataType={}", urlencoding::encode("String")),
+        format!(
+            "SendMessageBatchRequestEntry.1.MessageAttribute.2.Value.DataType={}",
+            urlencoding::encode("String")
+        ),
     ]
     .join("&")
 }
@@ -163,6 +181,9 @@ mod tests {
     fn sqs_form_body_url_encodes_json() {
         // JSON braces must be percent-encoded — { → %7B
         let body = encode_sqs_batch(r#"{"key":"val"}"#, "{}");
-        assert!(body.contains("%7B"), "JSON must be URL-encoded in the form body");
+        assert!(
+            body.contains("%7B"),
+            "JSON must be URL-encoded in the form body"
+        );
     }
 }

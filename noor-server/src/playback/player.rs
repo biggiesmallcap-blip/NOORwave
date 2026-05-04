@@ -7,9 +7,9 @@ use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleMode};
 use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
 use crate::services::audio_analysis::compute_harmonic_multiplier;
+use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use crate::smart::taste_vector::adapters::from_session_profile;
 use crate::smart::taste_vector::{SeedContext, TasteVector};
-use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use rand::Rng;
@@ -171,9 +171,11 @@ impl ActiveListenSession {
         prior: Option<&LiveListenSession>,
     ) -> Self {
         let (session_id, position, transition_from) = match prior {
-            Some(ls) if (now - ls.last_finished_at).num_minutes() < SESSION_GAP_MINUTES => {
-                (ls.session_id.clone(), ls.position + 1, Some(ls.last_track_id))
-            }
+            Some(ls) if (now - ls.last_finished_at).num_minutes() < SESSION_GAP_MINUTES => (
+                ls.session_id.clone(),
+                ls.position + 1,
+                Some(ls.last_track_id),
+            ),
             _ => (uuid::Uuid::new_v4().to_string(), 0, None),
         };
         Self {
@@ -484,9 +486,7 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
                 .position(|item| item.track.id == track_id)
         })
         .or_else(|| {
-            current_queue_item_id.and_then(|qid| {
-                queue_items.iter().position(|item| item.id == qid)
-            })
+            current_queue_item_id.and_then(|qid| queue_items.iter().position(|item| item.id == qid))
         });
 
     let next_track = match repeat_mode.as_str() {
@@ -510,7 +510,11 @@ pub fn next_track(conn: &Connection) -> Result<PlaybackSnapshot> {
     if let Some(item) = next_track {
         // Pending rows have track.id == 0 (COALESCE sentinel); write NULL so the FK is not
         // violated. current_queue_item_id tracks position for the next advance.
-        let new_track_id: Option<i64> = if item.track.id != 0 { Some(item.track.id) } else { None };
+        let new_track_id: Option<i64> = if item.track.id != 0 {
+            Some(item.track.id)
+        } else {
+            None
+        };
         conn.execute(
             "UPDATE playback_state
              SET current_track_id = ?1, current_queue_item_id = ?2, position_ms = 0, is_playing = 1
@@ -561,7 +565,9 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
         .or_else(|| {
             current_track_id.and_then(|track_id| {
-                queue_items.iter().position(|item| item.track.id == track_id)
+                queue_items
+                    .iter()
+                    .position(|item| item.track.id == track_id)
             })
         });
 
@@ -655,18 +661,7 @@ pub fn peek_next_track(conn: &Connection) -> Result<Option<Track>> {
     Ok(next.map(|item| item.track.clone()))
 }
 
-pub fn queue_tracks(snapshot: &PlaybackSnapshot) -> Vec<Track> {
-    snapshot
-        .queue
-        .iter()
-        .map(|item| item.track.clone())
-        .collect()
-}
-
-pub(crate) fn preferred_tidal_quality(
-    track: &Track,
-    user_pref: Option<AudioQuality>,
-) -> String {
+pub(crate) fn preferred_tidal_quality(track: &Track, user_pref: Option<AudioQuality>) -> String {
     if let Some(q) = user_pref {
         return q.as_tidal_str().to_string();
     }
@@ -790,7 +785,10 @@ fn build_automix_extension(
             if !neighbors.is_empty() {
                 let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
                 let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
-                let track_map = tracks.into_iter().map(|track| (track.id, track)).collect::<HashMap<_, _>>();
+                let track_map = tracks
+                    .into_iter()
+                    .map(|track| (track.id, track))
+                    .collect::<HashMap<_, _>>();
                 let ordered = neighbor_ids
                     .into_iter()
                     .filter_map(|track_id| track_map.get(&track_id).cloned())
@@ -1226,11 +1224,7 @@ fn parse_days_since_last_played(timestamp: &str) -> f64 {
     elapsed.num_seconds().max(0) as f64 / 86_400.0
 }
 
-fn matches_preferred_genres(
-    genres: &[String],
-    taste: &TasteVector,
-    seed: &SeedContext,
-) -> bool {
+fn matches_preferred_genres(genres: &[String], taste: &TasteVector, seed: &SeedContext) -> bool {
     genres
         .iter()
         .map(|genre| normalize_genre_key(genre))
@@ -1689,8 +1683,11 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Unenriched Artist')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Unenriched Artist')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, source, fidelity_score)
              VALUES (1, 'Fresh Tidal Import', 1, 'tidal_stream', 0)",
@@ -1718,10 +1715,10 @@ mod tests {
         let extension = build_automix_extension(
             &conn,
             &seed,
-            &[],          // empty queue
+            &[], // empty queue
             ShuffleMode::Off,
-            12,           // typical needed
-            true,         // use_learning enabled — fast-path will run, find no model, fall through
+            12,   // typical needed
+            true, // use_learning enabled — fast-path will run, find no model, fall through
         )
         .expect("extension call");
         assert!(
@@ -1754,15 +1751,8 @@ mod tests {
         )
         .unwrap();
 
-        let extension = build_automix_extension(
-            &conn,
-            &seed,
-            &[],
-            ShuffleMode::Off,
-            12,
-            true,
-        )
-        .expect("extension call");
+        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+            .expect("extension call");
 
         // We don't pin contents — only that the empty-signal guard
         // didn't bail. Sparse-signal seeds still walk through the
@@ -2018,11 +2008,7 @@ mod parity_tests {
         for (id, weight) in [(2, 1.1_f64), (3, 2.4)] {
             profile.negative_artists.insert(id, weight);
         }
-        for (genre, weight) in [
-            ("house", 6.4_f64),
-            ("techno", 4.2),
-            ("ambient", 2.0),
-        ] {
+        for (genre, weight) in [("house", 6.4_f64), ("techno", 4.2), ("ambient", 2.0)] {
             profile.positive_genres.insert(genre.to_string(), weight);
         }
         for (genre, weight) in [("jazz", 1.8_f64), ("ambient", 0.4)] {
@@ -2156,11 +2142,7 @@ mod parity_tests {
         sorted.into_iter().take(n).map(|(id, _)| id).collect()
     }
 
-    fn kendall_tau_top_n(
-        new_scores: &[(i64, f64)],
-        old_scores: &[(i64, f64)],
-        n: usize,
-    ) -> f64 {
+    fn kendall_tau_top_n(new_scores: &[(i64, f64)], old_scores: &[(i64, f64)], n: usize) -> f64 {
         let new_top = top_n_ids(new_scores, n);
         let old_top = top_n_ids(old_scores, n);
         let new_rank: HashMap<i64, usize> =
@@ -2203,18 +2185,21 @@ mod parity_tests {
     /// `|new_score - old_score|` descending so tiny diffs at the top
     /// suggest float precision while large diffs at the top point to a
     /// logic bug. Free triage signal.
-    fn emit_divergence_table(
-        new_scores: &[(i64, f64)],
-        old_scores: &[(i64, f64)],
-    ) {
+    fn emit_divergence_table(new_scores: &[(i64, f64)], old_scores: &[(i64, f64)]) {
         let new_lookup: HashMap<i64, f64> = new_scores.iter().copied().collect();
         let old_lookup: HashMap<i64, f64> = old_scores.iter().copied().collect();
         let new_full = top_n_ids(new_scores, new_scores.len());
         let old_full = top_n_ids(old_scores, old_scores.len());
-        let new_rank: HashMap<i64, usize> =
-            new_full.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let old_rank: HashMap<i64, usize> =
-            old_full.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let new_rank: HashMap<i64, usize> = new_full
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
+        let old_rank: HashMap<i64, usize> = old_full
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
 
         let mut rows: Vec<(i64, usize, usize, f64, f64)> = new_scores
             .iter()
@@ -2234,7 +2219,13 @@ mod parity_tests {
 
         eprintln!(
             "{:>8}  {:>8}  {:>8}  {:>10}  {:>11}  {:>11}  {:>13}",
-            "track_id", "old_rank", "new_rank", "rank_delta", "old_score", "new_score", "score_delta"
+            "track_id",
+            "old_rank",
+            "new_rank",
+            "rank_delta",
+            "old_score",
+            "new_score",
+            "score_delta"
         );
         for (id, or, nr, old_s, new_s) in rows {
             let rank_delta = (nr as i64) - (or as i64);
@@ -2289,9 +2280,7 @@ mod parity_tests {
         if new_top != old_top {
             eprintln!("\nautomix parity divergence (sorted by |score_delta| desc):");
             emit_divergence_table(&new_scores, &old_scores);
-            panic!(
-                "top-{n} ranking diverged.\n  old: {old_top:?}\n  new: {new_top:?}"
-            );
+            panic!("top-{n} ranking diverged.\n  old: {old_top:?}\n  new: {new_top:?}");
         }
     }
 }

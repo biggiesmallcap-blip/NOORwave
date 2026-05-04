@@ -31,6 +31,7 @@ pub struct StreamInfo {
     pub url: String,
     pub segment_urls: Vec<String>,
     #[serde(rename = "trackId")]
+    #[allow(dead_code)]
     pub track_id: i64,
     #[serde(rename = "audioQuality")]
     pub audio_quality: String,
@@ -65,6 +66,7 @@ impl StreamInfo {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_lossless(&self) -> bool {
         matches!(self.codec_kind(), StreamCodec::Flac)
     }
@@ -76,11 +78,13 @@ impl StreamInfo {
         )
     }
 
+    #[allow(dead_code)]
     pub fn sample_rate_hz(&self) -> Option<u32> {
         self.sample_rate
             .and_then(|rate| (rate > 0).then_some(rate as u32))
     }
 
+    #[allow(dead_code)]
     pub fn bit_depth_bits(&self) -> Option<u16> {
         self.bit_depth
             .and_then(|depth| (depth > 0).then_some(depth as u16))
@@ -92,6 +96,7 @@ pub enum StreamResolveError {
     #[error("TIDAL session expired while resolving stream: {message}")]
     SessionExpired { message: String },
     #[error("TIDAL session refresh failed: {message}")]
+    #[allow(dead_code)]
     SessionRefreshFailed { message: String },
     #[error("TIDAL playback request was rejected: {message}")]
     StreamRejected { message: String },
@@ -119,6 +124,7 @@ impl StreamResolveError {
         matches!(self, Self::SessionExpired { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_stream_rejected(&self) -> bool {
         matches!(self, Self::StreamRejected { .. })
     }
@@ -169,17 +175,16 @@ fn extract_dash_codec(xml: &str) -> String {
 
 // Parses a DASH SegmentTemplate manifest and returns (init_url, vec_of_segment_urls).
 // Handles both duration= attribute (uniform segments) and <SegmentTimeline> (variable).
-fn parse_dash_segment_template(
-    xml: &str,
-) -> Result<(String, Vec<String>), StreamResolveError> {
+fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), StreamResolveError> {
     fn parse_err(msg: impl Into<String>) -> StreamResolveError {
-        StreamResolveError::ManifestParseFailed { message: msg.into() }
+        StreamResolveError::ManifestParseFailed {
+            message: msg.into(),
+        }
     }
 
-    static MPD_DURATION_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| {
-            regex::Regex::new(r#"mediaPresentationDuration="([^"]+)""#).unwrap()
-        });
+    static MPD_DURATION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"mediaPresentationDuration="([^"]+)""#).unwrap()
+    });
     static INIT_RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r#"initialization="([^"]+)""#).unwrap());
     static MEDIA_RE: std::sync::LazyLock<regex::Regex> =
@@ -200,8 +205,11 @@ fn parse_dash_segment_template(
         .and_then(|c| c.get(1))
         .map(|m| m.as_str())
         .ok_or_else(|| parse_err("DASH manifest missing mediaPresentationDuration"))?;
-    let total_secs = parse_iso_duration(duration_str)
-        .ok_or_else(|| parse_err(format!("DASH manifest unparseable duration: {duration_str}")))?;
+    let total_secs = parse_iso_duration(duration_str).ok_or_else(|| {
+        parse_err(format!(
+            "DASH manifest unparseable duration: {duration_str}"
+        ))
+    })?;
 
     let init_url = INIT_RE
         .captures(xml)
@@ -247,7 +255,9 @@ fn parse_dash_segment_template(
     };
 
     if segment_count == 0 {
-        return Err(parse_err("DASH manifest: could not determine segment count"));
+        return Err(parse_err(
+            "DASH manifest: could not determine segment count",
+        ));
     }
 
     let segment_urls: Vec<String> = (start_number..start_number + segment_count as u64)
@@ -339,12 +349,11 @@ pub async fn resolve_stream(
     // Resolve the manifest into (stream_url, segment_urls, audio_codec).
     // segment_urls is non-empty only for segmented DASH (SegmentTemplate shape).
     let (stream_url, segment_urls, dash_codec) = if manifest_mime.contains("dash+xml") {
-        let manifest_str =
-            std::str::from_utf8(&manifest_bytes).map_err(|error| {
-                StreamResolveError::ManifestParseFailed {
-                    message: format!("DASH manifest is not valid UTF-8: {error}"),
-                }
-            })?;
+        let manifest_str = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+            StreamResolveError::ManifestParseFailed {
+                message: format!("DASH manifest is not valid UTF-8: {error}"),
+            }
+        })?;
         let codec = extract_dash_codec(manifest_str);
 
         // Try SegmentTemplate (segmented CMAF fMP4) first.

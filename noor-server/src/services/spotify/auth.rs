@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
@@ -99,7 +99,10 @@ pub async fn fetch_app_token(http: &Client, creds: &SpotifyCredentials) -> Resul
         .await
         .context("Failed to parse Spotify token response")?;
 
-    info!("Fetched Spotify app token (expires in {}s)", data.expires_in);
+    info!(
+        "Fetched Spotify app token (expires in {}s)",
+        data.expires_in
+    );
 
     Ok(SpotifyTokens {
         access_token: data.access_token,

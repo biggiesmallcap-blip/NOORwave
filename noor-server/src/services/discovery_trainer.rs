@@ -8,7 +8,6 @@
 /// 5. Evaluation: recall@10 + MRR@20 on held-out transition pairs
 ///
 /// With rayon parallelism: ~10-30s for 32k tracks (was hours in Python).
-
 use crate::db::queries::EmbeddingTrackRow;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -68,6 +67,7 @@ pub struct TrainerInput {
     pub heldout_pairs: Vec<(i64, i64)>,
 }
 
+#[allow(dead_code)]
 fn default_include_audio_proxy() -> bool {
     true
 }
@@ -159,7 +159,11 @@ fn hashed_projection(tokens: &[String], dim: usize) -> Vec<f64> {
         let limit = usize::min(32, dim * 2);
         for offset in (0..limit).step_by(step) {
             let bucket = digest[offset] as usize % dim;
-            let sign = if digest[offset + 1] % 2 == 0 { 1.0 } else { -1.0 };
+            let sign = if digest[offset + 1] % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
             vec[bucket] += sign * 0.5;
         }
     }
@@ -177,10 +181,7 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         Some(&track.source),
     ];
     for value in fields.into_iter().flatten() {
-        let normalized = value
-            .to_lowercase()
-            .replace('/', " ")
-            .replace('-', " ");
+        let normalized = value.to_lowercase().replace('/', " ").replace('-', " ");
         tokens.extend(normalized.split_whitespace().map(String::from));
     }
     if let Some(duration) = track.duration_ms {
@@ -242,10 +243,7 @@ fn cancel_requested(cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool
 fn build_behavioral_embeddings(
     input: &TrainerInput,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> (
-    HashMap<i64, Vec<f64>>,
-    HashMap<i64, HashMap<i64, i64>>,
-) {
+) -> (HashMap<i64, Vec<f64>>, HashMap<i64, HashMap<i64, i64>>) {
     let dim = input.dimension;
     let window = input.window_size;
     let min_count = input.min_count;
@@ -327,7 +325,11 @@ fn build_behavioral_embeddings(
                 let limit = usize::min(32, dim * 2);
                 for offset in (0..limit).step_by(2) {
                     let bucket = digest[offset] as usize % dim;
-                    let sign = if digest[offset + 1] % 2 == 0 { 1.0 } else { -1.0 };
+                    let sign = if digest[offset + 1] % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     vec[bucket] += sign * score;
                 }
             }
@@ -460,7 +462,12 @@ fn similarity_neighbors(
             let album = t.album_title.clone();
             let genre_tokens: HashSet<String> = metadata_tokens(t)
                 .into_iter()
-                .filter(|tok| !tok.starts_with("dur_") && !tok.starts_with("bpm") && !tok.starts_with("energy_") && !tok.starts_with("key_"))
+                .filter(|tok| {
+                    !tok.starts_with("dur_")
+                        && !tok.starts_with("bpm")
+                        && !tok.starts_with("energy_")
+                        && !tok.starts_with("key_")
+                })
                 .collect();
             TrackMeta {
                 track_id: t.track_id,
@@ -481,10 +488,12 @@ fn similarity_neighbors(
         .collect();
     let behavioral_vecs: Vec<&Vec<f64>> = track_metas
         .iter()
-        .map(|m| behavioral.get(&m.track_id).unwrap_or_else(|| {
-            static EMPTY: Vec<f64> = Vec::new();
-            &EMPTY
-        }))
+        .map(|m| {
+            behavioral.get(&m.track_id).unwrap_or_else(|| {
+                static EMPTY: Vec<f64> = Vec::new();
+                &EMPTY
+            })
+        })
         .collect();
     let audio_vecs: Vec<&Vec<f64>> = track_metas
         .iter()
@@ -539,7 +548,16 @@ fn similarity_neighbors(
             // with the largest contribution to this edge's score.
             #[allow(clippy::type_complexity)]
             let mut scores: Vec<(
-                i64, f64, f64, f64, f64, Vec<String>, Option<String>, f64, i64, i64,
+                i64,
+                f64,
+                f64,
+                f64,
+                f64,
+                Vec<String>,
+                Option<String>,
+                f64,
+                i64,
+                i64,
             )> = Vec::new();
 
             for (other_idx, other_vector) in fusion_vecs.iter().enumerate() {
@@ -582,7 +600,11 @@ fn similarity_neighbors(
                 // Genre branch (pre-computed HashSets, no tokenization)
                 if !meta.genre_tokens.is_empty()
                     && !other_meta.genre_tokens.is_empty()
-                    && meta.genre_tokens.intersection(&other_meta.genre_tokens).next().is_some()
+                    && meta
+                        .genre_tokens
+                        .intersection(&other_meta.genre_tokens)
+                        .next()
+                        .is_some()
                 {
                     metadata_score += 0.18;
                     reason_tags.push("genre_branch".to_string());
@@ -625,7 +647,9 @@ fn similarity_neighbors(
                             let n = k[..num_end].parse::<i64>().ok()?;
                             Some((n, k[num_end..].to_string()))
                         };
-                        if let (Some((an, asuf)), Some((bn, bsuf))) = (parse_key(a_key), parse_key(b_key)) {
+                        if let (Some((an, asuf)), Some((bn, bsuf))) =
+                            (parse_key(a_key), parse_key(b_key))
+                        {
                             let num_diff = (an - bn).abs();
                             let wheel_diff = num_diff.min(12 - num_diff);
                             if wheel_diff <= 1 && asuf == bsuf {
@@ -683,9 +707,7 @@ fn similarity_neighbors(
                 } else {
                     0.0
                 };
-                let has_audio = !a_current.is_empty()
-                    && !a_other.is_empty()
-                    && audio_score > 0.0;
+                let has_audio = !a_current.is_empty() && !a_other.is_empty() && audio_score > 0.0;
                 let confidence = if support_count > 0 && has_audio {
                     behavioral_confidence.max(0.4)
                 } else if support_count > 0 {
@@ -694,10 +716,8 @@ fn similarity_neighbors(
                     0.25
                 };
 
-                let play_count_candidate = play_counts
-                    .get(&other_meta.track_id)
-                    .copied()
-                    .unwrap_or(0);
+                let play_count_candidate =
+                    play_counts.get(&other_meta.track_id).copied().unwrap_or(0);
 
                 scores.push((
                     other_meta.track_id,
@@ -803,10 +823,7 @@ fn compute_in_degree(neighbors: &mut [TrainerNeighbor]) {
 
 // ── Stage 5: Evaluation ───────────────────────────────────────────────────────
 
-fn evaluate(
-    neighbors: &[TrainerNeighbor],
-    heldout_pairs: &[(i64, i64)],
-) -> HashMap<String, f64> {
+fn evaluate(neighbors: &[TrainerNeighbor], heldout_pairs: &[(i64, i64)]) -> HashMap<String, f64> {
     if heldout_pairs.is_empty() {
         return HashMap::from([
             ("recall_at_10".to_string(), 0.0),
@@ -841,10 +858,7 @@ fn evaluate(
     let total = heldout_pairs.len() as f64;
     HashMap::from([
         ("recall_at_10".to_string(), hits as f64 / total),
-        (
-            "mrr_at_20".to_string(),
-            reciprocal_rank / total,
-        ),
+        ("mrr_at_20".to_string(), reciprocal_rank / total),
     ])
 }
 
@@ -876,11 +890,11 @@ fn compute_reason_hit_rates(
     let mut acc: HashMap<String, (i64, i64, f64, f64)> = HashMap::new();
 
     for &(source, target) in heldout_pairs {
-        let Some(ranked) = grouped.get(&source) else { continue; };
+        let Some(ranked) = grouped.get(&source) else {
+            continue;
+        };
         for (idx, (nid, primary)) in ranked.iter().take(20).enumerate() {
-            let key = primary
-                .clone()
-                .unwrap_or_else(|| "unspecified".to_string());
+            let key = primary.clone().unwrap_or_else(|| "unspecified".to_string());
             let entry = acc.entry(key).or_insert((0, 0, 0.0, 0.0));
             entry.0 += 1;
             if *nid == target {
@@ -1006,7 +1020,10 @@ pub fn run_discovery_training(
     if let Some(tx) = progress_tx {
         let _ = tx.send(TrainingProgressUpdate::stage_only(
             "neighbors",
-            &format!("Building similarity graph for {} tracks (O(n²) parallel)", fusion.len()),
+            &format!(
+                "Building similarity graph for {} tracks (O(n²) parallel)",
+                fusion.len()
+            ),
             0.70,
         ));
     }
@@ -1097,7 +1114,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    fn make_test_input(track_count: usize, dim: usize) -> (
+    fn make_test_input(
+        track_count: usize,
+        dim: usize,
+    ) -> (
         Vec<EmbeddingTrackRow>,
         HashMap<i64, Vec<f64>>,
         HashMap<i64, TrainerAudioFeature>,
@@ -1232,7 +1252,10 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         // Edge from track 0 → track 1 has 50 supporting events; everyone else has 0.
         let mut co_count: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
-        co_count.entry(tracks[0].track_id).or_default().insert(tracks[1].track_id, 50);
+        co_count
+            .entry(tracks[0].track_id)
+            .or_default()
+            .insert(tracks[1].track_id, 50);
         let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
@@ -1288,12 +1311,18 @@ mod tests {
         let heldout = vec![(1, 10)];
         let rates = compute_reason_hit_rates(&neighbors, &heldout);
 
-        let beh = rates.iter().find(|r| r.primary_reason == "behavioral").unwrap();
+        let beh = rates
+            .iter()
+            .find(|r| r.primary_reason == "behavioral")
+            .unwrap();
         assert_eq!(beh.impressions, 2);
         assert_eq!(beh.hits, 1);
         assert!((beh.hit_rate - 0.5).abs() < 1e-9);
 
-        let harm = rates.iter().find(|r| r.primary_reason == "harmonic_match").unwrap();
+        let harm = rates
+            .iter()
+            .find(|r| r.primary_reason == "harmonic_match")
+            .unwrap();
         assert_eq!(harm.impressions, 1);
         assert_eq!(harm.hits, 0);
         assert_eq!(harm.hit_rate, 0.0);
@@ -1354,9 +1383,21 @@ mod tests {
         ];
         compute_in_degree(&mut neighbors);
 
-        let pct_a = neighbors.iter().find(|n| n.neighbor_track_id == 100).unwrap().candidate_in_degree_percentile;
-        let pct_b = neighbors.iter().find(|n| n.neighbor_track_id == 200).unwrap().candidate_in_degree_percentile;
-        let pct_c = neighbors.iter().find(|n| n.neighbor_track_id == 300).unwrap().candidate_in_degree_percentile;
+        let pct_a = neighbors
+            .iter()
+            .find(|n| n.neighbor_track_id == 100)
+            .unwrap()
+            .candidate_in_degree_percentile;
+        let pct_b = neighbors
+            .iter()
+            .find(|n| n.neighbor_track_id == 200)
+            .unwrap()
+            .candidate_in_degree_percentile;
+        let pct_c = neighbors
+            .iter()
+            .find(|n| n.neighbor_track_id == 300)
+            .unwrap()
+            .candidate_in_degree_percentile;
 
         // 3 distinct tracks, ranks: A,B share count 1 (avg 0.5), C alone at count 3 (rank 2).
         // percentile = avg_rank / N where N=3.
@@ -1364,8 +1405,16 @@ mod tests {
         assert!((pct_b - 0.5 / 3.0).abs() < 1e-9, "B pct = {}", pct_b);
         assert!((pct_c - 2.0 / 3.0).abs() < 1e-9, "C pct = {}", pct_c);
 
-        let in_a = neighbors.iter().find(|n| n.neighbor_track_id == 100).unwrap().candidate_in_degree;
-        let in_c = neighbors.iter().find(|n| n.neighbor_track_id == 300).unwrap().candidate_in_degree;
+        let in_a = neighbors
+            .iter()
+            .find(|n| n.neighbor_track_id == 100)
+            .unwrap()
+            .candidate_in_degree;
+        let in_c = neighbors
+            .iter()
+            .find(|n| n.neighbor_track_id == 300)
+            .unwrap()
+            .candidate_in_degree;
         assert_eq!(in_a, 1);
         assert_eq!(in_c, 3);
     }

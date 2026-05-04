@@ -18,7 +18,9 @@ pub struct TidalPaginatedResponse<T> {
     pub items: Vec<T>,
     #[serde(rename = "totalNumberOfItems")]
     pub total_number_of_items: Option<i64>,
+    #[allow(dead_code)]
     pub limit: Option<i64>,
+    #[allow(dead_code)]
     pub offset: Option<i64>,
 }
 
@@ -283,11 +285,7 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
-    pub async fn search_playlists(
-        &self,
-        query: &str,
-        limit: i32,
-    ) -> Result<Vec<TidalPlaylist>> {
+    pub async fn search_playlists(&self, query: &str, limit: i32) -> Result<Vec<TidalPlaylist>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&types=PLAYLISTS",
             TIDAL_API_URL,
@@ -411,10 +409,7 @@ impl TidalClient {
     /// `editorial/charts/tracks`. Until then we attempt the most likely
     /// `pages/genre/all/tracks` shape and return an empty list with a logged
     /// warning if it fails so the route can fall back to Last.fm.
-    pub async fn get_editorial_top_tracks(
-        &self,
-        limit: i32,
-    ) -> Result<Vec<TidalSearchTrack>> {
+    pub async fn get_editorial_top_tracks(&self, limit: i32) -> Result<Vec<TidalSearchTrack>> {
         let url = format!(
             "{}/pages/genre/all/tracks?countryCode={}&limit={}&deviceType=DESKTOP",
             TIDAL_API_URL, self.country_code, limit
@@ -548,8 +543,7 @@ impl TidalClient {
         // Shape 1 (web client): rows[].modules[].pagedList.items[]
         if let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) {
             for row in rows {
-                let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array)
-                else {
+                let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array) else {
                     continue;
                 };
                 for module in modules {
@@ -558,9 +552,7 @@ impl TidalClient {
                         .get("pagedList")
                         .and_then(|p| p.get("items"))
                         .and_then(serde_json::Value::as_array)
-                        .or_else(|| {
-                            module.get("items").and_then(serde_json::Value::as_array)
-                        });
+                        .or_else(|| module.get("items").and_then(serde_json::Value::as_array));
                     let Some(items) = items else { continue };
                     for item in items {
                         if let Some(mix) = Self::parse_mix_item(item) {
@@ -774,6 +766,7 @@ impl TidalClient {
 #[derive(Debug, Deserialize)]
 pub struct FavoriteItem<T> {
     pub item: T,
+    #[allow(dead_code)]
     pub created: Option<String>,
 }
 
@@ -862,14 +855,23 @@ mod tests {
         assert!(mixes.iter().all(|m| !m.id.is_empty()));
         assert!(mixes.iter().all(|m| !m.title.is_empty()));
         assert!(
-            mixes.iter().all(|m| m.image_url.as_deref().is_some_and(|u| !u.is_empty())),
+            mixes
+                .iter()
+                .all(|m| m.image_url.as_deref().is_some_and(|u| !u.is_empty())),
             "every mix must surface an image url"
         );
         assert_eq!(mixes[0].mix_type.as_deref(), Some("DAILY_DISCOVERY"));
-        assert_eq!(mixes[0].image_url.as_deref(), Some("https://img.tidal.com/sq.jpg"));
+        assert_eq!(
+            mixes[0].image_url.as_deref(),
+            Some("https://img.tidal.com/sq.jpg")
+        );
         // Shape-2 imageId routed through the resources.tidal.com builder.
         assert!(
-            mixes[1].image_url.as_deref().unwrap().starts_with("https://resources.tidal.com/images/abc/def/ghi/"),
+            mixes[1]
+                .image_url
+                .as_deref()
+                .unwrap()
+                .starts_with("https://resources.tidal.com/images/abc/def/ghi/"),
             "imageId should be routed through artwork_url; got {:?}",
             mixes[1].image_url
         );

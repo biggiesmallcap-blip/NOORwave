@@ -253,6 +253,7 @@ pub fn evaluate_playlist<'a>(
 }
 
 /// Render a smart playlist definition into human-readable summary lines.
+#[allow(dead_code)]
 pub fn summarize_definition(definition: &SmartPlaylistDefinition) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(description) = definition
@@ -268,6 +269,7 @@ pub fn summarize_definition(definition: &SmartPlaylistDefinition) -> Vec<String>
 }
 
 /// Render a single rule clause into a concise label.
+#[allow(dead_code)]
 pub fn summarize_clause(clause: &RuleClause) -> String {
     match clause {
         RuleClause::Group { op, clauses } => {
@@ -362,6 +364,7 @@ pub fn summarize_clause(clause: &RuleClause) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn push_clause_summary(clause: &RuleClause, depth: usize, lines: &mut Vec<String>) {
     let indent = "  ".repeat(depth);
     match clause {
@@ -420,13 +423,21 @@ impl RuleClause {
                 let Some(dsp) = context.dsp_for_track(track.id) else {
                     return false;
                 };
-                key_matches(key, dsp.key_signature.as_deref(), dsp.camelot_key.as_deref())
+                key_matches(
+                    key,
+                    dsp.key_signature.as_deref(),
+                    dsp.camelot_key.as_deref(),
+                )
             }
             Self::CamelotKey { key } => {
                 let Some(dsp) = context.dsp_for_track(track.id) else {
                     return false;
                 };
-                key_matches(key, dsp.key_signature.as_deref(), dsp.camelot_key.as_deref())
+                key_matches(
+                    key,
+                    dsp.key_signature.as_deref(),
+                    dsp.camelot_key.as_deref(),
+                )
             }
             Self::EnergyRange { min, max } => context
                 .dsp_for_track(track.id)
@@ -439,13 +450,12 @@ impl RuleClause {
             Self::InstrumentalOnly { is_instrumental } => context
                 .dsp_for_track(track.id)
                 .is_some_and(|dsp| dsp.is_instrumental == *is_instrumental),
-            Self::HasSampleData { source } => match source
-                .as_deref()
-                .and_then(SampleDataSource::parse)
-            {
-                Some(src) => context.has_sample_source(track.id, src),
-                None => context.has_any_sample_source(track.id),
-            },
+            Self::HasSampleData { source } => {
+                match source.as_deref().and_then(SampleDataSource::parse) {
+                    Some(src) => context.has_sample_source(track.id, src),
+                    None => context.has_any_sample_source(track.id),
+                }
+            }
         }
     }
 }

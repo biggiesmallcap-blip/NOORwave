@@ -1,13 +1,13 @@
 pub mod bpm;
 pub mod engine;
 pub mod features;
+pub mod fingerprint;
 pub mod key;
 pub mod scanner;
-pub mod fingerprint;
 
 use crate::AppEvent;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
@@ -17,7 +17,8 @@ pub type AnalysisJob = (i64, Vec<f32>, u32); // (track_id, mono_samples, sample_
 
 /// Actor config: max samples to analyze per track, minimum interval between analyses
 pub struct AnalysisConfig {
-    pub max_seconds: u32,       // default 30
+    pub max_seconds: u32, // default 30
+    #[allow(dead_code)]
     pub min_interval_hours: u32, // default 7
 }
 
@@ -96,13 +97,13 @@ pub fn spawn_actor(
 
 /// Check if two Camelot keys are compatible (same number, or differ by 1 mod 12).
 pub fn camelot_compatible(a: &str, b: &str) -> bool {
-    camelot_number(a) == camelot_number(b)
-        || camelot_number_diff(a, b) == 1
+    camelot_number(a) == camelot_number(b) || camelot_number_diff(a, b) == 1
 }
 
 /// Check if two Camelot keys are adjacent (differ by 1 mod 12, or same number A<->B).
 pub fn camelot_adjacent(a: &str, b: &str) -> bool {
-    camelot_number_diff(a, b) == 1 || (camelot_number(a) == camelot_number(b) && camelot_letter(a) != camelot_letter(b))
+    camelot_number_diff(a, b) == 1
+        || (camelot_number(a) == camelot_number(b) && camelot_letter(a) != camelot_letter(b))
 }
 
 fn camelot_number(k: &str) -> u32 {
@@ -118,6 +119,33 @@ fn camelot_number_diff(a: &str, b: &str) -> u32 {
     let nb = camelot_number(b);
     let diff = if na > nb { na - nb } else { nb - na };
     diff.min(12 - diff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camelot_compatible_accepts_same_relative_and_adjacent_keys() {
+        assert!(camelot_compatible("8A", "8A"));
+        assert!(camelot_compatible("8A", "8B"));
+        assert!(camelot_compatible("8B", "8A"));
+        assert!(camelot_compatible("8A", "9A"));
+        assert!(camelot_compatible("12B", "1B"));
+    }
+
+    #[test]
+    fn camelot_compatible_rejects_distant_keys() {
+        assert!(!camelot_compatible("8A", "10A"));
+        assert!(!camelot_compatible("1A", "5A"));
+    }
+
+    #[test]
+    fn camelot_adjacent_includes_relative_and_neighbor_keys() {
+        assert!(camelot_adjacent("8A", "8B"));
+        assert!(camelot_adjacent("8A", "9A"));
+        assert!(camelot_adjacent("12B", "1B"));
+    }
 }
 
 /// Compute a shared harmonic/BPM multiplier used by both automix (`player.rs`)

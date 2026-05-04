@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 use crate::SharedState;
@@ -121,11 +121,7 @@ fn canonicalize_or_passthrough(raw: &str) -> Option<(String, String)> {
 /// - Err(())        — transient failure (429/5xx/network/auth) after retries.
 ///                    Caller should NOT mark the track as `spotify_checked` so
 ///                    we get another shot on the next run.
-async fn spotify_get(
-    http: &Client,
-    url: &str,
-    token: &str,
-) -> Result<Option<Response>, ()> {
+async fn spotify_get(http: &Client, url: &str, token: &str) -> Result<Option<Response>, ()> {
     for attempt in 0..MAX_RETRIES {
         let result = http
             .get(url)
@@ -205,11 +201,8 @@ where
 {
     info!("Spotify enrichment started.");
 
-    let tracks_to_enrich: Vec<(i64, String, String, Option<String>)> = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
+    let tracks_to_enrich: Vec<(i64, String, String, Option<String>)> =
+        state.read().await.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT t.id, t.title, a.name, t.isrc
                  FROM tracks t

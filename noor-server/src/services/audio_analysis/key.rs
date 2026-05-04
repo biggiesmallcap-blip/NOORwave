@@ -6,7 +6,6 @@
 /// 3. Pearson correlate rotated Krumhansl-Schmuckler profiles vs PCP
 /// 4. Gate: best_corr > 0.6 AND margin over 2nd-best > 0.05
 /// 5. Convert to Camelot notation
-
 use rustfft::FftPlanner;
 use std::f64::consts::PI;
 
@@ -15,22 +14,46 @@ const HOP: usize = 2048;
 const C0_FREQ: f64 = 16.3516; // C0 in Hz
 
 // Krumhansl-Schmuckler profiles
-const MAJOR_PROFILE: [f64; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const MINOR_PROFILE: [f64; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+const MAJOR_PROFILE: [f64; 12] = [
+    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const MINOR_PROFILE: [f64; 12] = [
+    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
 
 // Camelot lookup tables
 const MAJOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "8B"), ("C#", "9B"), ("D", "10B"), ("D#", "11B"),
-    ("E", "12B"), ("F", "1B"), ("F#", "2B"), ("G", "3B"),
-    ("G#", "4B"), ("A", "5B"), ("A#", "6B"), ("B", "7B"),
+    ("C", "8B"),
+    ("C#", "9B"),
+    ("D", "10B"),
+    ("D#", "11B"),
+    ("E", "12B"),
+    ("F", "1B"),
+    ("F#", "2B"),
+    ("G", "3B"),
+    ("G#", "4B"),
+    ("A", "5B"),
+    ("A#", "6B"),
+    ("B", "7B"),
 ];
 const MINOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "8A"), ("C#", "9A"), ("D", "10A"), ("D#", "11A"),
-    ("E", "12A"), ("F", "1A"), ("F#", "2A"), ("G", "3A"),
-    ("G#", "4A"), ("A", "5A"), ("A#", "6A"), ("B", "7A"),
+    ("C", "8A"),
+    ("C#", "9A"),
+    ("D", "10A"),
+    ("D#", "11A"),
+    ("E", "12A"),
+    ("F", "1A"),
+    ("F#", "2A"),
+    ("G", "3A"),
+    ("G#", "4A"),
+    ("A", "5A"),
+    ("A#", "6A"),
+    ("B", "7A"),
 ];
 
-const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
 
 /// Detect musical key from mono audio samples.
 /// Returns `Some((key_signature, camelot_key))` or `None` if confidence too low.
@@ -98,10 +121,8 @@ fn compute_pcp(samples: &[f32], sample_rate: u32) -> [f64; 12] {
 
         // Apply Hann window
         for i in 0..FFT_SIZE {
-            fft_input[i] = rustfft::num_complex::Complex::new(
-                samples[start + i] * hann[i] as f32,
-                0.0,
-            );
+            fft_input[i] =
+                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
         }
 
         fft.process(&mut fft_input);
@@ -165,51 +186,6 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     numerator / denominator
 }
 
-/// Check if two Camelot keys are compatible for harmonic mixing.
-/// Compatible if: same number, or differ by 1 (mod 12), or same number A<->B.
-pub fn camelot_compatible(key_a: &str, key_b: &str) -> bool {
-    if key_a == key_b {
-        return true;
-    }
-
-    let (num_a, type_a) = parse_camelot(key_a);
-    let (num_b, type_b) = parse_camelot(key_b);
-
-    // Same number, A<->B switch
-    if num_a == num_b && type_a != type_b {
-        return true;
-    }
-
-    // Differ by 1 (mod 12)
-    let diff = ((num_a as i32 - num_b as i32).abs()) % 12;
-    if diff == 1 {
-        return true;
-    }
-
-    false
-}
-
-/// Check if two Camelot keys are adjacent (differ by 1 mod 12, but NOT same number).
-pub fn camelot_adjacent(key_a: &str, key_b: &str) -> bool {
-    let (num_a, _) = parse_camelot(key_a);
-    let (num_b, _) = parse_camelot(key_b);
-
-    let diff = ((num_a as i32 - num_b as i32).abs()) % 12;
-    diff == 1 && num_a != num_b
-}
-
-/// Parse a Camelot key like "8A" or "12B" into (number, type_char).
-fn parse_camelot(key: &str) -> (u32, char) {
-    let chars: Vec<char> = key.chars().collect();
-    if chars.is_empty() {
-        return (0, 'A');
-    }
-    let type_char = chars.last().copied().unwrap_or('A');
-    let num_str: String = chars[..chars.len() - 1].iter().collect();
-    let num = num_str.parse::<u32>().unwrap_or(0);
-    (num, type_char)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,43 +199,5 @@ mod tests {
     fn test_too_short() {
         let samples = vec![0.0f32; 100];
         assert!(detect_key(&samples, 44100).is_none());
-    }
-
-    #[test]
-    fn test_camelot_compatible_same() {
-        assert!(camelot_compatible("8A", "8A"));
-        assert!(camelot_compatible("8A", "8B"));
-        assert!(camelot_compatible("8B", "8A"));
-    }
-
-    #[test]
-    fn test_camelot_compatible_adjacent() {
-        assert!(camelot_compatible("8A", "9A"));
-        assert!(camelot_compatible("12B", "1B")); // wrap-around
-    }
-
-    #[test]
-    fn test_camelot_compatible_incompatible() {
-        assert!(!camelot_compatible("8A", "10A"));
-        assert!(!camelot_compatible("1A", "5A"));
-    }
-
-    #[test]
-    fn test_camelot_adjacent_yes() {
-        assert!(camelot_adjacent("8A", "9A"));
-        assert!(camelot_adjacent("12B", "1B"));
-    }
-
-    #[test]
-    fn test_camelot_adjacent_same_number() {
-        // Same number is NOT "adjacent" per definition
-        assert!(!camelot_adjacent("8A", "8B"));
-    }
-
-    #[test]
-    fn test_parse_camelot() {
-        assert_eq!(parse_camelot("8A"), (8, 'A'));
-        assert_eq!(parse_camelot("12B"), (12, 'B'));
-        assert_eq!(parse_camelot("1A"), (1, 'A'));
     }
 }

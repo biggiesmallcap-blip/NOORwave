@@ -37,7 +37,10 @@ impl TidalBackoff {
             403 if {
                 let lower = body.to_lowercase();
                 lower.contains("abuse") || lower.contains("suspended")
-            } => 1800,
+            } =>
+            {
+                1800
+            }
             _ => return,
         };
         let until = chrono::Utc::now().timestamp() + duration_secs;
@@ -47,7 +50,10 @@ impl TidalBackoff {
             let reason_str = if status == 429 {
                 "rate-limited (HTTP 429)".to_string()
             } else {
-                format!("abuse-detected (HTTP 403): {}", &body[..body.len().min(200)])
+                format!(
+                    "abuse-detected (HTTP 403): {}",
+                    &body[..body.len().min(200)]
+                )
             };
             if let Ok(mut r) = self.reason.write() {
                 *r = reason_str;
@@ -63,7 +69,11 @@ impl TidalBackoff {
         BackoffState {
             active: remaining_secs > 0.0,
             remaining_secs,
-            reason: if remaining_secs > 0.0 { reason } else { String::new() },
+            reason: if remaining_secs > 0.0 {
+                reason
+            } else {
+                String::new()
+            },
         }
     }
 }
@@ -125,7 +135,10 @@ mod tests {
         let long_until = b.until_secs.load(Ordering::Relaxed);
         b.classify(429, "");
         let after = b.until_secs.load(Ordering::Relaxed);
-        assert_eq!(long_until, after, "60s window must not shorten the 1800s window");
+        assert_eq!(
+            long_until, after,
+            "60s window must not shorten the 1800s window"
+        );
     }
 
     #[test]

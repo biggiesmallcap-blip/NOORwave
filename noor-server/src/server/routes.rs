@@ -8,11 +8,11 @@ use crate::services::discovery::{
 };
 use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
-use crate::services::tidal::{
-    auth as tidal_auth, client::TidalClient, import as tidal_import,
-    mutations as tidal_mutations, stream as tidal_stream,
-};
 use crate::services::spotify;
+use crate::services::tidal::{
+    auth as tidal_auth, client::TidalClient, import as tidal_import, mutations as tidal_mutations,
+    stream as tidal_stream,
+};
 use crate::smart::discovery as discovery_engine;
 use crate::smart::external_discovery as external_discovery_engine;
 use crate::smart::playlists::{
@@ -27,9 +27,9 @@ use axum::{
     response::Json,
     routing::{get, patch, post, put},
 };
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -285,7 +285,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists/{id}/discography", get(get_artist_discography))
         .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
         .route("/api/tidal/albums/{id}/import", post(import_tidal_album))
-        .route("/api/tidal/tracks/import", post(import_tidal_track_for_radio))
+        .route(
+            "/api/tidal/tracks/import",
+            post(import_tidal_track_for_radio),
+        )
         .route("/api/genres", get(get_genres))
         .route("/api/genres/heat", get(get_genre_heat))
         .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
@@ -293,8 +296,14 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/genres/evolution", get(get_genre_evolution))
         .route("/api/genres/{id}/tracks", get(get_genre_tracks))
         .route("/api/playlists", get(get_playlists))
-        .route("/api/playlists/{id}/tracks", get(get_playlist_tracks).post(add_tracks_to_playlist_route))
-        .route("/api/playlists/{id}/favorite", patch(toggle_playlist_favorite_route))
+        .route(
+            "/api/playlists/{id}/tracks",
+            get(get_playlist_tracks).post(add_tracks_to_playlist_route),
+        )
+        .route(
+            "/api/playlists/{id}/favorite",
+            patch(toggle_playlist_favorite_route),
+        )
         .route("/api/smart/playlists", post(create_smart_playlist_route))
         .route(
             "/api/smart/playlists/{id}",
@@ -314,7 +323,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/connections", post(discover_connected_music))
         .route("/api/discovery/status", get(get_discovery_status))
         .route("/api/discovery/train", post(start_discovery_training))
-        .route("/api/discovery/train/status", get(get_discovery_training_status))
+        .route(
+            "/api/discovery/train/status",
+            get(get_discovery_training_status),
+        )
         .route("/api/discovery/train/stop", post(stop_discovery_training))
         .route(
             "/api/discovery/train/intensity",
@@ -328,7 +340,10 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         // Similar Radio
         .route("/api/discovery/radio", post(get_radio_tracks))
-        .route("/api/discovery/radio/compute", post(compute_radio_similarity))
+        .route(
+            "/api/discovery/radio/compute",
+            post(compute_radio_similarity),
+        )
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
         .route("/api/radio/song", post(radio_song))
@@ -396,7 +411,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/queue/remove", post(remove_queue_track))
         .route("/api/playback/queue/move", post(move_queue_track))
         .route("/api/playback/queue/clear", post(clear_queue_route))
-        .route("/api/playlists/from-queue", post(create_playlist_from_queue))
+        .route(
+            "/api/playlists/from-queue",
+            post(create_playlist_from_queue),
+        )
         // Audio output settings + device enumeration
         .route("/api/audio/devices", get(get_audio_devices))
         .route(
@@ -413,42 +431,93 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/login/poll", post(tidal_poll))
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/status", get(tidal_status))
-        .route("/api/tidal/backoff", axum::routing::get(get_tidal_backoff_status))
+        .route(
+            "/api/tidal/backoff",
+            axum::routing::get(get_tidal_backoff_status),
+        )
         .route("/api/tidal/search", get(tidal_search))
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
-        .route("/api/tidal/playlists/{uuid}/tracks", get(tidal_playlist_tracks))
+        .route(
+            "/api/tidal/playlists/{uuid}/tracks",
+            get(tidal_playlist_tracks),
+        )
         .route("/api/tidal/play", post(play_tidal_ephemeral))
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
         .route("/api/spotify/config", post(spotify_save_config))
-        .route("/api/spotify/config", axum::routing::delete(spotify_clear_config))
+        .route(
+            "/api/spotify/config",
+            axum::routing::delete(spotify_clear_config),
+        )
         .route("/api/spotify/status", get(spotify_status))
-        .route("/api/library/enrich/spotify", post(start_spotify_enrichment))
-        .route("/api/library/enrich/spotify/status", get(get_spotify_enrichment_status))
-        .route("/api/library/enrich/spotify/reset", post(reset_spotify_enrichment))
-        .route("/api/library/tidal-stream/purge", post(purge_orphan_tidal_stream_tracks))
+        .route(
+            "/api/library/enrich/spotify",
+            post(start_spotify_enrichment),
+        )
+        .route(
+            "/api/library/enrich/spotify/status",
+            get(get_spotify_enrichment_status),
+        )
+        .route(
+            "/api/library/enrich/spotify/reset",
+            post(reset_spotify_enrichment),
+        )
+        .route(
+            "/api/library/tidal-stream/purge",
+            post(purge_orphan_tidal_stream_tracks),
+        )
         // Last.fm
         .route("/api/lastfm/config", post(lastfm_save_config))
-        .route("/api/lastfm/config", axum::routing::delete(lastfm_clear_config))
+        .route(
+            "/api/lastfm/config",
+            axum::routing::delete(lastfm_clear_config),
+        )
         .route("/api/lastfm/status", get(lastfm_status))
         // Last.fm scrobble auth (server-side flow — `LASTFM_API_SECRET` env required)
         .route("/api/lastfm/auth/start", post(lastfm_auth_start))
         .route("/api/lastfm/auth/complete", post(lastfm_auth_complete))
         .route("/api/lastfm/auth/disconnect", post(lastfm_auth_disconnect))
         .route("/api/library/enrich/lastfm", post(start_lastfm_enrichment))
-        .route("/api/library/enrich/lastfm/stop", post(stop_lastfm_enrichment))
-        .route("/api/library/enrich/lastfm/status", get(get_lastfm_enrichment_status))
-        .route("/api/library/enrich/lastfm/reset", post(reset_lastfm_enrichment))
+        .route(
+            "/api/library/enrich/lastfm/stop",
+            post(stop_lastfm_enrichment),
+        )
+        .route(
+            "/api/library/enrich/lastfm/status",
+            get(get_lastfm_enrichment_status),
+        )
+        .route(
+            "/api/library/enrich/lastfm/reset",
+            post(reset_lastfm_enrichment),
+        )
         // Audio analysis
-        .route("/api/library/analyze/audio-features", post(start_audio_analysis))
+        .route(
+            "/api/library/analyze/audio-features",
+            post(start_audio_analysis),
+        )
         .route("/api/library/analyze/stop", post(stop_audio_analysis))
-        .route("/api/library/analyze/status", get(get_audio_analysis_status))
-        .route("/api/tracks/{id}/audio-features", get(get_track_audio_features))
-        .route("/api/library/audio-features/stats", get(get_audio_features_stats))
-        .route("/api/library/audio-features/quality", get(get_audio_features_quality))
+        .route(
+            "/api/library/analyze/status",
+            get(get_audio_analysis_status),
+        )
+        .route(
+            "/api/tracks/{id}/audio-features",
+            get(get_track_audio_features),
+        )
+        .route(
+            "/api/library/audio-features/stats",
+            get(get_audio_features_stats),
+        )
+        .route(
+            "/api/library/audio-features/quality",
+            get(get_audio_features_quality),
+        )
         .route("/api/library/analytics", get(get_library_analytics))
-        .route("/api/library/analyze/reanalyze-stale", get(reanalyze_stale_tracks))
+        .route(
+            "/api/library/analyze/reanalyze-stale",
+            get(reanalyze_stale_tracks),
+        )
         .route("/api/library/analyze/reset", post(reset_audio_analysis))
         .route("/api/sync/info", get(get_sync_info))
         .route("/api/sync/auto", post(set_auto_sync))
@@ -469,16 +538,17 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/charts/lastfm/countries", get(list_lastfm_countries))
         // Server auth management
         .route("/api/server/token", get(get_server_token_handler))
-        .route("/api/server/token/regenerate", post(regenerate_server_token_handler))
+        .route(
+            "/api/server/token/regenerate",
+            post(regenerate_server_token_handler),
+        )
         // Server configuration
         .route("/api/server/info", get(get_server_info))
         .route("/api/server/host_mode", put(put_server_host_mode))
         .with_state(state)
 }
 
-async fn get_server_token_handler(
-    State(state): State<SharedState>,
-) -> Json<Value> {
+async fn get_server_token_handler(State(state): State<SharedState>) -> Json<Value> {
     let s = state.read().await;
     Json(json!({ "token": s.server_token }))
 }
@@ -515,7 +585,11 @@ async fn get_server_info(State(state): State<SharedState>) -> Json<Value> {
         })
         .unwrap_or(false);
 
-    let bind_address = if host_mode { "0.0.0.0:3334" } else { "127.0.0.1:3334" };
+    let bind_address = if host_mode {
+        "0.0.0.0:3334"
+    } else {
+        "127.0.0.1:3334"
+    };
     Json(json!({
         "host_mode": host_mode,
         "bind_address": bind_address,
@@ -545,8 +619,14 @@ async fn put_server_host_mode(
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let bind_address = if host_mode { "0.0.0.0:3334" } else { "127.0.0.1:3334" };
-    Ok(Json(json!({ "host_mode": host_mode, "bind_address": bind_address })))
+    let bind_address = if host_mode {
+        "0.0.0.0:3334"
+    } else {
+        "127.0.0.1:3334"
+    };
+    Ok(Json(
+        json!({ "host_mode": host_mode, "bind_address": bind_address }),
+    ))
 }
 
 async fn get_tracks(
@@ -573,8 +653,16 @@ async fn get_tracks(
     state
         .db
         .with_conn(|conn| {
-            let tracks =
-                queries::get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, liked_only, &dsp)?;
+            let tracks = queries::get_tracks_with_dsp(
+                conn,
+                sort_by,
+                sort_dir,
+                limit,
+                offset,
+                favorite_only,
+                liked_only,
+                &dsp,
+            )?;
             let total = queries::get_track_count(conn, favorite_only, liked_only)?;
             Ok(Json(json!({ "tracks": tracks, "total": total })))
         })
@@ -672,9 +760,13 @@ async fn get_artist_discography(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tidal_artist_id = {
         let s = state.read().await;
-        s.db
-            .with_conn(|conn| queries::get_artist_tidal_id(conn, id))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))?
+        s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?
     };
 
     let Some(tidal_artist_id) = tidal_artist_id else {
@@ -688,7 +780,10 @@ async fn get_artist_discography(
 
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
@@ -712,21 +807,25 @@ async fn get_artist_discography(
     let (albums_res, eps_res, top_res) = tokio::join!(albums_fut, eps_fut, top_fut);
 
     let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
-    if let Ok(r) = albums_res { all_albums.extend(r.items); }
-    if let Ok(r) = eps_res { all_albums.extend(r.items); }
+    if let Ok(r) = albums_res {
+        all_albums.extend(r.items);
+    }
+    if let Ok(r) = eps_res {
+        all_albums.extend(r.items);
+    }
 
     let tidal_album_ids: Vec<i64> = all_albums.iter().map(|a| a.id).collect();
     let known_map = {
         let s = state.read().await;
-        s.db
-            .with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
+        s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
             .unwrap_or_default()
     };
 
     let albums_payload: Vec<Value> = all_albums
         .into_iter()
         .map(|a| {
-            let artwork = crate::services::tidal::client::TidalClient::get_artwork_url(&a.cover, 320);
+            let artwork =
+                crate::services::tidal::client::TidalClient::get_artwork_url(&a.cover, 320);
             let local_id = known_map.get(&a.id).copied();
             json!({
                 "tidal_id": a.id,
@@ -751,7 +850,12 @@ async fn get_artist_discography(
                         .album
                         .as_ref()
                         .and_then(|al| al.cover.as_ref())
-                        .map(|c| crate::services::tidal::client::TidalClient::get_artwork_url(&Some(c.clone()), 160))
+                        .map(|c| {
+                            crate::services::tidal::client::TidalClient::get_artwork_url(
+                                &Some(c.clone()),
+                                160,
+                            )
+                        })
                         .flatten();
                     json!({
                         "tidal_id": t.id,
@@ -779,7 +883,10 @@ async fn get_tidal_album_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
@@ -794,7 +901,10 @@ async fn get_tidal_album_tracks(
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
     let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
-        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
     })?;
 
     let tracks: Vec<Value> = result
@@ -805,7 +915,12 @@ async fn get_tidal_album_tracks(
                 .album
                 .as_ref()
                 .and_then(|al| al.cover.as_ref())
-                .map(|c| crate::services::tidal::client::TidalClient::get_artwork_url(&Some(c.clone()), 160))
+                .map(|c| {
+                    crate::services::tidal::client::TidalClient::get_artwork_url(
+                        &Some(c.clone()),
+                        160,
+                    )
+                })
                 .flatten();
             json!({
                 "tidal_id": t.id,
@@ -830,7 +945,10 @@ async fn import_tidal_album(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (tokens, db) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         (s.tidal_tokens.clone().or(persisted), s.db.clone())
@@ -846,7 +964,12 @@ async fn import_tidal_album(
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
     let imported = tidal_import::import_album(&db, &client, tidal_album_id)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
 
     let tracks: Vec<Value> = imported
         .tracks
@@ -951,11 +1074,10 @@ async fn get_genre_co_occurrence(
     state
         .db
         .with_conn(|conn| {
-            let pairs = queries::get_genre_co_occurrence(conn, days, window, min)
-                .map_err(|e| {
-                    tracing::error!("co-occurrence query failed: {e:#}");
-                    anyhow::anyhow!("co-occurrence query failed: {e:#}")
-                })?;
+            let pairs = queries::get_genre_co_occurrence(conn, days, window, min).map_err(|e| {
+                tracing::error!("co-occurrence query failed: {e:#}");
+                anyhow::anyhow!("co-occurrence query failed: {e:#}")
+            })?;
             Ok(Json(json!({ "pairs": pairs })))
         })
         .map_err(|e| {
@@ -1444,7 +1566,8 @@ async fn discover_new_music(
             }
         }
     }
-    feed.results.sort_by(|left, right| right.score.cmp(&left.score));
+    feed.results
+        .sort_by(|left, right| right.score.cmp(&left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }
@@ -1532,12 +1655,8 @@ async fn play_discovery_track(
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
     let user_quality = current_user_audio_quality(&state).await;
-    let job = player::build_playback_preparation(
-        &track,
-        Some(&stream_info),
-        crossfade_ms,
-        user_quality,
-    );
+    let job =
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -1706,7 +1825,8 @@ async fn discover_connected_music(
             }
         }
     }
-    feed.results.sort_by(|left, right| right.score.cmp(&left.score));
+    feed.results
+        .sort_by(|left, right| right.score.cmp(&left.score));
 
     Ok(Json(json!({ "feed": feed })))
 }
@@ -1773,15 +1893,17 @@ async fn get_discovery_training_status(
     // Build a synthetic per-stage breakdown so the frontend can render a
     // pipeline view without needing multi-row stage history in the schema.
     const STAGE_ORDER: &[&str] = &[
-        "corpus", "behavioral", "audio", "fusion", "neighbors", "evaluate",
+        "corpus",
+        "behavioral",
+        "audio",
+        "fusion",
+        "neighbors",
+        "evaluate",
     ];
     const STAGE_THRESHOLDS: &[f64] = &[0.05, 0.2, 0.55, 0.72, 0.88, 0.96];
 
     let stages: Vec<Value> = if let Some(ref r) = run {
-        let current_stage_idx = STAGE_ORDER
-            .iter()
-            .position(|&s| s == r.stage)
-            .unwrap_or(0);
+        let current_stage_idx = STAGE_ORDER.iter().position(|&s| s == r.stage).unwrap_or(0);
         STAGE_ORDER
             .iter()
             .enumerate()
@@ -1912,8 +2034,7 @@ async fn set_discovery_intensity(
     };
     let s = state.read().await;
     let parsed = DiscoveryIntensity::parse(&payload.intensity);
-    save_intensity(&s.db, parsed)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    save_intensity(&s.db, parsed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "intensity": parsed.as_str() })))
 }
 
@@ -1922,15 +2043,12 @@ async fn set_discovery_intensity(
 // active intensity tier, and the duration of the most recent successful run
 // (if any). Frontend uses this to gate the user with a "this'll take ~X min"
 // preview before they hit Start.
-async fn get_discovery_safety(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_discovery_safety(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::learning::load_discovery_intensity;
     let s = state.read().await;
 
-    let (track_count, last_run_seconds): (i64, Option<f64>) = s
-        .db
-        .with_conn(|conn| {
+    let (track_count, last_run_seconds): (i64, Option<f64>) =
+        s.db.with_conn(|conn| {
             let tracks: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM tracks WHERE source IS NOT NULL",
@@ -1983,8 +2101,7 @@ async fn get_discovery_safety(
 
     // Peak RAM rough estimate: dim × N × 8 bytes for behavioral vectors,
     // doubled for audio + fusion, plus the neighbor graph (top_k × N × 32).
-    let ram_mb = ((params.dimension as f64 * n * 8.0 * 3.0)
-        + (params.top_k as f64 * n * 32.0))
+    let ram_mb = ((params.dimension as f64 * n * 8.0 * 3.0) + (params.top_k as f64 * n * 32.0))
         / (1024.0 * 1024.0);
 
     // Safety classification: Green when the run is short or matches a known
@@ -2045,10 +2162,10 @@ async fn record_discovery_feedback(
 #[derive(Debug, Deserialize)]
 struct RadioRequest {
     seed_track_id: Option<i64>,
-    seed_tidal_id: Option<i64>,  // resolve to local library track when seed_track_id <= 0
+    seed_tidal_id: Option<i64>, // resolve to local library track when seed_track_id <= 0
     creativity: Option<f64>,    // 0.0 (tight) to 1.0 (adventurous), default 0.3
     context_window: Option<i64>, // number of recent tracks to influence, default 5
-    limit: Option<i64>,          // results to return, default 20
+    limit: Option<i64>,         // results to return, default 20
     exclude_ids: Option<Vec<i64>>, // already-played track IDs
 }
 
@@ -2071,12 +2188,13 @@ async fn get_radio_tracks(
         state
             .db
             .with_conn(|conn| {
-                Ok(conn.query_row(
-                    "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
-                    params![tidal_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?)
+                Ok(conn
+                    .query_row(
+                        "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+                        params![tidal_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?)
             })
             .map_err(|e| {
                 tracing::error!("DB error resolving tidal_id {}: {}", tidal_id, e);
@@ -2085,10 +2203,12 @@ async fn get_radio_tracks(
                     Json(json!({"error": "Database error"})),
                 )
             })?
-            .ok_or_else(|| (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "No local track matches that Tidal ID"})),
-            ))?
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "No local track matches that Tidal ID"})),
+                )
+            })?
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2109,8 +2229,7 @@ async fn get_radio_tracks(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "Failed to query learned neighbors"})),
         )
-    })?
-    {
+    })? {
         // DSP harmonic post-scoring — apply the shared harmonic multiplier to
         // every row that has audio features on both sides. Rows without
         // features are left untouched (never penalised for being unanalyzed).
@@ -2168,9 +2287,7 @@ async fn get_radio_tracks(
     // Get similar tracks from pre-computed similarity table
     let similar = state
         .db
-        .with_conn(|conn| {
-            queries::get_similar_tracks(conn, seed_track_id, limit * 3, &exclude_ids)
-        })
+        .with_conn(|conn| queries::get_similar_tracks(conn, seed_track_id, limit * 3, &exclude_ids))
         .map_err(|e| {
             tracing::error!("Failed to get similar tracks: {}", e);
             (
@@ -2313,9 +2430,7 @@ struct DiscoverySpaceRequest {
     mode: Option<String>,
     seed_track_id: Option<i64>,
     prompt: Option<String>,
-    creativity: Option<f64>,
     limit: Option<i64>,
-    include_artists: Option<bool>,
 }
 
 async fn get_discovery_space(
@@ -2356,7 +2471,7 @@ async fn get_discovery_space(
         last_played_at: Option<String>,
         play_count: i64,
         is_in_library: bool,
-        radio_source: Option<String>,  // "library" | "lastfm" | "engine"
+        radio_source: Option<String>, // "library" | "lastfm" | "engine"
         radio_reason: Option<String>,
         // v1.5 fields
         confidence: f64,
@@ -2377,62 +2492,72 @@ async fn get_discovery_space(
         // Prompt path: run the full discovery scoring engine against the library
         let p = prompt.clone();
         let lim = limit;
-        state_guard.db.with_conn(move |conn| {
-            let request = discovery_engine::DiscoveryPreviewRequest {
-                prompt: p.clone(),
-                mode: "mood".to_string(),
-                services: vec!["tidal".to_string()],
-                limit: lim as usize,
-            };
-            let context = discovery_engine::DiscoveryContext {
-                overview: queries::get_analytics_overview(conn)?,
-                behavior: queries::get_behavior_metrics(conn)?,
-                recent_listens: queries::get_recent_listens(conn, 12)?,
-                top_artists: queries::get_top_artists_by_history(conn, 6)?,
-                top_genres: queries::get_top_genres_by_history(conn, 6)?,
-                track_genres: queries::get_track_genre_paths(conn)?,
-            };
-            let candidates = queries::get_discovery_candidate_tracks(conn, lim * 4)?;
-            let preview = discovery_engine::build_preview(&request, &context, &candidates);
-            Ok(preview.results.into_iter().map(|r| SpaceTrack {
-                track_id: r.track_id,
-                title: r.title,
-                artist_name: r.artist_name.as_deref().unwrap_or("").to_string(),
-                album_title: r.album_title,
-                artwork_url: r.artwork_url,
-                duration_ms: r.duration_ms,
-                similarity_score: (r.score as f64 / 99.0).clamp(0.0, 1.0),
-                source: r.service,
-                energy: None,
-                danceability: None,
-                bpm: None,
-                key_signature: None,
-                camelot_key: None,
-                is_instrumental: None,
-                loudness_lufs: None,
-                skip_rate: None,
-                completion_avg: None,
-                cohort_id: None,
-                cohort_label: None,
-                top_genre: None,
-                top_genre_source: None,
-                top_genre_confidence: None,
-                last_played_at: None,
-                play_count: 0,
-                is_in_library: true,
-                radio_source: None,
-                radio_reason: None,
-                confidence: 1.0,
-                support_count: 0,
-                primary_reason: "unknown".to_string(),
-                reason_tags: vec![],
-                genres: vec![],
-                in_degree_pctile: 0.5,
-            }).collect::<Vec<_>>())
-        }).unwrap_or_default()
+        state_guard
+            .db
+            .with_conn(move |conn| {
+                let request = discovery_engine::DiscoveryPreviewRequest {
+                    prompt: p.clone(),
+                    mode: "mood".to_string(),
+                    services: vec!["tidal".to_string()],
+                    limit: lim as usize,
+                };
+                let context = discovery_engine::DiscoveryContext {
+                    overview: queries::get_analytics_overview(conn)?,
+                    behavior: queries::get_behavior_metrics(conn)?,
+                    recent_listens: queries::get_recent_listens(conn, 12)?,
+                    top_artists: queries::get_top_artists_by_history(conn, 6)?,
+                    top_genres: queries::get_top_genres_by_history(conn, 6)?,
+                    track_genres: queries::get_track_genre_paths(conn)?,
+                };
+                let candidates = queries::get_discovery_candidate_tracks(conn, lim * 4)?;
+                let preview = discovery_engine::build_preview(&request, &context, &candidates);
+                Ok(preview
+                    .results
+                    .into_iter()
+                    .map(|r| SpaceTrack {
+                        track_id: r.track_id,
+                        title: r.title,
+                        artist_name: r.artist_name.as_deref().unwrap_or("").to_string(),
+                        album_title: r.album_title,
+                        artwork_url: r.artwork_url,
+                        duration_ms: r.duration_ms,
+                        similarity_score: (r.score as f64 / 99.0).clamp(0.0, 1.0),
+                        source: r.service,
+                        energy: None,
+                        danceability: None,
+                        bpm: None,
+                        key_signature: None,
+                        camelot_key: None,
+                        is_instrumental: None,
+                        loudness_lufs: None,
+                        skip_rate: None,
+                        completion_avg: None,
+                        cohort_id: None,
+                        cohort_label: None,
+                        top_genre: None,
+                        top_genre_source: None,
+                        top_genre_confidence: None,
+                        last_played_at: None,
+                        play_count: 0,
+                        is_in_library: true,
+                        radio_source: None,
+                        radio_reason: None,
+                        confidence: 1.0,
+                        support_count: 0,
+                        primary_reason: "unknown".to_string(),
+                        reason_tags: vec![],
+                        genres: vec![],
+                        in_degree_pctile: 0.5,
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
     } else if seed_id > 0 {
         let db = state_guard.db.clone();
-        let lastfm = crate::metadata::lastfm::LastFmClient::load(state_guard.http_client.clone(), &state_guard.db);
+        let lastfm = crate::metadata::lastfm::LastFmClient::load(
+            state_guard.http_client.clone(),
+            &state_guard.db,
+        );
         drop(state_guard);
 
         let queue = crate::services::radio::orchestrate_song(
@@ -2456,8 +2581,9 @@ async fn get_discovery_space(
                     track_id: if c.is_in_library {
                         c.track_id
                     } else {
-                        c.tidal_track_id
-                            .unwrap_or_else(|| synthetic_external_track_id(&c.artist_name, &c.title))
+                        c.tidal_track_id.unwrap_or_else(|| {
+                            synthetic_external_track_id(&c.artist_name, &c.title)
+                        })
                     },
                     title: c.title,
                     artist_name: c.artist_name,
@@ -2492,12 +2618,15 @@ async fn get_discovery_space(
                         crate::services::radio::RadioSource::Engine => "engine".to_string(),
                     }),
                     radio_reason: Some(c.reason),
-                    confidence: c.confidence.unwrap_or(if c.is_in_library { 1.0 } else { 0.5 }),
+                    confidence: c
+                        .confidence
+                        .unwrap_or(if c.is_in_library { 1.0 } else { 0.5 }),
                     support_count: c.support_count.unwrap_or(0),
-                    primary_reason: ds::normalize_reason(
-                        c.primary_reason.as_deref().unwrap_or("")
-                    ).to_string(),
-                    reason_tags: c.primary_reason.as_deref()
+                    primary_reason: ds::normalize_reason(c.primary_reason.as_deref().unwrap_or(""))
+                        .to_string(),
+                    reason_tags: c
+                        .primary_reason
+                        .as_deref()
                         .map(|r| vec![ds::normalize_reason(r).to_string()])
                         .unwrap_or_default(),
                     genres: vec![],
@@ -2540,41 +2669,44 @@ async fn get_discovery_space(
                 }).unwrap_or(None);
 
             if let Some((id, title, artist, album, artwork, dur, src)) = seed_track_opt {
-                space_tracks.insert(0, SpaceTrack {
-                    track_id: id,
-                    title,
-                    artist_name: artist.unwrap_or_default(),
-                    album_title: album,
-                    artwork_url: artwork,
-                    duration_ms: dur,
-                    similarity_score: 1.0,
-                    source: src.unwrap_or_else(|| "tidal".to_string()),
-                    energy: None,
-                    danceability: None,
-                    bpm: None,
-                    key_signature: None,
-                    camelot_key: None,
-                    is_instrumental: None,
-                    loudness_lufs: None,
-                    skip_rate: None,
-                    completion_avg: None,
-                    cohort_id: None,
-                    cohort_label: None,
-                    top_genre: None,
-                    top_genre_source: None,
-                    top_genre_confidence: None,
-                    last_played_at: None,
-                    play_count: 0,
-                    is_in_library: true,
-                    radio_source: None,
-                    radio_reason: None,
-                    confidence: 1.0,
-                    support_count: 0,
-                    primary_reason: "unknown".to_string(),
-                    reason_tags: vec![],
-                    genres: vec![],
-                    in_degree_pctile: 0.5,
-                });
+                space_tracks.insert(
+                    0,
+                    SpaceTrack {
+                        track_id: id,
+                        title,
+                        artist_name: artist.unwrap_or_default(),
+                        album_title: album,
+                        artwork_url: artwork,
+                        duration_ms: dur,
+                        similarity_score: 1.0,
+                        source: src.unwrap_or_else(|| "tidal".to_string()),
+                        energy: None,
+                        danceability: None,
+                        bpm: None,
+                        key_signature: None,
+                        camelot_key: None,
+                        is_instrumental: None,
+                        loudness_lufs: None,
+                        skip_rate: None,
+                        completion_avg: None,
+                        cohort_id: None,
+                        cohort_label: None,
+                        top_genre: None,
+                        top_genre_source: None,
+                        top_genre_confidence: None,
+                        last_played_at: None,
+                        play_count: 0,
+                        is_in_library: true,
+                        radio_source: None,
+                        radio_reason: None,
+                        confidence: 1.0,
+                        support_count: 0,
+                        primary_reason: "unknown".to_string(),
+                        reason_tags: vec![],
+                        genres: vec![],
+                        in_degree_pctile: 0.5,
+                    },
+                );
             }
         }
     }
@@ -2586,8 +2718,10 @@ async fn get_discovery_space(
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
     if remaining > 0 && seed_id == 0 {
-        let fallback = state_guard.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
+        let fallback = state_guard
+            .db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
                 "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.source
                  FROM tracks t
                  LEFT JOIN artists a ON t.artist_id = a.id
@@ -2595,21 +2729,24 @@ async fn get_discovery_space(
                  ORDER BY t.play_count DESC, t.date_added DESC
                  LIMIT ?1",
             )?;
-            let rows = stmt.query_map([limit], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            })?;
-            let mut result = Vec::new();
-            for r in rows { result.push(r?); }
-            Ok(result)
-        }).unwrap_or_default();
+                let rows = stmt.query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                })?;
+                let mut result = Vec::new();
+                for r in rows {
+                    result.push(r?);
+                }
+                Ok(result)
+            })
+            .unwrap_or_default();
 
         for (id, title, artist, album, artwork, dur, src) in fallback {
             if !seeded_ids.contains(&id) {
@@ -2666,43 +2803,48 @@ async fn get_discovery_space(
             // No library tracks present (pure external response) — nothing to enrich.
         } else {
             type DspRow = (
-                Option<f64>, // energy
-                Option<f64>, // danceability
-                Option<f64>, // bpm
+                Option<f64>,    // energy
+                Option<f64>,    // danceability
+                Option<f64>,    // bpm
                 Option<String>, // key_signature
                 Option<String>, // camelot_key
-                Option<i64>, // is_instrumental (0/1)
-                Option<f64>, // loudness_lufs
+                Option<i64>,    // is_instrumental (0/1)
+                Option<f64>,    // loudness_lufs
             );
-            let dsp_map: std::collections::HashMap<i64, DspRow> = state_guard.db.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
+            let dsp_map: std::collections::HashMap<i64, DspRow> = state_guard
+                .db
+                .with_conn(|conn| {
+                    let sql = format!(
+                        "SELECT track_id, energy, danceability, bpm, key_signature, camelot_key,
                             is_instrumental, loudness_lufs
                      FROM audio_dsp_features WHERE track_id IN ({ids_csv})"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                        row.get::<_, Option<f64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
-                        row.get::<_, Option<f64>>(7)?,
-                    ))
-                })?;
-                let mut map = std::collections::HashMap::new();
-                for r in rows {
-                    let (id, energy, dance, bpm, key, camelot, instr, lufs) = r?;
-                    map.insert(id, (energy, dance, bpm, key, camelot, instr, lufs));
-                }
-                Ok(map)
-            }).unwrap_or_default();
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<f64>>(1)?,
+                            row.get::<_, Option<f64>>(2)?,
+                            row.get::<_, Option<f64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<i64>>(6)?,
+                            row.get::<_, Option<f64>>(7)?,
+                        ))
+                    })?;
+                    let mut map = std::collections::HashMap::new();
+                    for r in rows {
+                        let (id, energy, dance, bpm, key, camelot, instr, lufs) = r?;
+                        map.insert(id, (energy, dance, bpm, key, camelot, instr, lufs));
+                    }
+                    Ok(map)
+                })
+                .unwrap_or_default();
 
             for t in &mut space_tracks {
-                if let Some((energy, dance, bpm, key, camelot, instr, lufs)) = dsp_map.get(&t.track_id) {
+                if let Some((energy, dance, bpm, key, camelot, instr, lufs)) =
+                    dsp_map.get(&t.track_id)
+                {
                     t.energy = *energy;
                     t.danceability = *dance;
                     t.bpm = *bpm;
@@ -2780,25 +2922,28 @@ async fn get_discovery_space(
         if ids_csv.is_empty() {
             // No library tracks present (pure external response) — nothing to enrich.
         } else {
-            let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard.db.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    ))
-                })?;
-                let mut map = std::collections::HashMap::new();
-                for r in rows {
-                    let (id, last, plays) = r?;
-                    map.insert(id, (last, plays));
-                }
-                Ok(map)
-            }).unwrap_or_default();
+            let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard
+                .db
+                .with_conn(|conn| {
+                    let sql = format!(
+                        "SELECT id, last_played_at, play_count FROM tracks WHERE id IN ({ids_csv})"
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        ))
+                    })?;
+                    let mut map = std::collections::HashMap::new();
+                    for r in rows {
+                        let (id, last, plays) = r?;
+                        map.insert(id, (last, plays));
+                    }
+                    Ok(map)
+                })
+                .unwrap_or_default();
 
             for t in &mut space_tracks {
                 if let Some((last, plays)) = track_meta.get(&t.track_id) {
@@ -2823,31 +2968,37 @@ async fn get_discovery_space(
         } else {
             // genre_map: track_id → (top_name, top_source, top_conf, all_names)
             type GenreEntry = (String, Option<String>, Option<f64>, Vec<String>);
-            let genre_map: std::collections::HashMap<i64, GenreEntry> = state_guard.db.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT tg.track_id, g.name, tg.source, tg.confidence
+            let genre_map: std::collections::HashMap<i64, GenreEntry> = state_guard
+                .db
+                .with_conn(|conn| {
+                    let sql = format!(
+                        "SELECT tg.track_id, g.name, tg.source, tg.confidence
                      FROM track_genres tg
                      JOIN genres g ON g.id = tg.genre_id
                      WHERE tg.track_id IN ({ids_csv})
                      ORDER BY tg.track_id, COALESCE(tg.confidence, 0) DESC"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<f64>>(3)?,
-                    ))
-                })?;
-                let mut map: std::collections::HashMap<i64, GenreEntry> = std::collections::HashMap::new();
-                for r in rows {
-                    let (id, name, source, conf) = r?;
-                    let entry = map.entry(id).or_insert_with(|| (name.clone(), source.clone(), conf, vec![]));
-                    entry.3.push(name);
-                }
-                Ok(map)
-            }).unwrap_or_default();
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<f64>>(3)?,
+                        ))
+                    })?;
+                    let mut map: std::collections::HashMap<i64, GenreEntry> =
+                        std::collections::HashMap::new();
+                    for r in rows {
+                        let (id, name, source, conf) = r?;
+                        let entry = map
+                            .entry(id)
+                            .or_insert_with(|| (name.clone(), source.clone(), conf, vec![]));
+                        entry.3.push(name);
+                    }
+                    Ok(map)
+                })
+                .unwrap_or_default();
 
             for t in &mut space_tracks {
                 if let Some((name, source, conf, all_genres)) = genre_map.get(&t.track_id) {
@@ -2871,9 +3022,10 @@ async fn get_discovery_space(
         if track_ids.is_empty() {
             // No library tracks — skip cohort assignment.
         } else {
-            let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard.db.with_conn(|conn| {
-                queries::get_track_cohort_assignments(conn, &track_ids, 90)
-            }).unwrap_or_default();
+            let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard
+                .db
+                .with_conn(|conn| queries::get_track_cohort_assignments(conn, &track_ids, 90))
+                .unwrap_or_default();
 
             for t in &mut space_tracks {
                 if let Some((id, label)) = cohort_map.get(&t.track_id) {
@@ -2912,68 +3064,91 @@ async fn get_discovery_space(
             .map(|t| t.track_id)
             .collect();
         if track_id_set.len() > 1 {
-            let ids_csv: String = track_id_set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-            state_guard.db.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT n.track_id, n.neighbor_track_id, n.score,
+            let ids_csv: String = track_id_set
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            state_guard
+                .db
+                .with_conn(|conn| {
+                    let sql = format!(
+                        "SELECT n.track_id, n.neighbor_track_id, n.score,
                             n.behavioral_score, n.audio_score, n.metadata_score,
                             n.reason_json, n.confidence, n.support_count
                      FROM track_neighbors n
                      WHERE n.track_id IN ({ids_csv}) AND n.neighbor_track_id IN ({ids_csv})
                      ORDER BY n.score DESC
                      LIMIT 300"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, f64>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<f64>>(7)?,
-                        row.get::<_, Option<i64>>(8)?,
-                    ))
-                })?;
-                let mut result = Vec::new();
-                for r in rows { result.push(r?); }
-                Ok(result)
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(from_id, to_id, score, behavioral, audio, metadata, reason_json, confidence, support_count)| {
-                let parsed: Vec<Value> = reason_json
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-                    .unwrap_or_default();
-                let raw_tags: Vec<String> = parsed
-                    .iter()
-                    .filter_map(|v| {
-                        v.get("key")
-                            .and_then(|k| k.as_str())
-                            .or_else(|| v.get("label").and_then(|l| l.as_str()))
-                            .map(|s| s.to_string())
-                    })
-                    .collect();
-                let reason_tags = ds::normalize_reason_tags(&raw_tags);
-                let primary_reason = reason_tags.first().cloned().unwrap_or_else(|| "unknown".to_string());
-                FullEdge {
-                    from_track_id: from_id,
-                    to_track_id: to_id,
-                    weight: score.clamp(0.0, 1.0),
-                    confidence: confidence.unwrap_or(0.5),
-                    primary_reason,
-                    reason_tags,
-                    source: "library".to_string(),
-                    support_count,
-                    behavioral_score: behavioral,
-                    audio_score: audio,
-                    metadata_score: metadata,
-                }
-            })
-            .collect()
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, f64>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<f64>>(7)?,
+                            row.get::<_, Option<i64>>(8)?,
+                        ))
+                    })?;
+                    let mut result = Vec::new();
+                    for r in rows {
+                        result.push(r?);
+                    }
+                    Ok(result)
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(
+                    |(
+                        from_id,
+                        to_id,
+                        score,
+                        behavioral,
+                        audio,
+                        metadata,
+                        reason_json,
+                        confidence,
+                        support_count,
+                    )| {
+                        let parsed: Vec<Value> = reason_json
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+                            .unwrap_or_default();
+                        let raw_tags: Vec<String> = parsed
+                            .iter()
+                            .filter_map(|v| {
+                                v.get("key")
+                                    .and_then(|k| k.as_str())
+                                    .or_else(|| v.get("label").and_then(|l| l.as_str()))
+                                    .map(|s| s.to_string())
+                            })
+                            .collect();
+                        let reason_tags = ds::normalize_reason_tags(&raw_tags);
+                        let primary_reason = reason_tags
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        FullEdge {
+                            from_track_id: from_id,
+                            to_track_id: to_id,
+                            weight: score.clamp(0.0, 1.0),
+                            confidence: confidence.unwrap_or(0.5),
+                            primary_reason,
+                            reason_tags,
+                            source: "library".to_string(),
+                            support_count,
+                            behavioral_score: behavioral,
+                            audio_score: audio,
+                            metadata_score: metadata,
+                        }
+                    },
+                )
+                .collect()
         } else {
             vec![]
         }
@@ -3002,23 +3177,26 @@ async fn get_discovery_space(
     }
 
     // ── 5. Score normalization (per source group) ─────────────────────────────
-    let score_candidates: Vec<ds::ScoreCandidate> = space_tracks.iter().map(|t| {
-        ds::ScoreCandidate {
+    let score_candidates: Vec<ds::ScoreCandidate> = space_tracks
+        .iter()
+        .map(|t| ds::ScoreCandidate {
             track_id: t.track_id,
             raw_score: t.similarity_score,
             source: ds::normalize_source(&t.source).to_string(),
-        }
-    }).collect();
+        })
+        .collect();
     let norm_scores = ds::normalize_scores_by_source(&score_candidates);
 
     // ── 6. Within-set in-degree stats ────────────────────────────────────────
-    let prune_edges: Vec<ds::PruneEdge> = typed_edges.iter().map(|e| ds::PruneEdge {
-        from_track_id: e.from_track_id,
-        to_track_id: e.to_track_id,
-        weight: e.weight,
-        confidence: e.confidence,
-        primary_reason: e.primary_reason.clone(),
-    }).collect();
+    let prune_edges: Vec<ds::PruneEdge> = typed_edges
+        .iter()
+        .map(|e| ds::PruneEdge {
+            from_track_id: e.from_track_id,
+            to_track_id: e.to_track_id,
+            weight: e.weight,
+            confidence: e.confidence,
+        })
+        .collect();
     let track_ids_for_deg: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let in_deg_stats = ds::compute_in_degree_stats(&track_ids_for_deg, &prune_edges);
     for t in &mut space_tracks {
@@ -3028,16 +3206,25 @@ async fn get_discovery_space(
     }
 
     // ── 7. Graph pruning ──────────────────────────────────────────────────────
-    let prune_nodes: Vec<ds::PruneNode> = space_tracks.iter().map(|t| ds::PruneNode {
-        track_id: t.track_id,
-        score: norm_scores.get(&t.track_id).copied().unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0)),
-        confidence: t.confidence,
-        source: ds::normalize_source(&t.source).to_string(),
-        is_seed: t.track_id == seed_id,
-        primary_reason: t.primary_reason.clone(),
-        in_degree_pctile: t.in_degree_pctile,
-    }).collect();
-    let prune_result = ds::prune_graph(prune_nodes, prune_edges, seed_id, &ds::PruneConfig::default());
+    let prune_nodes: Vec<ds::PruneNode> = space_tracks
+        .iter()
+        .map(|t| ds::PruneNode {
+            track_id: t.track_id,
+            score: norm_scores
+                .get(&t.track_id)
+                .copied()
+                .unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0)),
+            is_seed: t.track_id == seed_id,
+            primary_reason: t.primary_reason.clone(),
+            in_degree_pctile: t.in_degree_pctile,
+        })
+        .collect();
+    let prune_result = ds::prune_graph(
+        prune_nodes,
+        prune_edges,
+        seed_id,
+        &ds::PruneConfig::default(),
+    );
     let surviving_ids: HashSet<i64> = prune_result.node_ids.iter().copied().collect();
 
     // Filter space_tracks to survivors; preserve original order.
@@ -3049,13 +3236,21 @@ async fn get_discovery_space(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let norm_score = norm_scores.get(&t.track_id).copied().unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
+            let norm_score = norm_scores
+                .get(&t.track_id)
+                .copied()
+                .unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
             // Library tracks are only truly cold-start if confidence is very low —
             // support_count may be 0 simply because the neighbor table hasn't been
             // calculated yet, which doesn't mean there's no behavioral data.
             let is_cold_start = !t.is_in_library && (t.support_count == 0 || t.confidence < 0.3);
             let normalized_source = ds::normalize_source(&t.source);
-            let cluster_key = t.genres.first().or(t.top_genre.as_ref()).map(|s| s.as_str()).unwrap_or("unknown");
+            let cluster_key = t
+                .genres
+                .first()
+                .or(t.top_genre.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
 
             let (x, y) = match mode.as_str() {
                 "energy_arc" => {
@@ -3066,8 +3261,12 @@ async fn get_discovery_space(
                 }
                 "harmonic" => {
                     if let Some(ref ck) = t.camelot_key {
-                        let num = ck.chars().take_while(|c| c.is_ascii_digit())
-                            .collect::<String>().parse::<f64>().unwrap_or(1.0);
+                        let num = ck
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse::<f64>()
+                            .unwrap_or(1.0);
                         let is_a = ck.contains('A');
                         let angle = ((num - 1.0) / 12.0) * std::f64::consts::PI * 2.0
                             + if is_a { 0.0 } else { 0.26 };
@@ -3080,13 +3279,16 @@ async fn get_discovery_space(
                 }
                 _ => {
                     let angle = (i as f64 / total as f64) * std::f64::consts::PI * 2.0;
-                    let r = 80.0 + (1.0 - t.similarity_score) * 300.0
-                        + (i as f64 * 37.0).sin() * 50.0;
+                    let r =
+                        80.0 + (1.0 - t.similarity_score) * 300.0 + (i as f64 * 37.0).sin() * 50.0;
                     (angle.cos() * r, angle.sin() * r)
                 }
             };
             let node_radius = 5.0 + t.similarity_score * 20.0 + t.energy.unwrap_or(0.5) * 5.0;
-            let in_deg = in_deg_stats.get(&t.track_id).map(|(d, _)| *d as i64).unwrap_or(0);
+            let in_deg = in_deg_stats
+                .get(&t.track_id)
+                .map(|(d, _)| *d as i64)
+                .unwrap_or(0);
             let layout_obj = json!({
                 "x": x, "y": y,
                 "radius_hint": node_radius,
@@ -3151,7 +3353,9 @@ async fn get_discovery_space(
     // ── 9. Serialize edges with v1.5 fields ──────────────────────────────────
     let edge_nodes: Vec<Value> = typed_edges
         .iter()
-        .filter(|e| surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id))
+        .filter(|e| {
+            surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id)
+        })
         .map(|e| {
             let edge_id = format!("{}-{}-{}", e.from_track_id, e.to_track_id, e.primary_reason);
             json!({
@@ -3178,17 +3382,24 @@ async fn get_discovery_space(
         .collect();
 
     // ── 10. Diagnostics ───────────────────────────────────────────────────────
-    let mut source_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut reason_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut source_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut reason_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut conf_sum = 0.0f64;
     let mut pctile_sum = 0.0f64;
     for node in &track_nodes {
         let src = node["source"].as_str().unwrap_or("engine").to_string();
         *source_counts.entry(src).or_insert(0) += 1;
-        let reason = node["primary_reason"].as_str().unwrap_or("unknown").to_string();
+        let reason = node["primary_reason"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
         *reason_counts.entry(reason).or_insert(0) += 1;
         conf_sum += node["confidence"].as_f64().unwrap_or(0.5);
-        pctile_sum += node["candidate_in_degree_percentile"].as_f64().unwrap_or(0.0);
+        pctile_sum += node["candidate_in_degree_percentile"]
+            .as_f64()
+            .unwrap_or(0.0);
     }
     let n_nodes = track_nodes.len().max(1) as f64;
     let diagnostics = json!({
@@ -3217,11 +3428,15 @@ async fn get_discovery_space(
         // skip the spawn entirely when this seed is fresh under the same model.
         let active_model_id: Option<i64> = guard
             .db
-            .with_conn(|conn| Ok(crate::db::queries::get_active_embedding_model(conn)?.map(|m| m.id)))
+            .with_conn(|conn| {
+                Ok(crate::db::queries::get_active_embedding_model(conn)?.map(|m| m.id))
+            })
             .unwrap_or(None);
         let already_fresh = match active_model_id {
             Some(mid) => crate::services::neighbor_refresh::is_seed_fresh(
-                &guard.refreshed_seeds, seed_id, mid,
+                &guard.refreshed_seeds,
+                seed_id,
+                mid,
             ),
             None => true, // no model → nothing to do anyway
         };
@@ -3470,7 +3685,9 @@ async fn radio_start(
                 });
             }
         } else {
-            tracing::warn!("radio_start: Tidal tokens unavailable — pending rows will rely on lazy resolution");
+            tracing::warn!(
+                "radio_start: Tidal tokens unavailable — pending rows will rely on lazy resolution"
+            );
         }
     }
 
@@ -3571,45 +3788,64 @@ async fn get_discovery_space_meta(
 ) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
 
-    let total_tracks: i64 = state.db.with_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get::<_, i64>(0))
+    let total_tracks: i64 = state
+        .db
+        .with_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .map_err(Into::into)
-    }).unwrap_or(0);
+        })
+        .unwrap_or(0);
 
-    let model_row: Option<(String, String, Option<String>, i64)> = state.db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT model_key, status, trained_at, dimension
+    let model_row: Option<(String, String, Option<String>, i64)> = state
+        .db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT model_key, status, trained_at, dimension
              FROM embedding_models
              WHERE is_active = 1
              ORDER BY trained_at IS NULL, trained_at DESC
-             LIMIT 1"
-        )?;
-        let mut rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
-    }).ok().flatten();
+             LIMIT 1",
+            )?;
+            let mut rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            match rows.next() {
+                Some(r) => Ok(Some(r?)),
+                None => Ok(None),
+            }
+        })
+        .ok()
+        .flatten();
 
     let (model_key, model_status, trained_at, vector_dim, embedding_count) = match &model_row {
         Some((key, status, trained, dim)) => {
-            let count: i64 = state.db.with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM track_embeddings te
+            let count: i64 = state
+                .db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM track_embeddings te
                      JOIN embedding_models em ON em.id = te.model_id
                      WHERE em.model_key = ?1",
-                    rusqlite::params![key],
-                    |row| row.get::<_, i64>(0),
-                ).map_err(Into::into)
-            }).unwrap_or(0);
-            (Some(key.clone()), Some(status.clone()), trained.clone(), Some(*dim), count)
+                        rusqlite::params![key],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .unwrap_or(0);
+            (
+                Some(key.clone()),
+                Some(status.clone()),
+                trained.clone(),
+                Some(*dim),
+                count,
+            )
         }
         None => (None, None, None, None, 0),
     };
@@ -3642,29 +3878,34 @@ async fn get_discovery_artists(
 ) -> Result<Json<Value>, StatusCode> {
     let limit = query.limit.unwrap_or(50).max(1).min(200);
 
-    let artists = state.read().await.db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT a.id, a.name, COUNT(th.track_id) as listen_count
+    let artists = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT a.id, a.name, COUNT(th.track_id) as listen_count
              FROM artists a
              LEFT JOIN tracks t ON t.artist_id = a.id
              LEFT JOIN track_history th ON th.track_id = t.id
              GROUP BY a.id, a.name
              ORDER BY listen_count DESC
-             LIMIT ?"
-        )?;
-        let rows = stmt.query_map([limit], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        let mut result = Vec::new();
-        for r in rows {
-            result.push(r?);
-        }
-        Ok(result)
-    }).unwrap_or_default();
+             LIMIT ?",
+            )?;
+            let rows = stmt.query_map([limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut result = Vec::new();
+            for r in rows {
+                result.push(r?);
+            }
+            Ok(result)
+        })
+        .unwrap_or_default();
 
     let max_count = artists.iter().map(|(_, _, c)| *c).max().unwrap_or(1) as f64;
     let artist_count = artists.len();
@@ -3675,7 +3916,11 @@ async fn get_discovery_artists(
         .map(|(i, (id, name, count))| {
             let angle = (i as f64 / artist_count.max(1) as f64) * std::f64::consts::PI * 2.0;
             let radius = 80.0 + (i as f64 * 43.0).sin() * 120.0;
-            let affinity = if max_count > 0.0 { count as f64 / max_count } else { 0.0 };
+            let affinity = if max_count > 0.0 {
+                count as f64 / max_count
+            } else {
+                0.0
+            };
             json!({
                 "artist_id": id,
                 "name": name,
@@ -4319,7 +4564,13 @@ async fn overlay_snapshot_with_external_track_and_position(
         .collect::<Vec<_>>();
     drop(state_guard);
     if !pending.is_empty() {
-        let start_position = snapshot.queue.iter().map(|q| q.position).max().unwrap_or(-1) + 1;
+        let start_position = snapshot
+            .queue
+            .iter()
+            .map(|q| q.position)
+            .max()
+            .unwrap_or(-1)
+            + 1;
         for (offset, p) in pending.into_iter().enumerate() {
             let track = crate::db::models::Track {
                 id: -p.tidal_track_id,
@@ -5158,7 +5409,9 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
             .zip(state_guard.playback_runtime_info.as_ref())
             .map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
         let ephemeral = state_guard.ephemeral_tidal_track.is_some();
-        let active = state_guard.audio_active.load(std::sync::atomic::Ordering::Relaxed);
+        let active = state_guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Relaxed);
         (live_pos, ephemeral, active)
     };
 
@@ -5317,12 +5570,8 @@ async fn play_track(
 
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let job = player::build_playback_preparation(
-        &track,
-        Some(&stream_info),
-        crossfade_ms,
-        user_quality,
-    );
+    let job =
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -5350,7 +5599,11 @@ async fn play_track(
             let duration_ms = track.duration_ms.unwrap_or(0);
             tokio::spawn(async move {
                 if let Err(e) = crate::services::tidal::play_reporter::report_play(
-                    &http, &token, tidal_id, &quality, duration_ms,
+                    &http,
+                    &token,
+                    tidal_id,
+                    &quality,
+                    duration_ms,
                 )
                 .await
                 {
@@ -5799,7 +6052,11 @@ async fn resolve_pending_row(
                 &pending_artist,
                 &pending_title,
             );
-            if s >= MATCH_QUALITY_THRESHOLD { Some((s, t)) } else { None }
+            if s >= MATCH_QUALITY_THRESHOLD {
+                Some((s, t))
+            } else {
+                None
+            }
         })
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -5886,15 +6143,16 @@ async fn resolve_pending_current_queue_item(
 
     let (queue_item_id, pending_artist, pending_title): (i64, String, String) = db
         .with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT q.id, q.pending_artist, q.pending_title
+            Ok(conn
+                .query_row(
+                    "SELECT q.id, q.pending_artist, q.pending_title
                  FROM playback_state ps
                  JOIN queue q ON q.id = ps.current_queue_item_id
                  WHERE ps.id = 1 AND q.track_id IS NULL AND q.pending_at IS NOT NULL",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?)
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?)
         })
         .ok()
         .flatten()?;
@@ -5926,7 +6184,10 @@ async fn resolve_pending_current_queue_item(
     let tokens = {
         let persisted = match load_persisted_tidal_tokens(state).await.ok().flatten() {
             Some(t) => t,
-            None => { release_lock(&db, queue_item_id); return None; }
+            None => {
+                release_lock(&db, queue_item_id);
+                return None;
+            }
         };
         let s = state.read().await;
         s.tidal_tokens.clone().unwrap_or(persisted)
@@ -5936,7 +6197,10 @@ async fn resolve_pending_current_queue_item(
     let query = format!("{} {}", pending_artist, pending_title);
     let results = match client.search(&query, 5).await {
         Ok(r) => r,
-        Err(_) => { release_lock(&db, queue_item_id); return None; }
+        Err(_) => {
+            release_lock(&db, queue_item_id);
+            return None;
+        }
     };
 
     let best = results
@@ -5948,13 +6212,20 @@ async fn resolve_pending_current_queue_item(
                 &pending_artist,
                 &pending_title,
             );
-            if s >= MATCH_QUALITY_THRESHOLD { Some((s, t)) } else { None }
+            if s >= MATCH_QUALITY_THRESHOLD {
+                Some((s, t))
+            } else {
+                None
+            }
         })
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let (score, tidal_track) = match best {
         Some(pair) => pair,
-        None => { release_lock(&db, queue_item_id); return None; }
+        None => {
+            release_lock(&db, queue_item_id);
+            return None;
+        }
     };
 
     let tidal_id = tidal_track.id;
@@ -5977,7 +6248,10 @@ async fn resolve_pending_current_queue_item(
 
     let local_id = match imported {
         Ok(imp) => imp.local_id,
-        Err(_) => { release_lock(&db, queue_item_id); return None; }
+        Err(_) => {
+            release_lock(&db, queue_item_id);
+            return None;
+        }
     };
 
     let score_stored = (score * 1000.0) as i32;
@@ -6067,10 +6341,20 @@ async fn next_track(
         let current_pos = snapshot
             .state
             .current_queue_item_id
-            .and_then(|qid| snapshot.queue.iter().find(|q| q.id == qid).map(|q| q.position))
+            .and_then(|qid| {
+                snapshot
+                    .queue
+                    .iter()
+                    .find(|q| q.id == qid)
+                    .map(|q| q.position)
+            })
             .or_else(|| {
                 snapshot.state.current_track.as_ref().and_then(|t| {
-                    snapshot.queue.iter().find(|q| q.track.id == t.id).map(|q| q.position)
+                    snapshot
+                        .queue
+                        .iter()
+                        .find(|q| q.track.id == t.id)
+                        .map(|q| q.position)
                 })
             })
             .unwrap_or(0);
@@ -6090,7 +6374,8 @@ async fn next_track(
     }
 
     // A resolved pending track counts as Replaced, not QueueEnded.
-    let end_reason = if effective_current_track.is_some() || snapshot.state.current_track.is_some() {
+    let end_reason = if effective_current_track.is_some() || snapshot.state.current_track.is_some()
+    {
         Some(player::ListenSessionEndReason::Replaced)
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
@@ -6456,12 +6741,9 @@ async fn replace_playback_queue(
         .with_conn(|conn| {
             // Replace with library tracks first.
             match payload.reasons.as_ref() {
-                Some(reasons) => player::replace_queue_with_reasons(
-                    conn,
-                    &payload.track_ids,
-                    reasons,
-                    "user",
-                )?,
+                Some(reasons) => {
+                    player::replace_queue_with_reasons(conn, &payload.track_ids, reasons, "user")?
+                }
                 None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
             };
             // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
@@ -6518,9 +6800,7 @@ async fn move_queue_track(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn clear_queue_route(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
     state
         .db
@@ -6929,7 +7209,10 @@ async fn tidal_search(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
@@ -6951,22 +7234,32 @@ async fn tidal_search(
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                 .await
-                .map_err(|re| (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                ))?;
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
             let retry_client = TidalClient::new(
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
-            retry_client.search_catalog(&params.q, limit).await.map_err(|e2| {
-                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
-            })?
+            retry_client
+                .search_catalog(&params.q, limit)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
         }
-        Err(e) => return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )),
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
     };
 
     // Batch-lookup which Tidal IDs are in the local library so the frontend can
@@ -6976,15 +7269,14 @@ async fn tidal_search(
     let artist_tidal_ids: Vec<i64> = results.artists.iter().map(|a| a.id).collect();
     let (track_map, known_albums, known_artists, artist_photos) = {
         let s = state.read().await;
-        s.db
-            .with_conn(|conn| {
-                let tracks = queries::get_tidal_track_local_ids(conn, &track_tidal_ids)?;
-                let albums = queries::get_known_album_tidal_ids(conn, &album_tidal_ids)?;
-                let artists = queries::get_known_artist_tidal_ids(conn, &artist_tidal_ids)?;
-                let photos = queries::get_artist_photos_by_tidal_ids(conn, &artist_tidal_ids)?;
-                Ok((tracks, albums, artists, photos))
-            })
-            .unwrap_or_default()
+        s.db.with_conn(|conn| {
+            let tracks = queries::get_tidal_track_local_ids(conn, &track_tidal_ids)?;
+            let albums = queries::get_known_album_tidal_ids(conn, &album_tidal_ids)?;
+            let artists = queries::get_known_artist_tidal_ids(conn, &artist_tidal_ids)?;
+            let photos = queries::get_artist_photos_by_tidal_ids(conn, &artist_tidal_ids)?;
+            Ok((tracks, albums, artists, photos))
+        })
+        .unwrap_or_default()
     };
 
     let tracks: Vec<TidalSearchTrackResp> = results
@@ -7037,7 +7329,9 @@ async fn tidal_search(
         })
         .collect();
 
-    Ok(Json(json!({ "tracks": tracks, "albums": albums, "artists": artists })))
+    Ok(Json(
+        json!({ "tracks": tracks, "albums": albums, "artists": artists }),
+    ))
 }
 
 // ─── TIDAL Playlist Search + Tracks ───────────────────────────────────────────
@@ -7055,13 +7349,19 @@ async fn tidal_playlist_search(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
     };
     let Some(tokens) = tokens else {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "TIDAL not connected" }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
     };
 
     let limit = params.limit.unwrap_or(20).min(50);
@@ -7072,19 +7372,32 @@ async fn tidal_playlist_search(
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                 .await
-                .map_err(|re| (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                ))?;
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
             let retry_client = TidalClient::new(
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
-            retry_client.search_playlists(&params.q, limit).await.map_err(|e2| {
-                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
-            })?
+            retry_client
+                .search_playlists(&params.q, limit)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
         }
-        Err(e) => return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))),
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
     };
 
     Ok(Json(json!({ "playlists": playlists })))
@@ -7096,13 +7409,19 @@ async fn tidal_playlist_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
     };
     let Some(tokens) = tokens else {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "TIDAL not connected" }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
     };
 
     let http_client = state.read().await.http_client.clone();
@@ -7112,19 +7431,32 @@ async fn tidal_playlist_tracks(
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                 .await
-                .map_err(|re| (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                ))?;
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
             let retry_client = TidalClient::new(
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
-            retry_client.get_playlist_tracks(&uuid, 100, 0).await.map_err(|e2| {
-                (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() })))
-            })?
+            retry_client
+                .get_playlist_tracks(&uuid, 100, 0)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
         }
-        Err(e) => return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))),
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
     };
 
     // TidalTrack: id (i64), title (String), duration (i64), artist (TidalArtist, not Option),
@@ -7199,14 +7531,17 @@ async fn play_tidal_mix(
         ));
     }
 
-    let mut iter = body.tracks.into_iter().map(|t| crate::PendingEphemeralTidalTrack {
-        tidal_track_id: t.tidal_track_id,
-        title: t.title,
-        artist_name: t.artist_name,
-        album_title: t.album_title,
-        artwork_url: t.artwork_url,
-        duration_ms: t.duration_ms,
-    });
+    let mut iter = body
+        .tracks
+        .into_iter()
+        .map(|t| crate::PendingEphemeralTidalTrack {
+            tidal_track_id: t.tidal_track_id,
+            title: t.title,
+            artist_name: t.artist_name,
+            album_title: t.album_title,
+            artwork_url: t.artwork_url,
+            duration_ms: t.duration_ms,
+        });
     let first = iter.next().expect("non-empty per check above");
     let rest: Vec<crate::PendingEphemeralTidalTrack> = iter.collect();
 
@@ -7233,7 +7568,10 @@ async fn start_ephemeral_tidal_playback(
     // Resolve TIDAL tokens (same pattern as tidal_search)
     let tokens = {
         let persisted = load_persisted_tidal_tokens(state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
@@ -7252,37 +7590,36 @@ async fn start_ephemeral_tidal_playback(
         s.http_client.clone()
     };
     let stream_req = tidal_stream::StreamRequest::new(track.tidal_track_id, "LOSSLESS");
-    let stream_info = match tidal_stream::resolve_stream(
-        &http_client,
-        &tokens.access_token,
-        &stream_req,
-    )
-    .await
-    {
-        Ok(info) => info,
-        Err(e) if e.is_session_expired() => {
-            let refreshed = recover_tidal_session(state, &http_client, &tokens)
-                .await
-                .map_err(|re| (
+    let stream_info =
+        match tidal_stream::resolve_stream(&http_client, &tokens.access_token, &stream_req).await {
+            Ok(info) => info,
+            Err(e) if e.is_session_expired() => {
+                let refreshed = recover_tidal_session(state, &http_client, &tokens)
+                    .await
+                    .map_err(|re| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(
+                                json!({ "error": format!("TIDAL session refresh failed: {}", re) }),
+                            ),
+                        )
+                    })?;
+                tidal_stream::resolve_stream(&http_client, &refreshed.access_token, &stream_req)
+                    .await
+                    .map_err(|e2| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": format!("TIDAL stream resolve failed: {e2}") })),
+                        )
+                    })?
+            }
+            Err(e) => {
+                return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                ))?;
-            tidal_stream::resolve_stream(
-                &http_client,
-                &refreshed.access_token,
-                &stream_req,
-            )
-            .await
-            .map_err(|e2| (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("TIDAL stream resolve failed: {e2}") })),
-            ))?
-        }
-        Err(e) => return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("TIDAL stream resolve failed: {e}") })),
-        )),
-    };
+                    Json(json!({ "error": format!("TIDAL stream resolve failed: {e}") })),
+                ));
+            }
+        };
 
     // Build a synthetic Track with a negative id to avoid any DB collision
     let synthetic = crate::db::models::Track {
@@ -7312,7 +7649,8 @@ async fn start_ephemeral_tidal_playback(
 
     // Build the playback job and start it via the runtime
     let crossfade_ms = current_crossfade_ms(state).await;
-    let job = player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None);
+    let job =
+        player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None);
     let runtime_handle = ensure_playback_runtime_for_track(state, &synthetic).await?;
     runtime_handle.play(job).map_err(|e| {
         let message = format!("Failed to start host audio playback: {e}");
@@ -7354,7 +7692,12 @@ async fn start_ephemeral_tidal_playback(
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
         snapshot
     };
-    sync_session_after_snapshot(state, &snapshot, Some(player::ListenSessionEndReason::Replaced)).await;
+    sync_session_after_snapshot(
+        state,
+        &snapshot,
+        Some(player::ListenSessionEndReason::Replaced),
+    )
+    .await;
 
     Ok(())
 }
@@ -7365,7 +7708,10 @@ async fn tidal_artist_profile(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let tokens = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         })?;
         let s = state.read().await;
         s.tidal_tokens.clone().or(persisted)
@@ -7388,10 +7734,12 @@ async fn tidal_artist_profile(
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                 .await
-                .map_err(|re| (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                ))?;
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
             let retry_client = TidalClient::new(
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
@@ -7400,18 +7748,22 @@ async fn tidal_artist_profile(
                 retry_client.get_artist_top_tracks(tidal_artist_id, 10, 0),
                 retry_client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
             )
-            .map_err(|e2| (StatusCode::BAD_GATEWAY, Json(json!({ "error": e2.to_string() }))))?
+            .map_err(|e2| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e2.to_string() })),
+                )
+            })?
         }
-        Err(e) => return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )),
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
     };
 
-    let artist_name = top_tracks_page
-        .items
-        .first()
-        .map(|t| t.artist.name.clone());
+    let artist_name = top_tracks_page.items.first().map(|t| t.artist.name.clone());
 
     Ok(Json(json!({
         "artist_name": artist_name,
@@ -7425,7 +7777,10 @@ async fn get_sync_info(
     State(state): State<SharedState>,
     Query(params): Query<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let service = params.get("service").and_then(|v| v.as_str()).unwrap_or("tidal");
+    let service = params
+        .get("service")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tidal");
     let state = state.read().await;
     state
         .db
@@ -7455,7 +7810,9 @@ async fn set_auto_sync(
         .with_conn(|conn| {
             queries::set_auto_sync_daily(conn, service, payload.enabled)
                 .map_err(|e| anyhow::anyhow!("set auto sync failed: {e}"))?;
-            Ok(Json(json!({ "service": service, "auto_sync_daily": payload.enabled })))
+            Ok(Json(
+                json!({ "service": service, "auto_sync_daily": payload.enabled }),
+            ))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -7463,7 +7820,10 @@ async fn set_auto_sync(
 /// Public function to trigger auto-sync from server startup.
 pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Result<SyncStats> {
     if service != "tidal" {
-        return Err(anyhow::anyhow!("Unsupported auto-sync service: {}", service));
+        return Err(anyhow::anyhow!(
+            "Unsupported auto-sync service: {}",
+            service
+        ));
     }
 
     // Get tokens
@@ -7477,19 +7837,19 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     };
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    
+
     // Run sync
     let stats = run_tidal_sync_with_reauth(&client, state, tokens).await?;
-    
+
     // Record sync timestamp
     state.read().await.db.with_conn(|conn| {
         queries::update_sync_timestamp(conn, "tidal", stats.tracks as i64, stats.albums as i64)
     })?;
-    
+
     // Broadcast event
     let s = state.read().await;
     let _ = s.event_tx.send(AppEvent::LibrarySynced);
-    
+
     Ok(stats)
 }
 
@@ -7546,7 +7906,12 @@ async fn tidal_sync_library(
                 );
                 // Record sync timestamp in DB
                 if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
-                    queries::update_sync_timestamp(conn, "tidal", stats.tracks as i64, stats.albums as i64)
+                    queries::update_sync_timestamp(
+                        conn,
+                        "tidal",
+                        stats.tracks as i64,
+                        stats.albums as i64,
+                    )
                 }) {
                     tracing::warn!("Failed to record sync timestamp: {}", e);
                 }
@@ -8244,7 +8609,11 @@ fn spawn_playback_runtime_listener(
             match rx.recv().await {
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished { track_id }) => {
                     // Track is no longer producing audio — clear the flag before advancing.
-                    state.write().await.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                    state
+                        .write()
+                        .await
+                        .audio_active
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Err(error) = handle_runtime_finished(state.clone(), track_id).await {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
@@ -8261,7 +8630,9 @@ fn spawn_playback_runtime_listener(
                     channels,
                 }) => {
                     let mut state_guard = state.write().await;
-                    state_guard.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                    state_guard
+                        .audio_active
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     let last_error = state_guard
                         .playback_runtime_info
                         .as_ref()
@@ -8277,7 +8648,9 @@ fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Started { track_id, .. }) => {
                     let mut state_guard = state.write().await;
                     // CPAL buffer threshold crossed — samples are actually flowing now.
-                    state_guard.audio_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                    state_guard
+                        .audio_active
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.active_track_id = Some(track_id);
                         info.last_error = None;
@@ -8297,7 +8670,9 @@ fn spawn_playback_runtime_listener(
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stopped) => {
                     let mut state_guard = state.write().await;
-                    state_guard.audio_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                    state_guard
+                        .audio_active
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.active_track_id = None;
                     }
@@ -8395,10 +8770,14 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
     // rebuild the output device at the new rate before PrepareNext.
     {
         let state_guard = state.read().await;
-        if let (Some(stream), Some(info)) = (stream_info.as_ref(), &state_guard.playback_runtime_info) {
+        if let (Some(stream), Some(info)) =
+            (stream_info.as_ref(), &state_guard.playback_runtime_info)
+        {
             let audio_settings = state_guard
                 .db
-                .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+                .with_conn(|conn| {
+                    crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
+                })
                 .ok();
             if let Some(settings) = audio_settings {
                 if settings.sample_rate_follow {
@@ -8434,12 +8813,8 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         stream_info.as_ref(),
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
     );
-    let job = player::build_playback_preparation(
-        &next,
-        stream_info.as_ref(),
-        crossfade_ms,
-        user_quality,
-    );
+    let job =
+        player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms, user_quality);
     let _ = access_token; // already embedded in the config held by the runtime
 
     let _ = handle.prepare_next(job);
@@ -8666,8 +9041,9 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
                 .with_conn(|conn| Ok(player::lookup_current_listen_source(conn)))
                 .unwrap_or(crate::db::models::ListenSource::Unknown);
             let prior = state.live_listen_session.as_ref();
-            state.active_listen_session =
-                Some(player::ActiveListenSession::start(track.id, now, source, prior));
+            state.active_listen_session = Some(player::ActiveListenSession::start(
+                track.id, now, source, prior,
+            ));
         }
     }
 }
@@ -8972,9 +9348,15 @@ async fn sync_session_after_snapshot(
                 .map_err(|err| {
                     error!("failed to flush listen session: {err}");
                 })
-                .unwrap_or(FlushOutcome { flushed_track_id: None, scrobble_completed: None })
+                .unwrap_or(FlushOutcome {
+                    flushed_track_id: None,
+                    scrobble_completed: None,
+                })
         } else {
-            FlushOutcome { flushed_track_id: None, scrobble_completed: None }
+            FlushOutcome {
+                flushed_track_id: None,
+                scrobble_completed: None,
+            }
         };
 
         let mut now_playing: Option<(String, String, Option<String>, Option<i64>, String)> = None;
@@ -9000,7 +9382,11 @@ async fn sync_session_after_snapshot(
             state.active_listen_session = None;
         }
 
-        (outcome.flushed_track_id, outcome.scrobble_completed, now_playing)
+        (
+            outcome.flushed_track_id,
+            outcome.scrobble_completed,
+            now_playing,
+        )
     };
 
     if let Some(track_id) = flushed_track_id {
@@ -9056,7 +9442,10 @@ fn flush_active_listen_session_locked(
     _reason: player::ListenSessionEndReason,
 ) -> anyhow::Result<FlushOutcome> {
     let Some(mut session) = state.active_listen_session.take() else {
-        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
+        return Ok(FlushOutcome {
+            flushed_track_id: None,
+            scrobble_completed: None,
+        });
     };
 
     session.pause(now);
@@ -9064,14 +9453,20 @@ fn flush_active_listen_session_locked(
     // Skip sessions shorter than 5 seconds to avoid spurious near-zero entries
     // from rapid track changes or accidental clicks.
     if listened_ms < 5_000 {
-        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
+        return Ok(FlushOutcome {
+            flushed_track_id: None,
+            scrobble_completed: None,
+        });
     }
 
     let started_at = session.started_at.to_rfc3339();
     let started_at_unix = session.started_at.timestamp();
     let track_id = session.track_id;
     if track_id <= 0 {
-        return Ok(FlushOutcome { flushed_track_id: None, scrobble_completed: None });
+        return Ok(FlushOutcome {
+            flushed_track_id: None,
+            scrobble_completed: None,
+        });
     }
     let session_id = session.session_id.clone();
     let source = session.source;
@@ -9317,9 +9712,7 @@ pub struct SyncStats {
 // ─── Home Page Discovery Endpoints ───────────────────────────────────────────────
 
 /// Get new album releases from AllMusic RSS
-async fn get_home_releases(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_home_releases(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
 
     // Pull api_key from the existing Last.fm credentials row. If Last.fm
@@ -9327,12 +9720,11 @@ async fn get_home_releases(
     // state instead of falling back to the old AllMusic RSS feed.
     let (http, api_key) = {
         let s = state.read().await;
-        let api_key = s
-            .db
-            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-            .ok()
-            .flatten()
-            .map(|c| c.api_key);
+        let api_key =
+            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+                .ok()
+                .flatten()
+                .map(|c| c.api_key);
         (s.http_client.clone(), api_key)
     };
     let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
@@ -9357,9 +9749,7 @@ async fn get_home_releases(
 /// Master Mix, etc) for the home page Your Mixes shelf.
 ///
 /// 503 when TIDAL is disconnected so the frontend can render its connect prompt.
-async fn get_tidal_mixes(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let tokens = state.read().await.tidal_tokens.clone();
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -9388,7 +9778,10 @@ async fn get_tidal_mix_tracks(
     };
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
     let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
-        (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })))
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
     })?;
 
     // Reuse the same shape `getTidalAlbumTracks` returns so the frontend's
@@ -9431,19 +9824,16 @@ async fn get_tidal_mix_tracks(
 /// clicks "Yes, allow access" → returns to NOORwave → "I've authorized" button
 /// fires /complete → we redeem the token for a session_key (encrypted on disk).
 
-async fn lastfm_auth_start(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn lastfm_auth_start(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
 
     let (http, api_secret, api_key) = {
         let s = state.read().await;
-        let api_key = s
-            .db
-            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-            .ok()
-            .flatten()
-            .map(|c| c.api_key);
+        let api_key =
+            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+                .ok()
+                .flatten()
+                .map(|c| c.api_key);
         (s.http_client.clone(), s.lastfm_api_secret.clone(), api_key)
     };
     let Some(api_secret) = api_secret else {
@@ -9468,14 +9858,10 @@ async fn lastfm_auth_start(
 
     // Stash the pending token server-side so /complete doesn't have to trust
     // the client to round-trip it.
-    let stash_result = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
-            lastfm::auth::set_pending_token(conn, &token)?;
-            Ok(())
-        });
+    let stash_result = state.read().await.db.with_conn(|conn| {
+        lastfm::auth::set_pending_token(conn, &token)?;
+        Ok(())
+    });
     if let Err(e) = stash_result {
         tracing::warn!("Failed to stash Last.fm pending_token: {e}");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -9492,18 +9878,15 @@ async fn lastfm_auth_start(
     })))
 }
 
-async fn lastfm_auth_complete(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn lastfm_auth_complete(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
 
     let (http, api_secret, api_key, pending_token, master_key) = {
         let s = state.read().await;
-        let creds = s
-            .db
-            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-            .ok()
-            .flatten();
+        let creds =
+            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+                .ok()
+                .flatten();
         (
             s.http_client.clone(),
             s.lastfm_api_secret.clone(),
@@ -9528,8 +9911,7 @@ async fn lastfm_auth_complete(
         })));
     };
 
-    let session = match lastfm::scrobble::get_session(&http, &api_key, &api_secret, &token).await
-    {
+    let session = match lastfm::scrobble::get_session(&http, &api_key, &api_secret, &token).await {
         Ok(s) => s,
         Err(e) => {
             // Don't drop the pending_token on a "not yet authorized" error —
@@ -9543,7 +9925,12 @@ async fn lastfm_auth_complete(
     };
 
     let persist_result = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::save_session_key(conn, &master_key, &session.session_key, &session.user_name)?;
+        lastfm::auth::save_session_key(
+            conn,
+            &master_key,
+            &session.session_key,
+            &session.user_name,
+        )?;
         Ok(())
     });
     if let Err(e) = persist_result {
@@ -9569,46 +9956,49 @@ async fn lastfm_auth_disconnect(
 }
 
 /// Get daily picks curated from user's library using learning model
-async fn get_home_picks(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_home_picks(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let state_guard = state.read().await;
     let db = &state_guard.db;
-    
+
     // Get top tracks from listening history with variety
-    let picks = db.with_conn(|conn| {
-        // Fetch recent top tracks that aren't played in last 7 days (rediscovery)
-        let tracks = queries::get_tracks(conn, "play_count", "desc", 20, 0, false, false)?;
-        
-        // Get tracks from different genres for variety
-        let mut genre_tracks = conn.prepare(
-            "SELECT t.*, g.name as genre_name
+    let picks = db
+        .with_conn(|conn| {
+            // Fetch recent top tracks that aren't played in last 7 days (rediscovery)
+            let tracks = queries::get_tracks(conn, "play_count", "desc", 20, 0, false, false)?;
+
+            // Get tracks from different genres for variety
+            let mut genre_tracks = conn.prepare(
+                "SELECT t.*, g.name as genre_name
              FROM tracks t
              JOIN track_genres tg ON t.id = tg.track_id
              JOIN genres g ON tg.genre_id = g.id
              WHERE t.play_count > 0
              ORDER BY RANDOM()
-             LIMIT 10"
-        )?;
-        
-        let genre_picks: Vec<serde_json::Value> = genre_tracks.query_map([], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, i64>(0)?,
-                "title": row.get::<_, String>(1)?,
-                "artist_name": row.get::<_, Option<String>>(2)?,
-                "album_title": row.get::<_, Option<String>>(3)?,
-                "artwork_url": row.get::<_, Option<String>>(4)?,
-                "duration_ms": row.get::<_, Option<i64>>(5)?,
-                "play_count": row.get::<_, i64>(6)?,
-                "genre": row.get::<_, String>(7)?,
-            }))
-        })?.filter_map(|r| r.ok()).collect();
-        
-        Ok((tracks, genre_picks))
-    }).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+             LIMIT 10",
+            )?;
+
+            let genre_picks: Vec<serde_json::Value> = genre_tracks
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, i64>(0)?,
+                        "title": row.get::<_, String>(1)?,
+                        "artist_name": row.get::<_, Option<String>>(2)?,
+                        "album_title": row.get::<_, Option<String>>(3)?,
+                        "artwork_url": row.get::<_, Option<String>>(4)?,
+                        "duration_ms": row.get::<_, Option<i64>>(5)?,
+                        "play_count": row.get::<_, i64>(6)?,
+                        "genre": row.get::<_, String>(7)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            Ok((tracks, genre_picks))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let (top_tracks, genre_picks) = picks;
-    
+
     Ok(Json(json!({
         "top_picks": top_tracks.iter().take(10).map(|t| serde_json::json!({
             "id": t.id,
@@ -9626,12 +10016,10 @@ async fn get_home_picks(
 }
 
 /// Get weekly articles from AllMusic RSS
-async fn get_home_articles(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_home_articles(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let aggregator = state.read().await.rss_aggregator.clone();
     let articles = aggregator.get_articles().await;
-    
+
     Ok(Json(json!({
         "articles": articles,
         "source": "allmusic_rss"
@@ -9639,12 +10027,10 @@ async fn get_home_articles(
 }
 
 /// Get music industry news from multiple RSS sources
-async fn get_home_news(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn get_home_news(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let aggregator = state.read().await.rss_aggregator.clone();
     let news = aggregator.get_news().await;
-    
+
     Ok(Json(json!({
         "news": news,
         "sources": ["billboard", "nme", "spin", "pitchfork", "rolling_stone", "consequence", "the_guardian"],
@@ -9724,7 +10110,9 @@ async fn spotify_clear_config(State(state): State<SharedState>) -> Result<Json<V
     Ok(Json(json!({"status": "cleared"})))
 }
 
-async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn start_spotify_enrichment(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
 
     let (http, event_tx, running, total_atom, processed_atom) = {
@@ -9809,7 +10197,8 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
                     progress: current as f32 / total.max(1) as f32,
                 });
             },
-        ).await;
+        )
+        .await;
 
         running.store(false, Ordering::SeqCst);
         if result.is_ok() {
@@ -9820,12 +10209,20 @@ async fn start_spotify_enrichment(State(state): State<SharedState>) -> Result<Js
     Ok(Json(json!({"status": "started", "total": total})))
 }
 
-async fn get_spotify_enrichment_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn get_spotify_enrichment_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
     let s = state.read().await;
-    let enriched: i64 = s.db.with_conn(|conn| {
-        Ok(conn.query_row("SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'spotify'", [], |r| r.get(0))?)
-    }).unwrap_or(0);
+    let enriched: i64 =
+        s.db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'spotify'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap_or(0);
     let remaining: i64 = s.db.with_conn(|conn| {
         Ok(conn.query_row(
             "SELECT COUNT(*) FROM tracks t
@@ -9959,7 +10356,10 @@ async fn lastfm_save_config(
                         body_text.chars().take(200).collect::<String>())
                 })));
             }
-            let creds = lastfm::auth::LastFmCredentials { api_key, ..Default::default() };
+            let creds = lastfm::auth::LastFmCredentials {
+                api_key,
+                ..Default::default()
+            };
             let _ = state.read().await.db.with_conn(|conn| {
                 lastfm::auth::save_credentials(conn, &creds)?;
                 Ok(())
@@ -9981,11 +10381,10 @@ async fn lastfm_status(State(state): State<SharedState>) -> Result<Json<Value>, 
     use crate::services::lastfm;
     let (creds, has_secret) = {
         let s = state.read().await;
-        let creds = s
-            .db
-            .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-            .ok()
-            .flatten();
+        let creds =
+            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
+                .ok()
+                .flatten();
         (creds, s.lastfm_api_secret.is_some())
     };
     let enrichment = creds
@@ -10020,7 +10419,17 @@ async fn start_lastfm_enrichment(
     use crate::services::lastfm;
     use std::sync::atomic::Ordering;
 
-    let (http, event_tx, running, cancel, total_atom, processed_atom, prefetch_total_atom, prefetch_done_atom, started_at_atom) = {
+    let (
+        http,
+        event_tx,
+        running,
+        cancel,
+        total_atom,
+        processed_atom,
+        prefetch_total_atom,
+        prefetch_done_atom,
+        started_at_atom,
+    ) = {
         let s = state.read().await;
         (
             s.http_client.clone(),
@@ -10132,9 +10541,8 @@ async fn get_lastfm_enrichment_status(
 ) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
     let s = state.read().await;
-    let enriched: i64 = s
-        .db
-        .with_conn(|conn| {
+    let enriched: i64 =
+        s.db.with_conn(|conn| {
             Ok(conn.query_row(
                 "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'lastfm'",
                 [],
@@ -10229,7 +10637,11 @@ async fn start_audio_analysis(
     let local_path = payload.local_path.clone();
     let (analysis_tx, cancel, running) = {
         let s = state.read().await;
-        (s.analysis_tx.clone(), s.audio_analysis_cancel.clone(), s.audio_analysis_running.clone())
+        (
+            s.analysis_tx.clone(),
+            s.audio_analysis_cancel.clone(),
+            s.audio_analysis_running.clone(),
+        )
     };
 
     let Some(tx) = analysis_tx else {
@@ -10270,14 +10682,20 @@ async fn start_audio_analysis(
 
 async fn stop_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    s.audio_analysis_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    s.audio_analysis_running.store(false, std::sync::atomic::Ordering::Relaxed);
+    s.audio_analysis_cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    s.audio_analysis_running
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(Json(json!({ "status": "stopped" })))
 }
 
-async fn get_audio_analysis_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn get_audio_analysis_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let analyzed = s.db.with_conn(|conn| queries::count_audio_dsp_features(conn)).unwrap_or(0);
+    let analyzed =
+        s.db.with_conn(|conn| queries::count_audio_dsp_features(conn))
+            .unwrap_or(0);
     Ok(Json(json!({
         "running": s.audio_analysis_running.load(std::sync::atomic::Ordering::Relaxed),
         "analyzed": analyzed,
@@ -10289,23 +10707,28 @@ async fn get_track_audio_features(
     Path(track_id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let features = s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let features =
+        s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "features": features })))
 }
 
-async fn get_audio_features_stats(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn get_audio_features_stats(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let stats = s.db.with_conn(|conn| queries::get_audio_features_stats(conn))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stats =
+        s.db.with_conn(|conn| queries::get_audio_features_stats(conn))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "stats": stats })))
 }
 
-async fn get_library_analytics(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+async fn get_library_analytics(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let summary = s
-        .db
-        .with_conn(|conn| {
+    let summary =
+        s.db.with_conn(|conn| {
             let tracks = queries::get_all_tracks(conn)?;
             let playlists = queries::get_playlists(conn)?;
             let genre_paths = queries::get_track_genre_paths(conn)?;
@@ -10333,13 +10756,12 @@ async fn get_audio_features_quality(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let q = s
-        .db
-        .with_conn(|conn| queries::get_audio_features_quality(conn))
-        .map_err(|e| {
-            tracing::error!("audio-features/quality query failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let q =
+        s.db.with_conn(|conn| queries::get_audio_features_quality(conn))
+            .map_err(|e| {
+                tracing::error!("audio-features/quality query failed: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     Ok(Json(json!({
         "total_tracks": q.total_tracks,
         "analyzed": q.analyzed,
@@ -10470,9 +10892,16 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
     }
 
     fn has_usable_art(e: &ChartEntryDto) -> bool {
-        let local_ok = !is_unusable(e.local_track.as_ref().and_then(|t| t.artwork_url.as_deref()));
-        let tp_ok =
-            !is_unusable(e.tidal_playable.as_ref().and_then(|tp| tp.artwork_url.as_deref()));
+        let local_ok = !is_unusable(
+            e.local_track
+                .as_ref()
+                .and_then(|t| t.artwork_url.as_deref()),
+        );
+        let tp_ok = !is_unusable(
+            e.tidal_playable
+                .as_ref()
+                .and_then(|tp| tp.artwork_url.as_deref()),
+        );
         let img_ok = !is_unusable(e.image_url.as_deref());
         local_ok || tp_ok || img_ok
     }
@@ -10493,7 +10922,11 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
                 .local_track
                 .as_ref()
                 .and_then(|t| t.artist_name.clone())
-                .or_else(|| e.tidal_playable.as_ref().and_then(|tp| tp.artist_name.clone()))?;
+                .or_else(|| {
+                    e.tidal_playable
+                        .as_ref()
+                        .and_then(|tp| tp.artist_name.clone())
+                })?;
             Some((idx, artist, title))
         })
         .collect();
@@ -10622,7 +11055,13 @@ fn chart_cache_put(key: String, payload: serde_json::Value) {
         if cache.len() >= 32 {
             cache.clear();
         }
-        cache.insert(key, ChartCacheEntry { inserted_at: Instant::now(), payload });
+        cache.insert(
+            key,
+            ChartCacheEntry {
+                inserted_at: Instant::now(),
+                payload,
+            },
+        );
     }
 }
 
@@ -10667,16 +11106,22 @@ async fn get_charts(
         match country_input {
             None => (None, None),
             Some(s) if s.len() == 2 => match curated::find_country_by_code(s) {
-                Some(entry) => (Some(entry.lastfm_name.to_string()), Some(entry.code.to_string())),
+                Some(entry) => (
+                    Some(entry.lastfm_name.to_string()),
+                    Some(entry.code.to_string()),
+                ),
                 None => {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(json!({ "error": "unknown_country" })),
-                    ))
+                    ));
                 }
             },
             Some(s) => match curated::find_country_by_code_or_name(s) {
-                Some(entry) => (Some(entry.lastfm_name.to_string()), Some(entry.code.to_string())),
+                Some(entry) => (
+                    Some(entry.lastfm_name.to_string()),
+                    Some(entry.code.to_string()),
+                ),
                 None => (Some(s.to_string()), Some(s.to_ascii_uppercase())),
             },
         };
@@ -10688,7 +11133,7 @@ async fn get_charts(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": "unknown_genre" })),
-                ))
+                ));
             }
         },
         None => None,
@@ -10775,21 +11220,20 @@ async fn fetch_lastfm_chart(
         // merge, dedupe by normalised (artist, title), sum playcounts on dupes,
         // sort desc by playcount, truncate. Single-tag entries skip the merge.
         if genre.lastfm_tags.len() == 1 {
-            client.get_top_tracks_by_tag(genre.lastfm_tags[0], limit).await?
+            client
+                .get_top_tracks_by_tag(genre.lastfm_tags[0], limit)
+                .await?
         } else {
             use futures::future::join_all;
             // Overfetch per leg so dedup across overlapping tags doesn't shrink
             // the merged list below the requested `limit`. Capped at Last.fm's
             // per-call ceiling.
             let fan_limit = limit.saturating_mul(2).min(100);
-            let calls = genre
-                .lastfm_tags
-                .iter()
-                .map(|tag| {
-                    let c = client.clone();
-                    let t = (*tag).to_string();
-                    async move { c.get_top_tracks_by_tag(&t, fan_limit).await }
-                });
+            let calls = genre.lastfm_tags.iter().map(|tag| {
+                let c = client.clone();
+                let t = (*tag).to_string();
+                async move { c.get_top_tracks_by_tag(&t, fan_limit).await }
+            });
             let results = join_all(calls).await;
             let mut merged: Vec<crate::metadata::lastfm::LastFmChartTrack> = Vec::new();
             let mut by_key: HashMap<String, usize> = HashMap::new();
@@ -10890,10 +11334,7 @@ async fn fetch_lastfm_chart(
     Ok(out)
 }
 
-async fn fetch_tidal_chart(
-    state: &SharedState,
-    limit: i32,
-) -> anyhow::Result<Vec<ChartEntryDto>> {
+async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Vec<ChartEntryDto>> {
     let (tokens_opt, http, db) = {
         let s = state.read().await;
         (s.tidal_tokens.clone(), s.http_client.clone(), s.db.clone())
@@ -11080,7 +11521,6 @@ fn resolve_chart_pairs_to_local(
     Ok(out)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11220,7 +11660,9 @@ mod tests {
             external_playback_track: None,
             ephemeral_tidal_track: None,
             tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(reqwest::Client::new())),
+            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(
+                reqwest::Client::new(),
+            )),
             acrcloud_client: None,
             analysis_tx: None,
             audio_analysis_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -11276,11 +11718,11 @@ mod tests {
 
     /// Build a minimal test app backed by a fresh in-memory database.
     async fn build_test_app() -> Router {
-        let db_path =
-            std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(&db_path).expect("db opened");
         db.run_migrations().expect("migrations");
-        db.with_conn(|conn| schema::run_migrations(conn)).expect("schema migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         api_routes(Arc::new(tokio::sync::RwLock::new(crate::AppState {
             db,
@@ -11297,7 +11739,9 @@ mod tests {
             external_playback_track: None,
             ephemeral_tidal_track: None,
             tidal_login_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(reqwest::Client::new())),
+            rss_aggregator: Arc::new(crate::services::rss_feeds::FeedAggregator::new(
+                reqwest::Client::new(),
+            )),
             acrcloud_client: None,
             analysis_tx: None,
             audio_analysis_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -11338,9 +11782,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(body["host_mode"], false);
         assert!(body["bind_address"].as_str().unwrap().contains("3334"));
         assert!(body["version"].is_string());
@@ -11375,11 +11822,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp2.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(body["host_mode"], true);
-        assert!(body["bind_address"].as_str().unwrap().starts_with("0.0.0.0"));
+        assert!(
+            body["bind_address"]
+                .as_str()
+                .unwrap()
+                .starts_with("0.0.0.0")
+        );
     }
 
     /// Reproducer for the Phase 2b hotfix: `/api/radio/song` must
@@ -11407,7 +11862,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert!(
@@ -11418,7 +11875,10 @@ mod tests {
             "unexpected error body: {body}"
         );
         assert!(
-            body["hint"].as_str().unwrap_or("").contains("seed_tidal_id"),
+            body["hint"]
+                .as_str()
+                .unwrap_or("")
+                .contains("seed_tidal_id"),
             "expected hint to mention seed_tidal_id: {body}"
         );
     }

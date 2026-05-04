@@ -7,7 +7,7 @@
 // stay invisible in Library grids until the user favorites them.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use super::client::{TidalClient, TidalTrack};
 
@@ -65,14 +65,16 @@ pub async fn import_album(
         .and_then(|t| t.album.as_ref())
         .map(|a| a.title.clone())
         .unwrap_or_else(|| "Unknown album".to_string());
-    let primary_artist = tracks.first().map(|t| t.artist.clone()).unwrap_or_else(|| {
-        super::client::TidalArtist {
-            id: 0,
-            name: "Unknown artist".to_string(),
-            picture: None,
-            extra: Default::default(),
-        }
-    });
+    let primary_artist =
+        tracks
+            .first()
+            .map(|t| t.artist.clone())
+            .unwrap_or_else(|| super::client::TidalArtist {
+                id: 0,
+                name: "Unknown artist".to_string(),
+                picture: None,
+                extra: Default::default(),
+            });
 
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -194,7 +196,14 @@ fn upsert_album_tx(
     tx.execute(
         "INSERT INTO albums (tidal_id, title, artist_id, artwork_url, track_count, source)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![tidal_id, title, artist_id, artwork_url, track_count, TIDAL_STREAM_SOURCE],
+        params![
+            tidal_id,
+            title,
+            artist_id,
+            artwork_url,
+            track_count,
+            TIDAL_STREAM_SOURCE
+        ],
     )?;
     Ok(tx.last_insert_rowid())
 }
@@ -505,8 +514,12 @@ mod tests {
         .await
         .expect("import should succeed");
 
-        let (album_artwork, album_tidal, artist_photo): (Option<String>, Option<i64>, Option<String>) =
-            db.with_conn(|conn| {
+        let (album_artwork, album_tidal, artist_photo): (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = db
+            .with_conn(|conn| {
                 Ok(conn.query_row(
                     "SELECT al.artwork_url, al.tidal_id, a.photo_url
                      FROM albums al JOIN artists a ON al.artist_id = a.id

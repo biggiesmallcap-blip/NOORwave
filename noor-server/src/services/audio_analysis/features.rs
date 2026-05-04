@@ -6,7 +6,6 @@
 /// - `compute_spectral_centroid`: STFT-based spectral centroid
 /// - `detect_instrumental`: vocal energy ratio heuristic
 /// - `compute_danceability`: bass energy + BPM factor heuristic
-
 use rustfft::FftPlanner;
 use std::f64::consts::PI;
 
@@ -74,7 +73,10 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
         }
 
         // Mean square energy of block
-        let sum_sq: f64 = filtered[start..end].iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+        let sum_sq: f64 = filtered[start..end]
+            .iter()
+            .map(|s| (*s as f64).powi(2))
+            .sum::<f64>();
         let mean_sq = sum_sq / (end - start) as f64;
 
         if mean_sq > 1e-12 {
@@ -124,10 +126,7 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
     }
 
     // Second pass: recompute with relative gate
-    let sum_linear: f64 = gated_relative
-        .iter()
-        .map(|l| 10.0_f64.powf(l / 10.0))
-        .sum();
+    let sum_linear: f64 = gated_relative.iter().map(|l| 10.0_f64.powf(l / 10.0)).sum();
     let mean_linear = sum_linear / gated_relative.len() as f64;
 
     if mean_linear <= 1e-12 {
@@ -163,16 +162,8 @@ pub fn rescale_biquad_coefficients(
     }
 
     // Step 1 — inverse bilinear at from_sr → continuous-time (u = s·T1/2) biquad
-    let b_cap = [
-        b[0] + b[1] + b[2],
-        2.0 * (b[0] - b[2]),
-        b[0] - b[1] + b[2],
-    ];
-    let a_cap = [
-        a[0] + a[1] + a[2],
-        2.0 * (a[0] - a[2]),
-        a[0] - a[1] + a[2],
-    ];
+    let b_cap = [b[0] + b[1] + b[2], 2.0 * (b[0] - b[2]), b[0] - b[1] + b[2]];
+    let a_cap = [a[0] + a[1] + a[2], 2.0 * (a[0] - a[2]), a[0] - a[1] + a[2]];
 
     // Step 2 — re-bilinear at to_sr
     let r = to_sr / from_sr;
@@ -267,10 +258,8 @@ pub fn compute_spectral_centroid(samples: &[f32], sample_rate: u32) -> Option<f6
 
         // Apply Hann window
         for i in 0..SC_FFT_SIZE {
-            fft_input[i] = rustfft::num_complex::Complex::new(
-                samples[start + i] * hann[i] as f32,
-                0.0,
-            );
+            fft_input[i] =
+                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
         }
 
         fft.process(&mut fft_input);
@@ -335,10 +324,8 @@ pub fn detect_instrumental(samples: &[f32], sample_rate: u32) -> Option<bool> {
 
         // Apply Hann window
         for i in 0..INST_FFT_SIZE {
-            fft_input[i] = rustfft::num_complex::Complex::new(
-                samples[start + i] * hann[i] as f32,
-                0.0,
-            );
+            fft_input[i] =
+                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
         }
 
         fft.process(&mut fft_input);
@@ -418,10 +405,8 @@ pub fn compute_danceability(
         let start = frame_idx * hop;
 
         for i in 0..fft_size {
-            fft_input[i] = rustfft::num_complex::Complex::new(
-                samples[start + i] * hann[i] as f32,
-                0.0,
-            );
+            fft_input[i] =
+                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
         }
 
         fft.process(&mut fft_input);
@@ -514,12 +499,7 @@ mod tests {
     #[test]
     fn test_rescale_44100_lufs_kweight_stable() {
         // Rescale the 48kHz K-weight biquad to 44.1kHz — coefficients must remain finite.
-        let (b, a) = rescale_biquad_coefficients(
-            KWEIGHT_B_48K,
-            KWEIGHT_A_48K,
-            48_000.0,
-            44_100.0,
-        );
+        let (b, a) = rescale_biquad_coefficients(KWEIGHT_B_48K, KWEIGHT_A_48K, 48_000.0, 44_100.0);
         for v in b.iter().chain(a.iter()) {
             assert!(v.is_finite(), "coefficient must be finite, got {v}");
         }

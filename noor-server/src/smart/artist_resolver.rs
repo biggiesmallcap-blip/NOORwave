@@ -95,10 +95,8 @@ mod tests {
 
     fn conn_with_artists(rows: &[(i64, &str)]) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
-        )
-        .unwrap();
+        conn.execute_batch("CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+            .unwrap();
         for (id, name) in rows {
             conn.execute(
                 "INSERT INTO artists (id, name) VALUES (?1, ?2)",

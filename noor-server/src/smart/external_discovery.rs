@@ -193,6 +193,7 @@ pub fn build_external_feed(
     }
 }
 
+#[allow(dead_code)]
 pub fn build_trail_item(
     result: &DiscoveryExternalResult,
     connection_reason: impl Into<String>,

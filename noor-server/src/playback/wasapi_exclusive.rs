@@ -14,19 +14,19 @@
 //! from the same `PlaybackSharedState` the cpal callback path uses, so
 //! pause/stop/volume/seek still flow through the existing shared atomics.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tracing::{info, warn};
 use wasapi::{
-    initialize_mta, Direction, DeviceEnumerator, SampleType, ShareMode, StreamMode, WaveFormat,
+    DeviceEnumerator, Direction, SampleType, ShareMode, StreamMode, WaveFormat, initialize_mta,
 };
 
 use super::runtime::{
-    fill_f32_from_shared, PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState,
+    PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared,
 };
 
 /// Live exclusive-mode output. Drop to stop the render thread and release the
@@ -34,7 +34,9 @@ use super::runtime::{
 pub struct ExclusiveStream {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     pub effective_sample_rate: u32,
+    #[allow(dead_code)]
     pub effective_channels: u16,
 }
 
@@ -91,8 +93,7 @@ pub fn build_exclusive_stream(
 
     let (effective_rate, effective_channels) = init_rx
         .recv()
-        .context("WASAPI render thread died before reporting init result")?
-        ?;
+        .context("WASAPI render thread died before reporting init result")??;
 
     Ok(ExclusiveStream {
         shutdown,
@@ -149,7 +150,13 @@ fn run_render_thread(
 
             let bytes_needed = frames * blockalign;
             byte_buf.resize(bytes_needed, 0);
-            convert_f32_to_bytes(&f32_scratch, &mut byte_buf, fmt_tag, blockalign, channels as usize);
+            convert_f32_to_bytes(
+                &f32_scratch,
+                &mut byte_buf,
+                fmt_tag,
+                blockalign,
+                channels as usize,
+            );
 
             if let Err(e) = render_client.write_to_device(frames, &byte_buf, None) {
                 warn!("WASAPI write_to_device failed: {e}");
@@ -282,7 +289,13 @@ fn init_audio_client(
         desired_sample_rate, channels, blockalign, min_period
     );
 
-    Ok((audio_client, render_client, event_handle, blockalign, fmt_tag))
+    Ok((
+        audio_client,
+        render_client,
+        event_handle,
+        blockalign,
+        fmt_tag,
+    ))
 }
 
 fn convert_f32_to_bytes(

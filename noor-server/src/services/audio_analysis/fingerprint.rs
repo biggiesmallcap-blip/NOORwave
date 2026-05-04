@@ -1,7 +1,7 @@
 #![allow(unused)]
 
-use crate::db::queries;
 use crate::db::Database;
+use crate::db::queries;
 use num_complex::Complex32;
 use rustfft::FftPlanner;
 use std::collections::HashMap;
@@ -33,9 +33,9 @@ pub fn extract_fingerprint(samples: &[f32], _sample_rate: u32) -> (Vec<(u32, u32
 
         // Apply Hann window
         for (i, &s) in frame.iter().enumerate() {
-            let w = 0.5 * (1.0
-                - (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE - 1) as f64).cos()
-                    as f32);
+            let w = 0.5
+                * (1.0
+                    - (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE - 1) as f64).cos() as f32);
             buffer[i] = Complex32::new(s * w, 0.0);
         }
 
@@ -90,10 +90,7 @@ pub fn extract_fingerprint(samples: &[f32], _sample_rate: u32) -> (Vec<(u32, u32
 
 /// Match fingerprints: find tracks sharing hashes with the query.
 /// Returns Vec of (track_id, score) where score = max_histogram_count / query_hashes.len()
-pub fn match_fingerprints(
-    db: &Database,
-    query_hashes: &[(u32, u32)],
-) -> Vec<(i64, f64)> {
+pub fn match_fingerprints(db: &Database, query_hashes: &[(u32, u32)]) -> Vec<(i64, f64)> {
     if query_hashes.is_empty() {
         return Vec::new();
     }

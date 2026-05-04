@@ -19,8 +19,9 @@ pub fn normalize_reason(tag: &str) -> &'static str {
         "album_context" | "album_seed" | "connected_album_seed" => "album",
         "genre_branch" | "genre_affinity" | "genre_drift" | "prompt_genre" => "genre",
         "energy_match" => "energy",
-        "external_match" | "last.fm similar" | "discogs_style" | "prompt_match"
-        | "scene_match" => "external",
+        "external_match" | "last.fm similar" | "discogs_style" | "prompt_match" | "scene_match" => {
+            "external"
+        }
         _ => "unknown",
     }
 }
@@ -36,16 +37,6 @@ pub fn normalize_reason_tags(raw_tags: &[String]) -> Vec<String> {
 }
 
 /// Pick the primary reason from a list of raw tags using the first non-unknown result.
-pub fn primary_reason_from_tags(raw_tags: &[String]) -> &'static str {
-    for tag in raw_tags {
-        let n = normalize_reason(tag);
-        if n != "unknown" {
-            return n;
-        }
-    }
-    "unknown"
-}
-
 // ─── 2. Source normalizer ────────────────────────────────────────────────────
 
 pub fn normalize_source(source: &str) -> &'static str {
@@ -125,9 +116,7 @@ pub fn normalize_scores_by_source(candidates: &[ScoreCandidate]) -> HashMap<i64,
 #[derive(Debug, Clone)]
 pub struct PruneNode {
     pub track_id: i64,
-    pub score: f64,        // final normalized display relevance (0..1)
-    pub confidence: f64,   // 0..1; 0.5 when unknown
-    pub source: String,    // normalized: library/lastfm/engine/mixed
+    pub score: f64, // final normalized display relevance (0..1)
     pub is_seed: bool,
     pub primary_reason: String,
     pub in_degree_pctile: f64, // within current candidate set (0..1)
@@ -140,13 +129,11 @@ pub struct PruneEdge {
     pub to_track_id: i64,
     pub weight: f64,
     pub confidence: f64,
-    pub primary_reason: String,
 }
 
 /// Tunable pruning parameters. Default implements the no-hairball mandate.
 #[derive(Debug, Clone)]
 pub struct PruneConfig {
-    pub target_nodes: usize,
     pub hard_max_nodes: usize,
     pub hard_max_edges: usize,
     pub max_edges_per_node: usize,
@@ -161,7 +148,6 @@ pub struct PruneConfig {
 impl Default for PruneConfig {
     fn default() -> Self {
         Self {
-            target_nodes: 100,
             hard_max_nodes: 150,
             hard_max_edges: 300,
             max_edges_per_node: 6,
@@ -179,9 +165,6 @@ impl Default for PruneConfig {
 pub struct PruneResult {
     /// Surviving node track_ids in original order.
     pub node_ids: Vec<i64>,
-    /// Surviving edges (cloned from input).
-    pub edges: Vec<PruneEdge>,
-
     // Diagnostics counters
     pub raw_node_count: usize,
     pub raw_edge_count: usize,
@@ -271,12 +254,13 @@ pub fn prune_graph(
     // ── Step 6: truncate to hard_max_nodes ───────────────────────────────────
     if nodes.len() > config.hard_max_nodes {
         // Sort by score DESC (seed always first via is_seed flag).
-        nodes.sort_by(|a, b| {
-            match (a.is_seed, b.is_seed) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal),
-            }
+        nodes.sort_by(|a, b| match (a.is_seed, b.is_seed) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b
+                .score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
         });
         nodes.truncate(config.hard_max_nodes);
     }
@@ -284,22 +268,19 @@ pub fn prune_graph(
     let surviving_ids: HashSet<i64> = nodes.iter().map(|n| n.track_id).collect();
 
     // ── Step 7: drop dangling edges ──────────────────────────────────────────
-    edges.retain(|e| surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id));
+    edges.retain(|e| {
+        surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id)
+    });
 
     // ── Step 8: reason diversity guarantee ───────────────────────────────────
     // Count distinct reasons in *raw* (pre-prune) node set. If ≥ 3, ensure the
     // surviving set covers at least 3 distinct reasons.
     {
-        let raw_reasons: HashSet<&str> = nodes
-            .iter()
-            .map(|n| n.primary_reason.as_str())
-            .collect();
+        let raw_reasons: HashSet<&str> = nodes.iter().map(|n| n.primary_reason.as_str()).collect();
 
         if raw_reasons.len() >= 3 {
-            let surviving_reasons: HashSet<&str> = nodes
-                .iter()
-                .map(|n| n.primary_reason.as_str())
-                .collect();
+            let surviving_reasons: HashSet<&str> =
+                nodes.iter().map(|n| n.primary_reason.as_str()).collect();
 
             if surviving_reasons.len() < 3 {
                 // Already filtered too aggressively — this shouldn't happen with default config,
@@ -327,7 +308,6 @@ pub fn prune_graph(
 
     PruneResult {
         node_ids,
-        edges,
         raw_node_count,
         raw_edge_count,
         pruned_node_count,
@@ -411,12 +391,6 @@ mod tests {
         assert_eq!(result, vec!["harmonic", "genre"]);
     }
 
-    #[test]
-    fn primary_reason_skips_unknown() {
-        let tags = vec!["foobar".to_string(), "bpm_match".to_string()];
-        assert_eq!(primary_reason_from_tags(&tags), "bpm");
-    }
-
     // ── Source normalizer ─────────────────────────────────────────────────────
 
     #[test]
@@ -441,8 +415,16 @@ mod tests {
     #[test]
     fn score_norm_small_group_clamps() {
         let candidates = vec![
-            ScoreCandidate { track_id: 1, raw_score: 1.5, source: "library".to_string() },
-            ScoreCandidate { track_id: 2, raw_score: -0.1, source: "library".to_string() },
+            ScoreCandidate {
+                track_id: 1,
+                raw_score: 1.5,
+                source: "library".to_string(),
+            },
+            ScoreCandidate {
+                track_id: 2,
+                raw_score: -0.1,
+                source: "library".to_string(),
+            },
         ];
         let result = normalize_scores_by_source(&candidates);
         assert_eq!(result[&1], 1.0);
@@ -461,15 +443,26 @@ mod tests {
         let result = normalize_scores_by_source(&candidates);
         // All scores should be in 0..1.
         for score in result.values() {
-            assert!(*score >= 0.0 && *score <= 1.0, "score out of range: {score}");
+            assert!(
+                *score >= 0.0 && *score <= 1.0,
+                "score out of range: {score}"
+            );
         }
     }
 
     #[test]
     fn score_norm_groups_independently() {
         let candidates = vec![
-            ScoreCandidate { track_id: 1, raw_score: 0.9, source: "library".to_string() },
-            ScoreCandidate { track_id: 2, raw_score: 0.1, source: "lastfm".to_string() },
+            ScoreCandidate {
+                track_id: 1,
+                raw_score: 0.9,
+                source: "library".to_string(),
+            },
+            ScoreCandidate {
+                track_id: 2,
+                raw_score: 0.1,
+                source: "lastfm".to_string(),
+            },
         ];
         let result = normalize_scores_by_source(&candidates);
         // Both groups have < 5, so raw clamped.
@@ -483,8 +476,6 @@ mod tests {
         PruneNode {
             track_id: id,
             score,
-            confidence: 0.8,
-            source: "library".to_string(),
             is_seed,
             primary_reason: "behavioral".to_string(),
             in_degree_pctile: 0.5,
@@ -497,7 +488,6 @@ mod tests {
             to_track_id: to,
             weight,
             confidence: 0.8,
-            primary_reason: "behavioral".to_string(),
         }
     }
 
@@ -507,7 +497,7 @@ mod tests {
         let edges = vec![make_edge(1, 2, 0.05)]; // below min_edge_weight=0.12
         let config = PruneConfig::default();
         let result = prune_graph(nodes, edges, 1, &config);
-        assert!(result.edges.is_empty(), "low-weight edge should be dropped");
+        assert_eq!(result.pruned_edge_count, 1);
     }
 
     #[test]
@@ -517,18 +507,19 @@ mod tests {
         edge.confidence = 0.1; // below min_edge_confidence=0.20
         let config = PruneConfig::default();
         let result = prune_graph(nodes, vec![edge], 1, &config);
-        assert!(result.edges.is_empty());
+        assert_eq!(result.pruned_edge_count, 1);
         assert_eq!(result.low_confidence_edge_dropped_count, 1);
     }
 
     #[test]
     fn pruner_always_keeps_seed() {
-        let mut nodes: Vec<PruneNode> = (1..=200)
-            .map(|i| make_node(i, 0.1, i == 1))
-            .collect();
+        let mut nodes: Vec<PruneNode> = (1..=200).map(|i| make_node(i, 0.1, i == 1)).collect();
         nodes[0].is_seed = true;
         let edges = vec![];
-        let config = PruneConfig { hard_max_nodes: 50, ..Default::default() };
+        let config = PruneConfig {
+            hard_max_nodes: 50,
+            ..Default::default()
+        };
         let result = prune_graph(nodes, edges, 1, &config);
         assert!(result.node_ids.contains(&1), "seed must survive pruning");
     }
@@ -553,7 +544,10 @@ mod tests {
         let nodes = vec![make_node(1, 1.0, true), hub];
         let config = PruneConfig::default();
         let result = prune_graph(nodes, vec![], 1, &config);
-        assert!(result.node_ids.contains(&99), "high-score hub should survive");
+        assert!(
+            result.node_ids.contains(&99),
+            "high-score hub should survive"
+        );
     }
 
     #[test]
@@ -563,9 +557,12 @@ mod tests {
         let edges: Vec<PruneEdge> = (0..10)
             .map(|i| make_edge(1, 2, 0.5 + i as f64 * 0.01))
             .collect();
-        let config = PruneConfig { max_edges_per_node: 3, ..Default::default() };
+        let config = PruneConfig {
+            max_edges_per_node: 3,
+            ..Default::default()
+        };
         let result = prune_graph(nodes, edges, 99, &config);
-        assert!(result.edges.len() <= 3, "edge cap not enforced: {}", result.edges.len());
+        assert_eq!(result.pruned_edge_count, 7);
     }
 
     #[test]
@@ -578,7 +575,11 @@ mod tests {
 
     #[test]
     fn in_degree_stats_basic() {
-        let edges = vec![make_edge(1, 2, 0.8), make_edge(1, 2, 0.7), make_edge(3, 2, 0.6)];
+        let edges = vec![
+            make_edge(1, 2, 0.8),
+            make_edge(1, 2, 0.7),
+            make_edge(3, 2, 0.6),
+        ];
         let stats = compute_in_degree_stats(&[1, 2, 3], &edges);
         assert_eq!(stats[&2].0, 3, "node 2 should have in-degree 3");
         assert_eq!(stats[&1].0, 0);

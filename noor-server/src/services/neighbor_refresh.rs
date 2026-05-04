@@ -1,3 +1,8 @@
+use crate::db::queries::{
+    EmbeddingTrackRow, NeighborWriteRow, get_active_embedding_model, get_embedding_track_rows,
+    get_model_embeddings, replace_seed_neighbors,
+};
+use crate::services::learning::unpack_vector_blob;
 /// Background per-seed neighbor computation for DiscoverSpace.
 ///
 /// When `/api/discovery/space` is called with a seed_id, this module fires a
@@ -8,13 +13,7 @@
 ///
 /// Prerequisite: full training must have run at least once so embeddings exist.
 /// All failure paths are silent no-ops — the DiscoverSpace page degrades gracefully.
-
 use crate::{AppEvent, db};
-use crate::db::queries::{
-    get_active_embedding_model, get_model_embeddings, get_embedding_track_rows,
-    EmbeddingTrackRow, NeighborWriteRow, replace_seed_neighbors,
-};
-use crate::services::learning::unpack_vector_blob;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -49,9 +48,7 @@ pub struct EmbeddingCache {
 
 /// `std::sync::Mutex` poisons on panic. We treat poisoning as "ignore old state"
 /// rather than panicking the request thread — the worst case is one extra refresh.
-fn lock_refreshed<T>(
-    m: &Mutex<T>,
-) -> std::sync::MutexGuard<'_, T> {
+fn lock_refreshed<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -136,7 +133,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
 
     if !seed.genre_set.is_empty()
         && !cand.genre_set.is_empty()
-        && seed.genre_set.intersection(&cand.genre_set).next().is_some()
+        && seed
+            .genre_set
+            .intersection(&cand.genre_set)
+            .next()
+            .is_some()
     {
         score += 0.18;
         tags.push(("genre_branch", 0.18));
@@ -228,32 +229,23 @@ pub async fn refresh_seed_neighbors(
     let send_progress_for_blocking = send_progress.clone();
     let cache_for_store = Arc::clone(&embedding_cache);
 
-    let result: Result<Option<(i64, Arc<HashMap<i64, Vec<f64>>>, Arc<HashMap<i64, TrackMeta>>)>, anyhow::Error> =
-        tokio::task::spawn_blocking(move || {
-            db.with_conn(|conn| {
-                let Some(model) = get_active_embedding_model(conn)? else {
-                    info!("[neighbor_refresh] no active model — skipping seed {seed_id}");
-                    return Ok::<_, anyhow::Error>(None);
-                };
+    let result: Result<
+        Option<(
+            i64,
+            Arc<HashMap<i64, Vec<f64>>>,
+            Arc<HashMap<i64, TrackMeta>>,
+        )>,
+        anyhow::Error,
+    > = tokio::task::spawn_blocking(move || {
+        db.with_conn(|conn| {
+            let Some(model) = get_active_embedding_model(conn)? else {
+                info!("[neighbor_refresh] no active model — skipping seed {seed_id}");
+                return Ok::<_, anyhow::Error>(None);
+            };
 
-                let (vec_map, meta_map) = if let Some((cached_id, vm, mm)) = cached {
-                    if cached_id == model.id {
-                        (vm, mm)
-                    } else {
-                        send_progress_for_blocking("loading", 0.1);
-                        let embeddings = get_model_embeddings(conn, model.id)?;
-                        if embeddings.is_empty() {
-                            info!("[neighbor_refresh] model {} has no embeddings", model.id);
-                            return Ok(None);
-                        }
-                        let vm: HashMap<i64, Vec<f64>> = embeddings
-                            .iter()
-                            .map(|e| (e.track_id, unpack_vector_blob(&e.vector_blob)))
-                            .collect();
-                        let all_tracks = get_embedding_track_rows(conn)?;
-                        let mm = build_meta_map(&all_tracks);
-                        (Arc::new(vm), Arc::new(mm))
-                    }
+            let (vec_map, meta_map) = if let Some((cached_id, vm, mm)) = cached {
+                if cached_id == model.id {
+                    (vm, mm)
                 } else {
                     send_progress_for_blocking("loading", 0.1);
                     let embeddings = get_model_embeddings(conn, model.id)?;
@@ -268,116 +260,139 @@ pub async fn refresh_seed_neighbors(
                     let all_tracks = get_embedding_track_rows(conn)?;
                     let mm = build_meta_map(&all_tracks);
                     (Arc::new(vm), Arc::new(mm))
-                };
-
-                let Some(seed_vec) = vec_map.get(&seed_id) else {
-                    warn!("[neighbor_refresh] seed {seed_id} not in embedding table — skipping");
+                }
+            } else {
+                send_progress_for_blocking("loading", 0.1);
+                let embeddings = get_model_embeddings(conn, model.id)?;
+                if embeddings.is_empty() {
+                    info!("[neighbor_refresh] model {} has no embeddings", model.id);
                     return Ok(None);
-                };
-                let seed_vec = seed_vec.clone();
-
-                let seed_meta = meta_map.get(&seed_id);
-                let seed_play_count = seed_meta.map(|m| m.play_count).unwrap_or(0);
-
-                send_progress_for_blocking("computing", 0.4);
-
-                // Score all candidates. Periodic progress pings keep the spinner alive
-                // for large libraries (50k+ tracks).
-                let total_cands = vec_map.len().saturating_sub(1).max(1) as f32;
-                let progress_step = (total_cands / 8.0).max(1.0) as usize;
-                let mut scored: Vec<(i64, f64, f64, Vec<(&'static str, f64)>)> = Vec::with_capacity(vec_map.len());
-                let mut idx: usize = 0;
-                for (cand_id, cand_vec) in vec_map.iter() {
-                    if *cand_id == seed_id { continue; }
-                    let sim = cosine(&seed_vec, cand_vec);
-                    let (bonus, tags) =
-                        if let (Some(sm), Some(cm)) = (seed_meta, meta_map.get(cand_id)) {
-                            metadata_bonus(sm, cm)
-                        } else {
-                            (0.0, vec![])
-                        };
-                    scored.push((*cand_id, (sim + bonus).clamp(0.0, 1.0), sim, tags));
-                    idx += 1;
-                    if idx % progress_step == 0 {
-                        let frac = (idx as f32 / total_cands).min(1.0);
-                        send_progress_for_blocking("computing", 0.4 + frac * 0.4);
-                    }
                 }
-
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                scored.truncate(64);
-
-                if scored.is_empty() {
-                    return Ok(Some((model.id, vec_map, meta_map)));
-                }
-
-                send_progress_for_blocking("saving", 0.85);
-
-                let rows: Vec<NeighborWriteRow> = scored
-                    .into_iter()
-                    .enumerate()
-                    .map(|(rank, (cand_id, total, sim, tags))| {
-                        // Pick the highest-weighted matched tag as primary_reason
-                        // (insertion order would mislead — e.g. small album bonus
-                        // beating a larger BPM bonus).
-                        let primary_reason = tags
-                            .iter()
-                            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                            .map(|(k, _)| (*k).to_string());
-                        let reason_json = if tags.is_empty() {
-                            None
-                        } else {
-                            Some(
-                                serde_json::to_string(
-                                    &tags
-                                        .iter()
-                                        .map(|(k, _)| serde_json::json!({"key": k}))
-                                        .collect::<Vec<_>>(),
-                                )
-                                .unwrap_or_default(),
-                            )
-                        };
-                        let cand_play = meta_map.get(&cand_id).map(|m| m.play_count).unwrap_or(0);
-                        // Confidence proxies how strongly we trust the audio match.
-                        // Floor at 0.4 so refreshed neighbors don't trip the cold-start
-                        // gate (`< 0.3`) used downstream in `routes.rs`.
-                        let confidence = (0.40 + sim.clamp(0.0, 1.0) * 0.55).clamp(0.0, 1.0);
-                        NeighborWriteRow {
-                            track_id: seed_id,
-                            neighbor_track_id: cand_id,
-                            rank: (rank + 1) as i32,
-                            score: total,
-                            behavioral_score: 0.0,
-                            audio_score: sim,
-                            metadata_score: total - sim,
-                            reason_json,
-                            primary_reason,
-                            confidence,
-                            support_count: 0,
-                            candidate_in_degree: 0,
-                            candidate_in_degree_percentile: 0.5,
-                            play_count_seed: seed_play_count,
-                            play_count_candidate: cand_play,
-                        }
-                    })
+                let vm: HashMap<i64, Vec<f64>> = embeddings
+                    .iter()
+                    .map(|e| (e.track_id, unpack_vector_blob(&e.vector_blob)))
                     .collect();
+                let all_tracks = get_embedding_track_rows(conn)?;
+                let mm = build_meta_map(&all_tracks);
+                (Arc::new(vm), Arc::new(mm))
+            };
 
-                let n = rows.len();
-                replace_seed_neighbors(conn, model.id, seed_id, &rows)?;
-                info!("[neighbor_refresh] wrote {n} neighbors for seed {seed_id} (model {})", model.id);
+            let Some(seed_vec) = vec_map.get(&seed_id) else {
+                warn!("[neighbor_refresh] seed {seed_id} not in embedding table — skipping");
+                return Ok(None);
+            };
+            let seed_vec = seed_vec.clone();
 
-                Ok(Some((model.id, vec_map, meta_map)))
-            })
+            let seed_meta = meta_map.get(&seed_id);
+            let seed_play_count = seed_meta.map(|m| m.play_count).unwrap_or(0);
+
+            send_progress_for_blocking("computing", 0.4);
+
+            // Score all candidates. Periodic progress pings keep the spinner alive
+            // for large libraries (50k+ tracks).
+            let total_cands = vec_map.len().saturating_sub(1).max(1) as f32;
+            let progress_step = (total_cands / 8.0).max(1.0) as usize;
+            let mut scored: Vec<(i64, f64, f64, Vec<(&'static str, f64)>)> =
+                Vec::with_capacity(vec_map.len());
+            let mut idx: usize = 0;
+            for (cand_id, cand_vec) in vec_map.iter() {
+                if *cand_id == seed_id {
+                    continue;
+                }
+                let sim = cosine(&seed_vec, cand_vec);
+                let (bonus, tags) = if let (Some(sm), Some(cm)) = (seed_meta, meta_map.get(cand_id))
+                {
+                    metadata_bonus(sm, cm)
+                } else {
+                    (0.0, vec![])
+                };
+                scored.push((*cand_id, (sim + bonus).clamp(0.0, 1.0), sim, tags));
+                idx += 1;
+                if idx % progress_step == 0 {
+                    let frac = (idx as f32 / total_cands).min(1.0);
+                    send_progress_for_blocking("computing", 0.4 + frac * 0.4);
+                }
+            }
+
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(64);
+
+            if scored.is_empty() {
+                return Ok(Some((model.id, vec_map, meta_map)));
+            }
+
+            send_progress_for_blocking("saving", 0.85);
+
+            let rows: Vec<NeighborWriteRow> = scored
+                .into_iter()
+                .enumerate()
+                .map(|(rank, (cand_id, total, sim, tags))| {
+                    // Pick the highest-weighted matched tag as primary_reason
+                    // (insertion order would mislead — e.g. small album bonus
+                    // beating a larger BPM bonus).
+                    let primary_reason = tags
+                        .iter()
+                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(k, _)| (*k).to_string());
+                    let reason_json = if tags.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            serde_json::to_string(
+                                &tags
+                                    .iter()
+                                    .map(|(k, _)| serde_json::json!({"key": k}))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap_or_default(),
+                        )
+                    };
+                    let cand_play = meta_map.get(&cand_id).map(|m| m.play_count).unwrap_or(0);
+                    // Confidence proxies how strongly we trust the audio match.
+                    // Floor at 0.4 so refreshed neighbors don't trip the cold-start
+                    // gate (`< 0.3`) used downstream in `routes.rs`.
+                    let confidence = (0.40 + sim.clamp(0.0, 1.0) * 0.55).clamp(0.0, 1.0);
+                    NeighborWriteRow {
+                        track_id: seed_id,
+                        neighbor_track_id: cand_id,
+                        rank: (rank + 1) as i32,
+                        score: total,
+                        behavioral_score: 0.0,
+                        audio_score: sim,
+                        metadata_score: total - sim,
+                        reason_json,
+                        primary_reason,
+                        confidence,
+                        support_count: 0,
+                        candidate_in_degree: 0,
+                        candidate_in_degree_percentile: 0.5,
+                        play_count_seed: seed_play_count,
+                        play_count_candidate: cand_play,
+                    }
+                })
+                .collect();
+
+            let n = rows.len();
+            replace_seed_neighbors(conn, model.id, seed_id, &rows)?;
+            info!(
+                "[neighbor_refresh] wrote {n} neighbors for seed {seed_id} (model {})",
+                model.id
+            );
+
+            Ok(Some((model.id, vec_map, meta_map)))
         })
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("task panic: {e}")));
 
     match result {
         Ok(Some((model_id, vec_map, meta_map))) => {
             // Refresh cache so subsequent seeds reuse the same embedding snapshot.
             {
                 let mut guard = cache_for_store.lock().await;
-                let stale = guard.as_ref().is_none_or(|c| c.built_at.elapsed() >= EMBEDDING_CACHE_TTL || c.model_id != model_id);
+                let stale = guard.as_ref().is_none_or(|c| {
+                    c.built_at.elapsed() >= EMBEDDING_CACHE_TTL || c.model_id != model_id
+                });
                 if stale {
                     *guard = Some(EmbeddingCache {
                         model_id,
@@ -389,9 +404,14 @@ pub async fn refresh_seed_neighbors(
             }
             lock_refreshed(&refreshed_seeds).insert(
                 seed_id,
-                RefreshEntry { model_id, at: Instant::now() },
+                RefreshEntry {
+                    model_id,
+                    at: Instant::now(),
+                },
             );
-            let _ = event_tx.send(AppEvent::DiscoverySpaceRefreshed { seed_track_id: seed_id });
+            let _ = event_tx.send(AppEvent::DiscoverySpaceRefreshed {
+                seed_track_id: seed_id,
+            });
         }
         Ok(None) => { /* no-op: cold path or empty model */ }
         Err(e) => warn!("[neighbor_refresh] error for seed {seed_id}: {e}"),

@@ -100,11 +100,8 @@ pub fn queue_track_ids(conn: &Connection) -> Result<Vec<i64>> {
 }
 
 pub fn append_tracks(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
-    let with_reasons: Vec<(Track, Option<String>)> = tracks
-        .iter()
-        .cloned()
-        .map(|track| (track, None))
-        .collect();
+    let with_reasons: Vec<(Track, Option<String>)> =
+        tracks.iter().cloned().map(|track| (track, None)).collect();
     append_tracks_with_reasons(conn, &with_reasons, source)
 }
 

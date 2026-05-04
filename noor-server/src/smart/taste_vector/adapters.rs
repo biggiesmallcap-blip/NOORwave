@@ -106,9 +106,13 @@ pub fn from_taste_mesh(mesh: &TasteMeshProfile) -> TasteVector {
     let mut taste = TasteVector::default();
 
     for (name, weight) in &mesh.genre_affinity {
-        taste
-            .genre_affinity
-            .insert(name.clone(), AffinitySignal { pos: *weight, neg: 0.0 });
+        taste.genre_affinity.insert(
+            name.clone(),
+            AffinitySignal {
+                pos: *weight,
+                neg: 0.0,
+            },
+        );
     }
 
     // TasteMesh's novelty_bias lives in [1.0, 2.0] meaning "fatigue
@@ -167,8 +171,7 @@ pub fn from_analytics_overview(ctx: &AnalyticsContext) -> TasteVector {
     }
 
     if ctx.behavior.total_listens > 0 {
-        let skip_rate =
-            ctx.behavior.skipped_listens as f32 / ctx.behavior.total_listens as f32;
+        let skip_rate = ctx.behavior.skipped_listens as f32 / ctx.behavior.total_listens as f32;
         taste.exploration_bias = Some(skip_rate.clamp(0.0, 1.0));
     }
 

@@ -4,7 +4,6 @@
 /// instrumental detection, and danceability into a single analysis pass.
 ///
 /// ALWAYS use `analyze_clip_safe` (which wraps with panic catching) — never call `analyze_clip` directly.
-
 use crate::db::models::AudioDspFeatures;
 use std::panic::AssertUnwindSafe;
 
@@ -90,11 +89,7 @@ pub fn analyze_clip_safe(
         } else {
             "unknown panic".to_string()
         };
-        tracing::warn!(
-            track_id,
-            "analyze_clip panicked: {}",
-            msg
-        );
+        tracing::warn!(track_id, "analyze_clip panicked: {}", msg);
     })
     .ok()
 }
@@ -111,13 +106,11 @@ pub fn analyze_and_save(
 ) -> Option<AudioDspFeatures> {
     let features = analyze_clip_safe(samples, sample_rate, source, track_id)?;
 
-    db.with_conn(|conn| {
-        crate::db::queries::upsert_audio_dsp_features(conn, &features)
-    })
-    .map_err(|e| {
-        tracing::error!(track_id, "failed to save DSP features: {}", e);
-    })
-    .ok()?;
+    db.with_conn(|conn| crate::db::queries::upsert_audio_dsp_features(conn, &features))
+        .map_err(|e| {
+            tracing::error!(track_id, "failed to save DSP features: {}", e);
+        })
+        .ok()?;
 
     Some(features)
 }

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,11 +77,19 @@ pub fn save(conn: &Connection, s: &AudioSettings) -> rusqlite::Result<()> {
         "audio.output_device",
         s.output_device.as_deref().unwrap_or("default"),
     )?;
-    write_kv(conn, "audio.exclusive_mode", if s.exclusive_mode { "true" } else { "false" })?;
+    write_kv(
+        conn,
+        "audio.exclusive_mode",
+        if s.exclusive_mode { "true" } else { "false" },
+    )?;
     write_kv(
         conn,
         "audio.sample_rate_follow",
-        if s.sample_rate_follow { "true" } else { "false" },
+        if s.sample_rate_follow {
+            "true"
+        } else {
+            "false"
+        },
     )?;
     Ok(())
 }
@@ -158,8 +166,14 @@ mod tests {
 
     #[test]
     fn quality_serializes_to_tidal_strings() {
-        assert_eq!(AudioQuality::HiResLossless.as_tidal_str(), "HI_RES_LOSSLESS");
-        assert_eq!(AudioQuality::from_tidal_str("LOSSLESS"), Some(AudioQuality::Lossless));
+        assert_eq!(
+            AudioQuality::HiResLossless.as_tidal_str(),
+            "HI_RES_LOSSLESS"
+        );
+        assert_eq!(
+            AudioQuality::from_tidal_str("LOSSLESS"),
+            Some(AudioQuality::Lossless)
+        );
         assert_eq!(AudioQuality::from_tidal_str("MQA"), None);
     }
 }

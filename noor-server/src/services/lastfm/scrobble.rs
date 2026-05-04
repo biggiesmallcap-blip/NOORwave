@@ -17,7 +17,7 @@
 //! The `format` and `api_sig` keys are themselves never included in the
 //! signed string. We use `format=json` everywhere.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeMap;
 
 use crate::SharedState;
@@ -51,7 +51,14 @@ pub fn spawn_scrobble_completed(
     if !is_eligible_for_scrobble(duration_ms, listened_ms) {
         return;
     }
-    spawn_lastfm_call(state, ScrobbleKind::Completed { started_at_unix }, artist, track, album, Some(duration_ms));
+    spawn_lastfm_call(
+        state,
+        ScrobbleKind::Completed { started_at_unix },
+        artist,
+        track,
+        album,
+        Some(duration_ms),
+    );
 }
 
 /// Spawn a fire-and-forget `track.updateNowPlaying` for a TIDAL play.
@@ -67,7 +74,14 @@ pub fn spawn_now_playing(
     if source != "tidal" {
         return;
     }
-    spawn_lastfm_call(state, ScrobbleKind::NowPlaying, artist, track, album, duration_ms);
+    spawn_lastfm_call(
+        state,
+        ScrobbleKind::NowPlaying,
+        artist,
+        track,
+        album,
+        duration_ms,
+    );
 }
 
 enum ScrobbleKind {
@@ -88,24 +102,21 @@ fn spawn_lastfm_call(
         // the calling sync code is never blocked on the AppState lock.
         let (http, api_secret, api_key, session_key) = {
             let s = state.read().await;
-            let creds = s
-                .db
-                .with_conn(|conn| {
+            let creds =
+                s.db.with_conn(|conn| {
                     Ok(crate::services::lastfm::auth::load_credentials(conn)
                         .ok()
                         .flatten())
                 })
                 .ok()
                 .flatten();
-            let session_key = s
-                .db
-                .with_conn(|conn| {
-                    Ok(crate::services::lastfm::auth::load_session_key(
-                        conn,
-                        &s.master_key,
+            let session_key =
+                s.db.with_conn(|conn| {
+                    Ok(
+                        crate::services::lastfm::auth::load_session_key(conn, &s.master_key)
+                            .ok()
+                            .flatten(),
                     )
-                    .ok()
-                    .flatten())
                 })
                 .ok()
                 .flatten();
@@ -117,8 +128,12 @@ fn spawn_lastfm_call(
             )
         };
         let Some(api_secret) = api_secret else { return };
-        let Some(api_key) = api_key.filter(|k| !k.is_empty()) else { return };
-        let Some(session_key) = session_key else { return };
+        let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
+            return;
+        };
+        let Some(session_key) = session_key else {
+            return;
+        };
 
         let result = match kind {
             ScrobbleKind::NowPlaying => {
@@ -241,11 +256,7 @@ async fn api_call(
 /// Step 1 of web auth: get a request token. The user opens
 /// `https://www.last.fm/api/auth/?api_key=...&token=...` in their browser to
 /// authorize, then the route layer calls [`get_session`] to redeem it.
-pub async fn get_token(
-    http: &reqwest::Client,
-    api_key: &str,
-    api_secret: &str,
-) -> Result<String> {
+pub async fn get_token(http: &reqwest::Client, api_key: &str, api_secret: &str) -> Result<String> {
     let body = api_call(http, api_key, api_secret, "auth.getToken", Vec::new(), None).await?;
     body.get("token")
         .and_then(serde_json::Value::as_str)
@@ -394,7 +405,10 @@ mod tests {
         // Sanity: lowercase hex, exactly 32 chars.
         let s = sign(&params, "s");
         assert_eq!(s.len(), 32);
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 
     /// `format` and `api_sig` must be excluded from the signed string per spec.

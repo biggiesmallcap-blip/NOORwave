@@ -1,11 +1,16 @@
 use crate::services::acrcloud::{AcrCloudClient, HmacSha1};
-use hmac::Mac;
 use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
+use hmac::Mac;
 use serde::{Deserialize, Serialize};
 
 /// Generate a WAV file header (44 bytes)
-pub fn encode_wav_header(sample_rate: u32, channels: u16, bits_per_sample: u16, data_size: u32) -> Vec<u8> {
+pub fn encode_wav_header(
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+    data_size: u32,
+) -> Vec<u8> {
     let mut header = Vec::with_capacity(44);
     // RIFF header
     header.extend_from_slice(b"RIFF");
@@ -14,7 +19,7 @@ pub fn encode_wav_header(sample_rate: u32, channels: u16, bits_per_sample: u16, 
     // fmt chunk
     header.extend_from_slice(b"fmt ");
     header.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    header.extend_from_slice(&1u16.to_le_bytes());  // PCM
+    header.extend_from_slice(&1u16.to_le_bytes()); // PCM
     header.extend_from_slice(&channels.to_le_bytes());
     header.extend_from_slice(&sample_rate.to_le_bytes());
     let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
@@ -40,9 +45,18 @@ pub fn samples_to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 }
 
 /// Sign the ACRCloud request using HMAC-SHA1
-fn sign_request(access_secret: &str, method: &str, uri: &str, key: &str, data_type: &str, timestamp: i64) -> String {
-    let sign_string = format!("{}\n{}\n{}\n{}\n{}\n{}",
-        method, uri, key, data_type, 1, timestamp);
+fn sign_request(
+    access_secret: &str,
+    method: &str,
+    uri: &str,
+    key: &str,
+    data_type: &str,
+    timestamp: i64,
+) -> String {
+    let sign_string = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        method, uri, key, data_type, 1, timestamp
+    );
 
     let mut mac = HmacSha1::new_from_slice(access_secret.as_bytes()).unwrap();
     mac.update(sign_string.as_bytes());
@@ -187,8 +201,13 @@ pub async fn identify_track(
 
     let url = format!("https://{}/v1/identify", host);
 
-    let response = client.http_client.post(&url)
-        .header("Content-Type", format!("multipart/form-data; boundary={}", boundary))
+    let response = client
+        .http_client
+        .post(&url)
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
         .body(body)
         .send()
         .await;
@@ -208,7 +227,10 @@ pub async fn identify_track(
                 return IdentifyResult::NoMatch;
             }
             if !status.is_success() {
-                tracing::warn!("ACRCloud API non-success status {} — skipping track", status);
+                tracing::warn!(
+                    "ACRCloud API non-success status {} — skipping track",
+                    status
+                );
                 return IdentifyResult::NoMatch;
             }
             let data: AcrCloudResponse = match resp.json().await {

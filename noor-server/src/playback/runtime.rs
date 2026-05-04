@@ -239,11 +239,7 @@ impl PlaybackRuntimeHandle {
         if device_sample_rate == 0 || device_channels == 0 {
             return 0;
         }
-        let samples = self
-            .position_source
-            .lock()
-            .unwrap()
-            .load(Ordering::Relaxed);
+        let samples = self.position_source.lock().unwrap().load(Ordering::Relaxed);
         (samples * 1000 / (device_sample_rate as u64 * device_channels as u64)) as i64
     }
 
@@ -338,23 +334,14 @@ pub struct OutputDeviceInfo {
 
 pub fn enumerate_output_devices() -> Vec<OutputDeviceInfo> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_output_device()
-        .and_then(|d| d.name().ok());
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
 
     host.output_devices()
         .map(|iter| {
             iter.filter_map(|dev| {
                 let name = dev.name().ok()?;
-                let configs: Vec<_> = dev
-                    .supported_output_configs()
-                    .ok()?
-                    .collect();
-                let max_channels = configs
-                    .iter()
-                    .map(|c| c.channels())
-                    .max()
-                    .unwrap_or(0);
+                let configs: Vec<_> = dev.supported_output_configs().ok()?.collect();
+                let max_channels = configs.iter().map(|c| c.channels()).max().unwrap_or(0);
                 let mut rates: Vec<u32> = configs
                     .iter()
                     .flat_map(|c| {
@@ -595,10 +582,7 @@ fn run_runtime_loop(
                 // The fading-out engine reaching its terminal state is the
                 // expected end of a crossfade — drop it silently. The queue
                 // advance already happened at promotion time via Finished.
-                let fading = state
-                    .fading_out_engine
-                    .as_ref()
-                    .map(|e| e.track_id);
+                let fading = state.fading_out_engine.as_ref().map(|e| e.track_id);
                 if fading == Some(track_id) {
                     if let Some(mut engine) = state.fading_out_engine.take() {
                         engine.stop();
@@ -609,12 +593,10 @@ fn run_runtime_loop(
                         stop_current_engine(&mut state);
                         match outcome {
                             PlaybackTerminalReason::Finished => {
-                                let _ = event_tx
-                                    .send(PlaybackRuntimeEvent::Finished { track_id });
+                                let _ = event_tx.send(PlaybackRuntimeEvent::Finished { track_id });
                             }
                             PlaybackTerminalReason::Error(message) => {
-                                let _ = event_tx
-                                    .send(PlaybackRuntimeEvent::Error { message });
+                                let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
                             }
                         }
                     }
@@ -924,6 +906,7 @@ fn promote_next_to_active(
 enum OutputStream {
     Cpal(Stream),
     #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
     Wasapi(crate::playback::wasapi_exclusive::ExclusiveStream),
 }
 
@@ -942,7 +925,6 @@ impl OutputStream {
 
 struct PlaybackEngine {
     track_id: i64,
-    source_kind: PlaybackSourceKind,
     /// Active output stream; `None` only briefly during a `DeviceSwap` while
     /// we rebuild it on the new device or backend.
     stream: Option<OutputStream>,
@@ -1018,7 +1000,6 @@ impl PlaybackEngine {
 
         Ok(Self {
             track_id,
-            source_kind,
             stream: Some(stream),
             decoder_thread: Some(decoder_thread),
             shared,
@@ -1541,10 +1522,6 @@ impl PlaybackBuffer {
         available
     }
 
-    fn extend(&mut self, samples: &[f32]) {
-        self.samples.extend_from_slice(samples);
-    }
-
     fn mark_finished(&mut self) {
         self.finished = true;
     }
@@ -1895,7 +1872,11 @@ fn decode_and_buffer_job(
                     analysis_buf.extend_from_slice(&mono);
                     if analysis_buf.len() >= decoded_sample_rate as usize * 30 {
                         if let Some(tx) = &config.analysis_tx {
-                            let _ = tx.send((shared.track_id, std::mem::take(&mut analysis_buf), decoded_sample_rate));
+                            let _ = tx.send((
+                                shared.track_id,
+                                std::mem::take(&mut analysis_buf),
+                                decoded_sample_rate,
+                            ));
                         }
                         analysis_sent = true;
                     }
@@ -1912,10 +1893,7 @@ fn decode_and_buffer_job(
                 // a brief pitch glitch across the swap boundary is acceptable
                 // (matches the documented "brief silence is OK" behaviour for
                 // sample-rate-follow transitions).
-                let live_target_rate = shared
-                    .target_sample_rate
-                    .load(Ordering::Relaxed)
-                    .max(1);
+                let live_target_rate = shared.target_sample_rate.load(Ordering::Relaxed).max(1);
                 let _ = device_sample_rate; // kept in signature for callers; live rate above is authoritative
                 let channelized = adapt_channels(
                     sb.samples(),

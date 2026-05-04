@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::services::crypto::MasterKey;
@@ -129,6 +129,7 @@ pub fn set_pending_token(conn: &Connection, token: &str) -> Result<()> {
     save_credentials(conn, &creds)
 }
 
+#[allow(dead_code)]
 pub fn clear_pending_token(conn: &Connection) -> Result<()> {
     let mut creds = load_credentials(conn)?.unwrap_or_default();
     creds.pending_token = None;
@@ -223,7 +224,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(extra.contains("\"alice\""), "session_user should be in extra_data");
+        assert!(
+            extra.contains("\"alice\""),
+            "session_user should be in extra_data"
+        );
         assert!(
             !extra.contains(secret),
             "session_key must never be stored in extra_data JSON"

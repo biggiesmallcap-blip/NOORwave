@@ -36,6 +36,7 @@ struct DeviceCodeResponse {
     #[serde(rename = "verificationUriComplete")]
     verification_uri_complete: Option<String>,
     #[serde(rename = "expiresIn")]
+    #[allow(dead_code)]
     expires_in: i64,
     interval: i64,
 }

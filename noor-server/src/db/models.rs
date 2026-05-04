@@ -492,6 +492,7 @@ pub struct AudioFeaturesStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GenreAudioMetrics {
     pub genre_id: i64,
     pub genre_name: String,
@@ -502,6 +503,7 @@ pub struct GenreAudioMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AudioFingerprint {
     pub track_id: i64,
     pub hashes_blob: Option<Vec<u8>>,
@@ -509,6 +511,7 @@ pub struct AudioFingerprint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AcrCloudResult {
     pub id: i64,
     pub track_id: i64,

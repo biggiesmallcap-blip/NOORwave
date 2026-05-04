@@ -19,10 +19,10 @@
 //! token reads/writes to `MasterKey::encrypt`/`decrypt` and rename the column.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
     AeadCore, Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, OsRng},
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,8 +52,7 @@ impl MasterKey {
         }
         let path = dir.join(SECRET_FILENAME);
         let bytes = if path.exists() {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("read {}", path.display()))?;
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             if bytes.len() != 32 {
                 return Err(anyhow!(
                     "{} is {} bytes, expected 32 — refusing to use a malformed key",
@@ -73,7 +72,9 @@ impl MasterKey {
             buf
         };
         let key = Key::<Aes256Gcm>::from_slice(&bytes);
-        Ok(Self { cipher: Arc::new(Aes256Gcm::new(key)) })
+        Ok(Self {
+            cipher: Arc::new(Aes256Gcm::new(key)),
+        })
     }
 
     /// Encrypt arbitrary bytes. Output layout: `nonce(12) || ciphertext+tag`.
@@ -118,8 +119,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes)
-        .with_context(|| format!("create {}", path.display()))
+    std::fs::write(path, bytes).with_context(|| format!("create {}", path.display()))
 }
 
 /// Resolve the directory that should hold `.noor_secret` — the same dir as

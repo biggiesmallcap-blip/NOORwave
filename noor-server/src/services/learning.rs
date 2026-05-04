@@ -1,17 +1,16 @@
+use crate::AppEvent;
 use crate::db::{
     Database,
     models::{
-        DiscoveryNeighborReason, DiscoveryPreview, DiscoveryPreviewResult,
-        DiscoveryProfilePreview, DiscoveryRadioResult, DiscoveryReason,
+        DiscoveryNeighborReason, DiscoveryPreview, DiscoveryPreviewResult, DiscoveryProfilePreview,
+        DiscoveryRadioResult, DiscoveryReason,
     },
     queries::{self, EmbeddingTrackRow, TrackSimilarityResult},
 };
 use crate::services::discovery::DiscoveryCandidateTrack;
 use crate::services::discovery_trainer::{
-    TrainerInput, TrainerSequenceGroup, TrainingProgressUpdate,
-    run_discovery_training,
+    TrainerInput, TrainerSequenceGroup, TrainingProgressUpdate, run_discovery_training,
 };
-use crate::AppEvent;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -22,7 +21,6 @@ use tokio::sync::mpsc;
 
 const MODEL_KEY: &str = "discovery-fusion-v1";
 const MODEL_DIMENSION: i32 = 96;
-const MODEL_TOP_K: usize = 64;
 
 // Training intensity tier. Drives the cost/quality knobs the user picked in
 // settings. Higher tiers train a richer model at the cost of CPU time and
@@ -127,6 +125,7 @@ pub fn set_discovery_intensity(db: &Database, intensity: DiscoveryIntensity) -> 
 pub struct ActiveLearningModel {
     pub model_id: i64,
     pub model_key: String,
+    #[allow(dead_code)]
     pub family: String,
     pub vectors: HashMap<i64, Vec<f64>>,
 }
@@ -187,8 +186,8 @@ pub async fn start_training(
     // database lifetime. The trainer is the natural trigger — sequence-aware
     // features depend on session_id and transition_from_track_id, so we do
     // this before the corpus build runs.
-    if let Some(report) = db
-        .with_conn(|conn| crate::services::listen_history_backfill::run_if_needed(conn))?
+    if let Some(report) =
+        db.with_conn(|conn| crate::services::listen_history_backfill::run_if_needed(conn))?
     {
         tracing::info!(
             target: "noor.discovery.training",
@@ -230,7 +229,15 @@ pub async fn start_training(
 
             // Update DB progress
             let _ = db_clone.with_conn(|conn| {
-                queries::update_training_run_progress(conn, run_id, &update.stage, "running", update.progress as f64, None, 0)
+                queries::update_training_run_progress(
+                    conn,
+                    run_id,
+                    &update.stage,
+                    "running",
+                    update.progress as f64,
+                    None,
+                    0,
+                )
             });
         }
     });
@@ -407,8 +414,13 @@ pub fn radio_from_neighbors(
         return Ok(None);
     };
     db.with_conn(|conn| {
-        let neighbors =
-            queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit * 3, exclude_ids)?;
+        let neighbors = queries::get_track_neighbors(
+            conn,
+            active.model_id,
+            seed_track_id,
+            limit * 3,
+            exclude_ids,
+        )?;
         if neighbors.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -557,7 +569,8 @@ pub fn inject_query_seeds_from_neighbors(
         return Ok(Vec::new());
     };
     db.with_conn(|conn| {
-        let neighbors = queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit as i64, &[])?;
+        let neighbors =
+            queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit as i64, &[])?;
         let mut queries = Vec::new();
         for neighbor in neighbors {
             if let Some(artist) = neighbor.artist_name {
@@ -614,13 +627,41 @@ fn build_trainer_input(
         include_audio_proxy: intensity.include_audio_proxy,
         tracks,
         sequences: vec![
-            TrainerSequenceGroup { label: "playback_transitions".to_string(), weight: 1.6, sequences: transition_sequences },
-            TrainerSequenceGroup { label: "listen_history".to_string(), weight: 1.3, sequences: listen_sequences },
-            TrainerSequenceGroup { label: "playlist_tracks".to_string(), weight: 1.1, sequences: playlist_sequences },
-            TrainerSequenceGroup { label: "album_tracks".to_string(), weight: 0.7, sequences: album_sequences },
-            TrainerSequenceGroup { label: "artist_tracks".to_string(), weight: 0.35, sequences: artist_sequences },
-            TrainerSequenceGroup { label: "genre_tracks".to_string(), weight: 0.3, sequences: genre_sequences },
-            TrainerSequenceGroup { label: "favorites".to_string(), weight: 1.2, sequences: favorite_sequences },
+            TrainerSequenceGroup {
+                label: "playback_transitions".to_string(),
+                weight: 1.6,
+                sequences: transition_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "listen_history".to_string(),
+                weight: 1.3,
+                sequences: listen_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "playlist_tracks".to_string(),
+                weight: 1.1,
+                sequences: playlist_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "album_tracks".to_string(),
+                weight: 0.7,
+                sequences: album_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "artist_tracks".to_string(),
+                weight: 0.35,
+                sequences: artist_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "genre_tracks".to_string(),
+                weight: 0.3,
+                sequences: genre_sequences,
+            },
+            TrainerSequenceGroup {
+                label: "favorites".to_string(),
+                weight: 1.2,
+                sequences: favorite_sequences,
+            },
         ],
         heldout_pairs,
     })
@@ -722,7 +763,11 @@ fn resolve_prompt_anchor_ids(
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| right.1.cmp(&left.1));
-    scored.into_iter().take(3).map(|(track_id, _)| track_id).collect()
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(track_id, _)| track_id)
+        .collect()
 }
 
 fn external_candidate_proxy_vector(candidate: &DiscoveryCandidateTrack, dim: usize) -> Vec<f64> {
@@ -775,7 +820,10 @@ fn normalize_vector(vector: &[f64]) -> Vec<f64> {
 }
 
 fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
-    left.iter().zip(right.iter()).map(|(a, b)| a * b).sum::<f64>()
+    left.iter()
+        .zip(right.iter())
+        .map(|(a, b)| a * b)
+        .sum::<f64>()
 }
 
 fn tokenize(value: &str) -> Vec<String> {

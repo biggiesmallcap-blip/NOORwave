@@ -70,8 +70,11 @@ pub fn load_radio_flags(conn: &Connection) -> RadioFlags {
 #[derive(Debug, Clone)]
 pub struct RadioProfile {
     pub blend: RadioBlend,
+    #[allow(dead_code)]
     pub library_weight: f64,
+    #[allow(dead_code)]
     pub lastfm_weight: f64,
+    #[allow(dead_code)]
     pub engine_weight: f64,
     pub creativity: f64,
     pub min_confidence: f64,
@@ -80,7 +83,9 @@ pub struct RadioProfile {
     pub same_album_penalty: f64,
     pub genre_saturation_penalty: f64,
     pub hub_penalty: f64,
+    #[allow(dead_code)]
     pub max_genre_distance: Option<f64>,
+    #[allow(dead_code)]
     pub novelty_weight: f64,
 }
 
@@ -171,12 +176,15 @@ impl RadioProfile {
         }
     }
 
+    #[allow(dead_code)]
     pub fn familiar() -> Self {
         Self::from_blend(RadioBlend::Familiar)
     }
+    #[allow(dead_code)]
     pub fn mixed() -> Self {
         Self::from_blend(RadioBlend::Mixed)
     }
+    #[allow(dead_code)]
     pub fn adventurous() -> Self {
         Self::from_blend(RadioBlend::Adventurous)
     }

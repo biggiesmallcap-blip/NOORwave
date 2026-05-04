@@ -17,9 +17,9 @@ use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, NaiveDateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::sync::LazyLock;
 
 const ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
 
@@ -82,10 +82,7 @@ static CACHE: LazyLock<Mutex<Option<(Vec<ReleaseItem>, Instant)>>> =
     LazyLock::new(|| Mutex::new(None));
 
 /// Uncached pipeline. Public for tests + cache layer above.
-pub async fn fetch_new_releases(
-    http: &reqwest::Client,
-    api_key: &str,
-) -> Result<Vec<ReleaseItem>> {
+pub async fn fetch_new_releases(http: &reqwest::Client, api_key: &str) -> Result<Vec<ReleaseItem>> {
     let chart_body = call_lastfm(
         http,
         api_key,
@@ -157,11 +154,7 @@ pub async fn fetch_new_releases(
                 match call_lastfm(&http, &api_key, "album.getInfo", &params).await {
                     Ok(body) => Some(parse_album_info(&body, &cand)),
                     Err(e) => {
-                        tracing::debug!(
-                            "album.getInfo({} - {}): {e}",
-                            cand.artist,
-                            cand.album
-                        );
+                        tracing::debug!("album.getInfo({} - {}): {e}", cand.artist, cand.album);
                         // Fall back to the chart-list image we already have.
                         Some(EnrichedAlbum {
                             cand,
@@ -206,13 +199,12 @@ pub async fn fetch_new_releases(
         .map(|e| ReleaseItem {
             title: e.cand.album,
             author: e.cand.artist,
-            link: e
-                .link
-                .or_else(|| e.cand.url.clone())
-                .unwrap_or_default(),
+            link: e.link.or_else(|| e.cand.url.clone()).unwrap_or_default(),
             image_url: e.image_url.or_else(|| e.cand.image_url.clone()),
             source: "lastfm_api",
-            published_at: e.released_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            published_at: e
+                .released_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         })
         .collect())
 }
@@ -243,9 +235,9 @@ async fn call_lastfm(
     method: &str,
     extra: &[(&'static str, String)],
 ) -> Result<serde_json::Value> {
-    let mut req = http
-        .get(ENDPOINT)
-        .query(&[("method", method), ("api_key", api_key), ("format", "json")]);
+    let mut req =
+        http.get(ENDPOINT)
+            .query(&[("method", method), ("api_key", api_key), ("format", "json")]);
     for (k, v) in extra {
         req = req.query(&[(*k, v.as_str())]);
     }
@@ -298,7 +290,10 @@ fn parse_top_albums(
     };
     arr.iter()
         .filter_map(|a| {
-            let album = a.get("name").and_then(serde_json::Value::as_str)?.to_string();
+            let album = a
+                .get("name")
+                .and_then(serde_json::Value::as_str)?
+                .to_string();
             // Last.fm sentinel for unknown album.
             if album.eq_ignore_ascii_case("(null)") || album.is_empty() {
                 return None;
@@ -517,7 +512,10 @@ mod tests {
         };
         let e = parse_album_info(&body, &cand);
         assert_eq!(e.image_url.as_deref(), Some("https://img.example/mega.png"));
-        assert_eq!(e.link.as_deref(), Some("https://www.last.fm/music/Foo/Real+Album"));
+        assert_eq!(
+            e.link.as_deref(),
+            Some("https://www.last.fm/music/Foo/Real+Album")
+        );
         assert!(e.released_at.is_some());
     }
 

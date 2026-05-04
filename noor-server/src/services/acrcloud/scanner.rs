@@ -1,9 +1,9 @@
-use crate::{AppEvent, SharedState};
-use crate::services::acrcloud::identify::{identify_track, IdentifyResult};
-use crate::services::audio_analysis::fingerprint::extract_fingerprint;
 use crate::db::queries;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::services::acrcloud::identify::{IdentifyResult, identify_track};
+use crate::services::audio_analysis::fingerprint::extract_fingerprint;
+use crate::{AppEvent, SharedState};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -48,10 +48,7 @@ async fn wait_for_backoff(backoff_until: &BackoffGate, cancel: &Arc<AtomicBool>)
 }
 
 /// Run ACRCloud scan on library tracks
-pub async fn run_acrcloud_scan(
-    state: SharedState,
-    cancel: Arc<AtomicBool>,
-) {
+pub async fn run_acrcloud_scan(state: SharedState, cancel: Arc<AtomicBool>) {
     info!("Starting ACRCloud library scan.");
 
     let client = {
@@ -70,11 +67,16 @@ pub async fn run_acrcloud_scan(
     let backoff_until: BackoffGate = Arc::new(AtomicU64::new(0));
 
     // Get tracks missing ACRCloud results
-    let tracks = state.read().await.db.with_conn(|conn| {
-        // Query tracks that don't have acrcloud_results yet
-        // For now, use get_tracks_missing_dsp_features as proxy
-        queries::get_tracks_missing_dsp_features(conn, 500)
-    }).unwrap_or_default();
+    let tracks = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            // Query tracks that don't have acrcloud_results yet
+            // For now, use get_tracks_missing_dsp_features as proxy
+            queries::get_tracks_missing_dsp_features(conn, 500)
+        })
+        .unwrap_or_default();
 
     let total = tracks.len() as u32;
     let mut scanned = 0u32;
@@ -109,11 +111,15 @@ pub async fn run_acrcloud_scan(
                     track.id, peak_count, MIN_PEAKS_FOR_QUERY
                 );
                 scanned += 1;
-                let _ = state.read().await.event_tx.send(AppEvent::AcrCloudScanProgress {
-                    scanned,
-                    total,
-                    matches_found,
-                });
+                let _ = state
+                    .read()
+                    .await
+                    .event_tx
+                    .send(AppEvent::AcrCloudScanProgress {
+                        scanned,
+                        total,
+                        matches_found,
+                    });
                 continue;
             }
 
@@ -141,18 +147,26 @@ pub async fn run_acrcloud_scan(
 
         scanned += 1;
 
-        let _ = state.read().await.event_tx.send(AppEvent::AcrCloudScanProgress {
-            scanned,
-            total,
-            matches_found,
-        });
+        let _ = state
+            .read()
+            .await
+            .event_tx
+            .send(AppEvent::AcrCloudScanProgress {
+                scanned,
+                total,
+                matches_found,
+            });
 
         sleep(Duration::from_secs(3)).await; // Rate limit
     }
 
-    let _ = state.read().await.event_tx.send(AppEvent::AcrCloudScanComplete {
-        scanned,
-        matches_found,
-    });
+    let _ = state
+        .read()
+        .await
+        .event_tx
+        .send(AppEvent::AcrCloudScanComplete {
+            scanned,
+            matches_found,
+        });
     info!("ACRCloud scan complete. {} matches found.", matches_found);
 }

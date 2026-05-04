@@ -79,10 +79,7 @@ pub fn weighted_genre_set(paths: &[String]) -> HashMap<String, f64> {
 /// Returns `1.0` when both sets are empty (a degenerate match — caller
 /// should usually filter this case before scoring). Returns `0.0` for
 /// genuinely disjoint sets.
-pub fn weighted_jaccard(
-    seed: &HashMap<String, f64>,
-    cand: &HashMap<String, f64>,
-) -> f64 {
+pub fn weighted_jaccard(seed: &HashMap<String, f64>, cand: &HashMap<String, f64>) -> f64 {
     if seed.is_empty() && cand.is_empty() {
         return 1.0;
     }
@@ -96,8 +93,7 @@ pub fn weighted_jaccard(
             // Shared key qualifies as an ancestor case if it carries the
             // ancestor weight on at least one side (could be ancestor in
             // seed, in cand, or both).
-            if (*seed_w - ANCESTOR_WEIGHT).abs() < 1e-9
-                || (*cand_w - ANCESTOR_WEIGHT).abs() < 1e-9
+            if (*seed_w - ANCESTOR_WEIGHT).abs() < 1e-9 || (*cand_w - ANCESTOR_WEIGHT).abs() < 1e-9
             {
                 shared_ancestor_present = true;
             }
@@ -195,7 +191,10 @@ mod tests {
         let seed = weighted_genre_set(&paths(&["Electronic > House"]));
         let cand = weighted_genre_set(&paths(&["Electronic > Techno"]));
         let result = weighted_jaccard(&seed, &cand);
-        assert!(result > 0.2 && result < 0.5, "expected 0.2..0.5, got {result}");
+        assert!(
+            result > 0.2 && result < 0.5,
+            "expected 0.2..0.5, got {result}"
+        );
         assert!(approx(result, 0.359, 1e-3));
     }
 

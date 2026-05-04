@@ -29,6 +29,7 @@ struct Row {
 }
 
 pub struct BackfillReport {
+    #[allow(dead_code)]
     pub rows_scanned: usize,
     pub rows_updated: usize,
     pub sessions_created: usize,
@@ -189,7 +190,11 @@ mod tests {
     }
 
     fn insert_track(conn: &Connection, id: i64) {
-        conn.execute("INSERT INTO artists (id, name) VALUES (?1, 'A')", params![id]).unwrap();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (?1, 'A')",
+            params![id],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, source) VALUES (?1, 't', ?1, 'tidal')",
             params![id],
@@ -209,7 +214,9 @@ mod tests {
     #[test]
     fn groups_within_30_minutes_into_one_session() {
         let conn = open_in_memory();
-        for id in 1..=3 { insert_track(&conn, id); }
+        for id in 1..=3 {
+            insert_track(&conn, id);
+        }
         insert_listen(&conn, 1, "2026-01-01T10:00:00Z");
         insert_listen(&conn, 2, "2026-01-01T10:05:00Z");
         insert_listen(&conn, 3, "2026-01-01T10:25:00Z");
@@ -233,7 +240,9 @@ mod tests {
     #[test]
     fn splits_on_long_gap() {
         let conn = open_in_memory();
-        for id in 1..=2 { insert_track(&conn, id); }
+        for id in 1..=2 {
+            insert_track(&conn, id);
+        }
         insert_listen(&conn, 1, "2026-01-01T10:00:00Z");
         insert_listen(&conn, 2, "2026-01-01T11:00:00Z");
 
@@ -244,7 +253,9 @@ mod tests {
     #[test]
     fn position_increments_within_session() {
         let conn = open_in_memory();
-        for id in 1..=3 { insert_track(&conn, id); }
+        for id in 1..=3 {
+            insert_track(&conn, id);
+        }
         insert_listen(&conn, 1, "2026-01-01T10:00:00Z");
         insert_listen(&conn, 2, "2026-01-01T10:05:00Z");
         insert_listen(&conn, 3, "2026-01-01T10:10:00Z");
@@ -263,7 +274,9 @@ mod tests {
     #[test]
     fn transition_from_is_prior_track_in_session() {
         let conn = open_in_memory();
-        for id in [7, 11, 13] { insert_track(&conn, id); }
+        for id in [7, 11, 13] {
+            insert_track(&conn, id);
+        }
         insert_listen(&conn, 7, "2026-01-01T10:00:00Z");
         insert_listen(&conn, 11, "2026-01-01T10:05:00Z");
         insert_listen(&conn, 13, "2026-01-01T10:10:00Z");
@@ -311,7 +324,9 @@ mod tests {
         insert_listen(&conn, 1, "2026-01-01T10:00:00Z");
         backfill_listen_history(&conn).expect("backfill ok");
         let source: String = conn
-            .query_row("SELECT source FROM listen_history LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT source FROM listen_history LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(source, "unknown");
     }

@@ -73,7 +73,8 @@ pub struct AppState {
     /// ACRCloud client for sample recognition (loaded from service_auth if configured)
     pub acrcloud_client: Option<services::acrcloud::AcrCloudClient>,
     // Audio analysis
-    pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<services::audio_analysis::AnalysisJob>>,
+    pub analysis_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<services::audio_analysis::AnalysisJob>>,
     pub audio_analysis_cancel: Arc<AtomicBool>,
     pub audio_analysis_running: Arc<AtomicBool>,
     pub acrcloud_scan_running: Arc<AtomicBool>,
@@ -99,10 +100,13 @@ pub struct AppState {
     /// Seeds already refreshed this session, with model_id + timestamp.
     /// Entries expire after `REFRESH_TTL` or whenever the active model_id changes,
     /// so re-training or long sessions don't pin stale neighbor data.
-    pub refreshed_seeds: Arc<std::sync::Mutex<std::collections::HashMap<i64, services::neighbor_refresh::RefreshEntry>>>,
+    pub refreshed_seeds: Arc<
+        std::sync::Mutex<std::collections::HashMap<i64, services::neighbor_refresh::RefreshEntry>>,
+    >,
     /// Cached embedding load (per model) for the seed-refresh path.
     /// Avoids full table scans when several seeds are refreshed in sequence.
-    pub embedding_cache: Arc<tokio::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
+    pub embedding_cache:
+        Arc<tokio::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
@@ -113,7 +117,8 @@ pub struct AppState {
     /// different ephemeral track (`play_tidal_ephemeral` clears before
     /// queuing). Stream URLs resolved lazily at advance time — TIDAL
     /// stream URLs expire (~30 min) so pre-resolving the whole mix is wasteful.
-    pub pending_tidal_mix_queue: Arc<std::sync::Mutex<std::collections::VecDeque<PendingEphemeralTidalTrack>>>,
+    pub pending_tidal_mix_queue:
+        Arc<std::sync::Mutex<std::collections::VecDeque<PendingEphemeralTidalTrack>>>,
     /// Last.fm app shared secret, loaded once from `LASTFM_API_SECRET` env at
     /// boot. `None` disables every scrobble auth + scrobble call (endpoints
     /// return HTTP 501). Never serialized into responses, never logged.
@@ -133,11 +138,20 @@ pub enum AppEvent {
     PlaybackStateChanged,
     LibrarySynced,
     MusicBrainzEnriched,
-    TrackChanged { track_id: i64 },
-    SyncProgress { service: String, progress: f32 },
+    TrackChanged {
+        track_id: i64,
+    },
+    SyncProgress {
+        service: String,
+        progress: f32,
+    },
     QueueUpdated,
-    ListenHistoryUpdated { track_id: i64 },
-    PlaybackFailed { message: String },
+    ListenHistoryUpdated {
+        track_id: i64,
+    },
+    PlaybackFailed {
+        message: String,
+    },
     TrainingProgress {
         stage: String,
         progress: f32,
@@ -148,14 +162,33 @@ pub enum AppEvent {
         tracks_total: u32,
     },
     // Audio analysis events
-    AudioAnalysisProgress { analyzed: u32, total: u32, mode: String },
-    AudioAnalysisComplete { analyzed: u32 },
+    AudioAnalysisProgress {
+        analyzed: u32,
+        total: u32,
+        mode: String,
+    },
+    AudioAnalysisComplete {
+        analyzed: u32,
+    },
     // ACRCloud events
-    AcrCloudScanProgress { scanned: u32, total: u32, matches_found: u32 },
-    AcrCloudScanComplete { scanned: u32, matches_found: u32 },
+    AcrCloudScanProgress {
+        scanned: u32,
+        total: u32,
+        matches_found: u32,
+    },
+    AcrCloudScanComplete {
+        scanned: u32,
+        matches_found: u32,
+    },
     // DiscoverSpace per-seed background refresh progress + complete
-    DiscoverySpaceRefreshProgress { seed_track_id: i64, stage: String, progress: f32 },
-    DiscoverySpaceRefreshed { seed_track_id: i64 },
+    DiscoverySpaceRefreshProgress {
+        seed_track_id: i64,
+        stage: String,
+        progress: f32,
+    },
+    DiscoverySpaceRefreshed {
+        seed_track_id: i64,
+    },
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -272,7 +305,9 @@ async fn main() -> Result<()> {
     // Last.fm shared app secret. Optional: when missing, all scrobble auth +
     // scrobble endpoints return 501 and the rest of the app keeps working.
     // Never round-tripped through the UI, never logged.
-    let lastfm_api_secret = std::env::var("LASTFM_API_SECRET").ok().filter(|s| !s.is_empty());
+    let lastfm_api_secret = std::env::var("LASTFM_API_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
     if lastfm_api_secret.is_some() {
         info!("Last.fm scrobbling enabled (LASTFM_API_SECRET present)");
     } else {
@@ -307,8 +342,7 @@ async fn main() -> Result<()> {
     let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = None;
 
     // Generate or load the server access token
-    let server_token = db
-        .with_conn(|conn| db::queries::ensure_server_token(conn))?;
+    let server_token = db.with_conn(|conn| db::queries::ensure_server_token(conn))?;
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("  NOOR access token: {}", server_token);
     info!("  Copy this into the app on any new device.");
@@ -318,7 +352,9 @@ async fn main() -> Result<()> {
     let addr = resolve_bind_addr(&db);
 
     let http_client = reqwest::Client::new();
-    let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(http_client.clone()));
+    let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(
+        http_client.clone(),
+    ));
 
     // Spawn audio analysis actor
     let analysis_cancel = Arc::new(AtomicBool::new(false));
@@ -399,7 +435,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     // Wait a bit for server to fully start
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    
+
                     match server::routes::trigger_auto_sync(&state_clone, "tidal").await {
                         Ok(stats) => {
                             tracing::info!(

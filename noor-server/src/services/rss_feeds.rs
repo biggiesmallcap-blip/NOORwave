@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// An article or news item from an RSS feed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ pub struct FeedItem {
     pub author: Option<String>,
     pub published_at: Option<String>,
     pub image_url: Option<String>,
-    pub source: String, // e.g. "AllMusic", "Billboard"
+    pub source: String,   // e.g. "AllMusic", "Billboard"
     pub category: String, // "article", "news", "release"
 }
 
@@ -43,13 +43,11 @@ struct FeedSource {
 }
 
 /// AllMusic RSS feeds
-const ALLMUSIC_FEEDS: [FeedSource; 1] = [
-    FeedSource {
-        url: "https://www.allmusic.com/rss/all",
-        name: "AllMusic",
-        category: "mixed",
-    },
-];
+const ALLMUSIC_FEEDS: [FeedSource; 1] = [FeedSource {
+    url: "https://www.allmusic.com/rss/all",
+    name: "AllMusic",
+    category: "mixed",
+}];
 
 /// Music news RSS feeds
 const NEWS_FEEDS: &[FeedSource] = &[
@@ -127,7 +125,7 @@ impl FeedAggregator {
     /// Fetch and parse a single RSS feed
     async fn fetch_feed(&self, source: &FeedSource) -> anyhow::Result<Vec<FeedItem>> {
         debug!(url = %source.url, "Fetching RSS feed");
-        
+
         let resp = self
             .http_client
             .get(source.url)
@@ -138,14 +136,11 @@ impl FeedAggregator {
             .context("Failed to fetch RSS feed")?;
 
         if !resp.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "RSS feed returned HTTP {}",
-                resp.status()
-            ));
+            return Err(anyhow::anyhow!("RSS feed returned HTTP {}", resp.status()));
         }
 
         let body = resp.text().await.context("Failed to read RSS body")?;
-        
+
         let cursor = std::io::Cursor::new(body.as_bytes());
         let channel = match rss::Channel::read_from(cursor) {
             Ok(channel) => channel,
@@ -168,30 +163,42 @@ impl FeedAggregator {
                         .and_then(|ext| ext.author.as_ref())
                         .cloned()
                 });
-                
+
                 let published_at = item.pub_date;
 
-                let image_url = item.itunes_ext.as_ref().and_then(|ext| ext.image.as_ref()).cloned()
+                let image_url = item
+                    .itunes_ext
+                    .as_ref()
+                    .and_then(|ext| ext.image.as_ref())
+                    .cloned()
                     .or_else(|| {
                         // media:thumbnail url="..."
-                        item.extensions.get("media")
+                        item.extensions
+                            .get("media")
                             .and_then(|ns| ns.get("thumbnail"))
                             .and_then(|v| v.first())
                             .and_then(|ext| ext.attrs.get("url").cloned())
                     })
                     .or_else(|| {
                         // media:content url="..." medium="image"
-                        item.extensions.get("media")
+                        item.extensions
+                            .get("media")
                             .and_then(|ns| ns.get("content"))
-                            .and_then(|v| v.iter().find(|e| {
-                                e.attrs.get("medium").map(|m| m == "image").unwrap_or(false)
-                                    || e.attrs.get("type").map(|t| t.starts_with("image/")).unwrap_or(false)
-                            }))
+                            .and_then(|v| {
+                                v.iter().find(|e| {
+                                    e.attrs.get("medium").map(|m| m == "image").unwrap_or(false)
+                                        || e.attrs
+                                            .get("type")
+                                            .map(|t| t.starts_with("image/"))
+                                            .unwrap_or(false)
+                                })
+                            })
                             .and_then(|ext| ext.attrs.get("url").cloned())
                     })
                     .or_else(|| {
                         // First <img src="..."> in content:encoded HTML
-                        item.extensions.get("content")
+                        item.extensions
+                            .get("content")
                             .and_then(|ns| ns.get("encoded"))
                             .and_then(|v| v.first())
                             .and_then(|ext| ext.value.as_deref())
@@ -205,7 +212,8 @@ impl FeedAggregator {
                     })
                     .or_else(|| {
                         // <enclosure> with image mime type
-                        item.enclosure.as_ref()
+                        item.enclosure
+                            .as_ref()
                             .filter(|enc| enc.mime_type.starts_with("image/"))
                             .map(|enc| enc.url.clone())
                     });
@@ -233,26 +241,35 @@ impl FeedAggregator {
     /// Fallback XML parsing for feeds that don't strictly follow RSS spec
     fn parse_xml_fallback(&self, body: &str, source: &FeedSource) -> anyhow::Result<Vec<FeedItem>> {
         warn!("Using fallback XML parsing for {}", source.name);
-        
+
         // Basic fallback: try to extract items with regex-like approach
         // This handles Atom feeds and other non-standard formats
         let mut items = Vec::new();
-        
+
         // Simple Atom feed parsing
         if body.contains("<feed") || body.contains("<entry") {
             // Very basic regex-based extraction for Atom feeds
             // In production, you'd want a proper Atom parser
             let title_re = regex::Regex::new(r#"<title>([^<]+)</title>"#).unwrap();
             let link_re = regex::Regex::new(r#"<link[^>]+href="([^"]+)""#).unwrap();
-            let summary_re = regex::Regex::new(r#"<(?:summary|description)>([^<]+)</(?:summary|description)>"#).unwrap();
-            
+            let summary_re =
+                regex::Regex::new(r#"<(?:summary|description)>([^<]+)</(?:summary|description)>"#)
+                    .unwrap();
+
             for title_cap in title_re.captures_iter(body) {
-                let title = title_cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-                let link = link_re.captures_iter(body).next()
+                let title = title_cap
+                    .get(1)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                let link = link_re
+                    .captures_iter(body)
+                    .next()
                     .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
-                let summary = summary_re.captures_iter(body).next()
+                let summary = summary_re
+                    .captures_iter(body)
+                    .next()
                     .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
-                
+
                 if let Some(link) = link {
                     items.push(FeedItem {
                         title,
@@ -290,7 +307,7 @@ impl FeedAggregator {
     /// Fetch all feeds for a category (articles or news)
     async fn fetch_category_feeds(&self, sources: Vec<FeedSource>) -> Vec<FeedItem> {
         let mut all_items = Vec::new();
-        
+
         // Fetch feeds in parallel with timeout
         let fetches: Vec<_> = sources
             .into_iter()
@@ -307,10 +324,10 @@ impl FeedAggregator {
                 }
             })
             .collect();
-        
+
         // Await all fetches
         let results = futures::future::join_all(fetches).await;
-        
+
         for result in results {
             if let Some(items) = result {
                 all_items.extend(items);
@@ -319,9 +336,15 @@ impl FeedAggregator {
 
         // Sort by published date (newest first), fallback to title
         all_items.sort_by(|a, b| {
-            let a_date = a.published_at.as_ref().and_then(|d| DateTime::parse_from_rfc2822(d).ok());
-            let b_date = b.published_at.as_ref().and_then(|d| DateTime::parse_from_rfc2822(d).ok());
-            
+            let a_date = a
+                .published_at
+                .as_ref()
+                .and_then(|d| DateTime::parse_from_rfc2822(d).ok());
+            let b_date = b
+                .published_at
+                .as_ref()
+                .and_then(|d| DateTime::parse_from_rfc2822(d).ok());
+
             match (a_date, b_date) {
                 (Some(a), Some(b)) => b.cmp(&a),
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -336,10 +359,13 @@ impl FeedAggregator {
     /// Get articles (AllMusic weekly articles)
     pub async fn get_articles(&self) -> Vec<FeedItem> {
         let cache_key = "allmusic_all";
-        let all_items = self.get_cached_or_fetch(cache_key, ALLMUSIC_FEEDS.to_vec()).await;
-        
+        let all_items = self
+            .get_cached_or_fetch(cache_key, ALLMUSIC_FEEDS.to_vec())
+            .await;
+
         // Filter for article-like content (longer titles, non-album items)
-        all_items.into_iter()
+        all_items
+            .into_iter()
             .filter(|item| {
                 // Articles typically have longer titles and don't look like "Artist - Album"
                 item.title.len() > 20 && !item.title.contains(" - ")
@@ -351,10 +377,15 @@ impl FeedAggregator {
     /// Get music news (aggregated from multiple sources)
     pub async fn get_news(&self) -> Vec<FeedItem> {
         let cache_key = "music_news";
-        self.get_cached_or_fetch(cache_key, NEWS_FEEDS.to_vec()).await
+        self.get_cached_or_fetch(cache_key, NEWS_FEEDS.to_vec())
+            .await
     }
 
-    async fn get_cached_or_fetch(&self, cache_key: &str, sources: Vec<FeedSource>) -> Vec<FeedItem> {
+    async fn get_cached_or_fetch(
+        &self,
+        cache_key: &str,
+        sources: Vec<FeedSource>,
+    ) -> Vec<FeedItem> {
         // Check cache
         {
             let cache = self.cache.read().await;
@@ -368,7 +399,7 @@ impl FeedAggregator {
 
         // Fetch fresh data
         let items = self.fetch_category_feeds(sources).await;
-        
+
         // Update cache
         let mut cache = self.cache.write().await;
         cache.insert(
@@ -389,7 +420,7 @@ mod html_cleaner {
     pub fn clean_html(html: &str) -> String {
         let mut in_tag = false;
         let mut result = String::with_capacity(html.len());
-        
+
         for c in html.chars() {
             match c {
                 '<' => in_tag = true,
@@ -398,13 +429,10 @@ mod html_cleaner {
                 _ => {}
             }
         }
-        
+
         // Collapse whitespace
-        let mut cleaned = result
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        
+        let mut cleaned = result.split_whitespace().collect::<Vec<_>>().join(" ");
+
         // Decode common HTML entities
         cleaned = cleaned
             .replace("&amp;", "&")
@@ -415,7 +443,7 @@ mod html_cleaner {
             .replace("&apos;", "'")
             .replace("&#x27;", "'")
             .replace("&nbsp;", " ");
-        
+
         cleaned
     }
 }
