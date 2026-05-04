@@ -1168,11 +1168,13 @@
 							class:pending={isPending}
 							class="queue-row"
 							role="button"
-							tabindex="0"
+							tabindex={isPending ? undefined : 0}
+							aria-disabled={isPending}
+							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							draggable={true}
 							data-track-id={item.track.id}
-							onclick={() => { if (!isPending) void handleQueueTrackPlay(item.track.id); }}
-							onkeydown={(event) => { if (!isPending) handleQueueTrackKeydown(item.track.id, event); }}
+							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item.track.id)}
+							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item.track.id, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1196,7 +1198,12 @@
 
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if !isPending && aid && aid > 0}
+								{#if isPending}
+									<span class="queue-artist pending-label">
+										<span class="queue-inline-spinner" aria-hidden="true"></span>
+										Resolving on TIDAL...
+									</span>
+								{:else if aid && aid > 0}
 									<a
 										class="queue-artist"
 										href="/artists/{aid}"
@@ -1523,9 +1530,11 @@
 								: $currentTrack?.id === item.track.id}
 							class:pending={isPending}
 							role="button"
-							tabindex="0"
-							onclick={() => { if (!isPending) void handleQueueTrackPlay(item.track.id); }}
-							onkeydown={(event) => { if (!isPending) handleQueueTrackKeydown(item.track.id, event); }}
+							tabindex={isPending ? undefined : 0}
+							aria-disabled={isPending}
+							title={isPending ? 'Resolving on TIDAL...' : undefined}
+							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item.track.id)}
+							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item.track.id, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
@@ -1542,7 +1551,12 @@
 							</div>
 							<div class="queue-meta">
 								<p class="queue-title">{item.track.title}</p>
-								{#if !isPending && aid && aid > 0}
+								{#if isPending}
+									<span class="queue-artist pending-label">
+										<span class="queue-inline-spinner" aria-hidden="true"></span>
+										Resolving on TIDAL...
+									</span>
+								{:else if aid && aid > 0}
 									<a
 										class="queue-artist"
 										href="/artists/{aid}"
@@ -2589,12 +2603,16 @@
 
 	.queue-row.pending {
 		cursor: default;
-		opacity: 0.7;
+		opacity: 0.78;
 	}
 
 	.queue-row.pending:hover,
 	.queue-row.pending:focus-within {
 		transform: none;
+	}
+
+	.queue-row.pending .queue-title {
+		color: var(--text-secondary);
 	}
 
 	.queue-art.placeholder.pending-art {
@@ -2715,6 +2733,23 @@
 	a.queue-artist:hover {
 		color: var(--text-primary);
 		text-decoration: underline;
+	}
+
+	.queue-artist.pending-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		color: var(--text-tertiary);
+	}
+
+	.queue-inline-spinner {
+		width: 10px;
+		height: 10px;
+		border-radius: 999px;
+		border: 1.5px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
+		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+		animation: queue-spinner-spin 0.9s linear infinite;
+		flex-shrink: 0;
 	}
 
 	.queue-time,
