@@ -4836,7 +4836,8 @@ async fn batch_delete_items(
         let s = state.read().await;
         s.db.clone()
     };
-    if let Err(e) = db.with_conn(|conn| {
+    let deleted_track_ids: Vec<i64> = track_pairs.iter().map(|(local_id, _)| *local_id).collect();
+    let outcome = match db.with_conn(|conn| {
         for &(local_id, _) in &track_pairs {
             conn.execute(
                 "DELETE FROM tracks WHERE id = ?1",
@@ -4849,14 +4850,25 @@ async fn batch_delete_items(
                 rusqlite::params![local_id],
             )?;
         }
-        Ok(())
+        let outcome = player::reconcile_after_track_delete(conn, &deleted_track_ids)?;
+        Ok::<player::ReconcileOutcome, anyhow::Error>(outcome)
     }) {
-        warn!("Batch delete: local DB cleanup failed: {e}");
-    }
+        Ok(o) => o,
+        Err(e) => {
+            warn!("Batch delete: local DB cleanup failed: {e}");
+            player::ReconcileOutcome::default()
+        }
+    };
 
     {
         let state = state.read().await;
         let _ = state.event_tx.send(AppEvent::LibrarySynced);
+        if outcome.queue_changed {
+            let _ = state.event_tx.send(AppEvent::QueueUpdated);
+        }
+        if outcome.current_changed {
+            let _ = state.event_tx.send(AppEvent::PlaybackStateChanged);
+        }
     }
 
     Ok(Json(json!({
