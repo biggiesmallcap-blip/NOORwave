@@ -804,6 +804,18 @@ export async function startPlaylistRadio(tracks: { id: number; play_count?: numb
 	await startSongRadio(seed.id);
 }
 
+async function playFirstRadioItem(firstPlayable: {
+	type: 'library' | 'pending';
+	queue_item_id: number;
+	track_id: number | null;
+}) {
+	if (firstPlayable.type === 'library' && firstPlayable.track_id != null) {
+		await playTrackNow(firstPlayable.track_id);
+	} else {
+		await playNextTrack();
+	}
+}
+
 export async function playTidalPlaylist(tidalUuid: string) {
 	if (!assertOnline()) return;
 	playerError.set(null);
@@ -826,15 +838,12 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 	playerError.set(null);
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
-		const inLibrary = queue.tracks.filter((t) => t.is_in_library && t.track_id > 0);
-		const radioIds = inLibrary.map((t) => t.track_id);
-		const radioReasons = inLibrary.map((t) => t.reason ?? null);
-		if (radioIds.length === 0) {
-			playerError.set({ message: 'No library tracks found for radio.' });
+		if (!queue.first_playable) {
+			playerError.set({ message: 'No tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true, reasons: radioReasons });
+		await playFirstRadioItem(queue.first_playable);
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
@@ -846,15 +855,12 @@ export async function startAlbumRadio(albumId: number) {
 	playerError.set(null);
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
-		const inLibrary = queue.tracks.filter((t) => t.is_in_library && t.track_id > 0);
-		const radioIds = inLibrary.map((t) => t.track_id);
-		const radioReasons = inLibrary.map((t) => t.reason ?? null);
-		if (radioIds.length === 0) {
-			playerError.set({ message: 'No library tracks found for radio.' });
+		if (!queue.first_playable) {
+			playerError.set({ message: 'No tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await loadQueueAndPlay(radioIds, { preserveRadioReasons: true, reasons: radioReasons });
+		await playFirstRadioItem(queue.first_playable);
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start album radio', error, () => startAlbumRadio(albumId));

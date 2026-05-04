@@ -11,11 +11,19 @@ pub fn build_radio_queue_from_candidates(
     seed_track_id: i64,
     candidates: Vec<RadioCandidate>,
 ) -> rusqlite::Result<RadioQueueBuild> {
+    build_radio_queue_from_candidates_with_seed(conn, Some(seed_track_id), candidates)
+}
+
+pub fn build_radio_queue_from_candidates_with_seed(
+    conn: &rusqlite::Connection,
+    seed_track_id: Option<i64>,
+    candidates: Vec<RadioCandidate>,
+) -> rusqlite::Result<RadioQueueBuild> {
     // Seed track leads the queue, matching the user's explicit radio seed.
     // orchestrate_song already excludes it; this filter is a defensive guard.
     let (library_cands, pending_cands): (Vec<_>, Vec<_>) = candidates
         .into_iter()
-        .filter(|c| c.track_id != seed_track_id)
+        .filter(|c| seed_track_id != Some(c.track_id))
         .partition(|c| c.is_in_library && c.track_id > 0);
 
     let tx = conn.unchecked_transaction()?;
@@ -23,11 +31,13 @@ pub fn build_radio_queue_from_candidates(
     tx.execute("DELETE FROM queue", [])?;
 
     let mut pos = 0i32;
-    tx.execute(
-        "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', NULL)",
-        rusqlite::params![seed_track_id, pos],
-    )?;
-    pos += 1;
+    if let Some(seed_track_id) = seed_track_id {
+        tx.execute(
+            "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', NULL)",
+            rusqlite::params![seed_track_id, pos],
+        )?;
+        pos += 1;
+    }
 
     for c in &library_cands {
         tx.execute(
@@ -66,4 +76,79 @@ pub fn build_radio_queue_from_candidates(
         first_item,
         pending_item_ids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_with_queue() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id INTEGER,
+                position INTEGER NOT NULL,
+                source TEXT,
+                reason TEXT,
+                pending_artist TEXT,
+                pending_title TEXT,
+                pending_at TEXT,
+                tidal_id_hint INTEGER
+            );
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn candidate(
+        track_id: i64,
+        is_in_library: bool,
+        artist_name: &str,
+        title: &str,
+    ) -> RadioCandidate {
+        RadioCandidate {
+            track_id,
+            tidal_track_id: None,
+            title: title.to_string(),
+            artist_name: artist_name.to_string(),
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library,
+            source: crate::services::radio::RadioSource::Lastfm,
+            reason: "test candidate".to_string(),
+            similarity_score: 0.8,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        }
+    }
+
+    #[test]
+    fn optional_seed_builds_queue_from_candidates_without_seed_row() {
+        let conn = conn_with_queue();
+
+        let build = build_radio_queue_from_candidates_with_seed(
+            &conn,
+            None,
+            vec![
+                candidate(10, true, "Library Artist", "Library Track"),
+                candidate(0, false, "Pending Artist", "Pending Track"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(build.first_item, Some((1, Some(10))));
+        assert_eq!(build.pending_item_ids, vec![2]);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 }

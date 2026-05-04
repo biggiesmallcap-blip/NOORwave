@@ -702,6 +702,12 @@ export interface RadioQueue {
 		artist_name: string | null;
 	};
 	tracks: RadioCandidate[];
+	first_playable?: {
+		type: 'library' | 'pending';
+		queue_item_id: number;
+		track_id: number | null;
+	};
+	pending_count?: number;
 }
 
 // ─── Home Page Discovery Types ───────────────────────────────────────────────

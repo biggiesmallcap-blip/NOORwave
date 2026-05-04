@@ -3588,6 +3588,8 @@ async fn radio_song(
 
     let (db, lastfm) = {
         let g = state.read().await;
+        g.user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
@@ -3609,9 +3611,18 @@ async fn radio_song(
         )
     })?;
 
-    // TODO(Task 12b): after frontend radio callers stop replacing this result
-    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
-    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
+    let (first_playable, pending_count) = build_radio_queue_and_spawn_resolvers(
+        &state,
+        &db,
+        Some(payload.seed_track_id),
+        queue.tracks.clone(),
+        "radio_song",
+    )
+    .await?;
+    let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
+    body["first_playable"] = first_playable;
+    body["pending_count"] = json!(pending_count);
+    Ok(Json(body))
 }
 
 // ─── POST /api/radio/start ───────────────────────────────────────────────────
@@ -3627,6 +3638,95 @@ struct RadioStartRequest {
     blend: Option<crate::services::radio::RadioBlend>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+async fn build_radio_queue_and_spawn_resolvers(
+    state: &SharedState,
+    db: &crate::db::Database,
+    seed_track_id: Option<i64>,
+    tracks: Vec<crate::services::radio::RadioCandidate>,
+    context: &'static str,
+) -> Result<(Value, usize), (StatusCode, Json<Value>)> {
+    let build = db
+        .with_conn(move |conn| {
+            Ok(
+                crate::server::radio_pipeline::build_radio_queue_from_candidates_with_seed(
+                    conn,
+                    seed_track_id,
+                    tracks,
+                )?,
+            )
+        })
+        .map_err(|e| {
+            tracing::error!("{context}: queue build failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to build queue" })),
+            )
+        })?;
+    let first_item = build.first_item;
+    let pending_item_ids = build.pending_item_ids;
+    let pending_count = pending_item_ids.len();
+
+    let first_playable = match first_item {
+        Some((queue_item_id, Some(track_id))) => json!({
+            "type": "library",
+            "queue_item_id": queue_item_id,
+            "track_id": track_id
+        }),
+        Some((queue_item_id, None)) => json!({
+            "type": "pending",
+            "queue_item_id": queue_item_id,
+            "track_id": null
+        }),
+        None => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "queue is empty after insert" })),
+            ));
+        }
+    };
+
+    if !pending_item_ids.is_empty() {
+        let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
+            let s = state.read().await;
+            if let Some(t) = s.tidal_tokens.clone() {
+                Some(t)
+            } else {
+                drop(s);
+                load_persisted_tidal_tokens(state).await.ok().flatten()
+            }
+        };
+
+        if let Some(tokens) = tokens_opt {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
+            let event_tx = {
+                let s = state.read().await;
+                s.event_tx.clone()
+            };
+            for item_id in pending_item_ids {
+                let sem = semaphore.clone();
+                let db_bg = db.clone();
+                let tok = tokens.clone();
+                let tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok();
+                    resolve_pending_row(db_bg, tok, item_id, tx).await;
+                });
+            }
+        } else {
+            tracing::warn!(
+                "{context}: Tidal tokens unavailable - pending rows will rely on lazy resolution"
+            );
+        }
+    }
+
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::QueueUpdated);
+    }
+
+    Ok((first_playable, pending_count))
 }
 
 async fn radio_start(
@@ -3765,13 +3865,15 @@ struct RadioAlbumRequest {
 async fn radio_album(
     State(state): State<SharedState>,
     Json(payload): Json<RadioAlbumRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let blend = payload.blend.unwrap_or_default();
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
     let (db, lastfm) = {
         let g = state.read().await;
+        g.user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
@@ -3787,12 +3889,24 @@ async fn radio_album(
     .await
     .map_err(|e| {
         tracing::warn!("radio_album failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "radio orchestration failed" })),
+        )
     })?;
 
-    // TODO(Task 12b): after frontend radio callers stop replacing this result
-    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
-    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
+    let (first_playable, pending_count) = build_radio_queue_and_spawn_resolvers(
+        &state,
+        &db,
+        None,
+        queue.tracks.clone(),
+        "radio_album",
+    )
+    .await?;
+    let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
+    body["first_playable"] = first_playable;
+    body["pending_count"] = json!(pending_count);
+    Ok(Json(body))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3809,13 +3923,15 @@ struct RadioArtistRequest {
 async fn radio_artist(
     State(state): State<SharedState>,
     Json(payload): Json<RadioArtistRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let blend = payload.blend.unwrap_or_default();
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
     let (db, lastfm) = {
         let g = state.read().await;
+        g.user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm)
     };
@@ -3831,12 +3947,24 @@ async fn radio_artist(
     .await
     .map_err(|e| {
         tracing::warn!("radio_artist failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "radio orchestration failed" })),
+        )
     })?;
 
-    // TODO(Task 12b): after frontend radio callers stop replacing this result
-    // with loadQueueAndPlay, route this endpoint through radio_pipeline too.
-    Ok(Json(serde_json::to_value(queue).unwrap_or(json!({}))))
+    let (first_playable, pending_count) = build_radio_queue_and_spawn_resolvers(
+        &state,
+        &db,
+        None,
+        queue.tracks.clone(),
+        "radio_artist",
+    )
+    .await?;
+    let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
+    body["first_playable"] = first_playable;
+    body["pending_count"] = json!(pending_count);
+    Ok(Json(body))
 }
 
 async fn get_discovery_space_meta(
