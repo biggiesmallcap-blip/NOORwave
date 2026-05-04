@@ -1,4 +1,6 @@
-<h1 align="center"><img width="1600" height="560" alt="image" src="https://github.com/user-attachments/assets/0426b93c-d112-433f-864e-91fe1d05ae03" />
+<h1 align="center">
+<img width="1600" height="560" alt="wordmark-animated-dark (1)" src="https://github.com/user-attachments/assets/6f364bd7-e61a-4988-8d76-0f47a0335782" />
+
 </h1>
 
 <p align="center">A power-user music command center for TIDAL</p>
@@ -198,7 +200,7 @@ Recent searches auto-save as clickable chips.
 
 ## Getting Started
 
-### Prerequisites
+### Prerequisites for developers (building from source)
 
 - [Rust](https://rustup.rs/) stable toolchain (install via `rustup`)
 - Node.js 18+ and npm
