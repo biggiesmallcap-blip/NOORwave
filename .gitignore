@@ -9,6 +9,7 @@ noor.db-wal
 noor.db-shm
 *.exe
 .env
+.noor_secret
 
 # Local agent / design tooling — not shared
 .claude/settings.json

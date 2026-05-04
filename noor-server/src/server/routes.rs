@@ -41,7 +41,10 @@ pub struct ListParams {
     sort_dir: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    // Despite the name, `favorite_only=true` means "library tracks" = liked ∪ tracks from
+    // favorited albums. For a strict "user explicitly liked" filter, use `liked_only` instead.
     favorite_only: Option<bool>,
+    liked_only: Option<bool>,
     // DSP filter params
     bpm_min: Option<f64>,
     bpm_max: Option<f64>,
@@ -545,6 +548,7 @@ async fn get_tracks(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
     let favorite_only = params.favorite_only.unwrap_or(false);
+    let liked_only = params.liked_only.unwrap_or(false);
 
     let dsp = queries::DspFilters {
         bpm_min: params.bpm_min,
@@ -559,8 +563,8 @@ async fn get_tracks(
         .db
         .with_conn(|conn| {
             let tracks =
-                queries::get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, &dsp)?;
-            let total = queries::get_track_count(conn, favorite_only)?;
+                queries::get_tracks_with_dsp(conn, sort_by, sort_dir, limit, offset, favorite_only, liked_only, &dsp)?;
+            let total = queries::get_track_count(conn, favorite_only, liked_only)?;
             Ok(Json(json!({ "tracks": tracks, "total": total })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -571,11 +575,12 @@ async fn get_track_count(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let favorite_only = params.favorite_only.unwrap_or(false);
+    let liked_only = params.liked_only.unwrap_or(false);
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let count = queries::get_track_count(conn, favorite_only)?;
+            let count = queries::get_track_count(conn, favorite_only, liked_only)?;
             Ok(Json(json!({ "count": count })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)

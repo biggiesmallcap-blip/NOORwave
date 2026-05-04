@@ -85,7 +85,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 	{
 		prefix: 'jump',
 		description: 'Navigate to a page',
-		args: 'library|genres|playlists|discover|discoverspace|settings|search',
+		args: 'library|genres|playlists|discoverspace|settings|search',
 		execute: (arg) => { if (arg) goto(`/${arg}`); },
 	},
 	{

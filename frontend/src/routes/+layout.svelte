@@ -174,8 +174,7 @@
 				{ path: '/search', label: 'Search', icon: '⌕' },
 				{ path: '/genres', label: 'Genre Galaxy', icon: '✦' },
 				{ path: '/playlists', label: 'Playlists', icon: '☰' },
-				{ path: '/discover', label: 'Discover', icon: '✦' },
-				{ path: '/discoverspace', label: 'Discover Space', icon: '◈' }
+				{ path: '/discoverspace', label: 'Discover', icon: '◈' }
 			]
 		},
 		{
@@ -1370,12 +1369,12 @@
 			<span class="mobile-tab-label">Genres</span>
 		</a>
 		<a
-			href="/discover"
+			href="/discoverspace"
 			class="mobile-tab"
-			class:active={isNavItemActive('/discover')}
-			aria-current={isNavItemActive('/discover') ? 'page' : undefined}
+			class:active={isNavItemActive('/discoverspace')}
+			aria-current={isNavItemActive('/discoverspace') ? 'page' : undefined}
 		>
-			<span class="mobile-tab-icon">✦</span>
+			<span class="mobile-tab-icon">◈</span>
 			<span class="mobile-tab-label">Discover</span>
 		</a>
 		<button

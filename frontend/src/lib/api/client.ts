@@ -1,5 +1,3 @@
-import type { DiscoverySpaceMeta } from '$lib/components/Discover/discover.types';
-
 const API_BASE = 'http://localhost:3334';
 
 export function getApiBase(): string {
@@ -899,13 +897,17 @@ async function fetchApi<T>(
 }
 
 export const api = {
-	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0, favoriteOnly = true) {
+	// favoriteOnly: despite the name, means "library tracks" = liked ∪ tracks from favorited
+	// albums. For a strict "user explicitly liked this track" filter, use `likedOnly` instead.
+	// likedOnly takes precedence. TODO: make favoriteOnly explicit (no default) in a follow-up.
+	getTracks(sortBy = 'date_added', sortDir = 'desc', limit = 50, offset = 0, favoriteOnly = true, likedOnly = false) {
 		return fetchApi<{ tracks: Track[]; total: number }>('/api/tracks', {
 			sort_by: sortBy,
 			sort_dir: sortDir,
 			limit: String(limit),
 			offset: String(offset),
 			favorite_only: String(favoriteOnly),
+			liked_only: String(likedOnly),
 		});
 	},
 
@@ -1688,10 +1690,6 @@ export const api = {
 		return fetchApi<{ token: string }>('/api/server/token/regenerate', undefined, {
 			method: 'POST',
 		});
-	},
-
-	getDiscoverySpaceMeta() {
-		return fetchApi<DiscoverySpaceMeta>('/api/discovery/space/meta');
 	},
 
 	getVibeTracksForTrack(trackId: number) {
