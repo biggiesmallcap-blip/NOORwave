@@ -3740,13 +3740,18 @@ async fn radio_start(
 
         if let Some(tokens) = tokens_opt {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
+            let event_tx = {
+                let s = state.read().await;
+                s.event_tx.clone()
+            };
             for item_id in pending_item_ids {
                 let sem = semaphore.clone();
                 let db_bg = db.clone();
                 let tok = tokens.clone();
+                let tx = event_tx.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    resolve_pending_row(db_bg, tok, item_id).await;
+                    resolve_pending_row(db_bg, tok, item_id, tx).await;
                 });
             }
         } else {
@@ -6045,6 +6050,36 @@ fn score_tidal_candidate(
     SCORE_W_ARTIST * a + SCORE_W_TITLE * t
 }
 
+/// Atomically promote a pending queue row to a resolved library row.
+///
+/// Returns `true` iff this caller won the promotion race (queue row had
+/// `track_id IS NULL` at the moment of UPDATE). Both resolver paths funnel
+/// through this so the event-emission contract is the same: any successful
+/// promotion broadcasts `QueueUpdated` exactly once.
+fn promote_pending_row_emit(
+    db: &crate::db::Database,
+    event_tx: &tokio::sync::broadcast::Sender<AppEvent>,
+    queue_item_id: i64,
+    local_track_id: i64,
+    score_stored: i32,
+) -> bool {
+    let promoted = db
+        .with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE queue
+                 SET track_id = ?1, resolved_at = datetime('now'),
+                     tidal_match_score = ?2, resolving_at = NULL
+                 WHERE id = ?3 AND track_id IS NULL",
+                rusqlite::params![local_track_id, score_stored, queue_item_id],
+            )? == 1)
+        })
+        .unwrap_or(false);
+    if promoted {
+        let _ = event_tx.send(AppEvent::QueueUpdated);
+    }
+    promoted
+}
+
 /// Background-eager resolver for a single pending queue row.
 ///
 /// Spawned by `radio_start` after inserting pending rows. Bounded by
@@ -6055,6 +6090,7 @@ async fn resolve_pending_row(
     db: crate::db::Database,
     tokens: crate::services::tidal::auth::TidalTokens,
     queue_item_id: i64,
+    event_tx: tokio::sync::broadcast::Sender<AppEvent>,
 ) {
     let row: Option<(String, String)> = db
         .with_conn(move |conn| {
@@ -6166,17 +6202,7 @@ async fn resolve_pending_row(
     };
 
     let score_stored = (score * 1000.0) as i32;
-    let promoted = db
-        .with_conn(move |conn| {
-            Ok(conn.execute(
-                "UPDATE queue
-                 SET track_id = ?1, resolved_at = datetime('now'),
-                     tidal_match_score = ?2, resolving_at = NULL
-                 WHERE id = ?3 AND track_id IS NULL",
-                rusqlite::params![local_id, score_stored, queue_item_id],
-            )? == 1)
-        })
-        .unwrap_or(false);
+    let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
 
     if promoted {
         tracing::info!(
@@ -6321,17 +6347,12 @@ async fn resolve_pending_current_queue_item(
 
     let score_stored = (score * 1000.0) as i32;
     // Atomic promotion: only one resolver wins even under a race.
-    let promoted = db
-        .with_conn(move |conn| {
-            Ok(conn.execute(
-                "UPDATE queue
-                 SET track_id = ?1, resolved_at = datetime('now'),
-                     tidal_match_score = ?2, resolving_at = NULL
-                 WHERE id = ?3 AND track_id IS NULL",
-                rusqlite::params![local_id, score_stored, queue_item_id],
-            )? == 1)
-        })
-        .unwrap_or(false);
+    let event_tx = {
+        let s = state.read().await;
+        s.event_tx.clone()
+    };
+    let promoted =
+        promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
 
     if !promoted {
         return None;
@@ -6345,6 +6366,10 @@ async fn resolve_pending_current_queue_item(
         )
         .map_err(anyhow::Error::from)
     });
+    let _ = event_tx.send(AppEvent::TrackChanged {
+        track_id: local_id,
+    });
+    let _ = event_tx.send(AppEvent::PlaybackStateChanged);
 
     db.with_conn(move |conn| queue::get_track_by_id(conn, local_id))
         .ok()
@@ -11801,6 +11826,78 @@ mod tests {
         db.with_conn(|conn| schema::run_migrations(conn))
             .expect("schema migrations");
         api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
+    }
+
+    #[tokio::test]
+    async fn promote_pending_row_emit_broadcasts_queue_updated() {
+        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&db_path).expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
+
+        // Seed an artist + a real track to be the promotion target, plus a
+        // pending queue row pointing at "Pending Artist / Pending Title".
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Promoted Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, source, fidelity_score
+                 ) VALUES (1, 'Promoted Title', 1, 'tidal_stream', 0)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, pending_artist, pending_title, pending_at)
+                 VALUES (NULL, 0, 'radio_pending', 'Pending Artist', 'Pending Title', datetime('now'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let queue_item_id: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT id FROM queue WHERE track_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+
+        let (event_tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, 1, 950);
+        assert!(promoted, "promotion must succeed for a NULL-track row");
+
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event arrived in time")
+            .expect("event channel open");
+        assert!(matches!(evt, AppEvent::QueueUpdated));
+
+        // Confirm DB: the row is no longer pending.
+        let resolved_track_id: Option<i64> = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT track_id FROM queue WHERE id = ?1",
+                    rusqlite::params![queue_item_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(resolved_track_id, Some(1));
+
+        // Idempotency: a second promotion attempt is a no-op (track_id already set)
+        // and must NOT broadcast a second event.
+        let again = promote_pending_row_emit(&db, &event_tx, queue_item_id, 1, 950);
+        assert!(!again);
+        let no_more = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+        assert!(no_more.is_err(), "no second event should fire on idempotent retry");
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
