@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::db::models::Track;
+use crate::playback::player::ReconcileOutcome;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -576,6 +577,9 @@ pub struct ResolveResult {
     pub removed_track_ids: Vec<i64>,
     /// TIDAL IDs of tracks to unfavorite via API (caller handles the API call).
     pub tidal_ids_to_unfavorite: Vec<i64>,
+    /// Outcome of queue + playback_state reconciliation after the deletes.
+    /// Caller broadcasts events based on these flags.
+    pub reconcile: ReconcileOutcome,
 }
 
 /// Keep `preferred_track_id`, dismiss or delete the rest.
@@ -611,8 +615,16 @@ pub fn resolve_group(
     let removed_track_ids: Vec<i64> = to_remove.iter().map(|(id, _)| *id).collect();
     let tidal_ids_to_unfavorite: Vec<i64> = to_remove.iter().filter_map(|(_, tid)| *tid).collect();
 
+    // Reconcile queue + playback_state BEFORE deleting the tracks themselves.
+    // The helper drops affected queue rows, advances current_track_id /
+    // current_queue_item_id to the next surviving row, or stops playback if
+    // no survivor exists. Hand-rolled `DELETE FROM queue` here would leave
+    // playback_state.current_track_id pointing at a row we're about to drop.
+    let reconcile = crate::playback::player::reconcile_after_track_delete(conn, &removed_track_ids)?;
+
     // Remove non-preferred tracks from the DB.
     // Must clean up dependent rows explicitly since FKs lack ON DELETE CASCADE.
+    // Queue cleanup is handled above by reconcile_after_track_delete.
     for &track_id in &removed_track_ids {
         conn.execute(
             "DELETE FROM listen_history WHERE track_id = ?1",
@@ -622,7 +634,6 @@ pub fn resolve_group(
             "DELETE FROM playlist_tracks WHERE track_id = ?1",
             params![track_id],
         )?;
-        conn.execute("DELETE FROM queue WHERE track_id = ?1", params![track_id])?;
         conn.execute(
             "DELETE FROM shuffle_state WHERE track_id = ?1",
             params![track_id],
@@ -648,6 +659,7 @@ pub fn resolve_group(
     Ok(ResolveResult {
         removed_track_ids,
         tidal_ids_to_unfavorite,
+        reconcile,
     })
 }
 
@@ -712,6 +724,63 @@ mod tests {
                 is_preferred INTEGER DEFAULT 0,
                 PRIMARY KEY (group_id, track_id)
             );
+
+            CREATE TABLE listen_history (
+                id INTEGER PRIMARY KEY,
+                track_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                duration_listened_ms INTEGER DEFAULT 0,
+                completed INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE playlist_tracks (
+                playlist_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                position INTEGER NOT NULL
+            );
+
+            CREATE TABLE queue (
+                id               INTEGER PRIMARY KEY,
+                track_id         INTEGER,
+                position         INTEGER NOT NULL,
+                source           TEXT    DEFAULT 'user',
+                reason           TEXT,
+                pending_artist   TEXT,
+                pending_title    TEXT,
+                pending_at       TIMESTAMP,
+                resolving_at     TIMESTAMP,
+                resolved_at      TIMESTAMP,
+                tidal_match_score REAL,
+                tidal_id_hint    INTEGER
+            );
+
+            CREATE TABLE shuffle_state (
+                track_id INTEGER PRIMARY KEY,
+                position INTEGER NOT NULL
+            );
+
+            CREATE TABLE track_genres (
+                track_id INTEGER NOT NULL,
+                genre_id INTEGER NOT NULL,
+                source TEXT,
+                confidence REAL DEFAULT 1.0
+            );
+
+            CREATE TABLE playback_state (
+                id INTEGER PRIMARY KEY,
+                current_track_id INTEGER,
+                current_queue_item_id INTEGER,
+                position_ms INTEGER NOT NULL DEFAULT 0,
+                is_playing INTEGER NOT NULL DEFAULT 0,
+                volume REAL NOT NULL DEFAULT 1.0,
+                shuffle_mode TEXT NOT NULL DEFAULT 'off',
+                repeat_mode TEXT NOT NULL DEFAULT 'off',
+                automix_enabled INTEGER NOT NULL DEFAULT 0,
+                crossfade_ms INTEGER NOT NULL DEFAULT 0,
+                automix_discover_new INTEGER NOT NULL DEFAULT 0,
+                automix_use_learning INTEGER NOT NULL DEFAULT 1,
+                automix_allow_external INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )
         .expect("create schema");
@@ -721,6 +790,13 @@ mod tests {
             [],
         )
         .expect("insert artist");
+        conn.execute(
+            "INSERT INTO playback_state (
+                id, current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms
+            ) VALUES (1, NULL, 0, 0, 1.0, 'off', 'off', 0, 0)",
+            [],
+        )
+        .expect("seed playback_state");
         conn
     }
 

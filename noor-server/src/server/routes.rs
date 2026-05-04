@@ -5318,6 +5318,18 @@ async fn resolve_duplicate_group(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    // Broadcast queue / playback / library events based on the reconcile outcome.
+    {
+        let s = state.read().await;
+        if result.reconcile.queue_changed {
+            let _ = s.event_tx.send(AppEvent::QueueUpdated);
+        }
+        if result.reconcile.current_changed {
+            let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+        }
+        let _ = s.event_tx.send(AppEvent::LibrarySynced);
+    }
+
     // Best-effort unfavorite on TIDAL with session refresh retry.
     if let Some(t) = tokens.clone() {
         for tidal_id in &result.tidal_ids_to_unfavorite {
