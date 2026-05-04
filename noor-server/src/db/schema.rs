@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_027,
     MIGRATION_028,
     MIGRATION_029,
+    MIGRATION_030,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -806,6 +807,15 @@ CREATE TABLE IF NOT EXISTS spotify_null_cache (
     isrc      TEXT PRIMARY KEY,
     cached_at INTEGER NOT NULL
 );
+"#;
+
+// User-queued external tracks (TIDAL search rows the user clicked Add to queue
+// or Play next on) carry a known tidal_id at insert time. The pending-row
+// resolver uses this hint to fetch the track directly instead of searching
+// Tidal by artist+title — same row schema, faster + more accurate resolution.
+// Existing rows have NULL; resolver falls back to artist+title search.
+const MIGRATION_030: &str = r#"
+ALTER TABLE queue ADD COLUMN tidal_id_hint INTEGER;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -167,6 +167,105 @@ pub fn append_pending_tracks(
     load_queue(conn)
 }
 
+/// Description of a single track to insert into the queue from an external
+/// source (search row, Last.fm radio candidate, Discover Space row). The two
+/// "external" insert helpers below take this struct and dispatch to a library
+/// row insert (when `local_track_id` is known) or a pending row insert
+/// otherwise. `tidal_id_hint` is preserved on pending rows so the background
+/// resolver can fetch by ID instead of searching by artist+title.
+pub struct ExternalTrackInsert<'a> {
+    pub artist: &'a str,
+    pub title: &'a str,
+    pub source: &'a str,
+    pub reason: Option<&'a str>,
+    pub tidal_id_hint: Option<i64>,
+    pub local_track_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertResult {
+    Library { queue_id: i64, track_id: i64 },
+    Pending { queue_id: i64 },
+}
+
+impl InsertResult {
+    pub fn queue_id(self) -> i64 {
+        match self {
+            Self::Library { queue_id, .. } | Self::Pending { queue_id } => queue_id,
+        }
+    }
+}
+
+/// Insert an external track at the end of the queue.
+///
+/// Routes to a library-row insert when `local_track_id` is set, otherwise a
+/// pending-row insert. Both paths keep position bookkeeping consistent — the
+/// new row gets `MAX(position) + 1` so existing rows are never shifted.
+pub fn append_external_track(
+    conn: &Connection,
+    insert: &ExternalTrackInsert<'_>,
+) -> Result<InsertResult> {
+    let position: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM queue",
+        [],
+        |row| row.get(0),
+    )?;
+    insert_at_position(conn, insert, position)
+}
+
+/// Insert an external track immediately after `after_position`. Existing rows
+/// at that position or later are shifted by one. Used for "Play next" so the
+/// new row lands at `current_position + 1`.
+pub fn insert_external_track_after(
+    conn: &Connection,
+    insert: &ExternalTrackInsert<'_>,
+    after_position: i32,
+) -> Result<InsertResult> {
+    let target = after_position + 1;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE queue SET position = position + 1 WHERE position >= ?1",
+        params![target],
+    )?;
+    let result = insert_at_position(&tx, insert, target)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn insert_at_position(
+    conn: &Connection,
+    insert: &ExternalTrackInsert<'_>,
+    position: i32,
+) -> Result<InsertResult> {
+    if let Some(track_id) = insert.local_track_id {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, ?3, ?4)",
+            params![track_id, position, insert.source, insert.reason],
+        )?;
+        Ok(InsertResult::Library {
+            queue_id: conn.last_insert_rowid(),
+            track_id,
+        })
+    } else {
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, reason,
+                                pending_artist, pending_title, pending_at, tidal_id_hint)
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)",
+            params![
+                position,
+                insert.source,
+                insert.reason,
+                insert.artist,
+                insert.title,
+                insert.tidal_id_hint,
+            ],
+        )?;
+        Ok(InsertResult::Pending {
+            queue_id: conn.last_insert_rowid(),
+        })
+    }
+}
+
 pub fn replace_queue(conn: &Connection, tracks: &[Track], source: &str) -> Result<Vec<QueueItem>> {
     conn.execute("DELETE FROM queue", [])?;
     append_tracks(conn, tracks, source)
@@ -512,7 +611,8 @@ mod tests {
                 pending_at       TIMESTAMP,
                 resolving_at     TIMESTAMP,
                 resolved_at      TIMESTAMP,
-                tidal_match_score REAL
+                tidal_match_score REAL,
+                tidal_id_hint    INTEGER
             );
             CREATE TABLE genres (
                 id INTEGER PRIMARY KEY,
@@ -663,5 +763,107 @@ mod tests {
                 .map(String::as_str),
             Some("Electronic")
         );
+    }
+
+    #[test]
+    fn append_external_track_pending_creates_resolvable_row() {
+        let conn = conn();
+        let result = append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "Aphex Twin",
+                title: "Xtal",
+                source: "user_queue",
+                reason: None,
+                tidal_id_hint: Some(123),
+                local_track_id: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, InsertResult::Pending { .. }));
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track.title, "Xtal");
+        assert_eq!(rows[0].track.artist_name.as_deref(), Some("Aphex Twin"));
+        assert!(rows[0].is_pending);
+        assert_eq!(rows[0].source, "user_queue");
+
+        let hint: Option<i64> = conn
+            .query_row(
+                "SELECT tidal_id_hint FROM queue WHERE id = ?1",
+                params![result.queue_id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hint, Some(123));
+    }
+
+    #[test]
+    fn append_external_track_library_creates_normal_row() {
+        let conn = conn();
+        let result = append_external_track(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_queue",
+                reason: Some("seeded"),
+                tidal_id_hint: None,
+                local_track_id: Some(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            InsertResult::Library {
+                queue_id: result.queue_id(),
+                track_id: 1,
+            }
+        );
+
+        let rows = load_queue(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track.id, 1);
+        assert_eq!(rows[0].track.title, "Track 1");
+        assert!(!rows[0].is_pending);
+        assert_eq!(rows[0].reason.as_deref(), Some("seeded"));
+    }
+
+    #[test]
+    fn insert_external_track_after_shifts_later_rows() {
+        let conn = conn();
+        let tracks = vec![
+            get_track_by_id(&conn, 1).unwrap().unwrap(),
+            get_track_by_id(&conn, 2).unwrap().unwrap(),
+            get_track_by_id(&conn, 3).unwrap().unwrap(),
+        ];
+        replace_queue(&conn, &tracks, "test").unwrap();
+
+        // Insert track 4 immediately after position 0 (i.e. between t1 and t2).
+        insert_external_track_after(
+            &conn,
+            &ExternalTrackInsert {
+                artist: "ignored",
+                title: "ignored",
+                source: "user_play_next",
+                reason: None,
+                tidal_id_hint: None,
+                local_track_id: Some(4),
+            },
+            0,
+        )
+        .unwrap();
+
+        let queue = load_queue(&conn).unwrap();
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue[0].track.id, 1);
+        assert_eq!(queue[1].track.id, 4);
+        assert_eq!(queue[2].track.id, 2);
+        assert_eq!(queue[3].track.id, 3);
+        // Positions are contiguous after the shift.
+        for (idx, item) in queue.iter().enumerate() {
+            assert_eq!(item.position, idx as i32);
+        }
     }
 }
