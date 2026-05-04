@@ -31,6 +31,15 @@ export const wsMessages = writable<WsMessage[]>([]);
 
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let queueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleQueueRefresh() {
+	if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+	queueRefreshTimer = setTimeout(() => {
+		queueRefreshTimer = null;
+		void refreshPlaybackState();
+	}, 100);
+}
 
 function getWebSocketUrl(): string {
 	const apiUrl = new URL(getApiBase());
@@ -60,11 +69,12 @@ export function connectWebSocket() {
 		try {
 			const data = JSON.parse(event.data);
 			wsMessages.update((msgs) => [...msgs.slice(-99), data]);
-			if (
+			if (data?.type === 'queue_updated') {
+				scheduleQueueRefresh();
+			} else if (
 				data?.type === 'connected' ||
 				data?.type === 'playback_changed' ||
 				data?.type === 'track_changed' ||
-				data?.type === 'queue_updated' ||
 				data?.type === 'listen_history_updated' ||
 				data?.type === 'playback_failed'
 			) {
@@ -124,6 +134,10 @@ export function connectWebSocket() {
 
 export function disconnectWebSocket() {
 	clearTimeout(reconnectTimer);
+	if (queueRefreshTimer) {
+		clearTimeout(queueRefreshTimer);
+		queueRefreshTimer = null;
+	}
 	socket?.close();
 	socket = null;
 	wsConnected.set(false);
