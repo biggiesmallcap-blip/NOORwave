@@ -112,8 +112,10 @@ pub struct AppState {
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
-    /// Pending ephemeral TIDAL tracks queued behind the currently-playing
+    /// Legacy pending ephemeral TIDAL tracks queued behind the currently-playing
     /// ephemeral track (e.g. the rest of a TIDAL mix the user clicked into).
+    /// New persistent external queue actions should use pending rows in the
+    /// `queue` table instead of adding more producers to this in-memory queue.
     /// Auto-advanced by `handle_runtime_finished` when the active ephemeral
     /// track ends. Cleared on explicit stop or when the user starts a
     /// different ephemeral track (`play_tidal_ephemeral` clears before
