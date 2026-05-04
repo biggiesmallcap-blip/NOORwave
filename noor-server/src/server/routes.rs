@@ -193,6 +193,11 @@ pub struct QueueExternalRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct QueueExternalManyRequest {
+    items: Vec<QueueExternalRequest>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PlaylistFromQueueRequest {
     name: String,
     #[serde(default)]
@@ -305,7 +310,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/artists", get(get_artists))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
         .route("/api/artists/{id}/discography", get(get_artist_discography))
-        .route("/api/artists/{id}/spotify-stats", get(get_artist_spotify_stats))
+        .route(
+            "/api/artists/{id}/spotify-stats",
+            get(get_artist_spotify_stats),
+        )
         .route("/api/tidal/albums/{id}/tracks", get(get_tidal_album_tracks))
         .route("/api/tidal/albums/{id}/import", post(import_tidal_album))
         .route(
@@ -369,6 +377,56 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
+        // Sportify-based discovery resolver — single, bulk, and cache-only status poll.
+        .route("/api/resolve/tidal/track", get(resolve_tidal_track))
+        .route("/api/resolve/tidal/bulk", post(resolve_tidal_bulk))
+        .route("/api/resolve/tidal/status", get(resolve_tidal_status))
+        // Sportify (anonymous Spotify metadata proxy) discovery surface.
+        // Sportify is upstream and subject to breakage — every handler is
+        // cache-first, every failure surfaces as JSON error or empty list,
+        // and nothing here writes to library tables. Worst case for an
+        // outage is a degraded /discover; existing library data is never
+        // affected.
+        .route(
+            "/api/discovery/sportify/search",
+            get(sportify_discovery_search),
+        )
+        .route(
+            "/api/discovery/sportify/track/{spotify_id}",
+            get(sportify_discovery_track),
+        )
+        .route(
+            "/api/discovery/sportify/album/{spotify_id}",
+            get(sportify_discovery_album),
+        )
+        .route(
+            "/api/discovery/sportify/playlist/{spotify_id}",
+            get(sportify_discovery_playlist),
+        )
+        .route(
+            "/api/discovery/sportify/artist/{spotify_id}",
+            get(sportify_discovery_artist),
+        )
+        .route(
+            "/api/discovery/sportify/artist/{spotify_id}/top-tracks",
+            get(sportify_discovery_artist_top_tracks),
+        )
+        .route(
+            "/api/discovery/sportify/artist/{spotify_id}/related",
+            get(sportify_discovery_artist_related),
+        )
+        .route(
+            "/api/discovery/sportify/album/{spotify_id}/related",
+            get(sportify_discovery_album_related),
+        )
+        .route(
+            "/api/discovery/sportify/track/{spotify_id}/related",
+            get(sportify_discovery_track_related),
+        )
+        // Save an ephemeral Spotify-sourced playlist into the user's library.
+        // Imports each resolved TIDAL track + creates a noor playlist; rows
+        // without a TIDAL match are skipped (counted in the response).
+        .route("/api/spotify-playlist/save", post(save_spotify_playlist))
         .route("/api/radio/song", post(radio_song))
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))
@@ -435,7 +493,9 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/playback/queue/move", post(move_queue_track))
         .route("/api/playback/queue/clear", post(clear_queue_route))
         .route("/api/queue/play_next", post(queue_play_next))
+        .route("/api/queue/play_next_many", post(queue_play_next_many))
         .route("/api/queue/append", post(queue_append))
+        .route("/api/queue/append_many", post(queue_append_many))
         .route(
             "/api/playlists/from-queue",
             post(create_playlist_from_queue),
@@ -922,43 +982,35 @@ async fn get_artist_spotify_stats(
         if !enabled {
             return Json(json!({ "monthly_listeners": null, "tracks": [] }));
         }
-        let pairs = s
-            .db
-            .with_conn(|conn| queries::get_artist_tracks(conn, id))
-            .map(|tracks| {
-                let mut sorted = tracks
-                    .into_iter()
-                    .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.is_empty()))
-                    .collect::<Vec<_>>();
-                sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
-                sorted.truncate(10);
-                sorted
-                    .into_iter()
-                    .map(|t| (t.isrc.unwrap_or_default(), t.title))
-                    .collect::<Vec<(String, String)>>()
-            })
-            .unwrap_or_default();
-        let artist_name = pairs
-            .first()
-            .map(|_| String::new())
-            .unwrap_or_default();
+        let pairs =
+            s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+                .map(|tracks| {
+                    let mut sorted = tracks
+                        .into_iter()
+                        .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.is_empty()))
+                        .collect::<Vec<_>>();
+                    sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+                    sorted.truncate(10);
+                    sorted
+                        .into_iter()
+                        .map(|t| (t.isrc.unwrap_or_default(), t.title))
+                        .collect::<Vec<(String, String)>>()
+                })
+                .unwrap_or_default();
+        let artist_name = pairs.first().map(|_| String::new()).unwrap_or_default();
         // Re-look up the artist's display name (any track's artist_name works
         // — they all share artist_id=id by construction).
-        let name = s
-            .db
-            .with_conn(|conn| queries::get_artist_tracks(conn, id))
-            .ok()
-            .and_then(|ts| ts.first().and_then(|t| t.artist_name.clone()))
-            .unwrap_or(artist_name);
+        let name =
+            s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+                .ok()
+                .and_then(|ts| ts.first().and_then(|t| t.artist_name.clone()))
+                .unwrap_or(artist_name);
         (enabled, name, pairs)
     };
 
-    let result = crate::services::spotify_public::fetch_artist_stats(
-        enabled,
-        &artist_name,
-        &isrc_pairs,
-    )
-    .await;
+    let result =
+        crate::services::spotify_public::fetch_artist_stats(enabled, &artist_name, &isrc_pairs)
+            .await;
 
     Json(json!({
         "monthly_listeners": result.monthly_listeners,
@@ -2522,6 +2574,1464 @@ struct DiscoverySpaceRequest {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ResolveTidalTrackQuery {
+    spotify_id: String,
+    /// When true, ignore any cached resolution and re-run the matcher.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// Resolve one Spotify (Sportify) track to TIDAL for playback. Reads the
+/// Spotify→TIDAL map cache first; on miss, fetches Sportify metadata and
+/// runs the title/artist/duration matcher against TIDAL search.
+///
+/// Response shape mirrors the `tidal: {...}` block on the normalized
+/// DiscoveryTrack so the frontend can drop it straight in.
+async fn resolve_tidal_track(
+    State(state): State<SharedState>,
+    Query(params): Query<ResolveTidalTrackQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, resolver};
+
+    let spotify_id = params.spotify_id.trim();
+    if spotify_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    if !params.refresh {
+        let cached = db
+            .with_conn(|conn| sp_cache::get_tidal_resolution(conn, &cache_cfg, spotify_id))
+            .map_err(internal)?;
+        if let Some(hit) = cached {
+            return Ok(Json(json!({
+                "spotify_id": spotify_id,
+                "tidal": {
+                    "status": resolver::classify(hit.confidence).as_str(),
+                    "id": hit.tidal_track_id,
+                    "confidence": hit.confidence,
+                    "match_reason": hit.match_reason,
+                    "resolved_at": hit.resolved_at,
+                    "from_cache": true,
+                }
+            })));
+        }
+        let unresolved = db
+            .with_conn(|conn| sp_cache::get_unresolved(conn, spotify_id))
+            .map_err(internal)?;
+        if let Some(record) = unresolved.as_ref() {
+            if sp_cache::unresolved_is_cold(record, &cache_cfg) {
+                return Ok(Json(json!({
+                    "spotify_id": spotify_id,
+                    "tidal": {
+                        "status": "unresolved",
+                        "id": null,
+                        "confidence": 0.0,
+                        "match_reason": record.reason,
+                        "last_attempt_at": record.last_attempt_at,
+                        "attempts": record.attempts,
+                        "from_cache": true,
+                    }
+                })));
+            }
+        }
+    }
+
+    let sportify_track = match db
+        .with_conn(|conn| sp_cache::get_track_meta(conn, &cache_cfg, spotify_id))
+        .map_err(internal)?
+    {
+        Some(t) => t,
+        None => {
+            let fetched = sportify_client.track(spotify_id).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("sportify_track_fetch: {e}") })),
+                )
+            })?;
+            db.with_conn(|conn| {
+                sp_cache::put_track_meta(conn, spotify_id, &fetched)?;
+                crate::services::sportify::stats::write_track_playcount(conn, &fetched);
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let tokens = {
+        let persisted = load_persisted_tidal_tokens(&state)
+            .await
+            .map_err(internal)?;
+        let s = state.read().await;
+        s.tidal_tokens.clone().or(persisted)
+    };
+    let Some(tokens) = tokens else {
+        return Ok(Json(json!({
+            "spotify_id": spotify_id,
+            "tidal": {
+                "status": "error",
+                "id": null,
+                "confidence": 0.0,
+                "match_reason": "tidal_not_connected",
+            }
+        })));
+    };
+
+    let tidal_client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let outcome = resolver::resolve_track(&tidal_client, &sportify_track)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("resolve: {e}") })),
+            )
+        })?;
+
+    match outcome.status {
+        resolver::ResolutionStatus::Resolved | resolver::ResolutionStatus::LowConfidence => {
+            if let Some(tidal_id) = outcome.tidal_track_id {
+                let reason = outcome.reason.clone();
+                db.with_conn(|conn| {
+                    sp_cache::put_tidal_resolution(
+                        conn,
+                        spotify_id,
+                        tidal_id,
+                        outcome.confidence,
+                        Some(&reason),
+                    )
+                })
+                .map_err(internal)?;
+            }
+        }
+        resolver::ResolutionStatus::Unresolved => {
+            let reason = outcome.reason.clone();
+            db.with_conn(|conn| sp_cache::put_unresolved(conn, spotify_id, Some(&reason)))
+                .map_err(internal)?;
+        }
+    }
+
+    Ok(Json(json!({
+        "spotify_id": spotify_id,
+        "tidal": {
+            "status": outcome.status.as_str(),
+            "id": outcome.tidal_track_id,
+            "confidence": outcome.confidence,
+            "match_reason": outcome.reason,
+            "from_cache": false,
+        }
+    })))
+}
+
+// ─── Sportify bulk + status resolution endpoints ────────────
+
+#[derive(Debug, Deserialize)]
+struct ResolveTidalBulkBody {
+    spotify_ids: Vec<String>,
+    /// When true, ignore any cached resolution for the given ids.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// Resolve a batch of Spotify ids in one request. Returns the cached state
+/// for any ids that already had resolutions, plus fresh resolutions for the
+/// rest. Caller may use this for a "resolve everything before opening" flow
+/// or to force a refresh after a TIDAL session change.
+async fn resolve_tidal_bulk(
+    State(state): State<SharedState>,
+    Json(body): Json<ResolveTidalBulkBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, resolver};
+
+    let ids: Vec<String> = body
+        .spotify_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_ids required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, resolve_cfg, db, tokens_in_state) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.sportify_resolve_config,
+            s.db.clone(),
+            s.tidal_tokens.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    // Partition: which ids do we need to actually resolve vs. read from cache.
+    let mut resolved: Vec<Value> = Vec::new();
+    let mut unresolved_payload: Vec<Value> = Vec::new();
+    let mut needs_fetch: Vec<String> = Vec::new();
+    db.with_conn(|conn| {
+        for id in &ids {
+            if !body.refresh {
+                if let Some(hit) = sp_cache::get_tidal_resolution(conn, &cache_cfg, id)? {
+                    resolved.push(json!({
+                        "spotifyId": id,
+                        "tidal": {
+                            "status": resolver::classify(hit.confidence).as_str(),
+                            "id": hit.tidal_track_id,
+                            "confidence": hit.confidence,
+                            "matchReason": hit.match_reason,
+                            "fromCache": true,
+                        }
+                    }));
+                    continue;
+                }
+                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
+                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                        unresolved_payload.push(json!({
+                            "spotifyId": id,
+                            "tidal": {
+                                "status": "unresolved",
+                                "id": null,
+                                "confidence": 0.0,
+                                "matchReason": record.reason,
+                                "attempts": record.attempts,
+                                "fromCache": true,
+                            }
+                        }));
+                        continue;
+                    }
+                }
+            }
+            needs_fetch.push(id.clone());
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(internal)?;
+
+    if needs_fetch.is_empty() {
+        return Ok(Json(json!({
+            "resolved": resolved,
+            "unresolved": unresolved_payload,
+        })));
+    }
+
+    // Fetch Sportify metadata for everything we need to resolve. Cache miss
+    // → upstream call; failures fall through as `unresolved` rather than
+    // failing the whole batch.
+    let mut to_resolve: Vec<(String, crate::services::sportify::models::SportifyTrack)> =
+        Vec::with_capacity(needs_fetch.len());
+    for id in &needs_fetch {
+        let cached = db
+            .with_conn(|conn| sp_cache::get_track_meta(conn, &cache_cfg, id))
+            .map_err(internal)?;
+        let track = match cached {
+            Some(t) => t,
+            None => match sportify_client.track(id).await {
+                Ok(t) => {
+                    let _ = db.with_conn(|conn| {
+                        sp_cache::put_track_meta(conn, id, &t)?;
+                        crate::services::sportify::stats::write_track_playcount(conn, &t);
+                        Ok::<_, anyhow::Error>(())
+                    });
+                    t
+                }
+                Err(e) => {
+                    unresolved_payload.push(json!({
+                        "spotifyId": id,
+                        "tidal": {
+                            "status": "error",
+                            "id": null,
+                            "confidence": 0.0,
+                            "matchReason": format!("sportify_fetch:{e}"),
+                            "fromCache": false,
+                        }
+                    }));
+                    continue;
+                }
+            },
+        };
+        to_resolve.push((id.clone(), track));
+    }
+
+    let tokens = match tokens_in_state {
+        Some(t) => Some(t),
+        None => load_persisted_tidal_tokens(&state)
+            .await
+            .map_err(internal)?,
+    };
+    let Some(tokens) = tokens else {
+        for (id, _) in to_resolve {
+            unresolved_payload.push(json!({
+                "spotifyId": id,
+                "tidal": {
+                    "status": "error",
+                    "id": null,
+                    "confidence": 0.0,
+                    "matchReason": "tidal_not_connected",
+                    "fromCache": false,
+                }
+            }));
+        }
+        return Ok(Json(json!({
+            "resolved": resolved,
+            "unresolved": unresolved_payload,
+        })));
+    };
+
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let outcomes = resolver::resolve_many(&client, &to_resolve, resolve_cfg.bulk_concurrency).await;
+
+    db.with_conn(|conn| {
+        for (id, outcome) in &outcomes {
+            persist_outcome(conn, id, outcome);
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(internal)?;
+
+    for (id, outcome) in outcomes {
+        let row = json!({
+            "spotifyId": id,
+            "tidal": {
+                "status": outcome.status.as_str(),
+                "id": outcome.tidal_track_id,
+                "confidence": outcome.confidence,
+                "matchReason": outcome.reason,
+                "fromCache": false,
+            }
+        });
+        match outcome.status {
+            resolver::ResolutionStatus::Resolved | resolver::ResolutionStatus::LowConfidence => {
+                resolved.push(row);
+            }
+            resolver::ResolutionStatus::Unresolved => unresolved_payload.push(row),
+        }
+    }
+
+    Ok(Json(json!({
+        "resolved": resolved,
+        "unresolved": unresolved_payload,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveTidalStatusQuery {
+    /// Comma-separated list of Spotify track ids.
+    spotify_ids: String,
+}
+
+/// Cheap polling endpoint: reads the cache only, never hits TIDAL or
+/// Sportify. The frontend's lazy-tail poller calls this every ~1.5s after
+/// opening a list endpoint until everything is non-pending or it times out.
+async fn resolve_tidal_status(
+    State(state): State<SharedState>,
+    Query(params): Query<ResolveTidalStatusQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, resolver};
+
+    let ids: Vec<String> = params
+        .spotify_ids
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_ids required" })),
+        ));
+    }
+
+    let (cache_cfg, db) = {
+        let s = state.read().await;
+        (s.sportify_cache_config, s.db.clone())
+    };
+
+    let entries = db
+        .with_conn(|conn| {
+            let mut out: Vec<Value> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(hit) = sp_cache::get_tidal_resolution(conn, &cache_cfg, id)? {
+                    out.push(json!({
+                        "spotifyId": id,
+                        "tidal": {
+                            "status": resolver::classify(hit.confidence).as_str(),
+                            "id": hit.tidal_track_id,
+                            "confidence": hit.confidence,
+                            "matchReason": hit.match_reason,
+                            "fromCache": true,
+                        }
+                    }));
+                    continue;
+                }
+                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
+                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                        out.push(json!({
+                            "spotifyId": id,
+                            "tidal": {
+                                "status": "unresolved",
+                                "id": null,
+                                "confidence": 0.0,
+                                "matchReason": record.reason,
+                                "fromCache": true,
+                            }
+                        }));
+                        continue;
+                    }
+                }
+                out.push(json!({
+                    "spotifyId": id,
+                    "tidal": {
+                        "status": "pending",
+                        "id": null,
+                        "confidence": 0.0,
+                        "fromCache": false,
+                    }
+                }));
+            }
+            Ok::<_, anyhow::Error>(out)
+        })
+        .map_err(internal)?;
+
+    Ok(Json(json!({ "entries": entries })))
+}
+
+// ─── Sportify discovery read endpoints ──────────────────────
+
+/// Resolve the first `eager_n` Spotify tracks against TIDAL inline (so the
+/// top of the response is instantly playable) and spawn a background task
+/// for the remainder. Both paths persist into `sportify_track_map` /
+/// `sportify_unresolved`, so a follow-up `enrich_tracks_with_tidal_cache`
+/// call reflects the inline resolutions in the response.
+///
+/// Returns the list of spotify_ids spawned for lazy resolution — surfaced in
+/// the response so the frontend's status poller knows what to watch.
+async fn eager_and_lazy_resolve_for_list(
+    state: &SharedState,
+    sportify_tracks: &[crate::services::sportify::models::SportifyTrack],
+) -> Vec<String> {
+    use crate::services::sportify::{cache as sp_cache, resolver};
+
+    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state) = {
+        let s = state.read().await;
+        (
+            s.sportify_cache_config,
+            s.sportify_resolve_config,
+            s.db.clone(),
+            s.tidal_tokens.clone(),
+        )
+    };
+
+    // Filter to entries that need resolution: they have a spotify_id, no
+    // cached resolution, and aren't sitting in a fresh negative-cache row.
+    let needs_resolve: Vec<(String, crate::services::sportify::models::SportifyTrack)> = {
+        let pairs: Vec<(String, crate::services::sportify::models::SportifyTrack)> =
+            sportify_tracks
+                .iter()
+                .filter_map(|t| t.id.clone().map(|id| (id, t.clone())))
+                .collect();
+        let cache_check = db.with_conn(|conn| {
+            let mut keep = Vec::with_capacity(pairs.len());
+            for (id, track) in pairs.iter() {
+                if sp_cache::get_tidal_resolution(conn, &cache_cfg, id)?.is_some() {
+                    continue;
+                }
+                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
+                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                        continue;
+                    }
+                }
+                keep.push((id.clone(), track.clone()));
+            }
+            Ok::<_, anyhow::Error>(keep)
+        });
+        match cache_check {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("eager_and_lazy_resolve cache check failed: {}", e);
+                return Vec::new();
+            }
+        }
+    };
+
+    if needs_resolve.is_empty() {
+        return Vec::new();
+    }
+
+    // Without TIDAL credentials we can't resolve anything. Leave rows pending
+    // so the UI shows them as such — better than persisting bogus failures.
+    let tokens = match tidal_tokens_in_state {
+        Some(t) => Some(t),
+        None => match load_persisted_tidal_tokens(state).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("eager_and_lazy_resolve token load failed: {}", e);
+                None
+            }
+        },
+    };
+    let Some(tokens) = tokens else {
+        return Vec::new();
+    };
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+
+    let eager_count = needs_resolve.len().min(resolve_cfg.eager_n);
+    let (eager, lazy) = needs_resolve.split_at(eager_count);
+
+    // Eager pass: resolve inline and persist before returning.
+    if !eager.is_empty() {
+        let outcomes = resolver::resolve_many(&client, eager, resolve_cfg.bulk_concurrency).await;
+        let _ = db.with_conn(|conn| {
+            for (id, outcome) in &outcomes {
+                persist_outcome(conn, id, outcome);
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    // Lazy pass: spawn detached task. The cache writes show up in the next
+    // status-poll round trip from the frontend.
+    let lazy_ids: Vec<String> = lazy.iter().map(|(id, _)| id.clone()).collect();
+    if !lazy.is_empty() {
+        let lazy_owned = lazy.to_vec();
+        let db_lazy = db.clone();
+        let concurrency = resolve_cfg.bulk_concurrency;
+        tokio::spawn(async move {
+            let outcomes = resolver::resolve_many(&client, &lazy_owned, concurrency).await;
+            let _ = db_lazy.with_conn(|conn| {
+                for (id, outcome) in &outcomes {
+                    persist_outcome(conn, id, outcome);
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+        });
+    }
+
+    lazy_ids
+}
+
+/// Playlist pages need a fast first paint: return cache-only rows immediately
+/// and resolve every remaining Spotify track in the background.
+async fn spawn_background_resolve_for_list(
+    state: &SharedState,
+    sportify_tracks: &[crate::services::sportify::models::SportifyTrack],
+) -> Vec<String> {
+    use crate::services::sportify::{cache as sp_cache, resolver};
+
+    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state) = {
+        let s = state.read().await;
+        (
+            s.sportify_cache_config,
+            s.sportify_resolve_config,
+            s.db.clone(),
+            s.tidal_tokens.clone(),
+        )
+    };
+
+    let needs_resolve: Vec<(String, crate::services::sportify::models::SportifyTrack)> = {
+        let pairs: Vec<(String, crate::services::sportify::models::SportifyTrack)> =
+            sportify_tracks
+                .iter()
+                .filter_map(|t| t.id.clone().map(|id| (id, t.clone())))
+                .collect();
+        match db.with_conn(|conn| {
+            let mut keep = Vec::with_capacity(pairs.len());
+            for (id, track) in pairs.iter() {
+                if sp_cache::get_tidal_resolution(conn, &cache_cfg, id)?.is_some() {
+                    continue;
+                }
+                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
+                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                        continue;
+                    }
+                }
+                keep.push((id.clone(), track.clone()));
+            }
+            Ok::<_, anyhow::Error>(keep)
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("background Sportify resolve cache check failed: {}", e);
+                return Vec::new();
+            }
+        }
+    };
+
+    if needs_resolve.is_empty() {
+        return Vec::new();
+    }
+
+    let pending_ids: Vec<String> = needs_resolve.iter().map(|(id, _)| id.clone()).collect();
+    let tokens = match tidal_tokens_in_state {
+        Some(t) => Some(t),
+        None => match load_persisted_tidal_tokens(state).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("background Sportify resolve token load failed: {}", e);
+                None
+            }
+        },
+    };
+    let Some(tokens) = tokens else {
+        return Vec::new();
+    };
+
+    tokio::spawn(async move {
+        let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+        let outcomes =
+            resolver::resolve_many(&client, &needs_resolve, resolve_cfg.bulk_concurrency).await;
+        let _ = db.with_conn(|conn| {
+            for (id, outcome) in &outcomes {
+                persist_outcome(conn, id, outcome);
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+    });
+
+    pending_ids
+}
+
+fn persist_outcome(
+    conn: &rusqlite::Connection,
+    spotify_id: &str,
+    outcome: &crate::services::sportify::resolver::ResolutionOutcome,
+) {
+    use crate::services::sportify::{cache as sp_cache, resolver::ResolutionStatus};
+    match outcome.status {
+        ResolutionStatus::Resolved | ResolutionStatus::LowConfidence => {
+            if let Some(tidal_id) = outcome.tidal_track_id {
+                let _ = sp_cache::put_tidal_resolution(
+                    conn,
+                    spotify_id,
+                    tidal_id,
+                    outcome.confidence,
+                    Some(&outcome.reason),
+                );
+            }
+        }
+        ResolutionStatus::Unresolved => {
+            let _ = sp_cache::put_unresolved(conn, spotify_id, Some(&outcome.reason));
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SportifySearchQuery {
+    q: String,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+}
+
+fn parse_search_kind(s: Option<&str>) -> crate::services::sportify::client::SportifySearchKind {
+    use crate::services::sportify::client::SportifySearchKind;
+    match s.map(str::to_ascii_lowercase).as_deref() {
+        Some("album") => SportifySearchKind::Album,
+        Some("artist") => SportifySearchKind::Artist,
+        Some("playlist") => SportifySearchKind::Playlist,
+        // Default to track when missing or unknown — matches Sportify's own
+        // most-common usage.
+        _ => SportifySearchKind::Track,
+    }
+}
+
+async fn sportify_discovery_search(
+    State(state): State<SharedState>,
+    Query(params): Query<SportifySearchQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let q = params.q.trim();
+    if q.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "q required" })),
+        ));
+    }
+
+    let kind = parse_search_kind(params.r#type.as_deref());
+    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let offset = params.offset.unwrap_or(0);
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let cached = db
+        .with_conn(|conn| sp_cache::get_search(conn, &cache_cfg, q, kind, limit, offset))
+        .map_err(internal)?;
+
+    let payload = match cached {
+        Some(p) => p,
+        None => {
+            let fetched = sportify_client
+                .search(q, kind, limit, offset)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("sportify_search: {e}") })),
+                    )
+                })?;
+            db.with_conn(|conn| sp_cache::put_search(conn, q, kind, limit, offset, &fetched))
+                .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let mut normalized = normalize::search_from_sportify(&payload, "sportify_search");
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut normalized.tracks)?;
+        for album in normalized.albums.iter_mut() {
+            normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut album.tracks)?;
+        }
+        for playlist in normalized.playlists.iter_mut() {
+            normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut playlist.tracks)?;
+        }
+        Ok(())
+    })
+    .map_err(internal)?;
+
+    Ok(Json(serde_json::to_value(normalized).unwrap_or(json!({}))))
+}
+
+async fn sportify_discovery_track(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let track = match db
+        .with_conn(|conn| sp_cache::get_track_meta(conn, &cache_cfg, id))
+        .map_err(internal)?
+    {
+        Some(t) => t,
+        None => {
+            let fetched = sportify_client.track(id).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("sportify_track_fetch: {e}") })),
+                )
+            })?;
+            db.with_conn(|conn| {
+                sp_cache::put_track_meta(conn, id, &fetched)?;
+                crate::services::sportify::stats::write_track_playcount(conn, &fetched);
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let mut row = normalize::track_from_sportify(&track, "sportify_track");
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, std::slice::from_mut(&mut row))
+    })
+    .map_err(internal)?;
+
+    Ok(Json(serde_json::to_value(row).unwrap_or(json!({}))))
+}
+
+async fn sportify_discovery_album(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let album = match db
+        .with_conn(|conn| sp_cache::get_album_meta(conn, &cache_cfg, id))
+        .map_err(internal)?
+    {
+        Some(a) => a,
+        None => {
+            let fetched = sportify_client.album(id).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("sportify_album_fetch: {e}") })),
+                )
+            })?;
+            db.with_conn(|conn| {
+                sp_cache::put_album_meta(conn, id, &fetched)?;
+                crate::services::sportify::stats::write_track_playcounts(conn, &fetched.tracks);
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let mut row = normalize::album_from_sportify(&album, "sportify_album");
+    let pending_ids = eager_and_lazy_resolve_for_list(&state, &album.tracks).await;
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut row.tracks)
+    })
+    .map_err(internal)?;
+
+    Ok(Json(json!({
+        "album": serde_json::to_value(row).unwrap_or(json!({})),
+        "pendingSpotifyIds": pending_ids,
+    })))
+}
+
+async fn sportify_discovery_playlist(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let playlist = match db
+        .with_conn(|conn| sp_cache::get_playlist_meta(conn, &cache_cfg, id))
+        .map_err(internal)?
+    {
+        Some(p) => p,
+        None => {
+            let fetched = sportify_client.playlist(id).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("sportify_playlist_fetch: {e}") })),
+                )
+            })?;
+            db.with_conn(|conn| {
+                sp_cache::put_playlist_meta(conn, id, &fetched)?;
+                crate::services::sportify::stats::write_track_playcounts(conn, &fetched.tracks);
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let mut row = normalize::playlist_from_sportify(&playlist, "sportify_playlist");
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut row.tracks)
+    })
+    .map_err(internal)?;
+    let pending_ids = spawn_background_resolve_for_list(&state, &playlist.tracks).await;
+
+    Ok(Json(json!({
+        "playlist": serde_json::to_value(row).unwrap_or(json!({})),
+        "pendingSpotifyIds": pending_ids,
+    })))
+}
+
+async fn sportify_discovery_artist(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let artist = match db
+        .with_conn(|conn| sp_cache::get_artist_meta(conn, &cache_cfg, id))
+        .map_err(internal)?
+    {
+        Some(a) => a,
+        None => {
+            let fetched = sportify_client.artist(id).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("sportify_artist_fetch: {e}") })),
+                )
+            })?;
+            db.with_conn(|conn| {
+                sp_cache::put_artist_meta(conn, id, &fetched)?;
+                crate::services::sportify::stats::write_artist_monthly_listeners(conn, &fetched);
+                Ok::<_, anyhow::Error>(())
+            })
+            .map_err(internal)?;
+            fetched
+        }
+    };
+
+    let row = normalize::artist_from_sportify(&artist);
+    Ok(Json(serde_json::to_value(row).unwrap_or(json!({}))))
+}
+
+async fn sportify_discovery_artist_top_tracks(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, normalize};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    // Top tracks aren't cached as a unit (they're a derived list); rely on
+    // the per-track meta cache to absorb repeat hits.
+    let tracks = sportify_client.artist_top_tracks(id).await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("sportify_top_tracks_fetch: {e}") })),
+        )
+    })?;
+
+    db.with_conn(|conn| {
+        for t in &tracks {
+            if let Some(track_id) = t.id.as_deref() {
+                let _ = sp_cache::put_track_meta(conn, track_id, t);
+            }
+        }
+        crate::services::sportify::stats::write_track_playcounts(conn, &tracks);
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(internal)?;
+
+    let mut rows: Vec<_> = tracks
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_artist_top_tracks"))
+        .collect();
+    let pending_ids = eager_and_lazy_resolve_for_list(&state, &tracks).await;
+    db.with_conn(|conn| normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut rows))
+        .map_err(internal)?;
+
+    Ok(Json(json!({
+        "spotifyId": id,
+        "tracks": rows,
+        "pendingSpotifyIds": pending_ids,
+    })))
+}
+
+async fn sportify_discovery_artist_related(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{normalize, recommend};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let related = recommend::artist_related(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_related: {e}") })),
+            )
+        })?;
+
+    // Track lists go through eager+lazy resolution; albums/artists carry no
+    // tidal state since they're just navigation cards.
+    let mut top_rows: Vec<_> = related
+        .top_tracks
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_artist_related_top"))
+        .collect();
+    let mut deep_rows: Vec<_> = related
+        .deep_cuts
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_artist_related_deep"))
+        .collect();
+
+    let mut pending = Vec::new();
+    pending.extend(eager_and_lazy_resolve_for_list(&state, &related.top_tracks).await);
+    pending.extend(eager_and_lazy_resolve_for_list(&state, &related.deep_cuts).await);
+
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut top_rows)?;
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut deep_rows)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(internal)?;
+
+    let recent_releases: Vec<_> = related
+        .recent_releases
+        .iter()
+        .map(|a| normalize::album_from_sportify(a, "sportify_artist_related_recent"))
+        .collect();
+    let similar_artists: Vec<_> = related
+        .similar_artists
+        .iter()
+        .map(normalize::artist_from_sportify)
+        .collect();
+
+    Ok(Json(json!({
+        "spotifyId": id,
+        "topTracks": top_rows,
+        "deepCuts": deep_rows,
+        "recentReleases": recent_releases,
+        "similarArtists": similar_artists,
+        "pendingSpotifyIds": pending,
+    })))
+}
+
+async fn sportify_discovery_album_related(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{normalize, recommend};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let related = recommend::album_related(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_related: {e}") })),
+            )
+        })?;
+
+    let mut more_from_artist: Vec<_> = related
+        .more_from_artist
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_album_related"))
+        .collect();
+    let pending = eager_and_lazy_resolve_for_list(&state, &related.more_from_artist).await;
+
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut more_from_artist)
+    })
+    .map_err(internal)?;
+
+    let more_albums_by_artist: Vec<_> = related
+        .more_albums_by_artist
+        .iter()
+        .map(|a| normalize::album_from_sportify(a, "sportify_album_related_albums"))
+        .collect();
+
+    Ok(Json(json!({
+        "spotifyId": id,
+        "moreFromArtist": more_from_artist,
+        "moreAlbumsByArtist": more_albums_by_artist,
+        "pendingSpotifyIds": pending,
+    })))
+}
+
+async fn sportify_discovery_track_related(
+    State(state): State<SharedState>,
+    Path(spotify_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{normalize, recommend};
+
+    let id = spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let related = recommend::track_related(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_related: {e}") })),
+            )
+        })?;
+
+    let mut more_from_album: Vec<_> = related
+        .more_from_album
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_track_related_album"))
+        .collect();
+    let mut more_from_artist: Vec<_> = related
+        .more_from_artist
+        .iter()
+        .map(|t| normalize::track_from_sportify(t, "sportify_track_related_artist"))
+        .collect();
+
+    let mut pending = Vec::new();
+    pending.extend(eager_and_lazy_resolve_for_list(&state, &related.more_from_album).await);
+    pending.extend(eager_and_lazy_resolve_for_list(&state, &related.more_from_artist).await);
+
+    db.with_conn(|conn| {
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut more_from_album)?;
+        normalize::enrich_tracks_with_tidal_cache(conn, &cache_cfg, &mut more_from_artist)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(internal)?;
+
+    Ok(Json(json!({
+        "spotifyId": id,
+        "moreFromAlbum": more_from_album,
+        "moreFromArtist": more_from_artist,
+        "pendingSpotifyIds": pending,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveSpotifyPlaylistBody {
+    spotify_id: String,
+    /// Override for the noor playlist name. Defaults to the Sportify
+    /// playlist title.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Save an ephemeral Spotify-sourced playlist into the user's library.
+///
+/// Pre-condition: the playlist's tracks have been bulk-resolved against
+/// TIDAL (the ephemeral view does this on open). Tracks without a cached
+/// resolution are skipped — we never invent a placeholder TIDAL id.
+async fn save_spotify_playlist(
+    State(state): State<SharedState>,
+    Json(body): Json<SaveSpotifyPlaylistBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::services::sportify::{cache as sp_cache, recommend};
+
+    let id = body.spotify_id.trim();
+    if id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "spotify_id required" })),
+        ));
+    }
+
+    let (sportify_client, cache_cfg, db) = {
+        let s = state.read().await;
+        (
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+            s.db.clone(),
+        )
+    };
+    let Some(sportify_client) = sportify_client else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sportify_unavailable" })),
+        ));
+    };
+
+    let playlist = recommend::cached_playlist(&sportify_client, &db, &cache_cfg, id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sportify_playlist_fetch: {e}") })),
+            )
+        })?;
+
+    let playlist_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| playlist.name.clone())
+        .unwrap_or_else(|| "Spotify playlist".to_string());
+
+    // Pull cached TIDAL resolutions for the playlist's tracks. Tracks without
+    // a cached hit are skipped here — the frontend should bulk-resolve before
+    // calling Save.
+    let resolutions: Vec<(crate::services::sportify::models::SportifyTrack, i64)> = db
+        .with_conn(|conn| {
+            let mut out = Vec::new();
+            for t in &playlist.tracks {
+                let Some(spotify_track_id) = t.id.as_deref() else {
+                    continue;
+                };
+                if let Some(hit) =
+                    sp_cache::get_tidal_resolution(conn, &cache_cfg, spotify_track_id)?
+                {
+                    out.push((t.clone(), hit.tidal_track_id));
+                }
+            }
+            Ok::<_, anyhow::Error>(out)
+        })
+        .map_err(internal)?;
+
+    let total_tracks = playlist.tracks.len();
+    let resolved_count = resolutions.len();
+    let unresolved_count = total_tracks.saturating_sub(resolved_count);
+
+    if resolutions.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "no_resolved_tracks",
+                "totalTracks": total_tracks,
+                "resolvedCount": 0,
+                "unresolvedCount": unresolved_count,
+            })),
+        ));
+    }
+
+    // Import each resolved TIDAL track into the local library so it has a
+    // local_id for the playlist join. Failures are skipped, not fatal.
+    let mut local_ids: Vec<i64> = Vec::with_capacity(resolutions.len());
+    let mut import_failures: usize = 0;
+    for (sp_track, tidal_id) in &resolutions {
+        let metadata = tidal_import::ImportTrackMetadata {
+            tidal_id: *tidal_id,
+            title: sp_track.name.clone().unwrap_or_default(),
+            artist_name: sp_track
+                .primary_artist()
+                .map(str::to_string)
+                .unwrap_or_default(),
+            artist_tidal_id: None,
+            artist_picture: None,
+            album_title: sp_track.album.as_ref().and_then(|a| a.name.clone()),
+            album_tidal_id: None,
+            album_artwork_url: sp_track.best_thumbnail(),
+            duration_ms: sp_track.duration_ms,
+        };
+        match tidal_import::import_track_from_metadata(&db, metadata).await {
+            Ok(imported) => local_ids.push(imported.local_id),
+            Err(e) => {
+                tracing::warn!(
+                    "save_spotify_playlist: import failed for tidal_id {}: {}",
+                    tidal_id,
+                    e
+                );
+                import_failures += 1;
+            }
+        }
+    }
+
+    if local_ids.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "all_imports_failed",
+                "totalTracks": total_tracks,
+                "resolvedCount": resolved_count,
+                "importFailures": import_failures,
+            })),
+        ));
+    }
+
+    // Create the playlist row and bulk-add tracks in a single transaction.
+    let result = db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+                 VALUES (?1, ?2, 0, 0, 0)",
+                params![playlist_name, playlist.description],
+            )?;
+            let playlist_id = conn.last_insert_rowid();
+            let added = queries::add_tracks_to_playlist(conn, playlist_id, &local_ids)?;
+            let row = queries::get_playlist(conn, playlist_id)?
+                .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
+            Ok::<_, anyhow::Error>((row, added))
+        })
+        .map_err(internal)?;
+
+    Ok(Json(json!({
+        "playlist": result.0,
+        "added": result.1,
+        "totalTracks": total_tracks,
+        "resolvedCount": resolved_count,
+        "unresolvedCount": unresolved_count,
+        "importFailures": import_failures,
+    })))
+}
+
+fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": e.to_string() })),
+    )
+}
+
 async fn get_discovery_space(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoverySpaceRequest>,
@@ -3773,11 +5283,13 @@ async fn radio_start(
     // Build queue atomically and collect pending row IDs for background tasks.
     let build = db
         .with_conn(move |conn| {
-            Ok(crate::server::radio_pipeline::build_radio_queue_from_candidates(
-                conn,
-                payload.seed_track_id,
-                radio_queue.tracks,
-            )?)
+            Ok(
+                crate::server::radio_pipeline::build_radio_queue_from_candidates(
+                    conn,
+                    payload.seed_track_id,
+                    radio_queue.tracks,
+                )?,
+            )
         })
         .map_err(|e| {
             tracing::error!("radio_start: queue build failed: {e}");
@@ -5503,16 +7015,109 @@ async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
     let limit = params.limit.unwrap_or(20);
 
-    state
-        .db
-        .with_conn(|conn| {
-            let results = queries::search(conn, &params.q, limit)?;
-            Ok(Json(json!(results)))
+    // Snapshot what each side needs without holding the read lock across the
+    // Sportify HTTP call.
+    let (db, sportify_client, cache_cfg) = {
+        let s = state.read().await;
+        (
+            s.db.clone(),
+            s.sportify_client.clone(),
+            s.sportify_cache_config,
+        )
+    };
+
+    // Local DB search — must succeed; this is the existing contract.
+    let local = db
+        .with_conn(|conn| queries::search(conn, &params.q, limit))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Sportify playlist results — best-effort, never fails the request.
+    // Sportify is upstream and subject to breakage; we'd rather show local
+    // results with no Spotify bucket than 500 the search.
+    let spotify_playlists = match sportify_client {
+        Some(client) => fetch_spotify_playlist_search_compact(
+            &client,
+            &db,
+            &cache_cfg,
+            &params.q,
+            limit.min(20).max(1) as u32,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("sportify playlist search failed: {}", e);
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+
+    Ok(Json(json!({
+        "tracks": local.tracks,
+        "albums": local.albums,
+        "artists": local.artists,
+        "spotify_playlists": spotify_playlists,
+    })))
+}
+
+/// Compact playlist-search result tailored for inline rendering in /search
+/// and Ctrl+K. Drops the heavyweight track-list payload — the ephemeral
+/// view fetches that on click.
+#[derive(Debug, Serialize)]
+struct SpotifyPlaylistSearchItem {
+    spotify_id: String,
+    name: String,
+    description: Option<String>,
+    image_url: Option<String>,
+    owner: Option<String>,
+    follower_count: Option<i64>,
+    total_tracks: Option<i32>,
+}
+
+async fn fetch_spotify_playlist_search_compact(
+    client: &crate::services::sportify::SportifyClient,
+    db: &crate::db::Database,
+    cfg: &crate::services::sportify::cache::SportifyCacheConfig,
+    query: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<SpotifyPlaylistSearchItem>> {
+    use crate::services::sportify::client::SportifySearchKind;
+    use crate::services::sportify::recommend::cached_search;
+
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let results = cached_search(
+        client,
+        db,
+        cfg,
+        query,
+        SportifySearchKind::Playlist,
+        limit,
+        0,
+    )
+    .await?;
+
+    Ok(results
+        .playlists
+        .into_iter()
+        .filter_map(|p| {
+            let id = p.spotify_id()?;
+            Some(SpotifyPlaylistSearchItem {
+                spotify_id: id,
+                name: p.title().unwrap_or_default(),
+                description: p.description.clone(),
+                image_url: p.best_thumbnail(),
+                owner: p
+                    .owner
+                    .as_ref()
+                    .and_then(|o| o.display_name().map(str::to_string)),
+                follower_count: p.follower_count(),
+                total_tracks: p.total_track_count(),
+            })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -6348,17 +7953,21 @@ async fn resolve_pending_row(
     };
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let resolved =
-        match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
-                release(&db, queue_item_id);
-                return;
-            }
-        };
+    let resolved = match find_pending_tidal_match(
+        &client,
+        &pending_artist,
+        &pending_title,
+        tidal_id_hint,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
+            release(&db, queue_item_id);
+            return;
+        }
+    };
 
     let (score, metadata) = match resolved {
         Some(p) => p,
@@ -6509,8 +8118,7 @@ async fn resolve_pending_current_queue_item(
         let s = state.read().await;
         s.event_tx.clone()
     };
-    let promoted =
-        promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
+    let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
 
     if !promoted {
         return None;
@@ -6524,9 +8132,7 @@ async fn resolve_pending_current_queue_item(
         )
         .map_err(anyhow::Error::from)
     });
-    let _ = event_tx.send(AppEvent::TrackChanged {
-        track_id: local_id,
-    });
+    let _ = event_tx.send(AppEvent::TrackChanged { track_id: local_id });
     let _ = event_tx.send(AppEvent::PlaybackStateChanged);
 
     db.with_conn(move |conn| queue::get_track_by_id(conn, local_id))
@@ -7087,12 +8693,8 @@ async fn queue_append(
     State(state): State<SharedState>,
     Json(payload): Json<QueueExternalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let insert = queue_external_insert(&payload, "user_queue").map_err(|message| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": message })),
-        )
-    })?;
+    let insert = queue_external_insert(&payload, "user_queue")
+        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
     let (queue, inserted) = {
         let state_guard = state.read().await;
@@ -7123,16 +8725,57 @@ async fn queue_append(
     Ok(Json(json!({ "queue": queue })))
 }
 
+async fn queue_append_many(
+    State(state): State<SharedState>,
+    Json(payload): Json<QueueExternalManyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let inserts: Vec<_> = payload
+        .items
+        .iter()
+        .map(|item| queue_external_insert(item, "user_queue"))
+        .collect::<Result<_, _>>()
+        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
+
+    let (queue, inserted) = {
+        let state_guard = state.read().await;
+        state_guard
+            .user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let event_tx = state_guard.event_tx.clone();
+        state_guard
+            .db
+            .with_conn(|conn| {
+                let mut inserted = Vec::with_capacity(inserts.len());
+                for insert in &inserts {
+                    inserted.push(queue::append_external_track(conn, insert)?);
+                }
+                let queue = queue::load_queue(conn)?;
+                let _ = event_tx.send(AppEvent::QueueUpdated);
+                Ok((queue, inserted))
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to append queue items" })),
+                )
+            })?
+    };
+
+    for item in inserted {
+        if let queue::InsertResult::Pending { queue_id } = item {
+            spawn_pending_queue_resolver(&state, queue_id).await;
+        }
+    }
+
+    Ok(Json(json!({ "queue": queue })))
+}
+
 async fn queue_play_next(
     State(state): State<SharedState>,
     Json(payload): Json<QueueExternalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let insert = queue_external_insert(&payload, "user_play_next").map_err(|message| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": message })),
-        )
-    })?;
+    let insert = queue_external_insert(&payload, "user_play_next")
+        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
 
     let (queue, inserted) = {
         let state_guard = state.read().await;
@@ -7161,6 +8804,63 @@ async fn queue_play_next(
 
     if let queue::InsertResult::Pending { queue_id } = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
+    }
+
+    Ok(Json(json!({ "queue": queue })))
+}
+
+async fn queue_play_next_many(
+    State(state): State<SharedState>,
+    Json(payload): Json<QueueExternalManyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let inserts: Vec<_> = payload
+        .items
+        .iter()
+        .map(|item| queue_external_insert(item, "user_play_next"))
+        .collect::<Result<_, _>>()
+        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
+
+    let (queue, inserted) = {
+        let state_guard = state.read().await;
+        state_guard
+            .user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let event_tx = state_guard.event_tx.clone();
+        state_guard
+            .db
+            .with_conn(|conn| {
+                let mut inserted = Vec::with_capacity(inserts.len());
+                match current_queue_position(conn)? {
+                    Some(position) => {
+                        // Insert in reverse so repeated "after current" inserts preserve
+                        // the caller's original order in the queue.
+                        for insert in inserts.iter().rev() {
+                            inserted
+                                .push(queue::insert_external_track_after(conn, insert, position)?);
+                        }
+                    }
+                    None => {
+                        for insert in &inserts {
+                            inserted.push(queue::append_external_track(conn, insert)?);
+                        }
+                    }
+                }
+                let queue = queue::load_queue(conn)?;
+                let _ = event_tx.send(AppEvent::QueueUpdated);
+                Ok((queue, inserted))
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to insert queue items" })),
+                )
+            })?
+    };
+
+    for item in inserted {
+        if let queue::InsertResult::Pending { queue_id } = item {
+            spawn_pending_queue_resolver(&state, queue_id).await;
+        }
     }
 
     Ok(Json(json!({ "queue": queue })))
@@ -7619,6 +9319,7 @@ async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
 struct TidalSearchParams {
     q: String,
     limit: Option<i32>,
+    offset: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -7679,10 +9380,11 @@ async fn tidal_search(
     };
 
     let limit = params.limit.unwrap_or(20).min(50);
+    let offset = params.offset.unwrap_or(0).max(0);
     let http_client = state.read().await.http_client.clone();
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let results = match client.search_catalog(&params.q, limit).await {
+    let results = match client.search_catalog(&params.q, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -7698,7 +9400,7 @@ async fn tidal_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_catalog(&params.q, limit)
+                .search_catalog(&params.q, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -7794,6 +9496,8 @@ struct TidalPlaylistSearchParams {
     q: String,
     #[serde(default)]
     limit: Option<i32>,
+    #[serde(default)]
+    offset: Option<i32>,
 }
 
 async fn tidal_playlist_search(
@@ -7818,9 +9522,10 @@ async fn tidal_playlist_search(
     };
 
     let limit = params.limit.unwrap_or(20).min(50);
+    let offset = params.offset.unwrap_or(0).max(0);
     let http_client = state.read().await.http_client.clone();
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let playlists = match client.search_playlists(&params.q, limit).await {
+    let playlists = match client.search_playlists(&params.q, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
@@ -7836,7 +9541,7 @@ async fn tidal_playlist_search(
                 refreshed.country_code.clone(),
             );
             retry_client
-                .search_playlists(&params.q, limit)
+                .search_playlists(&params.q, limit, offset)
                 .await
                 .map_err(|e2| {
                     (
@@ -12200,6 +13905,10 @@ mod tests {
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             spotify_public_stats_enabled: false,
+            sportify_client: None,
+            sportify_cache_config: crate::services::sportify::cache::SportifyCacheConfig::default(),
+            sportify_resolve_config:
+                crate::services::sportify::cache::SportifyResolveConfig::default(),
         }
     }
 
@@ -12224,7 +13933,10 @@ mod tests {
 
     fn seed_basic_tracks(db: &Database) {
         db.with_conn(|conn| {
-            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')", [])?;
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+                [],
+            )?;
             conn.execute(
                 "INSERT INTO tracks (
                     id, title, artist_id, duration_ms, source, fidelity_score
@@ -12347,9 +14059,11 @@ mod tests {
 
         let source: String = db
             .with_conn(|conn| {
-                Ok(conn.query_row("SELECT source FROM queue WHERE track_id = 1", [], |row| {
-                    row.get(0)
-                })?)
+                Ok(
+                    conn.query_row("SELECT source FROM queue WHERE track_id = 1", [], |row| {
+                        row.get(0)
+                    })?,
+                )
             })
             .unwrap();
         assert_eq!(source, "user_queue");
@@ -12429,18 +14143,107 @@ mod tests {
                 )?)
             })
             .unwrap();
-        assert_eq!(pending, (1, "user_play_next".into(), "External Artist".into(), "External Title".into(), Some(777)));
+        assert_eq!(
+            pending,
+            (
+                1,
+                "user_play_next".into(),
+                "External Artist".into(),
+                "External Title".into(),
+                Some(777)
+            )
+        );
 
         let shifted_pos: i32 = db
             .with_conn(|conn| {
-                Ok(conn.query_row(
-                    "SELECT position FROM queue WHERE track_id = 2",
-                    [],
-                    |row| row.get(0),
-                )?)
+                Ok(
+                    conn.query_row("SELECT position FROM queue WHERE track_id = 2", [], |row| {
+                        row.get(0)
+                    })?,
+                )
             })
             .unwrap();
         assert_eq!(shifted_pos, 2);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn queue_play_next_many_preserves_requested_order() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            let qid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                rusqlite::params![qid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue/play_next_many")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"items":[
+                            {"kind":"tidal","tidal_id":101,"artist":"A","title":"First external"},
+                            {"kind":"tidal","tidal_id":102,"artist":"B","title":"Second external"}
+                        ]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().unwrap().len(), 4);
+        assert_eq!(body["queue"][1]["track"]["title"], "First external");
+        assert_eq!(body["queue"][2]["track"]["title"], "Second external");
+        assert_eq!(body["queue"][3]["track"]["id"], 2);
+
+        let rows: Vec<(i32, String, Option<i64>)> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT position, pending_title, tidal_id_hint
+                     FROM queue
+                     WHERE track_id IS NULL
+                     ORDER BY position ASC",
+                )?;
+                Ok(stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "First external".to_string(), Some(101)),
+                (2, "Second external".to_string(), Some(102)),
+            ]
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -12524,11 +14327,11 @@ mod tests {
 
         let queue_item_id: i64 = db
             .with_conn(|conn| {
-                Ok(conn.query_row(
-                    "SELECT id FROM queue WHERE track_id IS NULL",
-                    [],
-                    |row| row.get(0),
-                )?)
+                Ok(
+                    conn.query_row("SELECT id FROM queue WHERE track_id IS NULL", [], |row| {
+                        row.get(0)
+                    })?,
+                )
             })
             .unwrap();
 
@@ -12559,7 +14362,10 @@ mod tests {
         let again = promote_pending_row_emit(&db, &event_tx, queue_item_id, 1, 950);
         assert!(!again);
         let no_more = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
-        assert!(no_more.is_err(), "no second event should fire on idempotent retry");
+        assert!(
+            no_more.is_err(),
+            "no second event should fire on idempotent retry"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }

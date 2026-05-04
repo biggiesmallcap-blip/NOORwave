@@ -285,13 +285,14 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
-    pub async fn search_playlists(&self, query: &str, limit: i32) -> Result<Vec<TidalPlaylist>> {
+    pub async fn search_playlists(&self, query: &str, limit: i32, offset: i32) -> Result<Vec<TidalPlaylist>> {
         let url = format!(
-            "{}/search?query={}&countryCode={}&limit={}&types=PLAYLISTS",
+            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=PLAYLISTS",
             TIDAL_API_URL,
             urlencoding::encode(query),
             self.country_code,
             limit,
+            offset.max(0),
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         let items = payload
@@ -359,13 +360,14 @@ impl TidalClient {
 
     // ─── Search ────────────────────────────────────────────
 
-    pub async fn search_catalog(&self, query: &str, limit: i32) -> Result<TidalSearchCatalog> {
+    pub async fn search_catalog(&self, query: &str, limit: i32, offset: i32) -> Result<TidalSearchCatalog> {
         let url = format!(
-            "{}/search?query={}&countryCode={}&limit={}&types=TRACKS,ALBUMS,ARTISTS",
+            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=TRACKS,ALBUMS,ARTISTS",
             TIDAL_API_URL,
             urlencoding::encode(query),
             self.country_code,
-            limit
+            limit,
+            offset.max(0)
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
 
@@ -405,7 +407,7 @@ impl TidalClient {
     }
 
     pub async fn search(&self, query: &str, limit: i32) -> Result<Vec<TidalSearchTrack>> {
-        Ok(self.search_catalog(query, limit).await?.tracks)
+        Ok(self.search_catalog(query, limit, 0).await?.tracks)
     }
 
     /// Fetch Tidal editorial "Top Tracks" for the user's region.

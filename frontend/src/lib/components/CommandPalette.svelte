@@ -3,7 +3,13 @@
 	import { quintOut } from 'svelte/easing';
 	import { goto } from '$app/navigation';
 	import { get } from 'svelte/store';
-	import { api, type TidalSearchTrack, type TidalSearchAlbum, type TidalSearchArtist } from '$lib/api/client';
+	import {
+		api,
+		type TidalSearchTrack,
+		type TidalSearchAlbum,
+		type TidalSearchArtist,
+		type SpotifyPlaylistSearchItem,
+	} from '$lib/api/client';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
 	import {
 		playTidalTrackNow,
@@ -23,6 +29,7 @@
 	let tracks = $state<TidalSearchTrack[]>([]);
 	let albums = $state<TidalSearchAlbum[]>([]);
 	let artists = $state<TidalSearchArtist[]>([]);
+	let spotifyPlaylists = $state<SpotifyPlaylistSearchItem[]>([]);
 	let cursor = $state(0);
 	let debounceTimer: ReturnType<typeof setTimeout>;
 	let rowEls: (HTMLElement | null)[] = $state([]);
@@ -32,7 +39,9 @@
 
 	// Total navigable items count (for cursor wrapping)
 	const totalItems = $derived(
-		isSlashMode ? slashMatches.length : tracks.length + albums.length + artists.length
+		isSlashMode
+			? slashMatches.length
+			: tracks.length + albums.length + artists.length + spotifyPlaylists.length
 	);
 
 	$effect(() => {
@@ -43,6 +52,7 @@
 			tracks = [];
 			albums = [];
 			artists = [];
+			spotifyPlaylists = [];
 			cursor = 0;
 		}
 	});
@@ -58,19 +68,29 @@
 			tracks = [];
 			albums = [];
 			artists = [];
+			spotifyPlaylists = [];
 			loading = false;
 			return;
 		}
 		loading = true;
 		debounceTimer = setTimeout(async () => {
-			try {
-				const res = await api.searchTidal(query.trim());
-				tracks = res.tracks.slice(0, 5);
-				albums = res.albums.slice(0, 3);
-				artists = res.artists.slice(0, 3);
-			} catch { /* silent */ } finally {
-				loading = false;
+			// TIDAL + Spotify playlist searches in parallel. A Sportify outage
+			// must never block TIDAL results from rendering.
+			const [tidalRes, spotifyRes] = await Promise.allSettled([
+				api.searchTidal(query.trim()),
+				api.searchSpotifyPlaylists(query.trim(), 6),
+			]);
+			if (tidalRes.status === 'fulfilled') {
+				tracks = tidalRes.value.tracks.slice(0, 5);
+				albums = tidalRes.value.albums.slice(0, 3);
+				artists = tidalRes.value.artists.slice(0, 3);
+			} else {
+				tracks = [];
+				albums = [];
+				artists = [];
 			}
+			spotifyPlaylists = spotifyRes.status === 'fulfilled' ? spotifyRes.value.slice(0, 4) : [];
+			loading = false;
 		}, 220);
 	}
 
@@ -87,6 +107,11 @@
 	function selectArtist(artist: TidalSearchArtist) {
 		close();
 		goto(artist.local_id ? `/artists/${artist.local_id}` : `/tidal/artists/${artist.tidal_id}`);
+	}
+
+	function selectSpotifyPlaylist(playlist: SpotifyPlaylistSearchItem) {
+		close();
+		goto(`/spotify-playlist/${playlist.spotifyId}`);
 	}
 
 	// Wrap menu items so they always close the palette after firing.
@@ -253,12 +278,18 @@
 				return;
 			}
 			// Normal search mode: activate cursor item
-			const allItems = [...artists, ...albums, ...tracks];
-			const item = allItems[cursor];
-			if (!item) return;
-			if ('name' in item) selectArtist(item as TidalSearchArtist);
-			else if (!('duration_ms' in item)) selectAlbum(item as TidalSearchAlbum);
-			else void selectTrack(item as TidalSearchTrack);
+			const idx = cursor;
+			if (idx < artists.length) {
+				selectArtist(artists[idx]);
+			} else if (idx < artists.length + albums.length) {
+				selectAlbum(albums[idx - artists.length]);
+			} else if (idx < artists.length + albums.length + tracks.length) {
+				void selectTrack(tracks[idx - artists.length - albums.length]);
+			} else if (idx < artists.length + albums.length + tracks.length + spotifyPlaylists.length) {
+				selectSpotifyPlaylist(
+					spotifyPlaylists[idx - artists.length - albums.length - tracks.length],
+				);
+			}
 		}
 	}
 </script>
@@ -306,7 +337,7 @@
 					</li>
 				{/each}
 			</ul>
-		{:else if !isSlashMode && (tracks.length > 0 || albums.length > 0 || artists.length > 0)}
+		{:else if !isSlashMode && (tracks.length > 0 || albums.length > 0 || artists.length > 0 || spotifyPlaylists.length > 0)}
 			<ul class="palette-list">
 				{#each artists as artist, i (artist.tidal_id)}
 					{@const idx = i}
@@ -384,6 +415,26 @@
 							onclick={(e) => handleMoreClick(e, idx)}
 							onkeydown={(e) => handleMoreKeydown(e, idx)}
 						>⋯</button>
+					</li>
+				{/each}
+				{#each spotifyPlaylists as playlist, i (playlist.spotifyId)}
+					{@const idx = artists.length + albums.length + tracks.length + i}
+					<li class="palette-row-wrap" class:palette-row-wrap--active={cursor === idx} bind:this={rowEls[idx]}>
+						<button
+							class="palette-row"
+							onclick={() => selectSpotifyPlaylist(playlist)}
+						>
+							{#if playlist.thumbnail}
+								<div class="row-art" style="background-image:url('{playlist.thumbnail}')"></div>
+							{:else}
+								<div class="row-art row-art--fallback">♫</div>
+							{/if}
+							<div class="row-meta">
+								<span class="row-title">{playlist.title ?? 'Untitled playlist'}</span>
+								{#if playlist.owner}<span class="row-sub">{playlist.owner}{playlist.totalTracks ? ` · ${playlist.totalTracks} tracks` : ''}</span>{/if}
+							</div>
+							<span class="row-kind row-kind--spotify">Spotify</span>
+						</button>
 					</li>
 				{/each}
 			</ul>
@@ -520,6 +571,7 @@
 	.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 	.row-sub { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-kind { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
+	.row-kind--spotify { color: #1ed760; font-weight: 600; }
 	.row-lib { font-size: 10px; color: var(--accent); flex-shrink: 0; }
 	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: monospace; flex-shrink: 0; }
 	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: monospace; flex-shrink: 0; }

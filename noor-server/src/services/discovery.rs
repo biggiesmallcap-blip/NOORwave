@@ -217,7 +217,7 @@ impl DiscoveryProvider for TidalDiscoveryProvider {
         for query in queries {
             let catalog = self
                 .client
-                .search_catalog(query, limit_per_query as i32)
+                .search_catalog(query, limit_per_query as i32, 0)
                 .await?;
             tracks.extend(
                 self.collect_catalog_tracks(query, catalog, limit_per_query)
@@ -241,7 +241,7 @@ impl DiscoveryProvider for TidalDiscoveryProvider {
                 seed.artist_name.as_deref().unwrap_or_default(),
                 album_title
             );
-            let catalog = self.client.search_catalog(&album_query, 4).await?;
+            let catalog = self.client.search_catalog(&album_query, 4, 0).await?;
             tracks.extend(
                 self.collect_catalog_tracks(&album_query, catalog, limit_per_query)
                     .await?
@@ -257,7 +257,7 @@ impl DiscoveryProvider for TidalDiscoveryProvider {
         for query in queries {
             let catalog = self
                 .client
-                .search_catalog(query, limit_per_query as i32)
+                .search_catalog(query, limit_per_query as i32, 0)
                 .await?;
             tracks.extend(
                 self.collect_catalog_tracks(query, catalog, limit_per_query)

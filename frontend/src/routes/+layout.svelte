@@ -1039,6 +1039,15 @@
 						title="Quiet mode"
 						onclick={openQuietMode}
 					>⛶</button>
+					<button
+						class="np-art-fav"
+						class:active={$currentTrack?.is_favorite}
+						aria-label={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+						title={$currentTrack?.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+						aria-pressed={$currentTrack?.is_favorite}
+						disabled={desktopFavoritePending}
+						onclick={() => void handleDesktopFavoriteToggle()}
+					>{$currentTrack?.is_favorite ? '♥' : '♡'}</button>
 				{/if}
 			</div>
 
@@ -1063,8 +1072,6 @@
 				isPlaying={$isPlaying}
 				shuffleMode={$shuffleMode}
 				repeatMode={$repeatMode}
-				favoritePending={desktopFavoritePending}
-				onToggleFavorite={() => void handleDesktopFavoriteToggle()}
 				onCycleShuffle={() => void cyclePlayerShuffleMode()}
 				onPrev={() => void playPreviousTrack()}
 				onPlayPause={() => void togglePlayback()}
@@ -2021,6 +2028,51 @@
 
 	.np-fullscreen-btn:hover {
 		background: rgba(0, 0, 0, 0.65);
+	}
+
+	.np-art-fav {
+		position: absolute;
+		bottom: 10px;
+		right: 10px;
+		width: 36px;
+		height: 36px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		font-size: 18px;
+		line-height: 1;
+		color: rgba(255, 255, 255, 0.92);
+		background: rgba(0, 0, 0, 0.45);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		backdrop-filter: blur(8px);
+		cursor: pointer;
+		transition:
+			transform 160ms ease,
+			background 160ms ease,
+			color 160ms ease,
+			border-color 160ms ease,
+			box-shadow 160ms ease;
+	}
+
+	.np-art-fav:hover {
+		background: rgba(0, 0, 0, 0.65);
+		transform: translateY(-1px);
+	}
+
+	.np-art-fav:active {
+		transform: scale(0.92);
+	}
+
+	.np-art-fav:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.np-art-fav.active {
+		color: #ff4d6d;
+		background: color-mix(in srgb, #ff4d6d 24%, rgba(0, 0, 0, 0.55));
+		border-color: color-mix(in srgb, #ff4d6d 60%, transparent);
+		box-shadow: 0 0 14px color-mix(in srgb, #ff4d6d 40%, transparent);
 	}
 
 	.np-artwork {
