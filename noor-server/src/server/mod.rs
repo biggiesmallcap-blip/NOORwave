@@ -7,7 +7,7 @@ use anyhow::Result;
 use axum::{
     Router,
     extract::{ConnectInfo, Request, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     middleware::Next,
     response::{Json, Response},
     routing::{get, post},
@@ -69,6 +69,7 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
             let index_html = www.join("index.html");
             public_base
                 .fallback_service(ServeDir::new(&www).not_found_service(ServeFile::new(index_html)))
+                .layer(axum::middleware::from_fn(no_store_cache))
         }
         None => public_base,
     };
@@ -184,4 +185,13 @@ async fn require_token(
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+async fn no_store_cache(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp
 }

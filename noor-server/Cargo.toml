@@ -1,6 +1,6 @@
 [package]
 name = "noor-server"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 description = "NOOR â€” Multi-service music library manager + hi-fi player"
 
@@ -11,7 +11,7 @@ description = "NOOR â€” Multi-service music library manager + hi-fi player"
 # required to actually hit Spotify. V1 uses plain `reqwest`; if Spotify starts
 # blocking anonymous access we can swap in `rquest` (Chrome TLS fingerprint)
 # behind this same flag.
-default = []
+default = ["spotify-public"]
 spotify-public = []
 
 [dependencies]
