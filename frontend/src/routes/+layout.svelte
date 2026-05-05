@@ -64,6 +64,7 @@
 	import { palette } from '$lib/stores/palette';
 	import { paletteById } from '$lib/components/wallpaper/palettes';
 	import {
+		requestVideoClear,
 		requestVideoAutoplayToggle,
 		requestVideoJump,
 		videoSession,
@@ -1065,6 +1066,12 @@
 				<div class="video-panel-queue-head">
 					<span class="eyebrow">Queue</span>
 					<span>{$videoSessionUpcoming.length} up next</span>
+					<button
+						class="video-panel-queue-clear"
+						type="button"
+						title="Clear video queue"
+						onclick={() => requestVideoClear()}
+					>⌫</button>
 				</div>
 				{#if $videoSession.queue.length > 0}
 					<div class="video-panel-list">
@@ -1999,6 +2006,22 @@
 		align-items: center;
 		gap: 10px;
 		padding-bottom: 10px;
+	}
+
+	.video-panel-queue-clear {
+		margin-left: auto;
+		background: none;
+		border: none;
+		color: var(--text-muted);
+		cursor: pointer;
+		font-size: 0.85rem;
+		padding: 0.15rem 0.3rem;
+		border-radius: 4px;
+		line-height: 1;
+	}
+	.video-panel-queue-clear:hover {
+		color: var(--text);
+		background: var(--surface-hover, rgba(255, 255, 255, 0.07));
 	}
 
 	.video-panel-list {

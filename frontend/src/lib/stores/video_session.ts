@@ -73,6 +73,7 @@ export const videoSessionUpcoming = derived(session, ($session) => {
 
 export const videoJumpRequest = writable<{ videoId: number; nonce: number } | null>(null);
 export const videoAutoplayToggleRequest = writable(0);
+export const videoClearRequest = writable(0);
 
 let jumpNonce = 0;
 
@@ -82,4 +83,8 @@ export function requestVideoJump(videoId: number) {
 
 export function requestVideoAutoplayToggle() {
 	videoAutoplayToggleRequest.update((nonce) => nonce + 1);
+}
+
+export function requestVideoClear() {
+	videoClearRequest.update((n) => n + 1);
 }

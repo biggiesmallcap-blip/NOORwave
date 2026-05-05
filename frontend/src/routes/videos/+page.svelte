@@ -13,6 +13,7 @@
 	import { showToast } from '$lib/stores/toast';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import {
+		videoClearRequest,
 		videoAutoplayToggleRequest,
 		videoJumpRequest,
 		videoSession,
@@ -22,8 +23,46 @@
 	const PAGE_SIZE = 40;
 	const RECENT_KEY = 'noor_recent_video_searches';
 	const AUTOPLAY_KEY = 'noor_video_autoplay_next';
+	const SESSION_SNAPSHOT_KEY = 'noor_video_session_snapshot';
 	const RECENT_MAX = 8;
 	const HINTS = ['music video', 'live session', 'official video', 'visualizer'];
+
+	interface VideoPageSnapshot {
+		selectedVideo: TidalSearchVideo | TidalVideoMixItem | null;
+		videos: TidalSearchVideo[];
+		mixItems: TidalVideoMixItem[];
+		query: string;
+		lastQuery: string;
+		activeMixId: string | null;
+		hasMore: boolean;
+		offset: number;
+		streamUrl: string | null;
+		streamExpiresAt: string | null;
+	}
+
+	function saveSessionSnapshot() {
+		if (typeof sessionStorage === 'undefined' || !selectedVideo) return;
+		try {
+			const snap: VideoPageSnapshot = {
+				selectedVideo, videos, mixItems, query, lastQuery,
+				activeMixId, hasMore, offset, streamUrl, streamExpiresAt,
+			};
+			sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(snap));
+		} catch {}
+	}
+
+	function loadSessionSnapshot(): VideoPageSnapshot | null {
+		if (typeof sessionStorage === 'undefined') return null;
+		try {
+			const raw = sessionStorage.getItem(SESSION_SNAPSHOT_KEY);
+			return raw ? (JSON.parse(raw) as VideoPageSnapshot) : null;
+		} catch { return null; }
+	}
+
+	function clearSessionSnapshot() {
+		if (typeof sessionStorage === 'undefined') return;
+		sessionStorage.removeItem(SESSION_SNAPSHOT_KEY);
+	}
 
 	type PrefetchedVideoStream = {
 		videoId: number;
@@ -58,6 +97,7 @@
 	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
 	let handledJumpNonce = 0;
 	let handledAutoplayToggleNonce = 0;
+	let handledClearNonce = 0;
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
@@ -395,6 +435,38 @@
 
 	onMount(() => {
 		void audioSettings.load();
+		const params = new URLSearchParams(window.location.search);
+		const hasExplicitParams = params.has('q') || params.has('videoId') || params.has('mixId');
+
+		if (!hasExplicitParams) {
+			const snap = loadSessionSnapshot();
+			if (snap?.selectedVideo) {
+				selectedVideo = snap.selectedVideo;
+				videos = snap.videos ?? [];
+				mixItems = snap.mixItems ?? [];
+				query = snap.query ?? '';
+				lastQuery = snap.lastQuery ?? '';
+				activeMixId = snap.activeMixId ?? null;
+				hasMore = snap.hasMore ?? false;
+				offset = snap.offset ?? 0;
+
+				const streamFresh =
+					snap.streamUrl &&
+					snap.streamExpiresAt &&
+					new Date(snap.streamExpiresAt).getTime() > Date.now() + 30_000;
+				if (streamFresh) {
+					streamUrl = snap.streamUrl;
+					streamExpiresAt = snap.streamExpiresAt;
+				} else {
+					void selectVideo(snap.selectedVideo, false);
+				}
+
+				const onPop = () => void parseUrl();
+				window.addEventListener('popstate', onPop);
+				return () => window.removeEventListener('popstate', onPop);
+			}
+		}
+
 		void parseUrl();
 		const onPop = () => void parseUrl();
 		window.addEventListener('popstate', onPop);
@@ -429,6 +501,8 @@
 			loading: loadingSearch || loadingMore || loadingStream || loadingMix,
 			error: error ?? mixError,
 		});
+		if (selectedVideo) saveSessionSnapshot();
+		else clearSessionSnapshot();
 	});
 
 	$effect(() => {
@@ -447,12 +521,26 @@
 		toggleVideoAutoplay();
 	});
 
+	$effect(() => {
+		const nonce = $videoClearRequest;
+		if (nonce === handledClearNonce) return;
+		handledClearNonce = nonce;
+		videos = [];
+		mixItems = [];
+		query = '';
+		lastQuery = '';
+		activeMixId = null;
+		hasMore = false;
+		offset = 0;
+		error = null;
+		mixError = null;
+	});
+
 	onDestroy(() => {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		searchAbort?.abort();
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
-		videoSession.reset();
 	});
 </script>
 
