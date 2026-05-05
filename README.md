@@ -112,7 +112,8 @@ Recent searches auto-save as clickable chips.
 - **Quality selector** — Max (highest available) or Adaptive (hls.js ABR); persists across sessions
 - **Autoplay** — queues the next search result automatically; an "Up next" pill appears 15 s before the current video ends with the next title
 - **Fullscreen** with auto-hiding controls; native HLS fallback for Safari
-- **Video mixes** — browse TIDAL's curated editorial video playlists; displayed as a shelf alongside search results
+- **Video mixes** — TIDAL curated video playlists shown as a dedicated **Video Mixes** shelf on the home page (separate from Music Mixes); clicking a card navigates to `/videos`, loads the full playlist, and starts playback immediately
+- **Video session panel** — while `/videos` is active the desktop sidebar swaps from the audio now-playing panel to a compact video queue panel showing current artwork, up-next list, and an autoplay toggle; audio mini-player and now-playing sheet are hidden on mobile
 - Concurrent audio paused automatically when a video starts to prevent dual playback
 
 </details>
@@ -221,59 +222,102 @@ Recent searches auto-save as clickable chips.
 
 ## Getting Started
 
-### Prerequisites for developers (building from source)
+### Download (recommended)
 
-- [Rust](https://rustup.rs/) stable toolchain (install via `rustup`)
-- Node.js 18+ and npm
-- A TIDAL account
+Download the latest portable build from [GitHub Releases](../../releases/latest) — no install required:
+
+| Platform | File | Arch |
+|---|---|---|
+| Windows | `NOORwave-vX.X.X-windows-x64.zip` | x64 |
+| macOS | `NOORwave-vX.X.X-macos-arm64.tar.gz` | Apple Silicon |
+| macOS | `NOORwave-vX.X.X-macos-x64.tar.gz` | Intel |
+| Linux | `NOORwave-vX.X.X-linux-x64.tar.gz` | x64 |
+
+Every build contains the same three things — keep them together:
+
+```
+NOORwave(.exe)     ← desktop shell + system tray
+noor-server(.exe)  ← backend, API, audio engine
+www/               ← bundled UI  (do not move or delete)
+```
+
+Created next to the executables on first run: `noor.db` (library + settings), `noor-server.log`.
 
 ---
 
-**Windows portable — no install required. Unzip anywhere and run NOORwave.exe.**
+### Windows
 
-### Contents
-- `NOORwave.exe` — app window + system tray
-- `noor-server.exe` — local music server
-- `www/` — bundled UI (do not delete)
-
-Created next to the exes on first run:
-- `noor.db` (+ `noor.db-wal`, `noor.db-shm`) — your library, settings, and TIDAL session
-- `noor-server.log` — server output
-
-### Usage
 1. Unzip to any folder
 2. Double-click `NOORwave.exe`
-3. Window opens when server is ready (~2s)
+3. Window opens when the server is ready (~2 s)
 
-The folder is fully relocatable — drag `NOORwave\` to a different drive or rename the parent and it keeps working, as long as the contents stay together.
+The folder is fully relocatable — rename or move it to another drive and it keeps working.
 
-### Option A — Portable build (Windows, recommended)
+---
 
-Produces a self-contained `dist\NOORwave\` folder with two executables and the built frontend. Run once from the workspace root:
+### macOS
+
+1. Extract the `.tar.gz`
+2. Clear the Gatekeeper quarantine flag (required on first launch):
+   ```bash
+   xattr -cr NOORwave noor-server
+   ```
+3. Launch:
+   ```bash
+   ./NOORwave
+   ```
+
+> Gatekeeper blocks unsigned binaries by default. The `xattr -cr` command clears the quarantine flag — it is safe and equivalent to right-clicking → Open in Finder.
+
+---
+
+### Linux
+
+1. Extract the `.tar.gz`
+2. Mark the binaries executable:
+   ```bash
+   chmod +x NOORwave noor-server
+   ```
+3. Install runtime libraries if missing (Ubuntu / Debian):
+   ```bash
+   sudo apt-get install libwebkit2gtk-4.1-0 libasound2 libayatana-appindicator3-1
+   ```
+4. Launch:
+   ```bash
+   ./NOORwave
+   ```
+
+> Fedora / Arch users: install the equivalent `webkitgtk6.0`, `alsa-lib`, and `libayatana-appindicator` packages via your package manager.
+
+---
+
+### Building from source
+
+**Prerequisites:** [Rust](https://rustup.rs/) stable, Node.js 18+, pnpm, a TIDAL account.
+
+**Windows — one-shot build script:**
 
 ```powershell
 .\scripts\build-portable.ps1
 ```
 
-What the script does:
-1. `npm run build` in `frontend/` → static site in `frontend\build\`
-2. `cargo build --release -p noor-server` → `target\release\noor-server.exe`
-3. `cargo build --release -p noor-app` → `target\release\noor-app.exe`
-4. Assembles `dist\NOORwave\`:
-   ```
-   dist\NOORwave\
-     NOORwave.exe       ← Tauri desktop shell
-     noor-server.exe    ← backend + API server
-     www\               ← built frontend (served by noor-server on :3334)
-   ```
+Outputs `dist\NOORwave\` ready to run.
 
-Then launch `dist\NOORwave\NOORwave.exe`. The Tauri shell spawns `noor-server.exe` automatically and shows the window once the server is ready.
+**Linux / macOS — manual equivalent:**
 
-> **Note:** All three artifacts must be in the same folder. Copying only the exe files without `www\` will result in a blank window.
+```bash
+cd frontend && pnpm install && pnpm run build && cd ..
+cargo build --release -p noor-server
+cargo build --release -p noor-app
+mkdir -p dist/NOORwave
+cp target/release/noor-{app,server} dist/NOORwave/
+mv dist/NOORwave/noor-app dist/NOORwave/NOORwave
+cp -r frontend/build dist/NOORwave/www
+```
 
 ---
 
-### Option B — Dev mode (browser UI, fastest iteration)
+### Dev mode (browser UI, fastest iteration)
 
 Runs the backend and frontend separately. The frontend hot-reloads; the Tauri shell is not involved.
 
@@ -283,8 +327,8 @@ cargo run --release -p noor-server
 
 # Terminal 2 — frontend
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Open `http://localhost:5173`. The frontend connects to the backend on port 3334 automatically.
@@ -391,6 +435,8 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Song radio loading toast with proper dismiss on all paths; ephemeral TIDAL queue advance on next_track (v0.1.17)
 - [x] Automix suspend for 60 s after manual queue clear (v0.1.17)
 - [x] **TIDAL Video Playback** — dedicated `/videos` page: search TIDAL's video catalogue, full in-app HLS player (hls.js), quality selector, autoplay with up-next pill, video mixes shelf, fullscreen, concurrent audio paused on play (v0.1.18)
+- [x] **Video session integration** — home page splits Music Mixes and Video Mixes into separate shelves; clicking a video mix card navigates to `/videos` and starts playback automatically; desktop sidebar swaps to a compact video queue panel with up-next list and autoplay toggle during active video sessions; mobile audio chrome hidden during video playback (v0.1.19)
+- [x] **Multi-platform releases** — Linux x64, macOS ARM64, macOS x64 portable builds published to GitHub Releases alongside Windows (v0.1.19)
 - [x] Song Radio cold-start fallback — when all candidate sources return empty (newly-synced tracks not yet in the learning model), radio now surfaces other tracks by the same artist instead of failing silently (v0.1.18)
 - [x] TIDAL Your Mixes token auto-refresh — the shelf no longer loops on 401 errors; refreshes inline like all other TIDAL endpoints (v0.1.18)
 - [x] RSS feed fixes — removed defunct Resident Advisor feed; updated Pitchfork and Mixmag to current URLs; fixed Bandcamp Daily parse failure caused by UTF-8 BOM (v0.1.18)
