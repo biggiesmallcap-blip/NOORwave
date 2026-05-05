@@ -32,12 +32,48 @@ impl AudioQuality {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VideoQualityMode {
+    Max,
+    Auto,
+}
+
+impl Default for VideoQualityMode {
+    fn default() -> Self {
+        Self::Max
+    }
+}
+
+impl VideoQualityMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VideoQualityMode::Max => "MAX",
+            VideoQualityMode::Auto => "AUTO",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "MAX" => Some(Self::Max),
+            "AUTO" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
+fn default_video_quality_mode() -> VideoQualityMode {
+    VideoQualityMode::default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioSettings {
     pub quality: AudioQuality,
     /// `None` means "system default".
     pub output_device: Option<String>,
     pub exclusive_mode: bool,
     pub sample_rate_follow: bool,
+    #[serde(default = "default_video_quality_mode")]
+    pub video_quality_mode: VideoQualityMode,
 }
 
 impl Default for AudioSettings {
@@ -47,6 +83,7 @@ impl Default for AudioSettings {
             output_device: None,
             exclusive_mode: false,
             sample_rate_follow: false,
+            video_quality_mode: VideoQualityMode::Max,
         }
     }
 }
@@ -66,6 +103,11 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     }
     if let Some(v) = read_kv(conn, "audio.sample_rate_follow")? {
         s.sample_rate_follow = v == "true";
+    }
+    if let Some(v) = read_kv(conn, "video.quality_mode")? {
+        if let Some(mode) = VideoQualityMode::from_str(&v) {
+            s.video_quality_mode = mode;
+        }
     }
     Ok(s)
 }
@@ -91,6 +133,7 @@ pub fn save(conn: &Connection, s: &AudioSettings) -> rusqlite::Result<()> {
             "false"
         },
     )?;
+    write_kv(conn, "video.quality_mode", s.video_quality_mode.as_str())?;
     Ok(())
 }
 
@@ -134,6 +177,7 @@ mod tests {
         assert_eq!(s.output_device, None);
         assert!(!s.exclusive_mode);
         assert!(!s.sample_rate_follow);
+        assert_eq!(s.video_quality_mode, VideoQualityMode::Max);
     }
 
     #[test]
@@ -144,6 +188,7 @@ mod tests {
             output_device: Some("USB DAC #1".into()),
             exclusive_mode: true,
             sample_rate_follow: true,
+            video_quality_mode: VideoQualityMode::Auto,
         };
         save(&conn, &want).unwrap();
         let got = load(&conn).unwrap();
@@ -159,6 +204,7 @@ mod tests {
             output_device: Some("Other".into()),
             exclusive_mode: true,
             sample_rate_follow: false,
+            video_quality_mode: VideoQualityMode::Max,
         };
         save(&conn, &updated).unwrap();
         assert_eq!(load(&conn).unwrap(), updated);
@@ -175,5 +221,12 @@ mod tests {
             Some(AudioQuality::Lossless)
         );
         assert_eq!(AudioQuality::from_tidal_str("MQA"), None);
+    }
+
+    #[test]
+    fn video_quality_mode_serializes_to_setting_strings() {
+        assert_eq!(VideoQualityMode::Max.as_str(), "MAX");
+        assert_eq!(VideoQualityMode::from_str("AUTO"), Some(VideoQualityMode::Auto));
+        assert_eq!(VideoQualityMode::from_str("LOW"), None);
     }
 }

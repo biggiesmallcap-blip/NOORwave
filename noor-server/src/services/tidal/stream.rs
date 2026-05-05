@@ -1,4 +1,5 @@
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -40,6 +41,13 @@ pub struct StreamInfo {
     pub sample_rate: Option<i32>,
     #[serde(rename = "bitDepth")]
     pub bit_depth: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoStreamInfo {
+    pub hls_manifest_url: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub video_quality: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +179,106 @@ fn extract_dash_codec(xml: &str) -> String {
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| "audio/mp4".to_string())
+}
+
+fn parse_video_expiry(resp: &serde_json::Value) -> Option<DateTime<Utc>> {
+    for key in ["expiresAt", "expires_at", "expirationDate", "expiration"] {
+        if let Some(raw) = resp.get(key).and_then(serde_json::Value::as_str) {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+                return Some(dt.with_timezone(&Utc));
+            }
+        }
+    }
+    None
+}
+
+fn find_hls_url(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_hls_url),
+        serde_json::Value::Object(map) => {
+            for key in [
+                "hlsUrl",
+                "hls_url",
+                "manifestUrl",
+                "manifest_url",
+                "streamUrl",
+                "stream_url",
+                "url",
+            ] {
+                if let Some(url) = map.get(key).and_then(find_hls_url) {
+                    return Some(url);
+                }
+            }
+            for value in map.values() {
+                if let Some(url) = find_hls_url(value) {
+                    return Some(url);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_video_manifest_string(manifest: &str) -> Result<String, StreamResolveError> {
+    let trimmed = manifest.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+
+    let manifest_bytes = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|error| StreamResolveError::ManifestDecodeFailed {
+            message: error.to_string(),
+        })?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+        StreamResolveError::ManifestParseFailed {
+            message: format!("video manifest is not valid UTF-8: {error}"),
+        }
+    })?;
+
+    let manifest_text = manifest_text.trim();
+    if manifest_text.starts_with("http://") || manifest_text.starts_with("https://") {
+        return Ok(manifest_text.to_string());
+    }
+
+    let manifest_json: serde_json::Value =
+        serde_json::from_str(manifest_text).map_err(|error| {
+            StreamResolveError::ManifestParseFailed {
+                message: format!("failed to parse video manifest JSON: {error}"),
+            }
+        })?;
+    find_hls_url(&manifest_json).ok_or(StreamResolveError::MissingStreamUrl)
+}
+
+fn parse_video_stream_info(
+    resp: &serde_json::Value,
+    requested_quality: &str,
+) -> Result<VideoStreamInfo, StreamResolveError> {
+    let hls_manifest_url = if let Some(manifest) = resp.get("manifest").and_then(|v| v.as_str()) {
+        parse_video_manifest_string(manifest)?
+    } else {
+        find_hls_url(resp).ok_or(StreamResolveError::MissingStreamUrl)?
+    };
+
+    Ok(VideoStreamInfo {
+        hls_manifest_url,
+        expires_at: parse_video_expiry(resp),
+        video_quality: resp
+            .get("videoQuality")
+            .or_else(|| resp.get("video_quality"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(requested_quality)
+            .to_string(),
+    })
 }
 
 // Parses a DASH SegmentTemplate manifest and returns (init_url, vec_of_segment_urls).
@@ -455,9 +563,76 @@ pub async fn get_stream_url(
     resolve_stream(http, access_token, &StreamRequest::new(track_id, quality)).await
 }
 
+pub async fn resolve_video_stream(
+    http: &reqwest::Client,
+    access_token: &str,
+    video_id: i64,
+    video_quality: &str,
+) -> std::result::Result<VideoStreamInfo, StreamResolveError> {
+    crate::services::tidal::backoff::global()
+        .check()
+        .map_err(|error| StreamResolveError::RequestFailed {
+            message: error.to_string(),
+        })?;
+
+    let quality = if video_quality.trim().is_empty() {
+        "HIGH"
+    } else {
+        video_quality.trim()
+    };
+    let url = format!(
+        "{}/videos/{}/playbackinfopostpaywall?videoquality={}&playbackmode={}&assetpresentation={}",
+        TIDAL_API_URL, video_id, quality, DEFAULT_PLAYBACK_MODE, DEFAULT_ASSET_PRESENTATION
+    );
+
+    let resp = http
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|error| StreamResolveError::RequestFailed {
+            message: error.to_string(),
+        })?;
+
+    let status = resp.status();
+    let raw = resp
+        .text()
+        .await
+        .map_err(|error| StreamResolveError::RequestFailed {
+            message: format!("failed to read video playback response body: {error}"),
+        })?;
+    tracing::debug!(target: "tidal::video", video_id, "TIDAL video playback response: {}", raw);
+
+    if !status.is_success() {
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw);
+
+        if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
+            return Err(StreamResolveError::SessionExpired {
+                message: format!("TIDAL returned {status}: {raw}"),
+            });
+        }
+
+        if status.is_client_error() {
+            return Err(StreamResolveError::StreamRejected {
+                message: format!("TIDAL rejected video playback request with {status}: {raw}"),
+            });
+        }
+
+        return Err(StreamResolveError::UpstreamHttp { status, body: raw });
+    }
+
+    let resp_json: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| StreamResolveError::ResponseParseFailed {
+            message: format!("failed to parse video playback response JSON: {error}; body: {raw}"),
+        })?;
+
+    parse_video_stream_info(&resp_json, quality)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn identifies_session_errors() {
@@ -492,6 +667,34 @@ mod tests {
         };
         assert!(err.is_stream_rejected());
         assert!(!StreamResolveError::MissingManifest.is_stream_rejected());
+    }
+
+    #[test]
+    fn parses_direct_video_hls_url() {
+        let info = parse_video_stream_info(
+            &json!({
+                "hlsUrl": "https://cdn.example.test/master.m3u8",
+                "videoQuality": "HIGH",
+                "expiresAt": "2026-05-05T10:00:00Z"
+            }),
+            "LOW",
+        )
+        .expect("video stream should parse");
+
+        assert_eq!(info.hls_manifest_url, "https://cdn.example.test/master.m3u8");
+        assert_eq!(info.video_quality, "HIGH");
+        assert!(info.expires_at.is_some());
+    }
+
+    #[test]
+    fn parses_base64_json_video_manifest() {
+        let manifest = base64::engine::general_purpose::STANDARD
+            .encode(r#"{"urls":["https://cdn.example.test/video.m3u8"]}"#);
+        let info = parse_video_stream_info(&json!({ "manifest": manifest }), "MEDIUM")
+            .expect("base64 JSON manifest should parse");
+
+        assert_eq!(info.hls_manifest_url, "https://cdn.example.test/video.m3u8");
+        assert_eq!(info.video_quality, "MEDIUM");
     }
 
     fn resolve_manifest_url(

@@ -11,7 +11,7 @@ use crate::services::learning as discovery_learning;
 use crate::services::spotify;
 use crate::services::tidal::{
     auth as tidal_auth,
-    client::{TidalClient, TidalSearchTrack, TidalTrack},
+    client::{TidalClient, TidalSearchTrack, TidalSearchVideo, TidalTrack},
     import as tidal_import, mutations as tidal_mutations, stream as tidal_stream,
 };
 use crate::smart::discovery as discovery_engine;
@@ -521,6 +521,12 @@ pub fn api_routes(state: SharedState) -> Router {
             axum::routing::get(get_tidal_backoff_status),
         )
         .route("/api/tidal/search", get(tidal_search))
+        .route("/api/tidal/videos/search", get(tidal_video_search))
+        .route("/api/tidal/videos/{id}/playback", get(tidal_video_playback))
+        .route(
+            "/api/tidal/video-mixes/{id}/items",
+            get(tidal_video_mix_items),
+        )
         .route("/api/tidal/playlists/search", get(tidal_playlist_search))
         .route(
             "/api/tidal/playlists/{uuid}/tracks",
@@ -9431,6 +9437,20 @@ struct TidalSearchArtistResp {
     in_library: bool,
 }
 
+#[derive(Serialize)]
+struct TidalSearchVideoResp {
+    tidal_id: i64,
+    title: String,
+    duration_ms: Option<i64>,
+    artist_id: Option<i64>,
+    artist_name: Option<String>,
+    album_tidal_id: Option<i64>,
+    artwork_url: Option<String>,
+    quality: Option<String>,
+    explicit: Option<bool>,
+    r#type: String,
+}
+
 async fn tidal_search(
     State(state): State<SharedState>,
     Query(params): Query<TidalSearchParams>,
@@ -9558,12 +9578,316 @@ async fn tidal_search(
         })
         .collect();
 
+    let videos: Vec<TidalSearchVideoResp> = results
+        .videos
+        .into_iter()
+        .map(tidal_video_to_resp)
+        .collect();
+
     Ok(Json(
-        json!({ "tracks": tracks, "albums": albums, "artists": artists }),
+        json!({ "tracks": tracks, "albums": albums, "artists": artists, "videos": videos }),
     ))
 }
 
 // ─── TIDAL Playlist Search + Tracks ───────────────────────────────────────────
+
+fn tidal_video_to_resp(video: TidalSearchVideo) -> TidalSearchVideoResp {
+    TidalSearchVideoResp {
+        tidal_id: video.id,
+        title: video.title,
+        duration_ms: video.duration.map(|duration| duration * 1000),
+        artist_id: video.artist_id,
+        artist_name: video.artist_name,
+        album_tidal_id: video.album_id,
+        artwork_url: video.artwork_url,
+        quality: video.quality,
+        explicit: video.explicit,
+        r#type: video.r#type,
+    }
+}
+
+async fn tidal_request_tokens(
+    state: &SharedState,
+) -> Result<Option<tidal_auth::TidalTokens>, (StatusCode, Json<Value>)> {
+    let persisted = load_persisted_tidal_tokens(state).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let s = state.read().await;
+    Ok(s.tidal_tokens.clone().or(persisted))
+}
+
+async fn tidal_video_search(
+    State(state): State<SharedState>,
+    Query(params): Query<TidalSearchParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(tokens) = tidal_request_tokens(&state).await? else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let limit = params.limit.unwrap_or(20).min(50);
+    let offset = params.offset.unwrap_or(0).max(0);
+    let http_client = state.read().await.http_client.clone();
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let videos = match client.search_videos(&params.q, limit, offset).await {
+        Ok(videos) => videos,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .search_videos(&params.q, limit, offset)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    Ok(Json(json!({
+        "videos": videos.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct TidalVideoPlaybackParams {
+    quality: Option<String>,
+}
+
+fn tidal_video_stream_error_response(
+    video_id: i64,
+    err: tidal_stream::StreamResolveError,
+    fallback_message: &str,
+) -> (StatusCode, Json<Value>) {
+    match err {
+        tidal_stream::StreamResolveError::SessionExpired { message } => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "status": "session_expired",
+                "message": "TIDAL session expired while starting video playback.",
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::SessionRefreshFailed { message } => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "status": "session_refresh_failed",
+                "message": "TIDAL session could not be refreshed before video playback.",
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::ResponseParseFailed { message } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "response_parse_failed",
+                "message": fallback_message,
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::ManifestDecodeFailed { message } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "manifest_decode_failed",
+                "message": "TIDAL video manifest could not be decoded.",
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::ManifestParseFailed { message } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "manifest_parse_failed",
+                "message": "TIDAL video manifest could not be parsed.",
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::MissingStreamUrl => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "missing_stream_url",
+                "message": "TIDAL video manifest did not contain an HLS stream URL.",
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::MissingManifest => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "missing_manifest",
+                "message": "TIDAL video playback response did not contain a manifest.",
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::StreamRejected { message } => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "status": "stream_rejected",
+                "message": "TIDAL rejected the video playback request.",
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::RequestFailed { message } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "stream_request_failed",
+                "message": fallback_message,
+                "details": message,
+                "video_id": video_id,
+            })),
+        ),
+        tidal_stream::StreamResolveError::UpstreamHttp { status, body } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "stream_upstream_http",
+                "message": format!("TIDAL returned {} while starting video playback.", status),
+                "details": body,
+                "video_id": video_id,
+            })),
+        ),
+    }
+}
+
+async fn tidal_video_playback(
+    State(state): State<SharedState>,
+    Path(video_id): Path<i64>,
+    Query(params): Query<TidalVideoPlaybackParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(tokens) = tidal_request_tokens(&state).await? else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let quality = params.quality.unwrap_or_else(|| "HIGH".to_string());
+    let http_client = state.read().await.http_client.clone();
+    tracing::info!(target: "tidal::video", video_id, quality = %quality, "Resolving TIDAL video stream");
+    let stream_info = match tidal_stream::resolve_video_stream(
+        &http_client,
+        &tokens.access_token,
+        video_id,
+        &quality,
+    )
+    .await
+    {
+        Ok(info) => info,
+        Err(e) if e.is_session_expired() => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
+            tidal_stream::resolve_video_stream(
+                &http_client,
+                &refreshed.access_token,
+                video_id,
+                &quality,
+            )
+            .await
+            .map_err(|e2| {
+                tidal_video_stream_error_response(
+                    video_id,
+                    e2,
+                    "TIDAL video playback URL could not be resolved.",
+                )
+            })?
+        }
+        Err(e) => {
+            return Err(tidal_video_stream_error_response(
+                video_id,
+                e,
+                "TIDAL video playback URL could not be resolved.",
+            ));
+        }
+    };
+
+    Ok(Json(json!({
+        "hls_url": stream_info.hls_manifest_url,
+        "expires_at": stream_info.expires_at,
+        "quality": stream_info.video_quality,
+    })))
+}
+
+async fn tidal_video_mix_items(
+    State(state): State<SharedState>,
+    Path(mix_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(tokens) = tidal_request_tokens(&state).await? else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "TIDAL not connected" })),
+        ));
+    };
+
+    let http_client = state.read().await.http_client.clone();
+    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let items = match client.get_video_mix_items(&mix_id).await {
+        Ok(items) => items,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .get_video_mix_items(&mix_id)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
+    };
+
+    Ok(Json(json!({
+        "items": items.into_iter().map(tidal_video_to_resp).collect::<Vec<_>>()
+    })))
+}
 
 #[derive(Debug, Deserialize)]
 struct TidalPlaylistSearchParams {
@@ -12013,10 +12337,27 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let mixes = client.get_my_mixes().await.map_err(|e| {
-        tracing::warn!("TIDAL get_my_mixes failed: {e}");
-        StatusCode::BAD_GATEWAY
-    })?;
+    let mixes = match client.get_my_mixes().await {
+        Ok(mixes) => mixes,
+        Err(e) if error_looks_like_auth(&e) => {
+            let http_client = state.read().await.http_client.clone();
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_my_mixes().await.map_err(|e| {
+                tracing::warn!("TIDAL get_my_mixes failed after token refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_my_mixes failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
     Ok(Json(json!({ "mixes": mixes, "source": "tidal" })))
 }
 

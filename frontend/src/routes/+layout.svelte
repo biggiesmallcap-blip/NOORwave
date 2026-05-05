@@ -175,6 +175,7 @@
 				{ path: '/', label: 'Home', icon: '⌂' },
 				{ path: '/library', label: 'Library', icon: '♫' },
 				{ path: '/search', label: 'Search', icon: '⌕' },
+				{ path: '/videos', label: 'Videos', icon: '▷' },
 				{ path: '/genres', label: 'Genre Galaxy', icon: '✦' },
 				{ path: '/playlists', label: 'Playlists', icon: '☰' },
 				{ path: '/discoverspace', label: 'Discover', icon: '◈' }

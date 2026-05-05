@@ -9,6 +9,7 @@
 		setStoredToken,
 		type AudioDevice,
 		type AudioQuality,
+		type VideoQualityMode,
 		type DiscoveryStatus,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
@@ -970,6 +971,11 @@
 		{ value: 'HI_RES_LOSSLESS', label: 'Hi-Res Lossless (up to 24-bit / 192 kHz FLAC)' }
 	];
 
+	const VIDEO_QUALITY_OPTIONS: { value: VideoQualityMode; label: string }[] = [
+		{ value: 'MAX', label: 'Max available' },
+		{ value: 'AUTO', label: 'Auto adaptive' }
+	];
+
 	async function loadAudioOutput() {
 		await audioSettings.load();
 		try {
@@ -996,6 +1002,11 @@
 
 	function onAudioSrFollowToggle(e: Event) {
 		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
+	}
+
+	function onVideoQualityModeChange(e: Event) {
+		const value = (e.target as HTMLSelectElement).value as VideoQualityMode;
+		void audioSettings.patch({ video_quality_mode: value });
 	}
 
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
@@ -1526,7 +1537,7 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Quality, device, and exclusive mode." />
+				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Audio routing and video playback defaults." />
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
 					<div class="info-list">
@@ -1596,6 +1607,23 @@
 						</div>
 						<p class="page-copy" style="font-size:0.8rem">
 							Reconfigures the output device to each track's native rate (44.1 / 48 / 96 / 192 kHz). Recommended with exclusive mode.
+						</p>
+						<div class="info-row">
+							<span>Video quality</span>
+							<strong>
+								<select
+									class="audio-select"
+									value={s.video_quality_mode}
+									onchange={onVideoQualityModeChange}
+								>
+									{#each VIDEO_QUALITY_OPTIONS as opt (opt.value)}
+										<option value={opt.value}>{opt.label}</option>
+									{/each}
+								</select>
+							</strong>
+						</div>
+						<p class="page-copy" style="font-size:0.8rem">
+							Max chooses the highest HLS rendition exposed by each video. Auto lets the player adapt to bandwidth.
 						</p>
 					</div>
 

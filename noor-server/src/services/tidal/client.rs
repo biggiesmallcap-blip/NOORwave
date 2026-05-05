@@ -118,10 +118,26 @@ pub struct TidalSearchArtist {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TidalSearchVideo {
+    pub id: i64,
+    pub title: String,
+    pub duration: Option<i64>,
+    pub artist_id: Option<i64>,
+    pub artist_name: Option<String>,
+    pub album_id: Option<i64>,
+    pub artwork_url: Option<String>,
+    pub quality: Option<String>,
+    pub explicit: Option<bool>,
+    pub r#type: String,
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TidalSearchCatalog {
     pub tracks: Vec<TidalSearchTrack>,
     pub albums: Vec<TidalSearchAlbum>,
     pub artists: Vec<TidalSearchArtist>,
+    pub videos: Vec<TidalSearchVideo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -362,7 +378,7 @@ impl TidalClient {
 
     pub async fn search_catalog(&self, query: &str, limit: i32, offset: i32) -> Result<TidalSearchCatalog> {
         let url = format!(
-            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=TRACKS,ALBUMS,ARTISTS",
+            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=TRACKS,ALBUMS,ARTISTS,VIDEOS",
             TIDAL_API_URL,
             urlencoding::encode(query),
             self.country_code,
@@ -389,6 +405,12 @@ impl TidalClient {
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let videos = payload
+            .get("videos")
+            .and_then(|videos| videos.get("items"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
 
         Ok(TidalSearchCatalog {
             tracks: tracks
@@ -403,11 +425,43 @@ impl TidalClient {
                 .into_iter()
                 .filter_map(Self::parse_search_artist)
                 .collect(),
+            videos: videos
+                .into_iter()
+                .filter_map(Self::parse_search_video)
+                .collect(),
         })
     }
 
     pub async fn search(&self, query: &str, limit: i32) -> Result<Vec<TidalSearchTrack>> {
         Ok(self.search_catalog(query, limit, 0).await?.tracks)
+    }
+
+    pub async fn search_videos(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<TidalSearchVideo>> {
+        let url = format!(
+            "{}/search?query={}&countryCode={}&limit={}&offset={}&types=VIDEOS",
+            TIDAL_API_URL,
+            urlencoding::encode(query),
+            self.country_code,
+            limit,
+            offset.max(0)
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        let videos = payload
+            .get("videos")
+            .and_then(|videos| videos.get("items"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(videos
+            .into_iter()
+            .filter_map(Self::parse_search_video)
+            .collect())
     }
 
     /// Fetch Tidal editorial "Top Tracks" for the user's region.
@@ -532,6 +586,15 @@ impl TidalClient {
         Ok(Self::parse_mix_track_items(&payload))
     }
 
+    pub async fn get_video_mix_items(&self, mix_id: &str) -> Result<Vec<TidalSearchVideo>> {
+        let url = format!(
+            "{}/mixes/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
+            TIDAL_API_URL, mix_id, self.country_code
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_mix_video_items(&payload))
+    }
+
     fn parse_mix_track_items(payload: &serde_json::Value) -> Vec<TidalTrack> {
         let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
             return Vec::new();
@@ -543,6 +606,32 @@ impl TidalClient {
                 // others return the track directly. Try both.
                 let item = wrapper.get("item").unwrap_or(wrapper);
                 serde_json::from_value::<TidalTrack>(item.clone()).ok()
+            })
+            .collect()
+    }
+
+    fn parse_mix_video_items(payload: &serde_json::Value) -> Vec<TidalSearchVideo> {
+        let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|wrapper| {
+                let item = wrapper.get("item").unwrap_or(wrapper);
+                let video_type = wrapper
+                    .get("type")
+                    .or_else(|| item.get("type"))
+                    .or_else(|| item.get("contentType"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !video_type.is_empty()
+                    && !video_type.contains("video")
+                    && !video_type.contains("musicvideo")
+                {
+                    return None;
+                }
+                Self::parse_search_video(item.clone())
             })
             .collect()
     }
@@ -656,6 +745,35 @@ impl TidalClient {
         None
     }
 
+    fn pick_video_artwork(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+        for key in ["imageId", "image_id", "cover", "squareImage", "image"] {
+            if let Some(value) = object.get(key) {
+                if let Some(url) = direct_url_or_image_id(value) {
+                    return Some(url);
+                }
+                if let Some(raw) = value.as_str().filter(|s| !s.is_empty()) {
+                    return Some(if raw.starts_with("http://") || raw.starts_with("https://") {
+                        raw.to_string()
+                    } else {
+                        Self::artwork_url(raw, 640)
+                    });
+                }
+            }
+        }
+
+        object
+            .get("album")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|album| {
+                album
+                    .get("cover")
+                    .or_else(|| album.get("imageId"))
+                    .or_else(|| album.get("image"))
+                    .and_then(direct_url_or_image_id)
+            })
+            .or_else(|| Self::pick_mix_image(object.get("images")))
+    }
+
     fn parse_search_track(value: serde_json::Value) -> Option<TidalSearchTrack> {
         let object = value.as_object()?;
         let id = object.get("id")?.as_i64()?;
@@ -711,6 +829,85 @@ impl TidalClient {
             artwork_url,
             audio_quality,
             stream_ready,
+            extra,
+        })
+    }
+
+    fn parse_search_video(value: serde_json::Value) -> Option<TidalSearchVideo> {
+        let object = value.as_object()?;
+        let id = object
+            .get("id")
+            .and_then(|id| id.as_i64().or_else(|| id.as_str()?.parse().ok()))?;
+        let title = object.get("title")?.as_str()?.to_string();
+        let duration = object
+            .get("duration")
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| {
+                object
+                    .get("durationMs")
+                    .or_else(|| object.get("duration_ms"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|ms| ms / 1000)
+            });
+        let primary_artist = object.get("artist").or_else(|| {
+            object
+                .get("artists")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|artists| artists.first())
+        });
+        let artist_id = primary_artist
+            .and_then(|artist| artist.get("id"))
+            .and_then(serde_json::Value::as_i64);
+        let artist_name = primary_artist
+            .and_then(|artist| artist.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                object
+                    .get("artistName")
+                    .or_else(|| object.get("artist_name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+        let album_id = object
+            .get("album")
+            .and_then(|album| album.get("id"))
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| {
+                object
+                    .get("albumId")
+                    .or_else(|| object.get("album_id"))
+                    .and_then(serde_json::Value::as_i64)
+            });
+        let artwork_url = Self::pick_video_artwork(object);
+        let quality = object
+            .get("quality")
+            .or_else(|| object.get("videoQuality"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let explicit = object
+            .get("explicit")
+            .or_else(|| object.get("explicitContent"))
+            .and_then(serde_json::Value::as_bool);
+        let r#type = object
+            .get("type")
+            .or_else(|| object.get("contentType"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("video")
+            .to_string();
+        let extra = object.clone().into_iter().collect();
+
+        Some(TidalSearchVideo {
+            id,
+            title,
+            duration,
+            artist_id,
+            artist_name,
+            album_id,
+            artwork_url,
+            quality,
+            explicit,
+            r#type,
             extra,
         })
     }
@@ -800,6 +997,13 @@ pub struct TidalMix {
 /// `images` entry: direct `url`, or an `imageId` we can route through the
 /// standard `resources.tidal.com` artwork builder.
 fn direct_url_or_image_id(v: &serde_json::Value) -> Option<String> {
+    if let Some(raw) = v.as_str().filter(|s| !s.is_empty()) {
+        return Some(if raw.starts_with("http://") || raw.starts_with("https://") {
+            raw.to_string()
+        } else {
+            TidalClient::artwork_url(raw, 640)
+        });
+    }
     if let Some(u) = v
         .get("url")
         .and_then(serde_json::Value::as_str)
@@ -893,5 +1097,65 @@ mod tests {
         assert!(TidalClient::parse_my_mixes(&json!({})).is_empty());
         assert!(TidalClient::parse_my_mixes(&json!({"rows": []})).is_empty());
         assert!(TidalClient::parse_my_mixes(&json!({"rows": [{"modules": []}]})).is_empty());
+    }
+
+    #[test]
+    fn parse_search_video_extracts_renderable_fields() {
+        let video = TidalClient::parse_search_video(json!({
+            "id": 123,
+            "title": "A Good Video",
+            "duration": 245,
+            "artist": { "id": 55, "name": "NOOR" },
+            "album": { "id": 66, "cover": "abc-def-ghi" },
+            "videoQuality": "HIGH",
+            "explicit": true,
+            "type": "Music Video"
+        }))
+        .expect("video should parse");
+
+        assert_eq!(video.id, 123);
+        assert_eq!(video.duration, Some(245));
+        assert_eq!(video.artist_id, Some(55));
+        assert_eq!(video.artist_name.as_deref(), Some("NOOR"));
+        assert_eq!(video.album_id, Some(66));
+        assert_eq!(video.quality.as_deref(), Some("HIGH"));
+        assert_eq!(video.explicit, Some(true));
+        assert!(
+            video
+                .artwork_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://resources.tidal.com/images/abc/def/ghi/"))
+        );
+    }
+
+    #[test]
+    fn parse_video_mix_items_filters_non_video_wrappers() {
+        let payload = json!({
+            "items": [
+                {
+                    "type": "MusicVideo",
+                    "item": {
+                        "id": 1,
+                        "title": "Visual",
+                        "duration": 180,
+                        "artists": [{ "id": 9, "name": "Artist" }],
+                        "imageId": "111-222-333"
+                    }
+                },
+                {
+                    "type": "TRACK",
+                    "item": {
+                        "id": 2,
+                        "title": "Audio only",
+                        "duration": 180
+                    }
+                }
+            ]
+        });
+
+        let items = TidalClient::parse_mix_video_items(&payload);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, 1);
+        assert_eq!(items[0].artist_name.as_deref(), Some("Artist"));
     }
 }

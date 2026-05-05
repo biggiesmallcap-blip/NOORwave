@@ -132,6 +132,19 @@ export interface TidalSearchArtist {
 	in_library: boolean;
 }
 
+export interface TidalSearchVideo {
+	tidal_id: number;
+	title: string;
+	duration_ms: number | null;
+	artist_id: number | null;
+	artist_name: string | null;
+	album_tidal_id: number | null;
+	artwork_url: string | null;
+	quality: string | null;
+	explicit: boolean | null;
+	type: string;
+}
+
 export interface TidalSearchPlaylist {
 	uuid: string;
 	title: string;
@@ -144,7 +157,26 @@ export interface TidalSearchResults {
 	tracks: TidalSearchTrack[];
 	albums: TidalSearchAlbum[];
 	artists: TidalSearchArtist[];
+	videos?: TidalSearchVideo[];
 }
+
+export interface TidalVideoStream {
+	hls_url: string;
+	expires_at: string | null;
+	quality: string;
+}
+
+export interface TidalVideoMix {
+	id: string | number;
+	title: string;
+	artwork_url?: string | null;
+	description?: string | null;
+	type: 'mix';
+}
+
+export type TidalVideoMixItem = TidalSearchVideo & {
+	mix_id?: string | number | null;
+};
 
 /**
  * Compact Spotify-playlist search result. Powers the Spotify section of
@@ -1092,6 +1124,7 @@ export interface AcrCloudScanStatus {
 }
 
 export type AudioQuality = 'LOW' | 'HIGH' | 'LOSSLESS' | 'HI_RES_LOSSLESS';
+export type VideoQualityMode = 'MAX' | 'AUTO';
 
 export interface AudioDevice {
 	id: string;
@@ -1106,6 +1139,7 @@ export interface AudioSettings {
 	output_device: string | null;
 	exclusive_mode: boolean;
 	sample_rate_follow: boolean;
+	video_quality_mode: VideoQualityMode;
 }
 
 async function fetchApiResponse(
@@ -2093,6 +2127,32 @@ export const api = {
 			'/api/tidal/search',
 			{ q, limit: String(limit), offset: String(offset) },
 			{ signal },
+		);
+	},
+
+	searchTidalVideos(
+		q: string,
+		limit = 20,
+		offset = 0,
+		signal?: AbortSignal
+	): Promise<{ videos: TidalSearchVideo[] }> {
+		return fetchApi<{ videos: TidalSearchVideo[] }>(
+			'/api/tidal/videos/search',
+			{ q, limit: String(limit), offset: String(offset) },
+			{ signal },
+		);
+	},
+
+	getTidalVideoStream(videoId: number, quality = 'HIGH'): Promise<TidalVideoStream> {
+		return fetchApi<TidalVideoStream>(
+			`/api/tidal/videos/${videoId}/playback`,
+			{ quality },
+		);
+	},
+
+	getTidalVideoMixItems(mixId: string | number): Promise<{ items: TidalVideoMixItem[] }> {
+		return fetchApi<{ items: TidalVideoMixItem[] }>(
+			`/api/tidal/video-mixes/${encodeURIComponent(String(mixId))}/items`
 		);
 	},
 

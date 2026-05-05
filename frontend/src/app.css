@@ -266,6 +266,15 @@ textarea {
 
 .glass:hover { border-color: var(--border-strong); }
 
+.glass-tile {
+	background: var(--panel-bg);
+	backdrop-filter: blur(14px);
+	-webkit-backdrop-filter: blur(14px);
+	border: 1px solid var(--panel-border);
+	border-radius: 8px;
+	box-shadow: inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 38%, transparent);
+}
+
 .state-dormant { opacity: var(--state-alpha-dormant); }
 .state-hover { opacity: var(--state-alpha-hover); }
 .state-active { opacity: var(--state-alpha-active); }
