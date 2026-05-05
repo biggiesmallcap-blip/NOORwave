@@ -449,6 +449,21 @@ pub async fn orchestrate_song(
         }
     }
 
+    // Cold-start fallback: when embedding neighbors, Last.fm, and track_similarity
+    // all return empty (e.g. newly-synced tracks not yet in the learning model),
+    // surface other library tracks by the same artist so radio doesn't fail silently.
+    let ordered = if ordered.is_empty() {
+        let fallback = fallback_same_artist_tracks(db, seed_track_id, limit, exclude_track_ids);
+        if fallback.is_empty() {
+            tracing::warn!(seed_track_id, "orchestrate_song: all sources empty including same-artist fallback; returning empty queue");
+        } else {
+            tracing::info!(seed_track_id, count = fallback.len(), "orchestrate_song: using same-artist fallback");
+        }
+        fallback
+    } else {
+        ordered
+    };
+
     Ok(RadioQueue {
         session_id: new_session_id(),
         blend_used: blend,
@@ -684,6 +699,87 @@ fn engine_results_from_track_similarity(
         .collect();
 
     Ok(candidates)
+}
+
+/// Cold-start fallback: returns tracks by the same artist as the seed, randomly ordered.
+/// Used when all three primary candidate sources (embedding neighbors, Last.fm, track_similarity)
+/// return zero results — typically for newly-synced tracks not yet in the learning model.
+fn fallback_same_artist_tracks(
+    db: &Database,
+    seed_track_id: i64,
+    limit: usize,
+    exclude_ids: &[i64],
+) -> Vec<RadioCandidate> {
+    let exclude_set: HashSet<i64> = exclude_ids
+        .iter()
+        .copied()
+        .chain(std::iter::once(seed_track_id))
+        .collect();
+    let fetch_limit = (limit * 3).max(20) as i64;
+    let rows = db.with_conn(move |conn| {
+        let artist_id: Option<i64> = conn
+            .query_row(
+                "SELECT artist_id FROM tracks WHERE id = ?1",
+                rusqlite::params![seed_track_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        let Some(artist_id) = artist_id else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.title, ar.name, al.title, al.artwork_url, t.duration_ms
+             FROM tracks t
+             LEFT JOIN artists ar ON ar.id = t.artist_id
+             LEFT JOIN albums al ON al.id = t.album_id
+             WHERE t.artist_id = ?1 AND t.id != ?2
+             ORDER BY RANDOM()
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![artist_id, seed_track_id, fetch_limit],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    });
+    let rows = match rows {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    rows.into_iter()
+        .filter(|(id, ..)| !exclude_set.contains(id))
+        .take(limit)
+        .map(|(id, title, artist, album, art, dur)| RadioCandidate {
+            track_id: id,
+            tidal_track_id: None,
+            title,
+            artist_name: artist.unwrap_or_default(),
+            album_title: album,
+            artwork_url: art,
+            duration_ms: dur,
+            isrc: None,
+            is_in_library: true,
+            source: RadioSource::Library,
+            reason: "same artist · fallback".to_string(),
+            similarity_score: 0.5,
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        })
+        .collect()
 }
 
 /// Generate a session id like "rad_2a4f...".

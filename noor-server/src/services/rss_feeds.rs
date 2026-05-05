@@ -67,7 +67,7 @@ const NEWS_FEEDS: &[FeedSource] = &[
         category: "news",
     },
     FeedSource {
-        url: "https://pitchfork.com/feed/rss/news",
+        url: "https://pitchfork.com/rss/news/",
         name: "Pitchfork",
         category: "news",
     },
@@ -87,11 +87,6 @@ const NEWS_FEEDS: &[FeedSource] = &[
         category: "news",
     },
     FeedSource {
-        url: "https://ra.co/xml/news.xml",
-        name: "Resident Advisor",
-        category: "news",
-    },
-    FeedSource {
         url: "https://www.factmag.com/feed/",
         name: "FACT Magazine",
         category: "news",
@@ -102,7 +97,7 @@ const NEWS_FEEDS: &[FeedSource] = &[
         category: "news",
     },
     FeedSource {
-        url: "https://mixmag.net/feed/",
+        url: "https://mixmag.net/rss-category/news",
         name: "Mixmag",
         category: "news",
     },
@@ -140,13 +135,16 @@ impl FeedAggregator {
         }
 
         let body = resp.text().await.context("Failed to read RSS body")?;
+        // Strip UTF-8 BOM and leading whitespace — some feeds (e.g. Bandcamp Daily)
+        // prepend a BOM that causes the RSS parser to fail with "input did not begin with rss tag".
+        let body_trimmed = body.trim_start_matches('\u{FEFF}').trim_start();
 
-        let cursor = std::io::Cursor::new(body.as_bytes());
+        let cursor = std::io::Cursor::new(body_trimmed.as_bytes());
         let channel = match rss::Channel::read_from(cursor) {
             Ok(channel) => channel,
             Err(e) => {
                 warn!(error = %e, "Failed to parse RSS, trying alternative parsing");
-                return self.parse_xml_fallback(&body, source);
+                return self.parse_xml_fallback(body_trimmed, source);
             }
         };
 
