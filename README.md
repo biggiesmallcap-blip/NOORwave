@@ -1,5 +1,6 @@
 <h1 align="center">
-<img width="1600" height="560" alt="wordmark-animated-dark (1)" src="https://github.com/user-attachments/assets/6f364bd7-e61a-4988-8d76-0f47a0335782" />
+<img width="1280" height="640" alt="github-social-preview" src="https://github.com/user-attachments/assets/ab1848a0-74fa-4cbe-96ba-1917937184e1" />
+
 
 </h1>
 
