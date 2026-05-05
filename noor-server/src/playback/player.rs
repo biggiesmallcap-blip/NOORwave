@@ -789,22 +789,28 @@ pub fn current_track_id(conn: &Connection) -> Result<Option<i64>> {
 /// Returns the track that would play next **without** advancing the queue or
 /// mutating any playback state. Used for gapless pre-buffering.
 pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Option<Track>> {
-    let (current_track_id, repeat_mode): (Option<i64>, String) = conn.query_row(
-        "SELECT current_track_id, repeat_mode FROM playback_state WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (current_track_id, current_queue_item_id, repeat_mode): (Option<i64>, Option<i64>, String) =
+        conn.query_row(
+            "SELECT current_track_id, current_queue_item_id, repeat_mode FROM playback_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
 
     let queue_items = ensure_automix_queue_depth(conn, AUTOMIX_MIN_UPCOMING, recently_cleared)?;
     if queue_items.is_empty() {
         return Ok(None);
     }
 
-    let current_index = current_track_id.and_then(|track_id| {
-        queue_items
-            .iter()
-            .position(|item| item.track.id == track_id)
-    });
+    let current_index = current_track_id
+        .and_then(|track_id| {
+            queue_items
+                .iter()
+                .position(|item| item.track.id == track_id)
+        })
+        .or_else(|| {
+            current_queue_item_id
+                .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
+        });
 
     let next = match repeat_mode.as_str() {
         "one" => current_index

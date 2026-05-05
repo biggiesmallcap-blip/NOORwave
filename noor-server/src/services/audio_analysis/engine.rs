@@ -108,7 +108,7 @@ pub fn analyze_and_save(
 
     db.with_conn(|conn| crate::db::queries::upsert_audio_dsp_features(conn, &features))
         .map_err(|e| {
-            tracing::error!(track_id, "failed to save DSP features: {}", e);
+            tracing::debug!(track_id, "failed to save DSP features: {}", e);
         })
         .ok()?;
 
