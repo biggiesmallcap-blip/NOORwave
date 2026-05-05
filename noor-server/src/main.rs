@@ -333,6 +333,20 @@ async fn main() -> Result<()> {
             [],
         )?;
         conn.execute("DELETE FROM queue", [])?;
+        // Discovery training runs in-process; if the previous process died mid-run
+        // the row is left at status='running' forever and the UI's Stop button has
+        // no live cancel handle to flip. Mark orphans failed so the user can retrain.
+        let orphaned = conn.execute(
+            "UPDATE training_runs
+             SET status = 'failed',
+                 finished_at = datetime('now'),
+                 error_text = COALESCE(error_text, 'interrupted by server restart')
+             WHERE status = 'running'",
+            [],
+        )?;
+        if orphaned > 0 {
+            info!("Reconciled {} orphaned training run(s) on startup", orphaned);
+        }
         Ok(())
     })?;
     info!("Database initialized");

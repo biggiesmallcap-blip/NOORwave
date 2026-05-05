@@ -65,6 +65,15 @@ pub struct TrainerInput {
     pub tracks: Vec<EmbeddingTrackRow>,
     pub sequences: Vec<TrainerSequenceGroup>,
     pub heldout_pairs: Vec<(i64, i64)>,
+    /// Pre-computed audio-proxy features hydrated from `track_audio_features`.
+    /// When present, the trainer reuses these instead of running Stage 2.
+    /// Drives the Incremental Refresh mode — Stage 2 is the most expensive
+    /// per-track work, so skipping it makes the difference between modes
+    /// user-visible. `None` (the default) means recompute from scratch.
+    /// Ignored when `include_audio_proxy = false` (Low intensity skips audio
+    /// entirely regardless of cache state).
+    #[serde(skip)]
+    pub cached_audio_features: Option<HashMap<i64, TrainerAudioFeature>>,
 }
 
 #[allow(dead_code)]
@@ -980,12 +989,14 @@ pub fn run_discovery_training(
         ));
     }
 
-    // Stage 2 — skipped entirely on Low intensity. Fuse_embeddings handles an
-    // empty audio map by falling back to behavioral-only vectors, so the
-    // pipeline still produces a graph; cold tracks just have less to anchor on.
-    let audio = if input.include_audio_proxy {
-        build_audio_proxy_features(&tracks, dim, cancel)
-    } else {
+    // Stage 2 — three branches:
+    //   1. Low intensity → skip entirely, empty map; fuse_embeddings degrades
+    //      gracefully to behavioral-only vectors.
+    //   2. Incremental refresh with valid cache → reuse cached features. This
+    //      is the user-visible difference between Full Retrain and Incremental
+    //      Refresh; Stage 2 is by far the most expensive per-track work.
+    //   3. Full retrain (or first run, no cache) → recompute via DSP-proxy.
+    let audio = if !input.include_audio_proxy {
         if let Some(tx) = progress_tx {
             let _ = tx.send(TrainingProgressUpdate::stage_only(
                 "audio",
@@ -994,6 +1005,20 @@ pub fn run_discovery_training(
             ));
         }
         HashMap::new()
+    } else if let Some(cached) = input.cached_audio_features.as_ref() {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(TrainingProgressUpdate::stage_only(
+                "audio",
+                &format!(
+                    "Reusing {} cached audio features (incremental refresh)",
+                    cached.len()
+                ),
+                0.55,
+            ));
+        }
+        cached.clone()
+    } else {
+        build_audio_proxy_features(&tracks, dim, cancel)
     };
     if cancel_requested(cancel) {
         return TrainerOutput {
@@ -1076,6 +1101,16 @@ pub fn run_discovery_training(
     metrics.insert("embedded_tracks".to_string(), embedded);
     let total_sequences: usize = input.sequences.iter().map(|g| g.sequences.len()).sum();
     metrics.insert("sequence_count".to_string(), total_sequences as f64);
+    // Per-group counts so the activation gate can distinguish actual listening
+    // (playback_transitions / listen_history) from library-derived structure
+    // (album / artist / genre / playlist / favorites). A library sync alone
+    // shouldn't promote a user to the strict "established library" gate.
+    for group in &input.sequences {
+        metrics.insert(
+            format!("sequence_count.{}", group.label),
+            group.sequences.len() as f64,
+        );
+    }
     metrics.insert(
         "neighbor_tracks".to_string(),
         neighbors

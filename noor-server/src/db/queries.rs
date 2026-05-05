@@ -2963,6 +2963,28 @@ pub fn replace_track_embeddings(
     model_id: i64,
     embeddings: &[(i64, Vec<u8>, f64)],
 ) -> Result<()> {
+    // Refuse to wipe an already-populated model with an empty payload. The
+    // trainer is supposed to bail before reaching here when it produces no
+    // output (cancel checks at every stage), but a logic bug or panic-recovery
+    // path could still get us here with an empty slice — and a silent wipe
+    // turns a recoverable issue into a "discovery engine just died" bug for
+    // the user. Leave the prior rows in place; tracing makes the skip visible.
+    if embeddings.is_empty() {
+        let existing: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM track_embeddings WHERE model_id = ?1",
+            params![model_id],
+            |row| row.get(0),
+        )?;
+        if existing > 0 {
+            tracing::warn!(
+                target: "noor.discovery.training",
+                model_id,
+                existing_rows = existing,
+                "skipping embedding wipe: trainer returned 0 vectors but model has prior data"
+            );
+            return Ok(());
+        }
+    }
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "DELETE FROM track_embeddings WHERE model_id = ?1",
@@ -2979,6 +3001,37 @@ pub fn replace_track_embeddings(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Cached row from `track_audio_features`, used by Incremental Refresh to
+/// avoid recomputing the audio-proxy stage when the prior run's features are
+/// still valid. Caller is responsible for filtering rows whose unpacked
+/// vector dimension doesn't match the current intensity tier.
+pub struct CachedAudioFeatureRow {
+    pub track_id: i64,
+    pub feature_version: String,
+    pub vector_blob: Vec<u8>,
+    pub clip_start_ms: i64,
+    pub clip_duration_ms: i64,
+}
+
+pub fn get_cached_audio_features(conn: &Connection) -> Result<Vec<CachedAudioFeatureRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms
+         FROM track_audio_features",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CachedAudioFeatureRow {
+                track_id: row.get(0)?,
+                feature_version: row.get(1)?,
+                vector_blob: row.get(2)?,
+                clip_start_ms: row.get(3)?,
+                clip_duration_ms: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn replace_track_audio_features(
@@ -3087,6 +3140,25 @@ pub fn replace_track_neighbors(
     // Single transaction: ~2M+ INSERTs auto-committing one-by-one is what makes
     // training appear to hang. Batching also makes the DELETE+INSERT atomic so a
     // killed process can't leave the table half-populated.
+    //
+    // Same defensive skip as `replace_track_embeddings`: an empty slice on a
+    // populated model leaves the prior graph intact rather than wiping it.
+    if neighbors.is_empty() {
+        let existing: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM track_neighbors WHERE model_id = ?1",
+            params![model_id],
+            |row| row.get(0),
+        )?;
+        if existing > 0 {
+            tracing::warn!(
+                target: "noor.discovery.training",
+                model_id,
+                existing_rows = existing,
+                "skipping neighbor wipe: trainer returned 0 edges but model has prior data"
+            );
+            return Ok(());
+        }
+    }
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "DELETE FROM track_neighbors WHERE model_id = ?1",

@@ -20,7 +20,6 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
 const MODEL_KEY: &str = "discovery-fusion-v1";
-const MODEL_DIMENSION: i32 = 96;
 
 // Training intensity tier. Drives the cost/quality knobs the user picked in
 // settings. Higher tiers train a richer model at the cost of CPU time and
@@ -127,6 +126,10 @@ pub struct ActiveLearningModel {
     pub model_key: String,
     #[allow(dead_code)]
     pub family: String,
+    /// Vector dimension for this trained model. Authoritative for any code
+    /// that allocates buffers compared against `vectors` — the legacy 96d
+    /// constant is wrong on Medium (64) and Low (48) intensity tiers.
+    pub dimension: usize,
     pub vectors: HashMap<i64, Vec<f64>>,
 }
 
@@ -201,7 +204,7 @@ pub async fn start_training(
     // Build trainer input directly from DB (no JSON round-trip). The intensity
     // tier overrides dimension / top_k / window_size and decides whether to
     // include the audio-proxy stage (Low skips it).
-    let input = db.with_conn(|conn| build_trainer_input(conn, intensity_params))?;
+    let input = db.with_conn(|conn| build_trainer_input(conn, intensity_params, full_mode))?;
 
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
@@ -361,10 +364,25 @@ pub async fn start_training(
     let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
     let recall = output.metrics.get("recall_at_10").copied().unwrap_or(0.0);
     // Thresholds scale with library maturity:
-    // - Fresh library (no listen history): coverage ≥ 0.5 is enough to activate
-    //   since all signal comes from DSP + metadata, not behavioral co-occurrence.
-    // - Established library: full 85% coverage + 15% recall required.
-    let has_listen_history = output.metrics.get("sequence_count").copied().unwrap_or(0.0) > 0.0;
+    // - Fresh library (no real plays): coverage ≥ 0.5 — all signal comes from
+    //   DSP + metadata, recall@10 is meaningless on an empty held-out set.
+    // - Established library (user has actual plays): 85% coverage + 15% recall.
+    //
+    // `has_listen_history` MUST come from real playback signal, not from
+    // library-derived sequences (album / artist / genre / playlist / favorites).
+    // A fresh TIDAL sync with zero plays would otherwise trip the strict gate
+    // and the model would sit inactive forever.
+    let playback_seqs = output
+        .metrics
+        .get("sequence_count.playback_transitions")
+        .copied()
+        .unwrap_or(0.0);
+    let listen_seqs = output
+        .metrics
+        .get("sequence_count.listen_history")
+        .copied()
+        .unwrap_or(0.0);
+    let has_listen_history = playback_seqs > 0.0 || listen_seqs > 0.0;
     let should_activate = if has_listen_history {
         coverage >= 0.85 && recall >= 0.15
     } else {
@@ -398,6 +416,7 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
             model_id: model.id,
             model_key: model.model_key,
             family: model.family,
+            dimension: model.dimension.max(0) as usize,
             vectors,
         }))
     })
@@ -488,7 +507,7 @@ pub fn build_prompt_preview(
         if anchor_ids.is_empty() {
             return Ok(None);
         }
-        let centroid = centroid_for_ids(&active.vectors, &anchor_ids);
+        let centroid = centroid_for_ids(&active, &anchor_ids);
         let results = rank_preview_candidates(&active, &candidates, &anchor_ids, &centroid, limit);
         let summary = format!(
             "Learned {} discovery anchored by {} library seed(s).",
@@ -547,10 +566,10 @@ pub fn compute_external_embedding_scores(
         if anchor_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let centroid = centroid_for_ids(&active.vectors, &anchor_ids);
+        let centroid = centroid_for_ids(&active, &anchor_ids);
         let mut scores = HashMap::new();
         for candidate in candidates {
-            let proxy = external_candidate_proxy_vector(candidate, MODEL_DIMENSION as usize);
+            let proxy = external_candidate_proxy_vector(candidate, active.dimension);
             scores.insert(
                 candidate.provider_track_id.clone(),
                 cosine_similarity(&centroid, &proxy),
@@ -590,6 +609,7 @@ pub fn inject_query_seeds_from_neighbors(
 fn build_trainer_input(
     conn: &rusqlite::Connection,
     intensity: IntensityParams,
+    full_mode: bool,
 ) -> Result<TrainerInput> {
     let tracks = queries::get_embedding_track_rows(conn)?;
     let transition_sequences = queries::get_playback_transition_sequences(conn)?;
@@ -617,6 +637,37 @@ fn build_trainer_input(
             }
         })
         .collect::<Vec<_>>();
+
+    // Incremental Refresh: try to hydrate cached audio features from the prior
+    // run. We only reuse rows whose stored vector dim matches the current
+    // intensity tier — flipping Max→Medium changes the vector size, in which
+    // case the cache is invalid and we recompute. None when full_mode is true,
+    // when intensity skips audio entirely (Low), or when no cache rows match.
+    let cached_audio_features = if !full_mode && intensity.include_audio_proxy {
+        let expected_dim = intensity.dimension as usize;
+        let rows = queries::get_cached_audio_features(conn)?;
+        let map: HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let vector = unpack_vector_blob(&row.vector_blob);
+                if vector.len() != expected_dim {
+                    return None;
+                }
+                Some((
+                    row.track_id,
+                    crate::services::discovery_trainer::TrainerAudioFeature {
+                        vector,
+                        clip_start_ms: row.clip_start_ms,
+                        clip_duration_ms: row.clip_duration_ms,
+                        feature_version: row.feature_version,
+                    },
+                ))
+            })
+            .collect();
+        if map.is_empty() { None } else { Some(map) }
+    } else {
+        None
+    };
 
     Ok(TrainerInput {
         seed: 13,
@@ -664,14 +715,23 @@ fn build_trainer_input(
             },
         ],
         heldout_pairs,
+        cached_audio_features,
     })
 }
 
-fn centroid_for_ids(vectors: &HashMap<i64, Vec<f64>>, anchor_ids: &[i64]) -> Vec<f64> {
-    let mut centroid = vec![0.0; MODEL_DIMENSION as usize];
+fn centroid_for_ids(active: &ActiveLearningModel, anchor_ids: &[i64]) -> Vec<f64> {
+    let dim = active.dimension;
+    let mut centroid = vec![0.0; dim];
     let mut count = 0.0;
     for track_id in anchor_ids {
-        if let Some(vector) = vectors.get(track_id) {
+        if let Some(vector) = active.vectors.get(track_id) {
+            // Defensive: skip vectors that don't match the model's stated dim.
+            // Shouldn't happen post-fix, but a pre-fix DB may have stale rows
+            // from a prior intensity tier and a mismatched accumulate would
+            // index out-of-range or silently leave the tail at zero.
+            if vector.len() != dim {
+                continue;
+            }
             for (index, value) in vector.iter().enumerate() {
                 centroid[index] += value;
             }

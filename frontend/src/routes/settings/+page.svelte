@@ -755,12 +755,22 @@
 	// Live ETA for an in-progress run. Uses the latest run's progress +
 	// started_at to derive elapsed seconds, then projects remaining time.
 	// Only valid while training is running and progress > 0.
+	//
+	// SQLite stores `started_at` as UTC without a timezone marker
+	// ("YYYY-MM-DD HH:MM:SS"). `Date.parse` on a bare timestamp interprets
+	// it as local time, so on a UTC+N machine the parsed start drifts N
+	// hours into the future and "elapsed" balloons. Force UTC by converting
+	// to ISO-with-Z before parsing — same fix used elsewhere in this file
+	// (see `trained_at + 'Z'`).
 	let discoveryEtaSeconds: number | null = $derived.by(() => {
 		const r = discoveryStatus?.latest_run;
 		if (!r || r.status !== 'running' || !r.started_at) return null;
-		const startedMs = Date.parse(r.started_at);
+		const iso = r.started_at.includes('T') ? r.started_at : r.started_at.replace(' ', 'T');
+		const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z';
+		const startedMs = Date.parse(withTz);
 		if (Number.isNaN(startedMs)) return null;
 		const elapsed = (Date.now() - startedMs) / 1000;
+		if (elapsed <= 0) return null;
 		const progress = Math.max(0.01, Math.min(0.99, r.progress ?? 0));
 		const total = elapsed / progress;
 		return Math.max(0, Math.round(total - elapsed));
