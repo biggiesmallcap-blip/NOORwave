@@ -11,7 +11,7 @@ mod tags;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 #[cfg(not(feature = "spotify-public"))]
@@ -62,6 +62,7 @@ pub struct AppState {
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
+    pub playback_generation: Arc<AtomicU64>,
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
@@ -479,6 +480,7 @@ async fn main() -> Result<()> {
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,
+        playback_generation: Arc::new(AtomicU64::new(1)),
         current_stream_display: None,
         pending_stream_display: None,
         active_listen_session: None,

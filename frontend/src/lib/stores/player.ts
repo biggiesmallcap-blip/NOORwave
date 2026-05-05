@@ -763,7 +763,7 @@ export async function shuffleArtist(artistId: number) {
 
 async function startSongRadioFromLibraryTrack(seedTrackId: number) {
 	const result = await api.startRadioStart({ seed_track_id: seedTrackId, limit: 60 });
-	await playFirstRadioItem(result.first_playable);
+	hydratePlayback({ state: result.state, queue: result.queue });
 }
 
 export async function startSongRadio(seedTrackId: number) {
@@ -800,18 +800,6 @@ export async function startPlaylistRadio(tracks: { id: number; play_count?: numb
 	await startSongRadio(seed.id);
 }
 
-async function playFirstRadioItem(firstPlayable: {
-	type: 'library' | 'pending';
-	queue_item_id: number;
-	track_id: number | null;
-}) {
-	if (firstPlayable.type === 'library' && firstPlayable.track_id != null) {
-		await playTrackNow(firstPlayable.track_id);
-	} else {
-		await playNextTrack();
-	}
-}
-
 export async function playTidalPlaylist(tidalUuid: string) {
 	if (!assertOnline()) return;
 	playerError.set(null);
@@ -839,7 +827,9 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await playFirstRadioItem(queue.first_playable);
+		if (queue.state && queue.queue) {
+			hydratePlayback({ state: queue.state, queue: queue.queue });
+		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
@@ -856,7 +846,9 @@ export async function startAlbumRadio(albumId: number) {
 			return;
 		}
 		setRadioReasons(queue.tracks);
-		await playFirstRadioItem(queue.first_playable);
+		if (queue.state && queue.queue) {
+			hydratePlayback({ state: queue.state, queue: queue.queue });
+		}
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		setError('start album radio', error, () => startAlbumRadio(albumId));

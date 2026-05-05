@@ -939,6 +939,8 @@ export interface RadioQueue {
 		artist_name: string | null;
 	};
 	tracks: RadioCandidate[];
+	state?: PlaybackState;
+	queue?: QueueItem[];
 	first_playable?: {
 		type: 'library' | 'pending';
 		queue_item_id: number;
@@ -1695,11 +1697,14 @@ export const api = {
 		blend?: RadioBlend;
 		limit?: number;
 	}): Promise<{
+		state: PlaybackState;
+		queue: QueueItem[];
 		first_playable: {
 			type: 'library' | 'pending';
 			queue_item_id: number;
 			track_id: number | null;
 		};
+		pending_count?: number;
 	}> {
 		return fetchApi('/api/radio/start', undefined, {
 			method: 'POST',

@@ -1762,6 +1762,7 @@ async fn play_discovery_track(
     Json(payload): Json<DiscoveryExternalResultRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let previous_track_id = current_playback_track_id(&state).await;
+    let playback_generation = bump_playback_generation(&state).await;
     let provider = normalize_external_provider(&payload.provider).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -1803,10 +1804,14 @@ async fn play_discovery_track(
     let crossfade_ms = current_crossfade_ms(&state).await;
     let user_quality = current_user_audio_quality(&state).await;
     let job =
-        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
+            .with_generation(playback_generation);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
+        if let Ok(state_guard) = state.try_read() {
+            let _ = state_guard.db.with_conn(player::pause);
+        }
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -5135,9 +5140,12 @@ async fn radio_song(
         "radio_song",
     )
     .await?;
+    let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
     body["pending_count"] = json!(pending_count);
+    body["state"] = json!(snapshot.state);
+    body["queue"] = json!(snapshot.queue);
     Ok(Json(body))
 }
 
@@ -5245,6 +5253,148 @@ async fn build_radio_queue_and_spawn_resolvers(
     Ok((first_playable, pending_count))
 }
 
+async fn start_first_radio_queue_item(
+    state: &SharedState,
+) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
+    let playback_generation = bump_playback_generation(state).await;
+    clear_ephemeral_playback_markers(state, true).await;
+
+    let previous_track_id = current_playback_track_id(state).await;
+    let mut snapshot = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| player::start_queue_from_beginning(conn, false))
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_update_failed",
+                        "message": "Failed to start the radio queue.",
+                    })),
+                )
+            })?
+    };
+
+    let mut play_track = snapshot.state.current_track.clone();
+    if play_track.is_none() {
+        if let Some(resolved) = resolve_pending_current_queue_item(state).await {
+            play_track = Some(resolved);
+            let state_guard = state.read().await;
+            if let Ok(reloaded) = state_guard.db.with_conn(player::load_snapshot) {
+                snapshot = reloaded;
+            }
+        }
+    }
+
+    let end_reason = if play_track.is_some() {
+        Some(player::ListenSessionEndReason::Replaced)
+    } else {
+        Some(player::ListenSessionEndReason::QueueEnded)
+    };
+    sync_session_after_snapshot(state, &snapshot, end_reason).await;
+
+    if let Some(track) = play_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref())
+    {
+        let user_quality = current_user_audio_quality(state).await;
+        let stream_request = match player::build_tidal_stream_request(track, user_quality.clone()) {
+            Some(request) => request,
+            None => {
+                let state_guard = state.read().await;
+                let _ = state_guard.db.with_conn(player::pause);
+                return Err((
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(json!({
+                        "status": "local_playback_not_supported",
+                        "message": "Local-library playback is not wired into the host audio runtime yet.",
+                        "track_id": track.id,
+                    })),
+                ));
+            }
+        };
+        let stream_info = match resolve_tidal_playback_stream(state, track, &stream_request).await {
+            Ok(info) => info,
+            Err(error) => {
+                let state_guard = state.read().await;
+                let _ = state_guard.db.with_conn(player::pause);
+                return Err(tidal_playback_error_response(
+                    track.id,
+                    error,
+                    "TIDAL stream could not be resolved while starting radio.",
+                ));
+            }
+        };
+        let runtime_handle = match ensure_playback_runtime_for_track(state, track).await {
+            Ok(handle) => handle,
+            Err(_) => {
+                let state_guard = state.read().await;
+                let _ = state_guard.db.with_conn(player::pause);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "status": "playback_runtime_unavailable",
+                        "message": "Playback runtime was not available for starting radio.",
+                        "track_id": track.id,
+                    })),
+                ));
+            }
+        };
+        let job = player::build_playback_preparation(
+            track,
+            Some(&stream_info),
+            effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
+            user_quality,
+        )
+        .with_generation(playback_generation);
+        runtime_handle.play(job).map_err(|error| {
+            let message = format!("Failed to start host audio playback: {error}");
+            report_playback_failure(state, &message);
+            if let Ok(state_guard) = state.try_read() {
+                let _ = state_guard.db.with_conn(player::pause);
+            }
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "playback_runtime_failed",
+                    "message": message,
+                    "track_id": track.id,
+                })),
+            )
+        })?;
+        {
+            let mut state_guard = state.write().await;
+            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: stream_info.audio_quality.clone(),
+                sample_rate: stream_info.sample_rate,
+                bit_depth: stream_info.bit_depth,
+            });
+            state_guard.pending_stream_display = None;
+        }
+    } else if let Some(runtime_handle) = current_playback_runtime(state).await {
+        let _ = runtime_handle.stop();
+    }
+
+    record_transition_if_changed(state, previous_track_id, &snapshot, "radio", true).await;
+
+    let state_guard = state.read().await;
+    if let Some(track_id) = play_track
+        .as_ref()
+        .or(snapshot.state.current_track.as_ref())
+        .map(|track| track.id)
+    {
+        let _ = state_guard
+            .event_tx
+            .send(AppEvent::TrackChanged { track_id });
+    }
+    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    drop(state_guard);
+
+    Ok(overlay_snapshot_with_external_track(state, snapshot).await)
+}
+
 async fn radio_start(
     State(state): State<SharedState>,
     Json(payload): Json<RadioStartRequest>,
@@ -5306,6 +5456,7 @@ async fn radio_start(
         })?;
     let first_item = build.first_item;
     let pending_item_ids = build.pending_item_ids;
+    let pending_count = pending_item_ids.len();
 
     let first_playable = match first_item {
         Some((queue_item_id, Some(track_id))) => json!({
@@ -5366,7 +5517,14 @@ async fn radio_start(
         let _ = s.event_tx.send(AppEvent::QueueUpdated);
     }
 
-    Ok(Json(json!({ "first_playable": first_playable })))
+    let snapshot = start_first_radio_queue_item(&state).await?;
+
+    Ok(Json(json!({
+        "first_playable": first_playable,
+        "pending_count": pending_count,
+        "state": snapshot.state,
+        "queue": snapshot.queue
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -5421,9 +5579,12 @@ async fn radio_album(
         "radio_album",
     )
     .await?;
+    let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
     body["pending_count"] = json!(pending_count);
+    body["state"] = json!(snapshot.state);
+    body["queue"] = json!(snapshot.queue);
     Ok(Json(body))
 }
 
@@ -5479,9 +5640,12 @@ async fn radio_artist(
         "radio_artist",
     )
     .await?;
+    let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
     body["pending_count"] = json!(pending_count);
+    body["state"] = json!(snapshot.state);
+    body["queue"] = json!(snapshot.queue);
     Ok(Json(body))
 }
 
@@ -6226,6 +6390,15 @@ fn discovery_request_to_trail_item(
 async fn set_external_playback_track(state: &SharedState, track: Option<crate::db::models::Track>) {
     let mut state_guard = state.write().await;
     state_guard.external_playback_track = track;
+}
+
+async fn clear_ephemeral_playback_markers(state: &SharedState, clear_mix_queue: bool) {
+    let mut state_guard = state.write().await;
+    state_guard.external_playback_track = None;
+    state_guard.ephemeral_tidal_track = None;
+    if clear_mix_queue {
+        state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
+    }
 }
 
 async fn overlay_snapshot_with_external_track(
@@ -7317,6 +7490,7 @@ async fn play_track(
     }
 
     let previous_track_id = current_playback_track_id(&state).await;
+    let playback_generation = bump_playback_generation(&state).await;
     // User-driven play; reset the post-clear suppression so automix
     // re-engages naturally instead of waiting out the 60s window.
     {
@@ -7366,26 +7540,59 @@ async fn play_track(
         "playback start requested"
     );
 
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| player::play_track_now(conn, payload.track_id))
+            .map_err(|error| {
+                tracing::error!(
+                    target: "noor.playback.tidal",
+                    event = "playback_start_failed",
+                    track_id = payload.track_id,
+                    error = %error,
+                    "failed to start playback"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_start_failed",
+                        "message": "Failed to start playback.",
+                        "track_id": payload.track_id,
+                    })),
+                )
+            })?
+    };
+    clear_ephemeral_playback_markers(&state, true).await;
+
     let user_quality = current_user_audio_quality(&state).await;
-    let stream_request = player::build_tidal_stream_request(&track, user_quality.clone()).ok_or_else(|| {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({
-                "status": "local_playback_not_supported",
-                "message": "Local-library playback is not wired into the host audio runtime yet.",
-                "track_id": track.id,
-            })),
-        )
-    })?;
-    let stream_info = resolve_tidal_playback_stream(&state, &track, &stream_request)
-        .await
-        .map_err(|error| {
-            tidal_playback_error_response(
+    let stream_request = match player::build_tidal_stream_request(&track, user_quality.clone()) {
+        Some(request) => request,
+        None => {
+            let state_guard = state.read().await;
+            let _ = state_guard.db.with_conn(player::pause);
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "status": "local_playback_not_supported",
+                    "message": "Local-library playback is not wired into the host audio runtime yet.",
+                    "track_id": track.id,
+                })),
+            ));
+        }
+    };
+    let stream_info = match resolve_tidal_playback_stream(&state, &track, &stream_request).await {
+        Ok(info) => info,
+        Err(error) => {
+            let state_guard = state.read().await;
+            let _ = state_guard.db.with_conn(player::pause);
+            return Err(tidal_playback_error_response(
                 track.id,
                 error,
                 "TIDAL stream could not be resolved before playback.",
-            )
-        })?;
+            ));
+        }
+    };
     tracing::info!(
         target: "noor.playback.tidal",
         event = "playback_stream_ready",
@@ -7396,7 +7603,8 @@ async fn play_track(
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
     let job =
-        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
+            .with_generation(playback_generation);
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -7447,34 +7655,6 @@ async fn play_track(
         state_guard.pending_stream_display = None;
     }
 
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| player::play_track_now(conn, payload.track_id))
-            .map_err(|error| {
-                tracing::error!(
-                    target: "noor.playback.tidal",
-                    event = "playback_start_failed",
-                    track_id = payload.track_id,
-                    error = %error,
-                    "failed to start playback"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_start_failed",
-                        "message": "Failed to start playback.",
-                        "track_id": payload.track_id,
-                    })),
-                )
-            })?
-    };
-    set_external_playback_track(&state, None).await;
-    {
-        let mut state_guard = state.write().await;
-        state_guard.ephemeral_tidal_track = None;
-    }
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
@@ -8227,6 +8407,7 @@ async fn next_track(
         return Ok(response);
     }
 
+    let playback_generation = bump_playback_generation(&state).await;
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
         let state = state.read().await;
@@ -8365,7 +8546,8 @@ async fn next_track(
             Some(&stream_info),
             effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
-        );
+        )
+        .with_generation(playback_generation);
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -8414,6 +8596,7 @@ async fn next_track(
 async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let playback_generation = bump_playback_generation(&state).await;
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
         let state = state.read().await;
@@ -8507,7 +8690,8 @@ async fn previous_track(
             Some(&stream_info),
             effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
             user_quality,
-        );
+        )
+        .with_generation(playback_generation);
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -10207,33 +10391,17 @@ async fn start_ephemeral_tidal_playback(
         artwork_url: track.artwork_url.clone(),
     };
 
-    // Build the playback job and start it via the runtime
-    let crossfade_ms = current_crossfade_ms(state).await;
-    let job =
-        player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None);
-    let runtime_handle = ensure_playback_runtime_for_track(state, &synthetic).await?;
-    runtime_handle.play(job).map_err(|e| {
-        let message = format!("Failed to start host audio playback: {e}");
-        report_playback_failure(state, &message);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": message })),
-        )
-    })?;
-
-    // Store ephemeral track for state overlay and clear DB current_track_id
-    {
+    let playback_generation = bump_playback_generation(state).await;
+    let snapshot = {
         let mut state_guard = state.write().await;
-        state_guard.ephemeral_tidal_track = Some(synthetic);
+        state_guard.external_playback_track = None;
+        state_guard.ephemeral_tidal_track = Some(synthetic.clone());
         state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
             audio_quality: stream_info.audio_quality.clone(),
             sample_rate: stream_info.sample_rate,
             bit_depth: stream_info.bit_depth,
         });
         state_guard.pending_stream_display = None;
-    }
-    let snapshot = {
-        let state_guard = state.read().await;
         let snapshot = state_guard
             .db
             .with_conn(|conn| {
@@ -10257,6 +10425,32 @@ async fn start_ephemeral_tidal_playback(
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
         snapshot
     };
+
+    // Build the playback job and start it via the runtime
+    let crossfade_ms = current_crossfade_ms(state).await;
+    let job =
+        player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None)
+            .with_generation(playback_generation);
+    let runtime_handle = match ensure_playback_runtime_for_track(state, &synthetic).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            let state_guard = state.read().await;
+            let _ = state_guard.db.with_conn(player::pause);
+            return Err(error);
+        }
+    };
+    runtime_handle.play(job).map_err(|e| {
+        let message = format!("Failed to start host audio playback: {e}");
+        report_playback_failure(state, &message);
+        if let Ok(state_guard) = state.try_read() {
+            let _ = state_guard.db.with_conn(player::pause);
+        }
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": message })),
+        )
+    })?;
+
     sync_session_after_snapshot(
         state,
         &snapshot,
@@ -10330,37 +10524,43 @@ async fn tidal_artist_profile(
 
     let artist_name = top_tracks_page.items.first().map(|t| t.artist.name.clone());
 
-    let top_tracks: Vec<serde_json::Value> = top_tracks_page.items.iter().map(|t| {
-        let artwork_url = TidalClient::get_artwork_url(
-            &t.album.as_ref().and_then(|a| a.cover.clone()),
-            320,
-        );
-        json!({
-            "tidal_id": t.id,
-            "title": t.title,
-            "duration_ms": t.duration * 1000,
-            "artwork_url": artwork_url,
-            "album_title": t.album.as_ref().map(|a| &a.title),
-            "album_tidal_id": t.album.as_ref().map(|a| a.id),
-            "artist_name": t.artist.name,
-            "artist_tidal_id": t.artist.id,
+    let top_tracks: Vec<serde_json::Value> = top_tracks_page
+        .items
+        .iter()
+        .map(|t| {
+            let artwork_url =
+                TidalClient::get_artwork_url(&t.album.as_ref().and_then(|a| a.cover.clone()), 320);
+            json!({
+                "tidal_id": t.id,
+                "title": t.title,
+                "duration_ms": t.duration * 1000,
+                "artwork_url": artwork_url,
+                "album_title": t.album.as_ref().map(|a| &a.title),
+                "album_tidal_id": t.album.as_ref().map(|a| a.id),
+                "artist_name": t.artist.name,
+                "artist_tidal_id": t.artist.id,
+            })
         })
-    }).collect();
+        .collect();
 
-    let albums: Vec<serde_json::Value> = albums_page.items.iter().map(|a| {
-        let artwork_url = TidalClient::get_artwork_url(&a.cover, 320);
-        json!({
-            "tidal_id": a.id,
-            "local_id": null,
-            "title": a.title,
-            "artwork_url": artwork_url,
-            "release_date": a.release_date,
-            "release_type": a.release_type,
-            "number_of_tracks": a.number_of_tracks,
-            "artist_name": a.artist.name,
-            "in_library": false,
+    let albums: Vec<serde_json::Value> = albums_page
+        .items
+        .iter()
+        .map(|a| {
+            let artwork_url = TidalClient::get_artwork_url(&a.cover, 320);
+            json!({
+                "tidal_id": a.id,
+                "local_id": null,
+                "title": a.title,
+                "artwork_url": artwork_url,
+                "release_date": a.release_date,
+                "release_type": a.release_type,
+                "number_of_tracks": a.number_of_tracks,
+                "artist_name": a.artist.name,
+                "in_library": false,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(json!({
         "artist_name": artist_name,
@@ -11099,6 +11299,25 @@ async fn current_playback_runtime(
         .map(|runtime| runtime.handle.clone())
 }
 
+fn current_playback_generation(state: &crate::AppState) -> u64 {
+    state
+        .playback_generation
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+async fn current_playback_generation_async(state: &SharedState) -> u64 {
+    let state_guard = state.read().await;
+    current_playback_generation(&state_guard)
+}
+
+async fn bump_playback_generation(state: &SharedState) -> u64 {
+    let state_guard = state.read().await;
+    state_guard
+        .playback_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1
+}
+
 async fn ensure_playback_runtime_for_track(
     state: &SharedState,
     track: &crate::db::models::Track,
@@ -11204,14 +11423,19 @@ fn spawn_playback_runtime_listener(
 
         loop {
             match rx.recv().await {
-                Ok(playback_runtime::PlaybackRuntimeEvent::Finished { track_id }) => {
+                Ok(playback_runtime::PlaybackRuntimeEvent::Finished {
+                    track_id,
+                    generation,
+                }) => {
                     // Track is no longer producing audio — clear the flag before advancing.
                     state
                         .write()
                         .await
                         .audio_active
                         .store(false, std::sync::atomic::Ordering::Relaxed);
-                    if let Err(error) = handle_runtime_finished(state.clone(), track_id).await {
+                    if let Err(error) =
+                        handle_runtime_finished(state.clone(), track_id, generation).await
+                    {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
                         report_playback_failure(&state, &message);
@@ -11242,8 +11466,15 @@ fn spawn_playback_runtime_listener(
                         last_error,
                     });
                 }
-                Ok(playback_runtime::PlaybackRuntimeEvent::Started { track_id, .. }) => {
+                Ok(playback_runtime::PlaybackRuntimeEvent::Started {
+                    track_id,
+                    generation,
+                    ..
+                }) => {
                     let mut state_guard = state.write().await;
+                    if current_playback_generation(&state_guard) != generation {
+                        continue;
+                    }
                     // CPAL buffer threshold crossed — samples are actually flowing now.
                     state_guard
                         .audio_active
@@ -11274,12 +11505,16 @@ fn spawn_playback_runtime_listener(
                         info.active_track_id = None;
                     }
                     state_guard.external_playback_track = None;
+                    state_guard.ephemeral_tidal_track = None;
                     state_guard.current_stream_display = None;
                     state_guard.pending_stream_display = None;
                 }
-                Ok(playback_runtime::PlaybackRuntimeEvent::NearEnd { track_id }) => {
+                Ok(playback_runtime::PlaybackRuntimeEvent::NearEnd {
+                    track_id,
+                    generation,
+                }) => {
                     // Pre-decode the next track so the transition is gapless.
-                    if let Err(err) = handle_near_end(state.clone(), track_id).await {
+                    if let Err(err) = handle_near_end(state.clone(), track_id, generation).await {
                         warn!("Failed to pre-buffer next track: {err:?}");
                     }
                 }
@@ -11294,7 +11529,11 @@ fn spawn_playback_runtime_listener(
 
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the
 /// runtime so it can pre-decode the track and swap it in gaplessly when the current one ends.
-async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::Result<()> {
+async fn handle_near_end(
+    state: SharedState,
+    current_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<()> {
     let (next_track, runtime_handle, crossfade_ms) = {
         let state_guard = state.read().await;
 
@@ -11304,6 +11543,9 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
             .as_ref()
             .and_then(|info| info.active_track_id);
         if active_id != Some(current_track_id) {
+            return Ok(());
+        }
+        if current_playback_generation(&state_guard) != generation {
             return Ok(());
         }
 
@@ -11366,6 +11608,32 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         (info, token)
     };
 
+    {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        let db_current = state_guard
+            .db
+            .with_conn(player::current_track_id)
+            .unwrap_or(None);
+        let cleared = recently_cleared(&state_guard);
+        let still_next = state_guard
+            .db
+            .with_conn(|conn| player::peek_next_track(conn, cleared))
+            .ok()
+            .flatten()
+            .map(|track| track.id);
+        if active_id != Some(current_track_id)
+            || db_current != Some(current_track_id)
+            || current_playback_generation(&state_guard) != generation
+            || still_next != Some(next.id)
+        {
+            return Ok(());
+        }
+    }
+
     // If sample_rate_follow is enabled and the next track's rate differs from current,
     // rebuild the output device at the new rate before PrepareNext.
     {
@@ -11414,8 +11682,27 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
         crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
     );
     let job =
-        player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms, user_quality);
+        player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms, user_quality)
+            .with_generation(generation);
     let _ = access_token; // already embedded in the config held by the runtime
+
+    {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        let db_current = state_guard
+            .db
+            .with_conn(player::current_track_id)
+            .unwrap_or(None);
+        if active_id != Some(current_track_id) || db_current != Some(current_track_id) {
+            return Ok(());
+        }
+        if current_playback_generation(&state_guard) != generation {
+            return Ok(());
+        }
+    }
 
     let _ = handle.prepare_next(job);
     if let Some(ref si) = stream_info {
@@ -11430,7 +11717,18 @@ async fn handle_near_end(state: SharedState, current_track_id: i64) -> anyhow::R
     Ok(())
 }
 
-async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> anyhow::Result<()> {
+async fn handle_runtime_finished(
+    state: SharedState,
+    finished_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<()> {
+    {
+        let state_guard = state.read().await;
+        if current_playback_generation(&state_guard) != generation {
+            return Ok(());
+        }
+    }
+
     let external_finished = {
         let state_guard = state.read().await;
         state_guard
@@ -11438,6 +11736,11 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             .as_ref()
             .map(|track| track.id == finished_track_id)
             .unwrap_or(false)
+            || state_guard
+                .ephemeral_tidal_track
+                .as_ref()
+                .map(|track| track.id == finished_track_id)
+                .unwrap_or(false)
     };
     if external_finished {
         // Auto-advance through any queued ephemeral mix continuation before
@@ -11453,6 +11756,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
             {
                 let mut state_guard = state.write().await;
                 state_guard.external_playback_track = None;
+                state_guard.ephemeral_tidal_track = None;
             }
             if let Err((status, body)) = start_ephemeral_tidal_playback(&state, next).await {
                 tracing::warn!(
@@ -11470,6 +11774,7 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
         {
             let mut state_guard = state.write().await;
             state_guard.external_playback_track = None;
+            state_guard.ephemeral_tidal_track = None;
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                 info.active_track_id = None;
             }
@@ -11523,43 +11828,67 @@ async fn handle_runtime_finished(state: SharedState, finished_track_id: i64) -> 
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
         let user_quality = current_user_audio_quality(&state).await;
-        let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
-        else {
-            handle_runtime_error(
-                state.clone(),
-                "Local library playback is not wired into the host audio runtime yet.",
-            )
-            .await;
-            return Ok(());
-        };
-        let stream_info = resolve_tidal_playback_stream(&state, track, &stream_request)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "playback stream resolve failed: {}",
-                    describe_tidal_playback_error(&error)
-                )
-            })?;
         let runtime_handle = ensure_playback_runtime_for_track(&state, track)
             .await
             .map_err(|(status, body)| {
                 anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
             })?;
-        let job = player::build_playback_preparation(
-            track,
-            Some(&stream_info),
-            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
-            user_quality,
-        );
-        runtime_handle.switch_to(job)?;
-        {
-            let mut state_guard = state.write().await;
-            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-                audio_quality: stream_info.audio_quality.clone(),
-                sample_rate: stream_info.sample_rate,
-                bit_depth: stream_info.bit_depth,
-            });
-            state_guard.pending_stream_display = None;
+        let prepared_status = runtime_handle.track_status(track.id, generation);
+        if matches!(
+            prepared_status,
+            playback_runtime::PlaybackTrackStatus::Active
+                | playback_runtime::PlaybackTrackStatus::Prepared
+        ) {
+            let job = player::build_playback_preparation(
+                track,
+                None,
+                effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
+                user_quality,
+            )
+            .with_generation(generation);
+            runtime_handle.switch_to(job)?;
+            {
+                let mut state_guard = state.write().await;
+                if let Some(pending) = state_guard.pending_stream_display.take() {
+                    state_guard.current_stream_display = Some(pending);
+                }
+            }
+        } else {
+            let Some(stream_request) =
+                player::build_tidal_stream_request(track, user_quality.clone())
+            else {
+                handle_runtime_error(
+                    state.clone(),
+                    "Local library playback is not wired into the host audio runtime yet.",
+                )
+                .await;
+                return Ok(());
+            };
+            let stream_info = resolve_tidal_playback_stream(&state, track, &stream_request)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "playback stream resolve failed: {}",
+                        describe_tidal_playback_error(&error)
+                    )
+                })?;
+            let job = player::build_playback_preparation(
+                track,
+                Some(&stream_info),
+                effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
+                user_quality,
+            )
+            .with_generation(generation);
+            runtime_handle.switch_to(job)?;
+            {
+                let mut state_guard = state.write().await;
+                state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                    audio_quality: stream_info.audio_quality.clone(),
+                    sample_rate: stream_info.sample_rate,
+                    bit_depth: stream_info.bit_depth,
+                });
+                state_guard.pending_stream_display = None;
+            }
         }
     }
 
@@ -11582,6 +11911,7 @@ async fn handle_runtime_error(state: SharedState, message: &str) {
             info.active_track_id = None;
         }
         state_guard.external_playback_track = None;
+        state_guard.ephemeral_tidal_track = None;
     }
     report_playback_failure(&state, message);
 
@@ -11848,8 +12178,10 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
     };
 
     let crossfade_ms = current_crossfade_ms(state).await;
+    let generation = current_playback_generation_async(state).await;
     let job =
-        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality);
+        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
+            .with_generation(generation);
 
     handle.switch_to(job)?;
 
@@ -14320,6 +14652,7 @@ mod tests {
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
+            playback_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             current_stream_display: None,
             pending_stream_display: None,
             active_listen_session: None,

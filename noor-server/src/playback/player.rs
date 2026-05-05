@@ -49,6 +49,7 @@ pub struct PreparedPlaybackJob {
     pub track: Track,
     pub source: PlaybackSourceRequest,
     pub gapless: GaplessPlan,
+    pub generation: u64,
 }
 
 pub type PlaybackPreparation = PreparedPlaybackJob;
@@ -135,7 +136,13 @@ impl PreparedPlaybackJob {
             track,
             source,
             gapless,
+            generation: 0,
         }
+    }
+
+    pub fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        self
     }
 
     pub fn source_kind(&self) -> PlaybackSourceKind {
@@ -217,12 +224,12 @@ pub fn lookup_current_listen_source(conn: &Connection) -> crate::db::models::Lis
         .ok();
     match raw.as_deref() {
         Some("user") | Some("library") | Some("playback") => ListenSource::Manual,
-        Some("radio") => ListenSource::Radio,
+        Some("radio") | Some("radio_pending") => ListenSource::Radio,
         Some("playlist") => ListenSource::Playlist,
         Some("album") => ListenSource::Album,
         Some("artist") => ListenSource::Artist,
         Some("search") => ListenSource::Search,
-        Some("automix") => ListenSource::Automix,
+        Some("automix") | Some("automix-new") => ListenSource::Automix,
         _ => ListenSource::Unknown,
     }
 }
@@ -694,6 +701,21 @@ pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackS
     load_snapshot(conn)
 }
 
+pub fn start_queue_from_beginning(
+    conn: &Connection,
+    recently_cleared: bool,
+) -> Result<PlaybackSnapshot> {
+    conn.execute(
+        "UPDATE playback_state
+         SET current_track_id = NULL,
+             current_queue_item_id = NULL,
+             position_ms = 0
+         WHERE id = 1",
+        [],
+    )?;
+    next_track(conn, recently_cleared)
+}
+
 pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
     let (current_track_id, current_queue_item_id, position_ms): (Option<i64>, Option<i64>, i64) =
         conn.query_row(
@@ -945,7 +967,7 @@ fn build_automix_extension(
     use_learning: bool,
 ) -> Result<Vec<Track>> {
     if use_learning {
-        if let Some(model) = queries::get_active_embedding_model(conn)? {
+        if let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
             let excluded = queue_items
                 .iter()
                 .map(|item| item.track.id)
@@ -1497,6 +1519,31 @@ mod tests {
                 duration_listened_ms INTEGER DEFAULT 0,
                 completed INTEGER DEFAULT 0
             );
+            CREATE TABLE embedding_models (
+                id INTEGER PRIMARY KEY,
+                model_key TEXT NOT NULL UNIQUE,
+                family TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                trained_at TEXT,
+                config_json TEXT,
+                metrics_json TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE track_similarity (
+                track_a INTEGER NOT NULL,
+                track_b INTEGER NOT NULL,
+                similarity_score REAL NOT NULL DEFAULT 0,
+                co_listen_score REAL DEFAULT 0,
+                co_album_score REAL DEFAULT 0,
+                co_artist_score REAL DEFAULT 0,
+                genre_proximity REAL DEFAULT 0,
+                duration_proximity REAL DEFAULT 0,
+                era_proximity REAL DEFAULT 0,
+                computed_at TEXT,
+                PRIMARY KEY (track_a, track_b)
+            );
             CREATE TABLE playback_state (
                 id INTEGER PRIMARY KEY,
                 current_track_id INTEGER,
@@ -1533,6 +1580,12 @@ mod tests {
             "INSERT INTO playback_state (
                 id, current_track_id, position_ms, is_playing, volume, shuffle_mode, repeat_mode, automix_enabled, crossfade_ms
             ) VALUES (1, NULL, 0, 0, 1.0, 'off', 'off', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_similarity (track_a, track_b, similarity_score, co_artist_score)
+             VALUES (2, 3, 0.95, 1.0)",
             [],
         )
         .unwrap();
@@ -1823,6 +1876,32 @@ mod tests {
     }
 
     #[test]
+    fn lookup_listen_source_maps_radio_pending_and_automix_new() {
+        let conn = conn();
+        for (source, expected) in [
+            ("radio_pending", crate::db::models::ListenSource::Radio),
+            ("automix-new", crate::db::models::ListenSource::Automix),
+        ] {
+            conn.execute("DELETE FROM queue", []).unwrap();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, ?1)",
+                params![source],
+            )
+            .unwrap();
+            let qid = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 1, current_queue_item_id = ?1
+                 WHERE id = 1",
+                params![qid],
+            )
+            .unwrap();
+
+            assert_eq!(lookup_current_listen_source(&conn), expected);
+        }
+    }
+
+    #[test]
     fn next_track_starts_first_queue_item_when_no_current_anchor() {
         let conn = conn();
         let tracks = load_tracks(&conn, &[2, 3]);
@@ -1842,6 +1921,29 @@ mod tests {
         assert_eq!(
             snapshot.state.current_queue_item_id,
             snapshot.queue.first().map(|item| item.id)
+        );
+        assert!(snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn start_queue_from_beginning_ignores_previous_current_anchor() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let snapshot = start_queue_from_beginning(&conn, false).unwrap();
+
+        assert_eq!(snapshot.state.current_track.as_ref().map(|t| t.id), Some(1));
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            Some(queue_items[0].id)
         );
         assert!(snapshot.state.is_playing);
     }

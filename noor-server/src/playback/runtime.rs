@@ -66,15 +66,23 @@ pub enum PlaybackRuntimeCommand {
     /// Used to start the crossfade stream if the crossfade window has already opened.
     NextDecodeComplete {
         track_id: i64,
+        generation: u64,
     },
     /// Sent by the CPAL callback when the current track is within `crossfade_ms` of its end.
     /// If a pre-decoded next engine is ready, its stream is unpaused so both mix via the OS.
     CrossfadeStart {
         track_id: i64,
+        generation: u64,
     },
     TrackTerminal {
         track_id: i64,
+        generation: u64,
         outcome: PlaybackTerminalReason,
+    },
+    TrackStatus {
+        track_id: i64,
+        generation: u64,
+        respond_to: std::sync::mpsc::Sender<PlaybackTrackStatus>,
     },
     /// Swap the CPAL output device for any active engines. Shared mode only at
     /// this stage; `exclusive` and `sample_rate_follow` are wired in later tasks
@@ -87,6 +95,13 @@ pub enum PlaybackRuntimeCommand {
         desired_sample_rate: Option<u32>,
     },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackTrackStatus {
+    None,
+    Active,
+    Prepared,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +151,7 @@ pub enum PlaybackRuntimeEvent {
     },
     Started {
         track_id: i64,
+        generation: u64,
         source: PlaybackSourceKind,
     },
     Paused {
@@ -147,11 +163,13 @@ pub enum PlaybackRuntimeEvent {
     Stopped,
     Finished {
         track_id: i64,
+        generation: u64,
     },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.
     NearEnd {
         track_id: i64,
+        generation: u64,
     },
     Error {
         message: String,
@@ -226,6 +244,22 @@ impl PlaybackRuntimeHandle {
     /// Pre-decode the next track in the background so the transition is gapless.
     pub fn prepare_next(&self, job: PreparedPlaybackJob) -> Result<()> {
         self.send(PlaybackRuntimeCommand::PrepareNext(job))
+    }
+
+    pub fn track_status(&self, track_id: i64, generation: u64) -> PlaybackTrackStatus {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self
+            .send(PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return PlaybackTrackStatus::None;
+        }
+        rx.recv_timeout(std::time::Duration::from_millis(100))
+            .unwrap_or(PlaybackTrackStatus::None)
     }
 
     /// Set playback volume (0.0 = silent, 1.0 = full). Applied immediately to the CPAL callback.
@@ -428,6 +462,7 @@ fn run_runtime_loop(
                     &volume_ctl,
                     &position_samples,
                     &position_source,
+                    true,
                 )?;
             }
             PlaybackRuntimeCommand::Switch(job) => {
@@ -443,6 +478,7 @@ fn run_runtime_loop(
                     &volume_ctl,
                     &position_samples,
                     &position_source,
+                    false,
                 )?;
             }
             PlaybackRuntimeCommand::Seek(position_ms) => {
@@ -481,7 +517,7 @@ fn run_runtime_loop(
                 let already_pending = state
                     .next_engine
                     .as_ref()
-                    .map(|e| e.track_id == job.track.id)
+                    .map(|e| e.track_id == job.track.id && e.generation == job.generation)
                     .unwrap_or(false);
                 if !already_pending {
                     // Stop any stale pending engine first.
@@ -514,10 +550,15 @@ fn run_runtime_loop(
                     }
                 }
             }
-            PlaybackRuntimeCommand::CrossfadeStart { track_id } => {
+            PlaybackRuntimeCommand::CrossfadeStart {
+                track_id,
+                generation,
+            } => {
                 // The OUTGOING engine just entered its fade-out window and is asking
                 // us to start the pre-decoded next engine, if one is ready.
-                if state.engine.as_ref().map(|e| e.track_id) == Some(track_id) {
+                if state.engine.as_ref().map(|e| (e.track_id, e.generation))
+                    == Some((track_id, generation))
+                {
                     let next_ready = state
                         .next_engine
                         .as_ref()
@@ -529,14 +570,17 @@ fn run_runtime_loop(
                     // If not ready yet, NextDecodeComplete handles the late path.
                 }
             }
-            PlaybackRuntimeCommand::NextDecodeComplete { track_id } => {
+            PlaybackRuntimeCommand::NextDecodeComplete {
+                track_id,
+                generation,
+            } => {
                 // Decode for the pre-decoded next engine completed. If the outgoing
                 // engine has already entered the crossfade window, promote now —
                 // the user will hear a clipped fade-in, but it's better than silence.
                 let pending_match = state
                     .next_engine
                     .as_ref()
-                    .map(|e| e.track_id == track_id)
+                    .map(|e| e.track_id == track_id && e.generation == generation)
                     .unwrap_or(false);
                 if pending_match {
                     let crossfade_started = state
@@ -578,22 +622,35 @@ fn run_runtime_loop(
                 stop_all_engines(&mut state);
                 let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
             }
-            PlaybackRuntimeCommand::TrackTerminal { track_id, outcome } => {
+            PlaybackRuntimeCommand::TrackTerminal {
+                track_id,
+                generation,
+                outcome,
+            } => {
                 // The fading-out engine reaching its terminal state is the
                 // expected end of a crossfade — drop it silently. The queue
                 // advance already happened at promotion time via Finished.
-                let fading = state.fading_out_engine.as_ref().map(|e| e.track_id);
-                if fading == Some(track_id) {
+                let fading = state
+                    .fading_out_engine
+                    .as_ref()
+                    .map(|e| (e.track_id, e.generation));
+                if fading == Some((track_id, generation)) {
                     if let Some(mut engine) = state.fading_out_engine.take() {
                         engine.stop();
                     }
                 } else {
-                    let active = state.engine.as_ref().map(|engine| engine.track_id);
-                    if handle_terminal_event(active, track_id) {
+                    let active = state
+                        .engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation));
+                    if handle_terminal_event(active, track_id, generation) {
                         stop_current_engine(&mut state);
                         match outcome {
                             PlaybackTerminalReason::Finished => {
-                                let _ = event_tx.send(PlaybackRuntimeEvent::Finished { track_id });
+                                let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
+                                    track_id,
+                                    generation,
+                                });
                             }
                             PlaybackTerminalReason::Error(message) => {
                                 let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
@@ -601,6 +658,30 @@ fn run_runtime_loop(
                         }
                     }
                 }
+            }
+            PlaybackRuntimeCommand::TrackStatus {
+                track_id,
+                generation,
+                respond_to,
+            } => {
+                let active = state
+                    .engine
+                    .as_ref()
+                    .map(|engine| (engine.track_id, engine.generation))
+                    == Some((track_id, generation));
+                let prepared = state
+                    .next_engine
+                    .as_ref()
+                    .map(|engine| (engine.track_id, engine.generation))
+                    == Some((track_id, generation));
+                let status = if active {
+                    PlaybackTrackStatus::Active
+                } else if prepared {
+                    PlaybackTrackStatus::Prepared
+                } else {
+                    PlaybackTrackStatus::None
+                };
+                let _ = respond_to.send(status);
             }
             PlaybackRuntimeCommand::DeviceSwap {
                 device: selection,
@@ -745,6 +826,7 @@ fn transition_to_job(
     volume_ctl: &Arc<AtomicU32>,
     position_samples: &Arc<AtomicU64>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    force_restart: bool,
 ) -> Result<()> {
     // No-op when state.engine is already playing the requested track. This
     // happens after a crossfade swap: promote_next_to_active emitted Finished
@@ -753,7 +835,7 @@ fn transition_to_job(
     // a perfectly good audio stream and cold-start a duplicate.
     // position_source was already redirected to the promoted engine at promotion
     // time, so the handle reads the correct counter without any extra work here.
-    if state.engine.as_ref().map(|e| e.track_id) == Some(job.track.id) {
+    if !force_restart && state.engine.as_ref().map(|e| e.track_id) == Some(job.track.id) {
         return Ok(());
     }
 
@@ -777,7 +859,7 @@ fn transition_to_job(
     let pre_decoded_match = state
         .next_engine
         .as_ref()
-        .map(|e| e.track_id == job.track.id)
+        .map(|e| e.track_id == job.track.id && e.generation == job.generation)
         .unwrap_or(false);
 
     let engine = if pre_decoded_match {
@@ -890,11 +972,13 @@ fn promote_next_to_active(
     }
     if let Some(outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
+        let outgoing_generation = outgoing.generation;
         state.fading_out_engine = Some(outgoing);
         // Tell the routes layer that the audible "current" track has flipped.
         // Reusing Finished keeps the existing queue-advance path.
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
             track_id: outgoing_id,
+            generation: outgoing_generation,
         });
     }
 }
@@ -925,6 +1009,7 @@ impl OutputStream {
 
 struct PlaybackEngine {
     track_id: i64,
+    generation: u64,
     /// Active output stream; `None` only briefly during a `DeviceSwap` while
     /// we rebuild it on the new device or backend.
     stream: Option<OutputStream>,
@@ -954,13 +1039,23 @@ impl PlaybackEngine {
         }
 
         let track_id = job.track.id;
+        let generation = job.generation;
         let source_kind = job.source_kind();
+        let estimated_total_samples = job.track.duration_ms.and_then(|duration_ms| {
+            estimate_total_samples_from_duration_ms(
+                duration_ms,
+                device_sample_rate,
+                device_channels,
+            )
+        });
         let shared = Arc::new(PlaybackSharedState::new(
             track_id,
+            generation,
             source_kind,
             job.gapless,
             output_config.sample_rate.0,
             device_channels,
+            estimated_total_samples,
             command_tx.clone(),
             volume_ctl,
             position_samples,
@@ -1000,6 +1095,7 @@ impl PlaybackEngine {
 
         Ok(Self {
             track_id,
+            generation,
             stream: Some(stream),
             decoder_thread: Some(decoder_thread),
             shared,
@@ -1322,6 +1418,7 @@ fn write_output_buffer<T>(
         guard.started_notified = true;
         let _ = event_tx.send(PlaybackRuntimeEvent::Started {
             track_id: shared.track_id,
+            generation: shared.generation,
             source: shared.source_kind,
         });
     }
@@ -1330,6 +1427,7 @@ fn write_output_buffer<T>(
         guard.finished_notified = true;
         let _ = command_tx.send(PlaybackRuntimeCommand::TrackTerminal {
             track_id: shared.track_id,
+            generation: shared.generation,
             outcome: PlaybackTerminalReason::Finished,
         });
     }
@@ -1348,6 +1446,7 @@ fn write_output_buffer<T>(
                 shared.near_end_signaled.store(true, Ordering::Relaxed);
                 let _ = event_tx.send(PlaybackRuntimeEvent::NearEnd {
                     track_id: shared.track_id,
+                    generation: shared.generation,
                 });
             }
         }
@@ -1367,6 +1466,7 @@ fn write_output_buffer<T>(
                         .store(true, Ordering::Relaxed);
                     let _ = command_tx.send(PlaybackRuntimeCommand::CrossfadeStart {
                         track_id: shared.track_id,
+                        generation: shared.generation,
                     });
                 }
             }
@@ -1377,6 +1477,7 @@ fn write_output_buffer<T>(
 #[derive(Debug)]
 pub(crate) struct PlaybackSharedState {
     track_id: i64,
+    generation: u64,
     source_kind: PlaybackSourceKind,
     paused: AtomicBool,
     stopped: AtomicBool,
@@ -1418,10 +1519,12 @@ impl PlaybackSharedState {
     #[allow(clippy::too_many_arguments)]
     fn new(
         track_id: i64,
+        generation: u64,
         source_kind: PlaybackSourceKind,
         gapless: GaplessPlan,
         device_sample_rate: u32,
         device_channels: u16,
+        estimated_total_samples: Option<u64>,
         command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
@@ -1439,6 +1542,7 @@ impl PlaybackSharedState {
         };
         Self {
             track_id,
+            generation,
             source_kind,
             paused: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
@@ -1447,7 +1551,7 @@ impl PlaybackSharedState {
             volume_ctl,
             position_samples,
             seek_target_samples: AtomicU64::new(u64::MAX),
-            total_samples: AtomicU64::new(0),
+            total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
@@ -1468,6 +1572,7 @@ impl PlaybackSharedState {
         self.command_tx
             .send(PlaybackRuntimeCommand::TrackTerminal {
                 track_id: self.track_id,
+                generation: self.generation,
                 outcome,
             })
             .map_err(|_| anyhow!("playback runtime command channel closed"))
@@ -1934,6 +2039,7 @@ fn decode_and_buffer_job(
                 .command_tx
                 .send(PlaybackRuntimeCommand::NextDecodeComplete {
                     track_id: shared.track_id,
+                    generation: shared.generation,
                 });
         }
     }
@@ -2039,8 +2145,19 @@ fn samples_from_ms(ms: i32, sample_rate: u32, channels: u16) -> usize {
     (base + pad) as usize
 }
 
-fn handle_terminal_event(active_track_id: Option<i64>, track_id: i64) -> bool {
-    active_track_id == Some(track_id)
+fn estimate_total_samples_from_duration_ms(
+    duration_ms: i64,
+    sample_rate: u32,
+    channels: u16,
+) -> Option<u64> {
+    if duration_ms <= 0 || sample_rate == 0 || channels == 0 {
+        return None;
+    }
+    Some((duration_ms as u64 * sample_rate as u64 * channels as u64) / 1_000)
+}
+
+fn handle_terminal_event(active: Option<(i64, u64)>, track_id: i64, generation: u64) -> bool {
+    active == Some((track_id, generation))
 }
 
 #[cfg(test)]
@@ -2080,9 +2197,19 @@ mod tests {
 
     #[test]
     fn terminal_events_only_apply_to_active_track() {
-        assert!(!handle_terminal_event(None, 7));
-        assert!(handle_terminal_event(Some(7), 7));
-        assert!(!handle_terminal_event(Some(7), 8));
+        assert!(!handle_terminal_event(None, 7, 1));
+        assert!(handle_terminal_event(Some((7, 1)), 7, 1));
+        assert!(!handle_terminal_event(Some((7, 1)), 8, 1));
+        assert!(!handle_terminal_event(Some((7, 2)), 7, 1));
+    }
+
+    #[test]
+    fn estimates_total_samples_from_track_duration() {
+        assert_eq!(
+            estimate_total_samples_from_duration_ms(180_000, 48_000, 2),
+            Some(17_280_000)
+        );
+        assert_eq!(estimate_total_samples_from_duration_ms(0, 48_000, 2), None);
     }
 
     #[test]
@@ -2090,10 +2217,12 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = PlaybackSharedState::new(
             42,
+            0,
             PlaybackSourceKind::TidalStream,
             GaplessPlan::disabled(),
             48_000,
             2,
+            None,
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
@@ -2107,8 +2236,13 @@ mod tests {
             .try_recv()
             .expect("terminal command should be queued")
         {
-            PlaybackRuntimeCommand::TrackTerminal { track_id, outcome } => {
+            PlaybackRuntimeCommand::TrackTerminal {
+                track_id,
+                generation,
+                outcome,
+            } => {
                 assert_eq!(track_id, 42);
+                assert_eq!(generation, 0);
                 assert!(matches!(outcome, PlaybackTerminalReason::Finished));
             }
             other => panic!("unexpected command: {other:?}"),
@@ -2120,10 +2254,12 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = PlaybackSharedState::new(
             7,
+            0,
             PlaybackSourceKind::TidalStream,
             GaplessPlan::disabled(),
             48_000,
             2,
+            None,
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
@@ -2137,8 +2273,13 @@ mod tests {
             .try_recv()
             .expect("terminal command should be queued")
         {
-            PlaybackRuntimeCommand::TrackTerminal { track_id, outcome } => {
+            PlaybackRuntimeCommand::TrackTerminal {
+                track_id,
+                generation,
+                outcome,
+            } => {
                 assert_eq!(track_id, 7);
+                assert_eq!(generation, 0);
                 match outcome {
                     PlaybackTerminalReason::Error(message) => assert_eq!(message, "boom"),
                     PlaybackTerminalReason::Finished => panic!("expected error reason"),
