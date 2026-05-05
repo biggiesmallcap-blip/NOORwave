@@ -10330,10 +10330,42 @@ async fn tidal_artist_profile(
 
     let artist_name = top_tracks_page.items.first().map(|t| t.artist.name.clone());
 
+    let top_tracks: Vec<serde_json::Value> = top_tracks_page.items.iter().map(|t| {
+        let artwork_url = TidalClient::get_artwork_url(
+            &t.album.as_ref().and_then(|a| a.cover.clone()),
+            320,
+        );
+        json!({
+            "tidal_id": t.id,
+            "title": t.title,
+            "duration_ms": t.duration * 1000,
+            "artwork_url": artwork_url,
+            "album_title": t.album.as_ref().map(|a| &a.title),
+            "album_tidal_id": t.album.as_ref().map(|a| a.id),
+            "artist_name": t.artist.name,
+            "artist_tidal_id": t.artist.id,
+        })
+    }).collect();
+
+    let albums: Vec<serde_json::Value> = albums_page.items.iter().map(|a| {
+        let artwork_url = TidalClient::get_artwork_url(&a.cover, 320);
+        json!({
+            "tidal_id": a.id,
+            "local_id": null,
+            "title": a.title,
+            "artwork_url": artwork_url,
+            "release_date": a.release_date,
+            "release_type": a.release_type,
+            "number_of_tracks": a.number_of_tracks,
+            "artist_name": a.artist.name,
+            "in_library": false,
+        })
+    }).collect();
+
     Ok(Json(json!({
         "artist_name": artist_name,
-        "top_tracks": top_tracks_page.items,
-        "albums": albums_page.items,
+        "top_tracks": top_tracks,
+        "albums": albums,
     })))
 }
 

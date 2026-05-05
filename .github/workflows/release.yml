@@ -36,6 +36,12 @@ jobs:
             xattr -cr NOORwave noor-server
             ```
 
+            ### Verifying downloads
+            ```
+            sha256sum -c sha256sums.txt
+            ```
+            Windows: `certutil -hashfile NOORwave-vX.X.X-windows-x64.zip SHA256` and compare against `sha256sums.txt`
+
   build-windows:
     needs: create-release
     runs-on: windows-latest
@@ -86,6 +92,19 @@ jobs:
       - name: Rename artifact
         shell: pwsh
         run: Rename-Item dist\NOORwave-portable.zip "NOORwave-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Compute checksum
+        shell: pwsh
+        run: |
+          $file = "dist\NOORwave-${{ github.ref_name }}-windows-x64.zip"
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          "$hash  NOORwave-${{ github.ref_name }}-windows-x64.zip" | Out-File -Encoding utf8 dist\windows.sha256
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-windows
+          path: dist/windows.sha256
 
       - name: Upload artifact
         uses: softprops/action-gh-release@v2
@@ -159,6 +178,15 @@ jobs:
           cp -r frontend/build dist/NOORwave/www
           tar -czf "dist/NOORwave-$TAG-linux-x64.tar.gz" -C dist NOORwave
 
+      - name: Compute checksum
+        run: cd dist && sha256sum "NOORwave-${{ github.ref_name }}-linux-x64.tar.gz" > linux-x64.sha256
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-linux-x64
+          path: dist/linux-x64.sha256
+
       - name: Upload artifact
         uses: softprops/action-gh-release@v2
         with:
@@ -219,6 +247,15 @@ jobs:
           cp target/release/noor-server dist/NOORwave/noor-server
           cp -r frontend/build dist/NOORwave/www
           tar -czf "dist/NOORwave-$TAG-macos-arm64.tar.gz" -C dist NOORwave
+
+      - name: Compute checksum
+        run: cd dist && sha256sum "NOORwave-${{ github.ref_name }}-macos-arm64.tar.gz" > macos-arm64.sha256
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-macos-arm64
+          path: dist/macos-arm64.sha256
 
       - name: Upload artifact
         uses: softprops/action-gh-release@v2
@@ -281,7 +318,36 @@ jobs:
           cp -r frontend/build dist/NOORwave/www
           tar -czf "dist/NOORwave-$TAG-macos-x64.tar.gz" -C dist NOORwave
 
+      - name: Compute checksum
+        run: cd dist && sha256sum "NOORwave-${{ github.ref_name }}-macos-x64.tar.gz" > macos-x64.sha256
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-macos-x64
+          path: dist/macos-x64.sha256
+
       - name: Upload artifact
         uses: softprops/action-gh-release@v2
         with:
           files: dist/NOORwave-${{ github.ref_name }}-macos-x64.tar.gz
+
+  publish-checksums:
+    needs: [build-windows, build-linux, build-macos-arm64, build-macos-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all checksum artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sha256-*
+          merge-multiple: true
+
+      - name: Merge into sha256sums.txt
+        run: cat *.sha256 | sort > sha256sums.txt
+
+      - name: Upload sha256sums.txt to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sha256sums.txt
