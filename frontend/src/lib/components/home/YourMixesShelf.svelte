@@ -10,6 +10,9 @@
 	let viewState = $state<State>('loading');
 	let errorMsg = $state<string>('');
 
+	let audioMixes = $derived(mixes.filter((m) => !isMixVideo(m)));
+	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
+
 	onMount(load);
 
 	async function load() {
@@ -29,8 +32,17 @@
 		}
 	}
 
+	// Belt-and-suspenders: trust the server field but also check title/mix_type
+	// client-side in case the binary is stale or Tidal changes their field names.
+	function isMixVideo(mix: TidalMix): boolean {
+		if (mix.is_video_mix) return true;
+		const title = mix.title.toLowerCase();
+		const mixType = mix.mix_type?.toLowerCase() ?? '';
+		return title.includes('video mix') || mixType.includes('video');
+	}
+
 	function playMix(mix: TidalMix) {
-		if (mix.is_video_mix) {
+		if (isMixVideo(mix)) {
 			void goto(`/videos?mixId=${encodeURIComponent(mix.id)}&play=1`);
 			return;
 		}
@@ -72,11 +84,57 @@
 	}
 </script>
 
+{#snippet mixRail(items: TidalMix[])}
+	<div class="mix-rail" use:wheelToHorizontal>
+		{#each items as mix (mix.id)}
+			<button
+				type="button"
+				class="mix-card"
+				title={mix.sub_title ?? mix.title}
+				aria-label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+				onclick={() => playMix(mix)}
+			>
+				<div class="art-wrap">
+					{#if mix.image_url}
+						<div class="art" style="background-image: url('{mix.image_url}')"></div>
+					{:else}
+						<div class="art fallback">♫</div>
+					{/if}
+					<div class="play-overlay" aria-hidden="true">▶</div>
+					{#if isMixVideo(mix)}
+						<span class="video-badge">Video</span>
+					{/if}
+				</div>
+				<div class="meta">
+					<h3 class="title">{mix.title}</h3>
+					{#if mix.sub_title}
+						<p class="artist">{mix.sub_title}</p>
+					{/if}
+				</div>
+			</button>
+		{/each}
+	</div>
+{/snippet}
+
+{#snippet skeletonRail()}
+	<div class="mix-rail" use:wheelToHorizontal>
+		{#each [0, 1, 2, 3, 4, 5] as i (i)}
+			<div class="mix-card skeleton">
+				<div class="art-wrap"><div class="art skeleton-art"></div></div>
+				<div class="meta">
+					<div class="skeleton-line skeleton-line-title"></div>
+					<div class="skeleton-line skeleton-line-sub"></div>
+				</div>
+			</div>
+		{/each}
+	</div>
+{/snippet}
+
 <section class="discovery-section" data-section="your-mixes">
 	<div class="section-header">
 		<div class="section-title-group">
 			<p class="eyebrow">TIDAL</p>
-			<h2>Your Mixes</h2>
+			<h2>Music Mixes</h2>
 		</div>
 		{#if viewState === 'loading'}
 			<span class="loading-indicator">Loading…</span>
@@ -84,50 +142,9 @@
 	</div>
 
 	{#if viewState === 'loading'}
-		<div class="mix-rail" use:wheelToHorizontal>
-			{#each [0, 1, 2, 3, 4, 5] as i (i)}
-				<div class="mix-card skeleton">
-					<div class="art-wrap"><div class="art skeleton-art"></div></div>
-					<div class="meta">
-						<div class="skeleton-line skeleton-line-title"></div>
-						<div class="skeleton-line skeleton-line-sub"></div>
-					</div>
-				</div>
-			{/each}
-		</div>
-	{:else if viewState === 'ready'}
-		<div class="mix-rail" use:wheelToHorizontal>
-			{#each mixes as mix (mix.id)}
-				<button
-					type="button"
-					class="mix-card"
-					title={mix.sub_title ?? mix.title}
-					aria-label={`${mix.is_video_mix ? 'Play video mix' : 'Play mix'} ${mix.title}`}
-					onclick={() => playMix(mix)}
-				>
-					<div class="art-wrap">
-						{#if mix.image_url}
-							<div
-								class="art"
-								style="background-image: url('{mix.image_url}')"
-							></div>
-						{:else}
-							<div class="art fallback">♫</div>
-						{/if}
-						<div class="play-overlay" aria-hidden="true">▶</div>
-						{#if mix.is_video_mix}
-							<span class="video-badge">Video</span>
-						{/if}
-					</div>
-					<div class="meta">
-						<h3 class="title">{mix.title}</h3>
-						{#if mix.sub_title}
-							<p class="artist">{mix.sub_title}</p>
-						{/if}
-					</div>
-				</button>
-			{/each}
-		</div>
+		{@render skeletonRail()}
+	{:else if viewState === 'ready' && audioMixes.length > 0}
+		{@render mixRail(audioMixes)}
 	{:else if viewState === 'empty'}
 		<p class="muted-line">TIDAL hasn't built mixes for you yet — keep listening.</p>
 	{:else if viewState === 'disconnected'}
@@ -142,6 +159,18 @@
 		</p>
 	{/if}
 </section>
+
+{#if viewState === 'ready' && videoMixes.length > 0}
+	<section class="discovery-section" data-section="your-video-mixes">
+		<div class="section-header">
+			<div class="section-title-group">
+				<p class="eyebrow">TIDAL</p>
+				<h2>Video Mixes</h2>
+			</div>
+		</div>
+		{@render mixRail(videoMixes)}
+	</section>
+{/if}
 
 <style>
 	/* Mirrors the Trending shelf's visual language: borderless cards,
