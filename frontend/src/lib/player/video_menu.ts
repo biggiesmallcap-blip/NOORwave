@@ -58,9 +58,9 @@ export function buildVideoMenu(video: TidalSearchVideo | TidalVideoMixItem): Men
 export function buildVideoMixMenu(mix: TidalVideoMix): MenuItem[] {
 	return [
 		{
-			label: 'Open mix',
+			label: 'Play video mix',
 			icon: '▶',
-			onSelect: () => void goto(`/videos?mixId=${encodeURIComponent(String(mix.id))}`),
+			onSelect: () => void goto(`/videos?mixId=${encodeURIComponent(String(mix.id))}&play=1`),
 		},
 		{
 			label: 'Copy link',

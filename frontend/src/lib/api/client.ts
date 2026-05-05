@@ -982,6 +982,7 @@ export interface TidalMix {
 	sub_title?: string | null;
 	image_url?: string | null;
 	mix_type?: string | null;
+	is_video_mix: boolean;
 }
 
 export interface TidalMixesResponse {

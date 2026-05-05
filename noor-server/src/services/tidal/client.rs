@@ -301,7 +301,12 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
-    pub async fn search_playlists(&self, query: &str, limit: i32, offset: i32) -> Result<Vec<TidalPlaylist>> {
+    pub async fn search_playlists(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<TidalPlaylist>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=PLAYLISTS",
             TIDAL_API_URL,
@@ -376,7 +381,12 @@ impl TidalClient {
 
     // ─── Search ────────────────────────────────────────────
 
-    pub async fn search_catalog(&self, query: &str, limit: i32, offset: i32) -> Result<TidalSearchCatalog> {
+    pub async fn search_catalog(
+        &self,
+        query: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalSearchCatalog> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=TRACKS,ALBUMS,ARTISTS,VIDEOS",
             TIDAL_API_URL,
@@ -701,13 +711,44 @@ impl TidalClient {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
         let image_url = Self::pick_mix_image(obj.get("images"));
+        let is_video_mix =
+            Self::detect_video_mix(&title, sub_title.as_deref(), mix_type.as_deref());
         Some(TidalMix {
             id,
             title,
             sub_title,
             image_url,
             mix_type,
+            is_video_mix,
         })
+    }
+
+    fn detect_video_mix(title: &str, sub_title: Option<&str>, mix_type: Option<&str>) -> bool {
+        fn norm(value: &str) -> String {
+            value
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() {
+                        ch.to_ascii_lowercase()
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+        }
+
+        if mix_type.is_some_and(|value| {
+            let value = norm(value);
+            value.contains("video") || value.contains("music video") || value.contains("musicvideo")
+        }) {
+            return true;
+        }
+
+        [Some(title), sub_title]
+            .into_iter()
+            .flatten()
+            .map(norm)
+            .any(|value| value.contains("video mix") || value.contains("music video"))
     }
 
     /// TIDAL mix `images` ships in two shapes depending on the page version:
@@ -752,11 +793,13 @@ impl TidalClient {
                     return Some(url);
                 }
                 if let Some(raw) = value.as_str().filter(|s| !s.is_empty()) {
-                    return Some(if raw.starts_with("http://") || raw.starts_with("https://") {
-                        raw.to_string()
-                    } else {
-                        Self::artwork_url(raw, 640)
-                    });
+                    return Some(
+                        if raw.starts_with("http://") || raw.starts_with("https://") {
+                            raw.to_string()
+                        } else {
+                            Self::artwork_url(raw, 640)
+                        },
+                    );
                 }
             }
         }
@@ -991,6 +1034,7 @@ pub struct TidalMix {
     /// — TIDAL adds new types over time. Used for icon/category hints in the UI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix_type: Option<String>,
+    pub is_video_mix: bool,
 }
 
 /// Pull a renderable URL out of the various shapes TIDAL returns for an
@@ -998,11 +1042,13 @@ pub struct TidalMix {
 /// standard `resources.tidal.com` artwork builder.
 fn direct_url_or_image_id(v: &serde_json::Value) -> Option<String> {
     if let Some(raw) = v.as_str().filter(|s| !s.is_empty()) {
-        return Some(if raw.starts_with("http://") || raw.starts_with("https://") {
-            raw.to_string()
-        } else {
-            TidalClient::artwork_url(raw, 640)
-        });
+        return Some(
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                raw.to_string()
+            } else {
+                TidalClient::artwork_url(raw, 640)
+            },
+        );
     }
     if let Some(u) = v
         .get("url")
@@ -1056,6 +1102,15 @@ mod tests {
                                         "images": {
                                             "640": { "imageId": "abc-def-ghi" }
                                         }
+                                    },
+                                    {
+                                        "id": "0789feed",
+                                        "title": "My Video Mix 1",
+                                        "subTitle": "Music videos picked for you",
+                                        "mixType": "VIDEO_MIX",
+                                        "images": [
+                                            { "url": "https://img.tidal.com/video.jpg" }
+                                        ]
                                     }
                                 ]
                             }
@@ -1065,7 +1120,7 @@ mod tests {
             ]
         });
         let mixes = TidalClient::parse_my_mixes(&payload);
-        assert_eq!(mixes.len(), 2, "expected 2 mixes parsed from fixture");
+        assert_eq!(mixes.len(), 3, "expected 3 mixes parsed from fixture");
         assert!(mixes.iter().all(|m| !m.id.is_empty()));
         assert!(mixes.iter().all(|m| !m.title.is_empty()));
         assert!(
@@ -1089,6 +1144,38 @@ mod tests {
             "imageId should be routed through artwork_url; got {:?}",
             mixes[1].image_url
         );
+        assert!(!mixes[0].is_video_mix);
+        assert!(!mixes[1].is_video_mix);
+        assert!(mixes[2].is_video_mix);
+    }
+
+    #[test]
+    fn detects_video_mix_from_mix_metadata() {
+        assert!(TidalClient::detect_video_mix(
+            "My Mix 3",
+            None,
+            Some("VIDEO_MIX")
+        ));
+        assert!(TidalClient::detect_video_mix(
+            "My Video Mix 2",
+            Some("Your videos"),
+            None
+        ));
+        assert!(TidalClient::detect_video_mix(
+            "Fresh picks",
+            Some("Music videos from favorites"),
+            None
+        ));
+        assert!(!TidalClient::detect_video_mix(
+            "My Mix 2",
+            Some("Video Age, The Strokes"),
+            Some("PERSONAL")
+        ));
+        assert!(!TidalClient::detect_video_mix(
+            "Daily Discovery",
+            Some("Updated daily"),
+            Some("DAILY_DISCOVERY")
+        ));
     }
 
     /// An empty / malformed payload must yield an empty list, not panic.
@@ -1121,10 +1208,9 @@ mod tests {
         assert_eq!(video.quality.as_deref(), Some("HIGH"));
         assert_eq!(video.explicit, Some(true));
         assert!(
-            video
-                .artwork_url
-                .as_deref()
-                .is_some_and(|url| url.starts_with("https://resources.tidal.com/images/abc/def/ghi/"))
+            video.artwork_url.as_deref().is_some_and(
+                |url| url.starts_with("https://resources.tidal.com/images/abc/def/ghi/")
+            )
         );
     }
 

@@ -183,7 +183,8 @@ pub async fn resolve_many(
         });
         handles.push(handle);
     }
-    let mut results: Vec<Option<(String, ResolutionOutcome)>> = (0..inputs.len()).map(|_| None).collect();
+    let mut results: Vec<Option<(String, ResolutionOutcome)>> =
+        (0..inputs.len()).map(|_| None).collect();
     for h in handles {
         match h.await {
             Ok((idx, id, outcome)) => {
@@ -372,7 +373,11 @@ fn token_jaccard(a: &str, b: &str) -> f64 {
     }
     let intersection = ta.intersection(&tb).count() as f64;
     let union = ta.union(&tb).count() as f64;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 /// Detect version markers in a track title. Two tracks are eligible for
@@ -490,10 +495,7 @@ mod tests {
             normalize_title("Get Lucky - Radio Edit"),
             "get lucky - radio edit".to_string()
         );
-        assert_eq!(
-            normalize_title("Café del Mar"),
-            "cafe del mar".to_string()
-        );
+        assert_eq!(normalize_title("Café del Mar"), "cafe del mar".to_string());
     }
 
     #[test]

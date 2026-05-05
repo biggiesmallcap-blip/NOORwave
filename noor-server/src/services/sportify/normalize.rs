@@ -166,7 +166,11 @@ fn primary_artist_name(artists: &[SportifyArtistRef]) -> Option<String> {
     artists.first().and_then(|a| a.name.clone())
 }
 
-fn spotify_url_from_map(map: &std::collections::HashMap<String, String>, fallback_id: Option<&str>, kind: &str) -> Option<String> {
+fn spotify_url_from_map(
+    map: &std::collections::HashMap<String, String>,
+    fallback_id: Option<&str>,
+    kind: &str,
+) -> Option<String> {
     if let Some(url) = map.get("spotify").cloned() {
         return Some(url);
     }
@@ -193,7 +197,10 @@ pub fn track_from_sportify(t: &SportifyTrack, source_endpoint: &str) -> Discover
         artists: if !t.artists.is_empty() {
             artist_refs(&t.artists)
         } else if let Some(name) = t.artist.clone() {
-            vec![ArtistRef { id: None, name: Some(name) }]
+            vec![ArtistRef {
+                id: None,
+                name: Some(name),
+            }]
         } else {
             Vec::new()
         },
@@ -299,7 +306,10 @@ pub fn playlist_from_sportify(p: &SportifyPlaylist, source_endpoint: &str) -> Di
         title: p.title(),
         description: p.description.clone(),
         thumbnail: p.best_thumbnail(),
-        owner: p.owner.as_ref().and_then(|o| o.display_name().map(str::to_string)),
+        owner: p
+            .owner
+            .as_ref()
+            .and_then(|o| o.display_name().map(str::to_string)),
         followers: p.follower_count(),
         total_tracks: p.total_track_count(),
         snapshot_id: p.snapshot_id.clone(),

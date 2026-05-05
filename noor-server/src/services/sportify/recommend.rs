@@ -193,24 +193,50 @@ pub async fn artist_related(
 
     let (top_res, deep_search_res, album_search_res, similar_res) = tokio::join!(
         cached_artist_top_tracks(client, db, cfg, artist_id),
-        cached_search(client, db, cfg, &artist_name, SportifySearchKind::Track, SEARCH_FETCH, 0),
-        cached_search(client, db, cfg, &artist_name, SportifySearchKind::Album, SEARCH_FETCH, 0),
+        cached_search(
+            client,
+            db,
+            cfg,
+            &artist_name,
+            SportifySearchKind::Track,
+            SEARCH_FETCH,
+            0
+        ),
+        cached_search(
+            client,
+            db,
+            cfg,
+            &artist_name,
+            SportifySearchKind::Album,
+            SEARCH_FETCH,
+            0
+        ),
         async {
             match primary_genre.as_deref() {
                 Some(g) if !g.trim().is_empty() => {
-                    cached_search(client, db, cfg, g, SportifySearchKind::Artist, SEARCH_FETCH, 0)
-                        .await
+                    cached_search(
+                        client,
+                        db,
+                        cfg,
+                        g,
+                        SportifySearchKind::Artist,
+                        SEARCH_FETCH,
+                        0,
+                    )
+                    .await
                 }
                 _ => Ok(SportifySearchResults::default()),
             }
         },
     );
 
-    let top_tracks: Vec<SportifyTrack> = top_res.unwrap_or_default().into_iter().take(ROW_LIMIT).collect();
-    let top_ids: std::collections::HashSet<String> = top_tracks
-        .iter()
-        .filter_map(|t| t.id.clone())
+    let top_tracks: Vec<SportifyTrack> = top_res
+        .unwrap_or_default()
+        .into_iter()
+        .take(ROW_LIMIT)
         .collect();
+    let top_ids: std::collections::HashSet<String> =
+        top_tracks.iter().filter_map(|t| t.id.clone()).collect();
 
     let deep_cuts: Vec<SportifyTrack> = deep_search_res
         .unwrap_or_default()
@@ -276,11 +302,8 @@ pub async fn album_related(
         return Ok(AlbumRelated::default());
     }
 
-    let album_track_ids: std::collections::HashSet<String> = album
-        .tracks
-        .iter()
-        .filter_map(|t| t.id.clone())
-        .collect();
+    let album_track_ids: std::collections::HashSet<String> =
+        album.tracks.iter().filter_map(|t| t.id.clone()).collect();
 
     let top_fut = async {
         match artist_id.as_deref() {
@@ -288,15 +311,25 @@ pub async fn album_related(
             None => Ok(Vec::new()),
         }
     };
-    let albums_fut =
-        cached_search(client, db, cfg, &artist_name, SportifySearchKind::Album, SEARCH_FETCH, 0);
+    let albums_fut = cached_search(
+        client,
+        db,
+        cfg,
+        &artist_name,
+        SportifySearchKind::Album,
+        SEARCH_FETCH,
+        0,
+    );
 
     let (top_res, albums_res) = tokio::join!(top_fut, albums_fut);
 
     let more_from_artist: Vec<SportifyTrack> = top_res
         .unwrap_or_default()
         .into_iter()
-        .filter(|t| t.id.as_deref().map_or(true, |id| !album_track_ids.contains(id)))
+        .filter(|t| {
+            t.id.as_deref()
+                .map_or(true, |id| !album_track_ids.contains(id))
+        })
         .take(ROW_LIMIT)
         .collect();
 

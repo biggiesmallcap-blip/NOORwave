@@ -681,7 +681,10 @@ mod tests {
         )
         .expect("video stream should parse");
 
-        assert_eq!(info.hls_manifest_url, "https://cdn.example.test/master.m3u8");
+        assert_eq!(
+            info.hls_manifest_url,
+            "https://cdn.example.test/master.m3u8"
+        );
         assert_eq!(info.video_quality, "HIGH");
         assert!(info.expires_at.is_some());
     }

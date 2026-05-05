@@ -657,17 +657,15 @@ pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackS
         "one" => current_index
             .and_then(|idx| queue_items.get(idx))
             .or_else(|| queue_items.first()),
-        _ => {
-            current_index
-                .and_then(|idx| queue_items.get(idx + 1))
-                .or_else(|| {
-                    if current_index.is_none() || repeat_mode == "all" {
-                        queue_items.first()
-                    } else {
-                        None
-                    }
-                })
-        }
+        _ => current_index
+            .and_then(|idx| queue_items.get(idx + 1))
+            .or_else(|| {
+                if current_index.is_none() || repeat_mode == "all" {
+                    queue_items.first()
+                } else {
+                    None
+                }
+            }),
     };
 
     if let Some(item) = next_track {
@@ -808,8 +806,7 @@ pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Opti
                 .position(|item| item.track.id == track_id)
         })
         .or_else(|| {
-            current_queue_item_id
-                .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
+            current_queue_item_id.and_then(|qid| queue_items.iter().position(|item| item.id == qid))
         });
 
     let next = match repeat_mode.as_str() {

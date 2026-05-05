@@ -6,14 +6,43 @@ on:
       - "v*.*.*"
 
 jobs:
-  build:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            **Portable builds — no install required. Unzip/untar anywhere and run.**
+
+            | Platform | File | Launch |
+            |---|---|---|
+            | Windows | `NOORwave-vX.X.X-windows-x64.zip` | Double-click `NOORwave.exe` |
+            | macOS ARM64 | `NOORwave-vX.X.X-macos-arm64.tar.gz` | `./NOORwave` |
+            | macOS x64 | `NOORwave-vX.X.X-macos-x64.tar.gz` | `./NOORwave` |
+            | Linux x64 | `NOORwave-vX.X.X-linux-x64.tar.gz` | `./NOORwave` |
+
+            ### Contents (all platforms)
+            - `NOORwave` / `NOORwave.exe` — app window + system tray
+            - `noor-server` / `noor-server.exe` — local music server
+            - `www/` — bundled UI (do not delete)
+
+            ### macOS note
+            First launch may be blocked by Gatekeeper. To clear it:
+            ```
+            xattr -cr NOORwave noor-server
+            ```
+
+  build-windows:
+    needs: create-release
     runs-on: windows-latest
     permissions:
       contents: write
-
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,26 +83,205 @@ jobs:
         shell: pwsh
         run: .\scripts\build-portable.ps1
 
-      - name: Rename artifact with version tag
+      - name: Rename artifact
         shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          Rename-Item dist\NOORwave-portable.zip "NOORwave-$tag-windows-x64.zip"
+        run: Rename-Item dist\NOORwave-portable.zip "NOORwave-${{ github.ref_name }}-windows-x64.zip"
 
-      - name: Create GitHub release
+      - name: Upload artifact
         uses: softprops/action-gh-release@v2
         with:
           files: dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
-          generate_release_notes: true
-          body: |
-            **Windows portable — no install required. Unzip anywhere and run NOORwave.exe.**
 
-            ### Contents
-            - `NOORwave.exe` — app window + system tray
-            - `noor-server.exe` — local music server
-            - `www/` — bundled UI (do not delete)
+  build-linux:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            ### Usage
-            1. Unzip to any folder
-            2. Double-click `NOORwave.exe`
-            3. Window opens when server is ready (~2s)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libasound2-dev \
+            pkg-config \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-app/Cargo.toml
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-server/Cargo.toml
+          perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Build binaries
+        run: |
+          cargo build --release -p noor-server
+          cargo build --release -p noor-app
+
+      - name: Assemble and archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist/NOORwave
+          cp target/release/noor-app dist/NOORwave/NOORwave
+          cp target/release/noor-server dist/NOORwave/noor-server
+          cp -r frontend/build dist/NOORwave/www
+          tar -czf "dist/NOORwave-$TAG-linux-x64.tar.gz" -C dist NOORwave
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NOORwave-${{ github.ref_name }}-linux-x64.tar.gz
+
+  build-macos-arm64:
+    needs: create-release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-app/Cargo.toml
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-server/Cargo.toml
+          perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Build binaries
+        run: |
+          cargo build --release -p noor-server
+          cargo build --release -p noor-app
+
+      - name: Assemble and archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist/NOORwave
+          cp target/release/noor-app dist/NOORwave/NOORwave
+          cp target/release/noor-server dist/NOORwave/noor-server
+          cp -r frontend/build dist/NOORwave/www
+          tar -czf "dist/NOORwave-$TAG-macos-arm64.tar.gz" -C dist NOORwave
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NOORwave-${{ github.ref_name }}-macos-arm64.tar.gz
+
+  build-macos-x64:
+    needs: create-release
+    runs-on: macos-13
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-app/Cargo.toml
+          perl -i -pe "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" noor-server/Cargo.toml
+          perl -i -pe "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/" noor-app/tauri.conf.json
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Build binaries
+        run: |
+          cargo build --release -p noor-server
+          cargo build --release -p noor-app
+
+      - name: Assemble and archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist/NOORwave
+          cp target/release/noor-app dist/NOORwave/NOORwave
+          cp target/release/noor-server dist/NOORwave/noor-server
+          cp -r frontend/build dist/NOORwave/www
+          tar -czf "dist/NOORwave-$TAG-macos-x64.tar.gz" -C dist NOORwave
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NOORwave-${{ github.ref_name }}-macos-x64.tar.gz

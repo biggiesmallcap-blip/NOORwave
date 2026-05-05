@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { api, ApiError, type TidalMix } from '$lib/api/client';
 	import { playTidalMix } from '$lib/stores/player';
 
@@ -26,6 +27,14 @@
 				errorMsg = e instanceof Error ? e.message : 'Failed to load mixes';
 			}
 		}
+	}
+
+	function playMix(mix: TidalMix) {
+		if (mix.is_video_mix) {
+			void goto(`/videos?mixId=${encodeURIComponent(mix.id)}&play=1`);
+			return;
+		}
+		void playTidalMix(mix.id);
 	}
 
 	// Translate vertical wheel scroll to horizontal scroll over the rail.
@@ -93,8 +102,8 @@
 					type="button"
 					class="mix-card"
 					title={mix.sub_title ?? mix.title}
-					aria-label={`Play ${mix.title}`}
-					onclick={() => void playTidalMix(mix.id)}
+					aria-label={`${mix.is_video_mix ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+					onclick={() => playMix(mix)}
 				>
 					<div class="art-wrap">
 						{#if mix.image_url}
@@ -106,6 +115,9 @@
 							<div class="art fallback">♫</div>
 						{/if}
 						<div class="play-overlay" aria-hidden="true">▶</div>
+						{#if mix.is_video_mix}
+							<span class="video-badge">Video</span>
+						{/if}
 					</div>
 					<div class="meta">
 						<h3 class="title">{mix.title}</h3>
@@ -234,6 +246,19 @@
 	.mix-card:hover .play-overlay,
 	.mix-card:focus-visible .play-overlay {
 		opacity: 1;
+	}
+	.video-badge {
+		position: absolute;
+		right: 8px;
+		bottom: 8px;
+		padding: 3px 7px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.62);
+		color: #fff;
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
 	}
 
 	.art-wrap {

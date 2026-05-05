@@ -63,6 +63,12 @@
 	import { wallpaper } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
 	import { paletteById } from '$lib/components/wallpaper/palettes';
+	import {
+		requestVideoAutoplayToggle,
+		requestVideoJump,
+		videoSession,
+		videoSessionUpcoming,
+	} from '$lib/stores/video_session';
 
 	let { children } = $props();
 
@@ -813,10 +819,19 @@
 			localStorage.setItem(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
 		}
 	}
+	function formatVideoSourceLabel(source: string, label: string | null): string {
+		if (source === 'mix') return label ?? 'Video mix';
+		if (source === 'search') return label ? `Search: ${label}` : 'Video search';
+		if (source === 'direct') return 'Direct video';
+		return 'Video session';
+	}
+
 	let playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
-	let mobilePlayerVisible = $derived(Boolean($currentTrack));
+	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos'));
+	let videoChromeActive = $derived(videoRouteActive && $videoSession.active);
+	let mobilePlayerVisible = $derived(Boolean($currentTrack) && !videoChromeActive);
 	let progressWidth = $derived(
 		$currentTrack?.duration_ms && $currentTrack.duration_ms > 0
 			? `${Math.min((scrubPosition / $currentTrack.duration_ms) * 100, 100)}%`
@@ -835,6 +850,12 @@
 
 	$effect(() => {
 		if (!$currentTrack) {
+			nowPlayingOpen = false;
+		}
+	});
+
+	$effect(() => {
+		if (videoChromeActive) {
 			nowPlayingOpen = false;
 		}
 	});
@@ -1008,6 +1029,74 @@
 		{@render children()}
 	</main>
 
+	{#if videoChromeActive}
+		<aside class="now-playing-panel video-queue-panel" aria-label="Video queue">
+			<div class="video-panel-top">
+				<p class="eyebrow">Video session</p>
+				<div class="video-panel-art-wrap">
+					{#if $videoSession.current?.artwork_url}
+						<img class="video-panel-art" src={$videoSession.current.artwork_url} alt="" />
+					{:else}
+						<div class="video-panel-art placeholder">▶</div>
+					{/if}
+				</div>
+				<div class="video-panel-copy">
+					<strong>{$videoSession.current?.title ?? 'Video queue'}</strong>
+					<span>{$videoSession.current?.artist_name ?? formatVideoSourceLabel($videoSession.source, $videoSession.sourceLabel)}</span>
+				</div>
+				<div class="video-panel-actions">
+					<button
+						class="video-panel-chip"
+						class:active={$videoSession.autoplay}
+						type="button"
+						aria-pressed={$videoSession.autoplay}
+						onclick={() => requestVideoAutoplayToggle()}
+					>
+						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
+					</button>
+					<span class="video-panel-source">{formatVideoSourceLabel($videoSession.source, $videoSession.sourceLabel)}</span>
+				</div>
+				{#if $videoSession.error}
+					<p class="video-panel-error">{$videoSession.error}</p>
+				{/if}
+			</div>
+
+			<section class="video-panel-queue">
+				<div class="video-panel-queue-head">
+					<span class="eyebrow">Queue</span>
+					<span>{$videoSessionUpcoming.length} up next</span>
+				</div>
+				{#if $videoSession.queue.length > 0}
+					<div class="video-panel-list">
+						{#each $videoSession.queue.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
+							<button
+								type="button"
+								class="video-panel-row"
+								class:active={$videoSession.current?.tidal_id === video.tidal_id}
+								onclick={() => requestVideoJump(video.tidal_id)}
+							>
+								{#if video.artwork_url}
+									<img class="video-panel-row-art" src={video.artwork_url} alt="" />
+								{:else}
+									<span class="video-panel-row-art placeholder">▶</span>
+								{/if}
+								<span class="video-panel-row-copy">
+									<strong>{video.title}</strong>
+									<span>{video.artist_name ?? 'Unknown artist'}</span>
+								</span>
+								<span class="video-panel-row-time">{formatDuration(video.duration_ms ?? 0)}</span>
+							</button>
+						{/each}
+					</div>
+				{:else}
+					<div class="queue-empty">
+						<p>No video queue yet.</p>
+						<span>Search or open a video mix to build one.</span>
+					</div>
+				{/if}
+			</section>
+		</aside>
+	{:else}
 	<aside
 		class="now-playing-panel"
 		class:queue-expanded={queueExpanded}
@@ -1363,9 +1452,10 @@
 			{/if}
 		</section>
 	</aside>
+	{/if}
 
 	<!-- Mini player bar (mobile only) -->
-	{#if $currentTrack}
+	{#if $currentTrack && !videoChromeActive}
 		<div class="mobile-mini-player-bar" aria-label="Mini player">
 			<div class="mobile-mini-progress">
 				<div class="mobile-mini-progress-fill" style="width: {progressWidth}"></div>
@@ -1494,7 +1584,7 @@
 	{/if}
 
 	<!-- Now Playing sheet (mobile only) -->
-	{#if nowPlayingOpen && $currentTrack}
+	{#if nowPlayingOpen && $currentTrack && !videoChromeActive}
 		<button
 			class="mobile-np-backdrop"
 			type="button"
@@ -1801,6 +1891,194 @@
 	}
 
 	/* ── Mobile-only elements: hidden at desktop ─────────── */
+	.video-queue-panel {
+		padding: 18px;
+		gap: 16px;
+	}
+
+	.video-panel-top,
+	.video-panel-queue {
+		min-width: 0;
+	}
+
+	.video-panel-top {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.video-panel-art-wrap {
+		aspect-ratio: 16 / 9;
+		width: 100%;
+		border-radius: 8px;
+		overflow: hidden;
+		background: color-mix(in srgb, var(--instrument-surface-strong) 75%, transparent);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.video-panel-art {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.video-panel-art.placeholder {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--text-secondary);
+		font-size: 2rem;
+	}
+
+	.video-panel-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 0;
+	}
+
+	.video-panel-copy strong {
+		color: var(--text-primary);
+		font-size: 1rem;
+		line-height: 1.25;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.video-panel-copy span,
+	.video-panel-source,
+	.video-panel-queue-head {
+		color: var(--text-secondary);
+		font-size: 0.78rem;
+	}
+
+	.video-panel-actions {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+	}
+
+	.video-panel-chip {
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--instrument-surface) 80%, transparent);
+		color: var(--text-primary);
+		font: inherit;
+		font-size: 0.78rem;
+		font-weight: 700;
+		padding: 6px 10px;
+		cursor: pointer;
+	}
+
+	.video-panel-chip.active {
+		border-color: color-mix(in srgb, var(--accent-line) 70%, transparent);
+		background: color-mix(in srgb, var(--accent-soft) 75%, transparent);
+	}
+
+	.video-panel-error {
+		margin: 0;
+		color: var(--state-error);
+		font-size: 0.78rem;
+	}
+
+	.video-panel-queue {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		border-top: 1px solid var(--border-subtle);
+		padding-top: 14px;
+	}
+
+	.video-panel-queue-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 10px;
+		padding-bottom: 10px;
+	}
+
+	.video-panel-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		overflow-y: auto;
+		padding-right: 2px;
+	}
+
+	.video-panel-row {
+		width: 100%;
+		min-width: 0;
+		display: grid;
+		grid-template-columns: 48px minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 10px;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		padding: 7px;
+		cursor: pointer;
+	}
+
+	.video-panel-row:hover,
+	.video-panel-row:focus-visible,
+	.video-panel-row.active {
+		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
+		border-color: var(--border-subtle);
+		outline: none;
+	}
+
+	.video-panel-row.active {
+		border-color: color-mix(in srgb, var(--accent-line) 60%, transparent);
+	}
+
+	.video-panel-row-art {
+		width: 48px;
+		aspect-ratio: 16 / 9;
+		border-radius: 4px;
+		object-fit: cover;
+		background: color-mix(in srgb, var(--instrument-surface-strong) 85%, transparent);
+	}
+
+	.video-panel-row-art.placeholder {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--text-tertiary);
+		font-size: 0.8rem;
+	}
+
+	.video-panel-row-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.video-panel-row-copy strong,
+	.video-panel-row-copy span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.video-panel-row-copy strong {
+		font-size: 0.82rem;
+		color: var(--text-primary);
+	}
+
+	.video-panel-row-copy span,
+	.video-panel-row-time {
+		font-size: 0.72rem;
+		color: var(--text-secondary);
+	}
+
 	.mobile-top-bar,
 	.mobile-mini-player-bar,
 	.mobile-tab-bar,

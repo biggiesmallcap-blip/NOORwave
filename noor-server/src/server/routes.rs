@@ -8158,7 +8158,11 @@ async fn advance_ephemeral_next_if_needed(
 
     let next = {
         let state_guard = state.read().await;
-        state_guard.pending_tidal_mix_queue.lock().unwrap().pop_front()
+        state_guard
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .pop_front()
     };
 
     if let Some(next) = next {

@@ -383,24 +383,26 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "https://sportify.xcasper.space".to_string());
-    let sportify_client = match services::sportify::SportifyClient::new(
-        services::sportify::SportifyClientConfig {
+    let sportify_client =
+        match services::sportify::SportifyClient::new(services::sportify::SportifyClientConfig {
             base_url: sportify_base_url.clone(),
             user_agent: format!(
                 "noor-server/{} (sportify discovery)",
                 env!("CARGO_PKG_VERSION")
             ),
-        },
-    ) {
-        Ok(client) => {
-            info!("Sportify discovery client ready ({})", sportify_base_url);
-            Some(Arc::new(client))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to construct Sportify client: {}; /discover will be degraded", e);
-            None
-        }
-    };
+        }) {
+            Ok(client) => {
+                info!("Sportify discovery client ready ({})", sportify_base_url);
+                Some(Arc::new(client))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to construct Sportify client: {}; /discover will be degraded",
+                    e
+                );
+                None
+            }
+        };
     let sportify_cache_config = services::sportify::cache::SportifyCacheConfig {
         meta_ttl_secs: parse_days_env("DISCOVERY_CACHE_TTL_DAYS", 30) * 86_400,
         resolve_ttl_secs: parse_days_env("RESOLVE_CACHE_TTL_DAYS", 30) * 86_400,

@@ -150,8 +150,8 @@ fn write_meta<T: Serialize>(
     id: &str,
     payload: &T,
 ) -> Result<()> {
-    let json = serde_json::to_string(payload)
-        .with_context(|| format!("serialize {} payload", table))?;
+    let json =
+        serde_json::to_string(payload).with_context(|| format!("serialize {} payload", table))?;
     let sql = format!(
         "INSERT INTO {tbl} ({col}, payload, fetched_at) VALUES (?1, ?2, ?3)
          ON CONFLICT({col}) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at",
@@ -178,7 +178,13 @@ pub fn get_track_meta(
 }
 
 pub fn put_track_meta(conn: &Connection, spotify_id: &str, payload: &SportifyTrack) -> Result<()> {
-    write_meta(conn, "sportify_track_meta", "spotify_track_id", spotify_id, payload)
+    write_meta(
+        conn,
+        "sportify_track_meta",
+        "spotify_track_id",
+        spotify_id,
+        payload,
+    )
 }
 
 pub fn get_album_meta(
@@ -196,7 +202,13 @@ pub fn get_album_meta(
 }
 
 pub fn put_album_meta(conn: &Connection, spotify_id: &str, payload: &SportifyAlbum) -> Result<()> {
-    write_meta(conn, "sportify_album_meta", "spotify_album_id", spotify_id, payload)
+    write_meta(
+        conn,
+        "sportify_album_meta",
+        "spotify_album_id",
+        spotify_id,
+        payload,
+    )
 }
 
 pub fn get_artist_meta(
@@ -213,8 +225,18 @@ pub fn get_artist_meta(
     )
 }
 
-pub fn put_artist_meta(conn: &Connection, spotify_id: &str, payload: &SportifyArtist) -> Result<()> {
-    write_meta(conn, "sportify_artist_meta", "spotify_artist_id", spotify_id, payload)
+pub fn put_artist_meta(
+    conn: &Connection,
+    spotify_id: &str,
+    payload: &SportifyArtist,
+) -> Result<()> {
+    write_meta(
+        conn,
+        "sportify_artist_meta",
+        "spotify_artist_id",
+        spotify_id,
+        payload,
+    )
 }
 
 pub fn get_playlist_meta(
@@ -514,7 +536,15 @@ mod tests {
         let conn = open_test_db();
         let cfg = SportifyCacheConfig::default();
         let payload = SportifySearchResults::default();
-        put_search(&conn, "daft punk", SportifySearchKind::Track, 10, 0, &payload).unwrap();
+        put_search(
+            &conn,
+            "daft punk",
+            SportifySearchKind::Track,
+            10,
+            0,
+            &payload,
+        )
+        .unwrap();
         assert!(
             get_search(&conn, &cfg, "daft punk", SportifySearchKind::Track, 10, 0)
                 .unwrap()

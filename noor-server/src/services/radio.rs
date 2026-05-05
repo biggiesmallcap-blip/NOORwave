@@ -455,9 +455,16 @@ pub async fn orchestrate_song(
     let ordered = if ordered.is_empty() {
         let fallback = fallback_same_artist_tracks(db, seed_track_id, limit, exclude_track_ids);
         if fallback.is_empty() {
-            tracing::warn!(seed_track_id, "orchestrate_song: all sources empty including same-artist fallback; returning empty queue");
+            tracing::warn!(
+                seed_track_id,
+                "orchestrate_song: all sources empty including same-artist fallback; returning empty queue"
+            );
         } else {
-            tracing::info!(seed_track_id, count = fallback.len(), "orchestrate_song: using same-artist fallback");
+            tracing::info!(
+                seed_track_id,
+                count = fallback.len(),
+                "orchestrate_song: using same-artist fallback"
+            );
         }
         fallback
     } else {

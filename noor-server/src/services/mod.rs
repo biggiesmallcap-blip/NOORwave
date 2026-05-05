@@ -13,7 +13,7 @@ pub mod neighbor_refresh;
 pub mod radio;
 pub mod radio_config;
 pub mod rss_feeds;
+pub mod sportify;
 pub mod spotify;
 pub mod spotify_public;
-pub mod sportify;
 pub mod tidal;

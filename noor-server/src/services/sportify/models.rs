@@ -397,7 +397,10 @@ mod tests {
             playlist.spotify_id().as_deref(),
             Some("3jVA3AuxV9aPO07YPt3Ist"),
         );
-        assert_eq!(playlist.title().as_deref(), Some("lost vietnamese classics"));
+        assert_eq!(
+            playlist.title().as_deref(),
+            Some("lost vietnamese classics")
+        );
         assert_eq!(
             playlist.best_thumbnail().as_deref(),
             Some("https://example.com/cover.jpg"),

@@ -12,6 +12,12 @@
 	import { formatDuration } from '$lib/stores/library';
 	import { showToast } from '$lib/stores/toast';
 	import { audioSettings } from '$lib/stores/audio_settings';
+	import {
+		videoAutoplayToggleRequest,
+		videoJumpRequest,
+		videoSession,
+		type VideoSessionSource,
+	} from '$lib/stores/video_session';
 
 	const PAGE_SIZE = 40;
 	const RECENT_KEY = 'noor_recent_video_searches';
@@ -41,6 +47,7 @@
 	let offset = $state(0);
 	let hasMore = $state(false);
 	let lastQuery = $state('');
+	let activeMixId = $state<string | null>(null);
 	let sentinel = $state<HTMLDivElement | null>(null);
 	let recent = $state<string[]>(loadRecent());
 	let autoplayNext = $state(loadAutoplayPreference());
@@ -49,6 +56,8 @@
 	let streamRequestSeq = 0;
 	let prefetchRequestSeq = 0;
 	let prefetchedStream = $state<PrefetchedVideoStream | null>(null);
+	let handledJumpNonce = 0;
+	let handledAutoplayToggleNonce = 0;
 
 	let heroTitle = $derived(selectedVideo?.title ?? 'TIDAL video');
 	let heroArtist = $derived(selectedVideo?.artist_name ?? null);
@@ -194,7 +203,16 @@
 			} else {
 				await fetchStream(video.tidal_id);
 			}
-			if (updateUrl) void goto(`/videos?videoId=${video.tidal_id}`, { keepFocus: true });
+			if (updateUrl) {
+				const params = new URLSearchParams();
+				if ('mix_id' in video && video.mix_id) {
+					params.set('mixId', String(video.mix_id));
+				} else if (lastQuery) {
+					params.set('q', lastQuery);
+				}
+				params.set('videoId', String(video.tidal_id));
+				void goto(`/videos?${params.toString()}`, { keepFocus: true });
+			}
 			return true;
 		} catch (err) {
 			if (options.keepCurrentStream) {
@@ -215,14 +233,20 @@
 		return fetchStream(selectedVideo.tidal_id);
 	}
 
-	async function loadMix(mixId: string) {
+	async function loadMix(mixId: string, autoPlayFirst = false) {
 		loadingMix = true;
 		mixError = null;
+		activeMixId = mixId;
 		mixItems = [];
 		try {
 			const result = await api.getTidalVideoMixItems(mixId);
 			mixItems = result.items.map((item) => ({ ...item, mix_id: mixId }));
 			if (mixItems.length === 0) mixError = 'This mix did not return video items.';
+			if (autoPlayFirst && mixItems.length > 0) {
+				autoplayNext = true;
+				persistAutoplayPreference();
+				await selectVideo(mixItems[0], false);
+			}
 		} catch (err) {
 			mixError = normalizeError(err, 'Video mix items could not load.');
 			showToast(mixError, 'error', 3200);
@@ -256,6 +280,25 @@
 		const index = selectedQueueIndex(queue);
 		if (index < 0) return null;
 		return queue[index + 1] ?? null;
+	}
+
+	function videoSessionSource(): VideoSessionSource {
+		if (selectedVideo && 'mix_id' in selectedVideo && selectedVideo.mix_id != null) return 'mix';
+		if (lastQuery) return 'search';
+		if (selectedVideo) return 'direct';
+		return activeMixId ? 'mix' : 'none';
+	}
+
+	function videoSessionSourceLabel(): string | null {
+		const source = videoSessionSource();
+		if (source === 'mix') return activeMixId ? `Video mix ${activeMixId}` : 'Video mix';
+		if (source === 'search') return lastQuery;
+		if (source === 'direct') return 'Direct video';
+		return null;
+	}
+
+	function findVideoInCurrentContext(videoId: number): TidalSearchVideo | TidalVideoMixItem | null {
+		return [...mixItems, ...videos].find((item) => item.tidal_id === videoId) ?? null;
 	}
 
 	function toggleVideoAutoplay() {
@@ -316,13 +359,24 @@
 		}
 	}
 
-	function parseUrl() {
+	async function parseUrl() {
 		const params = new URLSearchParams(window.location.search);
 		const q = params.get('q') ?? '';
 		const videoId = Number(params.get('videoId'));
 		const mixId = params.get('mixId');
+		const shouldPlayMix = params.get('play') === '1';
 		query = q;
 		if (q) void runSearch(q, false);
+		if (mixId) {
+			await loadMix(mixId, shouldPlayMix);
+			if (!shouldPlayMix && Number.isFinite(videoId) && videoId > 0) {
+				const fromMix = mixItems.find((item) => item.tidal_id === videoId);
+				if (fromMix) {
+					void selectVideo(fromMix, false);
+					return;
+				}
+			}
+		}
 		if (Number.isFinite(videoId) && videoId > 0) {
 			void selectVideo({
 				tidal_id: videoId,
@@ -337,13 +391,12 @@
 				type: 'video',
 			}, false);
 		}
-		if (mixId) void loadMix(mixId);
 	}
 
 	onMount(() => {
 		void audioSettings.load();
-		parseUrl();
-		const onPop = () => parseUrl();
+		void parseUrl();
+		const onPop = () => void parseUrl();
 		window.addEventListener('popstate', onPop);
 		return () => window.removeEventListener('popstate', onPop);
 	});
@@ -366,11 +419,40 @@
 		void prefetchNextStream(nextAutoplayVideo);
 	});
 
+	$effect(() => {
+		videoSession.sync({
+			current: selectedVideo,
+			queue: activeVideoQueue(),
+			source: videoSessionSource(),
+			sourceLabel: videoSessionSourceLabel(),
+			autoplay: autoplayNext,
+			loading: loadingSearch || loadingMore || loadingStream || loadingMix,
+			error: error ?? mixError,
+		});
+	});
+
+	$effect(() => {
+		const request = $videoJumpRequest;
+		if (!request || request.nonce === handledJumpNonce) return;
+		handledJumpNonce = request.nonce;
+		const next = findVideoInCurrentContext(request.videoId);
+		if (!next) return;
+		void selectVideo(next);
+	});
+
+	$effect(() => {
+		const nonce = $videoAutoplayToggleRequest;
+		if (nonce === handledAutoplayToggleNonce) return;
+		handledAutoplayToggleNonce = nonce;
+		toggleVideoAutoplay();
+	});
+
 	onDestroy(() => {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		searchAbort?.abort();
 		streamRequestSeq += 1;
 		prefetchRequestSeq += 1;
+		videoSession.reset();
 	});
 </script>
 

@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn video_quality_mode_serializes_to_setting_strings() {
         assert_eq!(VideoQualityMode::Max.as_str(), "MAX");
-        assert_eq!(VideoQualityMode::from_str("AUTO"), Some(VideoQualityMode::Auto));
+        assert_eq!(
+            VideoQualityMode::from_str("AUTO"),
+            Some(VideoQualityMode::Auto)
+        );
         assert_eq!(VideoQualityMode::from_str("LOW"), None);
     }
 }
