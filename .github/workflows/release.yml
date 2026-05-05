@@ -60,12 +60,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Sync version from tag
-        shell: pwsh
+        shell: bash
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          (Get-Content noor-app/Cargo.toml) -replace '^version = "[^"]+"', "version = ""$version""" | Set-Content noor-app/Cargo.toml -Encoding utf8
-          (Get-Content noor-server/Cargo.toml) -replace '^version = "[^"]+"', "version = ""$version""" | Set-Content noor-server/Cargo.toml -Encoding utf8
-          (Get-Content noor-app/tauri.conf.json) -replace '"version": "[^"]+"', """version"": ""$version""" | Set-Content noor-app/tauri.conf.json -Encoding utf8
+          python3 - <<'EOF'
+          import re, os
+          v = os.environ['GITHUB_REF_NAME'].lstrip('v')
+          for p in ['noor-app/Cargo.toml', 'noor-server/Cargo.toml']:
+              t = open(p, encoding='utf-8').read()
+              open(p, 'w', encoding='utf-8').write(
+                  re.sub(r'^version = "[^"]+"', f'version = "{v}"', t, flags=re.MULTILINE))
+          t = open('noor-app/tauri.conf.json', encoding='utf-8').read()
+          open('noor-app/tauri.conf.json', 'w', encoding='utf-8').write(
+              re.sub(r'"version": "[^"]+"', f'"version": "{v}"', t))
+          EOF
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

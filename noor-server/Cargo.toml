@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "noor-server"
 version = "0.1.20"
 edition = "2024"
