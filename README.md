@@ -20,17 +20,17 @@
 
 <table>
   <tr>
-    <td width="33%"><a href="docs/assets/screenshot-home.png?raw=true"><img src="docs/assets/screenshot-home.png?raw=1&amp;v=20260504-2" width="100%" alt="Home"/></a><br/><sub><b>Home</b> — daily picks, new releases, now playing</sub></td>
-    <td width="33%"><a href="docs/assets/screenshot-library.png?raw=true"><img src="docs/assets/screenshot-library.png?raw=1&amp;v=20260504-2" width="100%" alt="Library"/></a><br/><sub><b>Library</b> — top artist hero, carousels, recent tracks</sub></td>
-    <td width="33%"><a href="docs/assets/screenshot-search.png?raw=true"><img src="docs/assets/screenshot-search.png?raw=1&amp;v=20260504-2" width="100%" alt="Search"/></a><br/><sub><b>Search</b> — top result card, power filters, queue</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-home.png"><img src="docs/assets/screenshot-home.png" width="100%" alt="Home"/></a><br/><sub><b>Home</b> — daily picks, new releases, now playing</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-library.png"><img src="docs/assets/screenshot-library.png" width="100%" alt="Library"/></a><br/><sub><b>Library</b> — top artist hero, carousels, recent tracks</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-search.png"><img src="docs/assets/screenshot-search.png" width="100%" alt="Search"/></a><br/><sub><b>Search</b> — top result card, power filters, queue</sub></td>
   </tr>
   <tr>
-    <td width="33%"><a href="docs/assets/screenshot-discover.png?raw=true"><img src="docs/assets/screenshot-discover.png?raw=1&amp;v=20260504-2" width="100%" alt="Discover"/></a><br/><sub><b>Discover</b> — learned recommendations, Sound Space, Song Radio</sub></td>
-    <td width="33%"><a href="docs/assets/screenshot-analytics.png?raw=true"><img src="docs/assets/screenshot-analytics.png?raw=1&amp;v=20260504-2" width="100%" alt="Analytics"/></a><br/><sub><b>Analytics</b> — listening trends, top artists, deep stats</sub></td>
-    <td width="33%"><a href="docs/assets/screenshot-automix.png?raw=true"><img src="docs/assets/screenshot-automix.png?raw=1&amp;v=20260504-2" width="100%" alt="AutoMix"/></a><br/><sub><b>AutoMix</b> — radio-style endless queue with intensity tiers</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-discover.png"><img src="docs/assets/screenshot-discover.png" width="100%" alt="Discover"/></a><br/><sub><b>Discover</b> — learned recommendations, Sound Space, Song Radio</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-analytics.png"><img src="docs/assets/screenshot-analytics.png" width="100%" alt="Analytics"/></a><br/><sub><b>Analytics</b> — listening trends, top artists, deep stats</sub></td>
+    <td width="33%"><a href="docs/assets/screenshot-automix.png"><img src="docs/assets/screenshot-automix.png" width="100%" alt="AutoMix"/></a><br/><sub><b>AutoMix</b> — radio-style endless queue with intensity tiers</sub></td>
   </tr>
   <tr>
-    <td colspan="3"><a href="docs/assets/screenshot-genregalaxy.png?raw=true"><img src="docs/assets/screenshot-genregalaxy.png?raw=1&amp;v=20260504-2" width="100%" alt="Genre Galaxy"/></a><br/><sub><b>Genre Galaxy</b> — force-directed cosmos for exploring your listening taxonomy</sub></td>
+    <td colspan="3"><a href="docs/assets/screenshot-genregalaxy.png"><img src="docs/assets/screenshot-genregalaxy.png" width="100%" alt="Genre Galaxy"/></a><br/><sub><b>Genre Galaxy</b> — force-directed cosmos for exploring your listening taxonomy</sub></td>
   </tr>
 </table>
 
