@@ -37,7 +37,8 @@
 		clearQueue as clearQueueAction,
 		restoreQueueItems,
 		saveQueueAsPlaylist,
-		playTidalTrackNext
+		playTidalTrackNext,
+		playTidalTrackNow
 	} from '$lib/stores/player';
 	import { get } from 'svelte/store';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
@@ -490,13 +491,18 @@
 		await setPlayerPosition(scrubPosition);
 	}
 
-	async function handleQueueTrackPlay(trackId: number) {
-		await playTrackNow(trackId);
+	async function handleQueueTrackPlay(item: QueueItemType) {
+		const tidal = queueItemTidalPlayable(item);
+		if (tidal && item.id < 0) {
+			await playTidalTrackNow(tidal);
+		} else {
+			await playTrackNow(item.track.id);
+		}
 		nowPlayingOpen = false;
 	}
 
-	function handleQueueTrackKeydown(trackId: number, event: KeyboardEvent) {
-		runOnActivation(event, () => void handleQueueTrackPlay(trackId));
+	function handleQueueTrackKeydown(item: QueueItemType, event: KeyboardEvent) {
+		runOnActivation(event, () => void handleQueueTrackPlay(item));
 	}
 
 	async function handleQueueRemove(queueItemId: number, event: MouseEvent) {
@@ -1358,8 +1364,8 @@
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							draggable={true}
 							data-track-id={item.track.id}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item.track.id)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item.track.id, event)}
+							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1720,8 +1726,8 @@
 							tabindex={isPending ? undefined : 0}
 							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item.track.id)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item.track.id, event)}
+							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>

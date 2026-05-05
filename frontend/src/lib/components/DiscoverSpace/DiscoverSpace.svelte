@@ -284,7 +284,7 @@
 		if (!canvas) return;
 		const world = canvasToWorld(e.clientX, e.clientY);
 		const hit = findNodeNear($discoverSpaceStore.nodes, world.x, world.y);
-		if (hit !== hoveredNode) {
+		if (hit?.trackId !== hoveredNode?.trackId) {
 			hoveredNode = hit;
 			canvas.style.cursor = hit ? 'pointer' : 'grab';
 			// Pass viewport coordinates — hover card uses position:fixed and needs viewport origin
