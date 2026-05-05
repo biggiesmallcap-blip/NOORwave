@@ -5,7 +5,7 @@
 
 <p align="center">A power-user music command center for TIDAL</p>
 
-<p align="center">Local sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
+<p align="center">Local sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -100,6 +100,19 @@ Recent searches auto-save as clickable chips.
 - Now-playing panel shows Camelot wheel key, BPM badge, and full queue
 - **Queue redesign**: drag-to-reorder, expanded layout (slim artwork + compact transport), `Q` hotkey to toggle, total-duration formatter, save-as-playlist, clear-with-undo (`Z` within 6 s)
 - **Toast-based player error UX** with retry, manual close, and 6 s auto-dismiss
+
+</details>
+
+<details>
+<summary><strong>Videos</strong> — search and play TIDAL music videos natively</summary>
+
+- Dedicated **`/videos` page** — search TIDAL's full video catalogue by artist, song, or session type
+- Full in-app HTML5 video player powered by hls.js: no redirects, no external browser tabs
+- **Quality selector** — Max (highest available) or Adaptive (hls.js ABR); persists across sessions
+- **Autoplay** — queues the next search result automatically; an "Up next" pill appears 15 s before the current video ends with the next title
+- **Fullscreen** with auto-hiding controls; native HLS fallback for Safari
+- **Video mixes** — browse TIDAL's curated editorial video playlists; displayed as a shelf alongside search results
+- Concurrent audio paused automatically when a video starts to prevent dual playback
 
 </details>
 
@@ -376,6 +389,10 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Unified playability states across all song cards (search, discover, trending) (v0.1.17)
 - [x] Song radio loading toast with proper dismiss on all paths; ephemeral TIDAL queue advance on next_track (v0.1.17)
 - [x] Automix suspend for 60 s after manual queue clear (v0.1.17)
+- [x] **TIDAL Video Playback** — dedicated `/videos` page: search TIDAL's video catalogue, full in-app HLS player (hls.js), quality selector, autoplay with up-next pill, video mixes shelf, fullscreen, concurrent audio paused on play (v0.1.18)
+- [x] Song Radio cold-start fallback — when all candidate sources return empty (newly-synced tracks not yet in the learning model), radio now surfaces other tracks by the same artist instead of failing silently (v0.1.18)
+- [x] TIDAL Your Mixes token auto-refresh — the shelf no longer loops on 401 errors; refreshes inline like all other TIDAL endpoints (v0.1.18)
+- [x] RSS feed fixes — removed defunct Resident Advisor feed; updated Pitchfork and Mixmag to current URLs; fixed Bandcamp Daily parse failure caused by UTF-8 BOM (v0.1.18)
 
 **Library + browsing**
 
