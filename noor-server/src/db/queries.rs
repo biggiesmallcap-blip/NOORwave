@@ -2235,7 +2235,15 @@ fn search_albums_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
          LEFT JOIN artists a ON a.id = al.artist_id
          JOIN albums_fts ON albums_fts.rowid = al.id
          WHERE albums_fts MATCH ?1
-         ORDER BY al.title ASC
+         UNION
+         SELECT al.id, al.tidal_id, al.ytmusic_id, al.title, al.artist_id,
+                a.name, al.year, al.artwork_url,
+                al.release_type, al.label, al.track_count, al.is_favorite, al.source
+         FROM albums al
+         LEFT JOIN artists a ON a.id = al.artist_id
+         JOIN artists_fts ON artists_fts.rowid = al.artist_id
+         WHERE artists_fts MATCH ?1
+         ORDER BY title ASC
          LIMIT ?2",
     )?;
     stmt.query_map(params![fts_query, limit], |row| {

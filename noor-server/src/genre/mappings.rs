@@ -325,10 +325,14 @@ impl GenreCatalog {
             return None;
         }
 
-        // Require at least one shared token to avoid purely character-level matches.
+        // Require at least one shared token, or substring containment, to avoid
+        // purely character-level matches (e.g. "british" → "britpop") while still
+        // catching single-token typos like "shoegazee" → "shoegaze".
         let candidate_tokens: Vec<&str> = best_norm.split_whitespace().collect();
         let shares_token = input_tokens.iter().any(|t| candidate_tokens.contains(t));
-        if !shares_token {
+        let substring_match = normalized.contains(best_norm.as_str())
+            || best_norm.contains(normalized);
+        if !shares_token && !substring_match {
             return None;
         }
 
