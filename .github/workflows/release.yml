@@ -271,7 +271,7 @@ jobs:
 
   build-macos-x64:
     needs: create-release
-    runs-on: macos-13
+    runs-on: macos-latest
     permissions:
       contents: write
     env:
@@ -282,6 +282,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -313,15 +315,15 @@ jobs:
 
       - name: Build binaries
         run: |
-          cargo build --release -p noor-server
-          cargo build --release -p noor-app
+          cargo build --release --target x86_64-apple-darwin -p noor-server
+          cargo build --release --target x86_64-apple-darwin -p noor-app
 
       - name: Assemble and archive
         run: |
           TAG="${GITHUB_REF_NAME}"
           mkdir -p dist/NOORwave
-          cp target/release/noor-app dist/NOORwave/NOORwave
-          cp target/release/noor-server dist/NOORwave/noor-server
+          cp target/x86_64-apple-darwin/release/noor-app dist/NOORwave/NOORwave
+          cp target/x86_64-apple-darwin/release/noor-server dist/NOORwave/noor-server
           cp -r frontend/build dist/NOORwave/www
           tar -czf "dist/NOORwave-$TAG-macos-x64.tar.gz" -C dist NOORwave
 
