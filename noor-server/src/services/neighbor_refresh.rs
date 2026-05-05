@@ -413,7 +413,14 @@ pub async fn refresh_seed_neighbors(
                 seed_track_id: seed_id,
             });
         }
-        Ok(None) => { /* no-op: cold path or empty model */ }
+        Ok(None) => {
+            // Seed has no embedding (cold start or track added post-training).
+            // Signal completion so the frontend clears the spinner instead of
+            // getting stuck at 10%.
+            let _ = event_tx.send(AppEvent::DiscoverySpaceRefreshed {
+                seed_track_id: seed_id,
+            });
+        }
         Err(e) => warn!("[neighbor_refresh] error for seed {seed_id}: {e}"),
     }
 }
