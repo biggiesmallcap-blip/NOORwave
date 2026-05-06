@@ -363,15 +363,24 @@ pub async fn start_training(
     let metrics_json = serde_json::to_string(&output.metrics)?;
     let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
     let recall = output.metrics.get("recall_at_10").copied().unwrap_or(0.0);
-    // Thresholds scale with library maturity:
-    // - Fresh library (no real plays): coverage ≥ 0.5 — all signal comes from
-    //   DSP + metadata, recall@10 is meaningless on an empty held-out set.
-    // - Established library (user has actual plays): 85% coverage + 15% recall.
+    // Thresholds scale with how much real playback signal exists. The strict
+    // recall@10 gate is only meaningful when the held-out set is big enough
+    // for the metric to be stable — `build_trainer_input` carves held-out
+    // pairs from playback_transitions and playlist sequences, so a user with
+    // a couple of plays has ≤10 held-out pairs and recall@10 collapses to
+    // noise (0% or 14%, neither carries information).
     //
-    // `has_listen_history` MUST come from real playback signal, not from
-    // library-derived sequences (album / artist / genre / playlist / favorites).
-    // A fresh TIDAL sync with zero plays would otherwise trip the strict gate
-    // and the model would sit inactive forever.
+    // Three tiers:
+    //   - 0 real plays         → coverage ≥ 0.5 (cold start, recall ignored)
+    //   - 1 ≤ plays < 50       → coverage ≥ 0.7 (warm, recall too noisy to gate on)
+    //   - ≥ 50 real plays      → coverage ≥ 0.85 ∧ recall ≥ 0.15 (full gate)
+    //
+    // 50 is the rough point where held-out has ~10+ pairs and a single hit
+    // no longer flips the metric by 10pp.
+    //
+    // Real-play counts MUST come from playback_transitions / listen_history
+    // only. Library-derived sequences (album / artist / genre / playlist /
+    // favorites) reflect what's been synced, not what's been listened to.
     let playback_seqs = output
         .metrics
         .get("sequence_count.playback_transitions")
@@ -382,9 +391,11 @@ pub async fn start_training(
         .get("sequence_count.listen_history")
         .copied()
         .unwrap_or(0.0);
-    let has_listen_history = playback_seqs > 0.0 || listen_seqs > 0.0;
-    let should_activate = if has_listen_history {
+    let real_play_seqs = playback_seqs + listen_seqs;
+    let should_activate = if real_play_seqs >= 50.0 {
         coverage >= 0.85 && recall >= 0.15
+    } else if real_play_seqs >= 1.0 {
+        coverage >= 0.7
     } else {
         coverage >= 0.5
     };

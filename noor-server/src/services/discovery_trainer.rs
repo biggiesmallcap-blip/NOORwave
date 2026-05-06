@@ -251,6 +251,7 @@ fn cancel_requested(cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool
 // `bail_if_cancelled` is responsible for recognizing that and aborting.
 fn build_behavioral_embeddings(
     input: &TrainerInput,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> (HashMap<i64, Vec<f64>>, HashMap<i64, HashMap<i64, i64>>) {
     let dim = input.dimension;
@@ -272,6 +273,12 @@ fn build_behavioral_embeddings(
         .filter_map(|(id, count)| if count >= min_count { Some(id) } else { None })
         .collect();
 
+    // Total sequence count for progress reporting. The caller's stage
+    // boundary fires at 0.20; the projection step at the end of this function
+    // claims the upper half of the range, so the co-occurrence pass maps into
+    // [0.20, 0.30] linearly with `sequences_seen / total_sequences`.
+    let total_sequences: usize = input.sequences.iter().map(|s| s.sequences.len()).sum();
+
     // Build co-occurrence scores: track_id -> { other_track_id -> weighted_score }
     // Plus raw counts for support/confidence computation downstream.
     let mut co: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
@@ -287,6 +294,27 @@ fn build_behavioral_embeddings(
             sequences_seen += 1;
             if sequences_seen.is_multiple_of(64) && cancel_requested(cancel) {
                 break 'outer;
+            }
+            // Emit progress every 1024 sequences. Same rationale as the cancel
+            // check: keep the atomic/channel cost out of the inner loop, but
+            // fire often enough that the UI bar visibly moves and a 30-second
+            // pause doesn't look like a hang.
+            if sequences_seen.is_multiple_of(1024) && total_sequences > 0 {
+                if let Some(tx) = progress_tx {
+                    let frac = (sequences_seen as f32 / total_sequences as f32).min(1.0);
+                    let _ = tx.send(TrainingProgressUpdate {
+                        stage: "behavioral".to_string(),
+                        progress: 0.20 + frac * 0.10,
+                        message: format!(
+                            "Co-occurrence: {}/{} sequences",
+                            sequences_seen, total_sequences
+                        ),
+                        current_track_id: None,
+                        current_track_title: None,
+                        tracks_done: sequences_seen as u32,
+                        tracks_total: total_sequences as u32,
+                    });
+                }
             }
             let filtered: Vec<i64> = sequence
                 .iter()
@@ -321,6 +349,12 @@ fn build_behavioral_embeddings(
     // checked once per outer track via `find_any` semantics — if any worker
     // sees the flag, downstream `bail_if_cancelled` will catch it; this pass
     // just stops accumulating work as fast as it can.
+    //
+    // Progress for this parallel pass uses a shared atomic counter — rayon
+    // workers don't see a deterministic index, so we count completions and
+    // emit when we cross multiples of 256. Maps into [0.30, 0.40].
+    let projection_total = co.len();
+    let projected_done = std::sync::atomic::AtomicUsize::new(0);
     let embeddings = co
         .into_par_iter()
         .map(|(track_id, neighbors)| {
@@ -342,6 +376,26 @@ fn build_behavioral_embeddings(
                     vec[bucket] += sign * score;
                 }
             }
+            let done = projected_done
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            if done.is_multiple_of(256) && projection_total > 0 {
+                if let Some(tx) = progress_tx {
+                    let frac = (done as f32 / projection_total as f32).min(1.0);
+                    let _ = tx.send(TrainingProgressUpdate {
+                        stage: "behavioral".to_string(),
+                        progress: 0.30 + frac * 0.10,
+                        message: format!(
+                            "Projecting vectors: {}/{}",
+                            done, projection_total
+                        ),
+                        current_track_id: None,
+                        current_track_title: None,
+                        tracks_done: done as u32,
+                        tracks_total: projection_total as u32,
+                    });
+                }
+            }
             (track_id, normalize(&vec).0)
         })
         .collect();
@@ -356,8 +410,12 @@ fn build_behavioral_embeddings(
 fn build_audio_proxy_features(
     tracks: &[EmbeddingTrackRow],
     dim: usize,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> HashMap<i64, TrainerAudioFeature> {
+    // Shared counter for parallel progress reporting. Maps into [0.40, 0.55].
+    let total = tracks.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
     tracks
         .par_iter()
         .filter_map(|track| {
@@ -373,6 +431,21 @@ fn build_audio_proxy_features(
             };
             let tokens = metadata_tokens(track);
             let vec = hashed_projection(&tokens, dim);
+            let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if completed.is_multiple_of(512) && total > 0 {
+                if let Some(tx) = progress_tx {
+                    let frac = (completed as f32 / total as f32).min(1.0);
+                    let _ = tx.send(TrainingProgressUpdate {
+                        stage: "audio".to_string(),
+                        progress: 0.40 + frac * 0.15,
+                        message: format!("Audio proxy: {}/{}", completed, total),
+                        current_track_id: None,
+                        current_track_title: None,
+                        tracks_done: completed as u32,
+                        tracks_total: total as u32,
+                    });
+                }
+            }
             Some((
                 track.track_id,
                 TrainerAudioFeature {
@@ -969,7 +1042,7 @@ pub fn run_discovery_training(
     }
 
     // Stage 1 — also returns raw co-occurrence counts for support/confidence.
-    let (behavioral, co_count) = build_behavioral_embeddings(&input, cancel);
+    let (behavioral, co_count) = build_behavioral_embeddings(&input, progress_tx, cancel);
     if cancel_requested(cancel) {
         return TrainerOutput {
             behavioral_embeddings: HashMap::new(),
@@ -1018,7 +1091,7 @@ pub fn run_discovery_training(
         }
         cached.clone()
     } else {
-        build_audio_proxy_features(&tracks, dim, cancel)
+        build_audio_proxy_features(&tracks, dim, progress_tx, cancel)
     };
     if cancel_requested(cancel) {
         return TrainerOutput {

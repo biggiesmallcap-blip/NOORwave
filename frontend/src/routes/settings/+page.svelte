@@ -1444,6 +1444,54 @@
 					</p>
 				</div>
 
+				<details class="discovery-guide glass-panel">
+					<summary>How discovery works — when to retrain, what activates a model</summary>
+					<div class="guide-body">
+						<p>
+							The discovery engine learns a similarity space over your library: every track gets a vector, and each track's top neighbours are pre-computed and stored. Radio, automix, "more like this", and the discover page all read those neighbours. Until a trained model is active, those surfaces fall back to a metadata-only heuristic (same artist / genre / decade), which is flat — same handful of tracks every time.
+						</p>
+
+						<h5>When to retrain</h5>
+						<ul>
+							<li><strong>First time</strong> after syncing your library — there's no model yet.</li>
+							<li><strong>After a big sync</strong> — new tracks have no neighbours until you retrain.</li>
+							<li><strong>After a few weeks of listening</strong> — the model improves with real plays. New transitions teach it which tracks belong together.</li>
+							<li><strong>You don't need to retrain often.</strong> Once a week or so when you've added music or listened a lot. Daily is overkill.</li>
+						</ul>
+
+						<h5>Incremental refresh vs Full retrain</h5>
+						<p>
+							<strong>Incremental refresh</strong> reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
+						</p>
+						<p>
+							<strong>Full retrain</strong> wipes the audio cache and recomputes everything from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
+						</p>
+						<p>
+							On the very first run there's nothing cached, so both buttons do identical work.
+						</p>
+
+						<h5>Intensity tiers</h5>
+						<p>
+							<strong>Max</strong> (96-dim, 64 neighbours, 8-track context) — best radio quality, slowest. Recommended for libraries under ~10k or overnight runs.
+							<br /><strong>Medium</strong> (64-dim, 32 neighbours, 5-track context) — the default. Indistinguishable from Max for most listening; ~50% of the wall-clock.
+							<br /><strong>Low</strong> (48-dim, 24 neighbours, 3-track context) — skips the audio-proxy stage entirely. Cold tracks lose their metadata anchor, but the engine stays usable on modest hardware.
+						</p>
+
+						<h5>Why a model might not activate</h5>
+						<p>
+							A run can complete with full coverage but still leave Active model on <strong>Fallback only</strong>. The activation gate scales with how much you've actually listened:
+						</p>
+						<ul>
+							<li><strong>0 plays</strong> — needs ≥ 50% coverage. Cold-start mode.</li>
+							<li><strong>1–49 plays</strong> — needs ≥ 70% coverage. Recall@10 isn't reliable on a tiny held-out set, so the gate looks at coverage only.</li>
+							<li><strong>50+ plays</strong> — needs ≥ 85% coverage AND ≥ 15% recall@10. Full strict gate.</li>
+						</ul>
+						<p>
+							If you complete a run and the model doesn't activate, you'll usually see Coverage well above the relevant threshold but Active model still says Fallback. That means recall didn't clear — keep listening, retrain again in a week, and the gate will pass naturally.
+						</p>
+					</div>
+				</details>
+
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
 					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
@@ -2385,6 +2433,64 @@
 	.discovery-warning p {
 		margin: 0;
 		line-height: 1.5;
+	}
+
+	.discovery-guide {
+		padding: 14px 18px;
+		margin-top: 12px;
+	}
+
+	.discovery-guide > summary {
+		cursor: pointer;
+		font-size: 0.92rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		list-style: none;
+	}
+
+	.discovery-guide > summary::marker,
+	.discovery-guide > summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.discovery-guide > summary::before {
+		content: '▸ ';
+		display: inline-block;
+		transition: transform 0.15s ease;
+		margin-right: 4px;
+	}
+
+	.discovery-guide[open] > summary::before {
+		transform: rotate(90deg);
+	}
+
+	.guide-body {
+		margin-top: 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		font-size: 0.88rem;
+		line-height: 1.55;
+		color: var(--text-secondary);
+	}
+
+	.guide-body h5 {
+		margin: 8px 0 0;
+		font-size: 0.92rem;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.guide-body ul {
+		margin: 0;
+		padding-left: 18px;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.guide-body p {
+		margin: 0;
 	}
 
 	.action-row {
