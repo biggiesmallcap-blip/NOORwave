@@ -96,41 +96,42 @@ pub fn match_fingerprints(db: &Database, query_hashes: &[(u32, u32)]) -> Vec<(i6
     }
 
     let hash_values: Vec<u32> = query_hashes.iter().map(|(h, _)| *h).collect();
-
-    // Find all tracks sharing any hash
     let candidates = db
         .with_conn(|conn| queries::find_tracks_by_hash(conn, &hash_values))
         .unwrap_or_default();
-
     if candidates.is_empty() {
         return Vec::new();
     }
 
-    // Build a quick lookup: hash -> list of query offsets
+    build_match_scores(query_hashes, &candidates)
+}
+
+/// Build per-track scores by histogramming `q_off - target_off` per (track, hash) pair
+/// and taking the max bin as a fraction of query length. A consistent time alignment
+/// produces a sharp peak; random hash co-occurrences spread across many bins.
+fn build_match_scores(
+    query_hashes: &[(u32, u32)],
+    candidates: &[(i64, u32, u32)],
+) -> Vec<(i64, f64)> {
     let mut query_hash_offsets: HashMap<u32, Vec<u32>> = HashMap::new();
     for &(hash, offset) in query_hashes {
         query_hash_offsets.entry(hash).or_default().push(offset);
     }
 
-    // Build histogram of time-delta alignment per track
     let mut track_alignments: HashMap<i64, Vec<i32>> = HashMap::new();
-
-    for &(track_id, hash) in &candidates {
+    for &(track_id, hash, target_off) in candidates {
         if let Some(q_offsets) = query_hash_offsets.get(&hash) {
             let entry = track_alignments.entry(track_id).or_default();
-            // For each query offset, compute delta (simplified — we don't have target offset here)
             for &q_off in q_offsets {
-                entry.push(q_off as i32);
+                entry.push(q_off as i32 - target_off as i32);
             }
         }
     }
 
-    // Score = max histogram count / query_hashes.len()
     let query_len = query_hashes.len() as f64;
     let mut scores: Vec<(i64, f64)> = track_alignments
         .iter()
         .map(|(&tid, alignments)| {
-            // Find max alignment count
             let mut counts: HashMap<i32, usize> = HashMap::new();
             for &delta in alignments {
                 *counts.entry(delta).or_default() += 1;
@@ -231,5 +232,42 @@ pub fn record_fingerprint_duplicate_pairs(
 pub fn optimize_after_bulk_scan(db: &Database) {
     if let Err(e) = db.with_conn(queries::optimize_fingerprint_hashes) {
         tracing::warn!("PRAGMA optimize / ANALYZE fingerprint_hashes failed: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bug 2 regression: when the query is a time-shifted copy of a track's
+    /// fingerprint, the histogram should peak at delta = -k with score ≈ 1.0
+    /// for that track, well above any spurious matches against an unrelated track
+    /// that shares some hashes at random offsets.
+    #[test]
+    fn test_match_scores_self_match_dominates_decoy() {
+        let query: Vec<(u32, u32)> = (0..10).map(|i| (1000 + i, i)).collect();
+        let shift = 7u32;
+
+        let mut candidates: Vec<(i64, u32, u32)> = Vec::new();
+        for &(h, off) in &query {
+            candidates.push((1, h, off + shift));
+        }
+        for (idx, &(h, _)) in query.iter().enumerate() {
+            candidates.push((2, h, (idx as u32 * 13) ^ 0x55));
+        }
+
+        let scores = build_match_scores(&query, &candidates);
+        let map: std::collections::HashMap<i64, f64> = scores.iter().copied().collect();
+        let s1 = *map.get(&1).expect("track 1 must score");
+        let s2 = map.get(&2).copied().unwrap_or(0.0);
+
+        assert!(
+            s1 > 0.9,
+            "self-match score should be ≈1.0 after Bug 2 fix, got {s1}"
+        );
+        assert!(
+            s1 > s2 + 0.5,
+            "aligned track ({s1}) should beat decoy ({s2}) by a large margin"
+        );
     }
 }

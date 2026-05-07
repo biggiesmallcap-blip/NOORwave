@@ -34,17 +34,16 @@ pub fn analyze_clip(
     // 4. LUFS
     let loudness_lufs = features::compute_lufs(samples, sample_rate);
 
-    // 5. Spectral centroid
-    let spectral_centroid = features::compute_spectral_centroid(samples, sample_rate);
+    // 5-6, 8. One STFT pass feeds spectral_centroid + instrumental + danceability.
+    let stft = features::compute_stft_features(samples, sample_rate);
+    let spectral_centroid = stft.as_ref().and_then(|s| s.centroid_hz);
+    let is_instrumental = stft.as_ref().and_then(features::detect_instrumental_from);
+    let danceability = stft
+        .as_ref()
+        .and_then(|s| features::compute_danceability_from(s, bpm, beat_strength));
 
-    // 6. Instrumental detection
-    let is_instrumental = features::detect_instrumental(samples, sample_rate);
-
-    // 7. Stereo width — return 0.5 for mono (simplification)
+    // 7. Stereo width — placeholder; pipeline currently consumes mono samples only.
     let stereo_width = Some(0.5);
-
-    // 8. Danceability
-    let danceability = features::compute_danceability(samples, sample_rate, bpm, beat_strength);
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -64,7 +63,7 @@ pub fn analyze_clip(
         analysis_offset_ms: 0,
         samples_analyzed: Some(samples.len() as i64),
         analyzed_at: now,
-        analysis_version: "v1".to_string(),
+        analysis_version: "v2".to_string(),
     }
 }
 

@@ -3855,7 +3855,7 @@ pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          LEFT JOIN audio_dsp_features dsp ON t.id = dsp.track_id
-         WHERE dsp.track_id IS NULL
+         WHERE dsp.track_id IS NULL OR dsp.analysis_version != 'v2'
          LIMIT ?1",
     )?;
     let tracks = stmt
@@ -4197,13 +4197,16 @@ pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
         .map_err(Into::into)
 }
 
-pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64, u32)>> {
+pub fn find_tracks_by_hash(
+    conn: &Connection,
+    hashes: &[u32],
+) -> Result<Vec<(i64, u32, u32)>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
     let placeholders: Vec<String> = hashes.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT track_id, hash
+        "SELECT track_id, hash, time_offset
          FROM fingerprint_hashes
          WHERE hash IN ({})
          ORDER BY hash",
@@ -4212,7 +4215,11 @@ pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64
     let mut stmt = conn.prepare(&sql)?;
     let hash_params: Vec<i64> = hashes.iter().map(|h| *h as i64).collect();
     let rows = stmt.query_map(params_from_iter(hash_params.iter()), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u32))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)? as u32,
+            row.get::<_, i64>(2)? as u32,
+        ))
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

@@ -15017,6 +15017,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             tidal_http_client: reqwest::Client::new(),
             tidal_tokens: None,
+            tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,

@@ -21,34 +21,37 @@ const MINOR_PROFILE: [f64; 12] = [
     6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
 ];
 
-// Camelot lookup tables
+// Camelot lookup tables, indexed by semitone position (0=C, 1=C#, ..., 11=B).
+// Camelot wheel proceeds by circle of fifths, not by semitones — the previous
+// sequential mapping (Bug 9) was wrong for every odd-index entry, throwing
+// every harmonic-compatibility decision into garbage.
 const MAJOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "8B"),
-    ("C#", "9B"),
-    ("D", "10B"),
-    ("D#", "11B"),
-    ("E", "12B"),
-    ("F", "1B"),
-    ("F#", "2B"),
-    ("G", "3B"),
-    ("G#", "4B"),
-    ("A", "5B"),
-    ("A#", "6B"),
-    ("B", "7B"),
+    ("C", "8B"),    // 0
+    ("C#", "3B"),   // 1
+    ("D", "10B"),   // 2
+    ("D#", "5B"),   // 3
+    ("E", "12B"),   // 4
+    ("F", "7B"),    // 5
+    ("F#", "2B"),   // 6
+    ("G", "9B"),    // 7
+    ("G#", "4B"),   // 8
+    ("A", "11B"),   // 9
+    ("A#", "6B"),   // 10
+    ("B", "1B"),    // 11
 ];
 const MINOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "8A"),
-    ("C#", "9A"),
-    ("D", "10A"),
-    ("D#", "11A"),
-    ("E", "12A"),
-    ("F", "1A"),
-    ("F#", "2A"),
-    ("G", "3A"),
-    ("G#", "4A"),
-    ("A", "5A"),
-    ("A#", "6A"),
-    ("B", "7A"),
+    ("C", "5A"),    // 0
+    ("C#", "12A"),  // 1
+    ("D", "7A"),    // 2
+    ("D#", "2A"),   // 3
+    ("E", "9A"),    // 4
+    ("F", "4A"),    // 5
+    ("F#", "11A"),  // 6
+    ("G", "6A"),    // 7
+    ("G#", "1A"),   // 8
+    ("A", "8A"),    // 9
+    ("A#", "3A"),   // 10
+    ("B", "10A"),   // 11
 ];
 
 const NOTE_NAMES: [&str; 12] = [
@@ -156,11 +159,12 @@ fn compute_pcp(samples: &[f32], sample_rate: u32) -> [f64; 12] {
     pcp
 }
 
-/// Rotate a profile by shifting (circular shift left by `rotation`).
+/// Rotate a tonic-major/minor profile so its tonic peak lands at index `rotation`.
+/// I.e. `rotation = 9` produces a profile peaked at A.
 fn rotate_profile(profile: &[f64; 12], rotation: usize) -> [f64; 12] {
     let mut rotated = [0.0f64; 12];
     for i in 0..12 {
-        rotated[i] = profile[(i + rotation) % 12];
+        rotated[i] = profile[(i + 12 - rotation) % 12];
     }
     rotated
 }
@@ -199,5 +203,50 @@ mod tests {
     fn test_too_short() {
         let samples = vec![0.0f32; 100];
         assert!(detect_key(&samples, 44100).is_none());
+    }
+
+    #[test]
+    fn test_key_detects_a_minor_triad() {
+        // A minor triad (A4 + C5 + E5) sustained over 4 s at 44.1 kHz.
+        let sr = 44_100u32;
+        let total = (sr * 4) as usize;
+        let freqs = [440.0_f64, 523.2511_f64, 659.2551_f64];
+        let samples: Vec<f32> = (0..total)
+            .map(|n| {
+                let t = n as f64 / sr as f64;
+                let s: f64 = freqs
+                    .iter()
+                    .map(|f| (2.0 * PI * f * t).sin())
+                    .sum::<f64>()
+                    / freqs.len() as f64;
+                (s * 0.5) as f32
+            })
+            .collect();
+
+        let detected = detect_key(&samples, sr).expect("key should be detected for clean triad");
+        assert_eq!(
+            detected.0, "Am",
+            "expected A minor, got {} (camelot {})",
+            detected.0, detected.1
+        );
+        assert_eq!(detected.1, "8A");
+    }
+
+    #[test]
+    fn test_key_returns_none_on_white_noise() {
+        // Deterministic pseudo-noise — should produce flat PCP and fail gate.
+        let sr = 44_100u32;
+        let total = (sr * 4) as usize;
+        let mut state: u64 = 0xABCDEF;
+        let samples: Vec<f32> = (0..total)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state as i64 as f32) / (i64::MAX as f32)) * 0.5
+            })
+            .collect();
+        assert!(
+            detect_key(&samples, sr).is_none(),
+            "white noise should not produce a confident key"
+        );
     }
 }

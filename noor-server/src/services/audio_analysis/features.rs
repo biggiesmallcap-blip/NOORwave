@@ -50,11 +50,10 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
         rescale_biquad_coefficients(HP_B_48K, HP_A_48K, 48_000.0, sample_rate as f64)
     };
 
-    // Apply biquad filters (stage 1: K-weight high-shelf, stage 2: high-pass at 38Hz)
-    let filtered = biquad_process(samples, kb, ka);
-    let filtered = biquad_process(&filtered, hb, ha);
+    // Apply biquad filters in f64 throughout (Bug 5: avoid f32 round-trip between stages).
+    let filtered = biquad_process_f64(samples.iter().map(|&s| s as f64), kb, ka);
+    let filtered = biquad_process_f64(filtered.iter().copied(), hb, ha);
 
-    // Gated integration: 400ms blocks, 75% overlap
     let block_size = (sample_rate as f64 * 0.4) as usize; // 400ms
     let hop = (block_size as f64 * 0.25) as usize; // 75% overlap = 25% hop
 
@@ -72,11 +71,7 @@ pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> Option<f64> {
             continue;
         }
 
-        // Mean square energy of block
-        let sum_sq: f64 = filtered[start..end]
-            .iter()
-            .map(|s| (*s as f64).powi(2))
-            .sum::<f64>();
+        let sum_sq: f64 = filtered[start..end].iter().map(|s| s.powi(2)).sum::<f64>();
         let mean_sq = sum_sq / (end - start) as f64;
 
         if mean_sq > 1e-12 {
@@ -192,16 +187,17 @@ pub fn rescale_biquad_coefficients(
     )
 }
 
-/// Apply a biquad filter to a sample buffer.
-/// b = [b0, b1, b2], a = [a0, a1, a2] (with a0 assumed to be 1.0 or already normalised)
-fn biquad_process(samples: &[f32], b: [f64; 3], a: [f64; 3]) -> Vec<f32> {
-    let mut output = Vec::with_capacity(samples.len());
-    let mut x1 = 0.0f64;
-    let mut x2 = 0.0f64;
-    let mut y1 = 0.0f64;
-    let mut y2 = 0.0f64;
+/// Apply a biquad filter, keeping the signal in f64 throughout.
+/// b = [b0, b1, b2], a = [a0, a1, a2] (a0 normalised internally)
+fn biquad_process_f64<I: IntoIterator<Item = f64>>(
+    samples: I,
+    b: [f64; 3],
+    a: [f64; 3],
+) -> Vec<f64> {
+    let iter = samples.into_iter();
+    let (lower, _) = iter.size_hint();
+    let mut output = Vec::with_capacity(lower);
 
-    // Normalise coefficients if a[0] != 1.0
     let a0 = a[0];
     let b0 = b[0] / a0;
     let b1 = b[1] / a0;
@@ -209,12 +205,14 @@ fn biquad_process(samples: &[f32], b: [f64; 3], a: [f64; 3]) -> Vec<f32> {
     let a1 = a[1] / a0;
     let a2 = a[2] / a0;
 
-    for &sample in samples {
-        let x = sample as f64;
+    let mut x1 = 0.0f64;
+    let mut x2 = 0.0f64;
+    let mut y1 = 0.0f64;
+    let mut y2 = 0.0f64;
+
+    for x in iter {
         let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-
-        output.push(y as f32);
-
+        output.push(y);
         x2 = x1;
         x1 = x;
         y2 = y1;
@@ -224,219 +222,172 @@ fn biquad_process(samples: &[f32], b: [f64; 3], a: [f64; 3]) -> Vec<f32> {
     output
 }
 
-// ─── Spectral Centroid ───────────────────────────────────────────────────────
+// ─── Unified STFT pass ───────────────────────────────────────────────────────
+//
+// Spectral centroid, instrumental detection, and danceability all want the same
+// 4096/2048 Hann STFT. Doing one pass that accumulates everything is ~3× faster
+// than running three independent STFTs.
 
-const SC_FFT_SIZE: usize = 4096;
-const SC_HOP: usize = 2048;
+const STFT_FFT_SIZE: usize = 4096;
+const STFT_HOP: usize = 2048;
 
-/// Compute spectral centroid averaged across STFT frames.
-/// Returns `None` if samples too short.
-pub fn compute_spectral_centroid(samples: &[f32], sample_rate: u32) -> Option<f64> {
-    if sample_rate == 0 || samples.len() < SC_FFT_SIZE {
-        return None;
-    }
-
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(SC_FFT_SIZE);
-
-    let num_frames = samples.len().saturating_sub(SC_FFT_SIZE) / SC_HOP + 1;
-    if num_frames == 0 {
-        return None;
-    }
-
-    // Precompute Hann window
-    let hann: Vec<f64> = (0..SC_FFT_SIZE)
-        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f64 / (SC_FFT_SIZE - 1) as f64).cos()))
-        .collect();
-
-    let mut fft_input = vec![rustfft::num_complex::Complex::new(0.0f32, 0.0); SC_FFT_SIZE];
-    let mut centroid_sum = 0.0f64;
-    let mut valid_frames = 0usize;
-
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * SC_HOP;
-
-        // Apply Hann window
-        for i in 0..SC_FFT_SIZE {
-            fft_input[i] =
-                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
-        }
-
-        fft.process(&mut fft_input);
-
-        // Compute spectral centroid for this frame
-        let mut weighted_sum = 0.0f64;
-        let mut magnitude_sum = 0.0f64;
-
-        for bin in 1..(SC_FFT_SIZE / 2) {
-            let freq = bin as f64 * sample_rate as f64 / SC_FFT_SIZE as f64;
-            let magnitude = fft_input[bin].norm() as f64;
-
-            weighted_sum += freq * magnitude;
-            magnitude_sum += magnitude;
-        }
-
-        if magnitude_sum > 1e-12 {
-            centroid_sum += weighted_sum / magnitude_sum;
-            valid_frames += 1;
-        }
-    }
-
-    if valid_frames == 0 {
-        return None;
-    }
-
-    Some(centroid_sum / valid_frames as f64)
+pub struct StftFeatures {
+    pub centroid_hz: Option<f64>,
+    pub vocal_ratio: f64,
+    pub bass_ratio: f64,
+    pub total_energy: f64,
 }
 
-// ─── Instrumental Detection ─────────────────────────────────────────────────
-
-const INST_FFT_SIZE: usize = 4096;
-const INST_HOP: usize = 2048;
-
-/// Detect whether a track is likely instrumental.
-/// Uses vocal energy ratio in 300-3400 Hz range.
-/// Returns `Some(true)` if vocal_ratio < 0.12, `Some(false)` if > 0.22, `None` otherwise.
-pub fn detect_instrumental(samples: &[f32], sample_rate: u32) -> Option<bool> {
-    if sample_rate == 0 || samples.len() < INST_FFT_SIZE {
+/// One STFT pass that accumulates all feature statistics derived from the
+/// 4096-point Hann magnitude/power spectrum.
+pub fn compute_stft_features(samples: &[f32], sample_rate: u32) -> Option<StftFeatures> {
+    if sample_rate == 0 || samples.len() < STFT_FFT_SIZE {
         return None;
     }
 
     let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(INST_FFT_SIZE);
+    let fft = planner.plan_fft_forward(STFT_FFT_SIZE);
 
-    let num_frames = samples.len().saturating_sub(INST_FFT_SIZE) / INST_HOP + 1;
+    let num_frames = samples.len().saturating_sub(STFT_FFT_SIZE) / STFT_HOP + 1;
     if num_frames == 0 {
         return None;
     }
 
-    // Precompute Hann window
-    let hann: Vec<f64> = (0..INST_FFT_SIZE)
-        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f64 / (INST_FFT_SIZE - 1) as f64).cos()))
+    let hann: Vec<f64> = (0..STFT_FFT_SIZE)
+        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f64 / (STFT_FFT_SIZE - 1) as f64).cos()))
         .collect();
 
-    let mut fft_input = vec![rustfft::num_complex::Complex::new(0.0f32, 0.0); INST_FFT_SIZE];
+    let mut fft_input = vec![rustfft::num_complex::Complex::new(0.0f32, 0.0); STFT_FFT_SIZE];
+    let mut centroid_sum = 0.0f64;
+    let mut centroid_valid_frames = 0usize;
     let mut vocal_energy = 0.0f64;
+    let mut bass_energy = 0.0f64;
     let mut total_energy = 0.0f64;
 
     for frame_idx in 0..num_frames {
-        let start = frame_idx * INST_HOP;
+        let start = frame_idx * STFT_HOP;
 
-        // Apply Hann window
-        for i in 0..INST_FFT_SIZE {
-            fft_input[i] =
-                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
+        for i in 0..STFT_FFT_SIZE {
+            fft_input[i] = rustfft::num_complex::Complex::new(
+                samples[start + i] * hann[i] as f32,
+                0.0,
+            );
         }
 
         fft.process(&mut fft_input);
 
-        for bin in 1..(INST_FFT_SIZE / 2) {
-            let freq = bin as f64 * sample_rate as f64 / INST_FFT_SIZE as f64;
+        let mut weighted_sum = 0.0f64;
+        let mut magnitude_sum = 0.0f64;
+
+        for bin in 1..(STFT_FFT_SIZE / 2) {
+            let freq = bin as f64 * sample_rate as f64 / STFT_FFT_SIZE as f64;
             let magnitude = fft_input[bin].norm() as f64;
             let power = magnitude * magnitude;
 
-            total_energy += power;
+            weighted_sum += freq * magnitude;
+            magnitude_sum += magnitude;
 
-            // Vocal range: 300-3400 Hz
+            total_energy += power;
+            if (20.0..=250.0).contains(&freq) {
+                bass_energy += power;
+            }
             if (300.0..=3400.0).contains(&freq) {
                 vocal_energy += power;
             }
         }
+
+        if magnitude_sum > 1e-12 {
+            centroid_sum += weighted_sum / magnitude_sum;
+            centroid_valid_frames += 1;
+        }
     }
 
-    if total_energy < 1e-12 {
+    let centroid_hz = if centroid_valid_frames > 0 {
+        Some(centroid_sum / centroid_valid_frames as f64)
+    } else {
+        None
+    };
+
+    let (vocal_ratio, bass_ratio) = if total_energy > 1e-12 {
+        (vocal_energy / total_energy, bass_energy / total_energy)
+    } else {
+        (0.0, 0.0)
+    };
+
+    Some(StftFeatures {
+        centroid_hz,
+        vocal_ratio,
+        bass_ratio,
+        total_energy,
+    })
+}
+
+// ─── Spectral Centroid ───────────────────────────────────────────────────────
+
+/// Compute spectral centroid averaged across STFT frames.
+#[allow(dead_code)]
+pub fn compute_spectral_centroid(samples: &[f32], sample_rate: u32) -> Option<f64> {
+    compute_stft_features(samples, sample_rate).and_then(|s| s.centroid_hz)
+}
+
+// ─── Instrumental Detection ─────────────────────────────────────────────────
+
+/// Detect whether a track is likely instrumental.
+/// Uses vocal energy ratio in 300-3400 Hz range.
+/// Returns `Some(true)` if vocal_ratio < 0.12, `Some(false)` if > 0.22, `None` otherwise.
+#[allow(dead_code)]
+pub fn detect_instrumental(samples: &[f32], sample_rate: u32) -> Option<bool> {
+    detect_instrumental_from(&compute_stft_features(samples, sample_rate)?)
+}
+
+pub fn detect_instrumental_from(stft: &StftFeatures) -> Option<bool> {
+    if stft.total_energy < 1e-12 {
         return None;
     }
-
-    let vocal_ratio = vocal_energy / total_energy;
-
-    if vocal_ratio < 0.12 {
+    if stft.vocal_ratio < 0.12 {
         Some(true)
-    } else if vocal_ratio > 0.22 {
+    } else if stft.vocal_ratio > 0.22 {
         Some(false)
     } else {
         None
     }
 }
 
-// ─── Danceability Helper ─────────────────────────────────────────────────────
+// ─── Danceability ───────────────────────────────────────────────────────────
 
 /// Compute danceability from bass energy ratio, BPM, and beat strength.
-/// This is called from engine.rs after BPM detection.
 ///
 /// Formula:
-///   bass_energy = energy(20-250 Hz) / total_energy
+///   bass_ratio = energy(20-250 Hz) / total_energy
 ///   bpm_factor = if bpm in 100..160 { 1.0 } else { 0.6 }
-///   danceability = clamp(bass_energy * 1.5 * bpm_factor * beat_strength, 0, 1)
+///   danceability = clamp(bass_ratio * 1.5 * bpm_factor * beat_strength, 0, 1)
+#[allow(dead_code)]
 pub fn compute_danceability(
     samples: &[f32],
     sample_rate: u32,
     bpm: Option<f64>,
     beat_strength: Option<f64>,
 ) -> Option<f64> {
-    if sample_rate == 0 || samples.len() < 256 {
+    let stft = compute_stft_features(samples, sample_rate)?;
+    compute_danceability_from(&stft, bpm, beat_strength)
+}
+
+pub fn compute_danceability_from(
+    stft: &StftFeatures,
+    bpm: Option<f64>,
+    beat_strength: Option<f64>,
+) -> Option<f64> {
+    if stft.total_energy < 1e-12 {
         return None;
     }
-
     let bpm = bpm.unwrap_or(120.0);
     let beat_strength = beat_strength.unwrap_or(0.5);
-
-    // Compute bass energy using a simplified approach (energy in 20-250 Hz band)
-    // Using the same STFT approach as instrumental detection
-    let mut planner = FftPlanner::new();
-    let fft_size = 4096usize;
-    let hop = 2048usize;
-    let fft = planner.plan_fft_forward(fft_size);
-
-    let num_frames = samples.len().saturating_sub(fft_size) / hop + 1;
-    if num_frames == 0 {
-        return None;
-    }
-
-    let hann: Vec<f64> = (0..fft_size)
-        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f64 / (fft_size - 1) as f64).cos()))
-        .collect();
-
-    let mut fft_input = vec![rustfft::num_complex::Complex::new(0.0f32, 0.0); fft_size];
-    let mut bass_energy = 0.0f64;
-    let mut total_energy = 0.0f64;
-
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * hop;
-
-        for i in 0..fft_size {
-            fft_input[i] =
-                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
-        }
-
-        fft.process(&mut fft_input);
-
-        for bin in 1..(fft_size / 2) {
-            let freq = bin as f64 * sample_rate as f64 / fft_size as f64;
-            let magnitude = fft_input[bin].norm() as f64;
-            let power = magnitude * magnitude;
-
-            total_energy += power;
-
-            if (20.0..=250.0).contains(&freq) {
-                bass_energy += power;
-            }
-        }
-    }
-
-    if total_energy < 1e-12 {
-        return None;
-    }
-
-    let bass_ratio = bass_energy / total_energy;
     let bpm_factor = if (100.0..=160.0).contains(&bpm) {
         1.0
     } else {
         0.6
     };
-
-    let danceability = (bass_ratio * 1.5 * bpm_factor * beat_strength).clamp(0.0, 1.0);
-    Some(danceability)
+    Some((stft.bass_ratio * 1.5 * bpm_factor * beat_strength).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -488,6 +439,16 @@ mod tests {
     }
 
     #[test]
+    fn test_danceability_short_clip_returns_none_not_panic() {
+        // Bug 4 regression: previously panicked on samples between 256 and 4096
+        // because the guard checked < 256 but the FFT needed 4096.
+        let samples = vec![0.1f32; 1000];
+        assert!(compute_danceability(&samples, 44100, Some(120.0), Some(0.5)).is_none());
+        let samples = vec![0.1f32; 4095];
+        assert!(compute_danceability(&samples, 44100, Some(120.0), Some(0.5)).is_none());
+    }
+
+    #[test]
     fn test_rescale_same_rate() {
         let b = [1.0, 2.0, 3.0];
         let a = [1.0, 0.5, 0.25];
@@ -530,5 +491,94 @@ mod tests {
         assert!(lufs.is_some());
         let l = lufs.unwrap();
         assert!(l.is_finite(), "LUFS must be finite");
+    }
+
+    #[test]
+    fn test_lufs_within_expected_range_for_known_sine() {
+        // 0.5-amplitude 1kHz sine: mean-square = 0.125 → ~-9 dBFS.
+        // K-weighting adds a few dB at 1kHz; result should land in [-12, -3] LUFS.
+        let sr = 48_000u32;
+        let samples: Vec<f32> = (0..(sr * 2) as usize)
+            .map(|n| 0.5 * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin() as f32)
+            .collect();
+        let lufs = compute_lufs(&samples, sr).expect("LUFS must compute");
+        assert!(
+            (-12.0..=-3.0).contains(&lufs),
+            "LUFS for 0.5-amp 1kHz sine should be in [-12, -3], got {lufs}"
+        );
+    }
+
+    #[test]
+    fn test_instrumental_classifies_pure_bass_as_instrumental() {
+        // 60 Hz fundamental + harmonics that stay below the 300 Hz vocal floor.
+        let sr = 48_000u32;
+        let total = (sr * 2) as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|n| {
+                let t = n as f64 / sr as f64;
+                let s = (2.0 * PI * 60.0 * t).sin()
+                    + 0.5 * (2.0 * PI * 120.0 * t).sin()
+                    + 0.25 * (2.0 * PI * 180.0 * t).sin();
+                (s * 0.3) as f32
+            })
+            .collect();
+        assert_eq!(
+            detect_instrumental(&samples, sr),
+            Some(true),
+            "low-frequency-only signal should be classified instrumental"
+        );
+    }
+
+    #[test]
+    fn test_instrumental_classifies_vocal_band_signal_as_vocal() {
+        // 1 kHz sine sits squarely in the 300-3400 Hz vocal band.
+        let sr = 48_000u32;
+        let total = (sr * 2) as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|n| 0.3 * (2.0 * PI * 1000.0 * n as f64 / sr as f64).sin() as f32)
+            .collect();
+        assert_eq!(
+            detect_instrumental(&samples, sr),
+            Some(false),
+            "vocal-band-only signal should be classified vocal"
+        );
+    }
+
+    #[test]
+    fn test_danceability_bassy_click_track_is_high() {
+        // 128 BPM clicks with strong bass content (60 Hz envelope).
+        let sr = 44_100u32;
+        let total = (sr * 6) as usize;
+        let click_period = (sr as f64 * 60.0 / 128.0) as usize;
+        let mut samples = vec![0.0f32; total];
+        for i in (0..total).step_by(click_period) {
+            for j in 0..(sr / 30) as usize {
+                if i + j < samples.len() {
+                    let t = j as f64 / sr as f64;
+                    samples[i + j] = 0.5 * (2.0 * PI * 60.0 * t).sin() as f32;
+                }
+            }
+        }
+        let dance = compute_danceability(&samples, sr, Some(128.0), Some(0.8))
+            .expect("should compute danceability");
+        assert!(
+            dance > 0.3,
+            "bassy 128 BPM click track should score >0.3, got {dance}"
+        );
+    }
+
+    #[test]
+    fn test_spectral_centroid_tracks_dominant_freq() {
+        // 5 kHz sine should produce a high centroid (>2 kHz).
+        let sr = 48_000u32;
+        let total = (sr * 2) as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|n| 0.3 * (2.0 * PI * 5000.0 * n as f64 / sr as f64).sin() as f32)
+            .collect();
+        let centroid = compute_spectral_centroid(&samples, sr).expect("centroid must compute");
+        assert!(
+            (3000.0..=7000.0).contains(&centroid),
+            "5 kHz sine should yield centroid in [3 kHz, 7 kHz], got {centroid}"
+        );
     }
 }

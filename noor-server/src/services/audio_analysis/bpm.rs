@@ -92,13 +92,7 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     }
 
     // Step 6: Gaussian prior centred at 120 BPM (sigma=30)
-    let prior_mean = 120.0f64;
-    let prior_sigma = 30.0f64;
-    for (_, c) in &mut corr {
-        let bpm = (*c).abs(); // use absolute for prior application
-        let prior = (-0.5 * ((bpm - prior_mean) / prior_sigma).powi(2)).exp();
-        *c *= prior;
-    }
+    apply_bpm_prior(&mut corr, 120.0, 30.0);
 
     // Step 7: Find argmax
     let (best_bpm, best_corr) = corr
@@ -107,10 +101,13 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
         .copied()
         .unwrap_or((120, 0.0));
 
-    // Normalise beat_strength to [0,1]
-    let max_corr = corr.iter().map(|(_, c)| c.abs()).fold(0.0f64, f64::max);
-    let beat_strength = if max_corr > 1e-12 {
-        best_corr.abs() / max_corr
+    // Beat strength as peak-prominence: how much the winner stands above the mean.
+    // Old code divided best_corr by max_corr — but those are equal by construction
+    // (autocorrelation of half-wave-rectified onset is non-negative), so this was
+    // always 1.0. Peak-to-mean ratio is the textbook prominence measure.
+    let mean_corr = corr.iter().map(|(_, c)| *c).sum::<f64>() / corr.len() as f64;
+    let beat_strength = if mean_corr > 1e-12 {
+        ((best_corr / mean_corr - 1.0) / 4.0).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -120,6 +117,15 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
         return None;
     }
     Some((best_bpm as f64, beat_strength))
+}
+
+/// Multiply each BPM candidate's correlation by a Gaussian prior centred at `mean` with stddev `sigma`.
+fn apply_bpm_prior(corr: &mut [(i32, f64)], mean: f64, sigma: f64) {
+    for (bpm, c) in corr.iter_mut() {
+        let bpm = *bpm as f64;
+        let prior = (-0.5 * ((bpm - mean) / sigma).powi(2)).exp();
+        *c *= prior;
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +153,83 @@ mod tests {
     fn test_silence() {
         let samples = vec![0.0f32; 44100 * 5];
         assert!(detect_bpm(&samples, 44100).is_none());
+    }
+
+    #[test]
+    fn test_bpm_prior_pulls_toward_center() {
+        // Bug 1 regression: prior must depend on BPM, not on correlation magnitude.
+        // With a flat correlation of 1.0 across 60/120/180, the Gaussian prior at
+        // mean=120, sigma=30 should leave 120 untouched and attenuate 60/180.
+        let mut corr = vec![(60, 1.0_f64), (120, 1.0), (180, 1.0)];
+        apply_bpm_prior(&mut corr, 120.0, 30.0);
+        assert!(
+            (corr[1].1 - 1.0).abs() < 1e-9,
+            "prior at center should leave correlation unchanged, got {}",
+            corr[1].1
+        );
+        assert!(
+            corr[0].1 < 0.2 && corr[2].1 < 0.2,
+            "prior 2σ away should attenuate to <0.2, got {} and {}",
+            corr[0].1,
+            corr[2].1
+        );
+    }
+
+    #[test]
+    fn test_bpm_detects_synthetic_120() {
+        // 120 BPM impulse train at 44.1 kHz for 8 s. Click every 0.5 s.
+        let sr = 44_100u32;
+        let total_samples = (sr * 8) as usize;
+        let mut samples = vec![0.0f32; total_samples];
+        let click_period = sr as usize / 2; // 0.5 s = 120 BPM
+        for i in (0..total_samples).step_by(click_period) {
+            for j in 0..32 {
+                if i + j < samples.len() {
+                    samples[i + j] = 1.0;
+                }
+            }
+        }
+        let result = detect_bpm(&samples, sr).expect("should detect a BPM");
+        assert!(
+            (result.0 - 120.0).abs() < 5.0 || (result.0 - 60.0).abs() < 5.0,
+            "expected ~120 BPM (or 60 octave), got {}",
+            result.0
+        );
+    }
+
+    #[test]
+    fn test_beat_strength_separates_metronome_from_noise() {
+        // Bug 3 regression: beat_strength must be a real signal, not always 1.0.
+        let sr = 44_100u32;
+        let total_samples = (sr * 8) as usize;
+
+        // 1) clean 120 BPM click track
+        let mut clicks = vec![0.0f32; total_samples];
+        let click_period = sr as usize / 2;
+        for i in (0..total_samples).step_by(click_period) {
+            for j in 0..32 {
+                if i + j < clicks.len() {
+                    clicks[i + j] = 1.0;
+                }
+            }
+        }
+
+        // 2) deterministic pseudo-noise (LCG) — no periodic structure
+        let mut state: u64 = 0xC0FFEE;
+        let noise: Vec<f32> = (0..total_samples)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (state as i64 as f32) / (i64::MAX as f32)
+            })
+            .collect();
+
+        let click_bs = detect_bpm(&clicks, sr).map(|(_, bs)| bs).unwrap_or(0.0);
+        let noise_bs = detect_bpm(&noise, sr).map(|(_, bs)| bs).unwrap_or(0.0);
+
+        assert!(
+            click_bs > noise_bs + 0.3,
+            "metronome beat_strength {click_bs} should beat noise beat_strength {noise_bs} \
+             by at least 0.3 (was both 1.0 before Bug 3 fix)"
+        );
     }
 }

@@ -44,38 +44,40 @@ pub fn spawn_actor(
     tokio::spawn(async move {
         let mut analyzed_count: u32 = 0;
 
-        while let Some((track_id, samples, sample_rate)) = rx.recv().await {
+        while let Some((track_id, mut samples, sample_rate)) = rx.recv().await {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 info!("Analysis actor cancelled, stopping.");
                 break;
             }
 
-            // Respect config max_seconds — truncate samples
             let max_samples = (sample_rate * config.max_seconds) as usize;
-            let samples = if samples.len() > max_samples {
-                &samples[..max_samples]
-            } else {
-                &samples[..]
-            };
+            if samples.len() > max_samples {
+                samples.truncate(max_samples);
+            }
 
-            // Check if recently analyzed
+            // Skip tracks already on the current analysis version.
             let already_analyzed = db
                 .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
                 .ok()
                 .flatten()
-                .map(|f| f.analysis_version == "v1")
+                .map(|f| f.analysis_version == "v2")
                 .unwrap_or(false);
 
             if already_analyzed {
                 continue;
             }
 
-            // Analyze and save
-            let result = engine::analyze_and_save(&db, samples, sample_rate, "passive", track_id);
+            // CPU-heavy DSP must run off the tokio worker (Issue A).
+            let db_clone = db.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id)
+            })
+            .await
+            .ok()
+            .flatten();
 
             if result.is_some() {
                 analyzed_count += 1;
-                // Emit progress event
                 let _ = event_tx.send(AppEvent::AudioAnalysisProgress {
                     analyzed: analyzed_count,
                     total: 0, // unknown total in passive mode
