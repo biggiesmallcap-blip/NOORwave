@@ -9712,76 +9712,40 @@ async fn tidal_search(
 
     let limit = params.limit.unwrap_or(20).min(50);
     let offset = params.offset.unwrap_or(0).max(0);
-    // Snapshot what we need from state in one lock acquisition.
-    let (db, http_client) = {
-        let s = state.read().await;
-        (s.db.clone(), s.http_client.clone())
-    };
-
-    let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
-
-    // Cache check — best-effort. A read failure must NOT block the upstream call.
-    let cached = db
-        .with_conn(|conn| {
-            crate::services::tidal::cache::get_search(conn, &cache_cfg, &params.q, limit, offset)
-        })
-        .ok()
-        .flatten();
+    let http_client = state.read().await.http_client.clone();
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-
-    let results = if let Some(hit) = cached {
-        hit
-    } else {
-        let fetched = match client.search_catalog(&params.q, limit, offset).await {
-            Ok(r) => r,
-            Err(e) if error_looks_like_auth(&e) => {
-                let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                    .await
-                    .map_err(|re| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                        )
-                    })?;
-                let retry_client = TidalClient::new(
-                    refreshed.access_token.clone(),
-                    refreshed.country_code.clone(),
-                );
-                retry_client
-                    .search_catalog(&params.q, limit, offset)
-                    .await
-                    .map_err(|e2| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({ "error": e2.to_string() })),
-                        )
-                    })?
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                ));
-            }
-        };
-        // Best-effort cache write — log and continue on failure.
-        let to_cache = fetched.clone();
-        let q_owned = params.q.clone();
-        let lim_for_write = limit;
-        let off_for_write = offset;
-        if let Err(e) = db.with_conn(move |conn| {
-            crate::services::tidal::cache::put_search(
-                conn,
-                &q_owned,
-                lim_for_write,
-                off_for_write,
-                &to_cache,
-            )
-        }) {
-            tracing::warn!("tidal_search_cache write failed: {}", e);
+    let results = match client.search_catalog(&params.q, limit, offset).await {
+        Ok(r) => r,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|re| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                    )
+                })?;
+            let retry_client = TidalClient::new(
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry_client
+                .search_catalog(&params.q, limit, offset)
+                .await
+                .map_err(|e2| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e2.to_string() })),
+                    )
+                })?
         }
-        fetched
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            ));
+        }
     };
 
     // Batch-lookup which Tidal IDs are in the local library so the frontend can
