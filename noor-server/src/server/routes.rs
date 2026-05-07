@@ -7263,29 +7263,37 @@ async fn search(
         )
     };
 
-    // Local DB search — must succeed; this is the existing contract.
-    let local = db
-        .with_conn(|conn| queries::search(conn, &params.q, limit))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Sportify playlist results — best-effort, never fails the request.
-    // Sportify is upstream and subject to breakage; we'd rather show local
-    // results with no Spotify bucket than 500 the search.
-    let spotify_playlists = match sportify_client {
-        Some(client) => fetch_spotify_playlist_search_compact(
-            &client,
-            &db,
-            &cache_cfg,
-            &params.q,
-            limit.min(20).max(1) as u32,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("sportify playlist search failed: {}", e);
-            Vec::new()
-        }),
-        None => Vec::new(),
+    // Local DB search and Sportify playlist search are independent — run them
+    // concurrently. Local search must succeed (existing contract); Sportify is
+    // best-effort (upstream may break).
+    let q = params.q.clone();
+    let db_for_local = db.clone();
+    let local_fut = async move {
+        db_for_local.with_conn(|conn| queries::search(conn, &q, limit))
     };
+
+    let spotify_fut = async {
+        match sportify_client {
+            Some(client) => {
+                fetch_spotify_playlist_search_compact(
+                    &client,
+                    &db,
+                    &cache_cfg,
+                    &params.q,
+                    limit.min(20).max(1) as u32,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("sportify playlist search failed: {}", e);
+                    Vec::new()
+                })
+            }
+            None => Vec::new(),
+        }
+    };
+
+    let (local_res, spotify_playlists) = tokio::join!(local_fut, spotify_fut);
+    let local = local_res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({
         "tracks": local.tracks,
@@ -9712,40 +9720,76 @@ async fn tidal_search(
 
     let limit = params.limit.unwrap_or(20).min(50);
     let offset = params.offset.unwrap_or(0).max(0);
-    let http_client = state.read().await.http_client.clone();
+    // Snapshot what we need from state in one lock acquisition.
+    let (db, http_client) = {
+        let s = state.read().await;
+        (s.db.clone(), s.http_client.clone())
+    };
+
+    let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
+
+    // Cache check — best-effort. A read failure must NOT block the upstream call.
+    let cached = db
+        .with_conn(|conn| {
+            crate::services::tidal::cache::get_search(conn, &cache_cfg, &params.q, limit, offset)
+        })
+        .ok()
+        .flatten();
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
-    let results = match client.search_catalog(&params.q, limit, offset).await {
-        Ok(r) => r,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client = TidalClient::new(
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry_client
-                .search_catalog(&params.q, limit, offset)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
+
+    let results = if let Some(hit) = cached {
+        hit
+    } else {
+        let fetched = match client.search_catalog(&params.q, limit, offset).await {
+            Ok(r) => r,
+            Err(e) if error_looks_like_auth(&e) => {
+                let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                    .await
+                    .map_err(|re| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                        )
+                    })?;
+                let retry_client = TidalClient::new(
+                    refreshed.access_token.clone(),
+                    refreshed.country_code.clone(),
+                );
+                retry_client
+                    .search_catalog(&params.q, limit, offset)
+                    .await
+                    .map_err(|e2| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": e2.to_string() })),
+                        )
+                    })?
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e.to_string() })),
+                ));
+            }
+        };
+        // Best-effort cache write — log and continue on failure.
+        let to_cache = fetched.clone();
+        let q_owned = params.q.clone();
+        let lim_for_write = limit;
+        let off_for_write = offset;
+        if let Err(e) = db.with_conn(move |conn| {
+            crate::services::tidal::cache::put_search(
+                conn,
+                &q_owned,
+                lim_for_write,
+                off_for_write,
+                &to_cache,
+            )
+        }) {
+            tracing::warn!("tidal_search_cache write failed: {}", e);
         }
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            ));
-        }
+        fetched
     };
 
     // Batch-lookup which Tidal IDs are in the local library so the frontend can
