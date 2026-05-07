@@ -63,6 +63,10 @@ pub struct AppState {
     /// per-call TLS pool setup. Token + country_code are stitched in per-call.
     pub tidal_http_client: reqwest::Client,
     pub tidal_tokens: Option<services::tidal::auth::TidalTokens>,
+    /// 6h TTL cache for the home Your Mixes shelf. TIDAL builds these on a
+    /// daily cadence, so re-fetching on every Home remount was wasted work
+    /// (and a visible skeleton flash). Cleared on app restart.
+    pub tidal_mixes_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -510,6 +514,7 @@ async fn main() -> Result<()> {
         http_client,
         tidal_http_client: services::tidal::client::TidalClient::build_http_client(),
         tidal_tokens,
+        tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,

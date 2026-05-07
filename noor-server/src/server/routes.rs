@@ -13029,22 +13029,33 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
     // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
     // disk, so a direct in-memory check returns 503 even though the user is
     // connected. Other TIDAL endpoints follow this same pattern.
-    let (tokens, http_client, tidal_http_client) = {
+    let (tokens, http_client, tidal_http_client, mixes_cache) = {
         let in_memory = {
             let s = state.read().await;
-            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone(), s.tidal_mixes_cache.clone())
         };
         match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
             None => {
                 let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, in_memory.1, in_memory.2)
+                (persisted, in_memory.1, in_memory.2, in_memory.3)
             }
         }
     };
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+
+    // 6h TTL cache. TIDAL refreshes mixes daily; revisiting Home shouldn't
+    // round-trip TIDAL each time. Cache is cleared on app restart.
+    {
+        let guard = mixes_cache.lock().unwrap();
+        if let Some((stored_at, cached)) = guard.as_ref()
+            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+        {
+            return Ok(Json(json!({ "mixes": cached, "source": "tidal", "cached": true })));
+        }
+    }
     let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
@@ -13067,6 +13078,10 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
+    {
+        let mut guard = mixes_cache.lock().unwrap();
+        *guard = Some((Instant::now(), mixes.clone()));
+    }
     Ok(Json(json!({ "mixes": mixes, "source": "tidal" })))
 }
 

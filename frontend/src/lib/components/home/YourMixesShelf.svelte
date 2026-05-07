@@ -4,17 +4,24 @@
 	import { api, ApiError, type TidalMix } from '$lib/api/client';
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
+	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
-	let mixes = $state<TidalMix[]>([]);
-	let viewState = $state<State>('loading');
+	const cachedOnMount = getCachedMixes();
+	let mixes = $state<TidalMix[]>(cachedOnMount ?? []);
+	let viewState = $state<State>(cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading');
 	let errorMsg = $state<string>('');
 
 	let audioMixes = $derived(mixes.filter((m) => !isMixVideo(m)));
 	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
 
-	onMount(load);
+	// Skip the network on remount when we have warm cached mixes — the shelf
+	// renders synchronously from cache and stays static for the 6h TTL window.
+	onMount(() => {
+		if (cachedOnMount && cachedOnMount.length > 0) return;
+		void load();
+	});
 
 	// Re-fetch when TIDAL transitions to connected. Covers two cases:
 	//   1. Cold-boot race — shelf mounted and 503'd before tidal_status had
@@ -34,9 +41,11 @@
 		try {
 			const data = await api.getTidalMixes();
 			mixes = data.mixes ?? [];
+			if (mixes.length > 0) putCachedMixes(mixes);
 			viewState = mixes.length > 0 ? 'ready' : 'empty';
 		} catch (e) {
 			if (e instanceof ApiError && e.status === 503) {
+				clearCachedMixes();
 				viewState = 'disconnected';
 			} else {
 				viewState = 'error';
