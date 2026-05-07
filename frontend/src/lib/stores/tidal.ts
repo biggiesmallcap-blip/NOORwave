@@ -3,8 +3,9 @@ import { getApiBase, authFetch } from '$lib/api/client';
 
 export const tidalStatus = writable<'disconnected' | 'connecting' | 'connected'>('disconnected');
 export const tidalUserId = writable('');
-export const syncStatus = writable<'idle' | 'syncing' | 'done'>('idle');
+export const syncStatus = writable<'idle' | 'syncing' | 'done' | 'error' | 'cancelled'>('idle');
 export const syncProgress = writable<number | null>(null);
+export const syncError = writable<string | null>(null);
 
 // Sync metadata
 export interface SyncInfo {
@@ -53,14 +54,29 @@ export async function setAutoSyncDaily(enabled: boolean) {
 	} catch {}
 }
 
+export async function cancelTidalSync() {
+	try {
+		await authFetch(`${getApiBase()}/api/tidal/sync/cancel`, { method: 'POST' });
+	} catch {}
+}
+
 export function handleSyncProgress(progress: number) {
 	syncStatus.set('syncing');
+	syncError.set(null);
 	syncProgress.set(Math.max(0, Math.min(100, Math.round(progress * 100))));
 }
 
 export function handleSyncComplete() {
 	syncStatus.set('done');
+	syncError.set(null);
 	syncProgress.set(100);
 	// Refresh sync info to get updated timestamp
 	loadSyncInfo();
+}
+
+export function handleSyncFailed(message: string) {
+	const cancelled = /cancelled/i.test(message);
+	syncStatus.set(cancelled ? 'cancelled' : 'error');
+	syncError.set(message);
+	syncProgress.set(null);
 }

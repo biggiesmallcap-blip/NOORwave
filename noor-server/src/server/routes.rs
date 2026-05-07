@@ -522,6 +522,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/login", post(tidal_login))
         .route("/api/tidal/login/poll", post(tidal_poll))
         .route("/api/tidal/sync", post(tidal_sync_library))
+        .route("/api/tidal/sync/cancel", post(tidal_sync_cancel))
         .route("/api/tidal/status", get(tidal_status))
         .route(
             "/api/tidal/backoff",
@@ -10721,6 +10722,8 @@ async fn set_auto_sync(
 
 /// Public function to trigger auto-sync from server startup.
 pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Result<SyncStats> {
+    use std::sync::atomic::Ordering;
+
     if service != "tidal" {
         return Err(anyhow::anyhow!(
             "Unsupported auto-sync service: {}",
@@ -10728,62 +10731,124 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
         ));
     }
 
-    // Get tokens
+    // Get tokens + reentrancy/cancel flags
     let persisted_tokens = load_persisted_tidal_tokens(state).await?;
-    let tokens = {
+    let (tokens, running_flag, cancel_flag) = {
         let s = state.read().await;
-        s.tidal_tokens
+        let tokens = s
+            .tidal_tokens
             .clone()
             .or(persisted_tokens)
-            .ok_or_else(|| anyhow::anyhow!("No TIDAL tokens available for auto-sync"))?
+            .ok_or_else(|| anyhow::anyhow!("No TIDAL tokens available for auto-sync"))?;
+        (
+            tokens,
+            s.tidal_sync_running.clone(),
+            s.tidal_sync_cancel.clone(),
+        )
     };
+
+    if running_flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(anyhow::anyhow!(
+            "TIDAL sync is already running; auto-sync skipped"
+        ));
+    }
+    cancel_flag.store(false, Ordering::SeqCst);
+    let _running = TidalSyncRunningGuard(running_flag);
 
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
 
     // Run sync
-    let stats = run_tidal_sync_with_reauth(&client, state, tokens).await?;
+    let result = run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag).await;
+    match result {
+        Ok(stats) => {
+            // Record sync timestamp
+            state.read().await.db.with_conn(|conn| {
+                queries::update_sync_timestamp(
+                    conn,
+                    "tidal",
+                    stats.tracks as i64,
+                    stats.albums as i64,
+                )
+            })?;
 
-    // Record sync timestamp
-    state.read().await.db.with_conn(|conn| {
-        queries::update_sync_timestamp(conn, "tidal", stats.tracks as i64, stats.albums as i64)
-    })?;
-
-    // Broadcast event
-    let s = state.read().await;
-    let _ = s.event_tx.send(AppEvent::LibrarySynced);
-
-    Ok(stats)
+            // Broadcast completion
+            let s = state.read().await;
+            let _ = s.event_tx.send(AppEvent::LibrarySynced);
+            Ok(stats)
+        }
+        Err(e) => {
+            let s = state.read().await;
+            let _ = s.event_tx.send(AppEvent::SyncFailed {
+                service: "tidal".to_string(),
+                message: e.to_string(),
+            });
+            Err(e)
+        }
+    }
 }
 
 /// Sync TIDAL library into local database.
 async fn tidal_sync_library(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Get tokens and http client
+    use std::sync::atomic::Ordering;
+
+    // Get tokens and reentrancy/cancel flags
     let persisted_tokens = load_persisted_tidal_tokens(&state).await.map_err(|error| {
         TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response()
     })?;
-    let (tokens, _http) = {
+    let (tokens, running_flag, cancel_flag) = {
         let s = state.read().await;
         let tokens = s
             .tidal_tokens
             .clone()
             .or(persisted_tokens)
             .ok_or_else(|| TidalSyncStartError::NotConnected)?;
-        (tokens, s.http_client.clone())
+        (
+            tokens,
+            s.tidal_sync_running.clone(),
+            s.tidal_sync_cancel.clone(),
+        )
     };
+
+    // Reentrancy guard — refuse to start a second concurrent sync.
+    if running_flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(TidalSyncStartError::AlreadyRunning.into_response());
+    }
+    cancel_flag.store(false, Ordering::SeqCst);
+
+    // From here on, any early return MUST release the running flag — wrap the
+    // setup phase in a RAII guard. The spawned task will take ownership of the
+    // guard via mem::replace once the work actually starts.
+    let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
 
     // Create TIDAL client
     let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
 
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
-        .map_err(|error| error.into_response())?;
+        .map_err(|error| {
+            // setup_guard drops here on early-return path → releases running.
+            drop(setup_guard.take());
+            error.into_response()
+        })?;
+
+    // Hand the guard off to the background task so the flag stays set for the
+    // entire sync duration (and is released on completion or panic).
+    let task_guard = setup_guard.take().expect("guard still held");
 
     // Run sync in background
     let state_clone = state.clone();
     let sync_tokens = session.clone();
+    let cancel_for_task = cancel_flag.clone();
     tokio::spawn(async move {
+        let _running = task_guard; // released on scope exit
         tracing::info!(
             target: "noor.sync.tidal",
             event = "background_start",
@@ -10795,7 +10860,9 @@ async fn tidal_sync_library(
             sync_tokens.access_token.clone(),
             sync_tokens.country_code.clone(),
         );
-        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens).await {
+        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens, &cancel_for_task)
+            .await
+        {
             Ok(stats) => {
                 tracing::info!(
                     target: "noor.sync.tidal",
@@ -10806,7 +10873,6 @@ async fn tidal_sync_library(
                     playlists = stats.playlists,
                     "TIDAL sync complete"
                 );
-                // Record sync timestamp in DB
                 if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
                     queries::update_sync_timestamp(
                         conn,
@@ -10828,6 +10894,11 @@ async fn tidal_sync_library(
                     error = %e,
                     "TIDAL sync failed"
                 );
+                let s = state_clone.read().await;
+                let _ = s.event_tx.send(AppEvent::SyncFailed {
+                    service: "tidal".to_string(),
+                    message: e.to_string(),
+                });
             }
         }
     });
@@ -10842,46 +10913,92 @@ async fn tidal_sync_library(
     Ok(Json(response))
 }
 
+/// Cancel the in-flight TIDAL sync. Sets the cancel flag; the running task
+/// observes it between pages and returns early. Always returns 200 — the
+/// frontend uses this idempotently and doesn't care whether a sync was actually
+/// running.
+async fn tidal_sync_cancel(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    let s = state.read().await;
+    let was_running = s.tidal_sync_running.load(Ordering::SeqCst);
+    s.tidal_sync_cancel.store(true, Ordering::SeqCst);
+    Ok(Json(json!({ "status": if was_running { "cancelling" } else { "idle" } })))
+}
+
 /// Perform the actual TIDAL sync (runs in background task).
 async fn do_tidal_sync(
     client: &TidalClient,
     state: &SharedState,
     user_id: &str,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<SyncStats> {
     use crate::services::tidal::client::TidalClient as TC;
     use futures::stream::{self, StreamExt};
+    use std::sync::atomic::Ordering;
+
+    let check_cancel = || -> anyhow::Result<()> {
+        if cancel.load(Ordering::SeqCst) {
+            anyhow::bail!("TIDAL sync cancelled");
+        }
+        Ok(())
+    };
+
     let mut stats = SyncStats::default();
     let mut favorite_album_ids = HashSet::new();
     let mut favorite_track_ids = HashSet::new();
+
+    // Read previous run's counts so `apply_tidal_favorite_flags` can refuse to
+    // wipe favorites if this run somehow returns zero items.
+    let (prev_track_count, prev_album_count) = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| {
+            Ok(queries::get_sync_info(conn, "tidal")?
+                .map(|i| (i.last_sync_track_count, i.last_sync_album_count))
+                .unwrap_or((0, 0)))
+        })?
+    };
 
     // ── Sync favorite artists ────────────────────────
     tracing::info!("Syncing TIDAL artists...");
     let mut offset = 0;
     loop {
+        check_cancel()?;
         let resp = client.get_favorite_artists(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
         }
+        let artist_total = resp
+            .total_number_of_items
+            .unwrap_or((offset + resp.items.len() as i32) as i64)
+            .max(1) as f32;
         {
             let s = state.read().await;
             s.db.with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
                 for fav in &resp.items {
                     let a = &fav.item;
                     let photo = a.picture.as_ref().map(|p| {
                         let path = p.replace('-', "/");
                         format!("https://resources.tidal.com/images/{}/480x480.jpg", path)
                     });
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO artists (tidal_id, name, photo_url) VALUES (?1, ?2, ?3)
                          ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name, photo_url=COALESCE(excluded.photo_url, artists.photo_url)",
                         rusqlite::params![a.id, a.name, photo],
                     )?;
                     stats.artists += 1;
                 }
+                tx.commit()?;
                 Ok(())
             })?;
         }
         offset += resp.items.len() as i32;
+        // Artists phase shows up as 0.0 → 0.05 — small but non-zero so users see
+        // movement during what used to be a silent phase.
+        let artist_progress = ((offset as f32 / artist_total) * 0.05).clamp(0.0, 0.05);
+        send_tidal_sync_progress(state, artist_progress).await;
         if resp
             .total_number_of_items
             .map_or(true, |t| offset as i64 >= t)
@@ -10895,35 +11012,34 @@ async fn do_tidal_sync(
     tracing::info!("Syncing TIDAL albums...");
     offset = 0;
     loop {
+        check_cancel()?;
         let resp = client.get_favorite_albums(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
         }
-        for fav in &resp.items {
-            let album = &fav.item;
-            let artwork = TC::get_artwork_url(&album.cover, 640);
-            let year: Option<i32> = album
-                .release_date
-                .as_ref()
-                .and_then(|d| d.split('-').next())
-                .and_then(|y| y.parse().ok());
-
-            {
-                let s = state.read().await;
-                s.db.with_conn(|conn| {
-                    // Ensure artist exists
+        // Batch the page's album upserts in one transaction.
+        {
+            let s = state.read().await;
+            s.db.with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                for fav in &resp.items {
+                    let album = &fav.item;
+                    let artwork = TC::get_artwork_url(&album.cover, 640);
+                    let year: Option<i32> = album
+                        .release_date
+                        .as_ref()
+                        .and_then(|d| d.split('-').next())
+                        .and_then(|y| y.parse().ok());
                     let photo = album.artist.picture.as_ref().map(|p| {
                         let path = p.replace('-', "/");
                         format!("https://resources.tidal.com/images/{}/480x480.jpg", path)
                     });
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO artists (tidal_id, name, photo_url) VALUES (?1, ?2, ?3)
                          ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name, photo_url=COALESCE(excluded.photo_url, artists.photo_url)",
                         rusqlite::params![album.artist.id, album.artist.name, photo],
                     )?;
-
-                    // Insert album
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO albums (tidal_id, title, artist_id, year, artwork_url, release_type, track_count, is_favorite, source)
                          VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, ?5, ?6, ?7, 1, 'tidal')
                          ON CONFLICT(tidal_id) DO UPDATE SET title=excluded.title, year=COALESCE(excluded.year, albums.year),
@@ -10931,11 +11047,14 @@ async fn do_tidal_sync(
                          is_favorite=1",
                         rusqlite::params![album.id, album.title, album.artist.id, year, artwork, album.release_type, album.number_of_tracks],
                     )?;
-                    Ok(())
-                })?;
-            }
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
+        }
+        for fav in &resp.items {
             stats.albums += 1;
-            favorite_album_ids.insert(album.id);
+            favorite_album_ids.insert(fav.item.id);
         }
 
         // Hydrate album tracks with bounded concurrency so the UI keeps moving
@@ -10948,6 +11067,7 @@ async fn do_tidal_sync(
         let mut albums_hydrated_in_page = 0usize;
 
         for album_chunk in album_ids.chunks(10) {
+            check_cancel()?;
             let mut fetches = stream::iter(album_chunk.iter().copied())
                 .map(|album_id| async move { client.get_album_tracks(album_id).await })
                 .buffer_unordered(10);
@@ -10956,18 +11076,21 @@ async fn do_tidal_sync(
                 if let Ok(tracks_resp) = result {
                     let s = state.read().await;
                     s.db.with_conn(|conn| {
+                        let tx = conn.unchecked_transaction()?;
                         for track in &tracks_resp.items {
-                            insert_tidal_track(conn, track, false)?;
+                            insert_tidal_track(&tx, track, false)?;
                             stats.tracks += 1;
                         }
+                        tx.commit()?;
                         Ok(())
                     })?;
                 }
 
                 albums_hydrated_in_page += 1;
                 let processed_albums = offset as usize + albums_hydrated_in_page;
+                // Albums phase: 0.05 → 0.5. Artists phase ate 0.0–0.05.
                 let progress_fraction =
-                    ((processed_albums as f32 / album_total) * 0.5).clamp(0.0, 0.5);
+                    (0.05 + (processed_albums as f32 / album_total) * 0.45).clamp(0.05, 0.5);
                 send_tidal_sync_progress(state, progress_fraction).await;
             }
         }
@@ -10990,6 +11113,7 @@ async fn do_tidal_sync(
     tracing::info!("Syncing TIDAL favorite tracks...");
     offset = 0;
     loop {
+        check_cancel()?;
         let resp = client.get_favorite_tracks(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
@@ -10997,26 +11121,28 @@ async fn do_tidal_sync(
         {
             let s = state.read().await;
             s.db.with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
                 for fav in &resp.items {
                     let track = &fav.item;
                     favorite_track_ids.insert(track.id);
                     // Ensure artist
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
                         rusqlite::params![track.artist.id, track.artist.name],
                     )?;
                     // Ensure album ref
                     if let Some(ref album_ref) = track.album {
                         let artwork = TC::get_artwork_url(&album_ref.cover, 640);
-                        conn.execute(
+                        tx.execute(
                             "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
                              VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    insert_tidal_track(conn, track, true)?;
+                    insert_tidal_track(&tx, track, true)?;
                     stats.tracks += 1;
                 }
+                tx.commit()?;
                 Ok(())
             })?;
         }
@@ -11058,6 +11184,11 @@ async fn do_tidal_sync(
     }
     let total_playlists = all_playlists.len().max(1);
     for (playlist_index, playlist) in all_playlists.iter().enumerate() {
+        check_cancel()?;
+        // Upsert the playlist row up front so metadata sticks even if the
+        // track-fetch errors out partway. The DELETE+INSERT below for
+        // `playlist_tracks` is wrapped in a single transaction so the playlist
+        // never appears empty mid-sync.
         {
             let s = state.read().await;
             s.db.with_conn(|conn| {
@@ -11075,7 +11206,6 @@ async fn do_tidal_sync(
             })?;
         }
 
-        // Get playlist tracks
         let playlist_id: Option<i64> = {
             let s = state.read().await;
             s.db.with_conn(|conn| {
@@ -11090,62 +11220,21 @@ async fn do_tidal_sync(
         };
 
         if let Some(pid) = playlist_id {
-            // Clear old tracks
-            {
-                let s = state.read().await;
-                s.db.with_conn(|conn| {
-                    conn.execute(
-                        "DELETE FROM playlist_tracks WHERE playlist_id=?1",
-                        rusqlite::params![pid],
-                    )?;
-                    Ok(())
-                })?;
-            }
-
+            // Fetch all pages first, then DELETE+INSERT atomically. If the API
+            // errors mid-fetch, the existing playlist contents stay intact.
+            let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
             let mut track_offset = 0;
-            let mut position = 0;
             loop {
+                check_cancel()?;
                 let tracks_resp = client
                     .get_playlist_tracks(&playlist.uuid, 100, track_offset)
                     .await?;
                 if tracks_resp.items.is_empty() {
                     break;
                 }
-                {
-                    let s = state.read().await;
-                    s.db.with_conn(|conn| {
-                        for track in &tracks_resp.items {
-                            conn.execute(
-                                "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
-                                rusqlite::params![track.artist.id, track.artist.name],
-                            )?;
-                            if let Some(ref album_ref) = track.album {
-                                let artwork = TC::get_artwork_url(&album_ref.cover, 640);
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
-                                     VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
-                                    rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
-                                )?;
-                            }
-                            insert_tidal_track(conn, track, false)?;
-
-                            let track_id: Option<i64> = conn.query_row(
-                                "SELECT id FROM tracks WHERE tidal_id=?1",
-                                rusqlite::params![track.id],
-                                |row| row.get(0),
-                            ).ok();
-                            if let Some(tid) = track_id {
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-                                    rusqlite::params![pid, tid, position],
-                                )?;
-                                position += 1;
-                            }
-                        }
-                        Ok(())
-                    })?;
-                }
-                track_offset += tracks_resp.items.len() as i32;
+                let fetched = tracks_resp.items.len() as i32;
+                all_tracks.extend(tracks_resp.items);
+                track_offset += fetched;
                 if tracks_resp
                     .total_number_of_items
                     .map_or(true, |t| track_offset as i64 >= t)
@@ -11153,6 +11242,48 @@ async fn do_tidal_sync(
                     break;
                 }
             }
+
+            let s = state.read().await;
+            s.db.with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute(
+                    "DELETE FROM playlist_tracks WHERE playlist_id=?1",
+                    rusqlite::params![pid],
+                )?;
+                let mut position = 0;
+                for track in &all_tracks {
+                    tx.execute(
+                        "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
+                        rusqlite::params![track.artist.id, track.artist.name],
+                    )?;
+                    if let Some(ref album_ref) = track.album {
+                        let artwork = TC::get_artwork_url(&album_ref.cover, 640);
+                        tx.execute(
+                            "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
+                             VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
+                            rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
+                        )?;
+                    }
+                    insert_tidal_track(&tx, track, false)?;
+
+                    let track_id: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM tracks WHERE tidal_id=?1",
+                            rusqlite::params![track.id],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    if let Some(tid) = track_id {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![pid, tid, position],
+                        )?;
+                        position += 1;
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
         }
         stats.playlists += 1;
         let playlist_progress =
@@ -11164,8 +11295,8 @@ async fn do_tidal_sync(
     {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            apply_tidal_favorite_flags(conn, "albums", "tidal_id", &favorite_album_ids)?;
-            apply_tidal_favorite_flags(conn, "tracks", "tidal_id", &favorite_track_ids)?;
+            apply_tidal_favorite_flags(conn, "albums", &favorite_album_ids, prev_album_count)?;
+            apply_tidal_favorite_flags(conn, "tracks", &favorite_track_ids, prev_track_count)?;
             Ok(())
         })?;
     }
@@ -11185,8 +11316,9 @@ async fn run_tidal_sync_with_reauth(
     client: &TidalClient,
     state: &SharedState,
     tokens: tidal_auth::TidalTokens,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<SyncStats> {
-    match do_tidal_sync(client, state, &tokens.user_id).await {
+    match do_tidal_sync(client, state, &tokens.user_id, cancel).await {
         Ok(stats) => Ok(stats),
         Err(err) if error_looks_like_auth(&err) => {
             tracing::warn!(
@@ -11232,7 +11364,7 @@ async fn run_tidal_sync_with_reauth(
                 user_id = %refreshed.user_id,
                 "TIDAL sync session recovered; retrying sync"
             );
-            do_tidal_sync(&retry_client, state, &refreshed.user_id).await
+            do_tidal_sync(&retry_client, state, &refreshed.user_id, cancel).await
         }
         Err(err) => Err(err),
     }
@@ -11255,6 +11387,7 @@ impl TidalSyncSessionState {
 
 enum TidalSyncStartError {
     NotConnected,
+    AlreadyRunning,
     SessionCheckFailed(String),
     PreflightRefreshFailed(String),
 }
@@ -11267,6 +11400,13 @@ impl TidalSyncStartError {
                 Json(json!({
                     "status": "not_connected",
                     "message": "Connect TIDAL in Settings before syncing."
+                })),
+            ),
+            Self::AlreadyRunning => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "status": "already_running",
+                    "message": "A TIDAL sync is already in progress."
                 })),
             ),
             Self::SessionCheckFailed(message) => (
@@ -11285,6 +11425,18 @@ impl TidalSyncStartError {
                 })),
             ),
         }
+    }
+}
+
+/// RAII guard that flips `tidal_sync_running` back to `false` on drop, so a
+/// panic or early return inside the spawned sync task can never leave the flag
+/// stuck and lock out future syncs.
+struct TidalSyncRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for TidalSyncRunningGuard {
+    fn drop(&mut self) {
+        self.0
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -12676,10 +12828,26 @@ fn insert_tidal_track(
 fn apply_tidal_favorite_flags(
     conn: &rusqlite::Connection,
     table: &str,
-    id_column: &str,
     favorite_ids: &HashSet<i64>,
+    prev_count: i64,
 ) -> anyhow::Result<()> {
-    let reset_sql = format!("UPDATE {table} SET is_favorite = 0 WHERE {id_column} IS NOT NULL");
+    // Refuse to wipe favorites if this run somehow returned zero items but the
+    // previous run had a real population — almost always a transient TIDAL API
+    // hiccup, not a legitimate "user unfavorited everything".
+    if favorite_ids.is_empty() && prev_count > 0 {
+        anyhow::bail!(
+            "Refusing to clear is_favorite on '{}': sync returned 0 favorites but previous run had {}",
+            table,
+            prev_count
+        );
+    }
+
+    // Scope the reset to TIDAL-sourced rows so manually-imported albums/tracks
+    // (e.g. from `import_tidal_album`) keep whatever favorite state they had —
+    // they aren't "TIDAL favorites" in the strict sync sense.
+    let reset_sql = format!(
+        "UPDATE {table} SET is_favorite = 0 WHERE source = 'tidal' AND tidal_id IS NOT NULL"
+    );
     conn.execute(&reset_sql, [])?;
 
     let mut sorted_ids: Vec<i64> = favorite_ids.iter().copied().collect();
@@ -12691,7 +12859,7 @@ fn apply_tidal_favorite_flags(
             .collect::<Vec<_>>()
             .join(", ");
         let sql =
-            format!("UPDATE {table} SET is_favorite = 1 WHERE {id_column} IN ({placeholders})");
+            format!("UPDATE {table} SET is_favorite = 1 WHERE tidal_id IN ({placeholders})");
         conn.execute(&sql, rusqlite::params_from_iter(chunk.iter()))?;
     }
 
@@ -14796,6 +14964,8 @@ mod tests {
             lastfm_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             musicbrainz_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tidal_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tidal_sync_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

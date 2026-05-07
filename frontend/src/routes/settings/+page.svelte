@@ -22,9 +22,11 @@
 		syncStatus,
 		syncProgress,
 		syncInfo,
+		syncError,
 		loadTidalStatus as refreshTidalStatus,
 		loadSyncInfo,
-		setAutoSyncDaily
+		setAutoSyncDaily,
+		cancelTidalSync
 	} from '$lib/stores/tidal';
 	import {
 		audioAnalysis,
@@ -356,9 +358,11 @@
 	}
 
 	async function syncLibrary() {
-		syncStatus.set('syncing');
-		syncProgress.set(0);
+		// Don't flip syncStatus to 'syncing' until the server actually accepts
+		// the request — otherwise an immediate network error or 409 leaves the
+		// UI showing "Syncing…" for the duration of the failed POST.
 		errorMsg = '';
+		syncError.set(null);
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/sync`, { method: 'POST' });
 			markServerOnline();
@@ -367,17 +371,26 @@
 			if (data.status && data.status !== 'sync_started') {
 				throw new Error(data.message ?? 'Sync could not start');
 			}
+			syncStatus.set('syncing');
+			syncProgress.set(0);
 		} catch (e) {
-			syncStatus.set('idle');
+			syncStatus.set('error');
 			syncProgress.set(null);
 			if (isFetchConnectionError(e)) {
 				markServerOffline();
 				errorMsg = SERVER_UNREACHABLE_MESSAGE;
+				syncError.set(SERVER_UNREACHABLE_MESSAGE);
 			} else {
 				markServerOnline();
-				errorMsg = `Sync failed: ${e}`;
+				const msg = `Sync failed: ${e}`;
+				errorMsg = msg;
+				syncError.set(msg);
 			}
 		}
+	}
+
+	async function handleCancelSync() {
+		await cancelTidalSync();
 	}
 
 	async function disconnectTidal() {
@@ -1074,7 +1087,7 @@
 	<section class="settings-status-strip">
 		<div>
 			<span>Sync</span>
-			<strong>{$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : 'Ready'}</strong>
+			<strong>{$syncStatus === 'syncing' ? `${$syncProgress ?? 0}%` : $syncStatus === 'done' ? 'Done' : $syncStatus === 'error' ? 'Failed' : $syncStatus === 'cancelled' ? 'Cancelled' : 'Ready'}</strong>
 		</div>
 		<div>
 			<span>Enrichment</span>
@@ -1254,11 +1267,15 @@
 							<strong>
 								{#if $syncStatus === 'syncing'}
 									{$syncProgress ?? 0}% complete
+								{:else if $syncStatus === 'error'}
+									Failed
+								{:else if $syncStatus === 'cancelled'}
+									Cancelled
 								{:else if $syncInfo?.last_sync_at}
 									{formatSyncDate($syncInfo.last_sync_at)}
 									{#if $syncInfo.last_sync_track_count > 0}
 										<span class="sync-count">
-											({$syncInfo.last_sync_track_count.toLocaleString()} tracks)
+											({$syncInfo.last_sync_track_count.toLocaleString()} tracks{#if $syncInfo.last_sync_album_count > 0}, {$syncInfo.last_sync_album_count.toLocaleString()} albums{/if})
 										</span>
 									{/if}
 								{:else if $syncStatus === 'done'}
@@ -1268,6 +1285,12 @@
 								{/if}
 							</strong>
 						</div>
+						{#if $syncError && ($syncStatus === 'error' || $syncStatus === 'cancelled')}
+							<div class="info-row">
+								<span>Error</span>
+								<strong class="sync-error">{$syncError}</strong>
+							</div>
+						{/if}
 						<div class="info-row">
 							<span>Auto-sync daily</span>
 							<strong>
@@ -1284,8 +1307,19 @@
 					</div>
 					<div class="action-row">
 						<button class="btn btn-primary" onclick={syncLibrary} disabled={$syncStatus === 'syncing'}>
-							{$syncStatus === 'syncing' ? 'Syncing…' : $syncStatus === 'done' ? 'Sync again' : 'Sync library'}
+							{#if $syncStatus === 'syncing'}
+								Syncing…
+							{:else if $syncStatus === 'done'}
+								Sync again
+							{:else if $syncStatus === 'error' || $syncStatus === 'cancelled'}
+								Retry sync
+							{:else}
+								Sync library
+							{/if}
 						</button>
+						{#if $syncStatus === 'syncing'}
+							<button class="btn btn-glass" onclick={handleCancelSync}>Cancel</button>
+						{/if}
 						<button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button>
 					</div>
 				{/if}
@@ -2662,6 +2696,12 @@
 		color: rgba(255, 255, 255, 0.5);
 		font-weight: normal;
 	}
+	.sync-error {
+		color: var(--danger, #ff6b6b);
+		font-weight: 500;
+		word-break: break-word;
+	}
+
 
 	/* Audio analysis progress bar */
 	.progress-bar {

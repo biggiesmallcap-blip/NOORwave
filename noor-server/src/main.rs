@@ -71,6 +71,14 @@ pub struct AppState {
     pub ephemeral_tidal_track: Option<db::models::Track>,
     /// Cancellation flag for in-flight TIDAL device code login polling.
     pub tidal_login_cancel: Arc<AtomicBool>,
+    /// Reentrancy guard — true while a TIDAL library sync is running. Manual
+    /// click and the boot-time auto-sync both observe this to avoid racing on
+    /// the same `albums`/`tracks`/`playlists` rows and producing inconsistent
+    /// `is_favorite` state.
+    pub tidal_sync_running: Arc<AtomicBool>,
+    /// Cancellation flag for the in-flight TIDAL sync. Checked between pages
+    /// in `do_tidal_sync`; reset to `false` at sync start.
+    pub tidal_sync_cancel: Arc<AtomicBool>,
     /// RSS feed aggregator for music news and articles
     pub rss_aggregator: Arc<services::rss_feeds::FeedAggregator>,
     /// ACRCloud client for sample recognition (loaded from service_auth if configured)
@@ -171,6 +179,10 @@ pub enum AppEvent {
     SyncProgress {
         service: String,
         progress: f32,
+    },
+    SyncFailed {
+        service: String,
+        message: String,
     },
     QueueUpdated,
     ListenHistoryUpdated {
@@ -505,6 +517,8 @@ async fn main() -> Result<()> {
         external_playback_track: None,
         ephemeral_tidal_track: None,
         tidal_login_cancel: Arc::new(AtomicBool::new(false)),
+        tidal_sync_running: Arc::new(AtomicBool::new(false)),
+        tidal_sync_cancel: Arc::new(AtomicBool::new(false)),
         rss_aggregator,
         acrcloud_client: None,
         analysis_tx: Some(analysis_tx),
@@ -565,6 +579,25 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     // Wait a bit for server to fully start
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                    // "Daily" means once per 24h, not "every boot". Skip if a
+                    // recorded sync is fresher than 24h.
+                    let recent = {
+                        let s = state_clone.read().await;
+                        s.db.with_conn(|conn| {
+                            db::queries::sync_within_window(conn, "tidal", 24 * 60 * 60)
+                        })
+                        .unwrap_or(false)
+                    };
+                    if recent {
+                        tracing::info!(
+                            target: "noor.auto_sync",
+                            event = "startup_sync_skipped",
+                            service = "tidal",
+                            "Auto-sync daily skipped — last sync was <24h ago"
+                        );
+                        return;
+                    }
 
                     match server::routes::trigger_auto_sync(&state_clone, "tidal").await {
                         Ok(stats) => {

@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { getApiBase, getStoredToken } from '$lib/api/client';
 import { refreshPlaybackState, refreshPlaybackRuntime } from '$lib/stores/player';
-import { handleSyncProgress, handleSyncComplete, loadTidalStatus } from '$lib/stores/tidal';
+import { handleSyncProgress, handleSyncComplete, handleSyncFailed, loadTidalStatus } from '$lib/stores/tidal';
 import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/training';
 import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
 import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
@@ -19,6 +19,7 @@ export type WsMessage =
 	| { type: 'library_synced' }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }
+	| { type: 'sync_failed'; service: string; message: string }
 	| { type: 'training_progress'; stage: string; progress: number; message: string; current_track_id: number | null; current_track_title: string | null; tracks_done: number; tracks_total: number }
 	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
 	| { type: 'audio_analysis_complete'; analyzed: number }
@@ -91,6 +92,9 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'library_synced') {
 				handleSyncComplete();
+			}
+			if (data?.type === 'sync_failed' && data?.service === 'tidal') {
+				handleSyncFailed(data.message ?? 'TIDAL sync failed');
 			}
 			if (data?.type === 'training_progress') {
 				handleTrainingProgress(data);
