@@ -6969,7 +6969,7 @@ async fn start_musicbrainz_enrichment(
                     progress: progress.processed as f32 / progress.total.max(1) as f32,
                 });
             },
-            100,
+            1,
         )
         .await;
         match result {
