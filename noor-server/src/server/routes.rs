@@ -13138,8 +13138,9 @@ async fn spotify_save_config(
 }
 
 async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let configured = s
+    let configured = state
+        .read()
+        .await
         .db
         .with_conn(|conn| {
             Ok(spotify::auth::load_credentials(conn)
@@ -13148,12 +13149,7 @@ async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>,
                 .is_some())
         })
         .unwrap_or(false);
-    let active_auth_mode = s.spotify_tokens.as_ref().map(spotify::auth::token_mode);
-    Ok(Json(json!({
-        "configured": configured,
-        "active_auth_mode": active_auth_mode.map(|m| m.as_str()),
-        "anonymous_available": true,
-    })))
+    Ok(Json(json!({"configured": configured})))
 }
 
 async fn spotify_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -13194,18 +13190,21 @@ async fn start_spotify_enrichment(
         })));
     }
 
-    // Prime a fresh token before enqueueing work. Hybrid policy lives in
-    // `spotify::auth::obtain_token`: client-creds when configured AND not
-    // premium-locked, otherwise anonymous. Anonymous lets the user start
-    // enriching with zero setup; client-creds is the stable path.
+    // Require credentials and prime a fresh token before enqueueing work.
     let creds = state
         .read()
         .await
         .db
         .with_conn(|conn| Ok(spotify::auth::load_credentials(conn).ok().flatten()))
         .unwrap_or(None);
+    let Some(creds) = creds else {
+        return Ok(Json(json!({
+            "status": "error",
+            "message": "Spotify credentials not configured."
+        })));
+    };
 
-    match spotify::auth::obtain_token(&http, creds).await {
+    match spotify::auth::fetch_app_token(&http, &creds).await {
         Ok(tokens) => {
             let mut s = state.write().await;
             s.spotify_tokens = Some(tokens);
@@ -13213,10 +13212,7 @@ async fn start_spotify_enrichment(
         Err(e) => {
             return Ok(Json(json!({
                 "status": "error",
-                "message": format!(
-                    "Failed to obtain a Spotify token (client-credentials and anonymous both failed): {}",
-                    e
-                )
+                "message": format!("Failed to fetch Spotify token: {}", e)
             })));
         }
     }
@@ -13293,7 +13289,6 @@ async fn get_spotify_enrichment_status(
     let is_running = s.spotify_enrich_running.load(Ordering::SeqCst);
     let run_total = s.spotify_enrich_total.load(Ordering::SeqCst);
     let run_processed = s.spotify_enrich_processed.load(Ordering::SeqCst);
-    let active_auth_mode = s.spotify_tokens.as_ref().map(spotify::auth::token_mode);
 
     Ok(Json(json!({
         "enriched_tracks": enriched,
@@ -13301,7 +13296,6 @@ async fn get_spotify_enrichment_status(
         "is_running": is_running,
         "run_total": run_total,
         "run_processed": run_processed,
-        "active_auth_mode": active_auth_mode.map(|m| m.as_str()),
     })))
 }
 

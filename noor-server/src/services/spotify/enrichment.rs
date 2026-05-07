@@ -5,32 +5,16 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 use crate::SharedState;
-use crate::services::spotify::auth::SpotifyTokenMode;
 
 const SPOTIFY_SEARCH_URL: &str = "https://api.spotify.com/v1/search";
 const SPOTIFY_ALBUM_URL: &str = "https://api.spotify.com/v1/albums/{}";
 const SPOTIFY_ARTISTS_URL: &str = "https://api.spotify.com/v1/artists";
 
-// Per-track delay, calibrated by token source. Three API calls per track
-// (search + album + artists batch).
-//
-// Client-creds path: 600ms/track → ~5 req/sec, matching the Last.fm enricher's
-// outbound rate (200ms × 1 call/track). Spotify's documented limit is ~180
-// req/min for app tokens; we stay well under it.
-//
-// Anonymous path: 1000ms/track → ~3 req/sec. The endpoint is undocumented and
-// we don't want to be the user that gets it noticed. Conservative is the right
-// default here; a user with their own client creds gets the faster path.
-const PER_TRACK_DELAY_CLIENT_CREDS_MS: u64 = 600;
-const PER_TRACK_DELAY_ANONYMOUS_MS: u64 = 1000;
+// Per-track delay. Three API calls per track (search + album + artists batch);
+// at 1s/track that's ~3 req/sec sustained, just under Spotify's ~180 req/min
+// ceiling. 429 backoff still kicks in for bursts.
+const PER_TRACK_DELAY_MS: u64 = 1000;
 const MAX_RETRIES: u32 = 4;
-
-fn delay_for(mode: SpotifyTokenMode) -> u64 {
-    match mode {
-        SpotifyTokenMode::ClientCredentials => PER_TRACK_DELAY_CLIENT_CREDS_MS,
-        SpotifyTokenMode::Anonymous => PER_TRACK_DELAY_ANONYMOUS_MS,
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
@@ -248,7 +232,7 @@ where
     let mut transient_skips = 0usize;
 
     for (track_id, title, artist, isrc) in tracks_to_enrich {
-        let (token, token_mode) = match ensure_token(&state, &http).await {
+        let token = match ensure_token(&state, &http).await {
             Some(t) => t,
             None => break,
         };
@@ -371,7 +355,7 @@ where
             );
         }
 
-        sleep(Duration::from_millis(delay_for(token_mode))).await;
+        sleep(Duration::from_millis(PER_TRACK_DELAY_MS)).await;
     }
 
     info!(
@@ -381,49 +365,43 @@ where
     Ok(())
 }
 
-/// Hybrid token resolution. Prefers the client-credentials flow when a user has
-/// configured a Spotify Developer app; falls back to an anonymous guest token
-/// from `open.spotify.com` when they haven't (or when client-creds fails). The
-/// active mode is returned so the loop can calibrate its rate-limit delay.
-async fn ensure_token(state: &SharedState, http: &Client) -> Option<(String, SpotifyTokenMode)> {
-    let cached: Option<(String, SpotifyTokenMode)> = {
+async fn ensure_token(state: &SharedState, http: &Client) -> Option<String> {
+    let needs_refresh = {
         let s = state.read().await;
-        s.spotify_tokens
-            .as_ref()
-            .filter(|t| !crate::services::spotify::auth::is_expired(t))
-            .map(|t| {
-                (
-                    t.access_token.clone(),
-                    crate::services::spotify::auth::token_mode(t),
-                )
-            })
+        match &s.spotify_tokens {
+            Some(t) => crate::services::spotify::auth::is_expired(t),
+            None => true,
+        }
     };
-    if let Some(hit) = cached {
-        return Some(hit);
-    }
-
-    let creds = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
-            Ok(crate::services::spotify::auth::load_credentials(conn)
-                .ok()
-                .flatten())
-        })
-        .unwrap_or(None);
-
-    match crate::services::spotify::auth::obtain_token(http, creds).await {
-        Ok(fresh) => {
-            let token = fresh.access_token.clone();
-            let mode = crate::services::spotify::auth::token_mode(&fresh);
-            let mut s = state.write().await;
-            s.spotify_tokens = Some(fresh);
-            Some((token, mode))
+    if needs_refresh {
+        let creds = state
+            .read()
+            .await
+            .db
+            .with_conn(|conn| {
+                Ok(crate::services::spotify::auth::load_credentials(conn)
+                    .ok()
+                    .flatten())
+            })
+            .unwrap_or(None);
+        let creds = match creds {
+            Some(c) => c,
+            None => {
+                warn!("Spotify credentials missing during enrichment.");
+                return None;
+            }
+        };
+        match crate::services::spotify::auth::fetch_app_token(http, &creds).await {
+            Ok(fresh) => {
+                let mut s = state.write().await;
+                s.spotify_tokens = Some(fresh);
+            }
+            Err(e) => {
+                warn!("Failed to refresh Spotify token: {}", e);
+                return None;
+            }
         }
-        Err(e) => {
-            warn!("Spotify token resolution failed (both paths): {}", e);
-            None
-        }
     }
+    let s = state.read().await;
+    s.spotify_tokens.as_ref().map(|t| t.access_token.clone())
 }
