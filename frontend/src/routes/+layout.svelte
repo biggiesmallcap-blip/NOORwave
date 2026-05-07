@@ -739,7 +739,6 @@
 
 	async function handleClearQueue() {
 		if (upcomingQueue.length === 0) return;
-		if (!window.confirm('Clear all upcoming tracks?')) return;
 		const restorable = await clearQueueAction();
 		if (restorable.length > 0) {
 			// Replace the auto-toast with a richer one that has a real undo button.
