@@ -331,6 +331,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
         .route("/api/genres/cohorts", get(get_genre_cohorts))
         .route("/api/genres/evolution", get(get_genre_evolution))
+        .route("/api/genres/audio-metrics", get(get_genre_audio_metrics))
         .route("/api/genres/{id}/tracks", get(get_genre_tracks))
         .route("/api/playlists", get(get_playlists))
         .route(
@@ -1306,6 +1307,19 @@ async fn get_genre_evolution(
         .with_conn(|conn| {
             let evolution = queries::get_genre_evolution(conn, days)?;
             Ok(Json(json!({ "evolution": evolution })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn get_genre_audio_metrics(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let metrics = queries::get_genre_audio_metrics(conn)?;
+            Ok(Json(json!({ "metrics": metrics })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -6941,10 +6955,20 @@ async fn batch_set_genre(
 async fn start_musicbrainz_enrichment(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let (http_client, event_tx) = {
+    use std::sync::atomic::Ordering;
+
+    let (http_client, event_tx, running) = {
         let g = state.read().await;
-        (g.http_client.clone(), g.event_tx.clone())
+        (
+            g.http_client.clone(),
+            g.event_tx.clone(),
+            g.musicbrainz_enrich_running.clone(),
+        )
     };
+
+    if running.load(Ordering::SeqCst) {
+        return Ok(Json(json!({ "status": "already_running" })));
+    }
 
     let total: usize = {
         let g = state.read().await;
@@ -6957,6 +6981,8 @@ async fn start_musicbrainz_enrichment(
             json!({ "status": "already_complete", "remaining": 0 }),
         ));
     }
+
+    running.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
         let progress_tx = event_tx.clone();
@@ -6972,6 +6998,7 @@ async fn start_musicbrainz_enrichment(
             1,
         )
         .await;
+        running.store(false, Ordering::SeqCst);
         match result {
             Ok(_) => {
                 let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
@@ -14761,6 +14788,7 @@ mod tests {
             spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            musicbrainz_enrich_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_prefetch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

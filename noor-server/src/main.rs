@@ -86,6 +86,9 @@ pub struct AppState {
     pub spotify_enrich_running: Arc<AtomicBool>,
     pub spotify_enrich_total: Arc<std::sync::atomic::AtomicUsize>,
     pub spotify_enrich_processed: Arc<std::sync::atomic::AtomicUsize>,
+    /// MusicBrainz enrichment running flag — gates auto-enrich + manual-trigger
+    /// handler against double-runs.
+    pub musicbrainz_enrich_running: Arc<AtomicBool>,
     /// Last.fm enrichment progress.
     pub lastfm_enrich_running: Arc<AtomicBool>,
     pub lastfm_enrich_cancel: Arc<AtomicBool>,
@@ -512,6 +515,7 @@ async fn main() -> Result<()> {
         spotify_enrich_running: Arc::new(AtomicBool::new(false)),
         spotify_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         spotify_enrich_processed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        musicbrainz_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_running: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_cancel: Arc::new(AtomicBool::new(false)),
         lastfm_enrich_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -586,6 +590,59 @@ async fn main() -> Result<()> {
                 });
             }
         }
+    }
+
+    // Auto-enrichment: opportunistic post-import + daily catch-up.
+    //
+    // The library has 50%+ of tracks with no genre tags whenever new music
+    // arrives outside a manual enrichment run (see docs/genre-data-quality-2026-05-07.md).
+    // These two background tasks close that gap automatically:
+    //
+    // 1. Listener — every `LibrarySynced` event triggers a no-op-if-idle pass,
+    //    so any sync/import path that emits the event gets enrichment for
+    //    free without changes to the handler.
+    // 2. Daily loop — catches tracks added by paths that don't emit
+    //    `LibrarySynced`, and retries any rows that errored on the previous run.
+    //
+    // Both are gated by the per-runner `*_enrich_running` atomics so they
+    // never overlap with manual enrichment from the Settings UI or with each
+    // other.
+    {
+        let listener_state = state.clone();
+        let mut event_rx = listener_state.read().await.event_tx.subscribe();
+        tokio::spawn(async move {
+            // Defer the first auto-enrich until 60s after boot so we don't
+            // contend with the startup TIDAL sync's own work.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            loop {
+                match event_rx.recv().await {
+                    Ok(AppEvent::LibrarySynced) => {
+                        services::auto_enrich::run_if_idle(listener_state.clone()).await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(target: "noor.auto_enrich", lagged = n, "event listener lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let loop_state = state.clone();
+        tokio::spawn(async move {
+            // Wait 90s before the first sweep so listener-driven enrichment from
+            // the boot-time TIDAL sync gets a head start.
+            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            services::auto_enrich::run_if_idle(loop_state.clone()).await;
+
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            ticker.tick().await; // consume the immediate first tick
+            loop {
+                ticker.tick().await;
+                services::auto_enrich::run_if_idle(loop_state.clone()).await;
+            }
+        });
     }
 
     // Pending-queue GC: sweep stale locks and expired unresolved rows.
