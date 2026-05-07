@@ -23,8 +23,14 @@ use std::borrow::Cow;
 pub enum GalaxyFilterRule {
     /// No filtering — every row counts. Pre-refactor behavior.
     All,
-    /// Keep only rows whose `confidence` is at least the given value.
+    /// Keep only rows whose `confidence` is at least the given value. Strict —
+    /// tracks where every tag falls below the floor become galaxy-invisible.
     ConfidenceMin(f64),
+    /// Same floor as [`Self::ConfidenceMin`], but tracks where *every* tag is
+    /// below the floor still contribute their single strongest tag instead of
+    /// vanishing entirely. Trades a small amount of cluster noise for keeping
+    /// coverage-poor artists (Khruangbin, etc.) findable in the galaxy.
+    ConfidenceMinWithRescue(f64),
     /// Keep only the top-N highest-confidence rows per `track_id`. Tie-broken
     /// by source priority (MB > Spotify > Last.fm) then `genre_id`.
     TopNPerTrack(u32),
@@ -36,20 +42,29 @@ pub enum GalaxyFilterRule {
 }
 
 impl GalaxyFilterRule {
-    /// Default rule used when no filter is explicitly requested.
+    /// Default rule used when no filter is explicitly requested. The rescue
+    /// variant is the default because the strict variant orphans artists
+    /// whose every tag falls below 0.5 (a common shape — see
+    /// docs/genre-data-quality-2026-05-07.md, Khruangbin case).
     pub const fn default_rule() -> Self {
-        GalaxyFilterRule::ConfidenceMin(0.5)
+        GalaxyFilterRule::ConfidenceMinWithRescue(0.5)
     }
 
     /// Parse a query-string token into a rule. Unknown tokens fall back to
     /// the default rather than erroring — this is exposed on read-only
     /// galaxy endpoints where bad input shouldn't 400.
+    ///
+    /// Token convention: `conf05` = rescue-enabled at 0.5; `conf05_strict`
+    /// = strict floor with no rescue. Pre-rescue callers using the bare
+    /// `conf05` token are silently upgraded to the rescue variant.
     pub fn from_query(value: Option<&str>) -> Self {
         match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
             "" => Self::default_rule(),
             "all" | "raw" => GalaxyFilterRule::All,
-            "conf05" | "confidence_0_5" => GalaxyFilterRule::ConfidenceMin(0.5),
-            "conf07" | "confidence_0_7" => GalaxyFilterRule::ConfidenceMin(0.7),
+            "conf05" | "confidence_0_5" => GalaxyFilterRule::ConfidenceMinWithRescue(0.5),
+            "conf07" | "confidence_0_7" => GalaxyFilterRule::ConfidenceMinWithRescue(0.7),
+            "conf05_strict" | "confidence_0_5_strict" => GalaxyFilterRule::ConfidenceMin(0.5),
+            "conf07_strict" | "confidence_0_7_strict" => GalaxyFilterRule::ConfidenceMin(0.7),
             "top2" => GalaxyFilterRule::TopNPerTrack(2),
             "top3" => GalaxyFilterRule::TopNPerTrack(3),
             "mb_only" | "mbonly" | "musicbrainz" => GalaxyFilterRule::MbOnly,
@@ -64,6 +79,9 @@ impl GalaxyFilterRule {
         match self {
             GalaxyFilterRule::All => Cow::Borrowed("all"),
             GalaxyFilterRule::ConfidenceMin(min) => {
+                Cow::Owned(format!("confidence_{:.2}_strict", min).replace('.', "_"))
+            }
+            GalaxyFilterRule::ConfidenceMinWithRescue(min) => {
                 Cow::Owned(format!("confidence_{:.2}", min).replace('.', "_"))
             }
             GalaxyFilterRule::TopNPerTrack(n) => Cow::Owned(format!("top{}", n)),
@@ -91,6 +109,31 @@ pub fn filter_subquery(rule: GalaxyFilterRule) -> Cow<'static, str> {
             "SELECT track_id, genre_id, source, confidence FROM track_genres WHERE confidence >= {:.4}",
             min.clamp(0.0, 10.0)
         )),
+        GalaxyFilterRule::ConfidenceMinWithRescue(min) => {
+            // Two-step union expressed as a single window-pass:
+            //   1. confidence >= min — normal floor
+            //   2. OR (track's max confidence is below min AND this is the
+            //      strongest tag on the track) — rescue branch, fires only
+            //      when the WHOLE track is below threshold.
+            // Tracks with at least one tag clearing the floor get *just* their
+            // qualifying tags (not the floor + rescue together), so noise on
+            // well-tagged tracks isn't re-admitted.
+            let clamped = min.clamp(0.0, 10.0);
+            Cow::Owned(format!(
+                "SELECT track_id, genre_id, source, confidence FROM (\
+                    SELECT track_id, genre_id, source, confidence, \
+                        ROW_NUMBER() OVER (\
+                            PARTITION BY track_id \
+                            ORDER BY confidence DESC, \
+                                CASE source WHEN 'musicbrainz' THEN 1 WHEN 'spotify' THEN 2 WHEN 'lastfm' THEN 3 ELSE 9 END, \
+                                genre_id\
+                        ) AS rn, \
+                        MAX(confidence) OVER (PARTITION BY track_id) AS track_max_conf \
+                    FROM track_genres\
+                 ) WHERE confidence >= {clamped:.4} \
+                       OR (track_max_conf < {clamped:.4} AND rn = 1)"
+            ))
+        }
         GalaxyFilterRule::TopNPerTrack(n) => Cow::Owned(format!(
             "SELECT track_id, genre_id, source, confidence FROM (\
                 SELECT track_id, genre_id, source, confidence, \
@@ -123,8 +166,14 @@ mod tests {
             GalaxyFilterRule::from_query(Some("all")),
             GalaxyFilterRule::All
         ));
+        // Bare `conf05` upgrades to the rescue variant — that's the new default.
         assert!(matches!(
             GalaxyFilterRule::from_query(Some("conf05")),
+            GalaxyFilterRule::ConfidenceMinWithRescue(v) if (v - 0.5).abs() < 1e-9
+        ));
+        // `_strict` suffix opts back into the no-rescue floor.
+        assert!(matches!(
+            GalaxyFilterRule::from_query(Some("conf05_strict")),
             GalaxyFilterRule::ConfidenceMin(v) if (v - 0.5).abs() < 1e-9
         ));
         assert!(matches!(
@@ -161,6 +210,8 @@ mod tests {
         // Out-of-range floats can't blow up the SQL.
         let frag = filter_subquery(GalaxyFilterRule::ConfidenceMin(99.0));
         assert!(frag.contains(">= 10."));
+        let frag2 = filter_subquery(GalaxyFilterRule::ConfidenceMinWithRescue(99.0));
+        assert!(frag2.contains(">= 10."));
     }
 
     #[test]
@@ -170,10 +221,26 @@ mod tests {
     }
 
     #[test]
+    fn rescue_subquery_includes_both_branches() {
+        let frag = filter_subquery(GalaxyFilterRule::ConfidenceMinWithRescue(0.5));
+        assert!(frag.contains("track_max_conf"));
+        assert!(frag.contains("rn = 1"));
+        assert!(frag.contains("confidence >= 0.5000"));
+    }
+
+    #[test]
     fn label_is_stable() {
         assert_eq!(GalaxyFilterRule::All.label(), "all");
         assert_eq!(GalaxyFilterRule::MbOnly.label(), "mb_only");
         assert_eq!(GalaxyFilterRule::PrimaryOnly.label(), "primary_only");
         assert_eq!(GalaxyFilterRule::TopNPerTrack(2).label(), "top2");
+        assert_eq!(
+            GalaxyFilterRule::ConfidenceMinWithRescue(0.5).label(),
+            "confidence_0_50"
+        );
+        assert_eq!(
+            GalaxyFilterRule::ConfidenceMin(0.5).label(),
+            "confidence_0_50_strict"
+        );
     }
 }
