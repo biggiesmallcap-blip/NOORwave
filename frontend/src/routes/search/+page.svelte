@@ -1100,10 +1100,10 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title) }}
             >
               <div class="art-wrap">
-                {#if playlist.square_image}
+                {#if playlist.artwork_url}
                   <div
                     class="album-art"
-                    style="background-image: url('https://resources.tidal.com/images/{playlist.square_image.replaceAll('-', '/')}/320x320.jpg')"
+                    style="background-image: url('{playlist.artwork_url}')"
                   ></div>
                 {:else}
                   <div class="album-art fallback" style="background: {letterColor(playlist.title)}">
