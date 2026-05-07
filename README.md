@@ -395,27 +395,90 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 
 ---
 
-## Known Bugs
+## Updating
 
-### In Progress
+NOOR doesn't auto-install — it tells you when a new release is out and you swap the portable build yourself. Your library and settings carry over untouched.
 
-| Bug | Status |
+### Auto-update notification
+
+On every launch the Tauri shell quietly polls the GitHub Releases API. If a newer tag is available, the system tray menu gains an extra item:
+
+```
+↑ vX.Y.Z available — click to download
+```
+
+Clicking it opens the GitHub release page in your browser. There is **no silent in-app install**.
+
+### Manual portable swap
+
+Works on every platform:
+
+1. Quit NOORwave
+2. Download `NOORwave-vX.Y.Z-<platform>.<ext>` from [Releases](../../releases/latest)
+3. Extract over the existing folder, replacing `NOORwave(.exe)`, `noor-server(.exe)`, and `www/`
+4. Relaunch
+
+Your library, playlists, settings, PIN, training state, and queue all live in `noor.db` next to the binaries — the swap doesn't touch them.
+
+| Updated by the swap | Preserved across the swap |
 |---|---|
-| Gapless audio blend — pre-buffer engine swap works; audio-level crossfade mixing pending | In progress |
-| Discover / Sound Space — functional but incomplete; UI and model quality still evolving | In progress |
-| Song Radio — working but needs tuning; recommendation quality varies | In progress |
-| Genre Galaxy — live but several interaction and rendering issues under active work | In progress |
+| `NOORwave(.exe)` | `noor.db` |
+| `noor-server(.exe)` | `noor-server.log` |
+| `www/` | TIDAL session, PIN, queue, training state |
 
-### Reported / Queued
+### Platform notes
+
+- **macOS** — Gatekeeper quarantines every fresh download. Re-run `xattr -cr NOORwave noor-server` after extracting a new build.
+- **Linux** — runtime libraries (`libwebkit2gtk-4.1-0`, `libasound2`, `libayatana-appindicator3-1`) only need to be installed once. Subsequent updates don't require `apt-get` again.
+- **Windows** — the folder is fully relocatable; you can extract to a different drive and your old install keeps working until you delete it.
+
+---
+
+## Known Bugs
 
 | Bug | Notes |
 |---|---|
-| Duplicate detection UI missing | Backend detection logic complete; UI not yet wired |
-| ACRCloud sample recognition | Mostly placeholder; not reliably functional |
-| Playlist save failing under certain conditions | Edge case — reproducing intermittently |
-| Shuffle genre-spread not always respected | Algorithm issue under investigation |
-| Context menus disappear on scroll | Known UI bug |
-| Library sync stalls on very large libraries | Likely a pagination or timeout issue |
+| Discover / Sound Space — functional but incomplete | UI and model quality still evolving |
+| Song Radio — working but needs tuning | Recommendation quality varies |
+| Genre Galaxy — live but rough edges | Several interaction and rendering issues under active work |
+| ACRCloud sample recognition | Placeholder — not reliably functional |
+| Playlist save failing under certain conditions | Intermittent edge case, reproducing |
+
+---
+
+## Current Limitations
+
+The honest list of what NOOR doesn't do. Some of these are by design, some are not implemented yet, none are reproducible defects (those go in Known Bugs above).
+
+**Streaming sources**
+
+- Requires an active **TIDAL subscription**. HiFi or HiFi Plus is needed for lossless playback; the standard tier streams at AAC quality.
+- Spotify integration is **anonymous metadata only**. You can browse and play any Spotify playlist, but every track is resolved to and streamed from TIDAL — there is no native Spotify playback and no Spotify Premium required.
+- **YouTube Music** and **SoundCloud** are not implemented. Schema columns and API client stubs exist; resolution logic and routes do not.
+- **Beatport** and **Bandcamp** catalogues are not implemented.
+
+**Audio output**
+
+- WASAPI exclusive-mode bit-perfect output is **Windows only**. macOS and Linux fall back to the system mixer (CPAL shared-mode); the OS performs sample-rate conversion.
+- Sample-rate-follows-source is Windows-only for the same reason.
+
+**Distribution**
+
+- macOS builds are **unsigned** — Gatekeeper quarantine must be cleared on every download (`xattr -cr`).
+- The Tauri auto-updater **notifies, but does not install in-place**. Updates are a manual portable swap (see [Updating](#updating)).
+- No mobile app. The LAN UI works in a phone browser but isn't optimised for it.
+
+**Functionality not yet wired**
+
+- ACRCloud fingerprint sample recognition — UI placeholder only.
+- Lyrics — no lyrics view in Quiet Mode or anywhere else.
+- Offline mode — no cached metadata browsing or local-file playback.
+- Playlist export (M3U / JSON) — not implemented.
+- Playlist collaboration / public read-only sharing links — not implemented.
+
+**Network**
+
+- LAN access requires both devices on the same network. No tunneling, no remote-internet access by design.
 
 ---
 
@@ -459,6 +522,9 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] `audio_active` flag for output-state tracking
 - [x] TIDAL session health: pre-request backoff gate, status endpoint, play events to `ec.tidal.com`, auto-refresh on 401
 - [x] Crossfade gain sentinel + per-packet buffer flush (no double fade-in)
+- [x] **Equal-power crossfade ramps** (sin² + cos² = 1) eliminate the 3 dB midpoint dip (v0.1.26)
+- [x] **Bit-perfect playback path** with onboarding choice — quality vs compatibility prompt on first run (v0.1.26)
+- [x] **DSP correctness pass** — 9 audio-analysis bugs fixed, unified STFT, schema v2 bump (v0.1.25)
 
 **Player + queue**
 
@@ -478,6 +544,13 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Song Radio cold-start fallback — when all candidate sources return empty (newly-synced tracks not yet in the learning model), radio now surfaces other tracks by the same artist instead of failing silently (v0.1.18)
 - [x] TIDAL Your Mixes token auto-refresh — the shelf no longer loops on 401 errors; refreshes inline like all other TIDAL endpoints (v0.1.18)
 - [x] RSS feed fixes — removed defunct Resident Advisor feed; updated Pitchfork and Mixmag to current URLs; fixed Bandcamp Daily parse failure caused by UTF-8 BOM (v0.1.18)
+- [x] Play All on TIDAL albums and playlists now plays beyond track 1 (v0.1.26)
+- [x] **TIDAL Retry-After honored** + concurrent-request cap to avoid 429 lockouts (v0.1.26)
+- [x] Per-album TIDAL sync timeout + retry — sync no longer stalls on slow album lookups (v0.1.26)
+- [x] Shuffle bucket randomization + iterated stabilization — genre-spread mode now actually genre-spreads (v0.1.26)
+- [x] Shuffle preserves **Off** ordering and drops double artist-spread in Genre mode (v0.1.26)
+- [x] Jump within mix when clicking ahead in queue (v0.1.24)
+- [x] Drop native confirm on queue clear — undo via `Z` is the safety net (v0.1.24)
 
 **Library + browsing**
 
@@ -488,8 +561,17 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] `/tidal/artists/[id]` and `/tidal/albums/[id]` profile pages
 - [x] Search filter grids — single-category pills expand to multi-row grids (Artists 130px, Albums/Tracks/Playlists 180px) (v0.1.17)
 - [x] Trending shelf: unified Last.fm + TIDAL charts with country/genre scopes, lazy artwork backfill, 6-hour shared cache, stable shelf layout (v0.1.8)
-- [x] Duplicate-detection page (UI under polish)
+- [x] **Duplicate detection** page shipped — full UI for scan / groups / resolution
 - [x] Reimagined Automix and Analytics pages
+- [x] **FTS-first library search** with audio filters; `search_tracks_fts` ORDER BY repaired (v0.1.24)
+- [x] **TIDAL catalog search cached server-side** with TTL and offset keying; migration 034 adds `tidal_search_cache` (v0.1.24)
+- [x] TIDAL Your Mixes shelf cached for 6 h; refresh on TIDAL connect (v0.1.24)
+- [x] Search fan-out — local DB and Sportify in a single `Promise.allSettled` (v0.1.24)
+- [x] Reuse a shared `reqwest` client across all TIDAL calls (v0.1.24)
+- [x] TIDAL sync hardening — atomicity, reentrancy, error visibility (v0.1.24)
+- [x] Search uses pre-built `artwork_url` for TIDAL playlist art — no per-row regeneration (v0.1.24)
+- [x] Album search by artist name + shoegaze fuzzy match (v0.1.23)
+- [x] macOS layout fix — ShaderWallpaper canvas no longer blocks clicks (v0.1.25)
 
 **Track-row unification (Phase 1–7 frontend overhaul)**
 
@@ -524,6 +606,14 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Radio routes ephemeral Tidal tracks to the Tidal-aware path
 - [x] Last.fm `artist.getsimilar` fallback when track-level recall is empty
 - [x] Last.fm 8 s per-call timeout so a slow tag fetch can't hang the shelf
+- [x] **Three-tier activation gate** (0 / 1–49 / 50+ plays) with intra-stage progress and settings guide (v0.1.24)
+- [x] **Genre Galaxy display filter** + filter-rescue rule for coverage-poor tracks (v0.1.24)
+- [x] **Galaxy "honesty pass"** — modes, panel richness, library filter (v0.1.24)
+- [x] Genre fallback cascade — album-then-artist for empty-genre tracks; min_score floor 0.2 → 0.15 (v0.1.24)
+- [x] Audio-metrics endpoint + auto-enrich Last.fm / MusicBrainz (v0.1.24)
+- [x] MusicBrainz emits `sync_progress` per track so the panel keeps up after navigation (v0.1.24)
+- [x] **Discover help panel** — limits, reasons, seed failures, tips (v0.1.26)
+- [x] Unstick training, real incremental, correct ETA (v0.1.23)
 
 **UI & accessibility**
 
@@ -536,6 +626,7 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Manual purge of orphan `tidal_stream` tracks (v0.1.8)
 - [x] Codex typography + microcopy pass across pages
 - [x] Inline SVG brand mark + favicon
+- [x] **Context menu closes on scroll** instead of desyncing from its trigger (v0.1.26)
 
 **Playlists**
 
@@ -546,24 +637,20 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 - [x] Inline track-row migration on playlists page
 - [x] Sportify — anonymous Spotify metadata proxy; Spotify→TIDAL resolution with local caching; DB migrations 031-032 (v0.1.17)
 - [x] Spotify playlist view (`/spotify-playlist`) — browse and play any Spotify playlist via TIDAL resolution (v0.1.17)
+- [x] Mosaic playlist covers, click-to-open card, recent-update sort (v0.1.24)
 
 </details>
 
 **Up next:**
 
-- [ ] Gapless crossfade audio blend (audio-level mixing — pre-buffer engine swap already shipped)
-- [ ] Duplicate detection UI polish
 - [ ] Tune `RadioProfile` defaults from accumulated `radio_diagnostics` (Tier 2 surgery shipped behind flags)
 - [ ] Learned edge scorer to replace hardcoded metadata bonuses (uses `discovery_diagnostics` per-reason hit-rates)
 - [ ] Genre Galaxy polish (interaction + rendering issues)
-- [ ] Shuffle genre-spread algorithm (currently not always respected)
-- [ ] Context-menu-on-scroll handling (menus dismiss on scroll)
-- [ ] YouTube Music integration
-- [ ] SoundCloud integration
 - [ ] Lyrics view inside Quiet Mode
 - [ ] Color-sampled dynamic backdrop tint in Quiet Mode
 - [ ] ACRCloud fingerprint recognition (currently placeholder)
-- [ ] Library-sync timeout / pagination resilience for very large libraries
+- [ ] YouTube Music integration
+- [ ] SoundCloud integration
 
 ---
 
@@ -578,19 +665,6 @@ Open an issue on [GitHub Issues](../../issues) and include:
 
 ---
 
-## Future Plans
-
-Beyond the current roadmap:
-
-- Full YouTube Music and SoundCloud integration
-- Playlist collaboration and export (M3U, JSON)
-- Mobile-optimised LAN UI
-- Beatport / Bandcamp integration
-- Public read-only library sharing link
-- Offline mode: cached metadata + local file playback
-
----
-
 ## Disclaimer
 
 NOOR uses TIDAL's unofficial API via a device-code OAuth2 flow — the same mechanism used by other third-party TIDAL clients. This project is not affiliated with, endorsed by, or associated with TIDAL Music AS or MQA Ltd. Use is at your own discretion and risk. Credentials are stored locally, AES-GCM encrypted in the SQLite database. NOOR is intended for personal use only.
@@ -600,3 +674,35 @@ NOOR uses TIDAL's unofficial API via a device-code OAuth2 flow — the same mech
 ## License
 
 [MIT](LICENSE)
+
+---
+
+<details>
+<summary><strong>Maintainer notes</strong> — keeping the README current</summary>
+
+A convention so the bug list, roadmap, and limitations don't drift. Future-me, this is for you.
+
+### Section semantics
+
+- **Features** — present-tense capabilities only. If you can't run it today, it doesn't go here.
+- **Known Bugs** — reproducible defects on the current version only. If it's intentional or unimplemented, it lives in **Current Limitations** instead.
+- **Current Limitations** — by-design constraints AND unimplemented integrations. The "won't fix soon" pile.
+- **Roadmap → Up next** — actively planned with intent to land in the next few releases. Speculative items don't go here; they belong in **Current Limitations** under "Functionality not yet wired".
+- **Roadmap → What's already shipped** — every entry tagged with the `(vX.Y.Z)` it shipped in.
+
+### On every release tag
+
+1. Bump versions in [noor-server/Cargo.toml](noor-server/Cargo.toml), [noor-app/Cargo.toml](noor-app/Cargo.toml), [noor-app/tauri.conf.json](noor-app/tauri.conf.json) — refresh `Cargo.lock`.
+2. For each closed bug since the last tag: remove the row from **Known Bugs**, add a bullet to **What's already shipped** with `(vX.Y.Z)`.
+3. For each shipped roadmap item: remove from **Up next**, add to **What's already shipped** with `(vX.Y.Z)`.
+4. Adjust **Current Limitations** as constraints change — when ACRCloud is wired, move it from "Functionality not yet wired" into a Features bullet; when Linux gets a bit-perfect output path, qualify the WASAPI line; etc.
+5. After `git tag` + `git push --tags`: `gh release edit vX.Y.Z` to prepend a "What's new" section to the auto-generated release body. CI only emits portable-build boilerplate.
+
+### Verification before declaring a section accurate
+
+- **Bug status** — `git log v<prev>..HEAD --oneline | grep -i <keyword>`. If a closing commit exists, the bug is closed.
+- **Roadmap status** — same query. If shipped, move it.
+- **Features** — confirm the route or code path actually exists. Don't trust memory.
+- **Versions** — every `(vX.Y.Z)` tag in **What's already shipped** must match an entry in `git tag -l`.
+
+</details>
