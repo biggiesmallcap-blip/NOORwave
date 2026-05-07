@@ -395,18 +395,22 @@ pub fn apply_shuffle(
 }
 
 fn reorder_tracks(conn: &Connection, tracks: &[Track], mode: ShuffleMode) -> Result<Vec<Track>> {
-    let reordered = match mode {
-        ShuffleMode::Off => tracks.to_vec(),
-        ShuffleMode::True => true_shuffle(tracks),
-        ShuffleMode::Weighted => weighted_shuffle(tracks, &WeightedShuffleProfile::default()),
+    // Off must preserve the caller's order; an artist post-pass would silently
+    // rearrange tracks the user didn't ask to shuffle. Genre mode already runs
+    // artist-spread + genre-stabilize internally — running artist-spread again
+    // here re-clusters genres and undoes that work.
+    match mode {
+        ShuffleMode::Off => Ok(tracks.to_vec()),
+        ShuffleMode::True => Ok(artist_spread_shuffle(&true_shuffle(tracks))),
+        ShuffleMode::Weighted => {
+            let weighted = weighted_shuffle(tracks, &WeightedShuffleProfile::default());
+            Ok(artist_spread_shuffle(&weighted))
+        }
         ShuffleMode::Genre => {
             let genre_map = get_track_genres(conn, tracks)?;
-            genre_shuffle(tracks, &genre_map)
+            Ok(genre_shuffle(tracks, &genre_map))
         }
-    };
-
-    let spread = artist_spread_shuffle(&reordered);
-    Ok(spread)
+    }
 }
 
 pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i64, Vec<String>>> {
@@ -964,6 +968,58 @@ mod tests {
         // Positions are contiguous after the shift.
         for (idx, item) in queue.iter().enumerate() {
             assert_eq!(item.position, idx as i32);
+        }
+    }
+
+    #[test]
+    fn reorder_off_preserves_input_order() {
+        let conn = conn();
+        let tracks: Vec<Track> = (1..=4)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect();
+
+        // Off must be a pure identity. Run repeatedly so any thread_rng-driven
+        // post-pass would surface as an occasional reorder.
+        for _ in 0..20 {
+            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Off).unwrap();
+            let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
+            assert_eq!(ids, vec![1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn reorder_genre_alternates_genres_on_balanced_library() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'House', 'house', NULL),
+                (2, 'Ambient', 'ambient', NULL);
+             INSERT INTO track_genres (track_id, genre_id) VALUES
+                (1, 1), (2, 1), (3, 2), (4, 2);",
+        )
+        .unwrap();
+
+        let tracks: Vec<Track> = (1..=4)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect();
+        let genre_of = |id: i64| if id <= 2 { "House" } else { "Ambient" };
+
+        // Two genres × two tracks each → alternation is always achievable.
+        // If the unconditional artist post-pass returns, this fails on most seeds.
+        for _ in 0..20 {
+            let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Genre).unwrap();
+            let ids: Vec<i64> = reordered.iter().map(|t| t.id).collect();
+            assert_eq!(ids.len(), 4);
+            for pair in ids.windows(2) {
+                assert_ne!(
+                    genre_of(pair[0]),
+                    genre_of(pair[1]),
+                    "adjacent same-genre tracks {} and {} in {:?}",
+                    pair[0],
+                    pair[1],
+                    ids
+                );
+            }
         }
     }
 }
