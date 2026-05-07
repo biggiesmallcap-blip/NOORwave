@@ -37,6 +37,19 @@
 		}
 	}
 
+	// Position is a snapshot taken at open time, so any scroll desyncs the menu
+	// from its trigger. A transformed/will-change ancestor can also turn
+	// `position: fixed` into ancestor-relative, making the menu drift visually.
+	// In both cases, closing on scroll matches typical app behaviour.
+	$effect(() => {
+		if (!$contextMenu.open) return;
+		const onScroll = () => closeContextMenu();
+		// Scroll events do not bubble, so listen in the capture phase to catch
+		// any nested scroller without needing per-target wiring.
+		window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+		return () => window.removeEventListener('scroll', onScroll, { capture: true });
+	});
+
 	async function activate(item: MenuItem, index: number) {
 		if (item.disabled) return;
 		if (item.submenu && item.submenu.length > 0) {
