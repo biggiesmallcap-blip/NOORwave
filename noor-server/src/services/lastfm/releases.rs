@@ -53,11 +53,10 @@ pub async fn fetch_new_releases_cached(
 ) -> Result<Vec<ReleaseItem>> {
     {
         let guard = CACHE.lock().unwrap();
-        if let Some((items, fetched_at)) = guard.as_ref() {
-            if fetched_at.elapsed() < CACHE_TTL {
+        if let Some((items, fetched_at)) = guard.as_ref()
+            && fetched_at.elapsed() < CACHE_TTL {
                 return Ok(items.clone());
             }
-        }
     }
     match fetch_new_releases(http, api_key).await {
         Ok(items) => {
@@ -366,13 +365,11 @@ fn pick_image(images: Option<&serde_json::Value>, sizes: &[&str]) -> Option<Stri
         for img in arr {
             let s = img.get("size").and_then(serde_json::Value::as_str);
             let url = img.get("#text").and_then(serde_json::Value::as_str);
-            if s == Some(*size) {
-                if let Some(u) = url {
-                    if !u.is_empty() {
+            if s == Some(*size)
+                && let Some(u) = url
+                    && !u.is_empty() {
                         return Some(u.to_string());
                     }
-                }
-            }
         }
     }
     None
@@ -383,11 +380,10 @@ fn dedupe_candidates(candidates: &mut Vec<AlbumCandidate>) {
     let mut seen_mbid: HashSet<String> = HashSet::new();
     let mut seen_pair: HashSet<(String, String)> = HashSet::new();
     candidates.retain(|c| {
-        if let Some(mbid) = c.mbid.as_ref() {
-            if !seen_mbid.insert(mbid.clone()) {
+        if let Some(mbid) = c.mbid.as_ref()
+            && !seen_mbid.insert(mbid.clone()) {
                 return false;
             }
-        }
         let key = (c.artist.to_lowercase(), c.album.to_lowercase());
         if !seen_pair.insert(key) {
             return false;

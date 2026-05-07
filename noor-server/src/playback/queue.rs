@@ -358,16 +358,15 @@ pub fn apply_shuffle(
     for item in &queue_items[split_index..] {
         qid_buckets
             .entry(item.track.id)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(item.id);
     }
     let mut shuffled_qids: Vec<i64> = Vec::with_capacity(reordered_tracks.len());
     for t in &reordered_tracks {
-        if let Some(bucket) = qid_buckets.get_mut(&t.id) {
-            if let Some(qid) = bucket.pop_front() {
+        if let Some(bucket) = qid_buckets.get_mut(&t.id)
+            && let Some(qid) = bucket.pop_front() {
                 shuffled_qids.push(qid);
             }
-        }
     }
     // Defensive: if reorder_tracks dropped any rows (it shouldn't), append
     // remaining qids in their original order so the queue stays intact.
@@ -379,7 +378,7 @@ pub fn apply_shuffle(
 
     let final_qids: Vec<i64> = locked_qids
         .into_iter()
-        .chain(shuffled_qids.into_iter())
+        .chain(shuffled_qids)
         .collect();
 
     let tx = conn.unchecked_transaction()?;

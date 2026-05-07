@@ -190,7 +190,7 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         Some(&track.source),
     ];
     for value in fields.into_iter().flatten() {
-        let normalized = value.to_lowercase().replace('/', " ").replace('-', " ");
+        let normalized = value.to_lowercase().replace(['/', '-'], " ");
         tokens.extend(normalized.split_whitespace().map(String::from));
     }
     if let Some(duration) = track.duration_ms {
@@ -215,8 +215,8 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         tokens.push(format!("key_{}", key.to_lowercase()));
         // Also add the adjacent keys on the Camelot wheel so harmonically compatible
         // tracks cluster together (e.g. 8B is compatible with 7B, 9B, 8A).
-        if let Some(num_end) = key.find(|c: char| c.is_alphabetic()) {
-            if let Ok(n) = key[..num_end].parse::<i64>() {
+        if let Some(num_end) = key.find(|c: char| c.is_alphabetic())
+            && let Ok(n) = key[..num_end].parse::<i64>() {
                 let suffix = &key[num_end..].to_lowercase();
                 tokens.push(format!("key_{}{}", ((n - 2).rem_euclid(12) + 1), suffix));
                 tokens.push(format!("key_{}{}", (n % 12) + 1, suffix));
@@ -224,7 +224,6 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
                 let alt = if suffix == "a" { "b" } else { "a" };
                 tokens.push(format!("key_{}{}", n, alt));
             }
-        }
     }
     tokens
 }
@@ -299,8 +298,8 @@ fn build_behavioral_embeddings(
             // check: keep the atomic/channel cost out of the inner loop, but
             // fire often enough that the UI bar visibly moves and a 30-second
             // pause doesn't look like a hang.
-            if sequences_seen.is_multiple_of(1024) && total_sequences > 0 {
-                if let Some(tx) = progress_tx {
+            if sequences_seen.is_multiple_of(1024) && total_sequences > 0
+                && let Some(tx) = progress_tx {
                     let frac = (sequences_seen as f32 / total_sequences as f32).min(1.0);
                     let _ = tx.send(TrainingProgressUpdate {
                         stage: "behavioral".to_string(),
@@ -315,7 +314,6 @@ fn build_behavioral_embeddings(
                         tracks_total: total_sequences as u32,
                     });
                 }
-            }
             let filtered: Vec<i64> = sequence
                 .iter()
                 .copied()
@@ -379,8 +377,8 @@ fn build_behavioral_embeddings(
             let done = projected_done
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            if done.is_multiple_of(256) && projection_total > 0 {
-                if let Some(tx) = progress_tx {
+            if done.is_multiple_of(256) && projection_total > 0
+                && let Some(tx) = progress_tx {
                     let frac = (done as f32 / projection_total as f32).min(1.0);
                     let _ = tx.send(TrainingProgressUpdate {
                         stage: "behavioral".to_string(),
@@ -395,7 +393,6 @@ fn build_behavioral_embeddings(
                         tracks_total: projection_total as u32,
                     });
                 }
-            }
             (track_id, normalize(&vec).0)
         })
         .collect();
@@ -432,8 +429,8 @@ fn build_audio_proxy_features(
             let tokens = metadata_tokens(track);
             let vec = hashed_projection(&tokens, dim);
             let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if completed.is_multiple_of(512) && total > 0 {
-                if let Some(tx) = progress_tx {
+            if completed.is_multiple_of(512) && total > 0
+                && let Some(tx) = progress_tx {
                     let frac = (completed as f32 / total as f32).min(1.0);
                     let _ = tx.send(TrainingProgressUpdate {
                         stage: "audio".to_string(),
@@ -445,7 +442,6 @@ fn build_audio_proxy_features(
                         tracks_total: total as u32,
                     });
                 }
-            }
             Some((
                 track.track_id,
                 TrainerAudioFeature {
@@ -595,15 +591,14 @@ fn similarity_neighbors(
         .into_par_iter()
         .map(|idx| {
             // Cancel check — cheap atomic load, runs every iteration so Stop is responsive.
-            if let Some(flag) = cancel {
-                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(flag) = cancel
+                && flag.load(std::sync::atomic::Ordering::Relaxed) {
                     return Vec::<TrainerNeighbor>::new();
                 }
-            }
 
             // Progress every 500 tracks
-            if idx % 500 == 0 && total > 0 {
-                if let Some(tx) = progress_tx {
+            if idx % 500 == 0 && total > 0
+                && let Some(tx) = progress_tx {
                     let pct = (idx + 1) * 100 / total;
                     let progress = 0.70 + (pct as f32 / 100.0) * 0.25; // 0.70 to 0.95
                     let _ = tx.send(TrainingProgressUpdate {
@@ -616,7 +611,6 @@ fn similarity_neighbors(
                         tracks_total: total as u32,
                     });
                 }
-            }
 
             let meta = &track_metas[idx];
             let vector = fusion_vecs[idx];
@@ -648,7 +642,7 @@ fn similarity_neighbors(
                 }
 
                 // First: cheap fusion cosine. Skip everything if ≤ 0.
-                let score = cosine(vector, *other_vector);
+                let score = cosine(vector, other_vector);
                 if score <= 0.0 {
                     continue;
                 }
@@ -671,13 +665,12 @@ fn similarity_neighbors(
                 let mut contributions: Vec<(&'static str, f64)> = Vec::with_capacity(8);
 
                 // Artist affinity
-                if let (Some(cur), Some(oth)) = (&meta.artist_lower, &other_meta.artist_lower) {
-                    if cur == oth {
+                if let (Some(cur), Some(oth)) = (&meta.artist_lower, &other_meta.artist_lower)
+                    && cur == oth {
                         metadata_score += 0.2;
                         reason_tags.push("artist_affinity".to_string());
                         contributions.push(("artist_affinity", 0.2));
                     }
-                }
 
                 // Genre branch (pre-computed HashSets, no tokenization)
                 if !meta.genre_tokens.is_empty()
@@ -694,13 +687,12 @@ fn similarity_neighbors(
                 }
 
                 // Album context
-                if let (Some(cur), Some(oth)) = (&meta.album, &other_meta.album) {
-                    if cur == oth {
+                if let (Some(cur), Some(oth)) = (&meta.album, &other_meta.album)
+                    && cur == oth {
                         metadata_score += 0.12;
                         reason_tags.push("album_context".to_string());
                         contributions.push(("album_context", 0.12));
                     }
-                }
 
                 // BPM proximity — scaled bonus: 0.15 within 3 BPM, 0.08 within 8 BPM
                 if let (Some(a_bpm), Some(b_bpm)) = (meta.bpm, other_meta.bpm) {

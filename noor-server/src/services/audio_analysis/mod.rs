@@ -117,7 +117,7 @@ fn camelot_letter(k: &str) -> char {
 fn camelot_number_diff(a: &str, b: &str) -> u32 {
     let na = camelot_number(a);
     let nb = camelot_number(b);
-    let diff = if na > nb { na - nb } else { nb - na };
+    let diff = na.abs_diff(nb);
     diff.min(12 - diff)
 }
 

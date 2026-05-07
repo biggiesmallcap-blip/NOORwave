@@ -112,7 +112,7 @@ pub async fn resolve_track(
 
         // Track the highest pre-guard score so we can give a useful reason
         // when everything got rejected by the version guard.
-        if best_pre_guard.map_or(true, |s| scored.score > s) {
+        if best_pre_guard.is_none_or(|s| scored.score > s) {
             best_pre_guard = Some(scored.score);
         }
 
@@ -121,7 +121,7 @@ pub async fn resolve_track(
             continue;
         }
 
-        if best.as_ref().map_or(true, |b| scored.score > b.score) {
+        if best.as_ref().is_none_or(|b| scored.score > b.score) {
             best = Some(ScoredCandidate {
                 tidal_id: cand.id,
                 score: scored.score,
@@ -242,7 +242,7 @@ fn score(
     // TIDAL `TidalSearchTrack.duration` is seconds.
     let duration_score = match sportify.duration_ms {
         Some(ms) if ms > 0 => {
-            let cand_ms = (cand.duration as i64) * 1000;
+            let cand_ms = cand.duration * 1000;
             let diff = (ms - cand_ms).abs();
             if diff < 1500 {
                 1.0
@@ -289,8 +289,7 @@ pub fn normalize_title(s: &str) -> String {
 /// and treats `&`, `and`, `,` as separators.
 pub fn normalize_artist(s: &str) -> String {
     let base = normalize_title(s);
-    base.replace('&', " ")
-        .replace(',', " ")
+    base.replace(['&', ','], " ")
         .split_whitespace()
         .filter(|t| *t != "and" && *t != "with" && *t != "feat" && *t != "ft")
         .collect::<Vec<_>>()

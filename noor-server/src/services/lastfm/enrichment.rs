@@ -175,7 +175,7 @@ where
 
         fetched_so_far += 1;
         artist_progress(fetched_so_far, artist_total);
-        if fetched_so_far % 500 == 0 {
+        if fetched_so_far.is_multiple_of(500) {
             info!("Artist pre-fetch: {}/{}", fetched_so_far, artist_total);
         }
         sleep(Duration::from_millis(CALL_DELAY_MS)).await;
@@ -302,7 +302,7 @@ where
         processed += 1;
         progress(processed, total);
 
-        if processed % 500 == 0 {
+        if processed.is_multiple_of(500) {
             info!(
                 "Last.fm enrichment: {}/{} processed ({} tagged, {} retry-later)",
                 processed, total, tagged, transient_skips

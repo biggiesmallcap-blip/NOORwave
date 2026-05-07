@@ -326,10 +326,8 @@ impl FeedAggregator {
         // Await all fetches
         let results = futures::future::join_all(fetches).await;
 
-        for result in results {
-            if let Some(items) = result {
-                all_items.extend(items);
-            }
+        for items in results.into_iter().flatten() {
+            all_items.extend(items);
         }
 
         // Sort by published date (newest first), fallback to title

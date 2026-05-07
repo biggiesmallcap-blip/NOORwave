@@ -124,12 +124,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
     let mut score = 0.0f64;
     let mut tags: Vec<(&'static str, f64)> = Vec::new();
 
-    if let (Some(a), Some(b)) = (&seed.artist_lower, &cand.artist_lower) {
-        if a == b {
+    if let (Some(a), Some(b)) = (&seed.artist_lower, &cand.artist_lower)
+        && a == b {
             score += 0.20;
             tags.push(("artist_affinity", 0.20));
         }
-    }
 
     if !seed.genre_set.is_empty()
         && !cand.genre_set.is_empty()
@@ -143,12 +142,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
         tags.push(("genre_branch", 0.18));
     }
 
-    if let (Some(a), Some(b)) = (&seed.album, &cand.album) {
-        if a == b {
+    if let (Some(a), Some(b)) = (&seed.album, &cand.album)
+        && a == b {
             score += 0.12;
             tags.push(("album_context", 0.12));
         }
-    }
 
     if let (Some(a), Some(b)) = (seed.bpm, cand.bpm) {
         let diff = (a - b).abs();
@@ -185,12 +183,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
         }
     }
 
-    if let (Some(a), Some(b)) = (seed.energy, cand.energy) {
-        if (a - b).abs() <= 0.1 {
+    if let (Some(a), Some(b)) = (seed.energy, cand.energy)
+        && (a - b).abs() <= 0.1 {
             score += 0.08;
             tags.push(("energy_match", 0.08));
         }
-    }
 
     (score, tags)
 }
@@ -308,7 +305,7 @@ pub async fn refresh_seed_neighbors(
                 };
                 scored.push((*cand_id, (sim + bonus).clamp(0.0, 1.0), sim, tags));
                 idx += 1;
-                if idx % progress_step == 0 {
+                if idx.is_multiple_of(progress_step) {
                     let frac = (idx as f32 / total_cands).min(1.0);
                     send_progress_for_blocking("computing", 0.4 + frac * 0.4);
                 }

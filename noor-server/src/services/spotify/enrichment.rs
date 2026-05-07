@@ -348,7 +348,7 @@ where
         processed += 1;
         progress(processed, total);
 
-        if processed % 200 == 0 {
+        if processed.is_multiple_of(200) {
             info!(
                 "Spotify enrichment: {}/{} processed ({} tagged, {} retry-later)",
                 processed, total, tagged, transient_skips

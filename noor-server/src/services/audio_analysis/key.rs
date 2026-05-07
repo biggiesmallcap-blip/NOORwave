@@ -131,7 +131,7 @@ fn compute_pcp(samples: &[f32], sample_rate: u32) -> [f64; 12] {
         // Only use bins for C2-C7 range (approx 65-2093 Hz)
         for bin in 1..(FFT_SIZE / 2) {
             let freq = bin as f64 * sample_rate as f64 / FFT_SIZE as f64;
-            if freq < 65.0 || freq > 2100.0 {
+            if !(65.0..=2100.0).contains(&freq) {
                 continue;
             }
 

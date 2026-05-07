@@ -61,8 +61,7 @@ pub fn write_track_playcount(conn: &Connection, track: &SportifyTrack) {
         .as_ref()
         .and_then(|e| e.isrc.as_deref())
         .filter(|s| !s.is_empty())
-    {
-        if let Err(e) = conn.execute(
+        && let Err(e) = conn.execute(
             "INSERT INTO spotify_isrc_map (isrc, spotify_track_id, resolved_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(isrc) DO UPDATE SET
@@ -72,7 +71,6 @@ pub fn write_track_playcount(conn: &Connection, track: &SportifyTrack) {
         ) {
             tracing::warn!("spotify_isrc_map writeback for {} failed: {}", isrc, e);
         }
-    }
 }
 
 /// If the Sportify artist payload carries `monthly_listeners`, upsert it

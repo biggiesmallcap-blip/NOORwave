@@ -252,11 +252,10 @@ fn parse_usize_env(var: &str, default: usize) -> usize {
 
 fn resolve_bind_addr(db: &db::Database) -> String {
     // NOOR_ADDR env var always wins (power-user override)
-    if let Ok(addr) = std::env::var("NOOR_ADDR") {
-        if !addr.trim().is_empty() {
+    if let Ok(addr) = std::env::var("NOOR_ADDR")
+        && !addr.trim().is_empty() {
             return addr;
         }
-    }
     // --host flag forces 0.0.0.0
     if std::env::args().any(|a| a == "--host") {
         return "0.0.0.0:3334".to_string();
@@ -477,7 +476,7 @@ async fn main() -> Result<()> {
     let spotify_tokens: Option<services::spotify::auth::SpotifyTokens> = None;
 
     // Generate or load the server access token
-    let server_token = db.with_conn(|conn| db::queries::ensure_server_token(conn))?;
+    let server_token = db.with_conn(db::queries::ensure_server_token)?;
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("  NOOR access token: {}", server_token);
     info!("  Copy this into the app on any new device.");
@@ -557,7 +556,7 @@ async fn main() -> Result<()> {
         let state_read = state.read().await;
         let auto_sync_services = state_read
             .db
-            .with_conn(|conn| db::queries::get_auto_sync_services(conn))
+            .with_conn(db::queries::get_auto_sync_services)
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to query auto-sync services: {}", e);
                 vec![]

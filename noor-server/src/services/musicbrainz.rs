@@ -515,7 +515,7 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
             checked_skipped += 1;
             continue;
         };
-        checked_inserted += insert_checked.execute(params![track_id])? as usize;
+        checked_inserted += insert_checked.execute(params![track_id])?;
     }
 
     let mut genre_inserted = 0usize;
@@ -552,7 +552,7 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
             genre_skipped += 1;
             continue;
         };
-        genre_inserted += insert_genre.execute(params![track_id, genre_id, confidence])? as usize;
+        genre_inserted += insert_genre.execute(params![track_id, genre_id, confidence])?;
     }
     drop(insert_genre);
     drop(insert_checked);

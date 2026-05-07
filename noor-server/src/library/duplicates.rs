@@ -136,11 +136,10 @@ fn strip_ignorable_bracketed_segments(input: &str) -> String {
 
 fn strip_ignorable_suffix(input: &str) -> String {
     for separator in [" - ", " – ", " — "] {
-        if let Some((prefix, suffix)) = input.rsplit_once(separator) {
-            if is_ignorable_title_segment(suffix) {
+        if let Some((prefix, suffix)) = input.rsplit_once(separator)
+            && is_ignorable_title_segment(suffix) {
                 return prefix.trim().to_string();
             }
-        }
     }
 
     input.trim().to_string()

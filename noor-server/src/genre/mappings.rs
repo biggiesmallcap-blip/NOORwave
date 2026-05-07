@@ -251,17 +251,15 @@ impl GenreCatalog {
             return None;
         }
 
-        if let Some(canonical) = self.exact_lookup.get(&normalized) {
-            if let Some(m) = self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0) {
+        if let Some(canonical) = self.exact_lookup.get(&normalized)
+            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0) {
                 return Some(m);
             }
-        }
 
-        if let Some(canonical) = self.alias_lookup.get(&normalized) {
-            if let Some(m) = self.match_for_name(canonical, MatchKind::ExactAlias, 1.0) {
+        if let Some(canonical) = self.alias_lookup.get(&normalized)
+            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactAlias, 1.0) {
                 return Some(m);
             }
-        }
 
         self.best_fuzzy_match(&normalized)
     }
@@ -353,9 +351,7 @@ impl GenreCatalog {
 pub fn normalize_key(value: &str) -> String {
     let expanded = value.trim().to_ascii_lowercase().replace('&', " and ");
     let no_apostrophes = expanded
-        .replace('\'', "")
-        .replace('\u{2019}', "")
-        .replace('\u{2018}', "");
+        .replace(['\'', '\u{2019}', '\u{2018}'], "");
 
     no_apostrophes
         .chars()
@@ -385,7 +381,7 @@ pub fn slugify(value: &str) -> String {
 
 pub fn split_compound_terms(value: &str) -> Vec<&str> {
     value
-        .split(|ch| matches!(ch, ',' | ';' | '|' | '/'))
+        .split([',', ';', '|', '/'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect()

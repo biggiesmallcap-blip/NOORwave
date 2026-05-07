@@ -484,8 +484,8 @@ pub fn reconcile_after_track_delete(
     let mut stopped_playback = false;
     let mut new_current_track_id = current_track_id;
 
-    if let Some(ctid) = current_track_id {
-        if deleted_set.contains(&ctid) {
+    if let Some(ctid) = current_track_id
+        && deleted_set.contains(&ctid) {
             current_changed = true;
             if let Some((qid, tid, _)) = new_current_row.copied() {
                 tx.execute(
@@ -509,7 +509,6 @@ pub fn reconcile_after_track_delete(
                 new_current_track_id = None;
             }
         }
-    }
 
     if queue_changed {
         let surviving_ids: Vec<i64> = {
@@ -774,8 +773,8 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
     }
 
     // Nothing was playing — jump to the first item rather than doing nothing.
-    if current_index.is_none() {
-        if let Some(first_item) = queue_items.first() {
+    if current_index.is_none()
+        && let Some(first_item) = queue_items.first() {
             let new_track_id: Option<i64> = if first_item.track.id != 0 {
                 Some(first_item.track.id)
             } else {
@@ -790,7 +789,6 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
             )?;
             return load_snapshot(conn);
         }
-    }
 
     // Already at the start of the queue — just restart position.
     conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
@@ -966,8 +964,8 @@ fn build_automix_extension(
     needed: usize,
     use_learning: bool,
 ) -> Result<Vec<Track>> {
-    if use_learning {
-        if let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
+    if use_learning
+        && let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
             let excluded = queue_items
                 .iter()
                 .map(|item| item.track.id)
@@ -996,7 +994,6 @@ fn build_automix_extension(
                 }
             }
         }
-    }
 
     let session_profile = build_session_taste_profile(conn, current_track)?;
     let mut excluded_track_ids = queue_items
@@ -1308,7 +1305,7 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
             tracks
                 .iter()
                 .enumerate()
-                .position(|(i, t)| !visited[i] && t.album_id.map_or(true, |aid| aid != last_id))
+                .position(|(i, t)| !visited[i] && (t.album_id != Some(last_id)))
                 .unwrap_or_else(|| {
                     // Fallback: pick the first unvisited track.
                     tracks
@@ -1369,12 +1366,11 @@ fn automix_score(
         }
     }
 
-    if track.artist_id != 0 {
-        if let Some(affinity) = taste.artist_affinity.get(&track.artist_id) {
+    if track.artist_id != 0
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id) {
             score += affinity.pos * 0.5;
             score -= affinity.neg * 0.65;
         }
-    }
 
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
@@ -1401,11 +1397,10 @@ fn automix_score(
         );
 
         // Energy whiplash penalty.
-        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy) {
-            if (seed_energy - cand_energy).abs() > 0.5 {
+        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
+            && (seed_energy - cand_energy).abs() > 0.5 {
                 score *= 0.7;
             }
-        }
     }
 
     score.max(0.05)

@@ -19,11 +19,10 @@ pub fn ensure_server_token(conn: &Connection) -> Result<String> {
 
     // Keep the existing token only if it matches the current 6-digit PIN format.
     // Legacy hex/word-phrase tokens are auto-upgraded on next startup.
-    if let Some(token) = existing {
-        if is_valid_pin(&token) {
+    if let Some(token) = existing
+        && is_valid_pin(&token) {
             return Ok(token);
         }
-    }
 
     let token = generate_readable_token();
     conn.execute(
@@ -698,8 +697,7 @@ pub fn get_genres_for_tracks(
 
     // SQLite parameter limit is generous (default 999) but we keep the
     // CSV path predictable: one '?' per id, bound as int values.
-    let placeholders = std::iter::repeat("?")
-        .take(track_ids.len())
+    let placeholders = std::iter::repeat_n("?", track_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
@@ -2479,8 +2477,7 @@ fn aggregate_track_count(node: &Genre) -> i64 {
 }
 
 fn placeholders(count: usize) -> String {
-    std::iter::repeat("?")
-        .take(count)
+    std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(",")
 }

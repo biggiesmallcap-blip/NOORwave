@@ -259,7 +259,7 @@ fn build_profile(
             "Looking beyond your library with {} and leaning toward {} while steering away from recent repeats like {}.",
             request.prompt.trim(),
             list_or_fallback(
-                &prompt_genres.to_vec(),
+                prompt_genres,
                 &list_or_fallback(&top_genres, "broad genre lanes")
             ),
             list_or_fallback(&recent_tracks, "nothing too recent")
@@ -524,8 +524,8 @@ fn rank_candidates(
                 None
             };
 
-            if let Some(confidence) = candidate.discogs_confidence {
-                if confidence > 0.0
+            if let Some(confidence) = candidate.discogs_confidence
+                && confidence > 0.0
                     && (!candidate.discogs_styles.is_empty()
                         || !candidate.discogs_genres.is_empty())
                 {
@@ -537,7 +537,6 @@ fn rank_candidates(
                     score += discogs_bonus;
                     tags.push("discogs style".to_string());
                 }
-            }
 
             if recent_artist_penalty > 0.0 {
                 score -= recent_artist_penalty * taste_mesh.novelty_bias;
@@ -936,12 +935,11 @@ fn mood_mode_adjustment(
         adjustment.tags.push("generic artist".to_string());
     }
 
-    if let Some(duration_ms) = candidate.duration_ms {
-        if (240_000..=540_000).contains(&duration_ms) {
+    if let Some(duration_ms) = candidate.duration_ms
+        && (240_000..=540_000).contains(&duration_ms) {
             adjustment.score_delta += 4.0;
             adjustment.tags.push("immersive length".to_string());
         }
-    }
 
     if looks_mix_friendly(candidate) {
         adjustment.score_delta -= 8.0;

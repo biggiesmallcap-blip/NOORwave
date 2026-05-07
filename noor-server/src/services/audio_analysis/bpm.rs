@@ -85,11 +85,10 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
             *c += 0.5 * c2;
         }
         // Add contribution from bpm/2
-        if bpm % 2 == 0 {
-            if let Some(&c_half) = orig_corr.get(&(bpm / 2)) {
+        if bpm % 2 == 0
+            && let Some(&c_half) = orig_corr.get(&(bpm / 2)) {
                 *c += 0.5 * c_half;
             }
-        }
     }
 
     // Step 6: Gaussian prior centred at 120 BPM (sigma=30)
@@ -97,7 +96,7 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     let prior_sigma = 30.0f64;
     for (_, c) in &mut corr {
         let bpm = (*c).abs(); // use absolute for prior application
-        let prior = (-0.5 * ((bpm as f64 - prior_mean) / prior_sigma).powi(2)).exp();
+        let prior = (-0.5 * ((bpm - prior_mean) / prior_sigma).powi(2)).exp();
         *c *= prior;
     }
 

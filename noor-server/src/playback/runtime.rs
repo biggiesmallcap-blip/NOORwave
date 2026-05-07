@@ -894,8 +894,8 @@ fn transition_to_job(
         // If exclusive mode is currently engaged, swap the just-built cpal
         // shared stream over to the WASAPI exclusive backend so the user
         // doesn't silently get shared-mode output for every new track.
-        if state.current_exclusive {
-            if let Err(err) = eng.swap_stream(
+        if state.current_exclusive
+            && let Err(err) = eng.swap_stream(
                 device,
                 output_config,
                 output_sample_format,
@@ -909,7 +909,6 @@ fn transition_to_job(
                      falling back to shared mode"
                 );
             }
-        }
         eng
     };
 
@@ -2076,7 +2075,7 @@ fn adapt_channels(samples: &[f32], input_channels: usize, output_channels: usize
             }
             (1, channels) => {
                 let sample = frame[0];
-                output.extend(std::iter::repeat(sample).take(channels));
+                output.extend(std::iter::repeat_n(sample, channels));
             }
             _ => {
                 for channel in 0..output_channels {

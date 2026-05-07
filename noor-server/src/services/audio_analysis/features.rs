@@ -338,7 +338,7 @@ pub fn detect_instrumental(samples: &[f32], sample_rate: u32) -> Option<bool> {
             total_energy += power;
 
             // Vocal range: 300-3400 Hz
-            if freq >= 300.0 && freq <= 3400.0 {
+            if (300.0..=3400.0).contains(&freq) {
                 vocal_energy += power;
             }
         }
@@ -418,7 +418,7 @@ pub fn compute_danceability(
 
             total_energy += power;
 
-            if freq >= 20.0 && freq <= 250.0 {
+            if (20.0..=250.0).contains(&freq) {
                 bass_energy += power;
             }
         }

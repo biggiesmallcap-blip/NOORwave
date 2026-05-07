@@ -190,7 +190,7 @@ pub async fn start_training(
     // features depend on session_id and transition_from_track_id, so we do
     // this before the corpus build runs.
     if let Some(report) =
-        db.with_conn(|conn| crate::services::listen_history_backfill::run_if_needed(conn))?
+        db.with_conn(crate::services::listen_history_backfill::run_if_needed)?
     {
         tracing::info!(
             target: "noor.discovery.training",

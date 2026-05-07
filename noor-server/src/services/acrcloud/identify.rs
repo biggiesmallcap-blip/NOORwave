@@ -240,15 +240,12 @@ pub async fn identify_track(
                     return IdentifyResult::NoMatch;
                 }
             };
-            if data.status.code == 0 {
-                if let Some(meta) = data.metadata {
-                    if let Some(tracks) = meta.music {
-                        if let Some(track) = tracks.into_iter().next() {
+            if data.status.code == 0
+                && let Some(meta) = data.metadata
+                    && let Some(tracks) = meta.music
+                        && let Some(track) = tracks.into_iter().next() {
                             return IdentifyResult::Match(track);
                         }
-                    }
-                }
-            }
             IdentifyResult::NoMatch
         }
         Err(e) => {

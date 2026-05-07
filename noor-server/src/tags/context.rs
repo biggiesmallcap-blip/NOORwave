@@ -188,7 +188,7 @@ pub struct ClassifiedTag {
 }
 
 fn in_list(list: &[&str], tag: &str) -> bool {
-    list.iter().any(|&item| item == tag)
+    list.contains(&tag)
 }
 
 fn looks_like_era(tag: &str) -> bool {

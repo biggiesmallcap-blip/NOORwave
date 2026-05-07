@@ -57,7 +57,7 @@ impl LastFmClient {
     pub fn load(http: reqwest::Client, db: &crate::db::Database) -> Option<Self> {
         // 1. Try DB-stored credentials.
         let from_db = db
-            .with_conn(|conn| crate::services::lastfm::auth::load_credentials(conn))
+            .with_conn(crate::services::lastfm::auth::load_credentials)
             .ok()
             .flatten()
             .map(|c| c.api_key.trim().to_string())
@@ -387,7 +387,7 @@ impl LastFmClient {
             _ => "chart.gettoptracks",
         };
         let mut all_params = vec![("method", method.to_string())];
-        all_params.extend(params.into_iter().map(|(k, v)| (k, v)));
+        all_params.extend(params.into_iter());
 
         let payload = self.get_json(&all_params).await?;
         Ok(parse_chart_tracks(&payload, limit as usize))
@@ -714,14 +714,12 @@ pub(crate) fn parse_chart_tracks(payload: &Value, limit: usize) -> Vec<LastFmCha
                     for img in images {
                         let s = img.get("size").and_then(Value::as_str);
                         let url = img.get("#text").and_then(Value::as_str);
-                        if s == Some(size) {
-                            if let Some(u) = url {
-                                if !u.trim().is_empty() {
+                        if s == Some(size)
+                            && let Some(u) = url
+                                && !u.trim().is_empty() {
                                     candidate = Some(u);
                                     break;
                                 }
-                            }
-                        }
                     }
                     if candidate.is_some() {
                         break;

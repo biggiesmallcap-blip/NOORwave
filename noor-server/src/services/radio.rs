@@ -18,17 +18,14 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RadioBlend {
     Familiar,
+    #[default]
     Mixed,
     Adventurous,
 }
 
-impl Default for RadioBlend {
-    fn default() -> Self {
-        RadioBlend::Mixed
-    }
-}
 
 impl RadioBlend {
     /// Returns (library_weight, lastfm_weight, engine_weight) summing to 1.0.
@@ -937,11 +934,10 @@ fn normalize_source_scores(candidates: &mut [RadioCandidate]) {
 fn apply_confidence_penalty(candidates: &mut [RadioCandidate], min_confidence: f64) {
     const PENALTY_MULTIPLIER: f64 = 0.75;
     for cand in candidates.iter_mut() {
-        if let Some(conf) = cand.confidence {
-            if conf < min_confidence {
+        if let Some(conf) = cand.confidence
+            && conf < min_confidence {
                 cand.similarity_score *= PENALTY_MULTIPLIER;
             }
-        }
     }
 }
 
@@ -1229,11 +1225,10 @@ fn apply_genre_signals(
         };
 
         // Mode-based hard reject.
-        if let Some(threshold) = hard_reject_threshold {
-            if jaccard < threshold {
+        if let Some(threshold) = hard_reject_threshold
+            && jaccard < threshold {
                 return false;
             }
-        }
 
         // Multiplier per the locked Phase 2b formula.
         let bonus = jaccard * 0.30;
@@ -1361,19 +1356,16 @@ fn blend_interleave(
         let eng_behind = (eng_take as f64 - eng_done as f64) / eng_w.max(0.01);
 
         let pick = if lib_behind >= lfm_behind && lib_behind >= eng_behind {
-            lib_iter.next().map(|c| {
+            lib_iter.next().inspect(|c| {
                 lib_done += 1;
-                c
             })
         } else if lfm_behind >= eng_behind {
-            lfm_iter.next().map(|c| {
+            lfm_iter.next().inspect(|c| {
                 lfm_done += 1;
-                c
             })
         } else {
-            eng_iter.next().map(|c| {
+            eng_iter.next().inspect(|c| {
                 eng_done += 1;
-                c
             })
         };
 
@@ -1496,8 +1488,8 @@ fn score_candidate_for_slot(
         }
     }
 
-    if !drop_album && profile.same_album_penalty > 0.0 && weight > 0.0 {
-        if let Some(my_album) = cand.album_title.as_deref() {
+    if !drop_album && profile.same_album_penalty > 0.0 && weight > 0.0
+        && let Some(my_album) = cand.album_title.as_deref() {
             let lo = queue.len().saturating_sub(8);
             if queue[lo..].iter().any(|q| {
                 q.album_title
@@ -1509,10 +1501,9 @@ fn score_candidate_for_slot(
                 hits.album = true;
             }
         }
-    }
 
-    if !drop_genre && profile.genre_saturation_penalty > 0.0 && weight > 0.0 {
-        if let Some(my_genre) = primary_genres.get(&cand.track_id) {
+    if !drop_genre && profile.genre_saturation_penalty > 0.0 && weight > 0.0
+        && let Some(my_genre) = primary_genres.get(&cand.track_id) {
             let lo = queue.len().saturating_sub(10);
             let count = queue[lo..]
                 .iter()
@@ -1531,7 +1522,6 @@ fn score_candidate_for_slot(
                 hits.genre_saturation = true;
             }
         }
-    }
 
     (score, hits)
 }

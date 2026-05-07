@@ -245,7 +245,7 @@ pub async fn artist_related(
         .filter(|t| {
             // Same primary artist + not already in top tracks.
             primary_artist_matches(t, &artist_name)
-                && t.id.as_deref().map_or(true, |id| !top_ids.contains(id))
+                && t.id.as_deref().is_none_or(|id| !top_ids.contains(id))
         })
         .take(ROW_LIMIT)
         .collect();
@@ -271,7 +271,7 @@ pub async fn artist_related(
         .into_iter()
         .filter(|a| {
             // Drop the seed artist itself.
-            a.id.as_deref().map_or(true, |id| id != artist_id)
+            a.id.as_deref() != Some(artist_id)
         })
         .take(ROW_LIMIT)
         .collect();
@@ -328,7 +328,7 @@ pub async fn album_related(
         .into_iter()
         .filter(|t| {
             t.id.as_deref()
-                .map_or(true, |id| !album_track_ids.contains(id))
+                .is_none_or(|id| !album_track_ids.contains(id))
         })
         .take(ROW_LIMIT)
         .collect();
@@ -345,7 +345,7 @@ pub async fn album_related(
                 .and_then(|x| x.name.as_deref())
                 .map(|n| n.eq_ignore_ascii_case(artist_name.trim()))
                 .unwrap_or(false);
-            same_artist && a.id.as_deref().map_or(true, |id| id != album_id)
+            same_artist && (a.id.as_deref() != Some(album_id))
         })
         .collect();
     more_albums_by_artist.sort_by(|a, b| b.release_date.cmp(&a.release_date));

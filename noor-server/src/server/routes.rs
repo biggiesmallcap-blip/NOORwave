@@ -657,7 +657,7 @@ async fn regenerate_server_token_handler(
 ) -> Result<Json<Value>, StatusCode> {
     let new_token = {
         let s = state.read().await;
-        s.db.with_conn(|conn| crate::db::queries::regenerate_server_token(conn))
+        s.db.with_conn(crate::db::queries::regenerate_server_token)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     {
@@ -913,12 +913,10 @@ async fn get_artist_discography(
     // preserving the order of first appearance.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
-    for res in [albums_res, eps_res, comps_res, live_res] {
-        if let Ok(r) = res {
-            for item in r.items {
-                if seen.insert(item.id) {
-                    all_albums.push(item);
-                }
+    for r in [albums_res, eps_res, comps_res, live_res].into_iter().flatten() {
+        for item in r.items {
+            if seen.insert(item.id) {
+                all_albums.push(item);
             }
         }
     }
@@ -959,13 +957,12 @@ async fn get_artist_discography(
                         .album
                         .as_ref()
                         .and_then(|al| al.cover.as_ref())
-                        .map(|c| {
+                        .and_then(|c| {
                             crate::services::tidal::client::TidalClient::get_artwork_url(
                                 &Some(c.clone()),
                                 160,
                             )
-                        })
-                        .flatten();
+                        });
                     json!({
                         "tidal_id": t.id,
                         "title": t.title,
@@ -1070,13 +1067,12 @@ async fn get_tidal_album_tracks(
                 .album
                 .as_ref()
                 .and_then(|al| al.cover.as_ref())
-                .map(|c| {
+                .and_then(|c| {
                     crate::services::tidal::client::TidalClient::get_artwork_url(
                         &Some(c.clone()),
                         160,
                     )
-                })
-                .flatten();
+                });
             json!({
                 "tidal_id": t.id,
                 "title": t.title,
@@ -2161,7 +2157,7 @@ async fn start_discovery_training(
 
     // Guard: reject if a run is already in progress
     let already_running = db
-        .with_conn(|conn| queries::get_latest_training_run(conn))
+        .with_conn(queries::get_latest_training_run)
         .ok()
         .flatten()
         .map(|run| run.status == "running")
@@ -2563,7 +2559,7 @@ async fn get_radio_tracks(
     // Get computation timestamp
     let computed_at = state
         .db
-        .with_conn(|conn| queries::get_similarity_computed_at(conn))
+        .with_conn(queries::get_similarity_computed_at)
         .ok()
         .flatten();
 
@@ -2590,7 +2586,7 @@ async fn compute_radio_similarity(
     };
     tokio::spawn(async move {
         tracing::info!(target: "noor.radio", "Starting track similarity computation...");
-        match db.with_conn(|conn| queries::compute_track_similarity(conn)) {
+        match db.with_conn(queries::compute_track_similarity) {
             Ok(count) => {
                 tracing::info!(
                     target: "noor.radio",
@@ -2706,8 +2702,8 @@ async fn resolve_tidal_track(
         let unresolved = db
             .with_conn(|conn| sp_cache::get_unresolved(conn, spotify_id))
             .map_err(internal)?;
-        if let Some(record) = unresolved.as_ref() {
-            if sp_cache::unresolved_is_cold(record, &cache_cfg) {
+        if let Some(record) = unresolved.as_ref()
+            && sp_cache::unresolved_is_cold(record, &cache_cfg) {
                 return Ok(Json(json!({
                     "spotify_id": spotify_id,
                     "tidal": {
@@ -2721,7 +2717,6 @@ async fn resolve_tidal_track(
                     }
                 })));
             }
-        }
     }
 
     let sportify_track = match db
@@ -2880,8 +2875,8 @@ async fn resolve_tidal_bulk(
                     }));
                     continue;
                 }
-                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
-                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                if let Some(record) = sp_cache::get_unresolved(conn, id)?
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
                         unresolved_payload.push(json!({
                             "spotifyId": id,
                             "tidal": {
@@ -2895,7 +2890,6 @@ async fn resolve_tidal_bulk(
                         }));
                         continue;
                     }
-                }
             }
             needs_fetch.push(id.clone());
         }
@@ -3059,8 +3053,8 @@ async fn resolve_tidal_status(
                     }));
                     continue;
                 }
-                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
-                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                if let Some(record) = sp_cache::get_unresolved(conn, id)?
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
                         out.push(json!({
                             "spotifyId": id,
                             "tidal": {
@@ -3073,7 +3067,6 @@ async fn resolve_tidal_status(
                         }));
                         continue;
                     }
-                }
                 out.push(json!({
                     "spotifyId": id,
                     "tidal": {
@@ -3131,11 +3124,10 @@ async fn eager_and_lazy_resolve_for_list(
                 if sp_cache::get_tidal_resolution(conn, &cache_cfg, id)?.is_some() {
                     continue;
                 }
-                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
-                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                if let Some(record) = sp_cache::get_unresolved(conn, id)?
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
                         continue;
                     }
-                }
                 keep.push((id.clone(), track.clone()));
             }
             Ok::<_, anyhow::Error>(keep)
@@ -3235,11 +3227,10 @@ async fn spawn_background_resolve_for_list(
                 if sp_cache::get_tidal_resolution(conn, &cache_cfg, id)?.is_some() {
                     continue;
                 }
-                if let Some(record) = sp_cache::get_unresolved(conn, id)? {
-                    if sp_cache::unresolved_is_cold(&record, &cache_cfg) {
+                if let Some(record) = sp_cache::get_unresolved(conn, id)?
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
                         continue;
                     }
-                }
                 keep.push((id.clone(), track.clone()));
             }
             Ok::<_, anyhow::Error>(keep)
@@ -5334,15 +5325,14 @@ async fn start_first_radio_queue_item(
     };
 
     let mut play_track = snapshot.state.current_track.clone();
-    if play_track.is_none() {
-        if let Some(resolved) = resolve_pending_current_queue_item(state).await {
+    if play_track.is_none()
+        && let Some(resolved) = resolve_pending_current_queue_item(state).await {
             play_track = Some(resolved);
             let state_guard = state.read().await;
             if let Ok(reloaded) = state_guard.db.with_conn(player::load_snapshot) {
                 snapshot = reloaded;
             }
         }
-    }
 
     let end_reason = if play_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
@@ -6478,11 +6468,10 @@ async fn overlay_snapshot_with_external_track_and_position(
     // now that has no DB record.
     if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
         snapshot.state.current_track = Some(ephemeral.clone());
-    } else if snapshot.state.current_track.is_none() {
-        if let Some(track) = state_guard.external_playback_track.as_ref() {
+    } else if snapshot.state.current_track.is_none()
+        && let Some(track) = state_guard.external_playback_track.as_ref() {
             snapshot.state.current_track = Some(track.clone());
         }
-    }
     // Surface the pending TIDAL mix queue (auto-advance items behind the
     // currently-playing ephemeral track) into the visible queue so UP NEXT
     // shows the rest of the mix instead of "empty".
@@ -7217,10 +7206,9 @@ async fn resolve_duplicate_group(
             .await
             {
                 // If it looks like a session expiry, try to refresh and retry once.
-                if e.to_string().contains("401")
-                    || e.to_string().to_lowercase().contains("unauthorized")
-                {
-                    if let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await {
+                if (e.to_string().contains("401")
+                    || e.to_string().to_lowercase().contains("unauthorized"))
+                    && let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await {
                         if let Err(e2) = tidal_mutations::remove_favorite_track(
                             &http,
                             &refreshed.access_token,
@@ -7236,7 +7224,6 @@ async fn resolve_duplicate_group(
                         }
                         continue;
                     }
-                }
                 warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");
             }
         }
@@ -7971,19 +7958,18 @@ fn tidal_playback_error_response(
 }
 
 async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    if let Some(runtime_handle) = current_playback_runtime(&state).await {
-        if let Err(error) = runtime_handle.pause() {
+    if let Some(runtime_handle) = current_playback_runtime(&state).await
+        && let Err(error) = runtime_handle.pause() {
             let message = format!("Failed to pause host audio playback: {error}");
             report_playback_failure(&state, &message);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-    }
 
     let snapshot = {
         let state = state.read().await;
         state
             .db
-            .with_conn(|conn| player::pause(conn))
+            .with_conn(player::pause)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
@@ -7997,19 +7983,18 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
 }
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    if let Some(runtime_handle) = current_playback_runtime(&state).await {
-        if let Err(error) = runtime_handle.resume() {
+    if let Some(runtime_handle) = current_playback_runtime(&state).await
+        && let Err(error) = runtime_handle.resume() {
             let message = format!("Failed to resume host audio playback: {error}");
             report_playback_failure(&state, &message);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-    }
 
     let snapshot = {
         let state = state.read().await;
         state
             .db
-            .with_conn(|conn| player::resume(conn))
+            .with_conn(player::resume)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
@@ -8554,14 +8539,13 @@ async fn next_track(
             .iter()
             .filter(|q| q.position > current_pos && q.source == "automix-new")
             .count();
-        if new_upcoming < 2 {
-            if let Some(track) = snapshot.state.current_track.clone() {
+        if new_upcoming < 2
+            && let Some(track) = snapshot.state.current_track.clone() {
                 let bg_state = state.clone();
                 tokio::spawn(async move {
                     inject_discovery_tracks(&bg_state, &track).await;
                 });
             }
-        }
     }
 
     // A resolved pending track counts as Replaced, not QueueEnded.
@@ -8672,7 +8656,7 @@ async fn previous_track(
         let state = state.read().await;
         state
             .db
-            .with_conn(|conn| player::previous_track(conn))
+            .with_conn(player::previous_track)
             .map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -8700,7 +8684,7 @@ async fn previous_track(
                 None => {
                     if let Ok(prev_snapshot) = {
                         let s = state.read().await;
-                        s.db.with_conn(|conn| player::previous_track(conn))
+                        s.db.with_conn(player::previous_track)
                     } {
                         snapshot = prev_snapshot;
                     }
@@ -9220,8 +9204,8 @@ async fn replace_playback_queue(
                 None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
             };
             // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
-            if let Some(pending) = &payload.pending_candidates {
-                if !pending.is_empty() {
+            if let Some(pending) = &payload.pending_candidates
+                && !pending.is_empty() {
                     use crate::playback::queue::{PendingCandidate, append_pending_tracks};
                     let candidates: Vec<PendingCandidate> = pending
                         .iter()
@@ -9233,7 +9217,6 @@ async fn replace_playback_queue(
                         .collect();
                     append_pending_tracks(conn, &candidates)?;
                 }
-            }
             let final_queue = crate::playback::queue::load_queue(conn)?;
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
             Ok(Json(json!({ "queue": final_queue })))
@@ -9500,38 +9483,34 @@ async fn tidal_login(State(state): State<SharedState>) -> Result<Json<Value>, St
         s.tidal_login_cancel.clone()
     };
     tokio::spawn(async move {
-        loop {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                tracing::info!("TIDAL login polling cancelled (new login started)");
-                return;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!("TIDAL login polling cancelled (new login started)");
+            return;
+        }
+        match tidal_auth::poll_for_token(&http_clone, &device_code, interval).await {
+            Ok(tokens) => {
+                tracing::info!("TIDAL auth successful! User: {}", tokens.user_id);
+                // Persist tokens to DB so they survive restarts
+                {
+                    let s = state_clone.read().await;
+                    let _ = s.db.with_conn(|conn| {
+                        let token_json = serde_json::to_string(&tokens)?;
+                        conn.execute(
+                            "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
+                             VALUES ('tidal', ?1, ?2, datetime('now'))
+                             ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
+                             user_id=excluded.user_id, connected_at=excluded.connected_at",
+                            rusqlite::params![token_json.as_bytes(), tokens.user_id],
+                        )?;
+                        Ok(())
+                    });
+                }
+                let mut s = state_clone.write().await;
+                s.tidal_tokens = Some(tokens);
+                let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
             }
-            match tidal_auth::poll_for_token(&http_clone, &device_code, interval).await {
-                Ok(tokens) => {
-                    tracing::info!("TIDAL auth successful! User: {}", tokens.user_id);
-                    // Persist tokens to DB so they survive restarts
-                    {
-                        let s = state_clone.read().await;
-                        let _ = s.db.with_conn(|conn| {
-                            let token_json = serde_json::to_string(&tokens)?;
-                            conn.execute(
-                                "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
-                                 VALUES ('tidal', ?1, ?2, datetime('now'))
-                                 ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                                 user_id=excluded.user_id, connected_at=excluded.connected_at",
-                                rusqlite::params![token_json.as_bytes(), tokens.user_id],
-                            )?;
-                            Ok(())
-                        });
-                    }
-                    let mut s = state_clone.write().await;
-                    s.tidal_tokens = Some(tokens);
-                    let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
-                    return;
-                }
-                Err(e) => {
-                    tracing::error!("TIDAL polling failed: {}", e);
-                    return;
-                }
+            Err(e) => {
+                tracing::error!("TIDAL polling failed: {}", e);
             }
         }
     });
@@ -10806,7 +10785,7 @@ async fn tidal_sync_library(
             .tidal_tokens
             .clone()
             .or(persisted_tokens)
-            .ok_or_else(|| TidalSyncStartError::NotConnected)?;
+            .ok_or(TidalSyncStartError::NotConnected)?;
         (
             tokens,
             s.tidal_sync_running.clone(),
@@ -11001,7 +10980,7 @@ async fn do_tidal_sync(
         send_tidal_sync_progress(state, artist_progress).await;
         if resp
             .total_number_of_items
-            .map_or(true, |t| offset as i64 >= t)
+            .is_none_or(|t| offset as i64 >= t)
         {
             break;
         }
@@ -11098,7 +11077,7 @@ async fn do_tidal_sync(
         offset += resp.items.len() as i32;
         if resp
             .total_number_of_items
-            .map_or(true, |t| offset as i64 >= t)
+            .is_none_or(|t| offset as i64 >= t)
         {
             break;
         }
@@ -11156,7 +11135,7 @@ async fn do_tidal_sync(
         send_tidal_sync_progress(state, track_progress).await;
         if resp
             .total_number_of_items
-            .map_or(true, |t| offset as i64 >= t)
+            .is_none_or(|t| offset as i64 >= t)
         {
             break;
         }
@@ -11177,7 +11156,7 @@ async fn do_tidal_sync(
         playlist_offset += fetched;
         if resp
             .total_number_of_items
-            .map_or(true, |t| playlist_offset as i64 >= t)
+            .is_none_or(|t| playlist_offset as i64 >= t)
         {
             break;
         }
@@ -11237,7 +11216,7 @@ async fn do_tidal_sync(
                 track_offset += fetched;
                 if tracks_resp
                     .total_number_of_items
-                    .map_or(true, |t| track_offset as i64 >= t)
+                    .is_none_or(|t| track_offset as i64 >= t)
                 {
                     break;
                 }
@@ -11904,9 +11883,9 @@ async fn handle_near_end(
                     crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
                 })
                 .ok();
-            if let Some(settings) = audio_settings {
-                if settings.sample_rate_follow {
-                    if let Some(next_rate) = stream.sample_rate {
+            if let Some(settings) = audio_settings
+                && settings.sample_rate_follow
+                    && let Some(next_rate) = stream.sample_rate {
                         let current_rate = info.sample_rate;
                         if next_rate as u32 != current_rate {
                             let device_sel = match settings.output_device {
@@ -11929,8 +11908,6 @@ async fn handle_near_end(
                             }
                         }
                     }
-                }
-            }
         }
     }
 
@@ -12359,9 +12336,9 @@ async fn put_audio_settings(
             || old.exclusive_mode != saved.exclusive_mode
             || old.sample_rate_follow != saved.sample_rate_follow;
 
-        if needs_swap {
-            if let Some(runtime) = guard.playback_runtime.as_ref() {
-                if let Err(e) = runtime.handle.device_swap(
+        if needs_swap
+            && let Some(runtime) = guard.playback_runtime.as_ref()
+                && let Err(e) = runtime.handle.device_swap(
                     playback_runtime::OutputDeviceSelection::from_pref(
                         saved.output_device.as_deref(),
                     ),
@@ -12371,8 +12348,6 @@ async fn put_audio_settings(
                 ) {
                     warn!("Audio settings update: live device_swap failed: {e}");
                 }
-            }
-        }
 
         (old, saved)
     };
@@ -12381,11 +12356,10 @@ async fn put_audio_settings(
     // user immediately hears (and sees) the new tier. The track restarts from
     // 0; preserving position would require partial-stream offset support that
     // TIDAL's playbackinfo API doesn't expose.
-    if old.quality != new.quality {
-        if let Err(e) = reissue_current_track_at_new_quality(&state).await {
+    if old.quality != new.quality
+        && let Err(e) = reissue_current_track_at_new_quality(&state).await {
             warn!("Audio settings update: re-issue at new quality failed: {e}");
         }
-    }
 
     Ok(Json(new))
 }
@@ -12607,8 +12581,7 @@ async fn sync_session_after_snapshot(
     // when LASTFM_API_SECRET is unset, or when no session_key is stored.
     if let Some((artist, title, album, duration_ms, listened_ms, started_at_unix, source)) =
         scrobble_completed_payload
-    {
-        if !artist.is_empty() && !title.is_empty() {
+        && !artist.is_empty() && !title.is_empty() {
             crate::services::lastfm::scrobble::spawn_scrobble_completed(
                 state.clone(),
                 artist,
@@ -12620,9 +12593,8 @@ async fn sync_session_after_snapshot(
                 &source,
             );
         }
-    }
-    if let Some((artist, title, album, duration_ms, source)) = now_playing_payload {
-        if !artist.is_empty() && !title.is_empty() {
+    if let Some((artist, title, album, duration_ms, source)) = now_playing_payload
+        && !artist.is_empty() && !title.is_empty() {
             crate::services::lastfm::scrobble::spawn_now_playing(
                 state.clone(),
                 artist,
@@ -12632,7 +12604,6 @@ async fn sync_session_after_snapshot(
                 &source,
             );
         }
-    }
 }
 
 struct FlushOutcome {
@@ -12854,8 +12825,7 @@ fn apply_tidal_favorite_flags(
     sorted_ids.sort_unstable();
 
     for chunk in sorted_ids.chunks(800) {
-        let placeholders = std::iter::repeat("?")
-            .take(chunk.len())
+        let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(", ");
         let sql =
@@ -13950,7 +13920,7 @@ async fn get_audio_analysis_status(
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
     let analyzed =
-        s.db.with_conn(|conn| queries::count_audio_dsp_features(conn))
+        s.db.with_conn(queries::count_audio_dsp_features)
             .unwrap_or(0);
     Ok(Json(json!({
         "running": s.audio_analysis_running.load(std::sync::atomic::Ordering::Relaxed),
@@ -13974,7 +13944,7 @@ async fn get_audio_features_stats(
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
     let stats =
-        s.db.with_conn(|conn| queries::get_audio_features_stats(conn))
+        s.db.with_conn(queries::get_audio_features_stats)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "stats": stats })))
 }
@@ -14002,7 +13972,7 @@ async fn get_library_analytics(
 
 async fn reset_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    s.db.with_conn(|conn| queries::delete_all_audio_dsp_features(conn))
+    s.db.with_conn(queries::delete_all_audio_dsp_features)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "reset" })))
 }
@@ -14013,7 +13983,7 @@ async fn get_audio_features_quality(
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
     let q =
-        s.db.with_conn(|conn| queries::get_audio_features_quality(conn))
+        s.db.with_conn(queries::get_audio_features_quality)
             .map_err(|e| {
                 tracing::error!("audio-features/quality query failed: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -14043,7 +14013,7 @@ async fn reanalyze_stale_tracks(
     };
 
     let stale_ids = db
-        .with_conn(|conn| queries::get_stale_analysis_track_ids(conn))
+        .with_conn(queries::get_stale_analysis_track_ids)
         .map_err(|e| {
             tracing::error!("reanalyze-stale query failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -14224,11 +14194,10 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
             if is_unusable(entry.image_url.as_deref()) {
                 entry.image_url = Some(url.clone());
             }
-            if let Some(tp) = entry.tidal_playable.as_mut() {
-                if is_unusable(tp.artwork_url.as_deref()) {
+            if let Some(tp) = entry.tidal_playable.as_mut()
+                && is_unusable(tp.artwork_url.as_deref()) {
                     tp.artwork_url = Some(url);
                 }
-            }
         }
     }
 }
@@ -14243,8 +14212,7 @@ fn fetch_top_genres_for_tracks(
         return HashMap::new();
     }
     db.with_conn(|conn| {
-        let placeholders = std::iter::repeat("?")
-            .take(track_ids.len())
+        let placeholders = std::iter::repeat_n("?", track_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         // Pick the highest-confidence genre per track. Ties broken by

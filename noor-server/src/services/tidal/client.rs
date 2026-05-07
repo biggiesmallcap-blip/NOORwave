@@ -673,26 +673,24 @@ impl TidalClient {
         }
 
         // Shape 2 (older TIDAL): top-level items[]
-        if out.is_empty() {
-            if let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
+        if out.is_empty()
+            && let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
                 for item in items {
                     if let Some(mix) = Self::parse_mix_item(item) {
                         out.push(mix);
                     }
                 }
             }
-        }
 
         // Shape 3 (some regions): top-level mixes[]
-        if out.is_empty() {
-            if let Some(items) = payload.get("mixes").and_then(serde_json::Value::as_array) {
+        if out.is_empty()
+            && let Some(items) = payload.get("mixes").and_then(serde_json::Value::as_array) {
                 for item in items {
                     if let Some(mix) = Self::parse_mix_item(item) {
                         out.push(mix);
                     }
                 }
             }
-        }
 
         out
     }
@@ -763,11 +761,10 @@ impl TidalClient {
         if let Some(obj) = images.as_object() {
             // Prefer SQUARE > MEDIUM > LARGE > whatever-comes-first
             for key in ["SQUARE", "MEDIUM", "LARGE"] {
-                if let Some(v) = obj.get(key) {
-                    if let Some(u) = direct_url_or_image_id(v) {
+                if let Some(v) = obj.get(key)
+                    && let Some(u) = direct_url_or_image_id(v) {
                         return Some(u);
                     }
-                }
             }
             for v in obj.values() {
                 if let Some(u) = direct_url_or_image_id(v) {

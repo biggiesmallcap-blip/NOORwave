@@ -183,11 +183,10 @@ fn extract_dash_codec(xml: &str) -> String {
 
 fn parse_video_expiry(resp: &serde_json::Value) -> Option<DateTime<Utc>> {
     for key in ["expiresAt", "expires_at", "expirationDate", "expiration"] {
-        if let Some(raw) = resp.get(key).and_then(serde_json::Value::as_str) {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        if let Some(raw) = resp.get(key).and_then(serde_json::Value::as_str)
+            && let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
                 return Some(dt.with_timezone(&Utc));
             }
-        }
     }
     None
 }
@@ -346,7 +345,7 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
         .and_then(|m| m.as_str().parse::<u64>().ok())
     {
         let total_ts = (total_secs * timescale as f64).ceil() as u64;
-        ((total_ts + seg_dur - 1) / seg_dur) as usize
+        total_ts.div_ceil(seg_dur) as usize
     } else {
         S_ELEM_RE
             .captures_iter(xml)

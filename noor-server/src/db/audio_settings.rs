@@ -33,16 +33,13 @@ impl AudioQuality {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum VideoQualityMode {
+    #[default]
     Max,
     Auto,
 }
 
-impl Default for VideoQualityMode {
-    fn default() -> Self {
-        Self::Max
-    }
-}
 
 impl VideoQualityMode {
     pub fn as_str(&self) -> &'static str {
@@ -90,11 +87,10 @@ impl Default for AudioSettings {
 
 pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     let mut s = AudioSettings::default();
-    if let Some(v) = read_kv(conn, "audio.quality")? {
-        if let Some(q) = AudioQuality::from_tidal_str(&v) {
+    if let Some(v) = read_kv(conn, "audio.quality")?
+        && let Some(q) = AudioQuality::from_tidal_str(&v) {
             s.quality = q;
         }
-    }
     if let Some(v) = read_kv(conn, "audio.output_device")? {
         s.output_device = if v == "default" { None } else { Some(v) };
     }
@@ -104,11 +100,10 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     if let Some(v) = read_kv(conn, "audio.sample_rate_follow")? {
         s.sample_rate_follow = v == "true";
     }
-    if let Some(v) = read_kv(conn, "video.quality_mode")? {
-        if let Some(mode) = VideoQualityMode::from_str(&v) {
+    if let Some(v) = read_kv(conn, "video.quality_mode")?
+        && let Some(mode) = VideoQualityMode::from_str(&v) {
             s.video_quality_mode = mode;
         }
-    }
     Ok(s)
 }
 

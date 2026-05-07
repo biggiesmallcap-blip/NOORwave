@@ -229,7 +229,7 @@ pub fn record_fingerprint_duplicate_pairs(
 /// Run PRAGMA optimize + ANALYZE fingerprint_hashes after a bulk scan to keep
 /// the SQLite query planner healthy. Failures are logged but non-fatal.
 pub fn optimize_after_bulk_scan(db: &Database) {
-    if let Err(e) = db.with_conn(|conn| queries::optimize_fingerprint_hashes(conn)) {
+    if let Err(e) = db.with_conn(queries::optimize_fingerprint_hashes) {
         tracing::warn!("PRAGMA optimize / ANALYZE fingerprint_hashes failed: {}", e);
     }
 }
