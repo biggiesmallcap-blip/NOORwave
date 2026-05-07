@@ -13,6 +13,7 @@
 	import DiscoverLegend from '$lib/components/DiscoverSpace/DiscoverLegend.svelte';
 	import DiscoverLensControl from '$lib/components/DiscoverSpace/DiscoverLensControl.svelte';
 	import DiscoverTrainingStrip from '$lib/components/DiscoverSpace/DiscoverTrainingStrip.svelte';
+	import DiscoverHelp from '$lib/components/DiscoverSpace/DiscoverHelp.svelte';
 	import type { DiscoverTrackNode, RadioMode } from '$lib/components/DiscoverSpace/discover_space_types';
 	import { PAGE_TITLE, PAGE_SUBTITLE, SEARCH_PLACEHOLDER, EMPTY_STATE } from '$lib/components/DiscoverSpace/discover_space_story';
 
@@ -146,6 +147,7 @@
 				{isSearching ? '⟳' : '⤑'}
 			</button>
 		</form>
+		<DiscoverHelp />
 	</div>
 
 	<!-- Seed pill -->
