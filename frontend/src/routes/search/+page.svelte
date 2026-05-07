@@ -216,14 +216,35 @@
             tidalOffset = SEARCH_PAGE_SIZE
             // Cached page may already cap a category — assume more exists; the
             // next load-more attempt will discover the truth and flip the flag.
+            // Playlist results aren't cached alongside Tidal tracks — fetch them.
+            const [tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
+              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
+            ])
+            tidalPlaylistResults = tidalPlRes.status === 'fulfilled' ? tidalPlRes.value.playlists : []
+            spotifyPlaylistResults = spotifyPlRes.status === 'fulfilled' ? spotifyPlRes.value : []
+            tidalPlaylistOffset = tidalPlaylistResults.length
+            spotifyPlaylistOffset = spotifyPlaylistResults.length
+            if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+            if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
           } else {
-            const fresh = await api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0)
+            // Fan out all three upstream searches at once. Tidal-track is
+            // required (no fallback rendering without it); the two playlist
+            // lookups are best-effort and degrade to empty arrays.
+            const [tracksRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+              api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0),
+              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
+              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
+            ])
+
+            if (tracksRes.status !== 'fulfilled') {
+              throw tracksRes.reason
+            }
+            const fresh = tracksRes.value
             results = fresh
             resultCache.set(cacheKey, fresh)
             if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
             tidalOffset = SEARCH_PAGE_SIZE
-            // If the initial page came back short for ALL three categories,
-            // there's nothing left to load.
             if (
               fresh.tracks.length < SEARCH_PAGE_SIZE &&
               fresh.albums.length < SEARCH_PAGE_SIZE &&
@@ -231,20 +252,14 @@
             ) {
               hasMoreTidal = false
             }
+
+            tidalPlaylistResults = tidalPlRes.status === 'fulfilled' ? tidalPlRes.value.playlists : []
+            spotifyPlaylistResults = spotifyPlRes.status === 'fulfilled' ? spotifyPlRes.value : []
+            tidalPlaylistOffset = tidalPlaylistResults.length
+            spotifyPlaylistOffset = spotifyPlaylistResults.length
+            if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+            if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
           }
-          // TIDAL + Spotify playlist searches run in parallel. Either one
-          // failing leaves the other intact — Sportify is upstream and may
-          // break, but that should never block local + TIDAL results.
-          const [tidalRes, spotifyRes] = await Promise.allSettled([
-            api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
-            api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
-          ])
-          tidalPlaylistResults = tidalRes.status === 'fulfilled' ? tidalRes.value.playlists : []
-          spotifyPlaylistResults = spotifyRes.status === 'fulfilled' ? spotifyRes.value : []
-          tidalPlaylistOffset = tidalPlaylistResults.length
-          spotifyPlaylistOffset = spotifyPlaylistResults.length
-          if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
-          if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
         }
         error = null
         pushRecent(q)
