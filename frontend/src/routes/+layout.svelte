@@ -1848,6 +1848,10 @@
 		display: grid;
 		grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--panel-width);
 		overflow: hidden;
+		/* Force own compositor layer; works around a wry/WKWebView hit-testing
+		   quirk on macOS where buttons in the windowed shell stay unclickable
+		   until the window enters native fullscreen. */
+		transform: translateZ(0);
 		background:
 			radial-gradient(circle at 8% 6%, var(--atlas-haze-a), transparent 34%),
 			radial-gradient(circle at 90% 10%, var(--atlas-haze-b), transparent 28%),
