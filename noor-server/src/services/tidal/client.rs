@@ -82,7 +82,7 @@ pub struct TidalArtist {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchTrack {
     pub id: i64,
     pub title: String,
@@ -98,7 +98,7 @@ pub struct TidalSearchTrack {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchAlbum {
     pub id: i64,
     pub title: String,
@@ -108,7 +108,7 @@ pub struct TidalSearchAlbum {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchArtist {
     pub id: i64,
     pub name: String,
@@ -117,7 +117,7 @@ pub struct TidalSearchArtist {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchVideo {
     pub id: i64,
     pub title: String,
@@ -132,7 +132,7 @@ pub struct TidalSearchVideo {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchCatalog {
     pub tracks: Vec<TidalSearchTrack>,
     pub albums: Vec<TidalSearchAlbum>,
