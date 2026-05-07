@@ -1575,6 +1575,22 @@ pub fn get_auto_sync_services(conn: &Connection) -> Result<Vec<String>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// True if `service` has a recorded `last_sync_at` within `window_secs`.
+/// Used by the boot-time auto-sync to honour the "daily" promise instead of
+/// running on every server start.
+pub fn sync_within_window(conn: &Connection, service: &str, window_secs: i64) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sync_metadata
+         WHERE service = ?1
+           AND last_sync_at IS NOT NULL
+           AND last_sync_at != ''
+           AND (strftime('%s','now') - strftime('%s', last_sync_at)) < ?2",
+        rusqlite::params![service, window_secs],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 // ─── Genre Co-Occurrence (co-listening pairs) ────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2134,6 +2150,14 @@ fn to_fts_query(input: &str) -> String {
 }
 
 fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<Vec<Track>> {
+    // Positional ORDER BY (17/18/16/2) instead of named columns: SQLite rejects
+    // bare column names in compound-SELECT (UNION) ORDER BY when the SELECTs
+    // contain JOINs, with "1st ORDER BY term does not match any column in the
+    // result set". Positional indices sidestep the resolver entirely. Mapping:
+    //   2  = t.title
+    //   16 = t.fidelity_score
+    //   17 = t.is_favorite
+    //   18 = t.play_count
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
@@ -2158,7 +2182,7 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
          LEFT JOIN albums al ON t.album_id = al.id
          JOIN artists_fts ON artists_fts.rowid = t.artist_id
          WHERE artists_fts MATCH ?1
-         ORDER BY is_favorite DESC, play_count DESC, fidelity_score DESC, title ASC
+         ORDER BY 17 DESC, 18 DESC, 16 DESC, 2 ASC
          LIMIT ?2",
     )?;
     stmt.query_map(params![fts_query, limit], track_from_row)?
@@ -4668,6 +4692,39 @@ mod tests {
         let r2 = search_with_audio_filters(&conn, "love - remix", &AudioFilters::default(), 50)
             .expect("'love - remix' must not error");
         assert!(r2.iter().any(|r| r.id == 8002), "expected 'Love Remix' to match; got ids {:?}", r2.iter().map(|r| r.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn global_search_tracks_fts_does_not_error_on_artist_match() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        // Setup designed to exercise the artists_fts UNION arm: track title
+        // contains nothing of the query, but the artist name does.
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'The Cure')", []).expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (1, 'Disintegration', 1, 'tidal')",
+            [],
+        )
+        .expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES (1, 'Pictures of You', 1, 1, 420000, 101, 'LOSSLESS', 'tidal', 10, 1, 'tidal', 0)",
+            [],
+        )
+        .expect("track");
+
+        // Calls search_tracks_fts directly so the LIKE fallback in search() can't
+        // mask an FTS-side error. If the UNION+ORDER-BY SQL is broken, this errors.
+        let tracks = search_tracks_fts(&conn, "the* cure*", 10)
+            .expect("search_tracks_fts must run without SQL errors");
+        let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
+        assert!(
+            titles.contains(&"Pictures of You"),
+            "FTS path should return the track via artists_fts arm; got {titles:?}"
+        );
     }
 
     #[test]
