@@ -126,7 +126,7 @@ pub fn artist_spread_shuffle_with_rng<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<Track> {
     let mut buckets = bucket_tracks_by_artist(tracks);
-    distribute_buckets(&mut buckets, rng, BucketConstraint::AvoidSameKey)
+    distribute_buckets(&mut buckets, rng)
 }
 
 pub fn genre_shuffle(tracks: &[Track], track_genres: &HashMap<i64, Vec<String>>) -> Vec<Track> {
@@ -140,7 +140,7 @@ pub fn genre_shuffle_with_rng<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<Track> {
     let mut buckets = bucket_tracks_by_genre(tracks, track_genres);
-    let genre_spread = distribute_buckets(&mut buckets, rng, BucketConstraint::AvoidSameKey);
+    let genre_spread = distribute_buckets(&mut buckets, rng);
     let artist_spread = artist_spread_shuffle_with_rng(&genre_spread, rng);
     stabilize_adjacent_keys(artist_spread, |track| {
         track_genres
@@ -158,16 +158,7 @@ fn fisher_yates_shuffle<R: Rng + ?Sized>(tracks: &mut [Track], rng: &mut R) {
     }
 }
 
-#[derive(Clone, Copy)]
-enum BucketConstraint {
-    AvoidSameKey,
-}
-
-fn distribute_buckets<R: Rng + ?Sized>(
-    buckets: &mut [Bucket],
-    rng: &mut R,
-    constraint: BucketConstraint,
-) -> Vec<Track> {
+fn distribute_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut R) -> Vec<Track> {
     for bucket in buckets.iter_mut() {
         let slice = bucket.tracks.make_contiguous();
         slice.shuffle(rng);
@@ -183,9 +174,7 @@ fn distribute_buckets<R: Rng + ?Sized>(
     let mut last_key: Option<String> = None;
 
     while sequence.len() < total {
-        let next_index = pick_bucket_index(buckets, last_key.as_deref(), constraint);
-
-        let Some(index) = next_index else {
+        let Some(index) = pick_bucket_index(buckets, last_key.as_deref(), rng) else {
             break;
         };
 
@@ -198,32 +187,46 @@ fn distribute_buckets<R: Rng + ?Sized>(
     sequence
 }
 
-fn pick_bucket_index(
+/// Pick the next bucket to drain. Eligible buckets (non-empty, key != last_key)
+/// are sampled in proportion to their remaining track count — large buckets get
+/// picked more often without being deterministic, so the queue isn't always led
+/// by the dominant key. Falls back to any non-empty bucket when no other key
+/// has tracks left.
+fn pick_bucket_index<R: Rng + ?Sized>(
     buckets: &[Bucket],
     last_key: Option<&str>,
-    _constraint: BucketConstraint,
+    rng: &mut R,
 ) -> Option<usize> {
-    let mut preferred: Option<usize> = None;
+    let mut total_weight: usize = 0;
+    let mut eligible: Vec<(usize, usize)> = Vec::new();
     let mut fallback: Option<usize> = None;
 
     for (index, bucket) in buckets.iter().enumerate() {
         if bucket.tracks.is_empty() {
             continue;
         }
-
         if fallback.is_none() {
             fallback = Some(index);
         }
-
         if last_key != Some(bucket.key.as_str()) {
-            match preferred {
-                Some(current) if buckets[current].tracks.len() >= bucket.tracks.len() => {}
-                _ => preferred = Some(index),
-            }
+            total_weight += bucket.tracks.len();
+            eligible.push((index, bucket.tracks.len()));
         }
     }
 
-    preferred.or(fallback)
+    if total_weight == 0 {
+        return fallback;
+    }
+
+    let mut threshold = rng.gen_range(0..total_weight);
+    for (index, weight) in &eligible {
+        if threshold < *weight {
+            return Some(*index);
+        }
+        threshold -= *weight;
+    }
+    // Defensive: numerical fall-through (shouldn't be reachable when total_weight > 0).
+    eligible.first().map(|(i, _)| *i).or(fallback)
 }
 
 fn bucket_tracks_by_artist(tracks: &[Track]) -> Vec<Bucket> {
@@ -287,6 +290,11 @@ fn normalize_bucket_key(value: &str) -> String {
     }
 }
 
+/// Forward-pass swap to break same-key adjacency, iterated to a fixed point
+/// (capped at 4 passes). A single pass can leave new same-key pairs behind
+/// when a swap target sits next to its own same-key neighbour; iterating lets
+/// the next pass mop those up. Same-key tail runs with no different-key track
+/// anywhere ahead are unfixable by forward swap and are left in place.
 fn stabilize_adjacent_keys<F>(mut tracks: Vec<Track>, key_fn: F) -> Vec<Track>
 where
     F: Fn(&Track) -> String,
@@ -295,18 +303,25 @@ where
         return tracks;
     }
 
-    for idx in 1..tracks.len() {
-        let previous_key = key_fn(&tracks[idx - 1]);
-        let current_key = key_fn(&tracks[idx]);
-        if previous_key != current_key {
-            continue;
-        }
+    for _ in 0..4 {
+        let mut changed = false;
+        for idx in 1..tracks.len() {
+            let previous_key = key_fn(&tracks[idx - 1]);
+            let current_key = key_fn(&tracks[idx]);
+            if previous_key != current_key {
+                continue;
+            }
 
-        if let Some(swap_idx) = ((idx + 1)..tracks.len()).find(|candidate_idx| {
-            let candidate_key = key_fn(&tracks[*candidate_idx]);
-            candidate_key != previous_key
-        }) {
-            tracks.swap(idx, swap_idx);
+            if let Some(swap_idx) = ((idx + 1)..tracks.len()).find(|candidate_idx| {
+                let candidate_key = key_fn(&tracks[*candidate_idx]);
+                candidate_key != previous_key
+            }) {
+                tracks.swap(idx, swap_idx);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -407,6 +422,72 @@ mod tests {
         for pair in shuffled.windows(2) {
             assert_ne!(pair[0].artist_id, pair[1].artist_id);
         }
+    }
+
+    #[test]
+    fn pick_bucket_does_not_always_lead_with_dominant_key() {
+        // Library skewed heavily to one genre. The greedy "pick largest" rule
+        // would always lead with that genre's track; weighted random picking
+        // should sometimes start elsewhere even when one bucket is largest.
+        let tracks: Vec<Track> = (1..=10)
+            .map(|id| track(id, id, "art", false, 1, None, 10))
+            .collect();
+        let mut genres = HashMap::new();
+        for id in 1..=8 {
+            genres.insert(id, vec!["House".to_string()]);
+        }
+        for id in 9..=10 {
+            genres.insert(id, vec!["Ambient".to_string()]);
+        }
+
+        let mut leading_genre_counts = std::collections::HashMap::new();
+        for seed in 0u64..200 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let shuffled = genre_shuffle_with_rng(&tracks, &genres, &mut rng);
+            let leader = genres
+                .get(&shuffled[0].id)
+                .and_then(|g| g.first())
+                .cloned()
+                .unwrap_or_default();
+            *leading_genre_counts.entry(leader).or_insert(0u32) += 1;
+        }
+        let ambient_leads = leading_genre_counts.get("Ambient").copied().unwrap_or(0);
+        assert!(
+            ambient_leads >= 5,
+            "Ambient should occasionally lead even when smaller — got {ambient_leads}/200"
+        );
+    }
+
+    #[test]
+    fn stabilize_iterates_to_fixed_point() {
+        // Construct an arrangement where a single forward pass leaves new
+        // same-key pairs behind. tracks: keys A B A A A B B, with track ids
+        // chosen so key_fn maps cleanly.
+        let tracks = vec![
+            track(1, 1, "A", false, 1, None, 10), // A
+            track(2, 2, "B", false, 1, None, 10), // B
+            track(3, 1, "A", false, 1, None, 10), // A
+            track(4, 1, "A", false, 1, None, 10), // A
+            track(5, 1, "A", false, 1, None, 10), // A
+            track(6, 2, "B", false, 1, None, 10), // B
+            track(7, 2, "B", false, 1, None, 10), // B
+        ];
+        let key_fn = |t: &Track| t.artist_name.clone().unwrap_or_default();
+        let stabilized = stabilize_adjacent_keys(tracks, key_fn.clone());
+
+        let keys: Vec<String> = stabilized.iter().map(key_fn).collect();
+        // A valid arrangement of 4×A + 3×B has at most one same-A adjacency
+        // (e.g. A B A B A B A). Our fixed-point iteration should reach that
+        // shape; before the fix, the single pass left two A-A adjacencies.
+        let same_pairs = keys
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .count();
+        assert!(
+            same_pairs <= 1,
+            "expected at most one same-key adjacency in {:?}, got {same_pairs}",
+            keys
+        );
     }
 
     #[test]
