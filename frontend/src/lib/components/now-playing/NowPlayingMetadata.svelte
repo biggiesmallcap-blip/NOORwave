@@ -88,13 +88,15 @@
 		{#if nowPlayingAttribution}
 			<p class="np-source">{nowPlayingAttribution}</p>
 		{/if}
-		{#if streamDetail}
-			<p class="np-stream-detail">{streamDetail}</p>
-		{/if}
 	</div>
 
 	{#if showStateBadge}
-		<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+		<div class="badge-row">
+			<StateBadge label={isScrubbing ? 'Scrubbing' : playerState} tone={track ? 'active' : 'muted'} compact={stateBadgeCompact} />
+			{#if streamDetail}
+				<span class="stream-micro">{streamDetail}</span>
+			{/if}
+		</div>
 	{/if}
 </div>
 
@@ -159,13 +161,20 @@
 		font-size: 0.8rem;
 	}
 
-	.np-stream-detail {
-		font-size: 0.7rem;
+	.badge-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.stream-micro {
+		font-size: 0.68rem;
 		color: var(--text-secondary);
-		opacity: 0.6;
+		opacity: 0.55;
 		font-variant-numeric: tabular-nums;
-		letter-spacing: 0.02em;
-		margin-top: 0.1rem;
+		letter-spacing: 0.025em;
+		white-space: nowrap;
 	}
 
 	.np-source {

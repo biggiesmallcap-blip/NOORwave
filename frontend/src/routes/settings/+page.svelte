@@ -53,6 +53,7 @@
 	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { audioSettings } from '$lib/stores/audio_settings';
+	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
@@ -1027,6 +1028,30 @@
 		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
 	}
 
+	function onExclusiveGraceChange(e: Event) {
+		const v = parseInt((e.target as HTMLInputElement).value, 10);
+		if (Number.isFinite(v)) {
+			void audioSettings.patch({ exclusive_release_grace_secs: v });
+		}
+	}
+
+	let retryingExclusive = $state(false);
+	async function retryExclusive() {
+		retryingExclusive = true;
+		try {
+			await api.retryAudioExclusive();
+		} catch {
+			// Server-side errors surface as ws audio_exclusive_failed events;
+			// the banner stays red. No extra UI needed here.
+		} finally {
+			retryingExclusive = false;
+		}
+	}
+
+	function disableExclusive() {
+		void audioSettings.patch({ exclusive_mode: false });
+	}
+
 	// "Bit-perfect mode" is the audiophile defaults flipped on at once: max
 	// available quality from Tidal, exclusive WASAPI grab so the OS mixer is
 	// out of the path, and sample-rate-follow so the device runs at the FLAC's
@@ -1728,9 +1753,64 @@
 								</strong>
 							</div>
 							<p class="page-copy" style="font-size:0.8rem">
-								When on, no other app can use this device while NOORwave is playing.
-								Crossfade and gapless pre-decode are disabled — exclusive mode
-								holds the device with a single stream.
+								Engaged only while audio plays. Releases the device after the
+								idle window below so other apps can use it; re-grabs on next play.
+								Crossfade and gapless pre-decode are disabled in exclusive mode.
+							</p>
+							{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
+								<div
+									class="exclusive-failed-banner"
+									role="alert"
+									style="margin: 0.6rem 0; padding: 0.85rem 1rem; border: 2px solid #ef4444; border-left-width: 6px; background: rgba(239, 68, 68, 0.12); color: #fecaca; border-radius: 6px;"
+								>
+									<strong style="display: block; margin-bottom: 0.25rem; color: #fff; letter-spacing: 0.02em;">
+										Exclusive mode unavailable
+									</strong>
+									<span style="font-size: 0.85rem; line-height: 1.4;">
+										{$exclusiveStatus.failureReason} Audio is currently routed
+										through Windows shared mixing.
+									</span>
+									<div style="margin-top: 0.6rem; display: flex; gap: 0.5rem;">
+										<button
+											type="button"
+											class="btn btn-primary"
+											style="padding: 0.35rem 0.9rem;"
+											disabled={retryingExclusive}
+											onclick={retryExclusive}
+										>
+											{retryingExclusive ? 'Retrying…' : 'Retry'}
+										</button>
+										<button
+											type="button"
+											class="btn"
+											style="padding: 0.35rem 0.9rem;"
+											onclick={disableExclusive}
+										>
+											Disable exclusive
+										</button>
+									</div>
+								</div>
+							{/if}
+							<div class="info-row">
+								<span>Idle release</span>
+								<strong>
+									<input
+										type="range"
+										min="5"
+										max="120"
+										step="5"
+										value={s.exclusive_release_grace_secs}
+										oninput={onExclusiveGraceChange}
+										style="vertical-align: middle; width: 140px;"
+									/>
+									<span style="margin-left: 0.5rem; font-variant-numeric: tabular-nums;">
+										{s.exclusive_release_grace_secs}s
+									</span>
+								</strong>
+							</div>
+							<p class="page-copy" style="font-size:0.8rem">
+								Seconds of pause / silence before NOORwave releases the device
+								for other apps. Lower = friendlier; higher = sticks around.
 							</p>
 						{/if}
 						<div class="info-row">

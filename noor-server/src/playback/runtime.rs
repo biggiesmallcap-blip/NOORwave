@@ -93,6 +93,10 @@ pub enum PlaybackRuntimeCommand {
         exclusive: bool,
         sample_rate_follow: bool,
         desired_sample_rate: Option<u32>,
+        /// Idle-release grace seconds for the WASAPI exclusive render thread.
+        /// Read from `AudioSettings::exclusive_release_grace_secs` by the route
+        /// layer. Ignored when `exclusive` is false.
+        exclusive_release_grace_secs: u32,
     },
     Shutdown,
 }
@@ -174,6 +178,22 @@ pub enum PlaybackRuntimeEvent {
     Error {
         message: String,
     },
+    /// WASAPI exclusive grab succeeded. Frontend clears any stale "failure"
+    /// banner and shows engaged state.
+    ExclusiveModeEngaged {
+        device_name: String,
+    },
+    /// WASAPI exclusive grab failed; runtime fell back to cpal shared so the
+    /// user still hears audio. `reason` is a human-readable explanation.
+    ExclusiveModeFailed {
+        reason: String,
+        device_name: String,
+    },
+    /// WASAPI exclusive render thread released the device after grace timeout.
+    /// Frontend clears engaged state. Runtime will re-grab on next Resume/Play.
+    ExclusiveModeReleased {
+        device_name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -217,18 +237,22 @@ impl PlaybackRuntimeHandle {
     /// across any active engines. Used by the audio settings PUT route and track
     /// transitions when sample_rate_follow is enabled. Optional desired_sample_rate
     /// allows specifying an exact target (e.g. next track's native rate).
+    /// `exclusive_release_grace_secs` is the idle-release grace window for the
+    /// WASAPI exclusive render thread (ignored unless `exclusive` is true).
     pub fn device_swap(
         &self,
         device: OutputDeviceSelection,
         exclusive: bool,
         sample_rate_follow: bool,
         desired_sample_rate: Option<u32>,
+        exclusive_release_grace_secs: u32,
     ) -> Result<()> {
         self.send(PlaybackRuntimeCommand::DeviceSwap {
             device,
             exclusive,
             sample_rate_follow,
             desired_sample_rate,
+            exclusive_release_grace_secs,
         })
     }
 
@@ -355,6 +379,10 @@ struct PlaybackRuntimeLoopState {
     current_sample_rate_follow: bool,
     /// Last-known device selection for cold-started engines.
     current_device_selection: OutputDeviceSelection,
+    /// Last-known idle-release grace seconds for the WASAPI exclusive render
+    /// thread. Used when re-grabbing exclusive on Resume/Play after the render
+    /// thread released the device, and when cold-starting new engines.
+    current_exclusive_release_grace_secs: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -434,6 +462,8 @@ fn run_runtime_loop(
         current_exclusive: false,
         current_sample_rate_follow: false,
         current_device_selection: OutputDeviceSelection::Default,
+        current_exclusive_release_grace_secs:
+            crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -608,6 +638,32 @@ fn run_runtime_loop(
                 }
             }
             PlaybackRuntimeCommand::Resume => {
+                // On-demand re-grab: if exclusive mode is on and the active
+                // engine's WASAPI stream self-released after idle, rebuild it
+                // BEFORE unpausing so the decoder doesn't push samples into a
+                // missing stream. swap_stream handles its own cpal-shared
+                // fallback if the re-grab now fails (e.g. another app grabbed
+                // exclusive while we were paused).
+                if state.current_exclusive
+                    && let Some(engine) = state.engine.as_mut()
+                    && engine.needs_stream_rebuild()
+                {
+                    info!(
+                        "Resume: rebuilding exclusive stream after idle release on {}",
+                        state.device_name
+                    );
+                    let _ = engine.swap_stream(
+                        &device,
+                        &output_config,
+                        output_sample_format,
+                        command_tx.clone(),
+                        event_tx.clone(),
+                        true,
+                        None,
+                        state.current_exclusive_release_grace_secs,
+                    );
+                }
+
                 if let Some(engine) = state.engine.as_mut() {
                     engine.resume()?;
                     let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
@@ -688,6 +744,7 @@ fn run_runtime_loop(
                 exclusive,
                 sample_rate_follow,
                 desired_sample_rate,
+                exclusive_release_grace_secs,
             } => {
                 // `exclusive` is honored as of Task 5 (Windows-only low-latency
                 // buffer + dedicated code path; full ShareMode::Exclusive is a
@@ -750,7 +807,10 @@ fn run_runtime_loop(
                 }
 
                 // Rebuild the stream on every live engine so they all play on
-                // the new device.
+                // the new device. swap_stream now transparently falls back to
+                // cpal shared on exclusive failure (and emits an
+                // ExclusiveModeFailed event), so a hard error here is rare —
+                // typically only a cpal shared build failure.
                 let mut swap_failed = false;
                 for engine_slot in [
                     state.engine.as_mut(),
@@ -768,6 +828,7 @@ fn run_runtime_loop(
                         event_tx.clone(),
                         exclusive,
                         desired_rate,
+                        exclusive_release_grace_secs,
                     ) {
                         warn!(
                             "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
@@ -797,6 +858,7 @@ fn run_runtime_loop(
                 state.current_exclusive = exclusive;
                 state.current_sample_rate_follow = sample_rate_follow;
                 state.current_device_selection = selection;
+                state.current_exclusive_release_grace_secs = exclusive_release_grace_secs;
 
                 let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
                     device_name: new_name,
@@ -894,6 +956,8 @@ fn transition_to_job(
         // If exclusive mode is currently engaged, swap the just-built cpal
         // shared stream over to the WASAPI exclusive backend so the user
         // doesn't silently get shared-mode output for every new track.
+        // swap_stream itself handles the fallback-to-cpal + event emission
+        // when the WASAPI grab fails, so a hard error here is rare.
         if state.current_exclusive
             && let Err(err) = eng.swap_stream(
                 device,
@@ -903,10 +967,10 @@ fn transition_to_job(
                 event_tx.clone(),
                 true,
                 None,
+                state.current_exclusive_release_grace_secs,
             ) {
                 warn!(
-                    "transition_to_job: failed to engage exclusive mode for new engine: {err:?}; \
-                     falling back to shared mode"
+                    "transition_to_job: swap_stream errored cold-starting new engine: {err:?}"
                 );
             }
         eng
@@ -1111,6 +1175,18 @@ impl PlaybackEngine {
         Ok(())
     }
 
+    /// True iff the engine's output stream is gone OR an exclusive WASAPI
+    /// stream has self-released after idle. Used by the runtime to know it
+    /// needs to call `swap_stream` to rebuild the stream before unpausing.
+    fn needs_stream_rebuild(&self) -> bool {
+        match self.stream.as_ref() {
+            None => true,
+            #[cfg(target_os = "windows")]
+            Some(OutputStream::Wasapi(s)) => s.is_released(),
+            Some(_) => false,
+        }
+    }
+
     fn stop(&mut self) {
         self.shared.stopped.store(true, Ordering::SeqCst);
         self.shared.paused.store(true, Ordering::SeqCst);
@@ -1134,6 +1210,14 @@ impl PlaybackEngine {
     /// new cpal stream at the new rate (a brief pitch glitch across the swap
     /// boundary is acceptable per the spec). When `None`, both the cpal stream
     /// and the decoder keep their existing rate.
+    /// Swap the output stream. When `exclusive` is true and the WASAPI grab
+    /// fails (device held by another exclusive app, exclusive disabled in
+    /// Windows, etc.), this method **transparently falls back to a cpal shared
+    /// stream** so the user keeps hearing audio, and emits an
+    /// `ExclusiveModeFailed` event so the UI can show a red-pill banner.
+    ///
+    /// Successful exclusive grabs emit `ExclusiveModeEngaged`. Plain shared
+    /// builds emit nothing.
     #[allow(clippy::too_many_arguments)]
     fn swap_stream(
         &mut self,
@@ -1144,6 +1228,8 @@ impl PlaybackEngine {
         event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
         exclusive: bool,
         desired_sample_rate: Option<u32>,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+        exclusive_release_grace_secs: u32,
     ) -> Result<()> {
         // Pause first so the decoder side doesn't keep filling while the
         // callback is gone, then drop the old stream before building the new
@@ -1165,18 +1251,48 @@ impl PlaybackEngine {
                 .store(effective_config.sample_rate.0, Ordering::Relaxed);
         }
 
+        let device_label = device
+            .name()
+            .unwrap_or_else(|_| "default output device".to_string());
+
         #[cfg(target_os = "windows")]
         let new_stream = if exclusive {
             let device_name = device.name().ok();
-            let exclusive_stream = crate::playback::wasapi_exclusive::build_exclusive_stream(
+            match crate::playback::wasapi_exclusive::build_exclusive_stream(
                 device_name.as_deref(),
+                device_label.clone(),
                 effective_config.sample_rate.0,
                 effective_config.channels,
+                exclusive_release_grace_secs,
                 Arc::clone(&self.shared),
-                command_tx,
-                event_tx,
-            )?;
-            OutputStream::Wasapi(exclusive_stream)
+                command_tx.clone(),
+                event_tx.clone(),
+            ) {
+                Ok(exclusive_stream) => {
+                    let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                        device_name: device_label.clone(),
+                    });
+                    OutputStream::Wasapi(exclusive_stream)
+                }
+                Err(failure) => {
+                    let reason = failure.user_message();
+                    warn!(
+                        "WASAPI exclusive grab failed; falling back to cpal shared: {reason}"
+                    );
+                    let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
+                        reason,
+                        device_name: device_label.clone(),
+                    });
+                    OutputStream::Cpal(build_output_stream(
+                        device,
+                        &effective_config,
+                        output_sample_format,
+                        Arc::clone(&self.shared),
+                        command_tx,
+                        event_tx,
+                    )?)
+                }
+            }
         } else {
             OutputStream::Cpal(build_output_stream(
                 device,
@@ -1190,6 +1306,7 @@ impl PlaybackEngine {
         #[cfg(not(target_os = "windows"))]
         let new_stream = {
             let _ = exclusive;
+            let _ = device_label;
             OutputStream::Cpal(build_output_stream(
                 device,
                 &effective_config,
@@ -1486,7 +1603,7 @@ pub(crate) struct PlaybackSharedState {
     track_id: i64,
     generation: u64,
     source_kind: PlaybackSourceKind,
-    paused: AtomicBool,
+    pub(crate) paused: AtomicBool,
     stopped: AtomicBool,
     buffer: Mutex<PlaybackBuffer>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,

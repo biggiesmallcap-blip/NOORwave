@@ -6,6 +6,8 @@ import { handleTrainingProgress, handleTrainingComplete } from '$lib/stores/trai
 import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audio_analysis';
 import { handleAcrCloudProgress, handleAcrCloudComplete } from '$lib/stores/acrcloud';
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
+import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
+import { showToast } from '$lib/stores/toast';
 
 export const wsConnected = writable(false);
 
@@ -26,7 +28,10 @@ export type WsMessage =
 	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
 	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number }
 	| { type: 'discovery_space_refresh_progress'; seed_track_id: number; stage: string; progress: number }
-	| { type: 'discovery_space_refreshed'; seed_track_id: number };
+	| { type: 'discovery_space_refreshed'; seed_track_id: number }
+	| { type: 'audio_exclusive_engaged'; device: string }
+	| { type: 'audio_exclusive_failed'; device: string; reason: string }
+	| { type: 'audio_exclusive_released'; device: string };
 
 export const wsMessages = writable<WsMessage[]>([]);
 
@@ -121,6 +126,19 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'discovery_space_refreshed') {
 				handleDiscoverySpaceRefreshed(data.seed_track_id);
+			}
+			if (data?.type === 'audio_exclusive_engaged') {
+				setExclusiveEngaged(data.device ?? '');
+			}
+			if (data?.type === 'audio_exclusive_failed') {
+				setExclusiveFailed(data.device ?? '', data.reason ?? 'Exclusive mode unavailable');
+				// One transient toast on the failure transition so the user notices
+				// even if they're not on the settings page. The persistent banner on
+				// settings carries the rest of the message.
+				showToast(`Exclusive mode unavailable: ${data.reason ?? 'unknown reason'}`, 'error', 8000);
+			}
+			if (data?.type === 'audio_exclusive_released') {
+				setExclusiveReleased(data.device ?? '');
 			}
 		} catch {}
 	};

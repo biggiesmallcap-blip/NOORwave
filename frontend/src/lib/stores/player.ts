@@ -4,6 +4,7 @@ import {
 	ApiError,
 	type AudioDspFeatures,
 	type PendingCandidateInfo,
+	type PlaybackRuntimeInfo,
 	type PlaybackSnapshot,
 	type PlaybackState,
 	type QueueItem,
@@ -11,6 +12,7 @@ import {
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
+import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { showToast, dismissToast } from '$lib/stores/toast';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
@@ -26,6 +28,7 @@ export const currentTrack = writable<Track | null>(null);
 export const currentQueueItemId = writable<number | null>(null);
 export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
 export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
+export const playbackRuntimeInfo = writable<PlaybackRuntimeInfo | null>(null);
 
 // ─── Error model ──────────────────────────────────────────────────────────────
 // `playerError` holds a friendly message + optional retry callback. The layout
@@ -101,6 +104,16 @@ export async function refreshPlaybackRuntime() {
 	try {
 		const result = await api.getPlaybackRuntime();
 		currentStreamDisplay.set(result.stream ?? null);
+		playbackRuntimeInfo.set(result.runtime ?? null);
+		// Sync exclusive status store so the pill shows correctly after page load
+		// without waiting for the next WS exclusive event.
+		if (result.runtime) {
+			if (result.runtime.exclusive_engaged) {
+				setExclusiveEngaged(result.runtime.device_name);
+			} else {
+				setExclusiveReleased(result.runtime.device_name ?? '');
+			}
+		}
 		noteSuccess();
 	} catch {
 		// non-critical — playback still works without live stream info

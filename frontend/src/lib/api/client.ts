@@ -573,6 +573,7 @@ export interface PlaybackRuntimeInfo {
 	channels: number;
 	active_track_id: number | null;
 	last_error: string | null;
+	exclusive_engaged: boolean;
 }
 
 export interface StreamDisplayInfo {
@@ -1145,6 +1146,8 @@ export interface AudioSettings {
 	exclusive_mode: boolean;
 	sample_rate_follow: boolean;
 	video_quality_mode: VideoQualityMode;
+	/** Seconds of paused state before WASAPI exclusive releases the device. Server clamps 5..=120. */
+	exclusive_release_grace_secs: number;
 }
 
 async function fetchApiResponse(
@@ -2201,6 +2204,12 @@ export const api = {
 		return fetchApi<AudioSettings>('/api/audio/settings', undefined, {
 			method: 'PUT',
 			body: JSON.stringify(settings),
+		});
+	},
+
+	retryAudioExclusive(): Promise<{ ok: boolean }> {
+		return fetchApi<{ ok: boolean }>('/api/audio/exclusive/retry', undefined, {
+			method: 'POST',
 		});
 	},
 

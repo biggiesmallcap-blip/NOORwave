@@ -4,7 +4,6 @@
 	import { api, authFetch, getApiBase, type AudioQuality } from '$lib/api/client';
 	import TidalConnect from '$lib/components/onboarding/TidalConnect.svelte';
 	import LastfmConnect from '$lib/components/onboarding/LastfmConnect.svelte';
-
 	let step = $state(0);
 	let tidalConnected = $state(false);
 	let syncErrorMessage = $state('');

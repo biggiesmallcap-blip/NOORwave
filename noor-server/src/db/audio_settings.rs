@@ -62,6 +62,21 @@ fn default_video_quality_mode() -> VideoQualityMode {
     VideoQualityMode::default()
 }
 
+pub const DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 30;
+pub const MIN_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 5;
+pub const MAX_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 120;
+
+fn default_exclusive_release_grace_secs() -> u32 {
+    DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS
+}
+
+pub fn clamp_exclusive_release_grace_secs(v: u32) -> u32 {
+    v.clamp(
+        MIN_EXCLUSIVE_RELEASE_GRACE_SECS,
+        MAX_EXCLUSIVE_RELEASE_GRACE_SECS,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioSettings {
     pub quality: AudioQuality,
@@ -71,6 +86,12 @@ pub struct AudioSettings {
     pub sample_rate_follow: bool,
     #[serde(default = "default_video_quality_mode")]
     pub video_quality_mode: VideoQualityMode,
+    /// Seconds of continuous silence (paused / no audio) before the exclusive
+    /// WASAPI render thread releases the device so other apps can use it. On
+    /// next playback the runtime re-grabs exclusive automatically. Clamped to
+    /// 5..=120 by the setter route.
+    #[serde(default = "default_exclusive_release_grace_secs")]
+    pub exclusive_release_grace_secs: u32,
 }
 
 impl Default for AudioSettings {
@@ -81,6 +102,7 @@ impl Default for AudioSettings {
             exclusive_mode: false,
             sample_rate_follow: false,
             video_quality_mode: VideoQualityMode::Max,
+            exclusive_release_grace_secs: DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         }
     }
 }
@@ -103,6 +125,10 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     if let Some(v) = read_kv(conn, "video.quality_mode")?
         && let Some(mode) = VideoQualityMode::from_str(&v) {
             s.video_quality_mode = mode;
+        }
+    if let Some(v) = read_kv(conn, "audio.exclusive_release_grace_secs")?
+        && let Ok(parsed) = v.parse::<u32>() {
+            s.exclusive_release_grace_secs = clamp_exclusive_release_grace_secs(parsed);
         }
     Ok(s)
 }
@@ -129,6 +155,11 @@ pub fn save(conn: &Connection, s: &AudioSettings) -> rusqlite::Result<()> {
         },
     )?;
     write_kv(conn, "video.quality_mode", s.video_quality_mode.as_str())?;
+    write_kv(
+        conn,
+        "audio.exclusive_release_grace_secs",
+        &clamp_exclusive_release_grace_secs(s.exclusive_release_grace_secs).to_string(),
+    )?;
     Ok(())
 }
 
@@ -184,6 +215,7 @@ mod tests {
             exclusive_mode: true,
             sample_rate_follow: true,
             video_quality_mode: VideoQualityMode::Auto,
+            exclusive_release_grace_secs: 60,
         };
         save(&conn, &want).unwrap();
         let got = load(&conn).unwrap();
@@ -200,9 +232,27 @@ mod tests {
             exclusive_mode: true,
             sample_rate_follow: false,
             video_quality_mode: VideoQualityMode::Max,
+            exclusive_release_grace_secs: 90,
         };
         save(&conn, &updated).unwrap();
         assert_eq!(load(&conn).unwrap(), updated);
+    }
+
+    #[test]
+    fn grace_secs_is_clamped_on_load() {
+        let conn = fresh_conn();
+        write_kv(&conn, "audio.exclusive_release_grace_secs", "999").unwrap();
+        let s = load(&conn).unwrap();
+        assert_eq!(
+            s.exclusive_release_grace_secs,
+            MAX_EXCLUSIVE_RELEASE_GRACE_SECS
+        );
+        write_kv(&conn, "audio.exclusive_release_grace_secs", "0").unwrap();
+        let s = load(&conn).unwrap();
+        assert_eq!(
+            s.exclusive_release_grace_secs,
+            MIN_EXCLUSIVE_RELEASE_GRACE_SECS
+        );
     }
 
     #[test]

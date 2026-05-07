@@ -115,6 +115,19 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "discovery_space_refreshed",
                         "seed_track_id": seed_track_id,
                     }),
+                    AppEvent::AudioExclusiveEngaged { device } => json!({
+                        "type": "audio_exclusive_engaged",
+                        "device": device,
+                    }),
+                    AppEvent::AudioExclusiveFailed { device, reason } => json!({
+                        "type": "audio_exclusive_failed",
+                        "device": device,
+                        "reason": reason,
+                    }),
+                    AppEvent::AudioExclusiveReleased { device } => json!({
+                        "type": "audio_exclusive_released",
+                        "device": device,
+                    }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;

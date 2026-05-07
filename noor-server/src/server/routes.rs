@@ -513,6 +513,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/audio/settings",
             get(get_audio_settings).put(put_audio_settings),
         )
+        .route(
+            "/api/audio/exclusive/retry",
+            post(post_audio_exclusive_retry),
+        )
         // Search
         .route("/api/search", get(search))
         .route("/api/search/audio", post(search_audio))
@@ -7519,6 +7523,7 @@ async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<V
             "channels": info.channels,
             "active_track_id": info.active_track_id,
             "last_error": info.last_error,
+            "exclusive_engaged": info.exclusive_engaged,
         })
     });
     let stream = state.current_stream_display.as_ref().map(|d| {
@@ -11807,12 +11812,18 @@ fn spawn_playback_runtime_listener(
                         .playback_runtime_info
                         .as_ref()
                         .and_then(|info| info.last_error.clone());
+                    let prev_exclusive = state_guard
+                        .playback_runtime_info
+                        .as_ref()
+                        .map(|i| i.exclusive_engaged)
+                        .unwrap_or(false);
                     state_guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
                         device_name,
                         sample_rate,
                         channels,
                         active_track_id: None,
                         last_error,
+                        exclusive_engaged: prev_exclusive,
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Started {
@@ -11866,6 +11877,39 @@ fn spawn_playback_runtime_listener(
                     if let Err(err) = handle_near_end(state.clone(), track_id, generation).await {
                         warn!("Failed to pre-buffer next track: {err:?}");
                     }
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged { device_name }) => {
+                    let mut state_guard = state.write().await;
+                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                        info.exclusive_engaged = true;
+                    }
+                    let _ = state_guard
+                        .event_tx
+                        .send(AppEvent::AudioExclusiveEngaged { device: device_name });
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                    reason,
+                    device_name,
+                }) => {
+                    let mut state_guard = state.write().await;
+                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                        info.exclusive_engaged = false;
+                    }
+                    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveFailed {
+                        device: device_name,
+                        reason,
+                    });
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                    device_name,
+                }) => {
+                    let mut state_guard = state.write().await;
+                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                        info.exclusive_engaged = false;
+                    }
+                    let _ = state_guard
+                        .event_tx
+                        .send(AppEvent::AudioExclusiveReleased { device: device_name });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");
@@ -12013,6 +12057,7 @@ async fn handle_near_end(
                                 settings.exclusive_mode,
                                 settings.sample_rate_follow,
                                 Some(next_rate as u32),
+                                settings.exclusive_release_grace_secs,
                             ) {
                                 warn!(
                                     "Failed to rebuild stream for next track {} at {} Hz: {e}",
@@ -12436,6 +12481,7 @@ async fn align_device_to_stream_rate(
         settings.exclusive_mode,
         settings.sample_rate_follow,
         Some(next_rate),
+        settings.exclusive_release_grace_secs,
     ) {
         warn!(
             "align_device_to_stream_rate: device_swap to {next_rate} Hz (from {current_rate} Hz) failed: {e}"
@@ -12448,6 +12494,53 @@ async fn align_device_to_stream_rate(
 // `GET /api/audio/devices`     — enumerate cpal output devices
 // `GET /api/audio/settings`    — current persisted AudioSettings
 // `PUT /api/audio/settings`    — persist + (if device/exclusive/SR-follow changed) live-swap
+// `POST /api/audio/exclusive/retry` — force a fresh DeviceSwap to retry exclusive grab
+
+/// Re-issue the active output device's `DeviceSwap` so the runtime tries to
+/// grab WASAPI exclusive again. Used by the "Retry" button on the red-pill
+/// banner after the user has closed the blocking app.
+async fn post_audio_exclusive_retry(
+    State(state): State<SharedState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let guard = state.read().await;
+    let settings = guard
+        .db
+        .with_conn(|conn| {
+            crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+        })?;
+
+    if !settings.exclusive_mode {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "exclusive_mode is off; nothing to retry"
+            })),
+        ));
+    }
+
+    if let Some(runtime) = guard.playback_runtime.as_ref()
+        && let Err(e) = runtime.handle.device_swap(
+            playback_runtime::OutputDeviceSelection::from_pref(settings.output_device.as_deref()),
+            settings.exclusive_mode,
+            settings.sample_rate_follow,
+            None,
+            settings.exclusive_release_grace_secs,
+        )
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": e.to_string() })),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
 
 async fn get_audio_devices(
     State(_state): State<SharedState>,
@@ -12473,7 +12566,7 @@ async fn get_audio_settings(
 /// footgun.
 async fn put_audio_settings(
     State(state): State<SharedState>,
-    Json(new): Json<crate::db::audio_settings::AudioSettings>,
+    Json(mut new): Json<crate::db::audio_settings::AudioSettings>,
 ) -> Result<Json<crate::db::audio_settings::AudioSettings>, (StatusCode, Json<serde_json::Value>)> {
     // Reject exclusive_mode on non-Windows.
     if new.exclusive_mode && !cfg!(target_os = "windows") {
@@ -12484,6 +12577,12 @@ async fn put_audio_settings(
             })),
         ));
     }
+    // Clamp the user-facing grace setting so a malformed PUT can't disable
+    // exclusive entirely (0) or wedge the device for an absurd duration.
+    new.exclusive_release_grace_secs =
+        crate::db::audio_settings::clamp_exclusive_release_grace_secs(
+            new.exclusive_release_grace_secs,
+        );
 
     let (old, new) = {
         let guard = state.read().await;
@@ -12502,9 +12601,14 @@ async fn put_audio_settings(
             })?;
 
         // Live-apply iff anything affecting the output stream changed.
+        // Grace-secs change is included so an active exclusive render thread
+        // gets the new value next time it's re-grabbed (the running thread's
+        // grace_secs is captured at construction; a swap rebuilds with the
+        // new value).
         let needs_swap = old.output_device != saved.output_device
             || old.exclusive_mode != saved.exclusive_mode
-            || old.sample_rate_follow != saved.sample_rate_follow;
+            || old.sample_rate_follow != saved.sample_rate_follow
+            || old.exclusive_release_grace_secs != saved.exclusive_release_grace_secs;
 
         if needs_swap
             && let Some(runtime) = guard.playback_runtime.as_ref()
@@ -12515,6 +12619,7 @@ async fn put_audio_settings(
                     saved.exclusive_mode,
                     saved.sample_rate_follow,
                     None,
+                    saved.exclusive_release_grace_secs,
                 ) {
                     warn!("Audio settings update: live device_swap failed: {e}");
                 }

@@ -30,6 +30,7 @@ pub struct PlaybackRuntimeInfo {
     pub channels: u16,
     pub active_track_id: Option<i64>,
     pub last_error: Option<String>,
+    pub exclusive_engaged: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +236,21 @@ pub enum AppEvent {
     },
     DiscoverySpaceRefreshed {
         seed_track_id: i64,
+    },
+    /// WASAPI exclusive grab succeeded on the audio engine.
+    AudioExclusiveEngaged {
+        device: String,
+    },
+    /// WASAPI exclusive grab failed; runtime fell back to cpal shared. The
+    /// `reason` is human-readable and surfaced in the settings red-pill banner.
+    AudioExclusiveFailed {
+        device: String,
+        reason: String,
+    },
+    /// WASAPI exclusive render thread released the device after idle. Audio
+    /// engine is currently shared until the next Resume / Play re-grabs.
+    AudioExclusiveReleased {
+        device: String,
     },
 }
 
