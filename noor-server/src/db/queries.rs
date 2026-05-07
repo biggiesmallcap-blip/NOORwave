@@ -4439,6 +4439,268 @@ mod tests {
         let count = get_track_count(&conn, false, false).expect("all count");
         assert_eq!(count, 3);
     }
+
+    // ─── FTS-first library search tests ──────────────────────────────────────
+
+    #[test]
+    fn library_search_multi_token_and_within_column_non_contiguous() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        // FTS5 AND-prefix semantics: tokens must all appear in the same indexed
+        // column, but NOT necessarily contiguously and NOT necessarily in order.
+        //   1001 — title "The Long Strokes": both tokens present, non-contiguous.
+        //          (Today's LIKE on "the strokes" would MISS this — substring fail.)
+        //   1002 — title "The Anthem": only "the". Missing "strokes". Should NOT match.
+        //   1003 — title "Strokes": only "strokes". Missing "the". Should NOT match.
+        conn.execute("INSERT INTO artists (id, name) VALUES (1001, 'Test')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (1001, 'Plain', 1001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (1001, 'The Long Strokes', 1001, 1001, 200000, 1001, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (1002, 'The Anthem',       1001, 1001, 200000, 1002, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (1003, 'Strokes',          1001, 1001, 200000, 1003, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+
+        let results = search_with_audio_filters(
+            &conn,
+            "the strokes",
+            &AudioFilters::default(),
+            50,
+        )
+        .expect("library search");
+
+        let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1001], "expected only 1001 (both tokens in title, non-contiguous); got {ids:?}");
+    }
+
+    #[test]
+    fn library_search_returns_track_when_album_title_matches() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (2001, 'Frank Ocean')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (2001, 'Blonde', 2001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES (2001, 'Pink + White', 2001, 2001, 200000, 2001, 'LOSSLESS', 'tidal', 8, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("track");
+
+        let results = search_with_audio_filters(&conn, "blonde", &AudioFilters::default(), 50).expect("search");
+        let titles: Vec<&str> = results.iter().map(|r| r.title.as_str()).collect();
+        assert!(
+            titles.contains(&"Pink + White"),
+            "expected 'Pink + White' (album 'Blonde' matches); got {titles:?}"
+        );
+    }
+
+    #[test]
+    fn library_search_audio_filter_composes_with_text() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (3001, 'Miles Davis')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (3001, 'Kind of Blue', 3001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (3001, 'So What (fast)', 3001, 3001, 540000, 3001, 'LOSSLESS', 'tidal', 9, 0, 'tidal', 0),
+                (3002, 'Blue in Green',  3001, 3001, 330000, 3002, 'LOSSLESS', 'tidal', 9, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, bpm) VALUES (3001, 120.0), (3002, 80.0)",
+            [],
+        )
+        .expect("dsp features");
+
+        let filters = AudioFilters { bpm_min: Some(100.0), ..Default::default() };
+
+        let results = search_with_audio_filters(&conn, "miles", &filters, 50).expect("search");
+        let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![3001], "expected only the 120-BPM track; got {ids:?}");
+    }
+
+    #[test]
+    fn library_search_empty_query_with_filters_returns_filtered_set() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (4001, 'Test')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (4001, 'A', 4001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (4001, 'Fast', 4001, 4001, 200000, 4001, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (4002, 'Slow', 4001, 4001, 200000, 4002, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, bpm) VALUES (4001, 130.0), (4002, 70.0)",
+            [],
+        )
+        .expect("dsp");
+
+        let filters = AudioFilters { bpm_min: Some(120.0), ..Default::default() };
+
+        let results = search_with_audio_filters(&conn, "", &filters, 50).expect("search");
+        let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![4001]);
+    }
+
+    #[test]
+    fn library_search_empty_query_no_filters_respects_limit() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (5001, 'A')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (5001, 'A', 5001, 'tidal')", []).expect("album");
+        for i in 0..5 {
+            let id = 5001 + i;
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                        fidelity_score, is_favorite, source, play_count
+                     ) VALUES ({id}, 'T{i}', 5001, 5001, 200000, {id}, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)"
+                ),
+                [],
+            )
+            .expect("track");
+        }
+
+        let results = search_with_audio_filters(&conn, "", &AudioFilters::default(), 3).expect("search");
+        assert_eq!(results.len(), 3, "expected limit=3 to cap results");
+    }
+
+    #[test]
+    fn library_search_favorites_lead_over_play_count() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (6001, 'Miles Davis')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (6001, 'Kind of Blue', 6001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (6001, 'Miles A', 6001, 6001, 200000, 6001, 'LOSSLESS', 'tidal', 5, 1, 'tidal', 0),
+                (6002, 'Miles B', 6001, 6001, 200000, 6002, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 1000)",
+            [],
+        )
+        .expect("tracks");
+
+        // Old ordering (play_count DESC, last_played_at DESC) → B leads.
+        // New ordering (is_favorite DESC, ...) → A leads.
+        let results = search_with_audio_filters(&conn, "miles", &AudioFilters::default(), 50).expect("search");
+        let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids.first(), Some(&6001), "favorited track should lead despite zero plays; got {ids:?}");
+    }
+
+    #[test]
+    fn library_search_non_track_track_type_returns_empty() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (7001, 'Anyone')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (7001, 'Anything', 7001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES (7001, 'Anything', 7001, 7001, 200000, 7001, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("track");
+
+        let filters = AudioFilters { track_type: Some("album".to_string()), ..Default::default() };
+
+        let results = search_with_audio_filters(&conn, "anything", &filters, 50).expect("search");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn library_search_strips_fts_special_characters() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        // Punctuation in user queries (?, /, -) must not cause FTS to error.
+        // to_fts_query strips non-alphanumerics; tokenization happens within a
+        // single column, so fixtures keep all match tokens together in one column.
+        conn.execute("INSERT INTO artists (id, name) VALUES (8001, 'AC/DC')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (8001, 'AC/DC Live', 8001, 'tidal')", []).expect("album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source, play_count
+             ) VALUES
+                (8001, 'Thunderstruck', 8001, 8001, 200000, 8001, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0),
+                (8002, 'Love Remix',    8001, 8001, 200000, 8002, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)",
+            [],
+        )
+        .expect("tracks");
+
+        // Query "AC/DC live?" → strips to "AC DC live" → tokens AC, DC, live must
+        // all appear in some indexed column. Album "AC/DC Live" tokenizes to
+        // ["ac", "dc", "live"] (unicode61 splits on /), satisfying all three.
+        let r1 = search_with_audio_filters(&conn, "AC/DC live?", &AudioFilters::default(), 50)
+            .expect("'AC/DC live?' must not error");
+        assert!(r1.iter().any(|r| r.id == 8001), "expected Thunderstruck (album 'AC/DC Live' has all tokens); got ids {:?}", r1.iter().map(|r| r.id).collect::<Vec<_>>());
+
+        // Query "love - remix" → "love remix" → tokens must both appear in same
+        // column. Track 8002's title "Love Remix" satisfies that.
+        let r2 = search_with_audio_filters(&conn, "love - remix", &AudioFilters::default(), 50)
+            .expect("'love - remix' must not error");
+        assert!(r2.iter().any(|r| r.id == 8002), "expected 'Love Remix' to match; got ids {:?}", r2.iter().map(|r| r.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn library_search_limit_is_respected_with_filters() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (9101, 'Miles Davis')", []).expect("artist");
+        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (9101, 'Kind of Blue', 9101, 'tidal')", []).expect("album");
+        for i in 0..3 {
+            let id = 9101 + i;
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
+                        fidelity_score, is_favorite, source, play_count
+                     ) VALUES ({id}, 'Miles {i}', 9101, 9101, 200000, {id}, 'LOSSLESS', 'tidal', 5, 0, 'tidal', 0)"
+                ),
+                [],
+            )
+            .expect("track");
+        }
+        conn.execute(
+            "INSERT INTO audio_dsp_features (track_id, bpm) VALUES (9101, 120.0), (9102, 121.0), (9103, 122.0)",
+            [],
+        )
+        .expect("dsp");
+
+        let filters = AudioFilters { bpm_min: Some(100.0), ..Default::default() };
+
+        let results = search_with_audio_filters(&conn, "miles", &filters, 2).expect("search");
+        assert_eq!(results.len(), 2, "limit=2 with both FTS bind and audio-filter binds; off-by-one would return 0 or 3");
+    }
 }
 
 /// Load enough metadata about a library track to seed external Tidal discovery.
@@ -4665,7 +4927,198 @@ pub fn get_underrated_tracks(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// SQL subquery returning track ids that match `?1` via tracks_fts (title),
+/// artists_fts (name), or albums_fts (title). Used inline as `t.id IN (...)`.
+/// `?1` is reused in all three UNION arms — bind once.
+fn track_fts_candidate_subquery() -> &'static str {
+    "SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?1 \
+     UNION \
+     SELECT t2.id FROM tracks t2 JOIN artists_fts ON artists_fts.rowid = t2.artist_id WHERE artists_fts MATCH ?1 \
+     UNION \
+     SELECT t3.id FROM tracks t3 JOIN albums_fts  ON albums_fts.rowid  = t3.album_id  WHERE albums_fts  MATCH ?1"
+}
+
+/// SQL fragment + bind params produced by `build_audio_filter_sql`. `next_idx`
+/// is the first free `?N` slot — caller binds `LIMIT ?{next_idx}`.
+struct AudioFilterSql {
+    sql: String,
+    params: Vec<Box<dyn rusqlite::ToSql>>,
+    next_idx: usize,
+}
+
+/// Builds the audio-filter portion of the WHERE clause and its bind params,
+/// starting bind indices at `start_idx`. Does NOT emit `LIMIT` — the caller does.
+/// Shared by both the FTS-first path and the LIKE fallback so the two cannot
+/// drift on filter handling.
+fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilterSql {
+    let mut sql = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut idx = start_idx;
+
+    if let Some(v) = filters.bpm_min {
+        sql.push_str(&format!(" AND d.bpm >= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.bpm_max {
+        sql.push_str(&format!(" AND d.bpm <= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.energy_min {
+        sql.push_str(&format!(" AND d.energy >= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.energy_max {
+        sql.push_str(&format!(" AND d.energy <= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.danceability_min {
+        sql.push_str(&format!(" AND d.danceability >= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.danceability_max {
+        sql.push_str(&format!(" AND d.danceability <= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(ref v) = filters.key_signature {
+        sql.push_str(&format!(" AND d.key_signature = ?{idx}"));
+        params.push(Box::new(v.clone()));
+        idx += 1;
+    }
+    if let Some(ref v) = filters.camelot_key {
+        sql.push_str(&format!(" AND d.camelot_key = ?{idx}"));
+        params.push(Box::new(v.clone()));
+        idx += 1;
+    }
+    if let Some(v) = filters.year_min {
+        sql.push_str(&format!(" AND al.year >= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = filters.year_max {
+        sql.push_str(&format!(" AND al.year <= ?{idx}"));
+        params.push(Box::new(v));
+        idx += 1;
+    }
+    if !filters.genre_ids.is_empty() {
+        // i64 ids — safe to inline.
+        let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
+        sql.push_str(&format!(
+            " AND t.id IN (SELECT track_id FROM track_genres WHERE genre_id IN ({}))",
+            id_list.join(", ")
+        ));
+    }
+    if let Some(instrumental) = filters.is_instrumental {
+        sql.push_str(&format!(" AND d.is_instrumental = ?{idx}"));
+        params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
+        idx += 1;
+    }
+
+    AudioFilterSql { sql, params, next_idx: idx }
+}
+
 pub fn search_with_audio_filters(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    limit: usize,
+) -> Result<Vec<AudioSearchResult>> {
+    match search_with_audio_filters_fts(conn, free_text, filters, limit) {
+        Ok(results) => Ok(results),
+        Err(err) => {
+            tracing::warn!(?err, query = %free_text, "FTS library search failed; falling back to LIKE");
+            search_with_audio_filters_like_fallback(conn, free_text, filters, limit)
+        }
+    }
+}
+
+fn search_with_audio_filters_fts(
+    conn: &Connection,
+    free_text: &str,
+    filters: &AudioFilters,
+    limit: usize,
+) -> Result<Vec<AudioSearchResult>> {
+    if filters
+        .track_type
+        .as_deref()
+        .is_some_and(|t| t != "track")
+    {
+        return Ok(Vec::new());
+    }
+
+    let normalized = free_text.trim().to_ascii_lowercase();
+    let has_text = !normalized.is_empty();
+
+    let mut sql = String::from(
+        "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, \
+         d.bpm, d.energy, d.danceability, d.key_signature, d.camelot_key, \
+         t.play_count, t.is_favorite, t.tidal_id, t.source \
+         FROM tracks t \
+         LEFT JOIN audio_dsp_features d ON d.track_id = t.id \
+         LEFT JOIN artists a ON a.id = t.artist_id \
+         LEFT JOIN albums al ON al.id = t.album_id \
+         WHERE 1=1",
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut start_idx: usize = 1;
+
+    if has_text {
+        sql.push_str(&format!(
+            " AND t.id IN ({sub})",
+            sub = track_fts_candidate_subquery()
+        ));
+        params.push(Box::new(to_fts_query(&normalized)));
+        start_idx += 1;
+    }
+
+    let filter_sql = build_audio_filter_sql(filters, start_idx);
+    let limit_idx = filter_sql.next_idx;
+    sql.push_str(&filter_sql.sql);
+    params.extend(filter_sql.params);
+
+    sql.push_str(&format!(
+        " ORDER BY t.is_favorite DESC, t.play_count DESC, t.fidelity_score DESC, t.title ASC \
+         LIMIT ?{limit_idx}"
+    ));
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let results = stmt
+        .query_map(params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            Ok(AudioSearchResult {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist_name: row.get(2)?,
+                album_title: row.get(3)?,
+                artwork_url: row.get(4)?,
+                duration_ms: row.get(5)?,
+                bpm: row.get(6)?,
+                energy: row.get(7)?,
+                danceability: row.get(8)?,
+                key_signature: row.get(9)?,
+                camelot_key: row.get(10)?,
+                play_count: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
+                is_favorite: row.get::<_, i64>(12)? != 0,
+                tidal_id: row.get(13)?,
+                source: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}
+
+/// Verbatim copy of the pre-FTS LIKE-based library search, kept as a fallback
+/// when FTS errors. Substring-contiguous LIKE on title/artist/album, ordered by
+/// today's existing `t.play_count DESC, t.last_played_at DESC`. Renamed (not just
+/// "fallback") so a future reader knows this is the OLD semantics, deliberately.
+fn search_with_audio_filters_like_fallback(
     conn: &Connection,
     free_text: &str,
     filters: &AudioFilters,
@@ -4681,7 +5134,6 @@ pub fn search_with_audio_filters(
         return Ok(Vec::new());
     }
 
-    // Base SELECT — always JOIN audio_dsp_features so filter columns are available
     let mut sql = String::from(
         "SELECT t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, \
          d.bpm, d.energy, d.danceability, d.key_signature, d.camelot_key, \
@@ -4693,104 +5145,28 @@ pub fn search_with_audio_filters(
          WHERE 1=1",
     );
 
-    // Dynamic params: start with positional index 1
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    let mut param_idx: usize = 1;
+    let mut start_idx: usize = 1;
 
-    // Free-text filter
     if !normalized.is_empty() {
         let pattern = format!("%{normalized}%");
         sql.push_str(&format!(
             " AND (LOWER(t.title) LIKE ?{0} \
                OR LOWER(COALESCE(a.name, '')) LIKE ?{0} \
                OR LOWER(COALESCE(al.title, '')) LIKE ?{0})",
-            param_idx
+            start_idx
         ));
         params.push(Box::new(pattern));
-        param_idx += 1;
+        start_idx += 1;
     }
 
-    // BPM range
-    if let Some(v) = filters.bpm_min {
-        sql.push_str(&format!(" AND d.bpm >= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-    if let Some(v) = filters.bpm_max {
-        sql.push_str(&format!(" AND d.bpm <= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
+    let filter_sql = build_audio_filter_sql(filters, start_idx);
+    let limit_idx = filter_sql.next_idx;
+    sql.push_str(&filter_sql.sql);
+    params.extend(filter_sql.params);
 
-    // Energy range
-    if let Some(v) = filters.energy_min {
-        sql.push_str(&format!(" AND d.energy >= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-    if let Some(v) = filters.energy_max {
-        sql.push_str(&format!(" AND d.energy <= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-
-    // Danceability range
-    if let Some(v) = filters.danceability_min {
-        sql.push_str(&format!(" AND d.danceability >= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-    if let Some(v) = filters.danceability_max {
-        sql.push_str(&format!(" AND d.danceability <= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-
-    // Key signature (exact)
-    if let Some(ref v) = filters.key_signature {
-        sql.push_str(&format!(" AND d.key_signature = ?{param_idx}"));
-        params.push(Box::new(v.clone()));
-        param_idx += 1;
-    }
-
-    // Camelot key (exact)
-    if let Some(ref v) = filters.camelot_key {
-        sql.push_str(&format!(" AND d.camelot_key = ?{param_idx}"));
-        params.push(Box::new(v.clone()));
-        param_idx += 1;
-    }
-
-    // Year range (via album)
-    if let Some(v) = filters.year_min {
-        sql.push_str(&format!(" AND al.year >= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-    if let Some(v) = filters.year_max {
-        sql.push_str(&format!(" AND al.year <= ?{param_idx}"));
-        params.push(Box::new(v));
-        param_idx += 1;
-    }
-
-    // Genre filter — inline i64 IDs (safe, not user strings)
-    if !filters.genre_ids.is_empty() {
-        let id_list: Vec<String> = filters.genre_ids.iter().map(|id| id.to_string()).collect();
-        sql.push_str(&format!(
-            " AND t.id IN (SELECT track_id FROM track_genres WHERE genre_id IN ({}))",
-            id_list.join(", ")
-        ));
-    }
-
-    // Instrumental filter
-    if let Some(instrumental) = filters.is_instrumental {
-        sql.push_str(&format!(" AND d.is_instrumental = ?{param_idx}"));
-        params.push(Box::new(if instrumental { 1i64 } else { 0i64 }));
-        param_idx += 1;
-    }
-
-    // Ordering and limit
     sql.push_str(&format!(
-        " ORDER BY t.play_count DESC, t.last_played_at DESC LIMIT ?{param_idx}"
+        " ORDER BY t.play_count DESC, t.last_played_at DESC LIMIT ?{limit_idx}"
     ));
     params.push(Box::new(limit as i64));
 
