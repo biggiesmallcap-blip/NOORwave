@@ -809,9 +809,8 @@ export async function playTidalPlaylist(tidalUuid: string) {
 			playerError.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
-		// TODO: queue remaining tracks once TIDAL ephemeral queue is supported (see addTidalTrackToQueue stub)
-		await playTidalTrackNow(tracks[0]);
-		showToast('Playing TIDAL playlist', 'success');
+		await startTidalEphemeralQueue(tracks);
+		showToast(`Playing playlist (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
 		setError('load TIDAL playlist', error, () => playTidalPlaylist(tidalUuid));
 	}
@@ -1036,25 +1035,68 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 			showToast('Album has no tracks', 'error');
 			return;
 		}
-		const first = tracks[0];
-		await playTidalTrackNow({
-			tidal_id: first.tidal_id,
-			title: first.title,
-			artist_name: first.artist_name ?? null,
-			album_title: first.album_title ?? null,
-			artwork_url: first.artwork_url,
-			duration_ms: first.duration_ms,
-		});
+		await startTidalEphemeralQueue(tracks);
+		showToast(`Playing album (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
 		setError('play that Tidal album', error, () => playTidalAlbum(tidalAlbumId));
 		showToast(`Album playback failed`, 'error');
 	}
 }
 
-/// Play a TIDAL mix by id — fetches the mix's track list and sends the WHOLE
-/// list to the server's `/api/tidal/play-mix` endpoint. The server starts the
-/// first track immediately and queues the rest behind it so playback
-/// auto-advances through the mix without a per-track round trip.
+/// Start an ephemeral TIDAL queue: optimistically reflect track 0 in the
+/// now-playing UI, then ship the full list to `/api/tidal/play-mix` (which is
+/// the generic "play this list" endpoint — name is historical). The server
+/// starts track 0 and queues the rest behind it so playback auto-advances.
+async function startTidalEphemeralQueue(
+	tracks: ReadonlyArray<{
+		tidal_id: number;
+		title: string;
+		artist_name?: string | null;
+		album_title?: string | null;
+		artwork_url?: string | null;
+		duration_ms?: number | null;
+		artist_tidal_id?: number | null;
+	}>,
+): Promise<void> {
+	const first = tracks[0];
+	currentTrack.set({
+		id: -first.tidal_id,
+		title: first.title,
+		artist_id: -1,
+		artist_name: first.artist_name ?? null,
+		artist_tidal_id: first.artist_tidal_id ?? null,
+		album_id: null,
+		album_title: first.album_title ?? null,
+		disc_number: null,
+		track_number: null,
+		duration_ms: first.duration_ms ?? null,
+		isrc: null,
+		tidal_id: first.tidal_id,
+		best_quality: 'LOSSLESS',
+		best_source: 'tidal',
+		fidelity_score: 0,
+		is_favorite: false,
+		play_count: 0,
+		last_played_at: null,
+		date_added: null,
+		source: 'tidal_ephemeral',
+		artwork_url: first.artwork_url ?? null,
+	});
+	isPlaying.set(true);
+
+	await api.playTidalMix(
+		tracks.map((t) => ({
+			tidal_id: t.tidal_id,
+			title: t.title,
+			artist_name: t.artist_name ?? null,
+			album_title: t.album_title ?? null,
+			artwork_url: t.artwork_url ?? null,
+			duration_ms: t.duration_ms ?? null,
+		})),
+	);
+	noteSuccess();
+}
+
 export async function playTidalMix(mixId: string): Promise<void> {
 	if (!assertOnline()) return;
 	playerError.set(null);
@@ -1064,46 +1106,7 @@ export async function playTidalMix(mixId: string): Promise<void> {
 			showToast('Mix has no tracks', 'error');
 			return;
 		}
-		// Optimistically reflect the first track in the now-playing UI so
-		// there's no flicker before the server's PlaybackStateChanged event
-		// arrives. Server will overwrite with authoritative data on Started.
-		const first = tracks[0];
-		currentTrack.set({
-			id: -first.tidal_id,
-			title: first.title,
-			artist_id: -1,
-			artist_name: first.artist_name ?? null,
-			artist_tidal_id: null,
-			album_id: null,
-			album_title: first.album_title ?? null,
-			disc_number: null,
-			track_number: null,
-			duration_ms: first.duration_ms,
-			isrc: null,
-			tidal_id: first.tidal_id,
-			best_quality: 'LOSSLESS',
-			best_source: 'tidal',
-			fidelity_score: 0,
-			is_favorite: false,
-			play_count: 0,
-			last_played_at: null,
-			date_added: null,
-			source: 'tidal_ephemeral',
-			artwork_url: first.artwork_url,
-		});
-		isPlaying.set(true);
-
-		await api.playTidalMix(
-			tracks.map((t) => ({
-				tidal_id: t.tidal_id,
-				title: t.title,
-				artist_name: t.artist_name ?? null,
-				album_title: t.album_title ?? null,
-				artwork_url: t.artwork_url,
-				duration_ms: t.duration_ms,
-			})),
-		);
-		noteSuccess();
+		await startTidalEphemeralQueue(tracks);
 		showToast(`Playing mix (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
 		setError('play that Tidal mix', error, () => playTidalMix(mixId));
