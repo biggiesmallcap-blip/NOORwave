@@ -67,6 +67,8 @@ pub struct Playlist {
     pub is_synced: bool,
     pub track_count: i32,
     pub is_favorite: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,7 +494,6 @@ pub struct AudioFeaturesStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct GenreAudioMetrics {
     pub genre_id: i64,
     pub genre_name: String,

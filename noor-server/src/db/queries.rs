@@ -482,7 +482,8 @@ pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>
 pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count, is_favorite
+                smart_rules, is_synced, track_count, is_favorite,
+                created_at, updated_at
          FROM playlists
          ORDER BY is_favorite DESC, name ASC",
     )?;
@@ -499,6 +500,8 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
                 is_synced: row.get::<_, i32>(6)? != 0,
                 track_count: row.get(7)?,
                 is_favorite: row.get::<_, i32>(8)? != 0,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -509,7 +512,8 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
-                smart_rules, is_synced, track_count, is_favorite
+                smart_rules, is_synced, track_count, is_favorite,
+                created_at, updated_at
          FROM playlists
          WHERE id = ?1",
     )?;
@@ -526,6 +530,8 @@ pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playli
             is_synced: row.get::<_, i32>(6)? != 0,
             track_count: row.get(7)?,
             is_favorite: row.get::<_, i32>(8)? != 0,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
         }))
     } else {
         Ok(None)
@@ -586,11 +592,14 @@ pub fn add_tracks_to_playlist(
         stmt.execute(params![playlist_id, track_id, max_pos + 1 + i as i64])?;
     }
 
-    // Keep track_count in sync
+    // Keep track_count in sync and bump updated_at so "Recently updated"
+    // sorts reflect content changes, not just smart-rule edits.
     conn.execute(
         "UPDATE playlists SET track_count = (
             SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1
-         ) WHERE id = ?1",
+         ),
+         updated_at = datetime('now')
+         WHERE id = ?1",
         params![playlist_id],
     )?;
 
@@ -3862,7 +3871,6 @@ pub fn delete_all_audio_dsp_features(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn get_genre_audio_metrics(conn: &Connection) -> Result<Vec<GenreAudioMetrics>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.name,

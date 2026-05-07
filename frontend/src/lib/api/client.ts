@@ -150,7 +150,7 @@ export interface TidalSearchPlaylist {
 	title: string;
 	description: string | null;
 	number_of_tracks: number | null;
-	square_image: string | null;
+	artwork_url: string | null;
 }
 
 export interface TidalSearchResults {
@@ -479,6 +479,8 @@ export interface Playlist {
 	track_count: number;
 	smart_rules?: string | null;
 	is_favorite: boolean;
+	created_at: string;
+	updated_at: string;
 }
 
 // ─── Smart Playlist Rule Types ───────────────────────────────────────────────

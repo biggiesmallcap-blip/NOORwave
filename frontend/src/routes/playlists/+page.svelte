@@ -24,6 +24,13 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import TrackRow from '$lib/components/TrackRow.svelte';
+	import {
+		getCachedMosaic,
+		setCachedMosaic,
+		snapshotCache,
+		pickArtworkUrls,
+		nameToGradient,
+	} from '$lib/stores/playlist_artwork_cache';
 
 	// ─── Types used only in the editor ────────────────────────────────────────
 	// A flat "draft clause" that the editor mutates before converting to RuleClause.
@@ -55,6 +62,9 @@
 		// has_sample_data
 		sample_source: SampleDataSource | '';
 	};
+
+	type PlaylistFilter = 'all' | 'favorites' | 'smart' | 'regular';
+	type PlaylistSort = 'default' | 'name' | 'tracks' | 'type' | 'recent_update' | 'recent_create';
 
 	let _draftIdCounter = 0;
 	function newDraftId() {
@@ -173,6 +183,13 @@
 	let errorById = $state<Record<number, string | null>>({});
 	let isLoading = $state(true);
 	let loadError = $state('');
+	let playlistQuery = $state('');
+	let playlistFilter = $state<PlaylistFilter>('all');
+	let playlistSort = $state<PlaylistSort>('default');
+
+	// Cover mosaics keyed by playlist id. Seeded from localStorage on mount,
+	// kept in sync whenever a playlist's tracks load.
+	let mosaicById = $state<Record<number, string[]>>({});
 
 	// Phase 5B — back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{
@@ -248,8 +265,17 @@
 	}
 
 	onMount(() => {
+		mosaicById = { ...mosaicById, ...mapMosaicsFromCache(snapshotCache()) };
 		void loadPlaylists();
 	});
+
+	function mapMosaicsFromCache(snapshot: Record<number, { urls: string[] }>): Record<number, string[]> {
+		const out: Record<number, string[]> = {};
+		for (const [idStr, entry] of Object.entries(snapshot)) {
+			out[Number(idStr)] = entry.urls;
+		}
+		return out;
+	}
 
 	// ─── Data loading ─────────────────────────────────────────────────────────
 	async function loadPlaylists() {
@@ -258,11 +284,56 @@
 		try {
 			const data = await api.getPlaylists();
 			playlists = data.playlists;
+			scheduleMosaicPrefetch();
 		} catch (error) {
 			loadError = `Failed to load playlists: ${error}`;
 		} finally {
 			isLoading = false;
 		}
+	}
+
+	function recordMosaic(id: number, tracks: Track[], trackCount: number) {
+		const urls = pickArtworkUrls(tracks);
+		if (urls.length === 0) return;
+		setCachedMosaic(id, urls, trackCount);
+		mosaicById = { ...mosaicById, [id]: urls };
+	}
+
+	function scheduleMosaicPrefetch() {
+		const run = () => void prefetchMosaics();
+		const ric = (globalThis as { requestIdleCallback?: (cb: () => void) => void })
+			.requestIdleCallback;
+		if (typeof ric === 'function') ric(run);
+		else setTimeout(run, 200);
+	}
+
+	async function prefetchMosaics() {
+		const targets = playlists.filter((p) => {
+			if (p.track_count <= 0) return false;
+			if (mosaicById[p.id]?.length) return false;
+			return getCachedMosaic(p.id, p.track_count) === null;
+		});
+		if (targets.length === 0) return;
+
+		const POOL = 3;
+		let cursor = 0;
+		const worker = async () => {
+			while (cursor < targets.length) {
+				const playlist = targets[cursor++];
+				try {
+					const data = playlist.is_smart
+						? await api.evaluateSmartPlaylist(playlist.id)
+						: await api.getPlaylistTracks(playlist.id);
+					recordMosaic(playlist.id, data.tracks, playlist.track_count);
+					if (!playlistTracksById[playlist.id]) {
+						playlistTracksById = { ...playlistTracksById, [playlist.id]: data.tracks };
+					}
+				} catch {
+					// Background task — leave the gradient fallback in place.
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: POOL }, worker));
 	}
 
 	function isExpanded(id: number) {
@@ -285,6 +356,7 @@
 				? await api.evaluateSmartPlaylist(id)
 				: await api.getPlaylistTracks(id);
 			playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
+			if (playlist) recordMosaic(id, data.tracks, playlist.track_count);
 		} catch (error) {
 			errorById = { ...errorById, [id]: `Failed to load tracks: ${error}` };
 			playlistTracksById = { ...playlistTracksById, [id]: [] };
@@ -295,12 +367,48 @@
 
 	async function playTrack(trackId: number) { await playTrackNow(trackId); }
 
-	async function playPlaylist(id: number, e: MouseEvent) {
+	async function ensurePlaylistTracks(id: number) {
+		if (!playlistTracksById[id] && !loadingById[id]) {
+			await expandPlaylist(id);
+		}
+		return playlistTracksById[id] ?? [];
+	}
+
+	async function playPlaylistQuick(playlist: Playlist, e: MouseEvent) {
 		e.stopPropagation();
-		const tracks = playlistTracksById[id];
-		if (!tracks?.length) return;
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		if (!tracks.length) return;
 		await api.replacePlaybackQueue(tracks.map((t) => t.id));
 		await playTrackNow(tracks[0].id);
+	}
+
+	async function shufflePlaylistQuick(playlist: Playlist, e: MouseEvent) {
+		e.stopPropagation();
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		await shufflePlaylist(tracks);
+	}
+
+	async function startPlaylistRadioQuick(playlist: Playlist, e: MouseEvent) {
+		e.stopPropagation();
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		await startPlaylistRadio(tracks);
+	}
+
+	function activatePlaylist(playlistId: number, e: KeyboardEvent) {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		if (e.target !== e.currentTarget) return;
+		e.preventDefault();
+		void expandPlaylist(playlistId);
+	}
+
+	async function togglePlaylistFavorite(playlist: Playlist, e: MouseEvent) {
+		e.stopPropagation();
+		try {
+			const updated = await api.togglePlaylistFavorite(playlist.id);
+			playlists = playlists.map((p) => (p.id === playlist.id ? updated.playlist : p));
+		} catch {
+			// Button state will be corrected on the next refresh.
+		}
 	}
 
 	// ─── Editor helpers ───────────────────────────────────────────────────────
@@ -390,6 +498,8 @@
 		const name = draftName.trim();
 		if (!name) { editorError = 'Name is required.'; return; }
 		if (draftClauses.length === 0) { editorError = 'Add at least one rule.'; return; }
+		const validationError = validateDraft();
+		if (validationError) { editorError = validationError; return; }
 
 		const rootClause: RuleClause = {
 			type: 'group',
@@ -543,6 +653,118 @@
 	};
 
 	let otherPlaylists = $derived(playlists.filter((p) => !p.is_smart));
+	let activeFilterLabel = $derived(
+		playlistFilter === 'all'
+			? 'All'
+			: playlistFilter === 'favorites'
+				? 'Favorites'
+				: playlistFilter === 'smart'
+					? 'Smart'
+					: 'Regular',
+	);
+	let filteredPlaylists = $derived.by(() => {
+		const q = playlistQuery.trim().toLowerCase();
+		return [...playlists]
+			.filter((playlist) => {
+				if (playlistFilter === 'favorites' && !playlist.is_favorite) return false;
+				if (playlistFilter === 'smart' && !playlist.is_smart) return false;
+				if (playlistFilter === 'regular' && playlist.is_smart) return false;
+				if (!q) return true;
+				return playlistSearchText(playlist).includes(q);
+			})
+			.sort(comparePlaylists);
+	});
+	let visibleTrackTotal = $derived(
+		filteredPlaylists.reduce((sum, playlist) => sum + Math.max(playlist.track_count ?? 0, 0), 0),
+	);
+
+	function playlistSearchText(playlist: Playlist): string {
+		return [
+			playlist.name,
+			playlist.description ?? '',
+			playlist.is_smart ? 'smart rules rule driven' : 'regular synced playlist',
+			playlistSubtitle(playlist),
+			...smartSummaryLines(playlist),
+		]
+			.join(' ')
+			.toLowerCase();
+	}
+
+	function comparePlaylists(a: Playlist, b: Playlist): number {
+		if (playlistSort === 'name') return a.name.localeCompare(b.name);
+		if (playlistSort === 'tracks') return b.track_count - a.track_count || a.name.localeCompare(b.name);
+		if (playlistSort === 'type') {
+			const typeDiff = Number(b.is_smart) - Number(a.is_smart);
+			return typeDiff || a.name.localeCompare(b.name);
+		}
+		if (playlistSort === 'recent_update') {
+			return (b.updated_at ?? '').localeCompare(a.updated_at ?? '') || a.name.localeCompare(b.name);
+		}
+		if (playlistSort === 'recent_create') {
+			return (b.created_at ?? '').localeCompare(a.created_at ?? '') || a.name.localeCompare(b.name);
+		}
+		const favoriteDiff = Number(b.is_favorite) - Number(a.is_favorite);
+		return favoriteDiff || a.name.localeCompare(b.name);
+	}
+
+	function filterCount(filter: PlaylistFilter): number {
+		if (filter === 'favorites') return playlists.filter((p) => p.is_favorite).length;
+		if (filter === 'smart') return smartCount();
+		if (filter === 'regular') return regularCount();
+		return playlists.length;
+	}
+
+	function playlistSourceLabel(playlist: Playlist): string {
+		if (playlist.is_smart) return 'Smart';
+		if (playlist.tidal_uuid) return 'TIDAL';
+		return 'Local';
+	}
+
+	function clearPlaylistSearch() {
+		playlistQuery = '';
+		playlistFilter = 'all';
+	}
+
+	function clauseValidation(clause: DraftClause): string | null {
+		if ((clause.type === 'genre' || clause.type === 'artist') && clause.names.length === 0) {
+			return `Add at least one ${clause.type}.`;
+		}
+		if (clause.type === 'date_range' && clause.date_start && clause.date_end && clause.date_start > clause.date_end) {
+			return 'The start date must be before the end date.';
+		}
+		if (clause.type === 'play_count') {
+			if (clause.play_count_value < 0 || clause.play_count_max < 0) return 'Play counts cannot be negative.';
+			if (clause.play_count_op === 'between_inclusive' && clause.play_count_max < clause.play_count_value) {
+				return 'The upper play-count value must be greater than the lower value.';
+			}
+		}
+		if (clause.type === 'not_in_playlist' && clause.exclude_playlist_ids.length === 0) {
+			return 'Choose at least one playlist to exclude.';
+		}
+		if (
+			(clause.type === 'bpm_range' || clause.type === 'energy_range' || clause.type === 'danceability_range') &&
+			clause.range_min != null &&
+			clause.range_max != null &&
+			clause.range_min > clause.range_max
+		) {
+			return 'The minimum value must be less than the maximum value.';
+		}
+		if (
+			(clause.type === 'energy_range' || clause.type === 'danceability_range') &&
+			[clause.range_min, clause.range_max].some((value) => value != null && (value < 0 || value > 1))
+		) {
+			return 'Use values between 0 and 1.';
+		}
+		if ((clause.type === 'key_signature' || clause.type === 'camelot_key') && !clause.key_value.trim()) {
+			return 'Choose a key.';
+		}
+		return null;
+	}
+
+	function validateDraft(): string | null {
+		const invalid = draftClauses.map(clauseValidation).find(Boolean);
+		return invalid ?? null;
+	}
 </script>
 
 <svelte:head>
@@ -569,6 +791,57 @@
 		<MetricPair label="Regular" value={regularCount()} copy="Curated lists." />
 	</section>
 
+	<section class="playlist-control-band glass">
+		<div class="playlist-search-wrap">
+			<input
+				class="playlist-search-input"
+				type="search"
+				placeholder="Search playlists, descriptions, or smart rules"
+				bind:value={playlistQuery}
+			/>
+			{#if playlistQuery.trim()}
+				<button class="clear-search" onclick={() => (playlistQuery = '')}>Clear</button>
+			{/if}
+		</div>
+
+		<div class="playlist-toolbar">
+			<div class="filter-pills" aria-label="Playlist filters">
+				{#each [
+					{ value: 'all', label: 'All' },
+					{ value: 'favorites', label: 'Favorites' },
+					{ value: 'smart', label: 'Smart' },
+					{ value: 'regular', label: 'Regular' },
+				] as filter}
+					<button
+						class="filter-pill"
+						class:active={playlistFilter === filter.value}
+						onclick={() => (playlistFilter = filter.value as PlaylistFilter)}
+					>
+						{filter.label}
+						<span>{filterCount(filter.value as PlaylistFilter)}</span>
+					</button>
+				{/each}
+			</div>
+
+			<div class="playlist-sort">
+				<label class="field-label" for="playlist-sort">Sort</label>
+				<select id="playlist-sort" bind:value={playlistSort}>
+					<option value="default">Favorites, then name</option>
+					<option value="recent_update">Recently updated</option>
+					<option value="recent_create">Recently created</option>
+					<option value="name">Name</option>
+					<option value="tracks">Track count</option>
+					<option value="type">Type</option>
+				</select>
+			</div>
+		</div>
+
+		<p class="playlist-result-copy">
+			Showing {filteredPlaylists.length} {activeFilterLabel.toLowerCase()} playlist{filteredPlaylists.length === 1 ? '' : 's'}
+			with {visibleTrackTotal.toLocaleString()} visible track{visibleTrackTotal === 1 ? '' : 's'}.
+		</p>
+	</section>
+
 	{#if deleteError}
 		<div class="feedback-bar error glass">{deleteError}</div>
 	{/if}
@@ -577,77 +850,90 @@
 		<EmptyState title="Playlists could not load" copy={loadError} />
 	{:else if isLoading}
 		<EmptyState title="Loading playlists" copy="Pulling synced and smart playlists." />
+	{:else if playlists.length > 0 && filteredPlaylists.length === 0}
+		<EmptyState title="No playlists match" copy="Try a different search, filter, or sort mode.">
+			{#snippet actions()}
+				<button class="btn btn-glass" onclick={clearPlaylistSearch}>Reset filters</button>
+			{/snippet}
+		</EmptyState>
 	{:else if playlists.length > 0}
-		<div class="playlist-list">
-			{#each playlists as playlist (playlist.id)}
+		<div class="playlist-grid">
+			{#each filteredPlaylists as playlist (playlist.id)}
+				{@const mosaic = mosaicById[playlist.id] ?? []}
 				<section class="playlist-card glass-panel">
-					<button class="playlist-header" onclick={() => void expandPlaylist(playlist.id)}>
+					<div
+						class="playlist-card-top"
+						role="button"
+						tabindex="0"
+						aria-expanded={isExpanded(playlist.id)}
+						onclick={() => void expandPlaylist(playlist.id)}
+						onkeydown={(e) => activatePlaylist(playlist.id, e)}
+					>
+						<div
+							class="playlist-cover"
+							class:has-mosaic={mosaic.length >= 4}
+							class:has-solo={mosaic.length > 0 && mosaic.length < 4}
+							style:background={mosaic.length === 0 ? nameToGradient(playlist.name) : undefined}
+						>
+							{#if mosaic.length >= 4}
+								{#each mosaic.slice(0, 4) as url}
+									<img src={url} alt="" loading="lazy" />
+								{/each}
+							{:else if mosaic.length > 0}
+								<img class="cover-solo" src={mosaic[0]} alt="" loading="lazy" />
+							{:else}
+								<span>{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
+							{/if}
+						</div>
 						<div class="playlist-meta">
-							<div class="title-row">
-								<h3>{playlist.name}</h3>
-								<StateBadge label={playlist.is_smart ? 'Smart' : 'Playlist'} tone={playlist.is_smart ? 'active' : 'muted'} compact={true} />
+							<div class="playlist-chip-row">
+								<StateBadge label={playlistSourceLabel(playlist)} tone={playlist.is_smart ? 'active' : 'muted'} compact={true} />
+								{#if playlist.is_favorite}
+									<StateBadge label="Favorite" tone="active" compact={true} />
+								{/if}
 							</div>
+							<h3>{playlist.name}</h3>
 							<p class="playlist-copy">{playlistSubtitle(playlist)}</p>
 							{#if playlist.is_smart}
 								<div class="smart-summary">
-									{#each smartSummaryLines(playlist).slice(0, 3) as line}
+									{#each smartSummaryLines(playlist).slice(0, 2) as line}
 										<p>{line}</p>
 									{/each}
 								</div>
 							{/if}
 						</div>
-						<div class="playlist-side">
-							<span>{playlist.track_count} tracks</span>
-							<svg
-								class="chevron"
-								class:open={isExpanded(playlist.id)}
-								width="16"
-								height="16"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								aria-hidden="true"
-							>
-								<path d="M6 9l6 6 6-6" />
-							</svg>
-						</div>
-					</button>
-
-					<div class="card-actions">
 						<button
-							class="action-btn fav-btn"
+							class="icon-btn favorite-btn"
 							class:active={playlist.is_favorite}
-							onclick={async (e) => {
-								e.stopPropagation();
-								try {
-									const updated = await api.togglePlaylistFavorite(playlist.id);
-									playlists = playlists.map(p => p.id === playlist.id ? updated.playlist : p);
-								} catch {
-									// silently ignore — button state reverts on next data load
-								}
-							}}
+							onclick={(e) => void togglePlaylistFavorite(playlist, e)}
 							title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
 							aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-						>♥</button>
+						>{playlist.is_favorite ? '♥' : '♡'}</button>
 					</div>
 
-					{#if playlist.is_smart}
-						<div class="smart-actions">
-							<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); openEdit(playlist); }}>
-								Edit rules
-							</button>
-							<button
-								class="btn btn-glass btn-sm danger"
-								disabled={deletingId === playlist.id}
-								onclick={(e) => { e.stopPropagation(); void confirmDelete(playlist.id); }}
-							>
-								{deletingId === playlist.id ? 'Deleting…' : 'Delete'}
-							</button>
+					<div class="playlist-card-foot">
+						<div class="playlist-count">
+							<strong>{playlist.track_count.toLocaleString()}</strong>
+							<span>tracks</span>
 						</div>
-					{/if}
+						<div class="playlist-actions">
+							<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylistQuick(playlist, e)}>Play</button>
+							<button class="btn btn-glass btn-sm" onclick={(e) => void shufflePlaylistQuick(playlist, e)}>Shuffle</button>
+							<button class="btn btn-glass btn-sm" onclick={(e) => void startPlaylistRadioQuick(playlist, e)}>Radio</button>
+							{#if playlist.is_smart}
+								<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); openEdit(playlist); }}>
+									Edit rules
+								</button>
+								<button
+									class="btn btn-glass btn-sm danger"
+									disabled={deletingId === playlist.id}
+									onclick={(e) => { e.stopPropagation(); void confirmDelete(playlist.id); }}
+								>
+									{deletingId === playlist.id ? 'Deleting...' : 'Delete'}
+								</button>
+							{/if}
+						</div>
+					</div>
 
 					{#if isExpanded(playlist.id)}
 						<div class="playlist-body">
@@ -656,27 +942,6 @@
 							{:else if errorById[playlist.id]}
 								<p class="playlist-copy">{errorById[playlist.id]}</p>
 							{:else if (playlistTracksById[playlist.id]?.length ?? 0) > 0}
-								<div class="playlist-body-actions">
-									<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylist(playlist.id, e)}>Play all</button>
-									<button
-										class="action-btn"
-										onclick={(e) => {
-											e.stopPropagation();
-											void shufflePlaylist(playlistTracksById[playlist.id]);
-										}}
-										title="Shuffle playlist"
-										aria-label="Shuffle playlist"
-									>⤮ Shuffle</button>
-									<button
-										class="action-btn"
-										onclick={(e) => {
-											e.stopPropagation();
-											void startPlaylistRadio(playlistTracksById[playlist.id]);
-										}}
-										title="Playlist radio"
-										aria-label="Playlist radio"
-									>◉ Radio</button>
-								</div>
 								<ol class="track-list">
 									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
 										<TrackRow
@@ -984,6 +1249,10 @@
 								<option value="fingerprint">Fingerprint</option>
 							</select>
 						{/if}
+
+						{#if clauseValidation(clause)}
+							<p class="clause-error">{clauseValidation(clause)}</p>
+						{/if}
 					</div>
 				{/each}
 			</div>
@@ -1005,43 +1274,221 @@
 {/if}
 
 <style>
-	.playlist-list {
+	.playlist-control-band {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-4);
+		gap: 14px;
+		padding: 16px;
+	}
+
+	.playlist-search-wrap {
+		position: relative;
+		width: 100%;
+	}
+
+	.playlist-search-input {
+		width: 100%;
+		background: var(--bg-raised);
+		border: 1px solid var(--border-strong);
+		border-radius: 20px;
+		padding: 12px 76px 12px 18px;
+		color: var(--text-primary);
+	}
+
+	.playlist-search-input:focus {
+		border-color: var(--accent);
+		background: var(--bg-elevated);
+		box-shadow: 0 0 0 3px var(--accent-soft);
+	}
+
+	.clear-search {
+		position: absolute;
+		right: 10px;
+		top: 50%;
+		transform: translateY(-50%);
+		padding: 4px 10px;
+		border-radius: 999px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: 0.75rem;
+	}
+
+	.clear-search:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.playlist-toolbar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+	}
+
+	.filter-pills {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.filter-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		padding: 5px 13px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 0.78rem;
+		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+	}
+
+	.filter-pill span {
+		color: var(--text-tertiary);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.filter-pill:hover {
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+	}
+
+	.filter-pill.active {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+
+	.filter-pill.active span { color: rgba(255,255,255,0.78); }
+
+	.playlist-sort {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 240px;
+	}
+
+	.playlist-sort select {
+		height: 34px;
+		padding: 6px 10px;
+		border-radius: 999px;
+	}
+
+	.playlist-result-copy {
+		color: var(--text-tertiary);
+		font-size: 0.8rem;
+	}
+
+	.playlist-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
 	}
 
 	.playlist-card {
-		padding: 20px;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 14px 18px;
+		padding: 14px 16px;
+		border-radius: 10px;
 	}
 
-	.playlist-header {
+	.playlist-card-top {
+		display: grid;
+		grid-template-columns: 50px minmax(0, 1fr) auto;
+		gap: 12px;
+		align-items: center;
+		min-width: 0;
+		cursor: pointer;
+		border-radius: 8px;
+		padding: 4px;
+		margin: -4px;
+		transition: background var(--motion-fast);
+	}
+
+	.playlist-card-top:hover,
+	.playlist-card-top:focus-visible {
+		background: var(--bg-hover);
+		outline: none;
+	}
+
+	.playlist-card-top[aria-expanded="true"] {
+		background: var(--accent-soft);
+	}
+
+	.playlist-cover {
+		width: 50px;
+		height: 50px;
+		border-radius: 7px;
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		border: 1px solid var(--border-subtle);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		flex-shrink: 0;
+	}
+
+	.playlist-cover span {
+		font-size: 1rem;
+		font-weight: 750;
+		color: #fff;
+		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+	}
+
+	.playlist-cover.has-mosaic {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		grid-template-rows: 1fr 1fr;
+		gap: 0;
+		place-items: stretch;
+		background: var(--bg-raised);
+	}
+
+	.playlist-cover.has-mosaic img {
 		width: 100%;
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--space-4);
-		text-align: left;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.playlist-cover.has-solo .cover-solo {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
 	}
 
 	.playlist-meta {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
+		gap: 5px;
 		min-width: 0;
 	}
 
-	.title-row {
+	.playlist-chip-row {
 		display: flex;
-		align-items: center;
-		gap: 8px;
 		flex-wrap: wrap;
+		gap: 5px;
+	}
+
+	.playlist-meta h3 {
+		margin: 0;
+		font-size: 0.98rem;
+		line-height: 1.2;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.playlist-copy,
 	.smart-summary p {
 		color: var(--text-secondary);
-		font-size: 0.875rem;
+		font-size: 0.8rem;
+		line-height: 1.35;
 	}
 
 	.smart-summary {
@@ -1051,35 +1498,65 @@
 	}
 
 	.smart-summary p {
-		font-size: 0.8125rem;
 		font-family: var(--font-mono);
 		color: var(--text-tertiary);
 	}
 
-	.playlist-side {
+	.icon-btn {
+		min-width: 36px;
+		height: 30px;
+		padding: 0 10px;
+		border-radius: 999px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: 1rem;
+		font-weight: 700;
+	}
+
+	.icon-btn:hover,
+	.icon-btn.active {
+		background: var(--accent-soft);
+		border-color: var(--accent-line);
+		color: var(--accent-strong);
+	}
+
+	.playlist-card-foot {
+		align-self: center;
+		display: grid;
+		grid-template-columns: auto minmax(260px, auto);
+		align-items: center;
+		gap: 14px;
+	}
+
+	.playlist-count {
 		display: flex;
 		flex-direction: column;
-		align-items: flex-end;
-		gap: 6px;
+		min-width: 58px;
+	}
+
+	.playlist-count strong {
+		font-size: 0.95rem;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.playlist-count span {
 		color: var(--text-tertiary);
-		white-space: nowrap;
-		font-size: 0.875rem;
+		font-size: 0.64rem;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
 	}
 
-	.chevron {
-		transition: transform 180ms ease;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	.smart-actions {
+	.playlist-actions {
 		display: flex;
-		gap: 8px;
-		margin-top: 14px;
-		padding-top: 14px;
-		border-top: 1px solid var(--border-subtle);
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		gap: 6px;
+	}
+
+	.playlist-actions .btn-sm {
+		min-height: 30px;
+		padding: 5px 10px;
 	}
 
 	.btn-sm {
@@ -1098,23 +1575,23 @@
 	}
 
 	.playlist-body {
-		margin-top: 18px;
-		padding-top: 18px;
+		grid-column: 1 / -1;
+		padding-top: 12px;
 		border-top: 1px solid var(--border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
 	}
 
-	.playlist-body-actions {
-		display: flex;
-		gap: 8px;
-	}
-
 	.track-list {
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+	}
+
+	.clause-error {
+		color: var(--state-error);
+		font-size: 0.75rem;
 	}
 
 	.feedback-bar {
@@ -1433,51 +1910,54 @@
 
 	.editor-error { font-size: 0.875rem; color: var(--state-error); }
 
-	/* ─── Card action buttons ────────────────────────────────── */
+	@media (max-width: 1120px) {
+		.playlist-card {
+			grid-template-columns: 1fr;
+		}
 
-	.card-actions {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-top: 10px;
+		.playlist-card-foot {
+			display: flex;
+			justify-content: space-between;
+			width: 100%;
+		}
 	}
-
-	.action-btn {
-		background: var(--surface-2, #2a2a2a);
-		border: none;
-		color: var(--text-secondary, #ccc);
-		cursor: pointer;
-		font-size: 12px;
-		padding: 5px 10px;
-		border-radius: 5px;
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		white-space: nowrap;
-	}
-	.action-btn:hover {
-		background: var(--surface-3, #333);
-		color: var(--text-primary, #fff);
-	}
-	.action-btn.fav-btn {
-		background: none;
-		font-size: 16px;
-		padding: 5px;
-		color: var(--text-tertiary, #666);
-	}
-	.action-btn.fav-btn.active {
-		color: var(--accent, #e00055);
-	}
-
-	/* ─── Responsive ──────────────────────────────────────────── */
 
 	@media (max-width: 760px) {
-		.playlist-header {
+		.playlist-card {
+			display: flex;
+			flex-direction: column;
+		}
+
+		.playlist-control-band {
+			padding: 12px;
+		}
+
+		.playlist-toolbar,
+		.playlist-card-foot {
+			display: flex;
 			flex-direction: column;
 			align-items: flex-start;
 		}
 
-		.playlist-side { align-items: flex-start; }
+		.filter-pills,
+		.playlist-sort,
+		.playlist-actions {
+			width: 100%;
+		}
+
+		.filter-pill {
+			flex: 1;
+			justify-content: center;
+		}
+
+		.playlist-card-top {
+			grid-template-columns: 50px minmax(0, 1fr);
+		}
+
+		.favorite-btn {
+			grid-column: 1 / -1;
+			justify-self: flex-start;
+		}
 
 		.editor-drawer {
 			width: 100vw;

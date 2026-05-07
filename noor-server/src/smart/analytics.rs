@@ -312,6 +312,8 @@ mod tests {
                 is_synced: true,
                 track_count: 3,
                 is_favorite: false,
+                created_at: "2025-01-01 00:00:00".into(),
+                updated_at: "2025-01-01 00:00:00".into(),
             },
             Playlist {
                 id: 2,
@@ -323,6 +325,8 @@ mod tests {
                 is_synced: true,
                 track_count: 2,
                 is_favorite: false,
+                created_at: "2025-01-01 00:00:00".into(),
+                updated_at: "2025-01-01 00:00:00".into(),
             },
         ];
         let context = AnalyticsContext::new()
