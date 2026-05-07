@@ -650,56 +650,77 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
-pub fn get_track_genre_paths(conn: &Connection) -> Result<HashMap<i64, Vec<String>>> {
-    let mut stmt = conn.prepare(
-        "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
-            SELECT id, parent_id, name
-            FROM genres
-            WHERE parent_id IS NULL
-            UNION ALL
-            SELECT g.id, g.parent_id, genre_paths.path || ' > ' || g.name
-            FROM genres g
-            JOIN genre_paths ON g.parent_id = genre_paths.id
-        )
-        SELECT tg.track_id, genre_paths.path
-        FROM track_genres tg
-        JOIN genre_paths ON genre_paths.id = tg.genre_id
-        ORDER BY tg.track_id, genre_paths.path",
-    )?;
-
-    let mut rows = stmt.query([])?;
-    let mut by_track: HashMap<i64, Vec<String>> = HashMap::new();
-    while let Some(row) = rows.next()? {
-        let track_id: i64 = row.get(0)?;
-        let path: String = row.get(1)?;
-        by_track.entry(track_id).or_default().push(path);
-    }
-
-    Ok(by_track)
+/// Provenance of a [`ResolvedGenre`] — distinguishes ground-truth track-level
+/// data from album/artist fallback rescues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenreSource {
+    /// Direct row from `track_genres`.
+    Track,
+    /// Aggregated from sibling tracks on the same single-artist album.
+    AlbumFallback,
+    /// Aggregated from other tracks by the same artist.
+    ArtistFallback,
 }
 
-/// Selective batch variant of [`get_track_genre_paths`]: returns the
-/// leaf-and-ancestor path strings for a specific list of track ids
-/// rather than the whole library. Used by radio's per-request genre
-/// enrichment pass — typically 30–60 candidates, well sized for a
-/// single recursive-CTE query.
+impl GenreSource {
+    fn from_sql_source(value: &str) -> Self {
+        match value {
+            "album_fallback" => GenreSource::AlbumFallback,
+            "artist_fallback" => GenreSource::ArtistFallback,
+            _ => GenreSource::Track,
+        }
+    }
+}
+
+/// One genre path string for a track, with provenance. Path is the same
+/// `"Parent > Leaf"` shape `get_genres_for_tracks` returns.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ResolvedGenre {
+    pub path: String,
+    pub source: GenreSource,
+}
+
+impl ResolvedGenre {
+    /// Adapter for callers that consume only the path strings (e.g.
+    /// `weighted_genre_set` in the Phase-2b Jaccard scorer).
+    pub fn paths_only(rows: &[ResolvedGenre]) -> Vec<String> {
+        rows.iter().map(|r| r.path.clone()).collect()
+    }
+}
+
+/// Variant of [`get_genres_for_tracks`] that fills empty tracks via
+/// album-then-artist fallback. Tracks with at least one row in
+/// `track_genres` are returned untouched at [`GenreSource::Track`]. Tracks
+/// with no rows get rescued from siblings on the same single-artist album
+/// ([`GenreSource::AlbumFallback`]) or, failing that, from other tracks by
+/// the same artist ([`GenreSource::ArtistFallback`]). Multi-artist albums
+/// (compilations) are skipped at the album tier to avoid cross-artist
+/// contamination.
 ///
-/// Tracks with no genre rows are absent from the returned map (callers
-/// should treat absence as "no genre data" rather than insert a default
-/// empty Vec).
-pub fn get_genres_for_tracks(
+/// Top-[`crate::genre::filter::FALLBACK_ROWS_PER_TRACK`] fallback rows per
+/// tier per track. Sibling rows are taken from `track_genres` directly
+/// (the inner rule is `GalaxyFilterRule::All`) — Path A consumers (radio
+/// Jaccard, JSON exports) want the full sibling material.
+///
+/// See the parent module docs and the `filter_subquery_with_fallback`
+/// implementation for cascade semantics.
+pub fn get_genres_for_tracks_with_fallback(
     conn: &Connection,
     track_ids: &[i64],
-) -> Result<HashMap<i64, Vec<String>>> {
+) -> Result<HashMap<i64, Vec<ResolvedGenre>>> {
     if track_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
-    // SQLite parameter limit is generous (default 999) but we keep the
-    // CSV path predictable: one '?' per id, bound as int values.
-    let placeholders = std::iter::repeat_n("?", track_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
+    // Use the per-track-narrowed cascade builder. Without it, every call would
+    // enumerate all 35k tracks in `needs_fallback` and scan the whole
+    // track_genres table for primary rows. The narrow form inlines an
+    // IN(?,?,...) filter so SQLite touches only the requested track ids.
+    let cascade = crate::genre::filter::filter_subquery_with_fallback_for_tracks(
+        crate::genre::filter::GalaxyFilterRule::All,
+        track_ids.len(),
+    );
     let sql = format!(
         "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
             SELECT id, parent_id, name
@@ -710,21 +731,69 @@ pub fn get_genres_for_tracks(
             FROM genres g
             JOIN genre_paths ON g.parent_id = genre_paths.id
         )
-        SELECT tg.track_id, genre_paths.path
-        FROM track_genres tg
-        JOIN genre_paths ON genre_paths.id = tg.genre_id
-        WHERE tg.track_id IN ({placeholders})
-        ORDER BY tg.track_id, genre_paths.path"
+        SELECT cr.track_id, genre_paths.path, cr.source
+        FROM ({cascade}) cr
+        JOIN genre_paths ON genre_paths.id = cr.genre_id
+        ORDER BY cr.track_id, genre_paths.path"
     );
     let mut stmt = conn.prepare(&sql)?;
     let params_iter = rusqlite::params_from_iter(track_ids.iter().copied());
     let mut rows = stmt.query(params_iter)?;
 
-    let mut by_track: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut by_track: HashMap<i64, Vec<ResolvedGenre>> = HashMap::new();
     while let Some(row) = rows.next()? {
         let track_id: i64 = row.get(0)?;
         let path: String = row.get(1)?;
-        by_track.entry(track_id).or_default().push(path);
+        let src: String = row.get(2)?;
+        by_track.entry(track_id).or_default().push(ResolvedGenre {
+            path,
+            source: GenreSource::from_sql_source(&src),
+        });
+    }
+
+    Ok(by_track)
+}
+
+/// Whole-library variant of [`get_genres_for_tracks_with_fallback`]. Returns
+/// the same `(track_id → Vec<ResolvedGenre>)` map for every track in the
+/// library, including tracks rescued via album/artist fallback. Used by the
+/// galaxy/discovery JSON-export endpoints.
+///
+/// More expensive than the per-track form — the cascade processes the
+/// whole library. Profile via `EXPLAIN QUERY PLAN` if perf becomes a
+/// concern.
+pub fn get_track_genre_paths_with_fallback(
+    conn: &Connection,
+) -> Result<HashMap<i64, Vec<ResolvedGenre>>> {
+    let cascade =
+        crate::genre::filter::filter_subquery_with_fallback(crate::genre::filter::GalaxyFilterRule::All);
+    let sql = format!(
+        "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
+            SELECT id, parent_id, name
+            FROM genres
+            WHERE parent_id IS NULL
+            UNION ALL
+            SELECT g.id, g.parent_id, genre_paths.path || ' > ' || g.name
+            FROM genres g
+            JOIN genre_paths ON g.parent_id = genre_paths.id
+        )
+        SELECT cr.track_id, genre_paths.path, cr.source
+        FROM ({cascade}) cr
+        JOIN genre_paths ON genre_paths.id = cr.genre_id
+        ORDER BY cr.track_id, genre_paths.path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+
+    let mut by_track: HashMap<i64, Vec<ResolvedGenre>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let track_id: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        let src: String = row.get(2)?;
+        by_track.entry(track_id).or_default().push(ResolvedGenre {
+            path,
+            source: GenreSource::from_sql_source(&src),
+        });
     }
 
     Ok(by_track)
@@ -1681,9 +1750,14 @@ pub fn get_genre_cohorts_filtered(
     conn: &Connection,
     days: i64,
     filter: crate::genre::filter::GalaxyFilterRule,
+    with_fallback: bool,
 ) -> Result<Vec<GenreCohort>> {
     let _ = days; // bound via ?1 below
-    let sub = crate::genre::filter::filter_subquery(filter);
+    let sub = if with_fallback {
+        crate::genre::filter::filter_subquery_with_fallback(filter)
+    } else {
+        crate::genre::filter::filter_subquery(filter)
+    };
     // We bucket listens into 4 time-of-day slots + weekend/weekday
     // Slot 0: 0-6 (Night), Slot 1: 6-12 (Morning), Slot 2: 12-18 (Afternoon), Slot 3: 18-24 (Evening)
     // Then find genres that dominate each slot.
@@ -1808,6 +1882,7 @@ pub fn get_track_cohort_assignments(
         conn,
         days,
         crate::genre::filter::GalaxyFilterRule::default_rule(),
+        true, // with_fallback: cohort labels need to cover empty-genre tracks
     )?;
     if cohorts.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -3387,7 +3462,15 @@ pub fn get_model_embeddings(conn: &Connection, model_id: i64) -> Result<Vec<Mode
 }
 
 pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackRow>> {
-    let genre_paths = get_track_genre_paths(conn)?;
+    // Discovery embedding training pulls in album/artist fallback genres so
+    // niche tracks (no track-level enrichment yet) cluster near coherent
+    // peers in the embedding instead of isolating. Cost ~2s on training start;
+    // training is periodic, not per-request, so the whole-library scan is fine.
+    let genre_paths_with_provenance = get_track_genre_paths_with_fallback(conn)?;
+    let genre_paths: HashMap<i64, Vec<String>> = genre_paths_with_provenance
+        .into_iter()
+        .map(|(id, rows)| (id, ResolvedGenre::paths_only(&rows)))
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, a.name, al.title, t.duration_ms, t.best_quality, t.source,
                 t.play_count, t.is_favorite,
@@ -4754,6 +4837,96 @@ mod tests {
 
         let results = search_with_audio_filters(&conn, "miles", &filters, 2).expect("search");
         assert_eq!(results.len(), 2, "limit=2 with both FTS bind and audio-filter binds; off-by-one would return 0 or 3");
+    }
+
+    /// End-to-end Path A read API: cascade joins through `genre_paths` and
+    /// returns ancestor-expanded paths with provenance. Mirrors the Path B
+    /// fixture (in genre/filter.rs) — same artist/album/comp shape.
+    #[test]
+    fn get_genres_for_tracks_with_fallback_returns_provenance() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        // Genre tree: Electronic > Drum and Bass; Jazz; Rock.
+        conn.execute_batch(
+            "INSERT INTO genres (id, name, slug, parent_id) VALUES
+                (1, 'Electronic', 'electronic', NULL),
+                (2, 'Drum and Bass', 'drum-and-bass', 1),
+                (3, 'Jazz', 'jazz', NULL),
+                (4, 'Rock', 'rock', NULL);
+             INSERT INTO artists (id, name) VALUES
+                (1, 'CoherentArtist'),
+                (2, 'PartiallyTaggedArtist'),
+                (3, 'CompContributorA'),
+                (4, 'CompContributorB');
+             INSERT INTO albums (id, title, artist_id, source) VALUES
+                (10, 'CoherentAlbum', 1, 'tidal'),
+                (20, 'PartialAlbumA', 2, 'tidal'),
+                (21, 'PartialAlbumB', 2, 'tidal'),
+                (30, 'MultiArtistComp', 3, 'tidal');
+             INSERT INTO tracks
+                (id, title, artist_id, album_id, duration_ms, best_quality, best_source, fidelity_score, source)
+             VALUES
+                (100, 'Tagged on coherent', 1, 10, 1000, 'LOSSLESS', 'tidal', 10, 'tidal'),
+                (101, 'Empty on coherent', 1, 10, 1000, 'LOSSLESS', 'tidal', 10, 'tidal'),
+                (200, 'Tagged on partial A', 2, 20, 1000, 'LOSSLESS', 'tidal', 10, 'tidal'),
+                (201, 'Empty on partial B', 2, 21, 1000, 'LOSSLESS', 'tidal', 10, 'tidal'),
+                (300, 'Tagged on comp (artist 3)', 3, 30, 1000, 'LOSSLESS', 'tidal', 10, 'tidal'),
+                (301, 'Empty on comp (artist 4)', 4, 30, 1000, 'LOSSLESS', 'tidal', 10, 'tidal');
+             INSERT INTO track_genres (track_id, genre_id, source, confidence) VALUES
+                (100, 2, 'musicbrainz', 1.0),
+                (200, 3, 'musicbrainz', 0.9),
+                (300, 4, 'lastfm', 0.7);",
+        )
+        .expect("seed fixtures");
+
+        let result =
+            get_genres_for_tracks_with_fallback(&conn, &[100, 101, 201, 301]).expect("query");
+
+        // Track 100: direct genre (Drum and Bass), ancestor-expanded into two paths
+        // ("Electronic" via the parent walk and "Electronic > Drum and Bass" via the leaf).
+        let r100 = result.get(&100).expect("track 100 present");
+        assert!(r100.iter().all(|g| g.source == GenreSource::Track));
+        assert!(
+            r100.iter().any(|g| g.path == "Electronic > Drum and Bass"),
+            "expected leaf path for direct genre, got {r100:?}"
+        );
+
+        // Track 101: empty, rescued from album sibling (track 100, genre 2).
+        let r101 = result.get(&101).expect("track 101 present");
+        assert!(r101.iter().all(|g| g.source == GenreSource::AlbumFallback));
+        assert!(r101.iter().any(|g| g.path == "Electronic > Drum and Bass"));
+
+        // Track 201: empty, no album sibling, rescued from artist (track 200, genre 3 = Jazz).
+        let r201 = result.get(&201).expect("track 201 present");
+        assert!(r201.iter().all(|g| g.source == GenreSource::ArtistFallback));
+        assert!(r201.iter().any(|g| g.path == "Jazz"));
+
+        // Track 301: empty on multi-artist comp; album tier MUST skip;
+        // artist 4 has no other tagged tracks. Track stays unrescued, so it
+        // should be absent from the returned map (per existing function's
+        // contract: tracks with no genres are absent rather than empty Vec).
+        assert!(
+            !result.contains_key(&301),
+            "track 301 must NOT inherit comp-mate genres; got {:?}",
+            result.get(&301)
+        );
+    }
+
+    #[test]
+    fn paths_only_drops_provenance() {
+        let rows = vec![
+            ResolvedGenre {
+                path: "Electronic > House".to_string(),
+                source: GenreSource::Track,
+            },
+            ResolvedGenre {
+                path: "Pop".to_string(),
+                source: GenreSource::AlbumFallback,
+            },
+        ];
+        let paths = ResolvedGenre::paths_only(&rows);
+        assert_eq!(paths, vec!["Electronic > House", "Pop"]);
     }
 }
 

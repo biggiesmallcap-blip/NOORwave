@@ -1138,24 +1138,31 @@ fn compute_genre_jaccard(
     all_ids.sort_unstable();
     all_ids.dedup();
 
-    let paths_by_track =
-        match db.with_conn(move |conn| crate::db::queries::get_genres_for_tracks(conn, &all_ids)) {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(
-                    seed_track_id,
-                    "radio: genre enrichment query failed ({err:#}); skipping genre signal"
-                );
-                return HashMap::new();
-            }
-        };
+    let resolved_by_track = match db.with_conn(move |conn| {
+        crate::db::queries::get_genres_for_tracks_with_fallback(conn, &all_ids)
+    }) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                seed_track_id,
+                "radio: genre enrichment query failed ({err:#}); skipping genre signal"
+            );
+            return HashMap::new();
+        }
+    };
 
-    let seed_set = match paths_by_track.get(&seed_track_id) {
-        Some(paths) => weighted_genre_set(paths),
+    let seed_set = match resolved_by_track.get(&seed_track_id) {
+        Some(rows) => {
+            let paths = crate::db::queries::ResolvedGenre::paths_only(rows);
+            weighted_genre_set(&paths)
+        }
         None => {
+            // Truly empty even after album/artist fallback (no siblings tagged
+            // anywhere). Older logging said "skipped for all candidates" — the
+            // failure mode is identical, just rarer now.
             tracing::debug!(
                 seed_track_id,
-                "radio: seed has no genre rows; genre Jaccard skipped for all candidates"
+                "radio: seed has no genre rows even after fallback; genre Jaccard skipped for all candidates"
             );
             return HashMap::new();
         }
@@ -1166,10 +1173,11 @@ fn compute_genre_jaccard(
         if cand.track_id <= 0 {
             continue;
         }
-        let Some(paths) = paths_by_track.get(&cand.track_id) else {
+        let Some(rows) = resolved_by_track.get(&cand.track_id) else {
             continue;
         };
-        let cand_set = weighted_genre_set(paths);
+        let paths = crate::db::queries::ResolvedGenre::paths_only(rows);
+        let cand_set = weighted_genre_set(&paths);
         let score = weighted_jaccard(&seed_set, &cand_set);
         let key = (
             cand.source,
@@ -1418,8 +1426,8 @@ fn primary_genres_for_candidates(
     if ids.is_empty() {
         return HashMap::new();
     }
-    let paths_by_track = match db
-        .with_conn(move |conn| crate::db::queries::get_genres_for_tracks(conn, &ids))
+    let resolved_by_track = match db
+        .with_conn(move |conn| crate::db::queries::get_genres_for_tracks_with_fallback(conn, &ids))
     {
         Ok(m) => m,
         Err(err) => {
@@ -1429,11 +1437,12 @@ fn primary_genres_for_candidates(
             return HashMap::new();
         }
     };
-    let mut out = HashMap::with_capacity(paths_by_track.len());
-    for (track_id, paths) in paths_by_track {
+    let mut out = HashMap::with_capacity(resolved_by_track.len());
+    for (track_id, rows) in resolved_by_track {
         let mut counts: HashMap<String, i32> = HashMap::new();
-        for path in &paths {
-            let root = path
+        for row in &rows {
+            let root = row
+                .path
                 .split(" > ")
                 .next()
                 .unwrap_or("")
