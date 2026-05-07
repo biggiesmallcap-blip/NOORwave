@@ -1027,6 +1027,34 @@
 		void audioSettings.patch({ sample_rate_follow: (e.target as HTMLInputElement).checked });
 	}
 
+	// "Bit-perfect mode" is the audiophile defaults flipped on at once: max
+	// available quality from Tidal, exclusive WASAPI grab so the OS mixer is
+	// out of the path, and sample-rate-follow so the device runs at the FLAC's
+	// native rate. Off mode reverts to the safer defaults that Just Work on
+	// flaky DACs (CD-quality, shared output, fixed device rate).
+	let bitPerfectActive = $derived(
+		$audioSettings.settings?.quality === 'HI_RES_LOSSLESS' &&
+		$audioSettings.settings?.exclusive_mode === true &&
+		$audioSettings.settings?.sample_rate_follow === true
+	);
+
+	function onBitPerfectToggle(e: Event) {
+		const enable = (e.target as HTMLInputElement).checked;
+		if (enable) {
+			void audioSettings.patch({
+				quality: 'HI_RES_LOSSLESS',
+				exclusive_mode: true,
+				sample_rate_follow: true,
+			});
+		} else {
+			void audioSettings.patch({
+				quality: 'LOSSLESS',
+				exclusive_mode: false,
+				sample_rate_follow: false,
+			});
+		}
+	}
+
 	function onVideoQualityModeChange(e: Event) {
 		const value = (e.target as HTMLSelectElement).value as VideoQualityMode;
 		void audioSettings.patch({ video_quality_mode: value });
@@ -1633,6 +1661,27 @@
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
 					<div class="info-list">
+						{#if isWindows}
+							<div class="info-row">
+								<span>
+									Bit-perfect mode
+									{#if bitPerfectActive}<em style="font-style:normal;opacity:0.6;font-size:0.75rem">&nbsp;active</em>{/if}
+								</span>
+								<strong>
+									<label class="toggle-switch">
+										<input
+											type="checkbox"
+											checked={bitPerfectActive}
+											onchange={onBitPerfectToggle}
+										/>
+										<span class="toggle-slider"></span>
+									</label>
+								</strong>
+							</div>
+							<p class="page-copy" style="font-size:0.8rem">
+								Sets quality to Hi-Res Lossless, takes exclusive control of the output device, and matches the device rate to each track's native rate. Equivalent to enabling the three audiophile toggles below at once. Some DACs misbehave under exclusive mode — turn off if you hear dropouts.
+							</p>
+						{/if}
 						<div class="info-row">
 							<span>Quality</span>
 							<strong>

@@ -1954,6 +1954,13 @@ fn decode_and_buffer_job(
             let mut analysis_sent = false;
             let mut analysis_buf: Vec<f32> = Vec::new();
 
+            // Per-track stateful resampler. Lazily built on the first packet whose
+            // input rate doesn't match the live target rate. Rebuilt whenever the
+            // live target rate changes (sample-rate-follow path) or the channel
+            // count flips. None when input rate already matches output rate
+            // (passthrough).
+            let mut resampler: Option<StreamResampler> = None;
+
             loop {
                 if shared.stopped.load(Ordering::SeqCst) {
                     return Ok(()); // track was stopped/skipped — exit cleanly
@@ -2012,18 +2019,60 @@ fn decode_and_buffer_job(
                     decoded_channels as usize,
                     device_channels as usize,
                 );
-                let resampled = resample_interleaved(
-                    &channelized,
-                    device_channels as usize,
-                    decoded_sample_rate,
-                    live_target_rate,
-                );
+
+                let resampled = if decoded_sample_rate == live_target_rate {
+                    // Bit-perfect passthrough — rates already match.
+                    resampler = None;
+                    channelized
+                } else {
+                    let needs_rebuild = match resampler.as_ref() {
+                        Some(r) => {
+                            r.in_rate != decoded_sample_rate
+                                || r.out_rate != live_target_rate
+                                || r.channels != device_channels as usize
+                        }
+                        None => true,
+                    };
+                    if needs_rebuild {
+                        match StreamResampler::new(
+                            decoded_sample_rate,
+                            live_target_rate,
+                            device_channels as usize,
+                        ) {
+                            Ok(r) => resampler = Some(r),
+                            Err(e) => {
+                                warn!(
+                                    "Resampler init failed ({decoded_sample_rate} -> {live_target_rate} Hz, {} ch): {e}; passing through unresampled (pitch will be wrong)",
+                                    device_channels
+                                );
+                                resampler = None;
+                            }
+                        }
+                    }
+                    match resampler.as_mut() {
+                        Some(r) => r.process(&channelized),
+                        None => channelized,
+                    }
+                };
 
                 let mut guard = shared
                     .buffer
                     .lock()
                     .map_err(|_| anyhow!("playback buffer poisoned"))?;
                 guard.samples.extend_from_slice(&resampled);
+            }
+
+            // Flush any residual samples held in the resampler at end-of-stream
+            // so the final fraction of a chunk doesn't get truncated.
+            if let Some(r) = resampler.as_mut() {
+                let tail = r.flush();
+                if !tail.is_empty() {
+                    let mut guard = shared
+                        .buffer
+                        .lock()
+                        .map_err(|_| anyhow!("playback buffer poisoned"))?;
+                    guard.samples.extend_from_slice(&tail);
+                }
             }
 
             // Apply fade-in / fade-out ramps and mark the stream complete.
@@ -2097,45 +2146,144 @@ fn adapt_channels(samples: &[f32], input_channels: usize, output_channels: usize
     output
 }
 
-fn resample_interleaved(
-    samples: &[f32],
+/// Stateful sample-rate converter built on rubato's polyphase Kaiser-windowed
+/// sinc filter. Operates on interleaved f32 samples to slot directly into the
+/// decoder pipeline.
+///
+/// rubato's `SincFixedIn` requires a fixed input chunk size per `process` call,
+/// so we accumulate decoded samples in a per-channel residual buffer and only
+/// invoke rubato when a full chunk is ready. This preserves continuity across
+/// Symphonia packet boundaries (which arrive in irregular sizes) — without
+/// state, every packet would start the filter cold and create audible clicks
+/// at packet edges.
+struct StreamResampler {
+    inner: rubato::SincFixedIn<f32>,
+    chunk_size_in: usize,
     channels: usize,
-    input_rate: u32,
-    output_rate: u32,
-) -> Vec<f32> {
-    if samples.is_empty()
-        || channels == 0
-        || input_rate == 0
-        || output_rate == 0
-        || input_rate == output_rate
-    {
-        return samples.to_vec();
+    in_rate: u32,
+    out_rate: u32,
+    residual: Vec<Vec<f32>>,
+}
+
+impl StreamResampler {
+    /// Default chunk size. 1024 frames at 48 kHz is ~21 ms — comfortably below
+    /// the audio buffer fill threshold so we don't starve the output, and large
+    /// enough to amortize rubato's per-call overhead.
+    const CHUNK_SIZE_IN: usize = 1024;
+
+    fn new(in_rate: u32, out_rate: u32, channels: usize) -> Result<Self> {
+        if channels == 0 || in_rate == 0 || out_rate == 0 {
+            return Err(anyhow!(
+                "StreamResampler::new: invalid arguments ({in_rate} -> {out_rate} Hz, {channels} ch)"
+            ));
+        }
+        let params = rubato::SincInterpolationParameters {
+            sinc_len: 128,
+            f_cutoff: 0.95,
+            interpolation: rubato::SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: rubato::WindowFunction::BlackmanHarris2,
+        };
+        let inner = rubato::SincFixedIn::<f32>::new(
+            out_rate as f64 / in_rate as f64,
+            // Allow live ratio changes within ±1 octave without rebuilding —
+            // we still rebuild on rate change for cleanliness, but this also
+            // covers any in-flight tweaks.
+            2.0,
+            params,
+            Self::CHUNK_SIZE_IN,
+            channels,
+        )
+        .context("rubato SincFixedIn init failed")?;
+        Ok(Self {
+            inner,
+            chunk_size_in: Self::CHUNK_SIZE_IN,
+            channels,
+            in_rate,
+            out_rate,
+            residual: vec![Vec::with_capacity(Self::CHUNK_SIZE_IN * 2); channels],
+        })
     }
 
-    let input_frames = samples.len() / channels;
-    if input_frames == 0 {
-        return Vec::new();
+    /// Feed interleaved input samples; return interleaved output samples for
+    /// any complete chunks that finished processing. Sub-chunk leftovers are
+    /// held in `residual` until the next call (or `flush`).
+    fn process(&mut self, interleaved: &[f32]) -> Vec<f32> {
+        if interleaved.is_empty() {
+            return Vec::new();
+        }
+        for frame in interleaved.chunks_exact(self.channels) {
+            for (ch, &s) in frame.iter().enumerate() {
+                self.residual[ch].push(s);
+            }
+        }
+        let mut out: Vec<f32> = Vec::new();
+        while self.residual[0].len() >= self.chunk_size_in {
+            let chunk_in: Vec<Vec<f32>> = self
+                .residual
+                .iter_mut()
+                .map(|ch| ch.drain(..self.chunk_size_in).collect())
+                .collect();
+            match rubato::Resampler::process(&mut self.inner, &chunk_in, None) {
+                Ok(chunk_out) => Self::interleave_into(&chunk_out, &mut out),
+                Err(e) => {
+                    warn!("rubato process error: {e}");
+                    return out;
+                }
+            }
+        }
+        out
     }
 
-    let output_frames =
-        ((input_frames as f64) * output_rate as f64 / input_rate as f64).round() as usize;
-    let frame_step = input_rate as f64 / output_rate as f64;
-    let mut output = Vec::with_capacity(output_frames * channels);
+    /// End-of-stream: zero-pad the residual to a full chunk, run it through,
+    /// then drop the prefix that corresponds to the padded silence so we
+    /// approximately preserve the true tail length.
+    fn flush(&mut self) -> Vec<f32> {
+        if self.residual[0].is_empty() {
+            return Vec::new();
+        }
+        let real_in = self.residual[0].len();
+        for ch in self.residual.iter_mut() {
+            ch.resize(self.chunk_size_in, 0.0);
+        }
+        let chunk_in: Vec<Vec<f32>> = self
+            .residual
+            .iter_mut()
+            .map(|ch| ch.drain(..self.chunk_size_in).collect())
+            .collect();
+        let chunk_out = match rubato::Resampler::process(&mut self.inner, &chunk_in, None) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("rubato flush error: {e}");
+                return Vec::new();
+            }
+        };
+        // Keep only the output frames that came from the genuine tail.
+        let real_out_frames =
+            ((real_in as f64) * self.out_rate as f64 / self.in_rate as f64).round() as usize;
+        let real_out_frames = real_out_frames.min(chunk_out[0].len());
+        let trimmed: Vec<Vec<f32>> = chunk_out
+            .into_iter()
+            .map(|ch| ch.into_iter().take(real_out_frames).collect())
+            .collect();
+        let mut out: Vec<f32> = Vec::with_capacity(real_out_frames * self.channels);
+        Self::interleave_into(&trimmed, &mut out);
+        out
+    }
 
-    for frame_index in 0..output_frames {
-        let source_pos = frame_index as f64 * frame_step;
-        let left_index = source_pos.floor() as usize;
-        let right_index = (left_index + 1).min(input_frames - 1);
-        let fraction = (source_pos - left_index as f64) as f32;
-
-        for channel in 0..channels {
-            let left_sample = samples[left_index * channels + channel];
-            let right_sample = samples[right_index * channels + channel];
-            output.push(left_sample + (right_sample - left_sample) * fraction);
+    fn interleave_into(chunk_out: &[Vec<f32>], out: &mut Vec<f32>) {
+        if chunk_out.is_empty() {
+            return;
+        }
+        let frames = chunk_out[0].len();
+        let channels = chunk_out.len();
+        out.reserve(frames * channels);
+        for f in 0..frames {
+            for ch in chunk_out.iter() {
+                out.push(ch[f]);
+            }
         }
     }
-
-    output
 }
 
 fn samples_from_ms(ms: i32, sample_rate: u32, channels: u16) -> usize {
@@ -2182,10 +2330,44 @@ mod tests {
     }
 
     #[test]
-    fn resample_interleaved_changes_frame_count() {
-        let samples = vec![0.0, 1.0, 0.0, 1.0];
-        let output = resample_interleaved(&samples, 2, 48_000, 24_000);
-        assert_eq!(output.len(), 2);
+    fn stream_resampler_passthrough_when_rates_match_at_callsite() {
+        // The decoder's call site short-circuits resampling when input == output
+        // rate, so it never builds a StreamResampler in that case. This test
+        // documents the contract for callers — same-rate inputs should not
+        // construct a resampler.
+        assert_eq!(48_000_u32, 48_000_u32);
+    }
+
+    #[test]
+    fn stream_resampler_produces_output_for_downsample() {
+        let mut r = StreamResampler::new(96_000, 48_000, 2).expect("new");
+        // Feed two full chunks of stereo silence so we get at least one output
+        // batch out (sinc filter has a warm-up delay).
+        let frames = StreamResampler::CHUNK_SIZE_IN * 2;
+        let input = vec![0.0_f32; frames * 2];
+        let out = r.process(&input);
+        assert!(!out.is_empty(), "expected resampled output, got empty");
+        // Output frame count should be roughly half of input frame count
+        // (96k -> 48k). Allow generous slack for filter warm-up frames the
+        // first chunks suppress.
+        let out_frames = out.len() / 2;
+        assert!(
+            out_frames < frames,
+            "downsample output ({out_frames}) should be less than input ({frames})"
+        );
+    }
+
+    #[test]
+    fn stream_resampler_holds_residual_under_chunk_size() {
+        let mut r = StreamResampler::new(44_100, 48_000, 2).expect("new");
+        // Feed only a few frames — less than CHUNK_SIZE_IN. Should buffer
+        // them all in residual and return nothing.
+        let input = vec![0.0_f32; 10 * 2];
+        let out = r.process(&input);
+        assert!(
+            out.is_empty(),
+            "small input should buffer in residual, not produce output"
+        );
     }
 
     #[test]

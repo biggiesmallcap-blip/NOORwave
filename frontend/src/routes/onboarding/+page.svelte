@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { authFetch, getApiBase } from '$lib/api/client';
+	import { api, authFetch, getApiBase, type AudioQuality } from '$lib/api/client';
 	import TidalConnect from '$lib/components/onboarding/TidalConnect.svelte';
 	import LastfmConnect from '$lib/components/onboarding/LastfmConnect.svelte';
 
@@ -10,6 +10,9 @@
 	let syncErrorMessage = $state('');
 	let completing = $state(false);
 	let completeError = $state('');
+	let audioChoice = $state<'bit-perfect' | 'standard' | 'later' | null>(null);
+	let audioApplyError = $state('');
+	const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
 
 	onMount(async () => {
 		try {
@@ -67,6 +70,31 @@
 		step = 3;
 	}
 
+	async function applyAudioChoice(choice: 'bit-perfect' | 'standard' | 'later') {
+		audioChoice = choice;
+		audioApplyError = '';
+		if (choice === 'later') {
+			step = 4;
+			return;
+		}
+		try {
+			const current = await api.getAudioSettings();
+			const next = {
+				...current,
+				quality: (choice === 'bit-perfect' ? 'HI_RES_LOSSLESS' : 'LOSSLESS') as AudioQuality,
+				exclusive_mode: choice === 'bit-perfect' && isWindows,
+				sample_rate_follow: choice === 'bit-perfect',
+			};
+			await api.updateAudioSettings(next);
+			step = 4;
+		} catch (err) {
+			audioApplyError =
+				err instanceof Error
+					? err.message
+					: "Couldn't save audio settings — you can set them later in Settings.";
+		}
+	}
+
 	async function finish() {
 		completing = true;
 		completeError = '';
@@ -91,7 +119,7 @@
 <div class="onboarding">
 	<div class="card">
 		<div class="progress" role="tablist" aria-label="Onboarding steps">
-			{#each Array(4) as _, i}
+			{#each Array(5) as _, i}
 				<button
 					type="button"
 					class="dot"
@@ -137,6 +165,45 @@
 				{/if}
 			</div>
 		{:else if step === 3}
+			<div class="step audio-quality">
+				<h2>How should we play it?</h2>
+				<p class="lede">
+					NOORwave can stream Tidal at full Hi-Res Lossless and bypass the OS mixer for bit-perfect output. This is the audiophile path — it works on most modern DACs, but a few quirky ones don't accept exclusive mode.
+				</p>
+				<div class="audio-choices">
+					<button
+						type="button"
+						class="audio-choice"
+						class:selected={audioChoice === 'bit-perfect'}
+						onclick={() => void applyAudioChoice('bit-perfect')}
+					>
+						<span class="audio-choice-title">Bit-perfect <span class="audio-choice-pill">recommended</span></span>
+						<span class="audio-choice-body">Hi-Res Lossless from Tidal{isWindows ? ', exclusive WASAPI grab,' : ''} and the device follows each track's native rate.</span>
+					</button>
+					<button
+						type="button"
+						class="audio-choice"
+						class:selected={audioChoice === 'standard'}
+						onclick={() => void applyAudioChoice('standard')}
+					>
+						<span class="audio-choice-title">Standard</span>
+						<span class="audio-choice-body">Lossless CD-quality FLAC, shared output. Always works, easier to mix with other apps.</span>
+					</button>
+					<button
+						type="button"
+						class="audio-choice subtle"
+						class:selected={audioChoice === 'later'}
+						onclick={() => void applyAudioChoice('later')}
+					>
+						<span class="audio-choice-title">Decide later</span>
+						<span class="audio-choice-body">Keep current defaults. You can change this in Settings → Audio anytime.</span>
+					</button>
+				</div>
+				{#if audioApplyError}
+					<p class="error">{audioApplyError}</p>
+				{/if}
+			</div>
+		{:else if step === 4}
 			<div class="step done">
 				<h2>You're all set</h2>
 				<p class="lede">
@@ -279,4 +346,58 @@
 	}
 	.warn { color: #d6b06a; }
 	.error { color: #ff8a8a; margin: 0; }
+	.audio-choices {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		width: 100%;
+		max-width: 420px;
+	}
+	.audio-choice {
+		text-align: left;
+		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 12px;
+		padding: 14px 16px;
+		cursor: pointer;
+		color: inherit;
+		font: inherit;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		transition: background 120ms, border-color 120ms;
+	}
+	.audio-choice:hover {
+		background: rgba(255, 255, 255, 0.06);
+		border-color: rgba(255, 255, 255, 0.18);
+	}
+	.audio-choice.selected {
+		border-color: #4a6dd8;
+		background: rgba(74, 109, 216, 0.12);
+	}
+	.audio-choice.subtle {
+		background: transparent;
+	}
+	.audio-choice-title {
+		font-weight: 600;
+		font-size: 14px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.audio-choice-pill {
+		font-size: 10px;
+		font-weight: 500;
+		padding: 2px 6px;
+		border-radius: 999px;
+		background: rgba(74, 109, 216, 0.25);
+		color: #9bb1f0;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.audio-choice-body {
+		font-size: 12.5px;
+		color: #b8c0d4;
+		line-height: 1.45;
+	}
 </style>

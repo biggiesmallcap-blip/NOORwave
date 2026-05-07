@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "noor-app"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "open",
  "reqwest 0.12.28",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "noor-server"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2728,6 +2728,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rss",
+ "rubato",
  "rusqlite",
  "rustfft",
  "serde",
@@ -3651,6 +3652,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realfft"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f821338fddb99d089116342c46e9f1fbf3828dba077674613e734e01d6ea8677"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3821,6 +3831,18 @@ dependencies = [
  "derive_builder",
  "never",
  "quick-xml 0.37.5",
+]
+
+[[package]]
+name = "rubato"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "realfft",
 ]
 
 [[package]]

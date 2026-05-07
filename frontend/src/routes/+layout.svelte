@@ -535,6 +535,22 @@
 		return parts.join(' · ');
 	}
 
+	// Compact resolution pill for the now-playing area: "24/96", "16/44.1", etc.
+	// Reflects what the server reports the stream resolved to — independent of
+	// the user's quality preference, so the user can see when Tidal silently
+	// downgraded a track that didn't have a Hi-Res asset.
+	function formatResolutionShort(stream: { sample_rate: number | null; bit_depth: number | null } | null): string {
+		if (!stream) return '';
+		const bd = stream.bit_depth;
+		const sr = stream.sample_rate;
+		if (!bd && !sr) return '';
+		const khz = sr ? (sr / 1000) : null;
+		const khzStr = khz === null ? '' : (Number.isInteger(khz) ? `${khz}` : khz.toFixed(1));
+		if (bd && sr) return `${bd}/${khzStr}`;
+		if (sr) return `${khzStr} kHz`;
+		return `${bd}-bit`;
+	}
+
 	function formatQueueSource(source: string): string {
 		const normalized = source.trim().toLowerCase();
 		if (normalized.includes('automix')) return 'Automix';
@@ -1128,6 +1144,11 @@
 					<span class={`quality-badge np-quality ${getQualityClass($currentStreamDisplay.audio_quality)}`}>
 						{formatQuality($currentStreamDisplay.audio_quality)}
 					</span>
+					{#if formatResolutionShort($currentStreamDisplay)}
+						<span class="quality-badge np-resolution" title="Actual playback resolution (bit-depth / kHz)">
+							{formatResolutionShort($currentStreamDisplay)}
+						</span>
+					{/if}
 				{:else if $currentTrack?.best_quality}
 					<span class={`quality-badge np-quality ${getQualityClass($currentTrack.best_quality)}`}>
 						{formatQuality($currentTrack.best_quality)}
@@ -1618,6 +1639,11 @@
 					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentStreamDisplay.audio_quality)}`}>
 						{formatQuality($currentStreamDisplay.audio_quality)}
 					</span>
+					{#if formatResolutionShort($currentStreamDisplay)}
+						<span class="quality-badge mobile-np-resolution" title="Actual playback resolution (bit-depth / kHz)">
+							{formatResolutionShort($currentStreamDisplay)}
+						</span>
+					{/if}
 				{:else if $currentTrack.best_quality}
 					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentTrack.best_quality)}`}>
 						{formatQuality($currentTrack.best_quality)}
@@ -2414,6 +2440,16 @@
 		position: absolute;
 		top: 10px;
 		right: 10px;
+	}
+
+	.np-resolution {
+		position: absolute;
+		top: 36px;
+		right: 10px;
+		font-variant-numeric: tabular-nums;
+		font-size: 0.65rem;
+		letter-spacing: 0.04em;
+		opacity: 0.85;
 	}
 
 	.np-info,
@@ -3748,6 +3784,16 @@
 			position: absolute;
 			top: 10px;
 			right: 10px;
+		}
+
+		.mobile-np-resolution {
+			position: absolute;
+			top: 38px;
+			right: 10px;
+			font-variant-numeric: tabular-nums;
+			font-size: 0.7rem;
+			letter-spacing: 0.04em;
+			opacity: 0.85;
 		}
 
 		.mobile-np-info {
