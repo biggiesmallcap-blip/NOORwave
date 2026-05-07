@@ -1,9 +1,13 @@
 <script lang="ts">
 	import { addTrackToQueue, playTrackNow } from '$lib/stores/player';
 	import { formatDuration, getQualityClass } from '$lib/stores/library';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import type { GenreHeat, Track } from '$lib/api/client';
 	import type { GalaxyNode } from './galaxy.types';
+
+	type NearbyEntry = { id: number; name: string };
 
 	let {
 		node = null,
@@ -16,12 +20,14 @@
 		open = false,
 		onClose = () => {},
 		onMix = () => {},
-		onToggleSeed = () => {}
+		onToggleSeed = () => {},
+		onOpenInterior = () => {},
+		onSelectNearby = () => {}
 	}: {
 		node?: GalaxyNode | null;
 		listenHeat?: GenreHeat | null;
 		tracks?: Track[];
-		nearbyGenres?: string[];
+		nearbyGenres?: NearbyEntry[];
 		isSeed?: boolean;
 		loading?: boolean;
 		error?: string | null;
@@ -29,7 +35,13 @@
 		onClose?: () => void;
 		onMix?: () => void;
 		onToggleSeed?: () => void;
+		onOpenInterior?: () => void;
+		onSelectNearby?: (id: number) => void;
 	} = $props();
+
+	function handleTrackContextMenu(event: MouseEvent, track: Track) {
+		openContextMenu(event, buildTrackMenu(track));
+	}
 
 	function runOnActivation(event: KeyboardEvent, action: () => void) {
 		if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -56,6 +68,33 @@
 
 	let listenedTime = $derived(listenHeat?.total_listened_ms ?? node?.totalListenedMs ?? 0);
 	let showTracks = $state(false);
+
+	// Top-3 artists derived from the panel's track sample.
+	let topArtists = $derived.by(() => {
+		const counts = new Map<string, number>();
+		for (const track of tracks) {
+			const name = track.artist_name?.trim();
+			if (!name) continue;
+			counts.set(name, (counts.get(name) ?? 0) + 1);
+		}
+		return [...counts.entries()]
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+			.slice(0, 3)
+			.map(([name]) => name);
+	});
+
+	// 12-period sparkline data, normalized to the local max for the slice.
+	let sparklineData = $derived.by(() => {
+		const history = node?.evolutionHistory ?? [];
+		if (history.length < 2) return [] as { count: number; norm: number }[];
+		const slice = history.slice(-12);
+		const max = Math.max(...slice.map((p) => p.listenCount), 1);
+		return slice.map((p) => ({ count: p.listenCount, norm: p.listenCount / max }));
+	});
+
+	let hasAudioSignature = $derived(
+		node !== null && (node.avgBpm != null || node.avgEnergy != null || node.avgDanceability != null)
+	);
 </script>
 
 <div class:open class="genre-panel glass-panel">
@@ -78,14 +117,63 @@
 				<button class={`btn btn-glass ${isSeed ? 'is-seed' : ''}`} onclick={onToggleSeed}>
 					{isSeed ? 'Seed locked' : 'Lock as seed'}
 				</button>
+				<button class="btn btn-glass" onclick={onOpenInterior}>Open interior</button>
 			</div>
 		</div>
+
+		{#if topArtists.length > 0}
+			<div class="meta-row">
+				<span class="meta-label">Top artists</span>
+				<div class="meta-values">
+					{#each topArtists as artist}
+						<span class="meta-pill">{artist}</span>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
+		{#if hasAudioSignature && node}
+			<div class="meta-row">
+				<span class="meta-label">Vibe</span>
+				<div class="meta-values">
+					{#if node.avgBpm != null}
+						<span class="meta-pill"><strong>{Math.round(node.avgBpm)}</strong> BPM</span>
+					{/if}
+					{#if node.avgEnergy != null}
+						<span class="meta-pill"><strong>{node.avgEnergy.toFixed(2)}</strong> energy</span>
+					{/if}
+					{#if node.avgDanceability != null}
+						<span class="meta-pill"><strong>{node.avgDanceability.toFixed(2)}</strong> dance</span>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
+		{#if sparklineData.length > 0}
+			<div class="meta-row sparkline-row">
+				<span class="meta-label">Trend</span>
+				<div class="sparkline" aria-label="12-period listen trend">
+					{#each sparklineData as bar}
+						<span
+							class="sparkline-bar"
+							style={`height: ${Math.max(3, bar.norm * 100)}%; opacity: ${0.35 + bar.norm * 0.65}`}
+						></span>
+					{/each}
+				</div>
+			</div>
+		{/if}
 
 		{#if nearbyGenres.length > 0}
 			<div class="nearby-block">
 				<div class="nearby-chips">
-					{#each nearbyGenres as genreName}
-						<span class="nearby-chip">{genreName}</span>
+					{#each nearbyGenres as nearby}
+						<button
+							type="button"
+							class="nearby-chip"
+							onclick={() => onSelectNearby(nearby.id)}
+						>
+							{nearby.name}
+						</button>
 					{/each}
 				</div>
 			</div>
@@ -111,6 +199,7 @@
 								tabindex="0"
 								onclick={() => void handleTrackPlay(track.id)}
 								onkeydown={(event) => runOnActivation(event, () => void handleTrackPlay(track.id))}
+								oncontextmenu={(event) => handleTrackContextMenu(event, track)}
 							>
 								<div class="track-main">
 									<strong>{track.title}</strong>
@@ -282,6 +371,19 @@
 		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 50%, transparent);
 		color: var(--signal-text);
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast),
+			transform var(--motion-fast);
+	}
+
+	.nearby-chip:hover {
+		background: color-mix(in srgb, var(--accent-soft) 60%, var(--instrument-surface-strong));
+		border-color: color-mix(in srgb, var(--accent-line) 80%, transparent);
+		color: var(--text-primary);
+		transform: translateY(-1px);
 	}
 
 	.nearby-block {
@@ -294,6 +396,62 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
+	}
+
+	.meta-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.meta-label {
+		font-size: 0.66rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--signal-text);
+		font-weight: 600;
+	}
+
+	.meta-values {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.meta-pill {
+		padding: 3px 9px;
+		border-radius: 999px;
+		font-size: 0.74rem;
+		background: color-mix(in srgb, var(--instrument-surface) 76%, transparent);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 42%, transparent);
+		color: var(--text-primary);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.meta-pill strong {
+		font-weight: 700;
+		margin-right: 2px;
+	}
+
+	.sparkline-row {
+		flex-direction: row;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.sparkline {
+		display: flex;
+		align-items: flex-end;
+		gap: 2px;
+		flex: 1;
+		height: 28px;
+	}
+
+	.sparkline-bar {
+		flex: 1;
+		min-width: 2px;
+		background: color-mix(in srgb, var(--accent-line) 80%, transparent);
+		border-radius: 2px 2px 0 0;
 	}
 
 	.track-section {

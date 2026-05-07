@@ -48,12 +48,8 @@ export interface GalaxyNode {
 	heatNorm: number;
 	color: string;
 	glowColor: string;
-	// Phase 1: listening-driven topology
-	orbitRadius: number;
 	cohortId: string | null;
-	// Phase 3: evolution data
 	evolutionHistory: { periodStart: string; listenCount: number }[];
-	// Phase 1 DSP: audio metrics
 	avgBpm: number | null;
 	avgEnergy: number | null;
 	avgDanceability: number | null;
@@ -75,8 +71,7 @@ export interface GalaxyCohort {
 }
 
 export interface GalaxyConfig {
-	viewMode: 'map' | 'constellations' | 'mood' | 'heat' | 'paths' | 'vibe';
-	listeningDriven: boolean;
+	viewMode: 'map' | 'heat' | 'vibe' | 'rediscover';
 	showCohorts: boolean;
 	showEvolution: boolean;
 }
@@ -104,7 +99,7 @@ export interface GalaxyData {
 }
 
 export type ZoomLevel = 'galaxy' | 'cluster' | 'node';
-export type GalaxyViewMode = 'map' | 'constellations' | 'mood' | 'heat' | 'paths' | 'vibe';
+export type GalaxyViewMode = 'map' | 'heat' | 'vibe' | 'rediscover';
 
 export const GALAXY_ROOT_RING_RADIUS = 380;
 export const GALAXY_DEFAULT_SCALE = 0.58;

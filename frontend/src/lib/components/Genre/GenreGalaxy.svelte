@@ -22,9 +22,9 @@
 		resetViewToken = 0,
 		viewMode = 'map',
 		labelsEnabled = true,
-		heatEnabled = true,
 		autoDrift = false,
 		artistChipMap = new Map<number, string[]>(),
+		searchHighlightIds = new Set<number>(),
 		onSelect = () => {},
 		onToggleSeed = () => {},
 		onMix = () => {},
@@ -39,9 +39,9 @@
 		resetViewToken?: number;
 		viewMode?: GalaxyViewMode;
 		labelsEnabled?: boolean;
-		heatEnabled?: boolean;
 		autoDrift?: boolean;
 		artistChipMap?: ArtistChipMap;
+		searchHighlightIds?: Set<number>;
 		onSelect?: (id: number | null) => void;
 		onToggleSeed?: (id: number) => void;
 		onMix?: (id: number) => void;
@@ -55,6 +55,11 @@
 	let height = $state(0);
 	let dpr = $state(1);
 	let hoveredNodeId = $state<number | null>(null);
+	// hoverCardId trails hoveredNodeId by ~280ms so the hover card only appears
+	// when the pointer parks on a node, not while sweeping across.
+	let hoverCardId = $state<number | null>(null);
+	let hoverCardTimer: ReturnType<typeof setTimeout> | null = null;
+	const HOVER_INTENT_MS = 280;
 	let activeFamilyId = $state<number | null>(null);
 	let zoomLevel = $state<ZoomLevel>('galaxy');
 	let isDragging = $state(false);
@@ -74,6 +79,29 @@
 	let hoveredNode = $derived(
 		hoveredNodeId === null ? null : nodeById.get(hoveredNodeId) ?? null
 	);
+	let hoverCardNode = $derived(
+		hoverCardId === null ? null : nodeById.get(hoverCardId) ?? null
+	);
+
+	// Schedule the hover card to appear after HOVER_INTENT_MS of stable hover.
+	// Hide immediately on leave / drag.
+	$effect(() => {
+		const target = hoveredNodeId;
+		if (target === null || isDragging) {
+			if (hoverCardTimer) {
+				clearTimeout(hoverCardTimer);
+				hoverCardTimer = null;
+			}
+			hoverCardId = null;
+			return;
+		}
+		if (target === hoverCardId) return;
+		if (hoverCardTimer) clearTimeout(hoverCardTimer);
+		hoverCardTimer = setTimeout(() => {
+			hoverCardId = target;
+			hoverCardTimer = null;
+		}, HOVER_INTENT_MS);
+	});
 
 	// Vibe mode: energy color mapping
 	function energyColor(energy: number | null): string {
@@ -189,27 +217,46 @@
 		return selectedSeedSet.has(nodeId);
 	}
 
+	function isRediscoverCandidate(node: GalaxyNode): boolean {
+		return node.trackCount > 0 && node.listenCount === 0;
+	}
+
 	function nodeActivity(node: GalaxyNode): number {
-		const inSelectedLineage = selectedLineageHas(node.id);
+		let activity: number;
 		if (selectedId !== null) {
 			const selectedNode = nodeById.get(selectedId);
-			if (!selectedNode) return 0.6;
-			if (viewMode === 'paths') {
-				if (node.id === selectedNode.id) return 1;
-				if (inSelectedLineage) return 0.96;
-				if (node.familyId === selectedNode.familyId) return 0.42;
-				return 0.14;
+			if (!selectedNode) {
+				activity = 0.6;
+			} else if (node.id === selectedNode.id) {
+				activity = 1;
+			} else if (selectedLineageHas(node.id)) {
+				activity = 0.88;
+			} else if (node.familyId === selectedNode.familyId) {
+				activity = 0.7;
+			} else {
+				activity = 0.28;
 			}
-			if (node.id === selectedNode.id) return 1;
-			if (node.familyId === selectedNode.familyId) return 0.76;
-			return 0.28;
+		} else if (activeFamilyId !== null) {
+			activity = node.familyId === activeFamilyId ? 0.94 : 0.44;
+		} else {
+			activity = 0.86;
 		}
 
-		if (activeFamilyId !== null) {
-			return node.familyId === activeFamilyId ? 0.94 : 0.44;
+		// Inline search dim: nodes outside the match lineage fade to make matches pop.
+		if (searchHighlightIds.size > 0 && !searchHighlightIds.has(node.id)) {
+			activity *= 0.22;
 		}
 
-		return 0.86;
+		// Rediscover mode: candidates pop, well-played and empty nodes fade.
+		if (viewMode === 'rediscover') {
+			if (isRediscoverCandidate(node)) {
+				activity = Math.max(activity, 0.95);
+			} else if (node.depth > 0) {
+				activity *= 0.32;
+			}
+		}
+
+		return activity;
 	}
 
 	function edgeActivity(edge: GalaxyEdge): number {
@@ -314,9 +361,17 @@
 
 	function buildParticles(nextEdges: GalaxyEdge[]): HeatParticle[] {
 		const particleLimit = isCompactViewport ? 54 : MAX_PARTICLES;
+		// Particles are an "active listening" signal. Only spawn them on edges
+		// where at least one endpoint actually has listen activity — otherwise
+		// the canvas pulses on a library with no data, which is a lie.
 		const parentEdges = nextEdges
 			.map((edge, index) => ({ edge, index }))
-			.filter(({ edge }) => edge.type === 'parent-child')
+			.filter(({ edge }) => {
+				if (edge.type !== 'parent-child') return false;
+				const source = nodeById.get(edge.sourceId);
+				const target = nodeById.get(edge.targetId);
+				return (source?.listenCount ?? 0) > 0 || (target?.listenCount ?? 0) > 0;
+			})
 			.sort((left, right) => right.edge.weight - left.edge.weight);
 
 		const nextParticles: HeatParticle[] = [];
@@ -568,7 +623,7 @@
 			if (activity < 0.2) continue;
 			const isSelectedEdge = selectedId !== null && (edge.sourceId === selectedId || edge.targetId === selectedId);
 			const edgeFade = particle.t < 0.15 ? particle.t / 0.15 : particle.t > 0.85 ? (1 - particle.t) / 0.15 : 1;
-			const heatFactor = heatEnabled || viewMode === 'heat' ? 0.72 + edge.weight * 0.8 : 0.54;
+			const heatFactor = viewMode === 'heat' ? 0.72 + edge.weight * 0.8 : 0.54;
 			// Skip shadow for performance
 			ctx.globalAlpha = particle.alpha * edgeFade * activity * heatFactor * (isSelectedEdge ? 1.15 : 1);
 			ctx.fillStyle = source.color;
@@ -596,7 +651,8 @@
 				screen.y,
 				fieldRadius
 			);
-			const heatBoost = heatEnabled || viewMode === 'heat' ? 0.75 + node.heatNorm * 1.35 : 0.78;
+			// Heat mode: amplify hot families and dim cold ones for clear at-a-glance contrast.
+			const heatBoost = viewMode === 'heat' ? 0.45 + node.heatNorm * 2.4 : 0.78;
 			glow.addColorStop(0, hexToRgba(node.color, 0.14 * activity * heatBoost));
 			glow.addColorStop(0.42, hexToRgba(node.color, 0.07 * activity * heatBoost));
 			glow.addColorStop(1, hexToRgba(node.color, 0));
@@ -620,41 +676,6 @@
 		vignette.addColorStop(1, 'rgba(4, 6, 12, 0.46)');
 		ctx.save();
 		ctx.fillStyle = vignette;
-		ctx.fillRect(0, 0, width, height);
-		ctx.restore();
-	}
-
-	function drawOrbitGuides(ctx: CanvasRenderingContext2D) {
-		if (isCompactViewport) return;
-		if (viewMode !== 'constellations' && viewMode !== 'mood') return;
-		const roots = nodes.filter((node) => node.depth === 0);
-		for (const root of roots) {
-			if (!nodeIsVisible(root)) continue;
-			const activity = nodeActivity(root);
-			const screen = worldToScreen(root.x, root.y);
-			const orbitRadii = [72, 118, 162];
-			ctx.save();
-			ctx.globalAlpha = 0.12 * activity;
-			ctx.setLineDash(viewMode === 'mood' ? [4, 12] : [2, 9]);
-			ctx.lineWidth = 1;
-			ctx.strokeStyle = hexToRgba(root.color, 0.46);
-			for (const orbitRadius of orbitRadii) {
-				ctx.beginPath();
-				ctx.arc(screen.x, screen.y, orbitRadius * camera.scale, 0, Math.PI * 2);
-				ctx.stroke();
-			}
-			ctx.restore();
-		}
-	}
-
-	function drawMoodOverlay(ctx: CanvasRenderingContext2D) {
-		if (viewMode !== 'mood') return;
-		const gradient = ctx.createLinearGradient(0, height, width, 0);
-		gradient.addColorStop(0, 'rgba(255, 145, 84, 0.08)');
-		gradient.addColorStop(0.5, 'rgba(111, 136, 255, 0.04)');
-		gradient.addColorStop(1, 'rgba(129, 255, 226, 0.08)');
-		ctx.save();
-		ctx.fillStyle = gradient;
 		ctx.fillRect(0, 0, width, height);
 		ctx.restore();
 	}
@@ -687,29 +708,44 @@
 			const radius = node.radius;
 			const activity = nodeActivity(node);
 			if (activity < 0.16) continue;
-			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
 
-			// Vibe mode: use energy color for glow
+			// Vibe mode: use energy color for glow when DSP is available.
+			// Unanalyzed nodes get NO halo so the data-coverage gap is honest.
 			if (viewMode === 'vibe') {
 				const eColor = energyColor(node.avgEnergy);
 				if (eColor) {
 					const glowR = danceGlowRadius(node.avgDanceability, radius);
 					const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, glowR);
-					gradient.addColorStop(0, eColor.replace('50%)', '60%)').replace('hsl', 'hsla').replace(')', ', 0.3)'));
+					gradient.addColorStop(0, eColor.replace('50%)', '60%)').replace('hsl', 'hsla').replace(')', ', 0.42)'));
 					gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
 					ctx.fillStyle = gradient;
 					ctx.beginPath();
 					ctx.arc(screen.x, screen.y, glowR, 0, Math.PI * 2);
 					ctx.fill();
-					continue;
 				}
+				continue;
 			}
 
-			// Glow extends only slightly past the node edge
-			const haloExtend = 2 + radius * 0.4 + nodeHeat * radius * 0.6;
+			// Heat mode: cold nodes get tiny halos, hot nodes blaze.
+			// Rediscover mode: candidates blaze, others fade.
+			// Map mode: even baseline halo for every node.
+			let heatExtra = 0;
+			let haloAlphaScale = 1;
+			if (viewMode === 'heat') {
+				heatExtra = node.heatNorm * radius * 0.85;
+				haloAlphaScale = 0.35 + node.heatNorm * 1.4;
+			} else if (viewMode === 'rediscover') {
+				if (isRediscoverCandidate(node)) {
+					heatExtra = radius * 0.7;
+					haloAlphaScale = 1.6;
+				} else {
+					haloAlphaScale = 0.25;
+				}
+			}
+			const haloExtend = 2 + radius * 0.4 + heatExtra;
 			const haloRadius = radius + haloExtend;
 			const gradient = ctx.createRadialGradient(screen.x, screen.y, radius * 0.5, screen.x, screen.y, haloRadius);
-			gradient.addColorStop(0, hexToRgba(node.color, 0.25 * activity));
+			gradient.addColorStop(0, hexToRgba(node.color, 0.25 * activity * haloAlphaScale));
 			gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
 			ctx.fillStyle = gradient;
 			ctx.beginPath();
@@ -718,18 +754,41 @@
 		}
 
 		// Pass 2: solid sharp cores (no blur)
+		const now = performance.now();
 		for (const node of visibleNodes) {
 			const screen = worldToScreen(node.x, node.y);
-			const radius = node.radius;
+			let radius = node.radius;
 			const activity = nodeActivity(node);
 			if (activity < 0.16) continue;
 
-			ctx.globalAlpha = activity;
-			// Vibe mode: energy-colored nodes
+			// Rediscover: gently pulse + grow candidates so they feel alive,
+			// signalling the user to play them. The moment a play registers,
+			// the next heat refresh drops them out of the candidate set and
+			// they shrink back down — visible feedback on listening.
+			if (viewMode === 'rediscover' && isRediscoverCandidate(node)) {
+				const pulse = 1 + Math.sin(now / 600 + node.id * 0.7) * 0.08;
+				radius = node.radius * 1.28 * pulse;
+			}
+
 			if (viewMode === 'vibe') {
 				const eColor = energyColor(node.avgEnergy);
-				ctx.fillStyle = eColor || node.color;
+				if (eColor) {
+					ctx.globalAlpha = activity;
+					ctx.fillStyle = eColor;
+				} else {
+					// No DSP coverage — render desaturated so Vibe is honest about its data.
+					ctx.globalAlpha = activity * 0.55;
+					ctx.fillStyle = '#4a4d5e';
+				}
+			} else if (viewMode === 'heat') {
+				// Cold nodes fade, hot nodes stay full bright.
+				ctx.globalAlpha = activity * (0.5 + node.heatNorm * 0.6);
+				ctx.fillStyle = node.color;
+			} else if (viewMode === 'rediscover') {
+				ctx.globalAlpha = activity;
+				ctx.fillStyle = isRediscoverCandidate(node) ? node.color : '#3a3d4e';
 			} else {
+				ctx.globalAlpha = activity;
 				ctx.fillStyle = node.color;
 			}
 			ctx.beginPath();
@@ -743,7 +802,7 @@
 			const screen = worldToScreen(node.x, node.y);
 			const radius = node.radius;
 			const activity = nodeActivity(node);
-			const nodeHeat = heatEnabled || viewMode === 'heat' ? node.heatNorm : 0;
+			const nodeHeat = viewMode === 'heat' ? node.heatNorm : 0;
 
 			if (node.depth === 0) {
 				ctx.globalAlpha = clamp(0.18 + activity * 0.18, 0.16, 0.38);
@@ -812,19 +871,6 @@
 				ctx.shadowBlur = 8;
 				ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
 				ctx.fillText(label, screen.x, chipY + chipHeight / 2);
-
-				// Cohort indicator dot below the label chip
-				if (node.cohortId) {
-					const dotY = chipY + chipHeight + 6;
-					const dotRadius = 3;
-					ctx.globalAlpha = alpha * activity * 0.7;
-					ctx.beginPath();
-					ctx.arc(screen.x, dotY, dotRadius, 0, Math.PI * 2);
-					ctx.fillStyle = 'rgba(255, 220, 160, 0.85)';
-					ctx.shadowBlur = 6;
-					ctx.shadowColor = 'rgba(255, 200, 120, 0.4)';
-					ctx.fill();
-				}
 			} else {
 				ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
 				ctx.shadowBlur = 10;
@@ -881,9 +927,7 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, width, height);
 		ctx.drawImage(bgCanvas, 0, 0, width, height);
-		drawMoodOverlay(ctx);
 		drawFamilyFields(ctx);
-		drawOrbitGuides(ctx);
 
 		if (pendingConnectionRedraw) {
 			drawConnectionsLayer();
@@ -1135,6 +1179,10 @@
 			window.cancelAnimationFrame(animationFrame);
 			resizeObserver?.disconnect();
 			window.removeEventListener('keydown', handleKeydown);
+			if (hoverCardTimer) {
+				clearTimeout(hoverCardTimer);
+				hoverCardTimer = null;
+			}
 		};
 	});
 </script>
@@ -1170,20 +1218,34 @@
 		</button>
 	{/if}
 
-	{#if hoveredNode && viewMode === 'vibe' && !isDragging}
+	{#if hoverCardNode && mixPillPosition && !isDragging && hoverCardId === hoveredNodeId}
+		{@const hoverArtists = artistChipMap.get(hoverCardNode.id) ?? []}
+		{@const hoverListenSec = Math.floor(hoverCardNode.totalListenedMs / 1000)}
+		{@const hoverHours = Math.floor(hoverListenSec / 3600)}
+		{@const hoverMinutes = Math.floor((hoverListenSec % 3600) / 60)}
 		<div
-			class="vibe-tooltip"
-			style={`transform: translate(${(mixPillPosition?.x ?? 0)}px, ${(mixPillPosition?.y ?? 0) + 16}px) translate(-50%, 0);`}
+			class="hover-card"
+			style={`transform: translate(${mixPillPosition.x}px, ${mixPillPosition.y + 16}px) translate(-50%, 0);`}
 		>
-			<span class="vibe-tooltip-name">{hoveredNode.name}</span>
-			{#if hoveredNode.avgBpm != null}
-				<span class="vibe-tooltip-metric">BPM: {Math.round(hoveredNode.avgBpm)}</span>
+			<div class="hover-head">
+				<span class="hover-dot" style={`background: ${hoverCardNode.color}`}></span>
+				<span class="hover-name">{hoverCardNode.name}</span>
+			</div>
+			<span class="hover-sub">
+				{hoverCardNode.familyName} · {hoverCardNode.trackCount.toLocaleString()} tracks
+				{#if hoverCardNode.totalListenedMs > 0}
+					· {hoverHours > 0 ? `${hoverHours}h ${hoverMinutes}m` : `${hoverMinutes}m`}
+				{/if}
+			</span>
+			{#if hoverArtists.length > 0}
+				<span class="hover-meta">Top: {hoverArtists.slice(0, 2).join(', ')}</span>
 			{/if}
-			{#if hoveredNode.avgEnergy != null}
-				<span class="vibe-tooltip-metric">Energy: {hoveredNode.avgEnergy.toFixed(2)}</span>
-			{/if}
-			{#if hoveredNode.avgDanceability != null}
-				<span class="vibe-tooltip-metric">Dance: {hoveredNode.avgDanceability.toFixed(2)}</span>
+			{#if viewMode === 'vibe' && (hoverCardNode.avgBpm != null || hoverCardNode.avgEnergy != null || hoverCardNode.avgDanceability != null)}
+				<span class="hover-meta hover-vibe">
+					{#if hoverCardNode.avgBpm != null}<span>{Math.round(hoverCardNode.avgBpm)} BPM</span>{/if}
+					{#if hoverCardNode.avgEnergy != null}<span>E {hoverCardNode.avgEnergy.toFixed(2)}</span>{/if}
+					{#if hoverCardNode.avgDanceability != null}<span>D {hoverCardNode.avgDanceability.toFixed(2)}</span>{/if}
+				</span>
 			{/if}
 		</div>
 	{/if}
@@ -1264,31 +1326,60 @@
 		}
 	}
 
-	/* Vibe mode tooltip */
-	.vibe-tooltip {
+	.hover-card {
 		position: absolute;
+		left: 0;
+		top: 0;
 		pointer-events: none;
-		z-index: 10;
+		z-index: 4;
 		display: flex;
 		flex-direction: column;
-		gap: 3px;
+		gap: 4px;
 		padding: 8px 12px;
-		border-radius: var(--radius-sm);
+		min-width: 160px;
+		max-width: 260px;
+		border-radius: 10px;
 		background: rgba(10, 10, 18, 0.92);
 		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
 		border: 1px solid rgba(255, 255, 255, 0.1);
-		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+		animation: hover-card-in 140ms ease-out both;
 	}
 
-	.vibe-tooltip-name {
+	@keyframes hover-card-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+
+	.hover-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.hover-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.hover-name {
 		font-size: 0.82rem;
 		font-weight: 600;
 		color: var(--text-primary);
 	}
 
-	.vibe-tooltip-metric {
-		font-size: 0.72rem;
-		color: var(--text-secondary);
+	.hover-sub,
+	.hover-meta {
+		font-size: 0.7rem;
+		color: var(--signal-text);
 		font-variant-numeric: tabular-nums;
+	}
+
+	.hover-vibe {
+		display: inline-flex;
+		gap: 8px;
 	}
 </style>

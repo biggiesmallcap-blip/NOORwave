@@ -2,7 +2,22 @@
 	import { onMount } from 'svelte';
 	import { api, type Track, type GenreHeat } from '$lib/api/client';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTrackMenu } from '$lib/player/track_menu';
 	import type { GalaxyNode } from './galaxy.types';
+
+	function handleTrackContextMenu(event: MouseEvent, track: Track) {
+		openContextMenu(event, buildTrackMenu(track));
+	}
+
+	type ArtistCluster = {
+		name: string;
+		artistId: number | null;
+		count: number;
+		x: number;
+		y: number;
+		radius: number;
+	};
 
 	let {
 		node = null,
@@ -24,7 +39,7 @@
 	let actionError = $state<string | null>(null);
 
 	// Artist micro-galaxy data
-	let artistClusters = $state<{ name: string; count: number; x: number; y: number; radius: number }[]>([]);
+	let artistClusters = $state<ArtistCluster[]>([]);
 	let canvasEl = $state<HTMLCanvasElement | null>(null);
 	let width = $state(0);
 	let height = $state(0);
@@ -43,26 +58,30 @@
 	}
 
 	function buildArtistGalaxy(trackList: Track[]) {
-		const artistCounts = new Map<string, number>();
+		const artistAcc = new Map<string, { count: number; artistId: number | null }>();
 		for (const track of trackList) {
 			const artist = track.artist_name?.trim();
 			if (!artist) continue;
-			artistCounts.set(artist, (artistCounts.get(artist) ?? 0) + 1);
+			const entry = artistAcc.get(artist) ?? { count: 0, artistId: track.artist_id ?? null };
+			entry.count += 1;
+			if (entry.artistId == null && track.artist_id != null) entry.artistId = track.artist_id;
+			artistAcc.set(artist, entry);
 		}
 
-		const sorted = [...artistCounts.entries()].sort((a, b) => b[1] - a[1]);
+		const sorted = [...artistAcc.entries()].sort((a, b) => b[1].count - a[1].count);
 		const topArtists = sorted.slice(0, 20);
-		const maxCount = topArtists[0]?.[1] ?? 1;
+		const maxCount = topArtists[0]?.[1].count ?? 1;
 
 		// Place artists in a mini force-directed layout
-		const nodes = topArtists.map(([name, count], i) => ({
+		const nodes = topArtists.map(([name, info], i) => ({
 			name,
-			count,
+			artistId: info.artistId,
+			count: info.count,
 			x: Math.cos((Math.PI * 2 * i) / topArtists.length) * 80,
 			y: Math.sin((Math.PI * 2 * i) / topArtists.length) * 80,
 			vx: 0,
 			vy: 0,
-			radius: 4 + Math.sqrt(count / maxCount) * 12
+			radius: 4 + Math.sqrt(info.count / maxCount) * 12
 		}));
 
 		// Mini simulation
@@ -90,8 +109,9 @@
 			}
 		}
 
-		artistClusters = nodes.map(n => ({
+		artistClusters = nodes.map((n) => ({
 			name: n.name,
+			artistId: n.artistId,
 			count: n.count,
 			x: n.x,
 			y: n.y,
@@ -278,6 +298,29 @@
 				{/if}
 			</div>
 
+			{#if node.avgBpm != null || node.avgEnergy != null || node.avgDanceability != null}
+				<div class="audio-dials" aria-label="Audio character">
+					{#if node.avgBpm != null}
+						<div class="dial">
+							<span class="dial-value">{Math.round(node.avgBpm)}</span>
+							<span class="dial-label">BPM</span>
+						</div>
+					{/if}
+					{#if node.avgEnergy != null}
+						<div class="dial">
+							<span class="dial-value">{node.avgEnergy.toFixed(2)}</span>
+							<span class="dial-label">Energy</span>
+						</div>
+					{/if}
+					{#if node.avgDanceability != null}
+						<div class="dial">
+							<span class="dial-value">{node.avgDanceability.toFixed(2)}</span>
+							<span class="dial-label">Danceability</span>
+						</div>
+					{/if}
+				</div>
+			{/if}
+
 			{#if evolutionData.length > 1}
 				<div class="evolution-strip">
 					<span class="evo-label">Listening trail</span>
@@ -311,6 +354,18 @@
 					? `${artistClusters.length} artists orbiting by play count`
 					: 'No artist data available yet'}
 			</p>
+
+			{#if artistClusters.length > 0}
+				<div class="artist-chip-row">
+					{#each artistClusters.slice(0, 8) as artist}
+						{#if artist.artistId != null}
+							<a class="artist-chip" href={`/artists/${artist.artistId}`}>{artist.name}</a>
+						{:else}
+							<span class="artist-chip artist-chip-static">{artist.name}</span>
+						{/if}
+					{/each}
+				</div>
+			{/if}
 		</div>
 
 		{#if actionError}
@@ -332,7 +387,12 @@
 			{:else}
 				<div class="tracks">
 					{#each tracks.slice(0, 40) as track (track.id)}
-						<div class="track-row">
+						<div
+							class="track-row"
+							role="button"
+							tabindex="0"
+							oncontextmenu={(event) => handleTrackContextMenu(event, track)}
+						>
 							{#if track.artwork_url}
 								<img class="track-art" src={track.artwork_url} alt="" />
 							{:else}
@@ -465,6 +525,70 @@
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		white-space: nowrap;
+	}
+
+	.audio-dials {
+		display: flex;
+		gap: 10px;
+		padding-top: 4px;
+	}
+
+	.dial {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 2px;
+		min-width: 64px;
+		padding: 6px 10px;
+		border-radius: 12px;
+		background: color-mix(in srgb, var(--instrument-surface-strong) 60%, transparent);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 35%, transparent);
+	}
+
+	.dial-value {
+		font-size: 1rem;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		color: var(--text-primary);
+	}
+
+	.dial-label {
+		color: var(--signal-text);
+		font-size: 0.58rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.artist-chip-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		padding: 8px 0 0;
+	}
+
+	.artist-chip {
+		padding: 4px 10px;
+		border-radius: 999px;
+		font-size: 0.72rem;
+		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
+		border: 1px solid color-mix(in srgb, var(--instrument-border) 36%, transparent);
+		color: var(--text-primary);
+		text-decoration: none;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			transform var(--motion-fast);
+	}
+
+	a.artist-chip:hover {
+		background: color-mix(in srgb, var(--accent-soft) 55%, var(--instrument-surface));
+		border-color: color-mix(in srgb, var(--accent-line) 75%, transparent);
+		transform: translateY(-1px);
+	}
+
+	.artist-chip-static {
+		opacity: 0.65;
 	}
 
 	.evo-bars {

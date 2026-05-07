@@ -81,7 +81,6 @@ function placeChildren(
 			heatNorm,
 			color: palette.color,
 			glowColor: palette.glowColor,
-			orbitRadius: 0,
 			cohortId: null,
 			evolutionHistory: [],
 			avgBpm: metrics?.avg_bpm ?? null,
@@ -115,31 +114,9 @@ function placeChildren(
 }
 
 /**
- * Compute orbit radius for each node: genres you listen to frequently
- * orbit closer to center; neglected ones drift outward.
- */
-function computeOrbitRadii(nodes: GalaxyNode[], maxListenCount: number): number {
-	const maxRadius = GALAXY_ROOT_RING_RADIUS * 0.85;
-	const minRadius = 40;
-	let maxRadiusUsed = 0;
-
-	nodes.forEach(node => {
-		if (maxListenCount === 0) {
-			node.orbitRadius = maxRadius;
-		} else {
-			const inverseHeat = 1 - Math.log1p(node.listenCount) / Math.log1p(maxListenCount);
-			node.orbitRadius = minRadius + inverseHeat * (maxRadius - minRadius);
-		}
-		maxRadiusUsed = Math.max(maxRadiusUsed, node.orbitRadius);
-	});
-
-	return maxRadiusUsed;
-}
-
-/**
  * Assign cohort IDs to nodes based on cohort data from backend.
  */
-function assignCohorts(nodes: GalaxyNode[], cohorts: GenreCohort[]): Map<number, string> {
+function assignCohorts(nodes: GalaxyNode[], cohorts: GenreCohort[]) {
 	const assignment = new Map<number, string>();
 	for (const cohort of cohorts) {
 		const ids = cohort.genre_ids ?? [];
@@ -150,7 +127,6 @@ function assignCohorts(nodes: GalaxyNode[], cohorts: GenreCohort[]): Map<number,
 	for (const node of nodes) {
 		node.cohortId = assignment.get(node.id) ?? null;
 	}
-	return assignment;
 }
 
 /**
@@ -163,7 +139,6 @@ function attachEvolution(nodes: GalaxyNode[], evolution: GenreEvolutionPoint[]) 
 		list.push({ periodStart: point.period_start, listenCount: point.listen_count });
 		byGenreId.set(point.genre_id, list);
 	}
-	// Sort each list chronologically
 	for (const [, points] of byGenreId) {
 		points.sort((a, b) => a.periodStart.localeCompare(b.periodStart));
 	}
@@ -180,14 +155,13 @@ export function buildGalaxyData(
 		cohorts?: GenreCohort[];
 		evolution?: GenreEvolutionPoint[];
 		metrics?: GenreAudioMetrics[];
-		listeningDriven?: boolean;
 	} = {}
 ): GalaxyData {
 	if (genres.length === 0) {
 		return { nodes: [], edges: [] };
 	}
 
-	const { cohorts = [], evolution = [], metrics = [], listeningDriven = false } = options;
+	const { cohorts = [], evolution = [], metrics = [] } = options;
 
 	const heatById = new Map(heat.map(entry => [entry.genre_id, entry]));
 	const metricsById = metrics.length > 0 ? new Map(metrics.map(m => [m.genre_id, m])) : undefined;
@@ -195,17 +169,6 @@ export function buildGalaxyData(
 	const nodes: GalaxyNode[] = [];
 	const edges: GalaxyEdge[] = [];
 	const rootCount = genres.length;
-
-	// Phase 1: Compute orbit radii for listening-driven layout
-	if (listeningDriven) {
-		computeOrbitRadii(nodes, maxListenCount);
-	}
-
-	// Assign cohorts
-	assignCohorts(nodes, cohorts);
-
-	// Attach evolution history
-	attachEvolution(nodes, evolution);
 
 	genres.forEach((root, index) => {
 		const familyKey = familyKeyFromSlug(root.slug);
@@ -215,23 +178,9 @@ export function buildGalaxyData(
 		const totalListenedMs = rootHeat?.total_listened_ms ?? 0;
 		const heatNorm = maxListenCount > 0 ? Math.log1p(listenCount) / Math.log1p(maxListenCount) : 0;
 
-		let x: number, y: number, angle: number;
-
-		if (listeningDriven) {
-			// Distribute on a ring but shift by heat — hotter genres pull toward top
-			const baseAngle = (Math.PI * 2 * index) / rootCount;
-			const heatOffset = (1 - heatNorm) * Math.PI * 0.15;
-			angle = baseAngle + heatOffset;
-			const rootOrbitRadius = maxListenCount > 0
-				? 200 + (1 - heatNorm) * 180
-				: GALAXY_ROOT_RING_RADIUS;
-			x = Math.cos(angle) * rootOrbitRadius;
-			y = Math.sin(angle) * rootOrbitRadius;
-		} else {
-			angle = -Math.PI / 2 + (Math.PI * 2 * index) / rootCount;
-			x = Math.cos(angle) * GALAXY_ROOT_RING_RADIUS;
-			y = Math.sin(angle) * GALAXY_ROOT_RING_RADIUS;
-		}
+		const angle = -Math.PI / 2 + (Math.PI * 2 * index) / rootCount;
+		const x = Math.cos(angle) * GALAXY_ROOT_RING_RADIUS;
+		const y = Math.sin(angle) * GALAXY_ROOT_RING_RADIUS;
 
 		const rootMetrics = metricsById?.get(root.id);
 
@@ -255,10 +204,7 @@ export function buildGalaxyData(
 			heatNorm,
 			color: palette.color,
 			glowColor: palette.glowColor,
-			orbitRadius: listeningDriven ? (maxListenCount > 0
-				? 200 + (1 - heatNorm) * 180
-				: GALAXY_ROOT_RING_RADIUS) : 0,
-			cohortId: cohorts.find(c => c.genre_ids.includes(root.id))?.id ?? null,
+			cohortId: null,
 			evolutionHistory: [],
 			avgBpm: rootMetrics?.avg_bpm ?? null,
 			avgEnergy: rootMetrics?.avg_energy ?? null,
@@ -277,13 +223,10 @@ export function buildGalaxyData(
 			root.id,
 			familyKey,
 			root.name,
-			listeningDriven ? Math.atan2(y, x) : angle,
+			angle,
 			metricsById
 		);
 	});
-
-	// Attach evolution to root nodes too
-	attachEvolution(nodes, evolution);
 
 	// Sibling edges between roots
 	const roots = nodes.filter(node => node.depth === 0);
@@ -299,7 +242,10 @@ export function buildGalaxyData(
 		});
 	}
 
-	runSimulation(nodes, edges, 200, { listeningDriven });
+	runSimulation(nodes, edges, 200);
+
+	assignCohorts(nodes, cohorts);
+	attachEvolution(nodes, evolution);
 
 	const nodeById = new Map(nodes.map(node => [node.id, node]));
 	for (const edge of edges) {

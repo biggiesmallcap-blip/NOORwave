@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import type { Unsubscriber } from 'svelte/store';
-	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type Track } from '$lib/api/client';
+	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -15,6 +15,7 @@
 	let heat = $state<GenreHeat[]>([]);
 	let cohorts = $state<GenreCohort[]>([]);
 	let evolution = $state<GenreEvolutionPoint[]>([]);
+	let metrics = $state<GenreAudioMetrics[]>([]);
 	let selectedId = $state<number | null>(null);
 	let loading = $state(true);
 	let refreshingTopology = $state(false);
@@ -32,21 +33,35 @@
 	let pendingRefreshKind: 'heat' | 'full' | null = null;
 	let viewMode = $state<GalaxyViewMode>('map');
 	let labelsEnabled = $state(true);
-	let heatEnabled = $state(false);
 	let autoDrift = $state(true);
+	let libraryOnly = $state(true);
 	let searchQuery = $state('');
 	let focusNodeId = $state<number | null>(null);
 	let resetViewToken = $state(0);
 	let selectedSeedIds = $state<number[]>([]);
 	let interiorOpen = $state(false);
-	const viewModes: GalaxyViewMode[] = ['map', 'constellations', 'mood', 'heat', 'paths'];
+	const viewModes: GalaxyViewMode[] = ['map', 'heat', 'vibe', 'rediscover'];
+
+	// Prune to subtrees that actually contain tracks. The default is on because
+	// pure-taxonomy nodes (no tracks in your library, even transitively) are
+	// decorative noise — you can't play them and they crowd the canvas.
+	function pruneToLibrary(nodes: Genre[]): Genre[] {
+		const result: Genre[] = [];
+		for (const node of nodes) {
+			const prunedChildren = pruneToLibrary(node.children ?? []);
+			const subtreeHasTracks = (node.track_count ?? 0) > 0 || prunedChildren.length > 0;
+			if (subtreeHasTracks) {
+				result.push({ ...node, children: prunedChildren });
+			}
+		}
+		return result;
+	}
+
+	let displayedTaxonomy = $derived(libraryOnly ? pruneToLibrary(taxonomy) : taxonomy);
 
 	let galaxyData = $derived(
-		taxonomy.length > 0
-			? buildGalaxyData(taxonomy, heat, {
-					cohorts: [], // cluster rendering removed; cohorts state still populates selectedNodeCohort for GenreInterior
-					evolution
-				})
+		displayedTaxonomy.length > 0
+			? buildGalaxyData(displayedTaxonomy, heat, { cohorts, evolution, metrics })
 			: { nodes: [], edges: [] }
 	);
 	let heatById = $derived(new Map(heat.map((entry) => [entry.genre_id, entry])));
@@ -68,10 +83,9 @@
 	);
 	let activeModeCopy = $derived.by(() => {
 		switch (viewMode) {
-			case 'constellations': return 'Editorial scene clusters and orbit guides.';
-			case 'mood': return 'Emotional field overlay across the taxonomy.';
 			case 'heat': return 'Momentum halos reflecting recent listening.';
-			case 'paths': return 'Lineage routes and bridge emphasis.';
+			case 'vibe': return 'Audio character: energy, BPM, danceability.';
+			case 'rediscover': return 'Stocked but unplayed — what you’re sleeping on.';
 			default: return 'Canonical galaxy map of your library.';
 		}
 	});
@@ -80,18 +94,44 @@
 			? cohorts.find((c) => c.id === selectedNode.cohortId)
 			: null
 	);
-	let nearbyGenres = $derived.by(() => {
-		if (!selectedNode) return [] as string[];
-		const genre = genreById.get(selectedNode.id);
-		if (!genre) return [] as string[];
+	type NearbyEntry = { id: number; name: string };
+	let searchHighlightIds = $derived.by<Set<number>>(() => {
+		const query = searchQuery.trim().toLowerCase();
+		if (!query) return new Set();
+		const ids = new Set<number>();
+		const nodeMap = new Map(galaxyData.nodes.map((node) => [node.id, node]));
+		for (const node of galaxyData.nodes) {
+			if (!node.name.toLowerCase().includes(query)) continue;
+			let cursor: typeof node | undefined = node;
+			while (cursor) {
+				if (ids.has(cursor.id)) break;
+				ids.add(cursor.id);
+				cursor = cursor.parentId === null ? undefined : nodeMap.get(cursor.parentId);
+			}
+		}
+		return ids;
+	});
 
-		const siblingNames = genre.parent_id === null
-			? taxonomy.filter((item) => item.id !== genre.id).map((item) => item.name)
+	let nearbyGenres = $derived.by<NearbyEntry[]>(() => {
+		if (!selectedNode) return [];
+		const genre = genreById.get(selectedNode.id);
+		if (!genre) return [];
+
+		const siblings: NearbyEntry[] = genre.parent_id === null
+			? taxonomy.filter((item) => item.id !== genre.id).map((item) => ({ id: item.id, name: item.name }))
 			: (genreById.get(genre.parent_id)?.children ?? [])
 				.filter((item) => item.id !== genre.id)
-				.map((item) => item.name);
-		const childNames = (genre.children ?? []).map((item) => item.name);
-		return [...new Set([...childNames, ...siblingNames])].slice(0, 6);
+				.map((item) => ({ id: item.id, name: item.name }));
+		const children: NearbyEntry[] = (genre.children ?? []).map((item) => ({ id: item.id, name: item.name }));
+		const seen = new Set<number>();
+		const merged: NearbyEntry[] = [];
+		for (const entry of [...children, ...siblings]) {
+			if (seen.has(entry.id)) continue;
+			seen.add(entry.id);
+			merged.push(entry);
+			if (merged.length >= 6) break;
+		}
+		return merged;
 	});
 
 	function flattenGenres(nodes: Genre[]): Genre[] {
@@ -120,6 +160,7 @@
 		heat: GenreHeat[];
 		cohorts: GenreCohort[];
 		evolution: GenreEvolutionPoint[];
+		metrics: GenreAudioMetrics[];
 	};
 
 	async function fetchGalaxySnapshot(): Promise<GalaxySnapshot> {
@@ -132,16 +173,18 @@
 			throw reason;
 		});
 
-		const [cohortsResp, evolutionResp] = await Promise.allSettled([
+		const [cohortsResp, evolutionResp, metricsResp] = await Promise.allSettled([
 			api.getGenreCohorts(90),
-			api.getGenreEvolution(90)
+			api.getGenreEvolution(90),
+			api.getGenreAudioMetrics()
 		]);
 
 		return {
 			genres: genreResponse.genres,
 			heat: heatResponse.heat,
 			cohorts: cohortsResp.status === 'fulfilled' ? cohortsResp.value.cohorts : [],
-			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : []
+			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : [],
+			metrics: metricsResp.status === 'fulfilled' ? metricsResp.value.metrics : []
 		};
 	}
 
@@ -163,6 +206,7 @@
 		heat = snapshot.heat;
 		cohorts = snapshot.cohorts;
 		evolution = snapshot.evolution;
+		metrics = snapshot.metrics;
 
 		if (invalidateCaches) {
 			clearGalaxyCaches();
@@ -241,6 +285,9 @@
 			error = reason instanceof Error ? reason.message : String(reason);
 			taxonomy = [];
 			heat = [];
+			cohorts = [];
+			evolution = [];
+			metrics = [];
 			clearGalaxyCaches();
 		} finally {
 			loading = false;
@@ -263,15 +310,17 @@
 	async function refreshHeat() {
 		refreshingHeat = true;
 		try {
-			const [heatResp, cohortResp, evolResp] = await Promise.allSettled([
+			const [heatResp, cohortResp, evolResp, metricsResp] = await Promise.allSettled([
 				api.getGenreHeat(90),
 				api.getGenreCohorts(90),
-				api.getGenreEvolution(90)
+				api.getGenreEvolution(90),
+				api.getGenreAudioMetrics()
 			]);
 			if (heatResp.status === 'fulfilled') heat = heatResp.value.heat;
 			else if (isNotFoundError(heatResp.reason)) heat = buildZeroHeat(taxonomy);
 			if (cohortResp.status === 'fulfilled') cohorts = cohortResp.value.cohorts;
 			if (evolResp.status === 'fulfilled') evolution = evolResp.value.evolution;
+			if (metricsResp.status === 'fulfilled') metrics = metricsResp.value.metrics;
 		} catch (reason) {
 			console.error('Failed to refresh galaxy data', reason);
 		} finally {
@@ -497,8 +546,8 @@
 					resetViewToken={resetViewToken}
 					viewMode={viewMode}
 					labelsEnabled={labelsEnabled}
-					heatEnabled={heatEnabled}
 					autoDrift={autoDrift}
+					searchHighlightIds={searchHighlightIds}
 					{artistChipMap}
 					onSelect={handleSelect}
 					onToggleSeed={toggleSeed}
@@ -528,10 +577,10 @@
 				</div>
 
 				<div class="hud-stats compact">
-					<div><strong>{taxonomy.length}</strong><span>families</span></div>
-					<div><strong>{galaxyData.nodes.length}</strong><span>mapped</span></div>
-					<div><strong>{activeThisMonthCount}</strong><span>active</span></div>
-					<div><strong>{rediscoveryCount}</strong><span>rediscovery</span></div>
+					<div title="Top-level genre families"><strong>{taxonomy.length}</strong><span>families</span></div>
+					<div title="Total genre nodes mapped to your library"><strong>{galaxyData.nodes.length}</strong><span>genres</span></div>
+					<div title="Genres listened to in the last 90 days"><strong>{activeThisMonthCount}</strong><span>active 90d</span></div>
+					<div title="Genres with tracks but no recent listens"><strong>{rediscoveryCount}</strong><span>rediscover</span></div>
 				</div>
 			</div>
 
@@ -550,7 +599,7 @@
 			</div>
 
 			{#if actionError}
-				<div class="error-toast glass-panel">{actionError}</div>
+				<div class="error-toast glass-panel" role="status" aria-live="polite">{actionError}</div>
 			{/if}
 
 			<div class="control-dock glass-panel">
@@ -569,6 +618,14 @@
 				<button class:active={autoDrift} class="dock-btn" onclick={() => (autoDrift = !autoDrift)}>
 					Auto drift
 				</button>
+				<button
+					class:active={libraryOnly}
+					class="dock-btn"
+					onclick={() => (libraryOnly = !libraryOnly)}
+					title="Hide genres with no tracks in your library"
+				>
+					Library only
+				</button>
 			</div>
 
 			{#if selectedSeedIds.length > 0}
@@ -585,9 +642,18 @@
 							{/if}
 						{/each}
 					</div>
-					<button class="btn btn-primary seed-mix-btn" onclick={() => void handleSeedMix()}>
-						▶ Build seed mix
-					</button>
+					<div class="seed-actions">
+						<button
+							class="btn btn-glass"
+							onclick={() => (selectedSeedIds = [])}
+							aria-label="Clear all seeds"
+						>
+							Clear
+						</button>
+						<button class="btn btn-primary seed-mix-btn" onclick={() => void handleSeedMix()}>
+							▶ Build seed mix
+						</button>
+					</div>
 				</div>
 			{/if}
 
@@ -603,6 +669,8 @@
 				onClose={() => handleSelect(null)}
 				onMix={() => selectedNode && void handleMix(selectedNode.id)}
 				onToggleSeed={() => selectedNode && toggleSeed(selectedNode.id)}
+				onOpenInterior={() => { if (selectedNode) interiorOpen = true; }}
+				onSelectNearby={(id) => { handleSelect(id); void focusNode(id); }}
 			/>
 
 			{#if interiorOpen && selectedNode}
@@ -864,6 +932,12 @@
 	}
 
 	.seed-mix-btn {
+		flex-shrink: 0;
+	}
+
+	.seed-actions {
+		display: flex;
+		gap: 8px;
 		flex-shrink: 0;
 	}
 

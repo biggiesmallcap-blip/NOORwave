@@ -29,29 +29,14 @@ function clampVelocity(node: GalaxyNode) {
 export function runSimulation(
 	nodes: GalaxyNode[],
 	edges: GalaxyEdge[],
-	iterations = 200,
-	options: { listeningDriven?: boolean } = {}
+	iterations = 200
 ): GalaxyNode[] {
 	if (nodes.length === 0) return nodes;
 
-	const { listeningDriven = false } = options;
 	const nodeById = new Map(nodes.map(node => [node.id, node]));
 	const rootAnchors = new Map(
 		nodes.filter(node => node.depth === 0).map(node => [node.id, { x: node.x, y: node.y }])
 	);
-
-	// Pre-compute cohort centroids for Phase 2
-	const cohortCentroids = new Map<string, { x: number; y: number; count: number }>();
-	if (listeningDriven) {
-		for (const node of nodes) {
-			if (!node.cohortId) continue;
-			const entry = cohortCentroids.get(node.cohortId) ?? { x: 0, y: 0, count: 0 };
-			entry.x += node.x;
-			entry.y += node.y;
-			entry.count += 1;
-			cohortCentroids.set(node.cohortId, entry);
-		}
-	}
 
 	for (let tick = 0; tick < iterations; tick += 1) {
 		// All-pairs repulsion
@@ -116,47 +101,21 @@ export function runSimulation(
 		}
 
 		for (const node of nodes) {
-			// Phase 1: Listening-driven orbital pull toward center
-			if (listeningDriven && node.orbitRadius > 0) {
-				const distFromCenter = Math.hypot(node.x, node.y);
-				const targetDist = node.orbitRadius;
-				const orbitalPull = (targetDist - distFromCenter) * 0.0018;
-				if (distFromCenter > 0) {
-					node.vx += (node.x / distFromCenter) * orbitalPull;
-					node.vy += (node.y / distFromCenter) * orbitalPull;
-				}
-			}
-
-			// Phase 2: Cohort gravity pull
-			if (listeningDriven && node.cohortId) {
-				const centroid = cohortCentroids.get(node.cohortId);
-				if (centroid && centroid.count > 1) {
-					const centerX = centroid.x / centroid.count;
-					const centerY = centroid.y / centroid.count;
-					node.vx += (centerX - node.x) * 0.0022;
-					node.vy += (centerY - node.y) * 0.0022;
-				}
-			}
-
-			// Taxonomy family pull (always, weaker when listening-driven)
 			if (node.depth > 0) {
 				const centroid = familyCentroids.get(node.familyId);
 				if (centroid && centroid.count > 0) {
 					const centerX = centroid.x / centroid.count;
 					const centerY = centroid.y / centroid.count;
-					const pullStrength = listeningDriven ? 0.0012 : 0.0033;
-					node.vx += (centerX - node.x) * pullStrength;
-					node.vy += (centerY - node.y) * pullStrength;
+					node.vx += (centerX - node.x) * 0.0033;
+					node.vy += (centerY - node.y) * 0.0033;
 				}
 			}
 
-			// Root anchoring
 			if (node.depth === 0) {
 				const anchor = rootAnchors.get(node.id);
 				if (anchor) {
-					const anchorStrength = listeningDriven ? 0.006 : 0.01;
-					node.vx += (anchor.x - node.x) * anchorStrength;
-					node.vy += (anchor.y - node.y) * anchorStrength;
+					node.vx += (anchor.x - node.x) * 0.01;
+					node.vy += (anchor.y - node.y) * 0.01;
 				}
 			}
 
