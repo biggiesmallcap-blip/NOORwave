@@ -28,6 +28,9 @@
 	"pnpm": {
 		"overrides": {
 			"cookie": "^0.7.2"
-		}
+		},
+		"onlyBuiltDependencies": [
+			"esbuild"
+		]
 	}
 }
