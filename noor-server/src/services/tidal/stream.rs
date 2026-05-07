@@ -405,6 +405,7 @@ pub async fn resolve_stream(
         })?;
 
     let status = resp.status();
+    let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
     let raw = resp
         .text()
         .await
@@ -414,7 +415,7 @@ pub async fn resolve_stream(
     tracing::debug!("TIDAL playback response: {}", raw);
 
     if !status.is_success() {
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
@@ -594,6 +595,7 @@ pub async fn resolve_video_stream(
         })?;
 
     let status = resp.status();
+    let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
     let raw = resp
         .text()
         .await
@@ -603,7 +605,7 @@ pub async fn resolve_video_stream(
     tracing::debug!(target: "tidal::video", video_id, "TIDAL video playback response: {}", raw);
 
     if !status.is_success() {
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {

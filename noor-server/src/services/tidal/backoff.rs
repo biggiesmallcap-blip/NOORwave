@@ -1,6 +1,17 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
+/// Default 429 lockout when TIDAL doesn't send a `Retry-After` header.
+/// 60s was punishing — a single rate-limited search froze every TIDAL
+/// endpoint for a minute. 10s matches TIDAL's typical recovery window.
+const DEFAULT_429_BACKOFF_SECS: i64 = 10;
+
+/// Upper bound for `Retry-After`-derived backoffs; protects against a
+/// misbehaving upstream sending a huge value.
+const MAX_429_BACKOFF_SECS: i64 = 300;
+
+const ABUSE_403_BACKOFF_SECS: i64 = 1800;
+
 pub struct TidalBackoff {
     until_secs: AtomicI64,
     reason: RwLock<String>,
@@ -10,6 +21,17 @@ static GLOBAL: OnceLock<TidalBackoff> = OnceLock::new();
 
 pub fn global() -> &'static TidalBackoff {
     GLOBAL.get_or_init(TidalBackoff::new)
+}
+
+/// Extract a `Retry-After` value (seconds) from a response. Only handles the
+/// numeric form — the HTTP-date form is rare for API rate-limits and not
+/// worth the parser. Caller passes the result to [`TidalBackoff::classify`].
+pub fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
 }
 
 impl TidalBackoff {
@@ -31,15 +53,17 @@ impl TidalBackoff {
         Ok(())
     }
 
-    pub fn classify(&self, status: u16, body: &str) {
+    pub fn classify(&self, status: u16, body: &str, retry_after_secs: Option<i64>) {
         let duration_secs: i64 = match status {
-            429 => 60,
+            429 => retry_after_secs
+                .map(|s| s.clamp(1, MAX_429_BACKOFF_SECS))
+                .unwrap_or(DEFAULT_429_BACKOFF_SECS),
             403 if {
                 let lower = body.to_lowercase();
                 lower.contains("abuse") || lower.contains("suspended")
             } =>
             {
-                1800
+                ABUSE_403_BACKOFF_SECS
             }
             _ => return,
         };
@@ -103,19 +127,40 @@ mod tests {
     }
 
     #[test]
-    fn backoff_set_on_429() {
+    fn backoff_set_on_429_default_window() {
         let b = fresh();
-        b.classify(429, "");
+        b.classify(429, "", None);
         assert!(b.check().is_err());
         let s = b.state();
         assert!(s.active);
-        assert!(s.remaining_secs > 50.0 && s.remaining_secs <= 60.0);
+        assert!(
+            s.remaining_secs > 0.0 && s.remaining_secs <= DEFAULT_429_BACKOFF_SECS as f64,
+            "default 429 window should be ~{DEFAULT_429_BACKOFF_SECS}s, got {}",
+            s.remaining_secs
+        );
+    }
+
+    #[test]
+    fn backoff_honors_retry_after_header() {
+        let b = fresh();
+        b.classify(429, "", Some(3));
+        let s = b.state();
+        assert!(s.active);
+        assert!(s.remaining_secs > 0.0 && s.remaining_secs <= 3.0);
+    }
+
+    #[test]
+    fn backoff_clamps_huge_retry_after() {
+        let b = fresh();
+        b.classify(429, "", Some(99_999));
+        let s = b.state();
+        assert!(s.remaining_secs <= MAX_429_BACKOFF_SECS as f64);
     }
 
     #[test]
     fn backoff_30min_on_abuse_403() {
         let b = fresh();
-        b.classify(403, "abuse detected");
+        b.classify(403, "abuse detected", None);
         let s = b.state();
         assert!(s.active);
         assert!(s.remaining_secs > 1700.0 && s.remaining_secs <= 1800.0);
@@ -124,27 +169,27 @@ mod tests {
     #[test]
     fn non_abuse_403_ignored() {
         let b = fresh();
-        b.classify(403, "not found");
+        b.classify(403, "not found", None);
         assert!(b.check().is_ok());
     }
 
     #[test]
     fn backoff_not_shortened_by_429_after_30min_403() {
         let b = fresh();
-        b.classify(403, "abuse");
+        b.classify(403, "abuse", None);
         let long_until = b.until_secs.load(Ordering::Relaxed);
-        b.classify(429, "");
+        b.classify(429, "", None);
         let after = b.until_secs.load(Ordering::Relaxed);
         assert_eq!(
             long_until, after,
-            "60s window must not shorten the 1800s window"
+            "short 429 window must not shorten the 1800s window"
         );
     }
 
     #[test]
     fn server_errors_ignored() {
         let b = fresh();
-        b.classify(500, "internal error");
+        b.classify(500, "internal error", None);
         assert!(b.check().is_ok());
     }
 

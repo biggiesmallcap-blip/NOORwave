@@ -1,8 +1,22 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
 
 const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
+
+/// Cap on concurrent in-flight TIDAL catalog requests. A single user session
+/// can otherwise fan out search + playlist + playback enrichment in parallel
+/// and trip TIDAL's per-second rate limit. 4 is empirically enough for
+/// snappy UI without bursting; raise if catalog browsing ever feels gated.
+const MAX_INFLIGHT_REQUESTS: usize = 4;
+
+static REQUEST_LIMITER: OnceLock<Semaphore> = OnceLock::new();
+
+fn request_limiter() -> &'static Semaphore {
+    REQUEST_LIMITER.get_or_init(|| Semaphore::new(MAX_INFLIGHT_REQUESTS))
+}
 
 #[derive(Clone)]
 pub struct TidalClient {
@@ -197,6 +211,11 @@ impl TidalClient {
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;
 
+        let _permit = request_limiter()
+            .acquire()
+            .await
+            .context("TIDAL request limiter closed")?;
+
         tracing::debug!("TIDAL GET {}", url);
         let resp = self
             .http
@@ -209,8 +228,13 @@ impl TidalClient {
 
         let status = resp.status();
         if !status.is_success() {
+            let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+            crate::services::tidal::backoff::global().classify(
+                status.as_u16(),
+                &body,
+                retry_after,
+            );
             anyhow::bail!("TIDAL API error {}: {}", status, body);
         }
 

@@ -22,8 +22,9 @@ pub async fn add_favorite_track(
         .await?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
         anyhow::bail!("TIDAL mutation error {}: {}", status, body);
     }
 
@@ -49,8 +50,9 @@ pub async fn remove_favorite_track(
         .await?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
         anyhow::bail!("TIDAL mutation error {}: {}", status, body);
     }
 
@@ -76,8 +78,9 @@ pub async fn remove_favorite_album(
         .await?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
         anyhow::bail!("TIDAL mutation error {}: {}", status, body);
     }
 
@@ -110,8 +113,9 @@ pub async fn add_to_playlist(
         .await?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body);
+        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
         anyhow::bail!("TIDAL mutation error {}: {}", status, body);
     }
 
