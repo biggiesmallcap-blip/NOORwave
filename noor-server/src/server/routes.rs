@@ -1864,6 +1864,7 @@ async fn play_discovery_track(
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(playback_generation);
+    align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -5407,6 +5408,7 @@ async fn start_first_radio_queue_item(
             user_quality,
         )
         .with_generation(playback_generation);
+        align_device_to_stream_rate(state, &runtime_handle, &stream_info).await;
         runtime_handle.play(job).map_err(|error| {
             let message = format!("Failed to start host audio playback: {error}");
             report_playback_failure(state, &message);
@@ -7683,6 +7685,7 @@ async fn play_track(
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(playback_generation);
+    align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -8624,6 +8627,7 @@ async fn next_track(
             user_quality,
         )
         .with_generation(playback_generation);
+        align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -8768,6 +8772,7 @@ async fn previous_track(
             user_quality,
         )
         .with_generation(playback_generation);
+        align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -10599,6 +10604,7 @@ async fn start_ephemeral_tidal_playback(
             return Err(error);
         }
     };
+    align_device_to_stream_rate(state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|e| {
         let message = format!("Failed to start host audio playback: {e}");
         report_playback_failure(state, &message);
@@ -11126,8 +11132,33 @@ async fn do_tidal_sync(
 
         for album_chunk in album_ids.chunks(10) {
             check_cancel()?;
+            // Bound each per-album fetch so a single hung Tidal request can't
+            // stall the chunk for ~30s (reqwest default). One retry on error
+            // or timeout handles transient network blips; a second timeout
+            // surfaces as an Err that the loop below quietly skips.
+            let album_fetch_timeout = std::time::Duration::from_secs(15);
             let mut fetches = stream::iter(album_chunk.iter().copied())
-                .map(|album_id| async move { client.get_album_tracks(album_id).await })
+                .map(|album_id| async move {
+                    let first = tokio::time::timeout(
+                        album_fetch_timeout,
+                        client.get_album_tracks(album_id),
+                    )
+                    .await;
+                    match first {
+                        Ok(Ok(resp)) => Ok(resp),
+                        _ => match tokio::time::timeout(
+                            album_fetch_timeout,
+                            client.get_album_tracks(album_id),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::anyhow!(
+                                "get_album_tracks timed out twice for album {album_id}"
+                            )),
+                        },
+                    }
+                })
                 .buffer_unordered(10);
 
             while let Some(result) = fetches.next().await {
@@ -12195,6 +12226,7 @@ async fn handle_runtime_finished(
                 user_quality,
             )
             .with_generation(generation);
+            align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
             runtime_handle.switch_to(job)?;
             {
                 let mut state_guard = state.write().await;
@@ -12355,6 +12387,62 @@ async fn current_user_audio_quality(
         .map(|s| s.quality)
 }
 
+// If sample-rate-follow is enabled and the freshly-resolved stream's native
+// rate differs from the device's current rate, swap the device to the new
+// rate before the track starts. Without this, the first track of a session
+// (and any track played from a cold start) plays at the device's existing
+// rate with a software resampler in the path — not bit-perfect. The
+// next-track pre-buffer path already does this; this helper makes every
+// play/switch site behave the same way.
+async fn align_device_to_stream_rate(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    stream_info: &tidal_stream::StreamInfo,
+) {
+    let (next_rate, settings, current_rate) = {
+        let guard = state.read().await;
+        let Some(info) = guard.playback_runtime_info.as_ref() else {
+            return;
+        };
+        let Some(rate_i32) = stream_info.sample_rate else {
+            return;
+        };
+        if rate_i32 <= 0 {
+            return;
+        }
+        let next_rate = rate_i32 as u32;
+        if next_rate == info.sample_rate {
+            return;
+        }
+        let settings = match guard
+            .db
+            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if !settings.sample_rate_follow {
+            return;
+        }
+        (next_rate, settings, info.sample_rate)
+    };
+
+    let device_sel = match settings.output_device.as_ref() {
+        Some(name) => playback_runtime::OutputDeviceSelection::Named(name.clone()),
+        None => playback_runtime::OutputDeviceSelection::Default,
+    };
+    if let Err(e) = handle.device_swap(
+        device_sel,
+        settings.exclusive_mode,
+        settings.sample_rate_follow,
+        Some(next_rate),
+    ) {
+        warn!(
+            "align_device_to_stream_rate: device_swap to {next_rate} Hz (from {current_rate} Hz) failed: {e}"
+        );
+    }
+}
+
 // ───── Audio output settings ────────────────────────────────────────────────
 //
 // `GET /api/audio/devices`     — enumerate cpal output devices
@@ -12496,6 +12584,7 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(generation);
 
+    align_device_to_stream_rate(state, &handle, &stream_info).await;
     handle.switch_to(job)?;
 
     {
