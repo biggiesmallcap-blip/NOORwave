@@ -111,7 +111,7 @@ pub fn write_genres(
     // Always mark as checked first so we never re-query this track.
     mark_checked(conn, track_id)?;
 
-    use crate::genre::scorer::{TagInput, TagLevel, TagSource, score_genre_tags};
+    use crate::genre::scorer::{MIN_SCORE_FLOOR, TagInput, TagLevel, TagSource, score_genre_tags};
     use crate::tags::context::{TagContext, classify_tag_context};
 
     let catalog = crate::genre::builder::embedded_builder().catalog();
@@ -129,7 +129,7 @@ pub fn write_genres(
         }
     }
 
-    let result = score_genre_tags(&inputs, 0.2);
+    let result = score_genre_tags(&inputs, MIN_SCORE_FLOOR);
 
     let mut inserted = 0;
     for scored in &result.genres {

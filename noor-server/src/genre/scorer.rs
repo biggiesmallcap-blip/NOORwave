@@ -1,6 +1,21 @@
 use crate::genre::mappings::GenreCatalog;
 use std::collections::HashMap;
 
+/// Minimum score a tag must clear to be persisted to `track_genres`.
+///
+/// Originally 0.2. Raised to that level when the May-4 source-aware scorer
+/// shipped and we wanted to be aggressive about filtering noise. The
+/// 2026-05-07 audit found it was too aggressive: artist-level Last.fm tags
+/// max out at `LastFmArtist × Artist = 0.4 × 0.45 = 0.18`, so they were
+/// mathematically incapable of clearing 0.2 even at count=100. This dropped
+/// the dominant signal for any artist whose tagging is concentrated at the
+/// artist level (Khruangbin's `funk@100`, similar across many artists).
+///
+/// At 0.15 the artist-level ceiling clears the floor, restoring those
+/// signals without re-admitting the lower-count noise tags (count<10
+/// artist-level tags still fall under 0.10 × 0.18 ≈ 0.05).
+pub const MIN_SCORE_FLOOR: f64 = 0.15;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum TagSource {

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::SharedState;
 use crate::genre::mappings::GenreCatalog;
-use crate::genre::scorer::{TagInput, TagLevel, TagSource, score_genre_tags};
+use crate::genre::scorer::{MIN_SCORE_FLOOR, TagInput, TagLevel, TagSource, score_genre_tags};
 use crate::metadata::lastfm::LastFmClient;
 use crate::services::lastfm::tag_filter::is_artist_name_tag;
 use crate::tags::context::{TagContext, classify_tag_context};
@@ -249,7 +249,7 @@ where
             }
 
             let (genre_inputs, context_rows) = route_tags(&routed_input, catalog);
-            let result = score_genre_tags(&genre_inputs, 0.2);
+            let result = score_genre_tags(&genre_inputs, MIN_SCORE_FLOOR);
 
             for scored in &result.genres {
                 let Some(genre_id): Option<i64> = conn
