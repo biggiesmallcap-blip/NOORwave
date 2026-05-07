@@ -58,6 +58,8 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Sync version from tag
         shell: bash
@@ -145,6 +147,8 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Sync version from tag
         run: |
@@ -215,6 +219,8 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Sync version from tag
         run: |
@@ -287,6 +293,8 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Sync version from tag
         run: |
