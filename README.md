@@ -155,6 +155,44 @@ Recent searches auto-save as clickable chips.
 </details>
 
 <details>
+<summary><strong>How discovery works</strong> — when to retrain, what activates a model</summary>
+
+The discovery engine learns a similarity space over your library: every track gets a vector, and each track's top neighbours are pre-computed and stored. Radio, Automix, "more like this", and the discover page all read those neighbours. Until a trained model is active, those surfaces fall back to a metadata-only heuristic (same artist / genre / decade), which is flat — same handful of tracks every time.
+
+**When to retrain**
+
+- First time after syncing your library — there's no model yet.
+- After a big sync — new tracks have no neighbours until you retrain.
+- After a few weeks of listening — the model improves with real plays. New transitions teach it which tracks belong together.
+- You don't need to retrain often. Once a week or so when you've added music or listened a lot. Daily is overkill.
+
+**Incremental refresh vs Full retrain**
+
+*Incremental refresh* reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
+
+*Full retrain* wipes the audio cache and recomputes everything from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
+
+On the very first run there's nothing cached, so both buttons do identical work.
+
+**Intensity tiers**
+
+- **Max** (96-dim, 64 neighbours, 8-track context) — best radio quality, slowest. Recommended for libraries under ~10k or overnight runs.
+- **Medium** (64-dim, 32 neighbours, 5-track context) — the default. Indistinguishable from Max for most listening; ~50% of the wall-clock.
+- **Low** (48-dim, 24 neighbours, 3-track context) — skips the audio-proxy stage entirely. Cold tracks lose their metadata anchor, but the engine stays usable on modest hardware.
+
+**Why a model might not activate**
+
+A run can complete with full coverage but still leave **Active model** on **Fallback only**. The activation gate scales with how much you've actually listened:
+
+- **0 plays** — needs ≥ 50% coverage. Cold-start mode.
+- **1–49 plays** — needs ≥ 70% coverage. Recall@10 isn't reliable on a tiny held-out set, so the gate looks at coverage only.
+- **50+ plays** — needs ≥ 85% coverage **AND** ≥ 15% recall@10. Full strict gate.
+
+If you complete a run and the model doesn't activate, you'll usually see Coverage well above the relevant threshold but Active model still says Fallback. That means recall didn't clear — keep listening, retrain again in a week, and the gate will pass naturally.
+
+</details>
+
+<details>
 <summary><strong>Radio orchestration</strong> — the thing that picks the next track when Automix or Song Radio is running</summary>
 
 - **Canonical TasteVector** powering both Automix and Song Radio — single scoring model so the two surfaces agree on what "similar" means
