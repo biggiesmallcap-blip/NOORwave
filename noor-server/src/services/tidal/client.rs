@@ -160,18 +160,33 @@ pub struct TidalPlaylistCreator {
 }
 
 impl TidalClient {
-    pub fn new(access_token: String, country_code: String) -> Self {
-        let http = reqwest::Client::builder()
+    /// Build a TIDAL-tuned `reqwest::Client`. Call once at boot and stash on
+    /// `AppState`; per-request `TidalClient` instances should use
+    /// `with_http` to reuse it instead of paying TLS pool setup repeatedly.
+    pub fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
             .user_agent("TIDAL_ANDROID/1039 okhttp/3.14.9")
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
-            .expect("failed to build HTTP client");
+            .expect("failed to build TIDAL HTTP client")
+    }
+
+    /// Construct a `TidalClient` with a caller-provided shared HTTP client.
+    /// Preferred for request-scoped use — see `AppState::tidal_http_client`.
+    pub fn with_http(http: reqwest::Client, access_token: String, country_code: String) -> Self {
         Self {
             http,
             access_token,
             country_code,
         }
+    }
+
+    /// Convenience constructor that builds a fresh HTTP client. Prefer
+    /// `with_http` when an `AppState`-level client is available — building a
+    /// client per call pays the TLS-pool setup repeatedly.
+    pub fn new(access_token: String, country_code: String) -> Self {
+        Self::with_http(Self::build_http_client(), access_token, country_code)
     }
 
     fn auth_header(&self) -> String {

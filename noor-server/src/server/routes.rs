@@ -877,7 +877,7 @@ async fn get_artist_discography(
         })));
     };
 
-    let tokens = {
+    let (tokens, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -885,7 +885,7 @@ async fn get_artist_discography(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -897,7 +897,7 @@ async fn get_artist_discography(
         })));
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
 
     let albums_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS"));
     let eps_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("EPSANDSINGLES"));
@@ -1033,7 +1033,7 @@ async fn get_tidal_album_tracks(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tokens = {
+    let (tokens, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1041,7 +1041,7 @@ async fn get_tidal_album_tracks(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -1051,7 +1051,7 @@ async fn get_tidal_album_tracks(
         ));
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -1094,7 +1094,7 @@ async fn import_tidal_album(
     State(state): State<SharedState>,
     Path(tidal_album_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tokens, db) = {
+    let (tokens, db, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1102,7 +1102,7 @@ async fn import_tidal_album(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.db.clone())
+        (s.tidal_tokens.clone().or(persisted), s.db.clone(), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -1112,7 +1112,7 @@ async fn import_tidal_album(
         ));
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let imported = tidal_import::import_album(&db, &client, tidal_album_id)
         .await
         .map_err(|e| {
@@ -1279,7 +1279,9 @@ async fn get_genre_cohorts(
     state
         .db
         .with_conn(|conn| {
-            let cohorts = queries::get_genre_cohorts_filtered(conn, days, filter)?;
+            // HTTP endpoint preserves strict semantics — `?filter` controls
+            // exactly what's matched. Fallback rescue is internal-only.
+            let cohorts = queries::get_genre_cohorts_filtered(conn, days, filter, false)?;
             Ok(Json(json!({
                 "cohorts": cohorts,
                 "filter": filter.label().as_ref(),
@@ -1681,7 +1683,10 @@ async fn preview_discovery(
                 recent_listens: queries::get_recent_listens(conn, 12)?,
                 top_artists: queries::get_top_artists_by_history(conn, 6)?,
                 top_genres: queries::get_top_genres_by_history(conn, 6)?,
-                track_genres: queries::get_track_genre_paths(conn)?,
+                track_genres: queries::get_track_genre_paths_with_fallback(conn)?
+                    .into_iter()
+                    .map(|(id, rows)| (id, queries::ResolvedGenre::paths_only(&rows)))
+                    .collect(),
             };
             let candidates = queries::get_discovery_candidate_tracks(conn, candidate_limit)?;
             let preview = discovery_engine::build_preview(&request, &context, &candidates);
@@ -2741,12 +2746,12 @@ async fn resolve_tidal_track(
         }
     };
 
-    let tokens = {
+    let (tokens, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state)
             .await
             .map_err(internal)?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
     };
     let Some(tokens) = tokens else {
         return Ok(Json(json!({
@@ -2760,7 +2765,7 @@ async fn resolve_tidal_track(
         })));
     };
 
-    let tidal_client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let tidal_client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let outcome = resolver::resolve_track(&tidal_client, &sportify_track)
         .await
         .map_err(|e| {
@@ -2838,7 +2843,7 @@ async fn resolve_tidal_bulk(
         ));
     }
 
-    let (sportify_client, cache_cfg, resolve_cfg, db, tokens_in_state) = {
+    let (sportify_client, cache_cfg, resolve_cfg, db, tokens_in_state, tidal_http_client) = {
         let s = state.read().await;
         (
             s.sportify_client.clone(),
@@ -2846,6 +2851,7 @@ async fn resolve_tidal_bulk(
             s.sportify_resolve_config,
             s.db.clone(),
             s.tidal_tokens.clone(),
+            s.tidal_http_client.clone(),
         )
     };
     let Some(sportify_client) = sportify_client else {
@@ -2967,7 +2973,7 @@ async fn resolve_tidal_bulk(
         })));
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let outcomes = resolver::resolve_many(&client, &to_resolve, resolve_cfg.bulk_concurrency).await;
 
     db.with_conn(|conn| {
@@ -3100,13 +3106,14 @@ async fn eager_and_lazy_resolve_for_list(
 ) -> Vec<String> {
     use crate::services::sportify::{cache as sp_cache, resolver};
 
-    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state) = {
+    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state, tidal_http_client) = {
         let s = state.read().await;
         (
             s.sportify_cache_config,
             s.sportify_resolve_config,
             s.db.clone(),
             s.tidal_tokens.clone(),
+            s.tidal_http_client.clone(),
         )
     };
 
@@ -3160,7 +3167,7 @@ async fn eager_and_lazy_resolve_for_list(
     let Some(tokens) = tokens else {
         return Vec::new();
     };
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
 
     let eager_count = needs_resolve.len().min(resolve_cfg.eager_n);
     let (eager, lazy) = needs_resolve.split_at(eager_count);
@@ -3205,13 +3212,14 @@ async fn spawn_background_resolve_for_list(
 ) -> Vec<String> {
     use crate::services::sportify::{cache as sp_cache, resolver};
 
-    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state) = {
+    let (cache_cfg, resolve_cfg, db, tidal_tokens_in_state, tidal_http_client) = {
         let s = state.read().await;
         (
             s.sportify_cache_config,
             s.sportify_resolve_config,
             s.db.clone(),
             s.tidal_tokens.clone(),
+            s.tidal_http_client.clone(),
         )
     };
 
@@ -3263,7 +3271,7 @@ async fn spawn_background_resolve_for_list(
     };
 
     tokio::spawn(async move {
-        let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+        let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
         let outcomes =
             resolver::resolve_many(&client, &needs_resolve, resolve_cfg.bulk_concurrency).await;
         let _ = db.with_conn(|conn| {
@@ -4165,7 +4173,10 @@ async fn get_discovery_space(
                     recent_listens: queries::get_recent_listens(conn, 12)?,
                     top_artists: queries::get_top_artists_by_history(conn, 6)?,
                     top_genres: queries::get_top_genres_by_history(conn, 6)?,
-                    track_genres: queries::get_track_genre_paths(conn)?,
+                    track_genres: queries::get_track_genre_paths_with_fallback(conn)?
+                        .into_iter()
+                        .map(|(id, rows)| (id, queries::ResolvedGenre::paths_only(&rows)))
+                        .collect(),
                 };
                 let candidates = queries::get_discovery_candidate_tracks(conn, lim * 4)?;
                 let preview = discovery_engine::build_preview(&request, &context, &candidates);
@@ -5272,18 +5283,19 @@ async fn build_radio_queue_and_spawn_resolvers(
 
         if let Some(tokens) = tokens_opt {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
-            let event_tx = {
+            let (event_tx, tidal_http_client) = {
                 let s = state.read().await;
-                s.event_tx.clone()
+                (s.event_tx.clone(), s.tidal_http_client.clone())
             };
             for item_id in pending_item_ids {
                 let sem = semaphore.clone();
                 let db_bg = db.clone();
                 let tok = tokens.clone();
                 let tx = event_tx.clone();
+                let http = tidal_http_client.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    resolve_pending_row(db_bg, tok, item_id, tx).await;
+                    resolve_pending_row(db_bg, tok, item_id, tx, http).await;
                 });
             }
         } else {
@@ -5538,18 +5550,19 @@ async fn radio_start(
 
         if let Some(tokens) = tokens_opt {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
-            let event_tx = {
+            let (event_tx, tidal_http_client) = {
                 let s = state.read().await;
-                s.event_tx.clone()
+                (s.event_tx.clone(), s.tidal_http_client.clone())
             };
             for item_id in pending_item_ids {
                 let sem = semaphore.clone();
                 let db_bg = db.clone();
                 let tok = tokens.clone();
                 let tx = event_tx.clone();
+                let http = tidal_http_client.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    resolve_pending_row(db_bg, tok, item_id, tx).await;
+                    resolve_pending_row(db_bg, tok, item_id, tx, http).await;
                 });
             }
         } else {
@@ -5940,7 +5953,7 @@ async fn tidal_discovery_provider(
         tokens.access_token,
         tokens.user_id,
         tokens.country_code,
-        state_guard.http_client.clone(),
+        state_guard.tidal_http_client.clone(),
     ))
 }
 
@@ -5955,7 +5968,7 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
         };
         (
             tokens,
-            guard.http_client.clone(),
+            guard.tidal_http_client.clone(),
             guard.db.clone(),
             guard.event_tx.clone(),
         )
@@ -8158,6 +8171,7 @@ async fn resolve_pending_row(
     tokens: crate::services::tidal::auth::TidalTokens,
     queue_item_id: i64,
     event_tx: tokio::sync::broadcast::Sender<AppEvent>,
+    http: reqwest::Client,
 ) {
     let row: Option<(String, String, Option<i64>)> = db
         .with_conn(move |conn| {
@@ -8200,7 +8214,7 @@ async fn resolve_pending_row(
         });
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(http, tokens.access_token.clone(), tokens.country_code.clone());
     let resolved = match find_pending_tidal_match(
         &client,
         &pending_artist,
@@ -8318,7 +8332,7 @@ async fn resolve_pending_current_queue_item(
         });
     };
 
-    let tokens = {
+    let (tokens, tidal_http_client) = {
         let persisted = match load_persisted_tidal_tokens(state).await.ok().flatten() {
             Some(t) => t,
             None => {
@@ -8327,10 +8341,10 @@ async fn resolve_pending_current_queue_item(
             }
         };
         let s = state.read().await;
-        s.tidal_tokens.clone().unwrap_or(persisted)
+        (s.tidal_tokens.clone().unwrap_or(persisted), s.tidal_http_client.clone())
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let resolved =
         match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
             .await
@@ -9010,12 +9024,12 @@ async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
         return;
     };
 
-    let (db, event_tx) = {
+    let (db, event_tx, tidal_http_client) = {
         let s = state.read().await;
-        (s.db.clone(), s.event_tx.clone())
+        (s.db.clone(), s.event_tx.clone(), s.tidal_http_client.clone())
     };
     tokio::spawn(async move {
-        resolve_pending_row(db, tokens, queue_item_id, event_tx).await;
+        resolve_pending_row(db, tokens, queue_item_id, event_tx, tidal_http_client).await;
     });
 }
 
@@ -9414,15 +9428,20 @@ fn resolve_smart_playlist_tracks_with_context(
 fn build_smart_playlist_context(
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<PlaylistEvaluationContext> {
-    let genre_map = queries::get_track_genre_paths(conn)?;
+    // Smart-playlist genre rules are inclusion-only — the RuleClause enum has
+    // no genre-negation variant (only NotInPlaylist). So fallback genres can
+    // safely apply to every rule. If a Genre-negation primitive is added
+    // later, this is the place to split into literal vs. fallback contexts.
+    let genre_map = queries::get_track_genre_paths_with_fallback(conn)?;
     let playlist_memberships = queries::get_playlist_memberships(conn)?;
     let dsp_rows = queries::get_all_audio_dsp_features(conn)?;
     let acrcloud_ids = queries::get_track_ids_with_acrcloud_match(conn)?;
     let fingerprint_ids = queries::get_track_ids_with_fingerprint(conn)?;
 
     let mut context = PlaylistEvaluationContext::new();
-    for (track_id, genres) in genre_map {
-        context = context.with_track_genres(track_id, genres);
+    for (track_id, rows) in genre_map {
+        context =
+            context.with_track_genres(track_id, queries::ResolvedGenre::paths_only(&rows));
     }
     for (playlist_id, track_ids) in playlist_memberships {
         context = context.with_playlist_tracks(playlist_id, track_ids);
@@ -9721,9 +9740,9 @@ async fn tidal_search(
     let limit = params.limit.unwrap_or(20).min(50);
     let offset = params.offset.unwrap_or(0).max(0);
     // Snapshot what we need from state in one lock acquisition.
-    let (db, http_client) = {
+    let (db, http_client, tidal_http_client) = {
         let s = state.read().await;
-        (s.db.clone(), s.http_client.clone())
+        (s.db.clone(), s.http_client.clone(), s.tidal_http_client.clone())
     };
 
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
@@ -9736,7 +9755,7 @@ async fn tidal_search(
         .ok()
         .flatten();
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
 
     let results = if let Some(hit) = cached {
         hit
@@ -9752,7 +9771,8 @@ async fn tidal_search(
                             Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                         )
                     })?;
-                let retry_client = TidalClient::new(
+                let retry_client = TidalClient::with_http(
+                    tidal_http_client,
                     refreshed.access_token.clone(),
                     refreshed.country_code.clone(),
                 );
@@ -9913,8 +9933,11 @@ async fn tidal_video_search(
 
     let limit = params.limit.unwrap_or(20).min(50);
     let offset = params.offset.unwrap_or(0).max(0);
-    let http_client = state.read().await.http_client.clone();
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let (http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.tidal_http_client.clone())
+    };
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let videos = match client.search_videos(&params.q, limit, offset).await {
         Ok(videos) => videos,
         Err(e) if error_looks_like_auth(&e) => {
@@ -9926,7 +9949,8 @@ async fn tidal_video_search(
                         Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                     )
                 })?;
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10130,8 +10154,11 @@ async fn tidal_video_mix_items(
         ));
     };
 
-    let http_client = state.read().await.http_client.clone();
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let (http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.tidal_http_client.clone())
+    };
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let items = match client.get_video_mix_items(&mix_id).await {
         Ok(items) => items,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10143,7 +10170,8 @@ async fn tidal_video_mix_items(
                         Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                     )
                 })?;
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10202,8 +10230,11 @@ async fn tidal_playlist_search(
 
     let limit = params.limit.unwrap_or(20).min(50);
     let offset = params.offset.unwrap_or(0).max(0);
-    let http_client = state.read().await.http_client.clone();
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let (http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.tidal_http_client.clone())
+    };
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let playlists = match client.search_playlists(&params.q, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10215,7 +10246,8 @@ async fn tidal_playlist_search(
                         Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                     )
                 })?;
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10273,8 +10305,11 @@ async fn tidal_playlist_tracks(
         ));
     };
 
-    let http_client = state.read().await.http_client.clone();
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let (http_client, tidal_http_client) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.tidal_http_client.clone())
+    };
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let resp = match client.get_playlist_tracks(&uuid, 100, 0).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10286,7 +10321,8 @@ async fn tidal_playlist_tracks(
                         Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                     )
                 })?;
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10422,7 +10458,7 @@ async fn start_ephemeral_tidal_playback(
     track: crate::PendingEphemeralTidalTrack,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     // Resolve TIDAL tokens (same pattern as tidal_search)
-    let tokens = {
+    let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10430,7 +10466,7 @@ async fn start_ephemeral_tidal_playback(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        (s.tidal_tokens.clone().or(persisted), s.http_client.clone(), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -10440,11 +10476,6 @@ async fn start_ephemeral_tidal_playback(
         ));
     };
 
-    // Resolve stream URL
-    let http_client = {
-        let s = state.read().await;
-        s.http_client.clone()
-    };
     // Backstop for callers that don't ship artwork (Spotify-resolved playlist
     // tracks below the fold never trigger the lazy IntersectionObserver, so
     // they arrive with `artwork_url: null`). Look up the TIDAL track once and
@@ -10452,7 +10483,7 @@ async fn start_ephemeral_tidal_playback(
     let mut track = track;
     if track.artwork_url.is_none() {
         let lookup_client =
-            TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+            TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
         if let Ok(t) = lookup_client.get_track(track.tidal_track_id).await {
             track.artwork_url = t
                 .album
@@ -10594,7 +10625,7 @@ async fn tidal_artist_profile(
     State(state): State<SharedState>,
     Path(tidal_artist_id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tokens = {
+    let (tokens, http_client, tidal_http_client) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10602,7 +10633,7 @@ async fn tidal_artist_profile(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        (s.tidal_tokens.clone().or(persisted), s.http_client.clone(), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -10612,8 +10643,7 @@ async fn tidal_artist_profile(
         ));
     };
 
-    let http_client = state.read().await.http_client.clone();
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let (top_tracks_page, albums_page) = match tokio::try_join!(
         client.get_artist_top_tracks(tidal_artist_id, 10, 0),
         client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
@@ -10628,7 +10658,8 @@ async fn tidal_artist_profile(
                         Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
                     )
                 })?;
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10756,7 +10787,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
 
     // Get tokens + reentrancy/cancel flags
     let persisted_tokens = load_persisted_tidal_tokens(state).await?;
-    let (tokens, running_flag, cancel_flag) = {
+    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
         let s = state.read().await;
         let tokens = s
             .tidal_tokens
@@ -10767,6 +10798,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
             tokens,
             s.tidal_sync_running.clone(),
             s.tidal_sync_cancel.clone(),
+            s.tidal_http_client.clone(),
         )
     };
 
@@ -10781,7 +10813,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     cancel_flag.store(false, Ordering::SeqCst);
     let _running = TidalSyncRunningGuard(running_flag);
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
 
     // Run sync
     let result = run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag).await;
@@ -10823,7 +10855,7 @@ async fn tidal_sync_library(
     let persisted_tokens = load_persisted_tidal_tokens(&state).await.map_err(|error| {
         TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response()
     })?;
-    let (tokens, running_flag, cancel_flag) = {
+    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
         let s = state.read().await;
         let tokens = s
             .tidal_tokens
@@ -10834,6 +10866,7 @@ async fn tidal_sync_library(
             tokens,
             s.tidal_sync_running.clone(),
             s.tidal_sync_cancel.clone(),
+            s.tidal_http_client.clone(),
         )
     };
 
@@ -10852,7 +10885,7 @@ async fn tidal_sync_library(
     let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
 
     // Create TIDAL client
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
 
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
@@ -10870,6 +10903,7 @@ async fn tidal_sync_library(
     let state_clone = state.clone();
     let sync_tokens = session.clone();
     let cancel_for_task = cancel_flag.clone();
+    let http_for_task = tidal_http_client;
     tokio::spawn(async move {
         let _running = task_guard; // released on scope exit
         tracing::info!(
@@ -10879,7 +10913,8 @@ async fn tidal_sync_library(
             user_id = %sync_tokens.user_id,
             "TIDAL sync background task started"
         );
-        let client = TidalClient::new(
+        let client = TidalClient::with_http(
+            http_for_task,
             sync_tokens.access_token.clone(),
             sync_tokens.country_code.clone(),
         );
@@ -11352,9 +11387,9 @@ async fn run_tidal_sync_with_reauth(
                 "TIDAL sync hit an auth error; trying refresh-token recovery"
             );
 
-            let http = {
+            let (http, tidal_http_client) = {
                 let s = state.read().await;
-                s.http_client.clone()
+                (s.http_client.clone(), s.tidal_http_client.clone())
             };
 
             let refreshed = match recover_tidal_session(state, &http, &tokens).await {
@@ -11377,7 +11412,8 @@ async fn run_tidal_sync_with_reauth(
                     ));
                 }
             };
-            let retry_client = TidalClient::new(
+            let retry_client = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -11542,7 +11578,9 @@ async fn recover_tidal_session(
     }
 
     persist_tidal_tokens(state, &refreshed).await?;
-    let validation_client = TidalClient::new(
+    let tidal_http_client = state.read().await.tidal_http_client.clone();
+    let validation_client = TidalClient::with_http(
+        tidal_http_client,
         refreshed.access_token.clone(),
         refreshed.country_code.clone(),
     );
@@ -12991,25 +13029,31 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
     // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
     // disk, so a direct in-memory check returns 503 even though the user is
     // connected. Other TIDAL endpoints follow this same pattern.
-    let tokens = {
-        let in_memory = state.read().await.tidal_tokens.clone();
-        match in_memory {
-            Some(t) => Some(t),
-            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
+    let (tokens, http_client, tidal_http_client) = {
+        let in_memory = {
+            let s = state.read().await;
+            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            None => {
+                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
+                (persisted, in_memory.1, in_memory.2)
+            }
         }
     };
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
         Err(e) if error_looks_like_auth(&e) => {
-            let http_client = state.read().await.http_client.clone();
             let refreshed = recover_tidal_session(&state, &http_client, &tokens)
                 .await
                 .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::new(
+            let retry = TidalClient::with_http(
+                tidal_http_client,
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -13033,11 +13077,17 @@ async fn get_tidal_mix_tracks(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tokens = {
-        let in_memory = state.read().await.tidal_tokens.clone();
+    let (tokens, tidal_http_client) = {
+        let s = state.read().await;
+        let tidal_http = s.tidal_http_client.clone();
+        let in_memory = s.tidal_tokens.clone();
+        drop(s);
         match in_memory {
-            Some(t) => Some(t),
-            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
+            Some(t) => (Some(t), tidal_http),
+            None => {
+                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
+                (persisted, tidal_http)
+            }
         }
     };
     let Some(tokens) = tokens else {
@@ -13046,7 +13096,7 @@ async fn get_tidal_mix_tracks(
             Json(json!({ "error": "TIDAL not connected" })),
         ));
     };
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -14001,10 +14051,11 @@ async fn get_library_analytics(
         s.db.with_conn(|conn| {
             let tracks = queries::get_all_tracks(conn)?;
             let playlists = queries::get_playlists(conn)?;
-            let genre_paths = queries::get_track_genre_paths(conn)?;
+            let genre_paths = queries::get_track_genre_paths_with_fallback(conn)?;
             let mut context = crate::smart::analytics::AnalyticsContext::new();
-            for (track_id, paths) in genre_paths {
-                context = context.with_track_genres(track_id, paths);
+            for (track_id, rows) in genre_paths {
+                context =
+                    context.with_track_genres(track_id, queries::ResolvedGenre::paths_only(&rows));
             }
             Ok(crate::smart::analytics::summarize_library(
                 &tracks, &playlists, &context,
@@ -14205,9 +14256,9 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
         return;
     }
 
-    let tokens = {
+    let (tokens, tidal_http_client) = {
         let s = state.read().await;
-        s.tidal_tokens.clone()
+        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
     };
     let tokens = match tokens {
         Some(t) => Some(t),
@@ -14217,7 +14268,7 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
         return;
     };
 
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
 
     let mut tasks = FuturesUnordered::new();
     for (idx, artist, title) in needs {
@@ -14603,9 +14654,9 @@ async fn fetch_lastfm_chart(
 }
 
 async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Vec<ChartEntryDto>> {
-    let (tokens_opt, http, db) = {
+    let (tokens_opt, http, db, tidal_http_client) = {
         let s = state.read().await;
-        (s.tidal_tokens.clone(), s.http_client.clone(), s.db.clone())
+        (s.tidal_tokens.clone(), s.http_client.clone(), s.db.clone(), s.tidal_http_client.clone())
     };
     let persisted = load_persisted_tidal_tokens(state).await?;
     let tokens = tokens_opt.or(persisted);
@@ -14614,7 +14665,7 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
         tracing::warn!("Tidal chart requested but Tidal not connected");
         return Ok(Vec::new());
     };
-    let client = TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
     let tracks = match client.get_editorial_top_tracks(limit).await {
         Ok(t) => t,
         Err(e) => {
@@ -14949,6 +15000,7 @@ mod tests {
             db,
             event_tx,
             http_client: reqwest::Client::new(),
+            tidal_http_client: reqwest::Client::new(),
             tidal_tokens: None,
             spotify_tokens: None,
             playback_runtime: None,

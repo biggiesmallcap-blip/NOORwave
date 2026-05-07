@@ -79,7 +79,7 @@ impl TidalDiscoveryProvider {
         http: reqwest::Client,
     ) -> Self {
         Self {
-            client: TidalClient::new(access_token.clone(), country_code.clone()),
+            client: TidalClient::with_http(http.clone(), access_token.clone(), country_code.clone()),
             http,
             access_token,
             user_id,

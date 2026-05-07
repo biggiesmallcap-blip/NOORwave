@@ -58,6 +58,10 @@ pub struct AppState {
     pub db: db::Database,
     pub event_tx: broadcast::Sender<AppEvent>,
     pub http_client: reqwest::Client,
+    /// Long-lived TIDAL-tuned reqwest client, built once at boot.
+    /// Per-request `TidalClient` instances reuse this via `with_http` to skip
+    /// per-call TLS pool setup. Token + country_code are stitched in per-call.
+    pub tidal_http_client: reqwest::Client,
     pub tidal_tokens: Option<services::tidal::auth::TidalTokens>,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
@@ -504,6 +508,7 @@ async fn main() -> Result<()> {
         db,
         event_tx,
         http_client,
+        tidal_http_client: services::tidal::client::TidalClient::build_http_client(),
         tidal_tokens,
         spotify_tokens,
         playback_runtime: None,
