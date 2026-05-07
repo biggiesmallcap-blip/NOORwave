@@ -86,6 +86,10 @@
 	let spotifyIsRunning = $state(false);
 	let spotifyRunTotal = $state(0);
 	let spotifyRunProcessed = $state(0);
+	// 'client_credentials' when running with a user-supplied Spotify Developer
+	// app, 'anonymous' when using the open.spotify.com guest token, null when
+	// no token has been fetched yet this session.
+	let spotifyAuthMode = $state<'client_credentials' | 'anonymous' | null>(null);
 	const SPOTIFY_BATCH_SIZE = 2000;
 
 	let lastfmConfigured = $state(false);
@@ -408,6 +412,7 @@
 			markServerOnline();
 			const data = await resp.json();
 			spotifyConfigured = data.configured === true;
+			spotifyAuthMode = data.active_auth_mode ?? null;
 		} catch (e) {
 			if (isFetchConnectionError(e)) markServerOffline();
 		}
@@ -419,6 +424,7 @@
 			spotifyIsRunning = data2.is_running === true;
 			spotifyRunTotal = data2.run_total ?? 0;
 			spotifyRunProcessed = data2.run_processed ?? 0;
+			if (data2.active_auth_mode) spotifyAuthMode = data2.active_auth_mode;
 		} catch {}
 	}
 
@@ -1333,10 +1339,127 @@
 			</section>
 
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Metadata" title="Spotify tags" subtitle="Unavailable: Premium-only API access." />
+				<SectionHeader
+					eyebrow="Metadata"
+					title="Spotify tags"
+					subtitle={spotifyConfigured
+						? 'Curated artist genres from your Spotify Developer app.'
+						: 'Curated artist genres via anonymous web-player token (zero setup).'}
+				/>
+
+				{#if spotifyError}
+					<p class="page-copy" style="color: var(--color-error, #f87171)">{spotifyError}</p>
+				{/if}
+
 				<p class="page-copy">
-					The integration code is still in place — if you ever subscribe to Spotify Premium, the existing app credentials should start working again and this panel will reactivate. For now, use Last.fm below as the second genre source.
+					{#if spotifyAuthMode === 'anonymous'}
+						<strong>Anonymous mode:</strong> using the same guest token web.player.spotify.com fetches on load. No registration. The endpoint is undocumented and Spotify can change it without notice — for stable long-term use, paste a Developer app's client ID + secret below.
+					{:else if spotifyAuthMode === 'client_credentials'}
+						<strong>Connected via Spotify Developer app.</strong> Stable, official rate limits.
+					{:else if !spotifyConfigured}
+						No credentials configured. Click <em>Enrich genres</em> to start with anonymous mode (works immediately, no signup), or paste a Spotify Developer app's client ID + secret below for the stable path.
+					{:else}
+						Credentials saved. Click <em>Enrich genres</em> to start.
+					{/if}
 				</p>
+
+				{#if !spotifyConfigured}
+					<div class="info-list">
+						<div class="info-row">
+							<span>Client ID</span>
+							<input
+								type="text"
+								class="text-input"
+								bind:value={spotifyClientId}
+								placeholder="Optional — paste from developer.spotify.com"
+								autocomplete="off"
+							/>
+						</div>
+						<div class="info-row">
+							<span>Client Secret</span>
+							<input
+								type="password"
+								class="text-input"
+								bind:value={spotifyClientSecret}
+								placeholder="Optional — paired with the client ID above"
+								autocomplete="off"
+							/>
+						</div>
+					</div>
+					<div class="action-row">
+						<button
+							class="btn btn-glass"
+							onclick={saveSpotifyConfig}
+							disabled={spotifySaving || !spotifyClientId || !spotifyClientSecret}
+						>
+							{spotifySaving ? 'Verifying…' : 'Save credentials'}
+						</button>
+					</div>
+				{/if}
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair
+						label="Tagged"
+						value={spotifyEnrichedCount.toLocaleString()}
+						copy="Tracks with Spotify-sourced genres."
+					/>
+					<MetricPair
+						label="Remaining"
+						value={spotifyRemaining.toLocaleString()}
+						copy={spotifyAuthMode === 'anonymous'
+							? 'Favorited tracks pending. Anonymous mode runs at ~1 track/sec to stay polite to the undocumented endpoint.'
+							: 'Favorited tracks pending. ~5 req/sec sustained on the official client-credentials path.'}
+					/>
+				</div>
+
+				<div class="enrichment-progress">
+					<div class="enrichment-progress-copy">
+						<p>
+							{#if spotifyIsRunning && spotifyRunTotal > 0}
+								Enriching… {spotifyRunProcessed.toLocaleString()} / {spotifyRunTotal.toLocaleString()} this run.
+							{:else if !spotifyIsRunning && spotifyRemaining === 0 && spotifyEnrichedCount > 0}
+								Enrichment finished. {spotifyEnrichedCount.toLocaleString()} tracks tagged.
+							{:else if !spotifyIsRunning && spotifyRemaining > 0}
+								{spotifyRemaining.toLocaleString()} favorited tracks pending. Click Enrich to start; runs in the background.
+							{:else}
+								No tracks pending Spotify enrichment.
+							{/if}
+						</p>
+						<span>
+							{#if spotifyIsRunning && spotifyRunTotal > 0}
+								{Math.round((spotifyRunProcessed / spotifyRunTotal) * 100)}%
+							{/if}
+						</span>
+					</div>
+					<div class="enrichment-progress-rail" aria-hidden="true">
+						<div
+							class="enrichment-progress-fill"
+							style={`width: ${spotifyRunTotal > 0 ? Math.round((spotifyRunProcessed / spotifyRunTotal) * 100) : 0}%`}
+						></div>
+					</div>
+				</div>
+
+				<div class="action-row">
+					<button
+						class="btn btn-primary"
+						onclick={startSpotifyEnrichment}
+						disabled={spotifyIsRunning || spotifyRemaining === 0}
+					>
+						{spotifyIsRunning
+							? 'Running…'
+							: spotifyRemaining === 0
+								? 'All enriched'
+								: 'Enrich genres'}
+					</button>
+					<button class="btn btn-glass" onclick={resetSpotifyEnrichment} disabled={spotifyIsRunning}>
+						Reset checked state
+					</button>
+					{#if spotifyConfigured}
+						<button class="btn btn-glass" onclick={clearSpotifyConfig} disabled={spotifyIsRunning}>
+							Clear credentials (revert to anonymous)
+						</button>
+					{/if}
+				</div>
 			</section>
 
 			<section class="glass-panel section-panel">

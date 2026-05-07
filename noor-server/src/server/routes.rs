@@ -67,11 +67,17 @@ pub struct SearchParams {
 #[derive(Debug, Deserialize)]
 pub struct GenreTrackParams {
     include_descendants: Option<bool>,
+    /// Galaxy display filter — see `crate::genre::filter::GalaxyFilterRule`.
+    /// Tokens: `all` | `conf05` | `conf07` | `top2` | `top3` | `mb_only` |
+    /// `primary`. Unknown / missing → default (`conf05`).
+    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct GenreHeatParams {
     days: Option<i64>,
+    /// See `GenreTrackParams::filter`.
+    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1177,13 +1183,26 @@ async fn import_tidal_track_for_radio(
     })))
 }
 
-async fn get_genres(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+#[derive(Debug, Deserialize)]
+struct GenreListParams {
+    /// See `GenreTrackParams::filter`.
+    filter: Option<String>,
+}
+
+async fn get_genres(
+    State(state): State<SharedState>,
+    Query(params): Query<GenreListParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let genres = queries::get_genre_tree(conn)?;
-            Ok(Json(json!({ "genres": genres })))
+            let genres = queries::get_genre_tree_filtered(conn, filter)?;
+            Ok(Json(json!({
+                "genres": genres,
+                "filter": filter.label().as_ref(),
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -1193,12 +1212,16 @@ async fn get_genre_heat(
     Query(params): Query<GenreHeatParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let days = params.days.unwrap_or(90).max(1);
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let heat = queries::get_genre_heat(conn, days)?;
-            Ok(Json(json!({ "heat": heat })))
+            let heat = queries::get_genre_heat_filtered(conn, days, filter)?;
+            Ok(Json(json!({
+                "heat": heat,
+                "filter": filter.label().as_ref(),
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -1208,6 +1231,8 @@ struct GenreCoOccurrenceParams {
     days: Option<i64>,
     window_minutes: Option<i64>,
     min_count: Option<i64>,
+    /// See `GenreTrackParams::filter`.
+    filter: Option<String>,
 }
 
 async fn get_genre_co_occurrence(
@@ -1217,15 +1242,21 @@ async fn get_genre_co_occurrence(
     let days = params.days.unwrap_or(90).max(1);
     let window = params.window_minutes.unwrap_or(30).max(5);
     let min = params.min_count.unwrap_or(3).max(1);
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let pairs = queries::get_genre_co_occurrence(conn, days, window, min).map_err(|e| {
-                tracing::error!("co-occurrence query failed: {e:#}");
-                anyhow::anyhow!("co-occurrence query failed: {e:#}")
-            })?;
-            Ok(Json(json!({ "pairs": pairs })))
+            let pairs =
+                queries::get_genre_co_occurrence_filtered(conn, days, window, min, filter)
+                    .map_err(|e| {
+                        tracing::error!("co-occurrence query failed: {e:#}");
+                        anyhow::anyhow!("co-occurrence query failed: {e:#}")
+                    })?;
+            Ok(Json(json!({
+                "pairs": pairs,
+                "filter": filter.label().as_ref(),
+            })))
         })
         .map_err(|e| {
             tracing::error!("co-occurrence handler error: {e:#}");
@@ -1236,6 +1267,8 @@ async fn get_genre_co_occurrence(
 #[derive(Debug, Deserialize)]
 struct GenreCohortParams {
     days: Option<i64>,
+    /// See `GenreTrackParams::filter`.
+    filter: Option<String>,
 }
 
 async fn get_genre_cohorts(
@@ -1243,12 +1276,16 @@ async fn get_genre_cohorts(
     Query(params): Query<GenreCohortParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let days = params.days.unwrap_or(90).max(1);
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let cohorts = queries::get_genre_cohorts(conn, days)?;
-            Ok(Json(json!({ "cohorts": cohorts })))
+            let cohorts = queries::get_genre_cohorts_filtered(conn, days, filter)?;
+            Ok(Json(json!({
+                "cohorts": cohorts,
+                "filter": filter.label().as_ref(),
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -1279,12 +1316,17 @@ async fn get_genre_tracks(
     Query(params): Query<GenreTrackParams>,
 ) -> Result<Json<Value>, StatusCode> {
     let include_descendants = params.include_descendants.unwrap_or(true);
+    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
     let state = state.read().await;
     state
         .db
         .with_conn(|conn| {
-            let tracks = queries::get_tracks_by_genre(conn, id, include_descendants)?;
-            Ok(Json(json!({ "tracks": tracks })))
+            let tracks =
+                queries::get_tracks_by_genre_filtered(conn, id, include_descendants, filter)?;
+            Ok(Json(json!({
+                "tracks": tracks,
+                "filter": filter.label().as_ref(),
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -10144,7 +10186,19 @@ async fn tidal_playlist_search(
         }
     };
 
-    Ok(Json(json!({ "playlists": playlists })))
+    let items: Vec<Value> = playlists
+        .into_iter()
+        .map(|p| {
+            json!({
+                "uuid": p.uuid,
+                "title": p.title,
+                "description": p.description,
+                "number_of_tracks": p.number_of_tracks,
+                "artwork_url": TidalClient::get_artwork_url(&p.square_image, 640),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "playlists": items })))
 }
 
 async fn tidal_playlist_tracks(
@@ -10211,8 +10265,8 @@ async fn tidal_playlist_tracks(
             "title": t.title,
             "artist_name": t.artist.name,
             "album_title": t.album.as_ref().map(|a| &a.title),
-            "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).map(|c| {
-                format!("https://resources.tidal.com/images/{}/320x320.jpg", c.replace('-', "/"))
+            "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).and_then(|c| {
+                TidalClient::get_artwork_url(&Some(c.clone()), 640)
             }),
             "duration_ms": t.duration * 1000,
             "track_id": 0,
@@ -10333,6 +10387,23 @@ async fn start_ephemeral_tidal_playback(
         let s = state.read().await;
         s.http_client.clone()
     };
+    // Backstop for callers that don't ship artwork (Spotify-resolved playlist
+    // tracks below the fold never trigger the lazy IntersectionObserver, so
+    // they arrive with `artwork_url: null`). Look up the TIDAL track once and
+    // reuse its album cover at the standard 640×640 size.
+    let mut track = track;
+    if track.artwork_url.is_none() {
+        let lookup_client =
+            TidalClient::new(tokens.access_token.clone(), tokens.country_code.clone());
+        if let Ok(t) = lookup_client.get_track(track.tidal_track_id).await {
+            track.artwork_url = t
+                .album
+                .as_ref()
+                .and_then(|a| a.cover.as_ref())
+                .and_then(|c| TidalClient::get_artwork_url(&Some(c.clone()), 640));
+        }
+    }
+
     let stream_req = tidal_stream::StreamRequest::new(track.tidal_track_id, "LOSSLESS");
     let stream_info =
         match tidal_stream::resolve_stream(&http_client, &tokens.access_token, &stream_req).await {
@@ -12700,7 +12771,17 @@ async fn get_home_releases(State(state): State<SharedState>) -> Result<Json<Valu
 ///
 /// 503 when TIDAL is disconnected so the frontend can render its connect prompt.
 async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let tokens = state.read().await.tidal_tokens.clone();
+    // Persisted-tokens fallback covers the cold-boot race: the home page
+    // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
+    // disk, so a direct in-memory check returns 503 even though the user is
+    // connected. Other TIDAL endpoints follow this same pattern.
+    let tokens = {
+        let in_memory = state.read().await.tidal_tokens.clone();
+        match in_memory {
+            Some(t) => Some(t),
+            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
+        }
+    };
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -12736,7 +12817,13 @@ async fn get_tidal_mix_tracks(
     State(state): State<SharedState>,
     Path(mix_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tokens = state.read().await.tidal_tokens.clone();
+    let tokens = {
+        let in_memory = state.read().await.tidal_tokens.clone();
+        match in_memory {
+            Some(t) => Some(t),
+            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
+        }
+    };
     let Some(tokens) = tokens else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12763,7 +12850,7 @@ async fn get_tidal_mix_tracks(
                 .and_then(|c| {
                     crate::services::tidal::client::TidalClient::get_artwork_url(
                         &Some(c.clone()),
-                        160,
+                        640,
                     )
                 });
             json!({
@@ -13051,9 +13138,8 @@ async fn spotify_save_config(
 }
 
 async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let configured = state
-        .read()
-        .await
+    let s = state.read().await;
+    let configured = s
         .db
         .with_conn(|conn| {
             Ok(spotify::auth::load_credentials(conn)
@@ -13062,7 +13148,12 @@ async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>,
                 .is_some())
         })
         .unwrap_or(false);
-    Ok(Json(json!({"configured": configured})))
+    let active_auth_mode = s.spotify_tokens.as_ref().map(spotify::auth::token_mode);
+    Ok(Json(json!({
+        "configured": configured,
+        "active_auth_mode": active_auth_mode.map(|m| m.as_str()),
+        "anonymous_available": true,
+    })))
 }
 
 async fn spotify_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -13103,21 +13194,18 @@ async fn start_spotify_enrichment(
         })));
     }
 
-    // Require credentials and prime a fresh token before enqueueing work.
+    // Prime a fresh token before enqueueing work. Hybrid policy lives in
+    // `spotify::auth::obtain_token`: client-creds when configured AND not
+    // premium-locked, otherwise anonymous. Anonymous lets the user start
+    // enriching with zero setup; client-creds is the stable path.
     let creds = state
         .read()
         .await
         .db
         .with_conn(|conn| Ok(spotify::auth::load_credentials(conn).ok().flatten()))
         .unwrap_or(None);
-    let Some(creds) = creds else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Spotify credentials not configured."
-        })));
-    };
 
-    match spotify::auth::fetch_app_token(&http, &creds).await {
+    match spotify::auth::obtain_token(&http, creds).await {
         Ok(tokens) => {
             let mut s = state.write().await;
             s.spotify_tokens = Some(tokens);
@@ -13125,7 +13213,10 @@ async fn start_spotify_enrichment(
         Err(e) => {
             return Ok(Json(json!({
                 "status": "error",
-                "message": format!("Failed to fetch Spotify token: {}", e)
+                "message": format!(
+                    "Failed to obtain a Spotify token (client-credentials and anonymous both failed): {}",
+                    e
+                )
             })));
         }
     }
@@ -13202,6 +13293,7 @@ async fn get_spotify_enrichment_status(
     let is_running = s.spotify_enrich_running.load(Ordering::SeqCst);
     let run_total = s.spotify_enrich_total.load(Ordering::SeqCst);
     let run_processed = s.spotify_enrich_processed.load(Ordering::SeqCst);
+    let active_auth_mode = s.spotify_tokens.as_ref().map(spotify::auth::token_mode);
 
     Ok(Json(json!({
         "enriched_tracks": enriched,
@@ -13209,6 +13301,7 @@ async fn get_spotify_enrichment_status(
         "is_running": is_running,
         "run_total": run_total,
         "run_processed": run_processed,
+        "active_auth_mode": active_auth_mode.map(|m| m.as_str()),
     })))
 }
 

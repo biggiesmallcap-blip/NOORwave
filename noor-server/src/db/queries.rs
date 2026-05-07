@@ -788,29 +788,40 @@ pub fn get_playlist_memberships(conn: &Connection) -> Result<HashMap<i64, HashSe
 
 // ─── Genres ───────────────────────────────────────────────
 
-pub fn get_genres(conn: &Connection) -> Result<Vec<Genre>> {
-    let mut stmt = conn.prepare(
+pub fn get_genres_filtered(
+    conn: &Connection,
+    filter: crate::genre::filter::GalaxyFilterRule,
+) -> Result<Vec<Genre>> {
+    let sub = crate::genre::filter::filter_subquery(filter);
+    let sql = format!(
         "SELECT g.id, g.name, g.slug, g.parent_id, COUNT(tg.track_id) AS track_count
          FROM genres g
-         LEFT JOIN track_genres tg ON tg.genre_id = g.id
+         LEFT JOIN ({sub}) tg ON tg.genre_id = g.id
          GROUP BY g.id, g.name, g.slug, g.parent_id
-         ORDER BY COALESCE(g.parent_id, g.id), g.name ASC",
-    )?;
-
+         ORDER BY COALESCE(g.parent_id, g.id), g.name ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let genres = stmt
         .query_map([], genre_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
-
     Ok(genres)
 }
 
-pub fn get_genre_tree(conn: &Connection) -> Result<Vec<Genre>> {
-    let genres = get_genres(conn)?;
+pub fn get_genre_tree_filtered(
+    conn: &Connection,
+    filter: crate::genre::filter::GalaxyFilterRule,
+) -> Result<Vec<Genre>> {
+    let genres = get_genres_filtered(conn, filter)?;
     Ok(build_genre_tree(genres))
 }
 
-pub fn get_genre_heat(conn: &Connection, days: i64) -> Result<Vec<GenreHeat>> {
-    let mut stmt = conn.prepare(
+pub fn get_genre_heat_filtered(
+    conn: &Connection,
+    days: i64,
+    filter: crate::genre::filter::GalaxyFilterRule,
+) -> Result<Vec<GenreHeat>> {
+    let sub = crate::genre::filter::filter_subquery(filter);
+    let sql = format!(
         "WITH RECURSIVE closure(ancestor_id, genre_id) AS (
             SELECT id, id
             FROM genres
@@ -826,13 +837,14 @@ pub fn get_genre_heat(conn: &Connection, days: i64) -> Result<Vec<GenreHeat>> {
             COALESCE(SUM(lh.duration_listened_ms), 0) AS total_listened_ms
         FROM genres g
         LEFT JOIN closure ON closure.ancestor_id = g.id
-        LEFT JOIN track_genres tg ON tg.genre_id = closure.genre_id
+        LEFT JOIN ({sub}) tg ON tg.genre_id = closure.genre_id
         LEFT JOIN listen_history lh
             ON lh.track_id = tg.track_id
            AND lh.started_at >= datetime('now', printf('-%d days', ?1))
         GROUP BY g.id, g.name
-        ORDER BY COALESCE(g.parent_id, g.id), g.name ASC",
-    )?;
+        ORDER BY COALESCE(g.parent_id, g.id), g.name ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let heat = stmt
         .query_map(params![days.max(1)], |row| {
@@ -941,89 +953,95 @@ pub fn get_genre_path(conn: &Connection, genre_id: i64) -> Result<Vec<Genre>> {
     Ok(path)
 }
 
-pub fn get_tracks_by_genre(
+pub fn get_tracks_by_genre_filtered(
     conn: &Connection,
     genre_id: i64,
     include_descendants: bool,
+    filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<Track>> {
     if !genre_exists(conn, genre_id)? {
         return Ok(Vec::new());
     }
 
-    // Filter rule: if a track has any Spotify tags, Spotify wins (only Spotify
-    // decides genre membership for that track). If a track has no Spotify tags,
-    // any source is accepted. This trusts Spotify over MusicBrainz on conflicts
-    // while still showing tracks that only one source has data on.
+    let sub = crate::genre::filter::filter_subquery(filter);
+    // The Spotify-dominance EXISTS check still queries raw `track_genres` —
+    // it's a "did Spotify ever tag this track at all" predicate, independent
+    // of the confidence filter that decides which clusters the track is
+    // visible in. The MAIN membership join uses the filtered rowset.
     let sql = if include_descendants {
-        "WITH RECURSIVE selected_genres(id) AS (
-            SELECT id FROM genres WHERE id = ?1
-            UNION ALL
-            SELECT g.id
-            FROM genres g
-            JOIN selected_genres sg ON g.parent_id = sg.id
+        format!(
+            "WITH RECURSIVE selected_genres(id) AS (
+                SELECT id FROM genres WHERE id = ?1
+                UNION ALL
+                SELECT g.id
+                FROM genres g
+                JOIN selected_genres sg ON g.parent_id = sg.id
+            )
+            SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
+                    t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                    t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                    t.best_quality, t.best_source, t.fidelity_score,
+                    t.is_favorite, t.play_count, t.last_played_at,
+                    t.date_added, t.source, al.artwork_url
+             FROM selected_genres sg
+             JOIN ({sub}) tg ON tg.genre_id = sg.id
+             JOIN tracks t ON tg.track_id = t.id
+             LEFT JOIN artists a ON t.artist_id = a.id
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE (
+                 NOT EXISTS (
+                     SELECT 1 FROM track_genres tg_sp
+                     WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM track_genres tg_sp
+                     WHERE tg_sp.track_id = t.id
+                       AND tg_sp.source = 'spotify'
+                       AND tg_sp.genre_id IN (SELECT id FROM selected_genres)
+                 )
+             )
+             ORDER BY
+                COALESCE(a.name, '') COLLATE NOCASE ASC,
+                COALESCE(al.title, '') COLLATE NOCASE ASC,
+                COALESCE(t.disc_number, 1) ASC,
+                COALESCE(t.track_number, 999999) ASC,
+                t.title COLLATE NOCASE ASC"
         )
-        SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
-         FROM selected_genres sg
-         JOIN track_genres tg ON tg.genre_id = sg.id
-         JOIN tracks t ON tg.track_id = t.id
-         LEFT JOIN artists a ON t.artist_id = a.id
-         LEFT JOIN albums al ON t.album_id = al.id
-         WHERE (
-             NOT EXISTS (
-                 SELECT 1 FROM track_genres tg_sp
-                 WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
-             )
-             OR EXISTS (
-                 SELECT 1 FROM track_genres tg_sp
-                 WHERE tg_sp.track_id = t.id
-                   AND tg_sp.source = 'spotify'
-                   AND tg_sp.genre_id IN (SELECT id FROM selected_genres)
-             )
-         )
-         ORDER BY
-            COALESCE(a.name, '') COLLATE NOCASE ASC,
-            COALESCE(al.title, '') COLLATE NOCASE ASC,
-            COALESCE(t.disc_number, 1) ASC,
-            COALESCE(t.track_number, 999999) ASC,
-            t.title COLLATE NOCASE ASC"
     } else {
-        "SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
-         FROM track_genres tg
-         JOIN tracks t ON tg.track_id = t.id
-         LEFT JOIN artists a ON t.artist_id = a.id
-         LEFT JOIN albums al ON t.album_id = al.id
-         WHERE tg.genre_id = ?1
-           AND (
-               NOT EXISTS (
-                   SELECT 1 FROM track_genres tg_sp
-                   WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
+        format!(
+            "SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
+                    t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                    t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                    t.best_quality, t.best_source, t.fidelity_score,
+                    t.is_favorite, t.play_count, t.last_played_at,
+                    t.date_added, t.source, al.artwork_url
+             FROM ({sub}) tg
+             JOIN tracks t ON tg.track_id = t.id
+             LEFT JOIN artists a ON t.artist_id = a.id
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE tg.genre_id = ?1
+               AND (
+                   NOT EXISTS (
+                       SELECT 1 FROM track_genres tg_sp
+                       WHERE tg_sp.track_id = t.id AND tg_sp.source = 'spotify'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM track_genres tg_sp
+                       WHERE tg_sp.track_id = t.id
+                         AND tg_sp.source = 'spotify'
+                         AND tg_sp.genre_id = ?1
+                   )
                )
-               OR EXISTS (
-                   SELECT 1 FROM track_genres tg_sp
-                   WHERE tg_sp.track_id = t.id
-                     AND tg_sp.source = 'spotify'
-                     AND tg_sp.genre_id = ?1
-               )
-           )
-         ORDER BY
-            COALESCE(a.name, '') COLLATE NOCASE ASC,
-            COALESCE(al.title, '') COLLATE NOCASE ASC,
-            COALESCE(t.disc_number, 1) ASC,
-            COALESCE(t.track_number, 999999) ASC,
-            t.title COLLATE NOCASE ASC"
+             ORDER BY
+                COALESCE(a.name, '') COLLATE NOCASE ASC,
+                COALESCE(al.title, '') COLLATE NOCASE ASC,
+                COALESCE(t.disc_number, 1) ASC,
+                COALESCE(t.track_number, 999999) ASC,
+                t.title COLLATE NOCASE ASC"
+        )
     };
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let tracks = stmt
         .query_map(params![genre_id], track_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1564,19 +1582,22 @@ pub struct GenreCoOccurrence {
 /// Two genres "co-occur" if a user listened to tracks from both genres within
 /// `window_minutes` of each other (default 30 min). Returns pairs with at least
 /// `min_count` co-occurrences, sorted by Jaccard similarity.
-pub fn get_genre_co_occurrence(
+pub fn get_genre_co_occurrence_filtered(
     conn: &Connection,
     _days: i64,
     _window_minutes: i64,
     min_count: i64,
+    filter: crate::genre::filter::GalaxyFilterRule,
 ) -> Result<Vec<GenreCoOccurrence>> {
-    // Find genre pairs that appear together on the same tracks
-    // (co-tagged genres), then score by Jaccard similarity.
-    let mut stmt = conn.prepare(
+    let sub = crate::genre::filter::filter_subquery(filter);
+    // Same query as before but built against the filtered rowset. The
+    // subquery is inlined twice rather than CTE'd because SQLite doesn't
+    // share materialization between CTE references reliably.
+    let sql = format!(
         "WITH track_genre_pairs AS (
             SELECT a.genre_id AS genre_a, b.genre_id AS genre_b
-            FROM track_genres a
-            JOIN track_genres b ON b.track_id = a.track_id AND b.genre_id > a.genre_id
+            FROM ({sub}) a
+            JOIN ({sub}) b ON b.track_id = a.track_id AND b.genre_id > a.genre_id
         ),
         pair_counts AS (
             SELECT genre_a, genre_b, COUNT(*) AS co_count
@@ -1586,7 +1607,7 @@ pub fn get_genre_co_occurrence(
         ),
         genre_totals AS (
             SELECT genre_id, COUNT(DISTINCT track_id) AS total_tracks
-            FROM track_genres
+            FROM ({sub})
             GROUP BY genre_id
         )
         SELECT
@@ -1600,8 +1621,9 @@ pub fn get_genre_co_occurrence(
         JOIN genres gb ON gb.id = pc.genre_b
         JOIN genre_totals gt_a ON gt_a.genre_id = pc.genre_a
         JOIN genre_totals gt_b ON gt_b.genre_id = pc.genre_b
-        ORDER BY jaccard DESC, pc.co_count DESC",
-    )?;
+        ORDER BY jaccard DESC, pc.co_count DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map(params![min_count], |row| {
         Ok(GenreCoOccurrence {
@@ -1632,11 +1654,17 @@ pub struct GenreCohort {
 /// Derive personal listening cohorts by analyzing time-of-day and day-of-week
 /// patterns. Groups genres into clusters like "Late Night", "Morning Commute",
 /// "Weekend", "Deep Focus", etc.
-pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort>> {
+pub fn get_genre_cohorts_filtered(
+    conn: &Connection,
+    days: i64,
+    filter: crate::genre::filter::GalaxyFilterRule,
+) -> Result<Vec<GenreCohort>> {
+    let _ = days; // bound via ?1 below
+    let sub = crate::genre::filter::filter_subquery(filter);
     // We bucket listens into 4 time-of-day slots + weekend/weekday
     // Slot 0: 0-6 (Night), Slot 1: 6-12 (Morning), Slot 2: 12-18 (Afternoon), Slot 3: 18-24 (Evening)
     // Then find genres that dominate each slot.
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "WITH recent AS (
             SELECT
                 lh.id AS listen_id,
@@ -1665,7 +1693,7 @@ pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort
                 COUNT(*) AS listens,
                 COALESCE(SUM(r.duration_listened_ms), 0) AS listened_ms
             FROM recent r
-            JOIN track_genres tg ON tg.track_id = r.track_id
+            JOIN ({sub}) tg ON tg.track_id = r.track_id
             JOIN genres g ON g.id = tg.genre_id
             GROUP BY tg.genre_id, time_slot, day_type
         ),
@@ -1683,8 +1711,9 @@ pub fn get_genre_cohorts(conn: &Connection, days: i64) -> Result<Vec<GenreCohort
         SELECT genre_id, genre_name, time_slot, day_type, listens, listened_ms
         FROM dominant
         WHERE rn = 1
-        ORDER BY listens DESC",
-    )?;
+        ORDER BY listens DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map(params![days], |row| {
         Ok((
@@ -1752,7 +1781,11 @@ pub fn get_track_cohort_assignments(
         return Ok(std::collections::HashMap::new());
     }
 
-    let cohorts = get_genre_cohorts(conn, days)?;
+    let cohorts = get_genre_cohorts_filtered(
+        conn,
+        days,
+        crate::genre::filter::GalaxyFilterRule::default_rule(),
+    )?;
     if cohorts.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
@@ -4214,7 +4247,12 @@ mod tests {
         )
         .expect("listen inserted");
 
-        let heat = get_genre_heat(&conn, 90).expect("genre heat");
+        let heat = get_genre_heat_filtered(
+            &conn,
+            90,
+            crate::genre::filter::GalaxyFilterRule::All,
+        )
+        .expect("genre heat");
         let electronic = heat
             .iter()
             .find(|entry| entry.genre_id == 1)
@@ -4243,7 +4281,12 @@ mod tests {
         )
         .expect("genres inserted");
 
-        let heat = get_genre_heat(&conn, 90).expect("genre heat");
+        let heat = get_genre_heat_filtered(
+            &conn,
+            90,
+            crate::genre::filter::GalaxyFilterRule::All,
+        )
+        .expect("genre heat");
         assert_eq!(heat.len(), 2);
         assert!(heat.iter().all(|entry| entry.listen_count == 0));
         assert!(heat.iter().all(|entry| entry.total_listened_ms == 0));

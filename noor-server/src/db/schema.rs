@@ -34,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_030,
     MIGRATION_031,
     MIGRATION_032,
+    MIGRATION_033,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -909,6 +910,43 @@ DELETE FROM sportify_album_meta;
 DELETE FROM sportify_artist_meta;
 DELETE FROM sportify_playlist_meta;
 DELETE FROM sportify_search_cache;
+"#;
+
+// Single-strongest-tag-per-track view. Used by radio diversity reranking and
+// any future consumer that wants ONE trustworthy signal instead of the
+// multi-tag set. Pick rule:
+//   1. confidence DESC
+//   2. source priority: musicbrainz > spotify > lastfm > anything else
+//   3. genre_id ASC (deterministic final tiebreak)
+//
+// Not materialized — recomputed on every read. At ~40k assignments the cost is
+// negligible and we avoid the synchronization burden of a real column. Galaxy
+// queries that want a top-1 view can `JOIN track_primary_genre` instead of
+// re-implementing the pick.
+const MIGRATION_033: &str = r#"
+CREATE VIEW IF NOT EXISTS track_primary_genre AS
+SELECT track_id, genre_id AS primary_genre_id, source, confidence
+FROM (
+    SELECT
+        track_id,
+        genre_id,
+        source,
+        confidence,
+        ROW_NUMBER() OVER (
+            PARTITION BY track_id
+            ORDER BY
+                confidence DESC,
+                CASE source
+                    WHEN 'musicbrainz' THEN 1
+                    WHEN 'spotify'     THEN 2
+                    WHEN 'lastfm'      THEN 3
+                    ELSE                    9
+                END,
+                genre_id
+        ) AS rn
+    FROM track_genres
+)
+WHERE rn = 1;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
