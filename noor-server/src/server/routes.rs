@@ -10318,12 +10318,19 @@ async fn play_tidal_ephemeral(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Fresh single-track play wipes any pending mix queue — the user is
-    // explicitly choosing a different track, so the previously-queued mix
-    // continuation is no longer the user's intent.
+    // If the picked track is sitting in the pending mix queue, jump to it —
+    // drop entries before it (and the entry itself, which we're about to
+    // start) and leave the rest queued. Only fully clear when the user
+    // chose something outside the current mix.
     {
         let s = state.read().await;
-        s.pending_tidal_mix_queue.lock().unwrap().clear();
+        let mut q = s.pending_tidal_mix_queue.lock().unwrap();
+        match q.iter().position(|p| p.tidal_track_id == body.tidal_track_id) {
+            Some(idx) => {
+                q.drain(..=idx);
+            }
+            None => q.clear(),
+        }
     }
     let track = crate::PendingEphemeralTidalTrack {
         tidal_track_id: body.tidal_track_id,
