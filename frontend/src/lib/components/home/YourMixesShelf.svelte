@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { api, ApiError, type TidalMix } from '$lib/api/client';
 	import { playTidalMix } from '$lib/stores/player';
+	import { tidalStatus } from '$lib/stores/tidal';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -14,6 +15,18 @@
 	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
 
 	onMount(load);
+
+	// Re-fetch when TIDAL transitions to connected. Covers two cases:
+	//   1. Cold-boot race — shelf mounted and 503'd before tidal_status had
+	//      rehydrated tokens from disk; without this it stayed "disconnected"
+	//      until the user navigated away and back.
+	//   2. Live connect — user opens Settings, connects TIDAL, returns home;
+	//      the shelf updates in place instead of needing a refresh.
+	$effect(() => {
+		if ($tidalStatus === 'connected' && viewState !== 'loading' && viewState !== 'ready') {
+			void load();
+		}
+	});
 
 	async function load() {
 		viewState = 'loading';
