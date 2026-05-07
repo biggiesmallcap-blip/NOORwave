@@ -1363,8 +1363,14 @@ fn write_output_buffer<T>(
 
     // Crossfade gain: fade-out during the overlap window of the outgoing track,
     // fade-in from position 0 for the incoming track.
-    // Both ramps are linear. Together they prevent the volume-doubling that occurs
-    // when two full-volume streams are mixed simultaneously.
+    //
+    // Equal-power (sine) ramps keep total power constant across the overlap:
+    // sin²(t·π/2) + cos²(t·π/2) = 1, so the summed amplitude of two streams
+    // running through opposite ends of the curve doesn't dip 3 dB at the
+    // midpoint the way linear ramps do. Both streams use the same
+    // `gain = sin(progress · π/2)` form — fade-in feeds `elapsed/xfade`,
+    // fade-out feeds `remaining/xfade`, which is the equivalent
+    // 1→0 parameterisation.
     //
     // IMPORTANT: check fadein_start_samples FIRST. When the next track is fully
     // pre-decoded before the crossfade window opens, total_samples > 0 for that
@@ -1378,7 +1384,8 @@ fn write_output_buffer<T>(
             // Incoming crossfade engine — apply fade-in ramp.
             let elapsed = pos.saturating_sub(fadein_start);
             if elapsed < xfade {
-                (elapsed as f32 / xfade as f32).min(1.0)
+                let t = (elapsed as f32 / xfade as f32).clamp(0.0, 1.0);
+                (t * std::f32::consts::FRAC_PI_2).sin()
             } else {
                 1.0f32
             }
@@ -1388,7 +1395,8 @@ fn write_output_buffer<T>(
             if total > 0 {
                 let remaining = total.saturating_sub(pos);
                 if remaining < xfade {
-                    (remaining as f32 / xfade as f32).max(0.0)
+                    let t = (remaining as f32 / xfade as f32).clamp(0.0, 1.0);
+                    (t * std::f32::consts::FRAC_PI_2).sin()
                 } else {
                     1.0f32
                 }
