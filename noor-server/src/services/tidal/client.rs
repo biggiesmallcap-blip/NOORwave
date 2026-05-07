@@ -199,6 +199,7 @@ impl TidalClient {
     /// Convenience constructor that builds a fresh HTTP client. Prefer
     /// `with_http` when an `AppState`-level client is available — building a
     /// client per call pays the TLS-pool setup repeatedly.
+    #[cfg(test)]
     pub fn new(access_token: String, country_code: String) -> Self {
         Self::with_http(Self::build_http_client(), access_token, country_code)
     }

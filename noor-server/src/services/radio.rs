@@ -1364,15 +1364,15 @@ fn blend_interleave(
         let eng_behind = (eng_take as f64 - eng_done as f64) / eng_w.max(0.01);
 
         let pick = if lib_behind >= lfm_behind && lib_behind >= eng_behind {
-            lib_iter.next().inspect(|c| {
+            lib_iter.next().inspect(|_| {
                 lib_done += 1;
             })
         } else if lfm_behind >= eng_behind {
-            lfm_iter.next().inspect(|c| {
+            lfm_iter.next().inspect(|_| {
                 lfm_done += 1;
             })
         } else {
-            eng_iter.next().inspect(|c| {
+            eng_iter.next().inspect(|_| {
                 eng_done += 1;
             })
         };
@@ -2656,7 +2656,7 @@ mod radio_phase2_tests {
         // Empty engine baseline (Stage 1 shape): combine library +
         // lastfm + empty engine. Use empty source slots since this test
         // exercises only the diff brought by the engine slot itself.
-        let mut empty_path = combine_with_dedup(Vec::new(), Vec::new(), Vec::new());
+        let empty_path = combine_with_dedup(Vec::new(), Vec::new(), Vec::new());
         assert!(empty_path.is_empty(), "no candidates without engine slot");
 
         // Engine-on (Stage 2 shape): same combine, with engine populated.

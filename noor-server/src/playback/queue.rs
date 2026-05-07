@@ -189,6 +189,7 @@ pub enum InsertResult {
 }
 
 impl InsertResult {
+    #[cfg(test)]
     pub fn queue_id(self) -> i64 {
         match self {
             Self::Library { queue_id, .. } | Self::Pending { queue_id } => queue_id,

@@ -970,23 +970,6 @@ mod tests {
     #[test]
     fn key_rule_matches_across_notation_styles() {
         let tracks = vec![dsp_track(1), dsp_track(2)];
-        let context = PlaylistEvaluationContext::new()
-            .with_track_dsp(
-                1,
-                TrackDspFeatures {
-                    key_signature: Some("Am".into()),
-                    camelot_key: Some("8A".into()),
-                    ..Default::default()
-                },
-            )
-            .with_track_dsp(
-                2,
-                TrackDspFeatures {
-                    key_signature: Some("Cmaj".into()),
-                    camelot_key: Some("8B".into()),
-                    ..Default::default()
-                },
-            );
 
         // Request matching track 1 by Camelot when track 1 stores "Am"/"5A".
         let ctx2 = PlaylistEvaluationContext::new().with_track_dsp(
