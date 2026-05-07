@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_031,
     MIGRATION_032,
     MIGRATION_033,
+    MIGRATION_034,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -947,6 +948,21 @@ FROM (
     FROM track_genres
 )
 WHERE rn = 1;
+"#;
+
+// Mirror of `sportify_search_cache` for upstream TIDAL catalog search.
+// Keyed by sha256(normalized query + limit + offset). The wrapper in
+// `services/tidal/cache.rs` writes the parsed `TidalSearchCatalog` JSON,
+// not the enriched response — `in_library` flags re-derive on every read.
+const MIGRATION_034: &str = r#"
+CREATE TABLE IF NOT EXISTS tidal_search_cache (
+    query_hash TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tidal_search_cache_fetched_at
+    ON tidal_search_cache(fetched_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
