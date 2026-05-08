@@ -255,8 +255,11 @@
 			}
 		});
 
-		void refreshTidalStatus();
-		void loadSyncInfo();
+		void Promise.allSettled([
+			refreshTidalStatus(),
+			loadSyncInfo(),
+			loadAcrCloudStatus(),
+		]);
 		void loadPlaybackRuntime();
 		void loadMbStatus();
 		void loadPortableSnapshot();
@@ -266,7 +269,6 @@
 		void loadAudioStats();
 		void syncAnalysisStatus();
 		void loadAudioOutput();
-		void loadAcrCloudStatus();
 		void loadSpotifyStatus();
 		void loadLastfmStatus();
 		serverToken = getStoredToken() ?? '';
