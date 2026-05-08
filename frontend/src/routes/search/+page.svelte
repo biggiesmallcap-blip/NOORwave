@@ -4,7 +4,10 @@
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
   import { catalogPlaylists, catalogGenres, ensureCatalogPlaylists, ensureCatalogGenres } from '$lib/stores/catalog_meta'
-  import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
+  const trendingShelfMod = (() => {
+    let p: Promise<typeof import('$lib/components/charts/TrendingShelf.svelte')> | null = null;
+    return () => (p ??= import('$lib/components/charts/TrendingShelf.svelte'));
+  })();
   type TrackMenuMod = typeof import('$lib/player/track_menu')
   type AlbumMenuMod = typeof import('$lib/player/album_menu')
   type ArtistMenuMod = typeof import('$lib/player/artist_menu')
@@ -897,7 +900,12 @@
     {/if}
 
     <section class="results-section">
-      <TrendingShelf limit={25} />
+      {#await trendingShelfMod() then mod}
+        {@const TrendingShelf = mod.default}
+        <TrendingShelf limit={25} />
+      {:catch}
+        <!-- silent — trending is non-critical -->
+      {/await}
     </section>
 
     {#if recent.length === 0}
