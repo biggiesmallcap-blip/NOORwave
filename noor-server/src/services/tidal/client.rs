@@ -617,9 +617,9 @@ impl TidalClient {
     /// Fetch the authenticated user's "My Mixes" page from TIDAL.
     ///
     /// Endpoint: `pages/my_collection_my_mixes` — undocumented private API
-    /// used by the TIDAL web client. Stable enough in practice, but if TIDAL
-    /// breaks the shape we surface an empty list with a `warn` rather than
-    /// erroring the whole home page (acceptable risk per plan).
+    /// used by the TIDAL web client. HTTP errors (including 401) are propagated
+    /// so the caller can handle token refresh. If TIDAL changes their response
+    /// shape, `parse_my_mixes` returns an empty vec rather than erroring.
     ///
     /// Response shape: `{ rows: [{ modules: [{ pagedList: { items: [...] } }] }] }`
     /// where each item is a mix `{ id, title, subTitle, mixType, images: {...} }`.
@@ -628,13 +628,7 @@ impl TidalClient {
             "{}/pages/my_collection_my_mixes?countryCode={}&deviceType=BROWSER&locale=en_US",
             TIDAL_API_URL, self.country_code
         );
-        let payload: serde_json::Value = match self.get_json(&url).await {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!("TIDAL my_mixes fetch failed: {}", err);
-                return Ok(Vec::new());
-            }
-        };
+        let payload: serde_json::Value = self.get_json(&url).await?;
         let mixes = Self::parse_my_mixes(&payload);
         if mixes.is_empty() {
             // Surface the actual response shape so we can debug why parsing
