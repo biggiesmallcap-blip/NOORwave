@@ -14331,8 +14331,12 @@ async fn reanalyze_stale_tracks(
     // re-decode & re-analyse).
     if total > 0 {
         db.with_conn(|conn| -> anyhow::Result<()> {
+            // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
             conn.execute(
-                "DELETE FROM audio_dsp_features WHERE analysis_version != 'v1'",
+                &format!(
+                    "DELETE FROM audio_dsp_features WHERE analysis_version != '{}'",
+                    crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
+                ),
                 [],
             )?;
             Ok(())

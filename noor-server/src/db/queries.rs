@@ -3843,7 +3843,8 @@ pub fn get_audio_dsp_features(
 }
 
 pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
+    // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
+    let sql = format!(
         "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
                 t.album_id, al.title as album_title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
@@ -3855,9 +3856,11 @@ pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          LEFT JOIN audio_dsp_features dsp ON t.id = dsp.track_id
-         WHERE dsp.track_id IS NULL OR dsp.analysis_version != 'v2'
+         WHERE dsp.track_id IS NULL OR dsp.analysis_version != '{}'
          LIMIT ?1",
-    )?;
+        crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let tracks = stmt
         .query_map(params![limit], track_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -4190,8 +4193,12 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
 /// Return the ids of all tracks whose stored analysis_version is not 'v1'
 /// (i.e. need to be re-analysed after an analysis-version bump).
 pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt =
-        conn.prepare("SELECT track_id FROM audio_dsp_features WHERE analysis_version != 'v1'")?;
+    // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
+    let sql = format!(
+        "SELECT track_id FROM audio_dsp_features WHERE analysis_version != '{}'",
+        crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)

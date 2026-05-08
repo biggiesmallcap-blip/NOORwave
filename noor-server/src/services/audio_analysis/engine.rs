@@ -63,7 +63,7 @@ pub fn analyze_clip(
         analysis_offset_ms: 0,
         samples_analyzed: Some(samples.len() as i64),
         analyzed_at: now,
-        analysis_version: "v2".to_string(),
+        analysis_version: super::CURRENT_ANALYSIS_VERSION.to_string(),
     }
 }
 
