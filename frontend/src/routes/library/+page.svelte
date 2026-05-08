@@ -2144,7 +2144,7 @@
 
 	.hint-filters {
 		opacity: 0.7;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		letter-spacing: 0.02em;
 	}
 

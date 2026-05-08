@@ -432,7 +432,7 @@
 		flex-direction: column;
 		gap: 2px;
 		font-size: 0.72rem;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		color: rgba(200, 200, 220, 0.8);
 		pointer-events: none;
 		z-index: 100;

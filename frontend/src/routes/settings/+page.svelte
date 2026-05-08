@@ -2764,7 +2764,7 @@
 		border-radius: var(--radius-sm);
 		background: rgba(255, 255, 255, 0.03);
 		border: 1px solid var(--panel-border);
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 1.9rem;
 		letter-spacing: 0.18em;
 		text-align: center;

@@ -575,8 +575,8 @@
 	.row-kind { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
 	.row-kind--spotify { color: var(--service-spotify); font-weight: 600; }
 	.row-lib { font-size: 10px; color: var(--accent); flex-shrink: 0; }
-	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: monospace; flex-shrink: 0; }
-	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: monospace; flex-shrink: 0; }
+	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: var(--font-mono); flex-shrink: 0; }
+	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
 	.cmd-desc { color: var(--text-secondary); margin-left: auto; font-size: var(--font-size-xs); }
 	.palette-empty, .palette-hint {
 		padding: 20px 18px;
@@ -590,7 +590,7 @@
 		border-radius: 4px;
 		padding: 1px 5px;
 		font-size: 11px;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		color: var(--text-secondary);
 	}
 </style>

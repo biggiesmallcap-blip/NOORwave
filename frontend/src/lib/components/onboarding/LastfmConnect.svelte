@@ -358,7 +358,7 @@
 		white-space: nowrap;
 	}
 	code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-family: var(--font-mono);
 		background: rgba(255, 255, 255, 0.06);
 		padding: 1px 5px;
 		border-radius: 4px;

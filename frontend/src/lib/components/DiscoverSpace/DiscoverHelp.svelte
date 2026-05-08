@@ -229,7 +229,7 @@
 	.panel-body strong { color: rgba(255, 255, 255, 0.92); font-weight: 600; }
 	.panel-body em { color: rgba(255, 255, 255, 0.55); font-style: normal; }
 	.panel-body code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-family: var(--font-mono);
 		font-size: 0.78rem;
 		padding: 1px 5px;
 		border-radius: 4px;
