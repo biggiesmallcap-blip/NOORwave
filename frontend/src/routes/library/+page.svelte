@@ -147,6 +147,7 @@
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
+	let trackListBodyEl = $state<HTMLDivElement | null>(null);
 
 	// Decade filter for albums tab
 	let activeDecade = $state<number | null>(null);
@@ -1045,7 +1046,7 @@
 	// the VirtualList window — scrollIntoView on a non-existent element is a no-op.
 	$effect(() => {
 		if (cursorIndex < 0) return;
-		const viewport = document.querySelector<HTMLElement>('.track-list-body .vl-viewport');
+		const viewport = trackListBodyEl?.querySelector<HTMLElement>('.vl-viewport') ?? null;
 		if (!viewport) return;
 		const itemTop = cursorIndex * TRACK_ROW_HEIGHT;
 		const itemBottom = itemTop + TRACK_ROW_HEIGHT;
@@ -1713,7 +1714,7 @@
 				</div>
 			{/snippet}
 
-			<div class="track-list-body">
+			<div class="track-list-body" bind:this={trackListBodyEl}>
 				<VirtualList
 					items={visibleTracks}
 					itemHeight={TRACK_ROW_HEIGHT}

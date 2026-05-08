@@ -80,7 +80,9 @@
     .vl-viewport {
         height: 100%;
         overflow-y: auto;
-        contain: strict;
+        /* size+layout+style containment without paint — paint would clip
+           position:absolute dropdowns from bottom-of-window rows. */
+        contain: size layout style;
     }
     .vl-item {
         contain: layout style paint;
