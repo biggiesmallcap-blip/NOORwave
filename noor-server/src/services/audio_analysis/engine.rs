@@ -119,6 +119,16 @@ pub fn analyze_and_save(
 ) -> Option<AudioDspFeatures> {
     let features = analyze_clip_safe(samples, sample_rate, source, track_id, offset_ms)?;
 
+    // Refuse to persist empty rows: when the input clip is silence (e.g. a
+    // DRM-encrypted TIDAL preview that decodes to zeros), every analyser
+    // returns None / 0.0 and we'd otherwise upsert a v{CURRENT}-versioned row
+    // with no signal. That row would then mark the track as "already analysed"
+    // and prevent the playback-driven actor from retrying with real audio.
+    if is_empty_analysis(&features) {
+        tracing::debug!(track_id, source, "skipping save: clip decoded to silence");
+        return None;
+    }
+
     db.with_conn(|conn| crate::db::queries::upsert_audio_dsp_features(conn, &features))
         .map_err(|e| {
             tracing::debug!(track_id, "failed to save DSP features: {}", e);
@@ -126,6 +136,12 @@ pub fn analyze_and_save(
         .ok()?;
 
     Some(features)
+}
+
+fn is_empty_analysis(f: &AudioDspFeatures) -> bool {
+    f.bpm.is_none()
+        && f.key_signature.is_none()
+        && f.energy.map(|e| e < 0.001).unwrap_or(true)
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
