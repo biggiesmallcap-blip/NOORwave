@@ -12,6 +12,7 @@
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { catalogPlaylists, catalogGenres, ensureCatalogPlaylists, ensureCatalogGenres } from '$lib/stores/catalog_meta';
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -92,8 +93,8 @@
 	const PAGE_SIZE = 100;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
-	let playlists = $state<Playlist[]>([]);
-	let genres = $state<Genre[]>([]);
+	let playlists = $derived($catalogPlaylists.filter((playlist) => !playlist.is_smart));
+	let genres = $derived.by(() => flattenGenres($catalogGenres));
 	let selectedPlaylistId = $state('');
 	let selectedGenreId = $state('');
 	let batchMessage = $state<string | null>(null);
@@ -160,31 +161,30 @@
 	});
 
 
+	// Seed the selector to the first item once the store resolves; only overwrite
+	// when the selector is still empty (don't discard a user's in-progress pick).
+	$effect(() => {
+		if (!selectedPlaylistId && playlists.length > 0) {
+			selectedPlaylistId = String(playlists[0].id);
+		}
+	});
+	$effect(() => {
+		if (!selectedGenreId && genres.length > 0) {
+			selectedGenreId = String(genres[0].id);
+		}
+	});
+
 	onMount(() => {
 		void loadAlbums();
 		void loadTracks();
-		void loadBatchMeta();
+		void ensureCatalogPlaylists();
+		void ensureCatalogGenres();
 		return () => {
 			if (searchTimer) clearTimeout(searchTimer);
 			infiniteObserver?.disconnect();
 			if (undoTimer) clearTimeout(undoTimer);
 		};
 	});
-
-	async function loadBatchMeta() {
-		try {
-			const [playlistData, genreData] = await Promise.all([
-				api.getPlaylists(),
-				api.getGenres(),
-			]);
-			playlists = playlistData.playlists.filter((playlist) => !playlist.is_smart);
-			selectedPlaylistId = playlists[0] ? String(playlists[0].id) : '';
-			genres = flattenGenres(genreData.genres);
-			selectedGenreId = genres[0] ? String(genres[0].id) : '';
-		} catch (error) {
-			console.error('Failed to load batch metadata:', error);
-		}
-	}
 
 	function handleSort(field: string) {
 		if ($sortBy === field) {

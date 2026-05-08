@@ -12,6 +12,7 @@
 		type DateField,
 		type SampleDataSource,
 	} from '$lib/api/client';
+	import { catalogPlaylists, ensureCatalogPlaylists, invalidateCatalog } from '$lib/stores/catalog_meta';
 	import {
 		currentTrack,
 		isPlaying,
@@ -176,7 +177,7 @@
 	}
 
 	// ─── Page state ───────────────────────────────────────────────────────────
-	let playlists = $state<Playlist[]>([]);
+	let playlists = $derived($catalogPlaylists);
 	let expandedPlaylistIds = $state<Set<number>>(new Set());
 	let playlistTracksById = $state<Record<number, Track[]>>({});
 	let loadingById = $state<Record<number, boolean>>({});
@@ -269,6 +270,11 @@
 		void loadPlaylists();
 	});
 
+	// After the shared store resolves (or if it's already warm), trigger mosaic prefetch.
+	$effect(() => {
+		if (playlists.length > 0) scheduleMosaicPrefetch();
+	});
+
 	function mapMosaicsFromCache(snapshot: Record<number, { urls: string[] }>): Record<number, string[]> {
 		const out: Record<number, string[]> = {};
 		for (const [idStr, entry] of Object.entries(snapshot)) {
@@ -282,9 +288,7 @@
 		isLoading = true;
 		loadError = '';
 		try {
-			const data = await api.getPlaylists();
-			playlists = data.playlists;
-			scheduleMosaicPrefetch();
+			await ensureCatalogPlaylists();
 		} catch (error) {
 			loadError = `Failed to load playlists: ${error}`;
 		} finally {
@@ -405,7 +409,7 @@
 		e.stopPropagation();
 		try {
 			const updated = await api.togglePlaylistFavorite(playlist.id);
-			playlists = playlists.map((p) => (p.id === playlist.id ? updated.playlist : p));
+			catalogPlaylists.update((ps) => ps.map((p) => (p.id === playlist.id ? updated.playlist : p)));
 		} catch {
 			// Button state will be corrected on the next refresh.
 		}
@@ -513,12 +517,13 @@
 			const desc = draftDescription.trim() || null;
 			if (editingPlaylistId === null) {
 				const result = await api.createSmartPlaylist(name, desc, rootClause);
-				playlists = [...playlists, result.playlist];
+				catalogPlaylists.update((ps) => [...ps, result.playlist]);
 			} else {
-				const result = await api.updateSmartPlaylist(editingPlaylistId, name, desc, rootClause);
-				playlists = playlists.map((p) => (p.id === editingPlaylistId ? result.playlist : p));
+				const id = editingPlaylistId;
+				const result = await api.updateSmartPlaylist(id, name, desc, rootClause);
+				catalogPlaylists.update((ps) => ps.map((p) => (p.id === id ? result.playlist : p)));
 				// Invalidate cached tracks so re-expand re-evaluates
-				const { [editingPlaylistId]: _removed, ...rest } = playlistTracksById;
+				const { [id]: _removed, ...rest } = playlistTracksById;
 				playlistTracksById = rest;
 			}
 			closeEditor();
@@ -534,7 +539,7 @@
 		deleteError = '';
 		try {
 			await api.deleteSmartPlaylist(id);
-			playlists = playlists.filter((p) => p.id !== id);
+			catalogPlaylists.update((ps) => ps.filter((p) => p.id !== id));
 			expandedPlaylistIds = new Set([...expandedPlaylistIds].filter((x) => x !== id));
 		} catch (e) {
 			deleteError = String(e);

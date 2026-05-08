@@ -3,6 +3,7 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
+  import { catalogPlaylists, catalogGenres, ensureCatalogPlaylists, ensureCatalogGenres } from '$lib/stores/catalog_meta'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   type TrackMenuMod = typeof import('$lib/player/track_menu')
   type AlbumMenuMod = typeof import('$lib/player/album_menu')
@@ -84,7 +85,7 @@
   // D5 — in-memory result cache (last 5 queries, keyed by normalised query string)
   const resultCache = new Map<string, TidalSearchResults>()
   let recent = $state<string[]>(loadRecent())
-  let genreList = $state<Genre[]>([])
+  let genreList = $derived($catalogGenres)
 
   // C3 — session-aware ranking
   let recentArtistNames = $state<Set<string>>(new Set())
@@ -93,7 +94,7 @@
   let vibeTrack = $state<VibeTrack[] | null>(null)
   let underratedTracks = $state<BasicTrack[] | null>(null)
 
-  let localPlaylists = $state<Playlist[]>([])
+  let localPlaylists = $derived($catalogPlaylists)
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
 
@@ -121,9 +122,7 @@
 
   onMount(() => {
     // Critical-path: powers the empty-state shelf. Keep eager.
-    void api.getPlaylists().then(({ playlists }) => {
-      localPlaylists = playlists
-    }).catch(() => {})
+    void ensureCatalogPlaylists()
 
     // Non-critical: dropdown sources. Defer until idle so they don't
     // push out first paint or compete with the user's first search.
@@ -133,9 +132,7 @@
         : setTimeout(cb, 200)
 
     idle(() => {
-      void api.getGenres().then(res => {
-        genreList = res.genres
-      }).catch(() => {})
+      void ensureCatalogGenres()
       void api.getRecentListens(20).then(listens => {
         const names = listens.listens
           .map(e => e.artist_name)

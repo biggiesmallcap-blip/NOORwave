@@ -15,6 +15,7 @@
 		type PlaybackRuntimeInfo,
 		type PortableMusicBrainzSnapshotStatus
 	} from '$lib/api/client';
+	import { ensureCatalogGenres, invalidateCatalog } from '$lib/stores/catalog_meta';
 	import { wsMessages } from '$lib/api/ws';
 	import {
 		tidalStatus,
@@ -148,10 +149,13 @@
 	async function refreshGalaxy() {
 		galaxyRefreshLabel = 'Refreshing genre data…';
 		try {
-			const genres = await api.getGenres();
-			const heat = await api.getGenreHeat(90);
+			invalidateCatalog('genres');
+			const [genres, heat] = await Promise.all([
+				ensureCatalogGenres(),
+				api.getGenreHeat(90),
+			]);
 			markServerOnline();
-			const genreCount = countGenres(genres.genres);
+			const genreCount = countGenres(genres);
 			const activeHeat = heat.heat.filter((e) => e.listen_count > 0).length;
 			galaxyRefreshLabel = `Galaxy ready: ${genreCount} genres, ${activeHeat} with recent heat data.`;
 		} catch (error) {
