@@ -183,21 +183,21 @@
     border: 1px solid var(--border-subtle);
     background: rgba(255,255,255,0.06);
     color: var(--text-secondary);
-    font-size: 0.68rem;
-    font-weight: 700;
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-bold);
     letter-spacing: 0.1em;
     text-transform: uppercase;
   }
   .artist-name {
-    font-size: clamp(2.4rem, 5.4vw, 4.6rem);
-    font-weight: 600;
+    font-size: var(--font-size-4xl);
+    font-weight: var(--font-weight-semibold);
     color: var(--text-primary);
     margin: 0;
   }
   .artist-meta {
     color: var(--text-secondary);
     margin: 0;
-    font-size: 0.9rem;
+    font-size: var(--font-size-sm);
   }
   .filter-bar { margin-bottom: 28px; }
   .filter-input {
@@ -205,7 +205,7 @@
     border: 1px solid var(--input-border);
     border-radius: 20px;
     padding: 7px 16px;
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     color: var(--text-primary);
     outline: none;
     width: 280px;
@@ -214,8 +214,8 @@
   .filter-input:focus { border-color: var(--accent); background: var(--input-focus); }
   .section { margin-bottom: 40px; }
   .section-label {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-semibold);
     text-transform: uppercase;
     letter-spacing: 1.5px;
     color: var(--accent);
@@ -242,7 +242,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .grid-sub {
-    font-size: 11px; color: var(--text-muted); margin: 2px 0 0;
+    font-size: var(--font-size-xs); color: var(--text-muted); margin: 2px 0 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .empty { color: var(--text-muted); font-size: var(--font-size-sm); margin-top: 32px; }

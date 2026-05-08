@@ -281,7 +281,7 @@
 	.quiet-art-placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 4rem;
+		font-size: var(--font-size-4xl);
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.4));
 		background: var(--bg-surface, #1a1a26);
 	}
@@ -314,7 +314,7 @@
 		background: rgba(255, 255, 255, 0.06);
 		border: 1px solid rgba(255, 255, 255, 0.12);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
@@ -334,7 +334,7 @@
 
 	.quiet-search-kbd {
 		font-family: var(--font-mono, ui-monospace, monospace);
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		padding: 1px 6px;
 		border-radius: 4px;
 		background: rgba(255, 255, 255, 0.1);
@@ -353,13 +353,13 @@
 
 	.quiet-empty-title {
 		font-family: var(--font-display);
-		font-size: 1.6rem;
+		font-size: var(--font-size-xl);
 		margin: 0;
 		color: var(--text-primary, #fff);
 	}
 
 	.quiet-empty-sub {
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 		margin: 0;
 	}
@@ -371,7 +371,7 @@
 		background: var(--accent, #6366f1);
 		color: #fff;
 		border: none;
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: transform 160ms ease, box-shadow 160ms ease;
 	}

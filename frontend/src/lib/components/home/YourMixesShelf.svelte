@@ -190,12 +190,12 @@
 		gap: 4px;
 	}
 	.section-title-group h2 {
-		font-size: 1.15rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 	}
 	.loading-indicator {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		font-style: italic;
 	}
@@ -282,8 +282,8 @@
 		border-radius: 999px;
 		background: rgba(0, 0, 0, 0.62);
 		color: #fff;
-		font-size: 10px;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
 	}
@@ -310,7 +310,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 48px;
+		font-size: var(--font-size-4xl);
 		color: rgba(255, 255, 255, 0.55);
 	}
 
@@ -322,13 +322,13 @@
 	}
 	.title {
 		margin: 0;
-		font-size: 13.5px;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary, #fff);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		line-height: 1.3;
+		line-height: var(--line-height-snug);
 	}
 	.artist {
 		margin: 0;
@@ -366,7 +366,7 @@
 	   muted line that sits in the rail's place. */
 	.muted-line {
 		margin: 0;
-		font-size: 13px;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.6));
 	}
 	.inline-link {

@@ -100,8 +100,8 @@
 	}
 
 	.header {
-		font-size: 10px;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.06em;
 		color: #9999b8;
 		text-transform: uppercase;
@@ -110,7 +110,7 @@
 
 	.prefix {
 		font-size: var(--font-size-xs);
-		line-height: 1.4;
+		line-height: var(--line-height-normal);
 		color: #c8c8dc;
 		word-break: break-word;
 	}
@@ -128,7 +128,7 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: baseline;
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 	}
 
 	.row-label {

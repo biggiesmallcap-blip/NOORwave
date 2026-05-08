@@ -211,7 +211,7 @@
 	.hero-art.placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 3rem;
+		font-size: var(--font-size-4xl);
 		color: var(--text-tertiary);
 	}
 
@@ -223,18 +223,18 @@
 	}
 
 	.eyebrow {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-primary);
 		margin: 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.hero-title {
 		font-family: var(--font-display);
-		font-size: clamp(2.15rem, 4.4vw, 3.6rem);
-		line-height: 1.02;
+		font-size: var(--font-size-4xl);
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
 		margin: 0;
 		color: var(--text-primary);
@@ -247,10 +247,10 @@
 		flex-wrap: wrap;
 		color: var(--text-secondary);
 		margin: 4px 0 0;
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 	}
 
-	.hero-link { color: var(--text-primary); font-weight: 700; }
+	.hero-link { color: var(--text-primary); font-weight: var(--font-weight-bold); }
 	.dot { opacity: 0.5; }
 
 	.hero-actions {
@@ -267,15 +267,15 @@
 		border: none;
 		border-radius: 20px;
 		padding: 8px 22px;
-		font-size: 0.88rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
 		transition: opacity 0.15s;
 	}
 	.play-all-btn:hover { opacity: 0.85; }
 
 	.not-in-library-badge {
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
@@ -298,10 +298,10 @@
 		padding: 6px 16px 10px;
 		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.col-num { text-align: center; }

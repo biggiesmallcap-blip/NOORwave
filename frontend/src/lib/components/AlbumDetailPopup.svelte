@@ -168,7 +168,7 @@
 		height: 32px;
 		color: var(--text-secondary, rgba(255,255,255,0.7));
 		cursor: pointer;
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 		transition: background 120ms ease, color 120ms ease;
 	}
 	.popup-close:hover {
@@ -193,7 +193,7 @@
 	.popup-art.placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 3rem;
+		font-size: var(--font-size-4xl);
 		color: rgba(255,255,255,0.35);
 		background: rgba(255,255,255,0.04);
 	}
@@ -207,15 +207,15 @@
 
 	.popup-info h2 {
 		margin: 0;
-		font-size: 1.45rem;
-		line-height: 1.2;
+		font-size: var(--font-size-xl);
+		line-height: var(--line-height-snug);
 		color: var(--text-primary, #fff);
 	}
 
 	.popup-artist {
 		margin: 0;
 		color: var(--text-secondary, rgba(255,255,255,0.7));
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 	}
 
 	.popup-meta-row {
@@ -231,7 +231,7 @@
 		background: var(--bg-hover);
 		border: 1px solid var(--panel-border);
 		color: var(--text-secondary, rgba(255,255,255,0.7));
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.popup-actions {
@@ -286,12 +286,12 @@
 	.popup-track-num {
 		color: var(--text-tertiary, rgba(255,255,255,0.45));
 		font-variant-numeric: tabular-nums;
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.popup-track-title {
 		color: var(--text-primary, #fff);
-		font-size: 0.92rem;
+		font-size: var(--font-size-sm);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -299,7 +299,7 @@
 
 	.popup-track-artist {
 		color: var(--text-secondary, rgba(255,255,255,0.7));
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -308,7 +308,7 @@
 	.popup-track-duration {
 		color: var(--text-tertiary, rgba(255,255,255,0.45));
 		font-variant-numeric: tabular-nums;
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		text-align: right;
 	}
 
@@ -318,7 +318,7 @@
 		background: rgba(255,255,255,0.06);
 		border: 1px solid rgba(255,255,255,0.09);
 		color: var(--text-secondary, rgba(255,255,255,0.7));
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 	}

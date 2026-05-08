@@ -157,8 +157,8 @@
 
 	.shortcut-eyebrow {
 		margin: 0 0 4px;
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
@@ -170,13 +170,13 @@
 	}
 
 	h2 {
-		font-size: 1.1rem;
-		line-height: 1.2;
+		font-size: var(--font-size-lg);
+		line-height: var(--line-height-snug);
 	}
 
 	h3 {
-		font-size: 0.78rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--text-secondary, rgba(255, 255, 255, 0.74));
@@ -189,7 +189,7 @@
 		border-radius: 50%;
 		background: rgba(255, 255, 255, 0.06);
 		color: var(--text-primary, #fff);
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 		line-height: 1;
 		cursor: pointer;
 	}
@@ -236,22 +236,22 @@
 		box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.2);
 		color: var(--text-primary, #fff);
 		font-family: inherit;
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		text-align: center;
 		white-space: nowrap;
 	}
 
 	.shortcut-plus {
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.42));
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.shortcut-action {
 		color: var(--text-secondary, rgba(255, 255, 255, 0.72));
-		font-size: 0.84rem;
-		line-height: 1.35;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
 	}
 
 	@media (max-width: 640px) {

@@ -180,8 +180,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 48px;
-    font-weight: 700;
+    font-size: var(--font-size-4xl);
+    font-weight: var(--font-weight-bold);
     color: rgba(255,255,255,0.9);
   }
 
@@ -192,8 +192,8 @@
   }
 
   .hero-kind {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-semibold);
     letter-spacing: 1.5px;
     color: var(--accent);
     text-transform: uppercase;
@@ -205,9 +205,9 @@
   }
 
   .hero-title {
-    font-size: clamp(28px, 4vw, 44px);
-    font-weight: 700;
-    line-height: 1.1;
+    font-size: var(--font-size-3xl);
+    font-weight: var(--font-weight-bold);
+    line-height: var(--line-height-tight);
     color: var(--text-primary, #fff);
     margin: 0;
   }
@@ -232,7 +232,7 @@
     padding: 10px 22px;
     border-radius: 999px;
     font-size: var(--font-size-sm);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
 
   .hero-nav {

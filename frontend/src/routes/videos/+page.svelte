@@ -713,7 +713,7 @@
 		border: 1px solid var(--border-strong);
 		border-radius: var(--radius-lg);
 		padding: 12px 22px;
-		font-size: 15px;
+		font-size: var(--font-size-md);
 		color: var(--text-primary);
 		outline: none;
 		transition: border-color 0.15s, background 0.15s;
@@ -749,7 +749,7 @@
 
 	.hero-meta h1 {
 		margin: 0;
-		font-size: clamp(1.35rem, 2vw, 1.9rem);
+		font-size: var(--font-size-2xl);
 	}
 
 	.meta-line {
@@ -758,18 +758,18 @@
 		gap: 8px;
 		align-items: center;
 		color: var(--text-tertiary);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.meta-link,
 	.text-btn {
 		color: var(--accent-strong);
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 	}
 
 	.inline-error {
 		color: var(--state-error);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.landing-row,
@@ -799,7 +799,7 @@
 	.section-heading h2 {
 		margin: 0;
 		color: var(--text-secondary);
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 	}
 
 	.chips {
@@ -814,8 +814,8 @@
 		color: var(--text-secondary);
 		border-radius: 999px;
 		padding: 7px 13px;
-		font-size: 0.76rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.hint-chip:hover {
@@ -839,7 +839,7 @@
 		display: grid;
 		place-items: center;
 		color: var(--text-tertiary);
-		font-size: 0.76rem;
+		font-size: var(--font-size-xs);
 	}
 
 	@media (max-width: 860px) {

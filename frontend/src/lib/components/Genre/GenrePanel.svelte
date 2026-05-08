@@ -272,8 +272,8 @@
 	}
 
 	.panel-copy h2 {
-		font-size: 1.8rem;
-		line-height: 1.05;
+		font-size: var(--font-size-2xl);
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
 	}
 
@@ -288,7 +288,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
@@ -308,7 +308,7 @@
 		border-radius: 999px;
 		background: color-mix(in srgb, var(--instrument-surface) 88%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 64%, transparent);
-		font-size: 1.35rem;
+		font-size: var(--font-size-xl);
 		line-height: 1;
 		transition: border-color var(--motion-fast), background var(--motion-fast);
 	}
@@ -330,7 +330,7 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
 		border-radius: var(--radius);
 		padding: 8px 12px;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--signal-text);
 		text-align: left;
 		cursor: pointer;
@@ -358,7 +358,7 @@
 	.nearby-chip {
 		padding: 4px 9px;
 		border-radius: 999px;
-		font-size: 0.7rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.04em;
 		background: color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 50%, transparent);
@@ -397,11 +397,11 @@
 	}
 
 	.meta-label {
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 		color: var(--signal-text);
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.meta-values {
@@ -413,7 +413,7 @@
 	.meta-pill {
 		padding: 3px 9px;
 		border-radius: 999px;
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		background: color-mix(in srgb, var(--instrument-surface) 76%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 42%, transparent);
 		color: var(--text-primary);
@@ -421,7 +421,7 @@
 	}
 
 	.meta-pill strong {
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 		margin-right: 2px;
 	}
 

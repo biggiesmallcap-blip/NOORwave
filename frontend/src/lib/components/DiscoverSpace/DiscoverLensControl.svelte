@@ -36,8 +36,8 @@
 		border: none;
 		background: transparent;
 		color: rgba(255, 255, 255, 0.5);
-		font-size: 0.72rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		transition: background 0.12s, color 0.12s;
 	}

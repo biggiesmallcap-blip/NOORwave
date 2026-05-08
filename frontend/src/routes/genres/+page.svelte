@@ -753,8 +753,8 @@
 	}
 
 	.hud h1 {
-		font-size: clamp(1.35rem, 2vw, 1.8rem);
-		line-height: 0.98;
+		font-size: var(--font-size-2xl);
+		line-height: var(--line-height-tight);
 	}
 
 	.hud-topline {
@@ -770,8 +770,8 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
 		background: color-mix(in srgb, var(--instrument-surface-strong) 70%, transparent);
 		color: var(--text-primary);
-		font-size: 0.7rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		white-space: nowrap;
@@ -783,7 +783,7 @@
 	}
 
 	.hud-copy {
-		font-size: 0.83rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.hud-stats {
@@ -808,14 +808,14 @@
 	}
 
 	.hud-stats strong {
-		font-size: 0.96rem;
+		font-size: var(--font-size-md);
 		font-family: var(--font-body);
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 	}
 
 	.hud-stats span {
 		color: var(--signal-text);
-		font-size: 0.62rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 	}
@@ -853,7 +853,7 @@
 	}
 
 	.mode-btn {
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
@@ -916,7 +916,7 @@
 
 	.seed-copy span {
 		color: var(--signal-text);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.seed-chips {
@@ -928,7 +928,7 @@
 	}
 
 	.seed-chip {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.seed-mix-btn {

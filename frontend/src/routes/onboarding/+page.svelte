@@ -312,16 +312,16 @@
 	.step h1, .step h2 {
 		margin: 0;
 		font-family: var(--font-display);
-		font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
-		font-weight: 500;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-medium);
 		letter-spacing: -0.02em;
-		line-height: 1.05;
+		line-height: var(--line-height-tight);
 	}
 	.lede {
 		margin: 0;
 		max-width: 420px;
 		color: var(--text-secondary);
-		line-height: 1.55;
+		line-height: var(--line-height-loose);
 		font-size: var(--font-size-md);
 	}
 	.btn {
@@ -330,7 +330,7 @@
 		border-radius: 10px;
 		border: 1px solid transparent;
 		cursor: pointer;
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		transition: background 120ms;
 	}
 	.btn-primary { background: rgba(255, 255, 255, 0.92); color: #0a0d14; }
@@ -398,15 +398,15 @@
 		background: transparent;
 	}
 	.audio-choice-title {
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		font-size: var(--font-size-sm);
 		display: flex;
 		align-items: center;
 		gap: 8px;
 	}
 	.audio-choice-pill {
-		font-size: 10px;
-		font-weight: 500;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-medium);
 		padding: 2px 6px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.16);
@@ -417,6 +417,6 @@
 	.audio-choice-body {
 		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
-		line-height: 1.5;
+		line-height: var(--line-height-normal);
 	}
 </style>

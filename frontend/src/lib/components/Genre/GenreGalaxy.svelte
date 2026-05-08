@@ -1291,8 +1291,8 @@
 			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 40%, transparent);
 		backdrop-filter: var(--blur-overlay);
 		-webkit-backdrop-filter: var(--blur-overlay);
-		font-size: 0.75rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		pointer-events: auto;
@@ -1363,14 +1363,14 @@
 	}
 
 	.hover-name {
-		font-size: 0.82rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 	}
 
 	.hover-sub,
 	.hover-meta {
-		font-size: 0.7rem;
+		font-size: var(--font-size-2xs);
 		color: var(--signal-text);
 		font-variant-numeric: tabular-nums;
 	}

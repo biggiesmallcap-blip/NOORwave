@@ -177,7 +177,7 @@
 
 	.eyebrow {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -186,7 +186,7 @@
 	.empty {
 		font-family: var(--font-body);
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		margin: 0;
 	}
 
@@ -239,7 +239,7 @@
 
 	.idx {
 		font-family: var(--font-mono);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		font-variant-numeric: tabular-nums;
 		width: 1.6em;
@@ -248,7 +248,7 @@
 
 	.primary {
 		font-family: var(--font-display);
-		font-size: 0.98rem;
+		font-size: var(--font-size-md);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -261,7 +261,7 @@
 		align-items: baseline;
 		gap: var(--space-2);
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		min-width: 0;
 		white-space: nowrap;
@@ -288,7 +288,7 @@
 
 	.value {
 		font-family: var(--font-mono);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;

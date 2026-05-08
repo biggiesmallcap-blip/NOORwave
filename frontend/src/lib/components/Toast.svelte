@@ -37,8 +37,8 @@
 		border: 1px solid var(--border-strong);
 		border-radius: 22px;
 		padding: 9px 18px;
-		font-size: 13px;
-		font-weight: 500;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		box-shadow: 0 12px 32px -10px rgba(0, 0, 0, 0.55);
 		cursor: pointer;
 		font-family: inherit;

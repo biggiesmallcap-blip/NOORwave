@@ -113,8 +113,8 @@
 
 	header h1 {
 		font-family: var(--font-display);
-		font-size: 1.6rem;
-		font-weight: 600;
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-semibold);
 		margin: 0 0 var(--space-1);
 	}
 
@@ -143,7 +143,7 @@
 
 	.controls select {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		background: var(--input-bg);
 		border: 1px solid var(--input-border);
 		color: var(--text-primary);
@@ -153,7 +153,7 @@
 
 	.control-label {
 		font-family: var(--font-mono);
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.12em;
 		color: var(--text-tertiary);
@@ -171,7 +171,7 @@
 
 	.info h2 {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.12em;
 		color: var(--text-tertiary);
@@ -184,12 +184,12 @@
 		gap: var(--space-2) var(--space-4);
 		margin: 0;
 		font-family: var(--font-body);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.info dt {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 	}
 
@@ -202,7 +202,7 @@
 		margin: 0;
 		font-family: var(--font-body);
 		color: var(--text-secondary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.not-found {

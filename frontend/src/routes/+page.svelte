@@ -361,13 +361,13 @@
 	}
 
 	.section-title-group h2 {
-		font-size: 1.15rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 	}
 
 	.loading-indicator {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		font-style: italic;
 	}
@@ -389,8 +389,8 @@
 		border: none;
 		color: var(--text-muted, #888);
 		font: inherit;
-		font-size: 0.78rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 		padding: 4px 10px;
 		border-radius: 999px;
 		cursor: pointer;
@@ -464,7 +464,7 @@
 		background: var(--accent-soft);
 		display: grid;
 		place-items: center;
-		font-size: 2.5rem;
+		font-size: var(--font-size-3xl);
 	}
 
 	.release-info {
@@ -474,8 +474,8 @@
 	}
 
 	.release-title {
-		font-size: 0.88rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		margin: 0;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -484,14 +484,14 @@
 	}
 
 	.release-artist {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		margin: 0;
 	}
 
 	.release-source {
-		font-size: 0.72rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
 	}
@@ -510,8 +510,8 @@
 	}
 
 	.subsection-title {
-		font-size: 0.95rem;
-		font-weight: 600;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-secondary);
 		margin: 0;
 	}
@@ -572,7 +572,7 @@
 		display: grid;
 		place-items: center;
 		color: var(--accent-strong);
-		font-size: 1.2rem;
+		font-size: var(--font-size-lg);
 		flex-shrink: 0;
 	}
 
@@ -585,8 +585,8 @@
 	}
 
 	.track-title {
-		font-size: 0.88rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		margin: 0;
 		white-space: nowrap;
 		overflow: hidden;
@@ -594,7 +594,7 @@
 	}
 
 	.track-artist {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 	}
 
@@ -605,9 +605,9 @@
 	}
 
 	.stat {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.genre-pills {
@@ -625,15 +625,15 @@
 	}
 
 	.genre-name {
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
 		color: var(--accent);
 	}
 
 	.genre-track {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -663,8 +663,8 @@
 	}
 
 	.article-title {
-		font-size: 0.95rem;
-		font-weight: 700;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -673,7 +673,7 @@
 	}
 
 	.article-desc {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-muted);
 		margin: 0;
 		display: -webkit-box;
@@ -691,14 +691,14 @@
 	}
 
 	.article-source {
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
 	}
 
 	.article-date {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 	}
 
@@ -728,8 +728,8 @@
 	}
 
 	.news-title {
-		font-size: 0.95rem;
-		font-weight: 700;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -738,7 +738,7 @@
 	}
 
 	.news-desc {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-muted);
 		margin: 0;
 		display: -webkit-box;
@@ -756,14 +756,14 @@
 	}
 
 	.news-source {
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
 	}
 
 	.news-date {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 	}
 
@@ -782,7 +782,7 @@
 		.now-playing-bar { display: none; }
 
 		.discovery-section { gap: 12px; }
-		.section-title-group h2 { font-size: 1rem; }
+		.section-title-group h2 { font-size: var(--font-size-md); }
 
 		.track-list {
 			grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -821,13 +821,13 @@
 		}
 
 		.quick-nav-icon {
-			font-size: 1.3rem;
+			font-size: var(--font-size-lg);
 			line-height: 1;
 		}
 
 		.quick-nav-label {
-			font-size: 0.72rem;
-			font-weight: 600;
+			font-size: var(--font-size-xs);
+			font-weight: var(--font-weight-semibold);
 			letter-spacing: 0.02em;
 		}
 	}
