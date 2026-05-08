@@ -1380,7 +1380,7 @@
 			</div>
 		{/snippet}
 
-		<div class="album-grid-wrapper" bind:this={albumGridEl}>
+		<div class="album-grid-wrapper" class:album-list-mode={$viewMode === 'list'} bind:this={albumGridEl}>
 			<VirtualList
 				items={albumRows}
 				itemHeight={$viewMode === 'list' ? 54 : ALBUM_ROW_HEIGHT}
@@ -2848,6 +2848,17 @@
 		flex-direction: column;
 	}
 
+	/* List mode: the wrapper becomes the single continuous panel.
+	   overflow:hidden clips first/last row to the rounded corners.
+	   This is safe because .album-art-overlay is display:none in list mode,
+	   so no absolutely-positioned children need to escape the wrapper. */
+	.album-grid-wrapper.album-list-mode {
+		border-radius: var(--radius-md);
+		border: 1px solid rgba(255, 255, 255, 0.05);
+		background: rgba(255, 255, 255, 0.015);
+		overflow: hidden;
+	}
+
 	/* Allow art-overlay buttons and ⋯ dropdown to overflow the VirtualList
 	   contain:paint boundary (same pattern as .track-list-body). */
 	:global(.album-grid-wrapper .vl-item) {
@@ -2863,16 +2874,24 @@
 		margin-bottom: var(--gap);
 	}
 
-	/* List-mode row: single column flex (mirrors the old .album-grid.album-list) */
+	/* List-mode row: single column flex. Panel chrome (border/radius/bg) is
+	   on the wrapper, not per-row — so rows are transparent and borderless. */
 	.album-row.album-list {
 		display: flex;
 		flex-direction: column;
 		gap: 0;
-		border-radius: var(--radius-md);
-		overflow: hidden;
-		border: 1px solid rgba(255, 255, 255, 0.05);
-		background: rgba(255, 255, 255, 0.015);
+		border-radius: 0;
+		overflow: visible;
+		border: 0;
+		background: transparent;
 		margin-bottom: 0;
+	}
+
+	/* Thin separator between consecutive virtualised rows in list mode.
+	   Each .album-row lives inside a .vl-item wrapper, so the sibling
+	   combinator must target .vl-item + .vl-item within the list-mode wrapper. */
+	:global(.album-grid-wrapper.album-list-mode .vl-item + .vl-item) {
+		border-top: 1px solid rgba(255, 255, 255, 0.04);
 	}
 
 	/* ─── Album List Mode ────────────────── */
