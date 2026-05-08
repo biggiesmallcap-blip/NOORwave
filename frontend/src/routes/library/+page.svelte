@@ -16,6 +16,7 @@
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import VirtualList from '$lib/components/ui/VirtualList.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
 	import AlbumCarousel from '$lib/components/AlbumCarousel.svelte';
@@ -91,6 +92,9 @@
 	}
 
 	const PAGE_SIZE = 100;
+	// Row height for virtualisation — measured from CSS: padding 6px top+bottom (12px) +
+	// menu-trigger height 32px = 44px. Must stay in sync with .track-row CSS.
+	const TRACK_ROW_HEIGHT = 44;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
 	let playlists = $derived($catalogPlaylists.filter((playlist) => !playlist.is_smart));
@@ -1002,10 +1006,19 @@
 	})
 
 	// Keep the highlighted track in view as the cursor moves.
+	// Uses viewport-scroll math because the row may not be mounted when it's outside
+	// the VirtualList window — scrollIntoView on a non-existent element is a no-op.
 	$effect(() => {
 		if (cursorIndex < 0) return;
-		const el = document.querySelector<HTMLElement>(`.track-row[data-cursor-idx="${cursorIndex}"]`);
-		el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		const viewport = document.querySelector<HTMLElement>('.track-list-body .vl-viewport');
+		if (!viewport) return;
+		const itemTop = cursorIndex * TRACK_ROW_HEIGHT;
+		const itemBottom = itemTop + TRACK_ROW_HEIGHT;
+		if (itemTop < viewport.scrollTop) {
+			viewport.scrollTop = itemTop;
+		} else if (itemBottom > viewport.scrollTop + viewport.clientHeight) {
+			viewport.scrollTop = itemBottom - viewport.clientHeight;
+		}
 	})
 </script>
 
@@ -1520,7 +1533,7 @@
 				<span class="col-actions"></span>
 			</div>
 
-			{#each visibleTracks as track, i (track.id)}
+			{#snippet trackRow(track: Track, i: number)}
 				<div
 					class="track-row"
 					class:selected={$selectedTrackIds.has(track.id)}
@@ -1645,7 +1658,19 @@
 						{/if}
 					</span>
 				</div>
-			{/each}
+			{/snippet}
+
+			<div class="track-list-body">
+				<VirtualList
+					items={visibleTracks}
+					itemHeight={TRACK_ROW_HEIGHT}
+					key={(t) => t.id}
+				>
+					{#snippet children(track: Track, i: number)}
+						{@render trackRow(track, i)}
+					{/snippet}
+				</VirtualList>
+			</div>
 		</div>
 
 		{#if visibleTracks.length === 0}
@@ -3129,6 +3154,23 @@
 	.track-list {
 		display: flex;
 		flex-direction: column;
+	}
+
+	/* VirtualList host — fixed viewport height so VirtualList can measure clientHeight.
+	   Uses calc(100dvh - offset) because page-shell has no fixed height of its own
+	   (workspace is the scroll container). The offset accounts for workspace padding
+	   (76px), search shell + tab pills (≈170px), sort header (≈37px), and spacing. */
+	.track-list-body {
+		height: calc(100dvh - 340px);
+		min-height: 400px;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Allow the inline ⋯ dropdown to overflow the VirtualList's contain:paint boundary. */
+	:global(.track-list-body .vl-item) {
+		contain: layout style;
+		overflow: visible;
 	}
 
 	.track-header {
