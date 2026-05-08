@@ -137,3 +137,7 @@ Errors are blocking; fix them before committing. `.svelte` components are linted
 Justify why an existing token cannot represent the value. New tokens grow the design system and become a maintenance cost. The current scale already covers spacing 3-48 px, radii 4-22 px, type 8-56 px (9 steps), weight 500/600/700, and line-height 1.1/1.3/1.5/1.6 — most additions to the system can be expressed in those. New sizes outside the type scale (sub-8 px or above-56 px) should escalate to a design discussion rather than auto-adding a 5xl or 3xs token.
 
 If you need a value outside the scale (e.g. a 64 px hero-art floor), prefer a per-component CSS custom property scoped to the parent over a new global token.
+
+## Future typography work (deferred)
+
+The Phase 4 typography migration tokenized every `font-size` / `font-weight` / `line-height` and locked the scale via stylelint. A follow-up "Phase C" is captured in the design spec for when the team wants to keep going: typography preset utility classes (`.text-body`, `.text-caption`, `.text-display`, `.text-label`, `.text-eyebrow`) that bundle size + weight + line-height + letter-spacing into named recipes, and migrating the 12+ hand-rolled route headers onto the canonical `PageHeader` / `SectionHeader` components. Estimate: 20-30 hours, biggest lift is the route-header migration. Not part of this branch.
