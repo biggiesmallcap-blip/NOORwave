@@ -903,8 +903,10 @@
       {#await trendingShelfMod() then mod}
         {@const TrendingShelf = mod.default}
         <TrendingShelf limit={25} />
-      {:catch}
-        <!-- silent — trending is non-critical -->
+      {:catch err}
+        {#if import.meta.env.DEV}
+          {void console.warn('[search] TrendingShelf import failed', err)}
+        {/if}
       {/await}
     </section>
 

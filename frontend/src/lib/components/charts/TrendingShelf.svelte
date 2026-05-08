@@ -19,6 +19,24 @@
 		type LastfmCountry,
 		type LastfmGenre,
 	} from '$lib/api/client';
+
+	// Lastfm reference data (countries + genres) is static within a session.
+	// Memoize across component remounts so re-entering the empty-query branch
+	// on /search doesn't refetch.
+	let curatedRefDataPromise: Promise<{
+		countries: Awaited<ReturnType<typeof api.getLastfmCountries>>;
+		genres: Awaited<ReturnType<typeof api.getLastfmGenres>>;
+	}> | null = null;
+
+	function loadCuratedRefData() {
+		if (!curatedRefDataPromise) {
+			curatedRefDataPromise = Promise.all([
+				api.getLastfmCountries(),
+				api.getLastfmGenres(),
+			]).then(([countries, genres]) => ({ countries, genres }));
+		}
+		return curatedRefDataPromise;
+	}
 	import { playTrackNow } from '$lib/stores/player';
 	import { playChartTidalTrack } from '$lib/player/play_trending';
 	import {
@@ -117,10 +135,7 @@
 
 	async function loadCurated() {
 		try {
-			const [c, g] = await Promise.all([
-				api.getLastfmCountries(),
-				api.getLastfmGenres(),
-			]);
+			const { countries: c, genres: g } = await loadCuratedRefData();
 			countries = c.countries;
 			genres = g.genres;
 		} catch (e) {
