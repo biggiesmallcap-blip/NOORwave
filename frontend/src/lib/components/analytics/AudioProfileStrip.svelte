@@ -69,7 +69,7 @@
 
 	.eyebrow {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -77,7 +77,7 @@
 
 	.coverage {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		font-variant-numeric: tabular-nums;
 	}
@@ -106,7 +106,7 @@
 
 	.label {
 		font-family: var(--font-mono);
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -114,8 +114,8 @@
 
 	.value {
 		font-family: var(--font-display);
-		font-size: 1.5rem;
-		font-weight: 500;
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
 		letter-spacing: -0.01em;
@@ -125,7 +125,7 @@
 		margin: 0;
 		font-family: var(--font-body);
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		opacity: 0.85;
 	}
 

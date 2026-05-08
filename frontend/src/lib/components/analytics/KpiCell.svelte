@@ -54,7 +54,7 @@
 
 	.label {
 		font-family: var(--font-mono);
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -69,18 +69,18 @@
 
 	.value {
 		font-family: var(--font-display);
-		font-size: 1.85rem;
-		font-weight: 500;
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
-		line-height: 1.05;
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.01em;
 		flex: 0 0 auto;
 	}
 
 	.delta {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		letter-spacing: 0.04em;
 		color: var(--text-tertiary);
 	}

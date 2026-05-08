@@ -386,7 +386,7 @@
 
 	.eyebrow {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -397,20 +397,20 @@
 		align-items: baseline;
 		gap: var(--space-3);
 		margin: 0;
-		font-weight: 500;
-		font-size: 1.4rem;
+		font-weight: var(--font-weight-medium);
+		font-size: var(--font-size-xl);
 	}
 
 	.title {
 		font-family: var(--font-display);
 		font-style: normal;
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		color: var(--text-primary);
 	}
 
 	.counter {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		letter-spacing: 0.04em;
 	}
@@ -441,7 +441,7 @@
 		top: 8px;
 		right: 200px; /* clear the legend on desktop */
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 		padding: 5px 12px;
@@ -477,13 +477,13 @@
 
 	.axes text {
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		letter-spacing: 0.04em;
 		fill: var(--text-tertiary);
 	}
 
 	.axes text.axis-name {
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.18em;
 		fill: var(--text-muted);
 	}
@@ -525,7 +525,7 @@
 
 	.legend-header {
 		font-family: var(--font-mono);
-		font-size: 0.62rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -537,7 +537,7 @@
 		align-items: center;
 		gap: var(--space-3);
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 	}
 
@@ -570,7 +570,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-xs);
 		font-family: var(--font-body);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		pointer-events: none;
 		max-width: max-content;
@@ -579,7 +579,7 @@
 
 	.tooltip strong {
 		color: var(--text-primary);
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 	}
 
 	.tooltip .dim {
@@ -588,7 +588,7 @@
 
 	.tooltip .mono {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.sr-only {
