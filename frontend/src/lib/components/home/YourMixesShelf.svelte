@@ -5,6 +5,8 @@
 	import { playTidalMix } from '$lib/stores/player';
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
+	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -71,39 +73,6 @@
 		void playTidalMix(mix.id);
 	}
 
-	// Translate vertical wheel scroll to horizontal scroll over the rail.
-	// Wheel events only fire on the hovered element, so this naturally
-	// activates only when the cursor is over the rail (per the user spec:
-	// "wheel should only be usable after a hover on card").
-	//
-	// Only preventDefault when there's actually room to scroll horizontally
-	// in the wheel direction — otherwise the page keeps scrolling vertically
-	// at the edges, so the rail doesn't trap the user mid-page.
-	function wheelToHorizontal(node: HTMLElement) {
-		const onWheel = (e: WheelEvent) => {
-			// Trackpads / native horizontal scroll devices already supply
-			// deltaX; only intervene when the user is genuinely scrolling
-			// vertically (deltaY dominant).
-			if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-
-			const max = node.scrollWidth - node.clientWidth;
-			if (max <= 0) return; // Nothing to scroll.
-
-			const goingRight = e.deltaY > 0;
-			const atStart = node.scrollLeft <= 0;
-			const atEnd = node.scrollLeft >= max - 1;
-			if ((goingRight && atEnd) || (!goingRight && atStart)) return;
-
-			e.preventDefault();
-			node.scrollLeft += e.deltaY;
-		};
-		node.addEventListener('wheel', onWheel, { passive: false });
-		return {
-			destroy() {
-				node.removeEventListener('wheel', onWheel);
-			},
-		};
-	}
 </script>
 
 {#snippet mixRail(items: TidalMix[])}
@@ -122,7 +91,11 @@
 					{:else}
 						<div class="art fallback">♫</div>
 					{/if}
-					<div class="play-overlay" aria-hidden="true">▶</div>
+					<PlayOverlay
+						position="center"
+						size="md"
+						label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+					/>
 					{#if isMixVideo(mix)}
 						<span class="video-badge">Video</span>
 					{/if}
@@ -234,6 +207,20 @@
 		overflow-x: auto;
 		padding-bottom: 8px;
 		scroll-snap-type: x mandatory;
+		mask-image: linear-gradient(
+			to right,
+			transparent 0,
+			black 16px,
+			black calc(100% - 32px),
+			transparent 100%
+		);
+		-webkit-mask-image: linear-gradient(
+			to right,
+			transparent 0,
+			black 16px,
+			black calc(100% - 32px),
+			transparent 100%
+		);
 	}
 	.mix-rail::-webkit-scrollbar { height: 6px; }
 	.mix-rail::-webkit-scrollbar-track {
@@ -282,21 +269,10 @@
 		border-color: var(--accent-line, rgba(125, 200, 175, 0.6));
 	}
 
-	.play-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: linear-gradient(180deg, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.55) 100%);
-		opacity: 0;
-		color: #fff;
-		font-size: 28px;
-		transition: opacity 160ms ease;
-	}
-	.mix-card:hover .play-overlay,
-	.mix-card:focus-visible .play-overlay {
+	.mix-card:hover :global(.play-overlay),
+	.mix-card:focus-visible :global(.play-overlay) {
 		opacity: 1;
+		transform: translateY(0);
 	}
 	.video-badge {
 		position: absolute;
@@ -356,7 +332,7 @@
 	}
 	.artist {
 		margin: 0;
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.6));
 		white-space: nowrap;
 		overflow: hidden;

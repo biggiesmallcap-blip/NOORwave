@@ -469,7 +469,7 @@
 	.quadrants text {
 		font-family: var(--font-display);
 		font-style: italic;
-		font-size: 22px;
+		font-size: var(--font-size-xl);
 		fill: var(--text-primary);
 		fill-opacity: 0.14;
 		pointer-events: none;

@@ -3,7 +3,7 @@
 	import { currentTrack, playTrackNow, playAlbum, shuffleAlbum } from '$lib/stores/player';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 
 	let { album, tracks, loading, onClose }: {
 		album: Album;
@@ -84,7 +84,7 @@
 						<span class="popup-track-num">{i + 1}</span>
 						<span class="popup-track-title">{track.title}</span>
 						<span class="popup-track-artist">{track.artist_name ?? ''}</span>
-						<span class="popup-track-duration">{formatDuration(track.duration_ms)}</span>
+						<span class="popup-track-duration">{formatTrackDuration(track.duration_ms)}</span>
 						<button
 							class="popup-track-menu"
 							aria-label="Track actions"
@@ -132,8 +132,8 @@
 		background: linear-gradient(160deg,
 			rgba(20, 20, 32, 0.72) 0%,
 			rgba(12, 12, 20, 0.68) 100%);
-		backdrop-filter: blur(28px) saturate(160%);
-		-webkit-backdrop-filter: blur(28px) saturate(160%);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 		box-shadow:
 			0 32px 64px -16px rgba(0, 0, 0, 0.72),
 			inset 0 1px 0 rgba(255, 255, 255, 0.07);
@@ -228,8 +228,8 @@
 	.popup-chip {
 		padding: 2px 9px;
 		border-radius: 999px;
-		background: rgba(255,255,255,0.06);
-		border: 1px solid rgba(255,255,255,0.08);
+		background: var(--bg-hover);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary, rgba(255,255,255,0.7));
 		font-size: 0.78rem;
 	}

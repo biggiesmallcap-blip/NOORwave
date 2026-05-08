@@ -9,10 +9,12 @@ const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'top
                                'phasing', 'spectrogram', 'lissajous', 'drone', 'reel',
                                'standing-wave'];
 
+const DEFAULT: WallpaperId = 'standing-wave';
+
 function readInitial(): WallpaperId {
-	if (typeof localStorage === 'undefined') return 'none';
+	if (typeof localStorage === 'undefined') return DEFAULT;
 	const raw = localStorage.getItem(STORAGE_KEY);
-	return (VALID as string[]).includes(raw ?? '') ? (raw as WallpaperId) : 'none';
+	return (VALID as string[]).includes(raw ?? '') ? (raw as WallpaperId) : DEFAULT;
 }
 
 export const wallpaper = writable<WallpaperId>(readInitial());

@@ -183,7 +183,7 @@
 		/>
 
 		{#if errorMsg}
-			<p class="error">{errorMsg}</p>
+			<p class="error" role="alert">{errorMsg}</p>
 		{/if}
 
 		<div class="actions">
@@ -196,6 +196,12 @@
 		</div>
 	{:else}
 		<p class="success">Last.fm key saved.</p>
+
+		{#if variant === 'onboarding'}
+			<div class="actions">
+				<button class="btn btn-primary" onclick={() => onconnected?.()}>Continue</button>
+			</div>
+		{/if}
 
 		<!-- Enable scrobbling sub-section. Only meaningful in the settings
 		     variant — onboarding doesn't need to surface scrobble auth at
@@ -226,7 +232,7 @@
 						there, then come back and click below.
 					</p>
 					{#if scrobbleError}
-						<p class="error">{scrobbleError}</p>
+						<p class="error" role="alert">{scrobbleError}</p>
 					{/if}
 					<div class="actions">
 						<button class="btn btn-primary" onclick={completeScrobbleAuth}>I've authorized</button>
@@ -243,7 +249,7 @@
 					<p class="muted">Starting Last.fm auth…</p>
 				{:else}
 					{#if scrobbleError}
-						<p class="error">{scrobbleError}</p>
+						<p class="error" role="alert">{scrobbleError}</p>
 					{/if}
 					<div class="actions">
 						<button class="btn btn-primary" onclick={startScrobbleAuth}>
@@ -268,15 +274,18 @@
 	}
 	.variant-onboarding h2 {
 		margin: 0 0 4px;
-		font-size: 22px;
-		font-weight: 600;
-		letter-spacing: -0.01em;
+		font-family: var(--font-display);
+		font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
+		font-weight: 500;
+		letter-spacing: -0.02em;
+		line-height: 1.05;
 	}
 	.muted {
 		margin: 0;
 		max-width: 460px;
-		color: var(--text-muted, #8b93a7);
-		line-height: 1.5;
+		color: var(--text-secondary);
+		line-height: 1.55;
+		font-size: var(--font-size-md);
 	}
 	.muted-link {
 		background: none;
@@ -298,7 +307,7 @@
 		min-width: 320px;
 		max-width: 100%;
 	}
-	.key-input:focus { outline: none; border-color: #4a6dd8; }
+	.key-input:focus { outline: none; border-color: rgba(255, 255, 255, 0.6); }
 	.actions {
 		display: flex;
 		gap: 12px;
@@ -317,8 +326,8 @@
 		font-weight: 500;
 		transition: background 120ms, border-color 120ms;
 	}
-	.btn-primary { background: #4a6dd8; color: #fff; }
-	.btn-primary:hover:not(:disabled) { background: #5a7ce8; }
+	.btn-primary { background: rgba(255, 255, 255, 0.92); color: #0a0d14; }
+	.btn-primary:hover:not(:disabled) { background: #fff; }
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 	.btn-ghost {
 		background: transparent;
@@ -331,7 +340,7 @@
 	.scrobble-section {
 		margin-top: 8px;
 		padding-top: 14px;
-		border-top: 1px solid rgba(255, 255, 255, 0.06);
+		border-top: 1px solid var(--border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 10px;

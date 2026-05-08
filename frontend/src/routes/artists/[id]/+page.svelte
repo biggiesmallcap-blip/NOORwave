@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
 	import { api, type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats, type TidalPlayable } from '$lib/api/client';
+	import { letterColor } from '$lib/utils/color';
 	import {
 		playArtist,
 		shuffleArtist,
@@ -18,6 +19,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { canPlayTrack } from '$lib/player/playable';
@@ -237,13 +239,6 @@
 			artist_tidal_id: artist?.tidal_id ?? null,
 			album_tidal_id: t.album_tidal_id ?? null,
 		};
-	}
-
-	function letterColor(name: string): string {
-		const colors = ['#e63946', '#457b9d', '#2a9d8f', '#e9c46a', '#f4a261', '#9b5de5', '#00b4d8'];
-		let h = 0;
-		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-		return colors[Math.abs(h) % colors.length];
 	}
 
 	function artistInitials(name: string): string {
@@ -853,11 +848,12 @@
 										<div class="grid-art placeholder">♫</div>
 									{/if}
 									{#if album.id != null}
-										<button
-											class="art-play-overlay"
+										<PlayOverlay
+											position="center"
+											size="md"
+											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
+										/>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -887,11 +883,12 @@
 										<div class="grid-art placeholder">♫</div>
 									{/if}
 									{#if album.id != null}
-										<button
-											class="art-play-overlay"
+										<PlayOverlay
+											position="center"
+											size="md"
+											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
+										/>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -993,7 +990,7 @@
 		align-items: flex-end;
 		gap: 28px;
 		width: 100%;
-		max-width: 1400px;
+		max-width: var(--content-width);
 	}
 
 	.hero-portrait-wrap {
@@ -1021,8 +1018,8 @@
 		justify-content: center;
 		isolation: isolate;
 		background: rgba(255, 255, 255, 0.04);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 	}
 	.hero-portrait-glass-art {
 		position: absolute;
@@ -1358,22 +1355,11 @@
 		margin-bottom: 6px;
 	}
 
-	.art-play-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: rgba(0, 0, 0, 0.45);
-		color: #fff;
-		font-size: 22px;
-		border: none;
-		cursor: pointer;
-		border-radius: 6px;
-		opacity: 0;
-		transition: opacity 0.15s;
+	.grid-art-wrap:hover :global(.play-overlay),
+	.grid-card:focus-within :global(.play-overlay) {
+		opacity: 1;
+		transform: translateY(0);
 	}
-	.grid-art-wrap:hover .art-play-overlay { opacity: 1; }
 
 	.badge-new {
 		position: absolute;
@@ -1386,7 +1372,8 @@
 		font-size: 0.62rem;
 		font-weight: 700;
 		letter-spacing: 0.12em;
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 	}
 
 	.grid-card.not-in-library .grid-title {
@@ -1493,7 +1480,7 @@
 		justify-content: center;
 		background: rgba(255, 255, 255, 0.06);
 		color: rgba(255, 255, 255, 0.45);
-		font-size: 18px;
+		font-size: var(--font-size-lg);
 	}
 	.tidal-row-meta {
 		min-width: 0;
@@ -1557,9 +1544,9 @@
 		transform: translateY(-50%);
 		padding: 2px 8px;
 		border-radius: 999px;
-		background: rgba(30, 215, 96, 0.14);
-		border: 1px solid rgba(30, 215, 96, 0.32);
-		color: rgba(30, 215, 96, 0.95);
+		background: color-mix(in srgb, var(--service-spotify) 14%, transparent);
+		border: 1px solid color-mix(in srgb, var(--service-spotify) 32%, transparent);
+		color: color-mix(in srgb, var(--service-spotify) 95%, transparent);
 		font-size: 0.72rem;
 		font-variant-numeric: tabular-nums;
 		font-weight: 600;

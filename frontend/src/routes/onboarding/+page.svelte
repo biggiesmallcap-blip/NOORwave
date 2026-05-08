@@ -14,6 +14,10 @@
 	const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
 
 	onMount(async () => {
+		// `?preview` bypasses the auto-redirect so the page can be designed/QA'd
+		// without unsetting onboarding state on the backend.
+		const params = new URLSearchParams(window.location.search);
+		if (params.has('preview')) return;
 		try {
 			const resp = await fetch(`${getApiBase()}/api/setup/onboarding`);
 			if (resp.ok) {
@@ -94,16 +98,19 @@
 		}
 	}
 
+	// Crossfade is handled at the layout level by the View Transitions API
+	// (see routes/+layout.svelte onNavigate hook). No local dissolve animation
+	// — that conflicted with the layout-level transition and read as a flash.
 	async function finish() {
 		completing = true;
 		completeError = '';
 		const ok = await markComplete();
 		completing = false;
-		if (ok) {
-			await goto('/', { replaceState: true });
-		} else {
+		if (!ok) {
 			completeError = "Couldn't save your setup.";
+			return;
 		}
+		await goto('/', { replaceState: true });
 	}
 
 	async function continueAnyway() {
@@ -134,9 +141,9 @@
 
 		{#if step === 0}
 			<div class="step welcome">
-				<img class="wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
+				<img class="wordmark" src="/mark-animated-dark.svg" alt="NOORwave" />
 				<h1>Welcome.</h1>
-				<p class="lede">A quiet, focused way to listen to your TIDAL library — with smart radio, trending shelves, and the kind of metadata you'd actually trust.</p>
+				<p class="lede">Pure sound. Perfect flow.</p>
 				<button class="btn btn-primary" onclick={() => (step = 1)}>Get started</button>
 				<button class="link" onclick={skipAll} disabled={completing}>Skip for now — set up later in Settings</button>
 			</div>
@@ -199,7 +206,7 @@
 					</button>
 				</div>
 				{#if audioApplyError}
-					<p class="error">{audioApplyError}</p>
+					<p class="error" role="alert">{audioApplyError}</p>
 				{/if}
 			</div>
 		{:else if step === 4}
@@ -214,7 +221,7 @@
 					<p class="warn">{syncErrorMessage}</p>
 				{/if}
 				{#if completeError}
-					<p class="error">{completeError}</p>
+					<p class="error" role="alert">{completeError}</p>
 					<div class="actions">
 						<button class="btn btn-primary" onclick={finish} disabled={completing}>Try again</button>
 						<button class="link" onclick={continueAnyway}>Continue anyway</button>
@@ -240,23 +247,31 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: radial-gradient(circle at 50% 30%, #1a1f2e 0%, #0a0d14 65%, #05070b 100%);
-		color: #e7eaf2;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		/* Transparent — the layout-level wallpaper-layer provides the
+		   standing-wave shader (forced during the /onboarding route in
+		   +layout.svelte). Persisting the same WebGL canvas across the
+		   navigation to home prevents the shader-remount flash. */
+		background: transparent;
+		color: var(--text-primary);
+		font-family: var(--font-body);
 		padding: 32px;
 		overflow: auto;
+		scrollbar-gutter: stable both-edges;
 	}
 	.card {
+		position: relative;
+		z-index: 1;
 		width: 100%;
 		max-width: 520px;
-		background: rgba(255, 255, 255, 0.02);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: rgba(10, 12, 18, 0.62);
+		border: 1px solid var(--border-subtle);
 		border-radius: 20px;
 		padding: 40px 36px 32px;
 		display: flex;
 		flex-direction: column;
 		gap: 24px;
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 	}
 	.progress {
 		display: flex;
@@ -276,7 +291,7 @@
 	.dot:disabled { cursor: default; }
 	.dot:not(:disabled):hover { background: rgba(255, 255, 255, 0.55); transform: scaleY(1.4); }
 	.dot.active { background: rgba(255, 255, 255, 0.4); }
-	.dot.current { background: #4a6dd8; }
+	.dot.current { background: #fff; }
 	.step {
 		display: flex;
 		flex-direction: column;
@@ -288,22 +303,26 @@
 	}
 	.welcome .wordmark {
 		display: block;
-		width: clamp(360px, 56vw, 560px);
+		width: 100%;
+		max-width: 150px;
 		height: auto;
-		margin: 0 auto 1rem;
+		margin: 0 auto 0.5rem;
 		filter: drop-shadow(0 8px 24px rgba(120, 150, 220, 0.15));
 	}
 	.step h1, .step h2 {
 		margin: 0;
-		font-size: 26px;
-		font-weight: 600;
-		letter-spacing: -0.015em;
+		font-family: var(--font-display);
+		font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
+		font-weight: 500;
+		letter-spacing: -0.02em;
+		line-height: 1.05;
 	}
 	.lede {
 		margin: 0;
 		max-width: 420px;
-		color: #b8c0d4;
-		line-height: 1.5;
+		color: var(--text-secondary);
+		line-height: 1.55;
+		font-size: var(--font-size-md);
 	}
 	.btn {
 		font: inherit;
@@ -314,22 +333,23 @@
 		font-weight: 500;
 		transition: background 120ms;
 	}
-	.btn-primary { background: #4a6dd8; color: #fff; }
-	.btn-primary:hover:not(:disabled) { background: #5a7ce8; }
+	.btn-primary { background: rgba(255, 255, 255, 0.92); color: #0a0d14; }
+	.btn-primary:hover:not(:disabled) { background: #fff; }
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 	.link {
 		background: none;
 		border: none;
-		color: #8b93a7;
+		color: var(--text-tertiary);
 		font: inherit;
-		font-size: 13px;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 		padding: 4px 8px;
 		text-decoration: underline;
-		text-decoration-color: rgba(139, 147, 167, 0.3);
+		text-decoration-color: color-mix(in srgb, var(--text-tertiary) 40%, transparent);
 		text-underline-offset: 3px;
+		transition: color var(--motion-fast);
 	}
-	.link:hover { color: #e7eaf2; }
+	.link:hover { color: var(--text-primary); }
 	.link:disabled { opacity: 0.5; cursor: not-allowed; }
 	.actions {
 		display: flex;
@@ -340,11 +360,11 @@
 	}
 	.footnote {
 		margin: 0;
-		font-size: 12px;
-		color: #8b93a7;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
 	}
-	.warn { color: #d6b06a; }
-	.error { color: #ff8a8a; margin: 0; }
+	.warn { color: var(--state-warning); }
+	.error { color: var(--state-error); margin: 0; }
 	.audio-choices {
 		display: flex;
 		flex-direction: column;
@@ -354,9 +374,9 @@
 	}
 	.audio-choice {
 		text-align: left;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 12px;
+		background: var(--panel-bg);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
 		padding: 14px 16px;
 		cursor: pointer;
 		color: inherit;
@@ -364,22 +384,22 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		transition: background 120ms, border-color 120ms;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 	.audio-choice:hover {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.18);
+		background: var(--bg-hover);
+		border-color: var(--border-strong);
 	}
 	.audio-choice.selected {
-		border-color: #4a6dd8;
-		background: rgba(74, 109, 216, 0.12);
+		border-color: rgba(255, 255, 255, 0.6);
+		background: rgba(255, 255, 255, 0.08);
 	}
 	.audio-choice.subtle {
 		background: transparent;
 	}
 	.audio-choice-title {
 		font-weight: 600;
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -389,14 +409,14 @@
 		font-weight: 500;
 		padding: 2px 6px;
 		border-radius: 999px;
-		background: rgba(74, 109, 216, 0.25);
-		color: #9bb1f0;
+		background: rgba(255, 255, 255, 0.16);
+		color: rgba(255, 255, 255, 0.92);
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}
 	.audio-choice-body {
-		font-size: 12.5px;
-		color: #b8c0d4;
-		line-height: 1.45;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+		line-height: 1.5;
 	}
 </style>

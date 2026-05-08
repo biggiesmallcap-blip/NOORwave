@@ -13,6 +13,7 @@ import type {
 } from './discover_space_types';
 import type { TidalPlayable, Track } from '$lib/api/client';
 import type { PlayableTrack } from '$lib/player/playable';
+import { clamp01 } from '$lib/utils/math';
 
 // ─── Deterministic initial layout ────────────────────────────────────────────
 
@@ -62,10 +63,6 @@ export function normalizeReasonTags(tags?: string[]): DiscoverReason[] {
 		seen.add(r);
 		return true;
 	});
-}
-
-function clamp01(v: number): number {
-	return Math.max(0, Math.min(1, v));
 }
 
 function normalizeSource(raw?: string): DiscoverSource {

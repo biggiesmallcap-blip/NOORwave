@@ -1468,7 +1468,7 @@
 				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
-					<p class="page-copy" style="color: var(--color-error, #f87171)">{lastfmError}</p>
+					<p class="page-copy" style="color: var(--state-error)">{lastfmError}</p>
 				{/if}
 
 				{#if !lastfmConfigured}
@@ -2119,7 +2119,7 @@
 		margin-bottom: 12px;
 		border-radius: 10px;
 		background: rgba(255, 255, 255, 0.02);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.intensity-header {
@@ -2337,7 +2337,7 @@
 		gap: 6px;
 		padding: 6px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.022);
 	}
 
@@ -2482,7 +2482,7 @@
 		gap: 10px;
 		padding: 9px 10px;
 		border-radius: 10px;
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		background: rgba(255, 255, 255, 0.02);
 		cursor: pointer;
 		transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
@@ -2508,7 +2508,7 @@
 		background: linear-gradient(135deg,
 			color-mix(in srgb, var(--accent, #7c80ff) 60%, #0a0a14),
 			color-mix(in srgb, var(--accent, #7c80ff) 20%, #050508));
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 	}
 
 	.wallpaper-tile-swatch-none {
@@ -2589,7 +2589,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 	}
 
 	.settings-grid.single-column .settings-main {
@@ -2645,7 +2645,7 @@
 		height: 10px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		overflow: hidden;
 	}
 
@@ -2763,7 +2763,7 @@
 		padding: 16px;
 		border-radius: var(--radius-sm);
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		font-family: monospace;
 		font-size: 1.9rem;
 		letter-spacing: 0.18em;
@@ -2789,7 +2789,7 @@
 		padding: 14px;
 		border-radius: var(--radius-sm);
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.roadmap-item p {
@@ -2864,7 +2864,7 @@
 		right: 0;
 		bottom: 0;
 		background: rgba(255, 255, 255, 0.12);
-		border-radius: 24px;
+		border-radius: 999px;
 		transition: background 0.2s ease;
 	}
 
@@ -2901,7 +2901,7 @@
 		font-weight: normal;
 	}
 	.sync-error {
-		color: var(--danger, #ff6b6b);
+		color: var(--state-error);
 		font-weight: 500;
 		word-break: break-word;
 	}
@@ -2913,7 +2913,7 @@
 		height: 10px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		overflow: hidden;
 	}
 
@@ -3013,7 +3013,7 @@
 		padding: 8px 12px;
 		border-radius: var(--radius-sm);
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		font-family: var(--font-mono);
 		font-size: 0.78rem;
 		color: var(--text-secondary);

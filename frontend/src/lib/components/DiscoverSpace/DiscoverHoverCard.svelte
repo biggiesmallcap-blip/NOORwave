@@ -83,9 +83,10 @@
 		z-index: 200;
 		width: 260px;
 		background: rgba(12, 12, 24, 0.96);
-		backdrop-filter: blur(12px);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		border-radius: 12px;
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
 		padding: 12px 14px;
 		display: flex;
 		flex-direction: column;

@@ -33,6 +33,53 @@ export function formatDuration(ms: number | null | undefined): string {
 	return `${hours}h ${String(remMin).padStart(2, '0')}m`;
 }
 
+/**
+ * Track duration in milliseconds → "M:SS" (e.g. "3:45", "12:07").
+ * null/0/NaN → "--:--" (clock-shaped placeholder for track-row visual continuity;
+ * this differs deliberately from the analytics-family `--` empty sentinel).
+ */
+export function formatTrackDuration(ms: number | null | undefined): string {
+	if (!ms || isMissing(ms)) return '--:--';
+	const totalSeconds = Math.floor(ms / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Relative-date formatter for track / album "added" timestamps.
+ *
+ *   formatDateShort('2026-05-08T...') → "Today"
+ *   formatDateShort('2026-05-05T...') → "3d ago"
+ *   formatDateShort('2025-12-01T...') → "Dec 1, 2025"
+ *   formatDateShort(null)             → "—"
+ *
+ * Uses an em-dash for the empty sentinel because it appears beside formatted
+ * dates in track-row metadata, not in analytics tiles.
+ */
+export function formatDateShort(iso: string | null): string {
+	if (!iso) return '—';
+	const d = new Date(iso);
+	const now = new Date();
+	const diffMs = now.getTime() - d.getTime();
+	const diffDays = Math.floor(diffMs / 86400000);
+
+	if (diffDays === 0) return 'Today';
+	if (diffDays === 1) return 'Yesterday';
+	if (diffDays < 7) return `${diffDays}d ago`;
+	if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
+	if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`;
+	return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** TIDAL audio-quality string → CSS class name for `.quality-badge.<class>`. */
+export function getQualityClass(quality: string | null): 'hires' | 'lossless' | 'lossy' {
+	if (!quality) return 'lossy';
+	if (quality.includes('HI_RES')) return 'hires';
+	if (quality === 'LOSSLESS') return 'lossless';
+	return 'lossy';
+}
+
 // ─── Percent / delta ─────────────────────────────────────────────────────────
 
 /** Ratio 0..1 → "74%". null → "--". `decimals` is required at every call site (no default). */

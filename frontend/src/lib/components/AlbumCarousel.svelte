@@ -1,6 +1,8 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+  import { letterColor } from '$lib/utils/color';
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
   interface AlbumCard {
     id: number;
@@ -17,15 +19,10 @@
 
   let lazyArt = $state<Record<number, string>>({});
 
-  function letterColor(name: string): string {
-    const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-    return colors[Math.abs(h) % colors.length];
-  }
 </script>
 
 {#if albums.length > 0}
+  <div class="album-carousel">
   <div class="albums-row" use:wheelToHorizontal>
     {#each albums as album (album.id)}
       {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
@@ -48,11 +45,7 @@
               <span>♫</span>
             </div>
           {/if}
-          <div class="art-play-overlay">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
-            </svg>
-          </div>
+          <PlayOverlay position="center" size="md" />
         </div>
         <span class="album-title">{album.title}</span>
         {#if album.artist_name}
@@ -61,9 +54,34 @@
       </button>
     {/each}
   </div>
+  </div>
 {/if}
 
 <style>
+  .album-carousel {
+    /* Outer wrapper holds the container so the inner overflow-x:auto rail
+       isn't itself the container (which has subtle browser quirks). Card
+       width adapts to this wrapper's inline-size via the @container rule. */
+    container-type: inline-size;
+    --album-card-w: clamp(112px, 11vw, 156px);
+    /* Edge fade hints at horizontally-scrollable content. mask-image works
+       on Chrome/Safari/Firefox; -webkit- prefix kept for older WebKit. */
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+  }
+
   .albums-row {
     display: flex;
     gap: 16px;
@@ -74,11 +92,15 @@
 
   .albums-row::-webkit-scrollbar { display: none; }
 
+  @container (max-width: 480px) {
+    .album-card { --album-card-w: clamp(80px, 22cqw, 110px); }
+  }
+
   .album-card {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    width: 128px;
+    width: var(--album-card-w);
     flex-shrink: 0;
     background: none;
     border: none;
@@ -90,9 +112,9 @@
 
   .art-wrap {
     position: relative;
-    width: 128px;
-    height: 128px;
-    border-radius: 6px;
+    width: var(--album-card-w);
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-xs);
     overflow: hidden;
   }
 
@@ -110,34 +132,22 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 36px;
+    font-size: var(--font-size-3xl);
     color: rgba(255,255,255,0.5);
-    background: var(--bg-glass, rgba(255,255,255,0.08));
+    background: var(--bg-hover);
   }
 
-  .art-play-overlay {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0,0,0,0.45);
-    opacity: 0;
-    transition: opacity 0.15s;
-    border-radius: 50%;
-    width: 36px;
-    height: 36px;
-    margin: auto;
-    color: #fff;
+  .album-card:hover :global(.play-overlay),
+  .album-card:focus-visible :global(.play-overlay) {
+    opacity: 1;
+    transform: translateY(0);
   }
-
-  .album-card:hover .art-play-overlay { opacity: 1; }
 
   .album-title {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-weight: 500;
     color: var(--text-primary, #fff);
-    width: 128px;
+    width: var(--album-card-w);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -146,7 +156,7 @@
   .album-artist {
     font-size: 11px;
     color: var(--text-secondary, rgba(255,255,255,0.5));
-    width: 128px;
+    width: var(--album-card-w);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

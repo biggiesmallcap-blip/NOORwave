@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getApiBase, authFetch } from '$lib/api/client';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -118,13 +118,6 @@
 		return q;
 	}
 
-	function qualityClass(q: string | null): string {
-		if (!q) return 'lossy';
-		if (q.startsWith('HI_RES')) return 'hires';
-		if (q === 'LOSSLESS') return 'lossless';
-		return 'lossy';
-	}
-
 	let removableCount = $derived(
 		scanStats ? Math.max(0, scanStats.tracks_affected - scanStats.groups_found) : groups.reduce((count, group) => count + Math.max(0, group.members.length - 1), 0)
 	);
@@ -200,7 +193,7 @@
 								</div>
 
 								<div class="member-badges">
-									<span class={`quality-badge ${qualityClass(member.track.best_quality)}`}>
+									<span class={`quality-badge ${getQualityClass(member.track.best_quality)}`}>
 										{qualityLabel(member.track.best_quality)}
 									</span>
 									{#if member.track.is_favorite}
@@ -214,7 +207,7 @@
 								<div class="info-list">
 									<div class="info-row">
 										<span>Duration</span>
-										<strong>{formatDuration(member.track.duration_ms)}</strong>
+										<strong>{formatTrackDuration(member.track.duration_ms)}</strong>
 									</div>
 									<div class="info-row">
 										<span>Plays</span>
@@ -296,7 +289,7 @@
 		padding: 16px;
 		border-radius: var(--radius);
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
@@ -319,7 +312,7 @@
 		border-radius: 12px;
 		object-fit: cover;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 	}
 
 	.placeholder {

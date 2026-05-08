@@ -32,14 +32,23 @@
 	--border-muted:  rgba(255, 255, 255, 0.07);
 	--border-strong: rgba(255, 255, 255, 0.13);
 
-	--state-success: #7ecba1;
-	--state-warning: #c9a84c;
-	--state-error:   #e8878a;
-	--state-active:  var(--accent);
+	--state-success:  #7ecba1;
+	--state-warning:  #c9a84c;
+	--state-error:    #e8878a;
+	--state-active:   var(--accent);
+	--state-favorite: #ff4d6d;
+	--state-favorite-glow: rgba(255, 77, 109, 0.35);
 
 	--quality-hires:    #c9a84c;
 	--quality-lossless: #6db89b;
 	--quality-lossy:    #8b90a8;
+
+	/* Service brand colors — used for source badges and service-branded heroes
+	 * only, never general UI chrome. Authentic brand color is the point, so these
+	 * stay stable across themes. */
+	--service-spotify: #1ed760;
+	--service-tidal:   #00b4d8;
+	--service-lastfm:  #d51007;
 
 	--input-bg:      rgba(255, 255, 255, 0.04);
 	--input-border:  rgba(255, 255, 255, 0.10);
@@ -99,13 +108,17 @@
 	--border-muted:  rgba(0, 0, 0, 0.08);
 	--border-strong: rgba(0, 0, 0, 0.16);
 
-	--state-success: #2d9e6a;
-	--state-warning: #a07a20;
-	--state-error:   #c84040;
+	--state-success:  #2d9e6a;
+	--state-warning:  #a07a20;
+	--state-error:    #c84040;
+	--state-favorite: #d6354a;
+	--state-favorite-glow: rgba(214, 53, 74, 0.22);
 
 	--quality-hires:    #a07a20;
 	--quality-lossless: #2d8a6e;
 	--quality-lossy:    #6b7090;
+	/* --service-* tokens cascade from :root — they are brand colors, not theme
+	 * variables, so they stay stable across themes. */
 
 	--input-bg:      rgba(0, 0, 0, 0.03);
 	--input-border:  rgba(0, 0, 0, 0.13);
@@ -141,31 +154,71 @@
 	--safe-bottom: env(safe-area-inset-bottom, 0px);
 	--safe-left: env(safe-area-inset-left, 0px);
 
-	--radius-xs: 6px;
-	--radius-sm: 10px;
-	--radius:    16px;
-	--radius-lg: 22px;
+	/* Radii — rem-based clamp(): scale with viewport, honor user-zoom preference.
+	 * `--radius-md` is the canonical mid-step (use this in new code); `--radius`
+	 * is kept as a legacy alias for the same value so older call sites keep
+	 * working without touching them. */
+	--radius-xs: clamp(0.25rem,   0.4vw + 0.125rem,  0.375rem);   /*  4-6 px  */
+	--radius-sm: clamp(0.4375rem, 0.6vw + 0.1875rem, 0.625rem);   /*  7-10 px */
+	--radius-md: clamp(0.625rem,  0.8vw + 0.25rem,   0.875rem);   /* 10-14 px */
+	--radius:    var(--radius-md);                                /* legacy alias — prefer --radius-md */
+	--radius-lg: clamp(0.9375rem, 1.2vw + 0.375rem,  1.375rem);   /* 15-22 px */
 
-	--space-1: 4px;
-	--space-2: 8px;
-	--space-3: 12px;
-	--space-4: 16px;
-	--space-5: 24px;
-	--space-6: 32px;
-	--space-7: 48px;
-	--gap-sm:  10px;
-	--gap:     16px;
-	--gap-lg:  24px;
+	/* Spacing — rem-based clamp(): see the comment above. Min values are ~25%
+	   smaller than the previous fixed values, max values match today's behaviour. */
+	--space-1: clamp(0.1875rem, 0.25vw + 0.0625rem, 0.25rem);  /* 3-4 px  */
+	--space-2: clamp(0.375rem,  0.5vw  + 0.125rem,  0.5rem);   /* 6-8 px  */
+	--space-3: clamp(0.5625rem, 0.75vw + 0.1875rem, 0.75rem);  /* 9-12 px */
+	--space-4: clamp(0.75rem,   1vw    + 0.25rem,   1rem);     /* 12-16 px */
+	--space-5: clamp(1.125rem,  1.5vw  + 0.375rem,  1.5rem);   /* 18-24 px */
+	--space-6: clamp(1.5rem,    2vw    + 0.5rem,    2rem);     /* 24-32 px */
+	--space-7: clamp(2.25rem,   3vw    + 0.75rem,   3rem);     /* 36-48 px */
+	--gap-sm:  clamp(0.5rem,    0.6vw  + 0.1875rem, 0.625rem); /* 8-10 px */
+	--gap:     clamp(0.75rem,   1vw    + 0.25rem,   1rem);     /* 12-16 px */
+	--gap-lg:  clamp(1.125rem,  1.5vw  + 0.375rem,  1.5rem);   /* 18-24 px */
 
 	--motion-fast: 130ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-base: 210ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-slow: 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
 
+	/* Blur tiers — three is the maximum that should ever exist. Anything outside
+	 * these tokens is drift. Applied via `backdrop-filter: var(--blur-*)`. */
+	--blur-base:    blur(8px) saturate(1.05);    /* compact tiles, badges          */
+	--blur-overlay: blur(16px) saturate(1.1);    /* glass cards, panels, hovercards */
+	--blur-modal:   blur(24px) saturate(1.2);    /* modals, context menus, palette  */
+
+	/* Z-index scale — use these tokens at component call sites instead of raw
+	   integers. Layers compose hierarchically: base < raised < overlay < modal
+	   < toast < tooltip. Rule of thumb: tooltips must overlap modals, toasts
+	   must overlap modals (so they remain readable when a modal opens), modals
+	   are above any in-flow content. */
+	--z-base:    1;     /* in-flow stacking (e.g. a hero z-1 element)        */
+	--z-raised:  10;    /* sticky-within-panel, hover lifts                  */
+	--z-overlay: 100;   /* dropdowns, popovers, hover cards                  */
+	--z-modal:   1000;  /* modal dialogs (confirm prompts, settings sheets)  */
+	--z-toast:   2000;  /* toasts, command palette, top-of-stack panels      */
+	--z-tooltip: 3000;  /* tooltips (must overlap modals)                    */
+
 	--font-body:    'Manrope', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
 	--font-display: 'Newsreader', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
 	--font-mono:    'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 
-	--content-width: 1280px;
+	/* Typography scale — rem-based clamp(): every step interpolates with viewport
+	   width and honours user-zoom preference. Use these tokens at component call
+	   sites instead of raw `font-size: Npx` so the entire system scales together. */
+	--font-size-xs:  clamp(0.6875rem, 0.3vw + 0.5625rem, 0.8125rem);  /* 11-13 px */
+	--font-size-sm:  clamp(0.8125rem, 0.4vw + 0.6875rem, 0.9375rem);  /* 13-15 px */
+	--font-size-md:  clamp(0.9375rem, 0.5vw + 0.8125rem, 1.0625rem);  /* 15-17 px */
+	--font-size-lg:  clamp(1.0625rem, 0.7vw + 0.875rem,  1.25rem);    /* 17-20 px */
+	--font-size-xl:  clamp(1.25rem,   1vw   + 1rem,      1.625rem);   /* 20-26 px */
+	--font-size-2xl: clamp(1.5rem,    1.5vw + 1.125rem,  2rem);       /* 24-32 px */
+	--font-size-3xl: clamp(1.75rem,   2vw   + 1.25rem,   2.5rem);     /* 28-40 px */
+
+	/* Content width — scales with viewport so wide monitors and zoomed-out
+	   4K screens get more horizontal room (= more cards per row). The 1280 px
+	   floor preserves today's behaviour on narrower viewports; the 2400 px
+	   ceiling keeps typography surfaces readable on ultra-wide displays. */
+	--content-width: clamp(1280px, 100vw - 4rem, 2400px);
 
 	/* Cross-component state matrix */
 	--state-alpha-dormant: 0.35;
@@ -196,7 +249,7 @@ body {
 	height: 100%;
 	width: 100%;
 	font-family: var(--font-body);
-	font-size: 14px;
+	font-size: var(--font-size-sm);
 	line-height: 1.5;
 	color: var(--text-primary);
 	background-color: var(--bg-base);
@@ -247,31 +300,77 @@ textarea {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
+/* ── Cross-route view transitions ─────────────────────────
+ * SvelteKit's `onNavigate` hook calls document.startViewTransition, which
+ * captures the old page and the new page as ::view-transition pseudo elements.
+ *
+ * The intent is "liquid glass": rather than a flat opacity crossfade, the
+ * outgoing page falls forward (slight zoom + blur, like glass dissolving away
+ * from the viewer) and the incoming page emerges from beyond (slight zoom +
+ * blur in reverse, resolving into focus). The wallpaper persists across the
+ * navigation (forced standing-wave during /onboarding, see +layout.svelte) so
+ * the shader keeps running through both halves of the transition. */
+::view-transition-old(root),
+::view-transition-new(root) {
+	animation-duration: 800ms;
+	animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1);
+	mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+	animation-name: noor-page-dissolve;
+}
+::view-transition-new(root) {
+	animation-name: noor-page-emerge;
+}
+@keyframes noor-page-dissolve {
+	to {
+		opacity: 0;
+		filter: blur(12px) saturate(1.2);
+		transform: scale(1.03);
+	}
+}
+@keyframes noor-page-emerge {
+	from {
+		opacity: 0;
+		filter: blur(24px) saturate(0.85);
+		transform: scale(0.985);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation-duration: 200ms;
+	}
+	@keyframes noor-page-dissolve { to { opacity: 0; filter: none; transform: none; } }
+	@keyframes noor-page-emerge   { from { opacity: 0; filter: none; transform: none; } }
+}
+
 /* ── Glass surface ────────────────────────────────────── */
 .glass,
 .glass-panel {
 	background:
 		linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface) 74%, transparent), color-mix(in srgb, var(--instrument-surface-strong) 88%, transparent)),
 		var(--panel-bg);
-	backdrop-filter: blur(16px);
-	-webkit-backdrop-filter: blur(16px);
+	backdrop-filter: var(--blur-overlay);
+	-webkit-backdrop-filter: var(--blur-overlay);
 	border: 1px solid color-mix(in srgb, var(--panel-border) 70%, var(--instrument-border));
 	box-shadow:
 		inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 52%, transparent),
 		var(--panel-shadow);
 }
 
-.glass       { border-radius: var(--radius); }
+.glass       { border-radius: var(--radius-md); }
 .glass-panel { border-radius: var(--radius-lg); }
 
 .glass:hover { border-color: var(--border-strong); }
 
 .glass-tile {
 	background: var(--panel-bg);
-	backdrop-filter: blur(14px);
-	-webkit-backdrop-filter: blur(14px);
+	backdrop-filter: var(--blur-base);
+	-webkit-backdrop-filter: var(--blur-base);
 	border: 1px solid var(--panel-border);
-	border-radius: 8px;
+	border-radius: var(--radius-sm);
 	box-shadow: inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 38%, transparent);
 }
 
@@ -376,6 +475,7 @@ h4 {
 	justify-content: center;
 	gap: 6px;
 	padding: 9px 16px;
+	min-height: 2rem;            /* 32 px floor on desktop — comfortable click target */
 	border-radius: 99px;
 	font-size: 0.82rem;
 	font-weight: 600;
@@ -386,6 +486,13 @@ h4 {
 		opacity var(--motion-fast),
 		transform var(--motion-fast);
 	white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+	.btn {
+		min-height: 2.75rem;       /* 44 px tap-target floor on mobile (WCAG 2.5.5) */
+		min-width: 2.75rem;        /* covers icon-only variants */
+	}
 }
 
 .btn:hover:not(:disabled)  { transform: translateY(-1px); }
@@ -519,7 +626,6 @@ input[type='checkbox'] { accent-color: var(--accent); }
 }
 
 @media (max-width: 760px) {
-	html { font-size: 13px; }
 	.page-shell { gap: var(--space-4); }
 	.stat-grid  { grid-template-columns: 1fr 1fr; }
 	button,

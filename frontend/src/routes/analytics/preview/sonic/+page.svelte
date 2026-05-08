@@ -72,7 +72,7 @@
 
 <style>
 	.preview {
-		max-width: 1280px;
+		max-width: var(--content-width);
 		margin: 0 auto;
 		padding: var(--space-5) var(--space-5) var(--space-7);
 		display: flex;

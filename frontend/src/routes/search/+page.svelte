@@ -9,7 +9,7 @@
   import { buildArtistMenu } from '$lib/player/artist_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
-  import { formatDuration } from '$lib/stores/library'
+  import { formatTrackDuration } from '$lib/utils/format'
   import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
   import { parseIntent } from '$lib/search/intent'
@@ -17,6 +17,7 @@
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -924,7 +925,7 @@
                   {#if track.album_title}{track.album_title}{/if}
                 </p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
               <div class="row-actions">
                 <button
                   class="row-btn"
@@ -1075,11 +1076,12 @@
                 {#if album.in_library}
                   <span class="lib-badge" aria-label="In your library"></span>
                 {/if}
-                <button
-                  class="art-play-overlay"
+                <PlayOverlay
+                  position="corner"
+                  size="sm"
+                  label="Play {album.title}"
                   onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
-                  aria-label="Play {album.title}"
-                >▶</button>
+                />
               </div>
               <p class="album-title">{album.title}</p>
               {#if album.artist_name}
@@ -1137,11 +1139,12 @@
                     <span>♫</span>
                   </div>
                 {/if}
-                <button
-                  class="art-play-overlay"
+                <PlayOverlay
+                  position="corner"
+                  size="sm"
+                  label="Play {playlist.title}"
                   onclick={(e) => { e.stopPropagation(); void playTidalPlaylist(playlist.uuid) }}
-                  aria-label="Play {playlist.title}"
-                >▶</button>
+                />
               </div>
               <p class="album-title">{playlist.title}</p>
               <p class="album-artist">TIDAL · {playlist.number_of_tracks ?? '?'} tracks</p>
@@ -1261,7 +1264,7 @@
                     —
                   {/if}
                 </span>
-                <span class="col-duration">{formatDuration(track.duration_ms)}</span>
+                <span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
                 <span class="col-actions">
                   <button
                     class="row-btn"
@@ -1343,7 +1346,7 @@
                   {/if}
                 </p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
               <div class="row-actions">
                 <button
                   class="row-btn"
@@ -1404,7 +1407,7 @@
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">{track.artist_name ?? ''}{track.bpm ? ` · ${Math.round(track.bpm)} bpm` : ''}{track.camelot_key ? ` · ${track.camelot_key}` : ''}</p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
             </li>
           {/each}
         </ul>
@@ -1436,7 +1439,7 @@
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">{track.artist_name ?? ''}{track.album_title ? ` · ${track.album_title}` : ''}</p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
             </li>
           {/each}
         </ul>
@@ -1460,12 +1463,12 @@
 
 <style>
   .search-page {
-    width: min(100%, 1280px);
+    width: min(100%, var(--content-width));
     margin: 0 auto;
     padding: 16px 4px 80px;
   }
   .search-header {
-    max-width: 1200px;
+    max-width: var(--content-width);
     margin: 0 auto 40px;
     padding: 0 4px;
   }
@@ -1476,7 +1479,7 @@
     margin: 0 auto;
     background: var(--bg-raised);
     border: 1px solid var(--border-strong);
-    border-radius: 24px;
+    border-radius: var(--radius-lg);
     padding: 12px 22px;
     font-size: 15px;
     color: var(--text-primary);
@@ -1554,9 +1557,9 @@
     background: var(--bg-elevated);
     border: 1px solid var(--accent-line);
     color: var(--text-secondary);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 4px 12px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     cursor: pointer;
     font-family: inherit;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -1567,7 +1570,7 @@
     color: var(--text-primary);
   }
   .chip-x {
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     line-height: 1;
     color: var(--text-tertiary);
     margin-left: 2px;
@@ -1588,9 +1591,9 @@
     background: transparent;
     border: 1px solid var(--border-subtle);
     color: var(--text-secondary);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 5px 14px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     cursor: pointer;
     font-family: inherit;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -1624,12 +1627,12 @@
   }
   .search-hint {
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     margin-top: 64px;
     text-align: center;
   }
   .search-error { color: var(--state-error); }
-  .results-section { margin-bottom: 32px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .results-section { margin-bottom: 32px; max-width: var(--content-width); margin-left: auto; margin-right: auto; }
   .recent-section { margin-top: 36px; max-width: 720px; margin-left: auto; margin-right: auto; }
   .recent-head {
     display: flex;
@@ -1655,9 +1658,9 @@
   .recent-chip {
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 6px 14px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
@@ -1667,7 +1670,7 @@
     border-color: var(--accent-line);
     color: var(--text-primary);
   }
-  .top-result-section { margin-bottom: 28px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .top-result-section { margin-bottom: 28px; max-width: var(--content-width); margin-left: auto; margin-right: auto; }
   .top-result-card {
     display: grid;
     grid-template-columns: 168px 1fr;
@@ -1740,7 +1743,7 @@
     letter-spacing: -0.02em;
   }
   .top-sub {
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     color: var(--text-secondary);
     margin: 0;
   }
@@ -1813,9 +1816,10 @@
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #1ed760;
+    color: var(--service-spotify);
     background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--blur-base);
+    -webkit-backdrop-filter: var(--blur-base);
   }
   .spotify-card { text-decoration: none; }
   .lib-dot {
@@ -1852,7 +1856,7 @@
   }
   .artist-avatar.fallback span {
     font-family: var(--font-body, inherit);
-    font-size: 22px;
+    font-size: var(--font-size-xl);
     font-weight: 600;
     color: rgba(255, 255, 255, 0.78);
     letter-spacing: 0.02em;
@@ -1882,32 +1886,11 @@
     transition: transform 0.18s ease;
   }
   .album-card:hover { transform: translateY(-3px); }
-  .art-play-overlay {
-    position: absolute;
-    bottom: 8px;
-    right: 8px;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
-    font-size: 14px;
-    border: none;
-    cursor: pointer;
-    opacity: 0;
-    transform: translateY(4px);
-    transition: opacity 0.15s, transform 0.15s;
-    box-shadow: 0 6px 16px -4px rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  }
-  .art-wrap:hover .art-play-overlay {
+  .art-wrap:hover :global(.play-overlay),
+  .album-card:focus-within :global(.play-overlay) {
     opacity: 1;
     transform: translateY(0);
   }
-  .art-play-overlay:hover { transform: scale(1.08); opacity: 1; }
   .album-art {
     width: 128px;
     height: 128px;
@@ -1927,7 +1910,7 @@
   }
   .album-card:hover .album-art { opacity: 0.85; }
   .album-title {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1985,7 +1968,7 @@
     justify-content: center;
   }
   .track-art.fallback span {
-    font-size: 16px;
+    font-size: var(--font-size-md);
     color: rgba(255, 255, 255, 0.5);
   }
   .track-title {
@@ -2007,7 +1990,7 @@
   .subtitle-link { color: inherit; text-decoration: none; }
   .subtitle-link:hover { color: var(--text-primary); text-decoration: underline; }
   .track-duration {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -2016,7 +1999,7 @@
     border: none;
     color: var(--text-tertiary);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     padding: 4px;
     border-radius: 4px;
     opacity: 0;
@@ -2120,7 +2103,7 @@
     position: relative;
     text-align: center;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
   }
   .search-track-row .track-num-label { display: inline; }
@@ -2129,7 +2112,7 @@
     background: none;
     border: none;
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     cursor: pointer;
     padding: 0;
   }
@@ -2153,7 +2136,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     color: rgba(255,255,255,0.5);
   }
   .search-track-row .row-title-text {
@@ -2182,7 +2165,7 @@
   }
   .search-track-row .col-duration {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
@@ -2201,7 +2184,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     padding: 16px 0;
   }
   .infinite-spinner { font-style: italic; }

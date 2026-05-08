@@ -85,7 +85,7 @@
 				<p>NOORwave plays from your TIDAL library. Sign in once and we'll keep your tracks in sync.</p>
 			{/if}
 			{#if errorMsg}
-				<p class="error">{errorMsg}</p>
+				<p class="error" role="alert">{errorMsg}</p>
 			{/if}
 			<div class="actions">
 				<button class="btn btn-primary" onclick={start}>
@@ -128,15 +128,18 @@
 	}
 	.variant-onboarding h2 {
 		margin: 0 0 4px;
-		font-size: 22px;
-		font-weight: 600;
-		letter-spacing: -0.01em;
+		font-family: var(--font-display);
+		font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
+		font-weight: 500;
+		letter-spacing: -0.02em;
+		line-height: 1.05;
 	}
 	.variant-onboarding p {
 		margin: 0;
 		max-width: 420px;
-		color: var(--text-muted, #8b93a7);
-		line-height: 1.5;
+		color: var(--text-secondary);
+		line-height: 1.55;
+		font-size: var(--font-size-md);
 	}
 	.actions {
 		display: flex;
@@ -154,10 +157,10 @@
 		transition: background 120ms, border-color 120ms;
 	}
 	.btn-primary {
-		background: #4a6dd8;
-		color: #fff;
+		background: rgba(255, 255, 255, 0.92);
+		color: #0a0d14;
 	}
-	.btn-primary:hover:not(:disabled) { background: #5a7ce8; }
+	.btn-primary:hover:not(:disabled) { background: #fff; }
 	.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
 	.btn-ghost {
 		background: transparent;
@@ -166,14 +169,14 @@
 	}
 	.btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: #e7eaf2; }
 	.code {
-		font-family: 'SF Mono', Menlo, Consolas, monospace;
-		font-size: 38px;
+		font-family: var(--font-mono);
+		font-size: clamp(2rem, 1.5rem + 2vw, 2.625rem);
 		font-weight: 600;
 		letter-spacing: 0.18em;
 		padding: 18px 28px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 12px;
+		background: var(--panel-bg);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
 		cursor: pointer;
 		user-select: all;
 	}
@@ -183,7 +186,7 @@
 		align-items: center;
 		gap: 12px;
 	}
-	.hint, .muted { color: var(--text-muted, #8b93a7); margin: 0; font-size: 13px; }
+	.hint, .muted { color: var(--text-tertiary); margin: 0; font-size: var(--font-size-xs); }
 	.hint-link {
 		background: none;
 		border: none;

@@ -374,7 +374,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
-		border-left: 1px solid rgba(255, 255, 255, 0.06);
+		border-left: 1px solid var(--border-subtle);
 	}
 	.panel-empty {
 		height: 100%;
@@ -399,7 +399,7 @@
 	.fingerprint { display: flex; flex-wrap: wrap; gap: 6px; }
 	.fp-chip {
 		background: rgba(255,255,255,0.05);
-		border: 1px solid rgba(255,255,255,0.08);
+		border: 1px solid var(--panel-border);
 		border-radius: 6px;
 		padding: 5px 8px;
 		display: flex;
@@ -442,7 +442,7 @@
 	.action-btn {
 		padding: 8px 12px;
 		border-radius: 8px;
-		border: 1px solid rgba(255,255,255,0.08);
+		border: 1px solid var(--panel-border);
 		background: rgba(255,255,255,0.04);
 		color: rgba(255,255,255,0.75);
 		font-size: 0.78rem;
@@ -526,7 +526,7 @@
 		display: flex; flex-direction: column; gap: 3px;
 		padding: 8px 10px;
 		background: rgba(255,255,255,0.03);
-		border: 1px solid rgba(255,255,255,0.06);
+		border: 1px solid var(--border-subtle);
 		border-radius: 6px;
 	}
 	.idle-lens-name { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(124,128,255,0.7); }

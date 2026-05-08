@@ -144,15 +144,15 @@
 <style>
 	.context-menu {
 		position: fixed;
-		z-index: 1700;
+		z-index: var(--z-modal);
 		min-width: 220px;
 		max-width: 280px;
 		padding: 6px;
 		background: color-mix(in srgb, var(--bg-surface-strong, #14162a) 94%, transparent);
-		backdrop-filter: blur(18px) saturate(140%);
-		-webkit-backdrop-filter: blur(18px) saturate(140%);
-		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
-		border-radius: 14px;
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
 		box-shadow:
 			0 18px 40px -12px rgba(0, 0, 0, 0.55),
 			0 2px 6px rgba(0, 0, 0, 0.25);
@@ -221,11 +221,11 @@
 	}
 
 	.context-menu-item.danger {
-		color: var(--danger, #f87171);
+		color: var(--state-error);
 	}
 
 	.context-menu-item.danger:hover {
-		background: color-mix(in srgb, var(--danger, #f87171) 16%, transparent);
+		background: color-mix(in srgb, var(--state-error) 16%, transparent);
 	}
 
 	.context-menu-icon {
@@ -264,10 +264,10 @@
 		padding: 6px;
 		list-style: none;
 		background: color-mix(in srgb, var(--bg-surface-strong, #14162a) 94%, transparent);
-		backdrop-filter: blur(18px) saturate(140%);
-		-webkit-backdrop-filter: blur(18px) saturate(140%);
-		border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
-		border-radius: 14px;
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
 		box-shadow:
 			0 18px 40px -12px rgba(0, 0, 0, 0.55),
 			0 2px 6px rgba(0, 0, 0, 0.25);

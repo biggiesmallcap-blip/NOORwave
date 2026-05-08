@@ -53,8 +53,9 @@
 		gap: 8px;
 		padding: 6px 14px;
 		background: rgba(10, 10, 20, 0.85);
-		backdrop-filter: blur(8px);
-		border: 1px solid rgba(124, 128, 255, 0.15);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		border: 1px solid var(--accent-line);
 		border-radius: 999px;
 		font-size: 0.75rem;
 		color: rgba(255, 255, 255, 0.6);

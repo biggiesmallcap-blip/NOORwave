@@ -44,6 +44,20 @@
 		/* Firefox + most browsers — slim track, semi-transparent thumb. */
 		scrollbar-width: thin;
 		scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+		mask-image: linear-gradient(
+			to right,
+			transparent 0,
+			black 16px,
+			black calc(100% - 32px),
+			transparent 100%
+		);
+		-webkit-mask-image: linear-gradient(
+			to right,
+			transparent 0,
+			black 16px,
+			black calc(100% - 32px),
+			transparent 100%
+		);
 	}
 	.media-rail::-webkit-scrollbar {
 		height: 6px;

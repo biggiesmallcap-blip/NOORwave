@@ -24,8 +24,9 @@
 		display: flex;
 		gap: 4px;
 		background: rgba(0, 0, 0, 0.5);
-		backdrop-filter: blur(8px);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		border: 1px solid var(--panel-border);
 		border-radius: 999px;
 		padding: 3px;
 	}

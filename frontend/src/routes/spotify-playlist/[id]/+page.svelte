@@ -3,6 +3,7 @@
   import { onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+  import { formatTrackDuration } from '$lib/utils/format';
   import {
     api,
     type SpotifyPlaylistDetail,
@@ -316,14 +317,6 @@
     }
   }
 
-  function formatDuration(ms: number | null): string {
-    if (!ms || ms <= 0) return '—';
-    const total = Math.floor(ms / 1000);
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  }
-
   function formatNumber(n: number | null): string {
     if (n === null || n === undefined) return '';
     if (n < 1_000) return n.toString();
@@ -448,7 +441,7 @@
                   ? 'Resolving…'
                   : 'N/A'}
           </span>
-          <span class="dur">{formatDuration(t.durationMs)}</span>
+          <span class="dur">{formatTrackDuration(t.durationMs)}</span>
           <div class="row-actions">
             <button
               class="row-btn"
@@ -485,7 +478,7 @@
 </div>
 
 <style>
-  .page { max-width: 1080px; margin: 0 auto; padding: 32px 28px 96px; }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; }
   .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
 
@@ -499,7 +492,7 @@
   .cover {
     width: 220px;
     height: 220px;
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     background-size: cover;
     background-position: center;
     box-shadow: 0 18px 36px -16px rgba(0, 0, 0, 0.6);
@@ -508,7 +501,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #1ed760, #1aa34a);
+    background: linear-gradient(135deg, var(--service-spotify), #1aa34a);
     font-size: 56px;
     color: #fff;
   }
@@ -517,7 +510,7 @@
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #1ed760;
+    color: var(--service-spotify);
     font-weight: 700;
   }
   .title {
@@ -538,7 +531,7 @@
     flex-wrap: wrap;
     gap: 6px;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
   }
   .stats .resolved-count { color: var(--accent); font-weight: 600; }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -554,9 +547,9 @@
     font-size: 13px;
   }
   .btn-secondary {
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--border-subtle);
     color: var(--text-primary);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--panel-border);
   }
   .btn-primary:disabled,
   .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -567,7 +560,7 @@
   }
   .toast {
     margin: 8px 0 0;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     padding: 8px 12px;
     border-radius: 8px;
     width: fit-content;
@@ -611,12 +604,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     font-weight: 500;
   }
   .row-artist {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -642,7 +635,7 @@
   .status--unresolved, .status--error { background: rgba(239, 68, 68, 0.10); color: #ef4444; }
   .dur {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
     min-width: 36px;
     text-align: right;

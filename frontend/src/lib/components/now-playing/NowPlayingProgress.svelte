@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 
 	let {
 		position,
@@ -58,8 +58,8 @@
 	</div>
 
 	<div class="np-times" class:scrubbing={isScrubbing}>
-		<span>{formatDuration(scrubPosition)}</span>
-		<span>{formatDuration(duration)}</span>
+		<span>{formatTrackDuration(scrubPosition)}</span>
+		<span>{formatTrackDuration(duration)}</span>
 	</div>
 </div>
 

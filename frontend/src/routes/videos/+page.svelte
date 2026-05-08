@@ -9,7 +9,7 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { assertOnline } from '$lib/stores/player';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { showToast } from '$lib/stores/toast';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import {
@@ -604,7 +604,7 @@
 						</button>
 					{/if}
 					{#if selectedVideo.duration_ms}
-						<span>{formatDuration(selectedVideo.duration_ms)}</span>
+						<span>{formatTrackDuration(selectedVideo.duration_ms)}</span>
 					{/if}
 					{#if streamExpiresAt}
 						<span>Stream ready</span>
@@ -693,7 +693,7 @@
 
 <style>
 	.videos-page {
-		width: min(100%, 1220px);
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
 		display: grid;
 		gap: 28px;
@@ -711,7 +711,7 @@
 		margin: 0 auto;
 		background: var(--bg-raised);
 		border: 1px solid var(--border-strong);
-		border-radius: 24px;
+		border-radius: var(--radius-lg);
 		padding: 12px 22px;
 		font-size: 15px;
 		color: var(--text-primary);

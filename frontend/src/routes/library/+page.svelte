@@ -6,11 +6,11 @@
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
 		loadTracks, loadAlbums,
-		formatDuration, formatDateShort, getQualityClass,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
+	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
@@ -1230,7 +1230,7 @@
 									<span class="ht-title">{track.title}</span>
 									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` — ${track.album_title}` : ''}</span>
 								</div>
-								<span class="ht-duration">{formatDuration(track.duration_ms)}</span>
+								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<div class="ht-actions">
 									<button
 										class="btn-icon"
@@ -1641,7 +1641,7 @@
 							{/if}
 						</span>
 					{/if}
-					<span class="col-duration">{formatDuration(track.duration_ms)}</span>
+					<span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
 					<span class="col-actions">
 						<button class="detail-btn" title="View details" onclick={(event) => { event.stopPropagation(); void openTrackDetail(track); }}>ℹ</button>
 						<button class="menu-trigger" aria-label="Track actions" onclick={(event) => toggleTrackMenu(track.id, event)}>
@@ -1751,7 +1751,7 @@
 				{/if}
 				<div class="meta-block">
 					<span class="meta-label">Duration</span>
-					<span class="meta-value">{formatDuration(detailTrack.duration_ms)}</span>
+					<span class="meta-value">{formatTrackDuration(detailTrack.duration_ms)}</span>
 				</div>
 				{#if detailTrack.disc_number && detailTrack.disc_number > 1}
 					<div class="meta-block">
@@ -1803,7 +1803,7 @@
 								{/if}
 								<span class="detail-track-title">{track.title}</span>
 								<span class="detail-track-artist">{track.artist_name ?? ''}</span>
-								<span class="detail-track-duration">{formatDuration(track.duration_ms)}</span>
+								<span class="detail-track-duration">{formatTrackDuration(track.duration_ms)}</span>
 								<button class="detail-track-queue" onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}>+</button>
 							</div>
 						{/each}
@@ -1839,7 +1839,7 @@
 		font-weight: 700;
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
-		color: var(--accent, #9b6fff);
+		color: var(--accent);
 		margin: 0;
 	}
 
@@ -1850,7 +1850,7 @@
 	}
 
 	.view-all-link {
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary, rgba(255,255,255,0.5));
 		background: none;
 		border: none;
@@ -1880,9 +1880,9 @@
 		transition: background 0.1s;
 	}
 
-	.home-track-row:hover { background: var(--bg-glass-hover, rgba(255,255,255,0.06)); }
+	.home-track-row:hover { background: var(--bg-hover); }
 
-	.home-track-row.playing .ht-title { color: var(--accent, #9b6fff); }
+	.home-track-row.playing .ht-title { color: var(--accent); }
 
 	.ht-art {
 		width: 36px;
@@ -1893,7 +1893,7 @@
 	}
 
 	.ht-art--fallback {
-		background: var(--bg-glass, rgba(255,255,255,0.08));
+		background: var(--bg-hover);
 	}
 
 	.ht-meta {
@@ -1921,7 +1921,7 @@
 	}
 
 	.ht-duration {
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted, rgba(255,255,255,0.4));
 		font-variant-numeric: tabular-nums;
 	}
@@ -1949,7 +1949,7 @@
 
 	.home-loading {
 		color: var(--text-secondary, rgba(255,255,255,0.5));
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		padding: 40px;
 		text-align: center;
 	}
@@ -2026,7 +2026,7 @@
 		align-items: center;
 		padding: 6px 10px;
 		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-secondary);
 		font-size: 0.78rem;
@@ -2047,11 +2047,11 @@
 	}
 	.decade-chip {
 		padding: 4px 13px;
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		font-size: 11px;
 		font-weight: 600;
 		cursor: pointer;
-		border: 1px solid rgba(255,255,255,0.08);
+		border: 1px solid var(--panel-border);
 		background: transparent;
 		color: var(--text-secondary);
 		font-family: inherit;
@@ -2139,7 +2139,7 @@
 		font-family: inherit;
 		font-size: 10px;
 		color: var(--text-secondary, rgba(255,255,255,0.5));
-		background: var(--bg-glass, rgba(255,255,255,0.05));
+		background: var(--bg-hover);
 	}
 
 	.hint-filters {
@@ -2232,7 +2232,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
-		max-width: 1200px;
+		max-width: var(--content-width);
 		margin: 0 auto 24px;
 		padding: 0 4px;
 	}
@@ -2242,9 +2242,9 @@
 		max-width: 640px;
 		margin: 0 auto;
 		padding: 14px 22px;
-		border-radius: 24px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
-		background: var(--bg-glass, rgba(255,255,255,0.04));
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--border-subtle);
+		background: var(--panel-bg);
 		color: var(--text-primary, #fff);
 		font-size: 15px;
 		outline: none;
@@ -2252,11 +2252,11 @@
 	}
 
 	.library-search-input:focus {
-		border-color: var(--accent, #9b6fff);
+		border-color: var(--accent);
 	}
 
 	.library-status {
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted, rgba(255,255,255,0.4));
 		margin-left: 4px;
 	}
@@ -2290,13 +2290,13 @@
 	}
 
 	.filter-pill:hover {
-		background: var(--bg-glass-hover, rgba(255,255,255,0.08));
+		background: var(--bg-hover);
 		color: var(--text-primary, #fff);
 	}
 
 	.filter-pill.active {
-		background: var(--accent, #9b6fff);
-		border-color: var(--accent, #9b6fff);
+		background: var(--accent);
+		border-color: var(--accent);
 		color: #fff;
 	}
 
@@ -2306,7 +2306,7 @@
 		padding: 2px;
 		border-radius: 8px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.view-toggle-btn {
@@ -2474,7 +2474,7 @@
 		padding: 4px 10px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
 		font-size: 0.72rem;
 		font-weight: 600;
@@ -2602,7 +2602,7 @@
 		height: 28px;
 		border-radius: 50%;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
 		font-size: 1rem;
 		display: flex;
@@ -2871,8 +2871,8 @@
 		border-radius: var(--radius-lg);
 		background:
 			linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
-			var(--bg-glass);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+			var(--bg-surface);
+		border: 1px solid var(--panel-border);
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
 		cursor: pointer;
 		transition:
@@ -2890,14 +2890,14 @@
 	}
 
 	.album-card.selected {
-		outline: 2px solid rgba(155, 111, 255, 0.85);
+		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 
 	.album-card:focus-visible,
 	.track-row:focus-visible,
 	.header-sort:focus-visible {
-		outline: 2px solid rgba(155, 111, 255, 0.9);
+		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 
@@ -3045,7 +3045,7 @@
 		padding: 2px 7px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-muted);
 		font-size: 0.64rem;
 		font-weight: 600;
@@ -3062,7 +3062,7 @@
 		height: 32px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-primary);
 		font-size: 1rem;
 		line-height: 1;
@@ -3079,7 +3079,7 @@
 		height: 28px;
 		border-radius: 50%;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
 		font-size: 0.85rem;
 		cursor: pointer;
@@ -3109,8 +3109,8 @@
 			0 8px 32px rgba(0, 0, 0, 0.6),
 			0 2px 8px rgba(0, 0, 0, 0.4),
 			inset 0 1px 0 rgba(255, 255, 255, 0.06);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 	}
 
 	.track-menu {
@@ -3210,7 +3210,7 @@
 	}
 
 	.track-row:hover {
-		background: var(--bg-glass-hover);
+		background: var(--bg-hover);
 	}
 
 	.track-row.selected {
@@ -3218,7 +3218,7 @@
 	}
 
 	.track-row.cursor {
-		background: var(--bg-glass-hover);
+		background: var(--bg-hover);
 		box-shadow: inset 2px 0 0 var(--accent);
 	}
 
@@ -3408,7 +3408,7 @@
 				". album quality";
 			gap: 6px 12px;
 			padding: 12px;
-			border: 1px solid rgba(255, 255, 255, 0.06);
+			border: 1px solid var(--border-subtle);
 			background: rgba(255, 255, 255, 0.02);
 		}
 
@@ -3617,7 +3617,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 28px;
+		font-size: var(--font-size-2xl);
 		color: rgba(255,255,255,0.3);
 	}
 	.discography-title {

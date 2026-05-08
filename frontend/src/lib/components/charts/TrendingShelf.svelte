@@ -135,7 +135,6 @@
 		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
 		error = false;
-		console.debug('[trending] fetching', { mode, country, genre, token });
 		try {
 			let data: { tracks: ChartEntry[] | null };
 			if (mode === 'tidal') {
@@ -148,7 +147,6 @@
 				data = await api.getTrending({ source: 'lastfm', limit });
 			}
 			const next = data.tracks ?? [];
-			console.debug('[trending] loaded', { token, count: next.length });
 			tracks = next;
 			// Only cache non-empty payloads so a transient 5xx returning [] doesn't
 			// poison the cache for 6h.
@@ -195,7 +193,7 @@
 <section class="trending-shelf">
 	<div class="section-header">
 		<div class="section-title-group">
-			<p class="eyebrow">Now moving</p>
+			<p class="eyebrow">From Last.fm <span class="eyebrow-dot" aria-hidden="true">·</span> Now moving</p>
 			<h2>Trending <span class="sub">· {subLabel}</span></h2>
 		</div>
 		<div class="trending-controls">
@@ -300,7 +298,7 @@
 	}
 
 	.section-title-group h2 .sub {
-		color: var(--text-muted, #888);
+		color: var(--text-muted);
 		font-weight: 500;
 		font-size: 0.95rem;
 		margin-left: 2px;
@@ -311,8 +309,12 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: var(--text-muted, #888);
+		color: var(--service-lastfm);
 		margin: 0;
+	}
+	.eyebrow-dot {
+		color: var(--text-muted);
+		margin: 0 4px;
 	}
 
 	.trending-controls {
@@ -325,30 +327,31 @@
 
 	.chip-group {
 		display: inline-flex;
-		gap: 4px;
+		gap: var(--space-1);
 		padding: 2px;
-		background: rgba(255, 255, 255, 0.04);
+		background: var(--panel-bg);
+		border: 1px solid var(--panel-border);
 		border-radius: 999px;
 	}
 
 	.chip {
 		background: transparent;
 		border: none;
-		color: var(--text-muted, #888);
+		color: var(--text-muted);
 		font: inherit;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		font-weight: 500;
 		padding: 4px 10px;
 		border-radius: 999px;
 		cursor: pointer;
-		transition: background 0.15s ease, color 0.15s ease;
+		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 
-	.chip:hover { color: var(--text, #fff); }
+	.chip:hover { color: var(--text-primary); }
 
 	.chip.active {
-		background: rgba(255, 255, 255, 0.12);
-		color: var(--text, #fff);
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
 
 	.chip-row {
@@ -396,7 +399,7 @@
 
 	.skeleton-card {
 		aspect-ratio: 1;
-		border-radius: 12px;
+		border-radius: var(--radius-md);
 		background: linear-gradient(
 			110deg,
 			rgba(255, 255, 255, 0.04) 30%,

@@ -149,32 +149,3 @@ export function updateLibraryTrackFavorite(trackId: number, isFavorite: boolean,
 	else if (appended) totalTracks.update((n) => n + 1);
 }
 
-export function formatDuration(ms: number | null): string {
-	if (!ms) return '--:--';
-	const totalSeconds = Math.floor(ms / 1000);
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
-export function formatDateShort(iso: string | null): string {
-	if (!iso) return '—';
-	const d = new Date(iso);
-	const now = new Date();
-	const diffMs = now.getTime() - d.getTime();
-	const diffDays = Math.floor(diffMs / 86400000);
-
-	if (diffDays === 0) return 'Today';
-	if (diffDays === 1) return 'Yesterday';
-	if (diffDays < 7) return `${diffDays}d ago`;
-	if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
-	if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`;
-	return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-export function getQualityClass(quality: string | null): string {
-	if (!quality) return 'lossy';
-	if (quality.includes('HI_RES')) return 'hires';
-	if (quality === 'LOSSLESS') return 'lossless';
-	return 'lossy';
-}

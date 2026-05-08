@@ -78,8 +78,8 @@
 		border-radius: var(--radius);
 		overflow: hidden;
 		/* glass treatment baked in so the strip feels native to the rest of the page */
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 		border: 1px solid color-mix(in srgb, var(--panel-border) 70%, var(--instrument-border));
 		box-shadow:
 			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 52%, transparent),

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import {
@@ -120,7 +120,7 @@
 				{#if showAlbum && track.album_title}{track.album_title}{/if}
 			</p>
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 		<div class="cell-actions">
 			<button
 				class="row-btn"
@@ -180,7 +180,7 @@
 				<span class="sub">{track.artist_name}</span>
 			{/if}
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 		<div class="cell-actions">
 			<button
 				class="row-btn"
@@ -239,7 +239,7 @@
 				{#if showAlbum && track.album_title}{track.album_title}{/if}
 			</p>
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 		<div class="cell-actions">
 			<button
 				class="row-btn"
@@ -292,7 +292,7 @@
 				<span class="sub">{track.artist_name}</span>
 			{/if}
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 	</li>
 {/if}
 
@@ -413,7 +413,7 @@
 		justify-content: center;
 	}
 	.cell-art-thumb.placeholder span {
-		font-size: 16px;
+		font-size: var(--font-size-md);
 		color: rgba(255, 255, 255, 0.5);
 	}
 

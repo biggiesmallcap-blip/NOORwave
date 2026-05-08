@@ -451,7 +451,7 @@
 		position: fixed;
 		inset: 0;
 		background: rgba(0,0,0,0.45);
-		z-index: 1600;
+		z-index: var(--z-toast);
 	}
 	.palette-panel {
 		position: fixed;
@@ -461,9 +461,11 @@
 		width: min(600px, calc(100vw - 32px));
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-strong);
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		box-shadow: 0 32px 64px -16px rgba(0,0,0,0.7);
-		z-index: 1601;
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
+		z-index: calc(var(--z-toast) + 1);
 		overflow: hidden;
 	}
 	.palette-input-wrap {
@@ -475,7 +477,7 @@
 	}
 	.palette-icon {
 		color: var(--text-muted);
-		font-size: 16px;
+		font-size: var(--font-size-md);
 		flex-shrink: 0;
 		width: 16px;
 		text-align: center;
@@ -492,7 +494,7 @@
 	.palette-input::placeholder { color: var(--text-muted); }
 	.palette-spinner {
 		color: var(--text-muted);
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		animation: spin 0.8s linear infinite;
 	}
 	@keyframes spin { to { transform: rotate(360deg); } }
@@ -537,7 +539,7 @@
 		background: none;
 		border: none;
 		color: var(--text-secondary, var(--text-muted));
-		font-size: 16px;
+		font-size: var(--font-size-md);
 		cursor: pointer;
 		opacity: 0;
 		padding: 0 14px 0 4px;
@@ -564,18 +566,18 @@
 	.row-art--fallback {
 		display: grid;
 		place-items: center;
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		color: var(--text-muted);
 	}
 	.row-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 	.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 	.row-sub { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-kind { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
-	.row-kind--spotify { color: #1ed760; font-weight: 600; }
+	.row-kind--spotify { color: var(--service-spotify); font-weight: 600; }
 	.row-lib { font-size: 10px; color: var(--accent); flex-shrink: 0; }
 	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: monospace; flex-shrink: 0; }
 	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: monospace; flex-shrink: 0; }
-	.cmd-desc { color: var(--text-secondary); margin-left: auto; font-size: 12px; }
+	.cmd-desc { color: var(--text-secondary); margin-left: auto; font-size: var(--font-size-xs); }
 	.palette-empty, .palette-hint {
 		padding: 20px 18px;
 		color: var(--text-muted);

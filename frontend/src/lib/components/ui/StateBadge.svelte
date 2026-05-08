@@ -24,7 +24,7 @@
 		gap: 8px;
 		padding: 7px 11px;
 		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-secondary);
 		font-size: 0.76rem;

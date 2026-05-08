@@ -2,8 +2,9 @@
 	import type { TidalSearchVideo, TidalVideoMix, TidalVideoMixItem } from '$lib/api/client';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { buildVideoMenu, buildVideoMixMenu, isVideoMix } from '$lib/player/video_menu';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type VideoLike = TidalSearchVideo | TidalVideoMix | TidalVideoMixItem;
 
@@ -15,7 +16,7 @@
 	let subtitle = $derived(
 		isVideoMix(video) ? (video.description ?? 'Video mix') : (video.artist_name ?? 'TIDAL video')
 	);
-	let duration = $derived(!isVideoMix(video) && video.duration_ms ? formatDuration(video.duration_ms) : null);
+	let duration = $derived(!isVideoMix(video) && video.duration_ms ? formatTrackDuration(video.duration_ms) : null);
 
 	function select() {
 		onSelect?.(video);
@@ -48,7 +49,11 @@
 		{:else}
 			<div class="poster placeholder">▶</div>
 		{/if}
-		<div class="play-overlay" aria-hidden="true">{isVideoMix(video) ? '↗' : '▶'}</div>
+		<PlayOverlay
+			position="corner"
+			size="sm"
+			label={isVideoMix(video) ? `Open mix ${title}` : `Play ${title}`}
+		/>
 		{#if duration}
 			<span class="duration">{duration}</span>
 		{/if}
@@ -93,25 +98,8 @@
 		color: var(--text-tertiary);
 	}
 
-	.play-overlay {
-		position: absolute;
-		right: 10px;
-		bottom: 10px;
-		width: 34px;
-		height: 34px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--accent);
-		color: white;
-		font-size: 0.8rem;
-		box-shadow: 0 8px 18px rgba(0, 0, 0, 0.34);
-		opacity: 0;
-		transform: translateY(4px);
-		transition: opacity 0.16s ease, transform 0.16s ease;
-	}
-
-	.video-card:hover .play-overlay {
+	.video-card:hover :global(.play-overlay),
+	.video-card:focus-visible :global(.play-overlay) {
 		opacity: 1;
 		transform: translateY(0);
 	}
