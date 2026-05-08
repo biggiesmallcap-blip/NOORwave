@@ -46,7 +46,6 @@ uniform vec3 u_color4;
 	}
 
 	onMount(() => {
-		console.log('[ShaderWallpaper] mount, interactive=', interactive);
 		const gl = canvas.getContext('webgl', { premultipliedAlpha: false, antialias: true });
 		if (!gl) return;
 		gl.getExtension('OES_standard_derivatives');
@@ -56,7 +55,6 @@ uniform vec3 u_color4;
 			console.warn('[ShaderWallpaper] WebGL context LOST');
 		};
 		const onContextRestored = () => {
-			console.log('[ShaderWallpaper] WebGL context restored — re-setting up program');
 			gl!.getExtension('OES_standard_derivatives');
 			prog = null;
 			buf = null;
@@ -256,7 +254,6 @@ uniform vec3 u_color4;
 		});
 
 		return () => {
-			console.log('[ShaderWallpaper] unmount, interactive=', interactive);
 			running = false;
 			cancelAnimationFrame(raf);
 			ro.disconnect();

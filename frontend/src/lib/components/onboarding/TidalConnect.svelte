@@ -85,7 +85,7 @@
 				<p>NOORwave plays from your TIDAL library. Sign in once and we'll keep your tracks in sync.</p>
 			{/if}
 			{#if errorMsg}
-				<p class="error">{errorMsg}</p>
+				<p class="error" role="alert">{errorMsg}</p>
 			{/if}
 			<div class="actions">
 				<button class="btn btn-primary" onclick={start}>
@@ -128,7 +128,7 @@
 	}
 	.variant-onboarding h2 {
 		margin: 0 0 4px;
-		font-size: 22px;
+		font-size: var(--font-size-xl);
 		font-weight: 600;
 		letter-spacing: -0.01em;
 	}

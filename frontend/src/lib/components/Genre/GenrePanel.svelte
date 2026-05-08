@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { addTrackToQueue, playTrackNow } from '$lib/stores/player';
-	import { formatDuration, getQualityClass } from '$lib/stores/library';
-	import { formatDuration as formatListenAggregate } from '$lib/utils/format';
+	import { formatTrackDuration, formatDuration, getQualityClass } from '$lib/utils/format';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -59,10 +58,6 @@
 		await addTrackToQueue(trackId);
 	}
 
-	// Listen-time aggregate now lives in $lib/utils/format (imported above as
-	// formatListenAggregate to avoid clashing with the M:SS-style formatDuration
-	// from $lib/stores/library).
-
 	let listenedTime = $derived(listenHeat?.total_listened_ms ?? node?.totalListenedMs ?? 0);
 	let showTracks = $state(false);
 
@@ -103,7 +98,7 @@
 					<span class="family-name">{node.familyName} system</span>
 				</div>
 				<h2>{node.name}</h2>
-				<p class="panel-subtitle">{node.trackCount.toLocaleString()} tracks{listenedTime > 0 ? ` · ${formatListenAggregate(listenedTime)}` : ''}</p>
+				<p class="panel-subtitle">{node.trackCount.toLocaleString()} tracks{listenedTime > 0 ? ` · ${formatDuration(listenedTime)}` : ''}</p>
 			</div>
 			<button class="close-btn" onclick={onClose} aria-label="Close genre panel">×</button>
 		</div>
@@ -213,7 +208,7 @@
 											{track.best_quality.replaceAll('_', ' ')}
 										</span>
 									{/if}
-									<span>{formatDuration(track.duration_ms)}</span>
+									<span>{formatTrackDuration(track.duration_ms)}</span>
 									<button class="queue-btn" onclick={(event) => void handleQueueTrack(track.id, event)}>+</button>
 								</div>
 							</div>

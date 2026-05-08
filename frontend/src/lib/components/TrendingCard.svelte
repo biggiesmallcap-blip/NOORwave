@@ -1,11 +1,12 @@
 <script lang="ts">
 	import type { ChartEntry, TidalPlayable, Track } from '$lib/api/client';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { currentTrack, isPlaying } from '$lib/stores/player';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
+	import { letterColor } from '$lib/utils/color';
 
 	let {
 		entry,
@@ -86,13 +87,6 @@
 		if (upper === 'HIGH') return 'High';
 		if (upper === 'LOW') return 'Low';
 		return null;
-	}
-
-	function letterColor(name: string): string {
-		const colors = ['#e63946', '#457b9d', '#2a9d8f', '#e9c46a', '#f4a261', '#9b5de5', '#00b4d8'];
-		let h = 0;
-		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-		return colors[Math.abs(h) % colors.length];
 	}
 
 	async function play() {
@@ -202,7 +196,7 @@
 				<span class="quality-badge {qualityClass}">{qualityLabel}</span>
 			{/if}
 			{#if durationMs}
-				<span class="duration">{formatDuration(durationMs)}</span>
+				<span class="duration">{formatTrackDuration(durationMs)}</span>
 			{/if}
 		</div>
 
@@ -369,7 +363,7 @@
 	}
 
 	.artist {
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.6));
 		white-space: nowrap;
 		overflow: hidden;

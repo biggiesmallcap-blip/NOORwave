@@ -44,7 +44,7 @@
 	import { get } from 'svelte/store';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
-	import { formatDuration, getQualityClass } from '$lib/stores/library';
+	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -1127,7 +1127,7 @@
 									<strong>{video.title}</strong>
 									<span>{video.artist_name ?? 'Unknown artist'}</span>
 								</span>
-								<span class="video-panel-row-time">{formatDuration(video.duration_ms ?? 0)}</span>
+								<span class="video-panel-row-time">{formatTrackDuration(video.duration_ms ?? 0)}</span>
 							</button>
 						{/each}
 					</div>
@@ -1441,7 +1441,7 @@
 							</div>
 
 							<div class="queue-side">
-								<span class="queue-time">{formatDuration(item.track.duration_ms)}</span>
+								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
 									{#if item.reason}
 										<button
@@ -1700,8 +1700,8 @@
 					/>
 				</div>
 				<div class="mobile-np-times">
-					<span>{formatDuration(scrubPosition)}</span>
-					<span>{formatDuration($currentTrack.duration_ms ?? 0)}</span>
+					<span>{formatTrackDuration(scrubPosition)}</span>
+					<span>{formatTrackDuration($currentTrack.duration_ms ?? 0)}</span>
 				</div>
 			</div>
 
@@ -1800,7 +1800,7 @@
 								{/if}
 							</div>
 							<div class="queue-side">
-								<span class="queue-time">{formatDuration(item.track.duration_ms)}</span>
+								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
 									<button
 										class="queue-action icon"
@@ -2070,8 +2070,8 @@
 		line-height: 1;
 	}
 	.video-panel-queue-clear:hover {
-		color: var(--text);
-		background: var(--surface-hover, rgba(255, 255, 255, 0.07));
+		color: var(--text-primary);
+		background: var(--bg-hover);
 	}
 
 	.video-panel-list {
@@ -2361,7 +2361,7 @@
 		border-radius: 8px;
 		display: grid;
 		place-items: center;
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		color: #fff;
 		background: rgba(0, 0, 0, 0.45);
 		border: 1px solid rgba(255, 255, 255, 0.18);
@@ -2391,7 +2391,7 @@
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
-		font-size: 18px;
+		font-size: var(--font-size-lg);
 		line-height: 1;
 		color: rgba(255, 255, 255, 0.92);
 		background: rgba(0, 0, 0, 0.45);
@@ -2652,7 +2652,7 @@
 	}
 
 	.tp-like-btn {
-		font-size: 18px;
+		font-size: var(--font-size-lg);
 		color: var(--text-secondary);
 		transition:
 			transform var(--motion-fast),
@@ -2701,7 +2701,7 @@
 		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
 		color: var(--text-primary);
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		flex-shrink: 0;
 		cursor: pointer;
 		transition: background var(--motion-fast), border-color var(--motion-fast);
@@ -3353,9 +3353,9 @@
 	}
 
 	.queue-action.icon.remove:hover {
-		background: color-mix(in srgb, var(--danger, #f87171) 22%, transparent);
-		border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent);
-		color: var(--danger, #f87171);
+		background: color-mix(in srgb, var(--state-error) 22%, transparent);
+		border-color: color-mix(in srgb, var(--state-error) 55%, transparent);
+		color: var(--state-error);
 	}
 
 	.queue-empty {
@@ -3577,7 +3577,7 @@
 			background: none;
 			border: none;
 			color: var(--text-primary);
-			font-size: 18px;
+			font-size: var(--font-size-lg);
 			cursor: pointer;
 			-webkit-tap-highlight-color: transparent;
 		}
@@ -4007,7 +4007,7 @@
 	.connect-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 9999;
+		z-index: var(--z-tooltip);
 		background: var(--bg-base, #0d0d12);
 		display: flex;
 		align-items: center;

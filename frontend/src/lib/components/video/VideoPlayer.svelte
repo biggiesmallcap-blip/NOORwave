@@ -416,11 +416,11 @@
 	></video>
 
 	{#if loading && !error && !unsupported}
-		<div class="status">Loading video…</div>
+		<div class="status" role="status" aria-live="polite">Loading video…</div>
 	{/if}
 
 	{#if error}
-		<div class="status error">{error}</div>
+		<div class="status error" role="alert">{error}</div>
 	{/if}
 
 	<div class="top-meta">

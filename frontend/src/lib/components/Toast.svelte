@@ -27,7 +27,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-		z-index: 1200;
+		z-index: var(--z-toast);
 		pointer-events: none;
 	}
 	.toast {

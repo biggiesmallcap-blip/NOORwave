@@ -183,7 +183,7 @@
 		/>
 
 		{#if errorMsg}
-			<p class="error">{errorMsg}</p>
+			<p class="error" role="alert">{errorMsg}</p>
 		{/if}
 
 		<div class="actions">
@@ -226,7 +226,7 @@
 						there, then come back and click below.
 					</p>
 					{#if scrobbleError}
-						<p class="error">{scrobbleError}</p>
+						<p class="error" role="alert">{scrobbleError}</p>
 					{/if}
 					<div class="actions">
 						<button class="btn btn-primary" onclick={completeScrobbleAuth}>I've authorized</button>
@@ -243,7 +243,7 @@
 					<p class="muted">Starting Last.fm auth…</p>
 				{:else}
 					{#if scrobbleError}
-						<p class="error">{scrobbleError}</p>
+						<p class="error" role="alert">{scrobbleError}</p>
 					{/if}
 					<div class="actions">
 						<button class="btn btn-primary" onclick={startScrobbleAuth}>
@@ -268,7 +268,7 @@
 	}
 	.variant-onboarding h2 {
 		margin: 0 0 4px;
-		font-size: 22px;
+		font-size: var(--font-size-xl);
 		font-weight: 600;
 		letter-spacing: -0.01em;
 	}

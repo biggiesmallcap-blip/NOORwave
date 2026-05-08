@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import {
 		buildTrackMenu,
@@ -180,7 +180,7 @@
 				onclick={handleHeart}
 			>{track.is_favorite ? '♥' : '♡'}</button>
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 	</li>
 {:else if variant === 'indexed'}
 	<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
@@ -266,7 +266,7 @@
 				onclick={handleHeart}
 			>{track.is_favorite ? '♥' : '♡'}</button>
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 	</li>
 {:else if variant === 'art'}
 	<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
@@ -299,7 +299,7 @@
 				{#if showAlbum && track.album_title}{track.album_title}{/if}
 			</p>
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 		<div class="cell-actions">
 			<button
 				class="row-btn"
@@ -356,7 +356,7 @@
 				<span class="sub">{track.artist_name}</span>
 			{/if}
 		</div>
-		<span class="cell-duration">{formatDuration(track.duration_ms)}</span>
+		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
 	</li>
 {/if}
 
@@ -488,7 +488,7 @@
 		justify-content: center;
 	}
 	.cell-art-thumb.placeholder span {
-		font-size: 16px;
+		font-size: var(--font-size-md);
 		color: rgba(255, 255, 255, 0.5);
 	}
 

@@ -199,7 +199,7 @@
 					</button>
 				</div>
 				{#if audioApplyError}
-					<p class="error">{audioApplyError}</p>
+					<p class="error" role="alert">{audioApplyError}</p>
 				{/if}
 			</div>
 		{:else if step === 4}
@@ -214,7 +214,7 @@
 					<p class="warn">{syncErrorMessage}</p>
 				{/if}
 				{#if completeError}
-					<p class="error">{completeError}</p>
+					<p class="error" role="alert">{completeError}</p>
 					<div class="actions">
 						<button class="btn btn-primary" onclick={finish} disabled={completing}>Try again</button>
 						<button class="link" onclick={continueAnyway}>Continue anyway</button>
@@ -340,7 +340,7 @@
 	}
 	.footnote {
 		margin: 0;
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: #8b93a7;
 	}
 	.warn { color: #d6b06a; }
@@ -379,7 +379,7 @@
 	}
 	.audio-choice-title {
 		font-weight: 600;
-		font-size: 14px;
+		font-size: var(--font-size-sm);
 		display: flex;
 		align-items: center;
 		gap: 8px;

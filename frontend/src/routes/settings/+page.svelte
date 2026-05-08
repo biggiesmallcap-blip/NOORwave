@@ -1468,7 +1468,7 @@
 				<SectionHeader eyebrow="Metadata" title="Last.fm tags" subtitle="Crowd tags from a local API key." />
 
 				{#if lastfmError}
-					<p class="page-copy" style="color: var(--color-error, #f87171)">{lastfmError}</p>
+					<p class="page-copy" style="color: var(--state-error)">{lastfmError}</p>
 				{/if}
 
 				{#if !lastfmConfigured}
@@ -2901,7 +2901,7 @@
 		font-weight: normal;
 	}
 	.sync-error {
-		color: var(--danger, #ff6b6b);
+		color: var(--state-error);
 		font-weight: 500;
 		word-break: break-word;
 	}

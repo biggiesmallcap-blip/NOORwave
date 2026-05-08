@@ -68,11 +68,11 @@
 
 <div class="page">
 	{#if loading}
-		<p class="status">Loading from TIDAL…</p>
+		<p class="status" role="status" aria-live="polite">Loading from TIDAL…</p>
 	{:else if error}
 		<p class="status error">{error}</p>
 	{:else if !header()}
-		<p class="status">Album not found.</p>
+		<p class="status" role="status" aria-live="polite">Album not found.</p>
 	{:else}
 		{@const h = header()!}
 
@@ -155,7 +155,7 @@
 		text-align: center;
 		color: var(--text-secondary);
 	}
-	.status.error { color: var(--danger, #f87171); }
+	.status.error { color: var(--state-error); }
 
 	.hero {
 		position: relative;

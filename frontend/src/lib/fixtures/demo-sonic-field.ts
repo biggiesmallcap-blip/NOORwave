@@ -4,6 +4,7 @@
  */
 
 import type { SonicView, SonicTrack } from '$lib/api/client';
+import { clamp } from '$lib/utils/math';
 
 export type SonicProfile = 'club' | 'eclectic' | 'chill' | 'aggressive';
 
@@ -62,10 +63,6 @@ function gaussian(rand: () => number, mu: number, sigma: number): number {
 	const v = rand();
 	const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 	return mu + z * sigma;
-}
-
-function clamp(x: number, lo: number, hi: number): number {
-	return Math.max(lo, Math.min(hi, x));
 }
 
 const ARTISTS = [

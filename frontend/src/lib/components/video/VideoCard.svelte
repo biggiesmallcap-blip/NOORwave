@@ -2,7 +2,7 @@
 	import type { TidalSearchVideo, TidalVideoMix, TidalVideoMixItem } from '$lib/api/client';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 	import { buildVideoMenu, buildVideoMixMenu, isVideoMix } from '$lib/player/video_menu';
 
 	type VideoLike = TidalSearchVideo | TidalVideoMix | TidalVideoMixItem;
@@ -15,7 +15,7 @@
 	let subtitle = $derived(
 		isVideoMix(video) ? (video.description ?? 'Video mix') : (video.artist_name ?? 'TIDAL video')
 	);
-	let duration = $derived(!isVideoMix(video) && video.duration_ms ? formatDuration(video.duration_ms) : null);
+	let duration = $derived(!isVideoMix(video) && video.duration_ms ? formatTrackDuration(video.duration_ms) : null);
 
 	function select() {
 		onSelect?.(video);

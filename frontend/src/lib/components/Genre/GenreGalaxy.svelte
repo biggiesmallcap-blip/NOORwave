@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { innerWidth } from 'svelte/reactivity/window';
+	import { clamp } from '$lib/utils/math';
 	import {
 		GALAXY_DEFAULT_SCALE,
 		type Camera,
@@ -150,10 +151,6 @@
 	const MAX_PARTICLES = 120;
 	const fontBody = '600 12px "Avenir Next", "Segoe UI", sans-serif';
 	const fontDisplay = '600 13px "Iowan Old Style", Georgia, serif';
-
-	function clamp(value: number, min: number, max: number): number {
-		return Math.min(max, Math.max(min, value));
-	}
 
 	function hexToRgba(hex: string, alpha: number): string {
 		const normalized = hex.replace('#', '');

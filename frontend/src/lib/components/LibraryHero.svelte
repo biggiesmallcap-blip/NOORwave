@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
+  import { letterColor } from '$lib/utils/color';
 
   interface Artist {
     id: number;
@@ -24,13 +25,6 @@
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const current = $derived(artists[currentIndex] ?? artists[0]);
-
-  function letterColor(name: string): string {
-    const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-    return colors[Math.abs(h) % colors.length];
-  }
 
   function initials(name: string): string {
     return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
@@ -133,7 +127,7 @@
     position: relative;
     border-radius: 12px;
     overflow: hidden;
-    background: var(--bg-glass, rgba(255,255,255,0.04));
+    background: var(--panel-bg);
     border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
     min-height: 200px;
   }
@@ -219,7 +213,7 @@
   }
 
   .hero-sub {
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     color: var(--text-secondary, rgba(255,255,255,0.55));
     margin: 2px 0 8px;
   }
@@ -237,7 +231,7 @@
     gap: 7px;
     padding: 10px 22px;
     border-radius: 24px;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     font-weight: 600;
   }
 
@@ -252,7 +246,7 @@
     background: rgba(0,0,0,0.5);
     border: 1px solid rgba(255,255,255,0.15);
     color: rgba(255,255,255,0.85);
-    font-size: 22px;
+    font-size: var(--font-size-xl);
     line-height: 1;
     cursor: pointer;
     display: flex;

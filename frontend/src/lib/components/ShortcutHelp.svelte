@@ -124,7 +124,7 @@
 	.shortcut-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 1800;
+		z-index: var(--z-modal);
 		display: flex;
 		align-items: flex-end;
 		justify-content: center;

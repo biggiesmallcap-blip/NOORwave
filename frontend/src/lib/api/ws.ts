@@ -68,7 +68,6 @@ export function connectWebSocket() {
 
 	socket.onopen = () => {
 		wsConnected.set(true);
-		console.log('WebSocket connected');
 	};
 
 	socket.onmessage = (event) => {

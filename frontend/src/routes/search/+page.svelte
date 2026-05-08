@@ -9,7 +9,7 @@
   import { buildArtistMenu } from '$lib/player/artist_menu'
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
-  import { formatDuration } from '$lib/stores/library'
+  import { formatTrackDuration } from '$lib/utils/format'
   import { parseQuery, filtersToChips, type ParsedQuery } from '$lib/search/query_parser'
   import { buildAudioParams as sharedBuildAudioParams } from '$lib/search/audio_params'
   import { parseIntent } from '$lib/search/intent'
@@ -924,7 +924,7 @@
                   {#if track.album_title}{track.album_title}{/if}
                 </p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
               <div class="row-actions">
                 <button
                   class="row-btn"
@@ -1261,7 +1261,7 @@
                     —
                   {/if}
                 </span>
-                <span class="col-duration">{formatDuration(track.duration_ms)}</span>
+                <span class="col-duration">{formatTrackDuration(track.duration_ms)}</span>
                 <span class="col-actions">
                   <button
                     class="row-btn"
@@ -1343,7 +1343,7 @@
                   {/if}
                 </p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
               <div class="row-actions">
                 <button
                   class="row-btn"
@@ -1404,7 +1404,7 @@
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">{track.artist_name ?? ''}{track.bpm ? ` · ${Math.round(track.bpm)} bpm` : ''}{track.camelot_key ? ` · ${track.camelot_key}` : ''}</p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
             </li>
           {/each}
         </ul>
@@ -1436,7 +1436,7 @@
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">{track.artist_name ?? ''}{track.album_title ? ` · ${track.album_title}` : ''}</p>
               </div>
-              <span class="track-duration">{formatDuration(track.duration_ms)}</span>
+              <span class="track-duration">{formatTrackDuration(track.duration_ms)}</span>
             </li>
           {/each}
         </ul>
@@ -1556,7 +1556,7 @@
     color: var(--text-secondary);
     border-radius: 14px;
     padding: 4px 12px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     cursor: pointer;
     font-family: inherit;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -1567,7 +1567,7 @@
     color: var(--text-primary);
   }
   .chip-x {
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     line-height: 1;
     color: var(--text-tertiary);
     margin-left: 2px;
@@ -1590,7 +1590,7 @@
     color: var(--text-secondary);
     border-radius: 14px;
     padding: 5px 14px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     cursor: pointer;
     font-family: inherit;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -1624,7 +1624,7 @@
   }
   .search-hint {
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     margin-top: 64px;
     text-align: center;
   }
@@ -1657,7 +1657,7 @@
     border: 1px solid var(--border-subtle);
     border-radius: 14px;
     padding: 6px 14px;
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-secondary);
     cursor: pointer;
     font-family: inherit;
@@ -1740,7 +1740,7 @@
     letter-spacing: -0.02em;
   }
   .top-sub {
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     color: var(--text-secondary);
     margin: 0;
   }
@@ -1852,7 +1852,7 @@
   }
   .artist-avatar.fallback span {
     font-family: var(--font-body, inherit);
-    font-size: 22px;
+    font-size: var(--font-size-xl);
     font-weight: 600;
     color: rgba(255, 255, 255, 0.78);
     letter-spacing: 0.02em;
@@ -1891,7 +1891,7 @@
     border-radius: 50%;
     background: var(--accent);
     color: #fff;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     border: none;
     cursor: pointer;
     opacity: 0;
@@ -1927,7 +1927,7 @@
   }
   .album-card:hover .album-art { opacity: 0.85; }
   .album-title {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1985,7 +1985,7 @@
     justify-content: center;
   }
   .track-art.fallback span {
-    font-size: 16px;
+    font-size: var(--font-size-md);
     color: rgba(255, 255, 255, 0.5);
   }
   .track-title {
@@ -2007,7 +2007,7 @@
   .subtitle-link { color: inherit; text-decoration: none; }
   .subtitle-link:hover { color: var(--text-primary); text-decoration: underline; }
   .track-duration {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -2016,7 +2016,7 @@
     border: none;
     color: var(--text-tertiary);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     padding: 4px;
     border-radius: 4px;
     opacity: 0;
@@ -2120,7 +2120,7 @@
     position: relative;
     text-align: center;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
   }
   .search-track-row .track-num-label { display: inline; }
@@ -2129,7 +2129,7 @@
     background: none;
     border: none;
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     cursor: pointer;
     padding: 0;
   }
@@ -2153,7 +2153,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     color: rgba(255,255,255,0.5);
   }
   .search-track-row .row-title-text {
@@ -2182,7 +2182,7 @@
   }
   .search-track-row .col-duration {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
@@ -2201,7 +2201,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     padding: 16px 0;
   }
   .infinite-spinner { font-style: italic; }

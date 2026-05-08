@@ -84,9 +84,20 @@ For grids, anchor the card width (and label widths) to the same custom property 
 
 Small inline thumbnails (track rows, video lists) stay near-fixed: `clamp(2rem, 3vw, 2.5rem)` so they don't shrink to absurdity in narrow lists.
 
-## Z-index scale (planned)
+## Z-index scale
 
-The codebase currently has ~52 raw `z-index: NNN` values from 0 to 9999 with no shared scale. **Do not add new raw z-indexes.** When the `--z-base / --z-raised / --z-overlay / --z-modal / --z-toast / --z-tooltip` scale lands (Phase 2), use those tokens.
+| Token | Value | Use for |
+| --- | --- | --- |
+| `--z-base` | 1 | In-flow stacking (e.g. a hero z-1 element) |
+| `--z-raised` | 10 | Sticky-within-panel headers, hover lifts |
+| `--z-overlay` | 100 | Dropdowns, popovers, hover cards |
+| `--z-modal` | 1000 | Modal dialogs (confirm prompts, settings sheets) |
+| `--z-toast` | 2000 | Toasts, command palette |
+| `--z-tooltip` | 3000 | Tooltips (must overlap modals) |
+
+**Don't add new raw `z-index: NNN` values.** Use the tokens above. When two elements within the same layer need explicit ordering, use `calc(var(--z-modal) + 1)` instead of escalating to a higher layer.
+
+Existing raw `z-index` values from before the scale was introduced have been migrated for the highest-impact sites (toasts, command palette, context menu, modals, tooltips). Lower-z values within panels (z 1–80) are left raw because they represent within-panel stacking that doesn't need to participate in the global scale.
 
 ## Linting
 

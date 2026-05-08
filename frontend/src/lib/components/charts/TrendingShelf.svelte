@@ -135,7 +135,6 @@
 		// lands avoids the flash-to-empty-state and the resulting grid reflow.
 		loading = true;
 		error = false;
-		console.debug('[trending] fetching', { mode, country, genre, token });
 		try {
 			let data: { tracks: ChartEntry[] | null };
 			if (mode === 'tidal') {
@@ -148,7 +147,6 @@
 				data = await api.getTrending({ source: 'lastfm', limit });
 			}
 			const next = data.tracks ?? [];
-			console.debug('[trending] loaded', { token, count: next.length });
 			tracks = next;
 			// Only cache non-empty payloads so a transient 5xx returning [] doesn't
 			// poison the cache for 6h.
@@ -344,11 +342,11 @@
 		transition: background 0.15s ease, color 0.15s ease;
 	}
 
-	.chip:hover { color: var(--text, #fff); }
+	.chip:hover { color: var(--text-primary); }
 
 	.chip.active {
 		background: rgba(255, 255, 255, 0.12);
-		color: var(--text, #fff);
+		color: var(--text-primary);
 	}
 
 	.chip-row {

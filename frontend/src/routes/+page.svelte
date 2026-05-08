@@ -122,13 +122,6 @@
 		});
 	}
 
-	function formatDuration(ms: number | null): string {
-		if (!ms) return '';
-		const minutes = Math.floor(ms / 60000);
-		const seconds = Math.floor((ms % 60000) / 1000);
-		return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-	}
-
 	function getSourceColor(source: string): string {
 		const colors: Record<string, string> = {
 			'AllMusic': 'var(--accent)',
@@ -404,11 +397,11 @@
 		transition: background 0.15s ease, color 0.15s ease;
 	}
 	.chip:hover {
-		color: var(--text, #fff);
+		color: var(--text-primary);
 	}
 	.chip.active {
 		background: rgba(255, 255, 255, 0.12);
-		color: var(--text, #fff);
+		color: var(--text-primary);
 	}
 
 	/* Horizontal scroll */

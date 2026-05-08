@@ -1,6 +1,7 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+  import { letterColor } from '$lib/utils/color';
 
   interface ArtistCard {
     id: number;
@@ -17,19 +18,13 @@
   let failedImages = $state(new Set<number>());
   let lazyArt = $state<Record<number, string>>({});
 
-  function letterColor(name: string): string {
-    const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-    return colors[Math.abs(h) % colors.length];
-  }
-
   function initials(name: string): string {
     return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
   }
 </script>
 
 {#if artists.length > 0}
+  <div class="artist-carousel">
   <div class="artists-row" use:wheelToHorizontal>
     {#each artists as artist (artist.id)}
       {@const baseSrc = artist.photo_url && !failedImages.has(artist.id) ? artist.photo_url : null}
@@ -63,9 +58,32 @@
       </button>
     {/each}
   </div>
+  </div>
 {/if}
 
 <style>
+  .artist-carousel {
+    /* Outer wrapper is the container; inner row stays as the overflow-x rail.
+       See AlbumCarousel for the rationale. */
+    container-type: inline-size;
+    --artist-card-w:   clamp(76px, 7.5vw, 104px);
+    --artist-avatar-w: clamp(64px, 6.4vw, 92px);
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+  }
+
   .artists-row {
     display: flex;
     gap: 16px;
@@ -75,14 +93,6 @@
   }
 
   .artists-row::-webkit-scrollbar { display: none; }
-
-  .artists-row {
-    /* Card width scales with viewport AND adapts to parent container size.
-       In a narrow sidebar context, the @container rule below tightens. */
-    container-type: inline-size;
-    --artist-card-w:   clamp(76px, 7.5vw, 104px);
-    --artist-avatar-w: clamp(64px, 6.4vw, 92px);
-  }
 
   @container (max-width: 480px) {
     .artist-card {
@@ -126,7 +136,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 22px;
+    font-size: var(--font-size-xl);
     font-weight: 700;
     color: rgba(255,255,255,0.85);
   }

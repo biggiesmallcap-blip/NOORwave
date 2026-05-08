@@ -1,6 +1,7 @@
 <script lang="ts">
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
+  import { letterColor } from '$lib/utils/color';
 
   interface AlbumCard {
     id: number;
@@ -17,15 +18,10 @@
 
   let lazyArt = $state<Record<number, string>>({});
 
-  function letterColor(name: string): string {
-    const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#9b5de5','#00b4d8'];
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-    return colors[Math.abs(h) % colors.length];
-  }
 </script>
 
 {#if albums.length > 0}
+  <div class="album-carousel">
   <div class="albums-row" use:wheelToHorizontal>
     {#each albums as album (album.id)}
       {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
@@ -61,9 +57,34 @@
       </button>
     {/each}
   </div>
+  </div>
 {/if}
 
 <style>
+  .album-carousel {
+    /* Outer wrapper holds the container so the inner overflow-x:auto rail
+       isn't itself the container (which has subtle browser quirks). Card
+       width adapts to this wrapper's inline-size via the @container rule. */
+    container-type: inline-size;
+    --album-card-w: clamp(112px, 11vw, 156px);
+    /* Edge fade hints at horizontally-scrollable content. mask-image works
+       on Chrome/Safari/Firefox; -webkit- prefix kept for older WebKit. */
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 32px),
+      transparent 100%
+    );
+  }
+
   .albums-row {
     display: flex;
     gap: 16px;
@@ -73,15 +94,6 @@
   }
 
   .albums-row::-webkit-scrollbar { display: none; }
-
-  .albums-row {
-    /* Card width scales with viewport AND adapts to the parent container size.
-       In a wide hero context, cards stay at the viewport-clamped size; in a
-       narrow sidebar context, the @container rule below switches to a tighter
-       cqw-based scale. Artwork and labels share the same value via this var. */
-    container-type: inline-size;
-    --album-card-w: clamp(112px, 11vw, 156px);
-  }
 
   @container (max-width: 480px) {
     .album-card { --album-card-w: clamp(80px, 22cqw, 110px); }
@@ -125,7 +137,7 @@
     justify-content: center;
     font-size: var(--font-size-3xl);
     color: rgba(255,255,255,0.5);
-    background: var(--bg-surface);
+    background: var(--bg-hover);
   }
 
   .art-play-overlay {
@@ -147,7 +159,7 @@
   .album-card:hover .art-play-overlay { opacity: 1; }
 
   .album-title {
-    font-size: 12px;
+    font-size: var(--font-size-xs);
     font-weight: 500;
     color: var(--text-primary, #fff);
     width: var(--album-card-w);

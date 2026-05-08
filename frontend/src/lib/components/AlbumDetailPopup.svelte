@@ -3,7 +3,7 @@
 	import { currentTrack, playTrackNow, playAlbum, shuffleAlbum } from '$lib/stores/player';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { formatDuration } from '$lib/stores/library';
+	import { formatTrackDuration } from '$lib/utils/format';
 
 	let { album, tracks, loading, onClose }: {
 		album: Album;
@@ -84,7 +84,7 @@
 						<span class="popup-track-num">{i + 1}</span>
 						<span class="popup-track-title">{track.title}</span>
 						<span class="popup-track-artist">{track.artist_name ?? ''}</span>
-						<span class="popup-track-duration">{formatDuration(track.duration_ms)}</span>
+						<span class="popup-track-duration">{formatTrackDuration(track.duration_ms)}</span>
 						<button
 							class="popup-track-menu"
 							aria-label="Track actions"

@@ -108,7 +108,7 @@
 	}
 
 	.prefix {
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		line-height: 1.4;
 		color: #c8c8dc;
 		word-break: break-word;

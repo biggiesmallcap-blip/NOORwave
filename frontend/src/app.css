@@ -164,6 +164,18 @@
 	--motion-base: 210ms cubic-bezier(0.25, 0.8, 0.25, 1);
 	--motion-slow: 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
 
+	/* Z-index scale — use these tokens at component call sites instead of raw
+	   integers. Layers compose hierarchically: base < raised < overlay < modal
+	   < toast < tooltip. Rule of thumb: tooltips must overlap modals, toasts
+	   must overlap modals (so they remain readable when a modal opens), modals
+	   are above any in-flow content. */
+	--z-base:    1;     /* in-flow stacking (e.g. a hero z-1 element)        */
+	--z-raised:  10;    /* sticky-within-panel, hover lifts                  */
+	--z-overlay: 100;   /* dropdowns, popovers, hover cards                  */
+	--z-modal:   1000;  /* modal dialogs (confirm prompts, settings sheets)  */
+	--z-toast:   2000;  /* toasts, command palette, top-of-stack panels      */
+	--z-tooltip: 3000;  /* tooltips (must overlap modals)                    */
+
 	--font-body:    'Manrope', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
 	--font-display: 'Newsreader', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
 	--font-mono:    'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;

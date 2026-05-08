@@ -16,6 +16,7 @@ import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive
 import { showToast, dismissToast } from '$lib/stores/toast';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
+import { clamp01 } from '$lib/utils/math';
 
 function trackLabel(track: { title?: string | null; artist_name?: string | null }): string {
 	const t = (track.title ?? '').trim();
@@ -327,7 +328,7 @@ export async function playNextTrack() {
 export async function setPlayerVolume(nextVolume: number) {
 	playerError.set(null);
 	try {
-		const clamped = Math.max(0, Math.min(1, nextVolume));
+		const clamped = clamp01(nextVolume);
 		const result = await api.setPlaybackVolume(clamped);
 		// Only sync volume — applying full state would overwrite the local position
 		// ticker with a slightly stale server value, causing the displayed time to jump.

@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
 	import { api, type Track, type TidalDiscographyAlbum, type TidalDiscographyTrack, type TidalArtistVideo, type TidalSimilarArtist, type TidalArtistBio, type SpotifyArtistStats, type TidalPlayable } from '$lib/api/client';
+	import { letterColor } from '$lib/utils/color';
 	import {
 		playArtist,
 		shuffleArtist,
@@ -237,13 +238,6 @@
 			artist_tidal_id: artist?.tidal_id ?? null,
 			album_tidal_id: t.album_tidal_id ?? null,
 		};
-	}
-
-	function letterColor(name: string): string {
-		const colors = ['#e63946', '#457b9d', '#2a9d8f', '#e9c46a', '#f4a261', '#9b5de5', '#00b4d8'];
-		let h = 0;
-		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
-		return colors[Math.abs(h) % colors.length];
 	}
 
 	function artistInitials(name: string): string {
@@ -1366,7 +1360,7 @@
 		justify-content: center;
 		background: rgba(0, 0, 0, 0.45);
 		color: #fff;
-		font-size: 22px;
+		font-size: var(--font-size-xl);
 		border: none;
 		cursor: pointer;
 		border-radius: 6px;
@@ -1493,7 +1487,7 @@
 		justify-content: center;
 		background: rgba(255, 255, 255, 0.06);
 		color: rgba(255, 255, 255, 0.45);
-		font-size: 18px;
+		font-size: var(--font-size-lg);
 	}
 	.tidal-row-meta {
 		min-width: 0;

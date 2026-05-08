@@ -238,12 +238,12 @@
   }
   .grid-card:hover .grid-art { opacity: 0.85; }
   .grid-title {
-    font-size: 12px; color: var(--text-primary); margin: 0;
+    font-size: var(--font-size-xs); color: var(--text-primary); margin: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .grid-sub {
     font-size: 11px; color: var(--text-muted); margin: 2px 0 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .empty { color: var(--text-muted); font-size: 14px; margin-top: 32px; }
+  .empty { color: var(--text-muted); font-size: var(--font-size-sm); margin-top: 32px; }
 </style>

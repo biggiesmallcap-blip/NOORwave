@@ -144,7 +144,7 @@
 <style>
 	.context-menu {
 		position: fixed;
-		z-index: 1700;
+		z-index: var(--z-modal);
 		min-width: 220px;
 		max-width: 280px;
 		padding: 6px;
@@ -221,11 +221,11 @@
 	}
 
 	.context-menu-item.danger {
-		color: var(--danger, #f87171);
+		color: var(--state-error);
 	}
 
 	.context-menu-item.danger:hover {
-		background: color-mix(in srgb, var(--danger, #f87171) 16%, transparent);
+		background: color-mix(in srgb, var(--state-error) 16%, transparent);
 	}
 
 	.context-menu-icon {

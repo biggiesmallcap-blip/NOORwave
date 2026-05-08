@@ -1,4 +1,10 @@
 {
+	"overrides": [
+		{
+			"files": ["**/*.svelte"],
+			"customSyntax": "postcss-html"
+		}
+	],
 	"rules": {
 		"declaration-property-value-disallowed-list": [
 			{

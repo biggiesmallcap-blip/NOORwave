@@ -13,6 +13,7 @@ import {
 	formatBpm,
 	formatCount,
 	formatDate,
+	formatDateShort,
 	formatDelta,
 	formatDr,
 	formatDuration,
@@ -21,6 +22,8 @@ import {
 	formatMultiplier,
 	formatPercent,
 	formatTilt,
+	formatTrackDuration,
+	getQualityClass,
 } from './format';
 
 const EMPTY = '--';
@@ -210,5 +213,84 @@ describe('identical-output across call sites', () => {
 		const kpi = formatDuration(ms);
 		const cohort = formatDuration(ms);
 		expect(kpi).toBe(cohort);
+	});
+});
+
+// ─── Track duration (M:SS, used in track rows / now-playing) ─────────────────
+
+describe('formatTrackDuration', () => {
+	test('returns "--:--" sentinel for null/undefined/NaN/0', () => {
+		expect(formatTrackDuration(null)).toBe('--:--');
+		expect(formatTrackDuration(undefined)).toBe('--:--');
+		expect(formatTrackDuration(Number.NaN)).toBe('--:--');
+		expect(formatTrackDuration(0)).toBe('--:--');
+	});
+	test('renders M:SS', () => {
+		expect(formatTrackDuration(45_000)).toBe('0:45');
+		expect(formatTrackDuration(225_000)).toBe('3:45');
+		expect(formatTrackDuration(7 * 60_000)).toBe('7:00');
+	});
+	test('zero-pads seconds', () => {
+		expect(formatTrackDuration(60_000)).toBe('1:00');
+		expect(formatTrackDuration(65_000)).toBe('1:05');
+	});
+	test('does not roll into hours — minutes count above 60 still render', () => {
+		expect(formatTrackDuration(72 * 60_000 + 7_000)).toBe('72:07');
+	});
+});
+
+// ─── formatDateShort (relative-date for track / album metadata) ──────────────
+
+describe('formatDateShort', () => {
+	test('returns em-dash for null', () => {
+		expect(formatDateShort(null)).toBe('—');
+	});
+	test('Today / Yesterday', () => {
+		const now = new Date();
+		expect(formatDateShort(now.toISOString())).toBe('Today');
+		const yesterday = new Date(now);
+		yesterday.setDate(yesterday.getDate() - 1);
+		expect(formatDateShort(yesterday.toISOString())).toBe('Yesterday');
+	});
+	test('within a week → "Nd ago"', () => {
+		const past = new Date();
+		past.setDate(past.getDate() - 3);
+		expect(formatDateShort(past.toISOString())).toBe('3d ago');
+	});
+	test('within a month → "Nw ago"', () => {
+		const past = new Date();
+		past.setDate(past.getDate() - 14);
+		expect(formatDateShort(past.toISOString())).toBe('2w ago');
+	});
+	test('within a year → "Nmo ago"', () => {
+		const past = new Date();
+		past.setDate(past.getDate() - 90);
+		expect(formatDateShort(past.toISOString())).toBe('3mo ago');
+	});
+	test('older than a year → locale date', () => {
+		// A clearly-old date ensures we land in the locale-date branch regardless of test-run time.
+		const result = formatDateShort('2020-01-15T00:00:00.000Z');
+		expect(result).toMatch(/\b2020\b/);
+		expect(result).toMatch(/Jan/);
+	});
+});
+
+// ─── getQualityClass (TIDAL audio-quality → CSS class) ───────────────────────
+
+describe('getQualityClass', () => {
+	test('null → lossy', () => {
+		expect(getQualityClass(null)).toBe('lossy');
+	});
+	test('HI_RES variants → hires', () => {
+		expect(getQualityClass('HI_RES')).toBe('hires');
+		expect(getQualityClass('HI_RES_LOSSLESS')).toBe('hires');
+	});
+	test('LOSSLESS → lossless', () => {
+		expect(getQualityClass('LOSSLESS')).toBe('lossless');
+	});
+	test('HIGH / LOW / unknown → lossy', () => {
+		expect(getQualityClass('HIGH')).toBe('lossy');
+		expect(getQualityClass('LOW')).toBe('lossy');
+		expect(getQualityClass('UNKNOWN')).toBe('lossy');
 	});
 });
