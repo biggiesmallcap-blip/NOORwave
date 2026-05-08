@@ -29,20 +29,20 @@
 					"inherit"
 				],
 				"font-size": [
-					"/var\\(--font-size-(2xs|xs|sm|md|lg|xl|2xl|3xl|4xl)\\)/",
+					"/var\\(--font-size-(2xs|xs|sm|md|lg|xl|2xl|3xl|4xl)(\\s*,[^)]*)?\\)/",
 					"inherit"
 				],
 				"font-family": [
-					"/var\\(--font-(display|body|mono)\\)/",
+					"/var\\(--font-(display|body|mono)(\\s*,[^)]*)?\\)/",
 					"inherit"
 				],
 				"font-weight": [
-					"/var\\(--font-weight-(medium|semibold|bold)\\)/",
+					"/var\\(--font-weight-(medium|semibold|bold)(\\s*,[^)]*)?\\)/",
 					"400", "800",
 					"normal", "bold", "inherit"
 				],
 				"line-height": [
-					"/var\\(--line-height-(tight|snug|normal|loose)\\)/",
+					"/var\\(--line-height-(tight|snug|normal|loose)(\\s*,[^)]*)?\\)/",
 					"inherit", "normal", "1", "0"
 				]
 			},
