@@ -173,7 +173,9 @@
 		return count;
 	}
 
-	function formatDuration(seconds: number | null | undefined): string {
+	// Seconds-variant (NOT milliseconds). Renamed from `formatDuration` so it can't be
+	// silently switched with the canonical ms-based `formatDuration` in $lib/utils/format.
+	function formatDurationSeconds(seconds: number | null | undefined): string {
 		if (seconds === null || seconds === undefined) return '—';
 		if (!isFinite(seconds) || seconds <= 0) return '—';
 		const total = Math.round(seconds);
@@ -203,7 +205,7 @@
 		const queue = lastfmIsRunning ? remainingInRun : lastfmRemaining;
 		return queue * LASTFM_FALLBACK_SECONDS_PER_TRACK;
 	});
-	let lastfmEtaLabel = $derived(formatDuration(lastfmEtaSeconds));
+	let lastfmEtaLabel = $derived(formatDurationSeconds(lastfmEtaSeconds));
 
 	onMount(() => {
 		const tick = setInterval(() => {
@@ -970,6 +972,7 @@
 	// avoiding WebGL context churn from per-tile mount/unmount cycles.
 	let previewShader = $state<string | null>(null);
 	let previewTileId = $state<string | null>(null);
+	let showExtendedShaders = $state(false);
 	let previewUnmountTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function onTileEnter(option: WallpaperOption) {
@@ -1232,7 +1235,7 @@
 				</div>
 
 				<div class="wallpaper-grid">
-					{#each WALLPAPERS as option (option.id)}
+					{#each WALLPAPERS.filter(o => !o.extended) as option (option.id)}
 						<button
 							type="button"
 							class="wallpaper-tile"
@@ -1257,6 +1260,41 @@
 						</button>
 					{/each}
 				</div>
+
+				<button
+					type="button"
+					class="wallpaper-more-btn"
+					onclick={() => { showExtendedShaders = !showExtendedShaders; }}
+					aria-expanded={showExtendedShaders}
+				>
+					<span class="wallpaper-more-icon" class:open={showExtendedShaders}>▸</span>
+					{showExtendedShaders ? 'Fewer shaders' : 'More shaders (11)'}
+				</button>
+
+				{#if showExtendedShaders}
+					<div class="wallpaper-grid wallpaper-grid-extended">
+						{#each WALLPAPERS.filter(o => o.extended) as option (option.id)}
+							<button
+								type="button"
+								class="wallpaper-tile wallpaper-tile-mono"
+								class:active={$wallpaper === option.id}
+								class:previewing={previewTileId === option.id}
+								onclick={() => setWallpaper(option.id)}
+								aria-pressed={$wallpaper === option.id}
+								onpointerenter={() => onTileEnter(option)}
+								onpointerleave={onTileLeave}
+							>
+								<div class="wallpaper-tile-swatch wallpaper-tile-swatch-mono"></div>
+								<div class="wallpaper-tile-label">
+									<strong>{option.label}</strong>
+									{#if $wallpaper === option.id}
+										<span class="wallpaper-active-badge">Active</span>
+									{/if}
+								</div>
+							</button>
+						{/each}
+					</div>
+				{/if}
 			</section>
 			{/if}
 
@@ -1640,11 +1678,11 @@
 						>
 							<div class="safety-headline">
 								{#if safety.recommendation === 'safe'}
-									Safe to run — about {formatDuration(safety.estimated_seconds)} expected.
+									Safe to run — about {formatDurationSeconds(safety.estimated_seconds)} expected.
 								{:else if safety.recommendation === 'moderate'}
-									Moderate cost — about {formatDuration(safety.estimated_seconds)} expected.
+									Moderate cost — about {formatDurationSeconds(safety.estimated_seconds)} expected.
 								{:else}
-									Heavy run — about {formatDuration(safety.estimated_seconds)} expected. Consider Medium or Low.
+									Heavy run — about {formatDurationSeconds(safety.estimated_seconds)} expected. Consider Medium or Low.
 								{/if}
 							</div>
 							<div class="safety-detail">
@@ -1653,14 +1691,14 @@
 								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
 								{#if safety.last_run_seconds !== null}
 									<span>·</span>
-									<span>last run {formatDuration(safety.last_run_seconds)}</span>
+									<span>last run {formatDurationSeconds(safety.last_run_seconds)}</span>
 								{/if}
 							</div>
 						</div>
 					{/if}
 					{#if discoveryIsRunning && discoveryEtaSeconds !== null}
 						<div class="eta-line">
-							Estimated time remaining: <strong>{formatDuration(discoveryEtaSeconds)}</strong>
+							Estimated time remaining: <strong>{formatDurationSeconds(discoveryEtaSeconds)}</strong>
 							{#if discoveryStatus?.latest_run?.progress !== undefined}
 								<span class="eta-progress">
 									({Math.round((discoveryStatus.latest_run.progress ?? 0) * 100)}% complete)
@@ -2507,6 +2545,43 @@
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
 		width: fit-content;
+	}
+
+	.wallpaper-tile-swatch-mono {
+		background: linear-gradient(160deg, #e8e8ea 0%, #1a1a1c 55%, #0a0a0b 100%);
+	}
+
+	.wallpaper-more-btn {
+		all: unset;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		cursor: pointer;
+		font-size: 0.76rem;
+		font-weight: 500;
+		color: var(--text-secondary, rgba(255,255,255,0.45));
+		padding: 5px 2px;
+		transition: color 140ms ease;
+		align-self: flex-start;
+	}
+
+	.wallpaper-more-btn:hover {
+		color: var(--text-primary, rgba(255,255,255,0.85));
+	}
+
+	.wallpaper-more-icon {
+		display: inline-block;
+		font-size: 0.65rem;
+		transition: transform 180ms ease;
+	}
+
+	.wallpaper-more-icon.open {
+		transform: rotate(90deg);
+	}
+
+	.wallpaper-grid-extended {
+		border-top: 1px solid rgba(255,255,255,0.05);
+		padding-top: 4px;
 	}
 
 	.section-panel {

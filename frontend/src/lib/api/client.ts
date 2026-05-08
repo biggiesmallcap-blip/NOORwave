@@ -100,6 +100,29 @@ export interface TidalDiscographyTrack {
 	artist_tidal_id?: number | null;
 }
 
+export interface TidalArtistVideo {
+	tidal_id: number;
+	title: string;
+	duration_ms: number;
+	artwork_url: string | null;
+	artist_name: string | null;
+	album_tidal_id?: number | null;
+}
+
+export interface TidalSimilarArtist {
+	tidal_id: number;
+	local_id: number | null;
+	name: string;
+	artwork_url: string | null;
+	in_library: boolean;
+}
+
+export interface TidalArtistBio {
+	summary: string | null;
+	text: string | null;
+	source: string | null;
+}
+
 export interface TidalSearchTrack {
 	tidal_id: number;
 	title: string;
@@ -716,6 +739,154 @@ export interface AnalyticsDashboard {
 	behavior: AnalyticsBehavior;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Analytics signals — GET /api/analytics/signals
+// Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+// JSON schema: noor-server/tests/fixtures/signals-schema.json
+// ─────────────────────────────────────────────────────────────────────────
+
+export type SignalsGranularity = 'day' | 'week' | 'month';
+
+export interface SignalsWindow {
+	days: number;
+	started_at: string;
+	previous_started_at: string;
+}
+
+export interface KpiPairInt {
+	current: number;
+	previous: number;
+}
+
+export interface KpiPairFloat {
+	current: number | null;
+	previous: number | null;
+}
+
+export interface DailyKpi {
+	day: string;
+	listens: number;
+	listened_ms: number;
+	completed: number;
+}
+
+export interface HeroStats {
+	peak_hour: number | null;
+	rhythm: number | null;
+	night_share: number | null;
+	morning_share: number | null;
+	longest_session_ms?: number | null;
+	distinct_tracks?: number | null;
+}
+
+export interface SessionsCoverage {
+	tracked: number;
+	untracked: number;
+}
+
+export interface SignalsKpis {
+	listened_ms: KpiPairInt;
+	sessions: KpiPairInt;
+	completion: KpiPairFloat;
+	skip_rate: KpiPairFloat;
+	daily: DailyKpi[];
+	hero_stats: HeroStats;
+	sessions_coverage: SessionsCoverage;
+}
+
+export interface BucketAxis {
+	min: number;
+	max: number;
+	step: number;
+}
+
+export interface BpmBucket {
+	bucket: number;
+	listens: number;
+}
+
+export interface TempoRow {
+	label: string;
+	granularity: SignalsGranularity;
+	buckets: BpmBucket[];
+}
+
+export interface TempoStats {
+	median: number | null;
+	mode: number | null;
+	sigma: number | null;
+}
+
+export interface Coverage {
+	analyzed: number;
+	total_listened: number;
+}
+
+export interface TempoView {
+	bucket_axis: BucketAxis;
+	rows: TempoRow[];
+	stats: TempoStats;
+	coverage: Coverage;
+	ridge_amp_max: number;
+}
+
+export interface SonicTrack {
+	track_id: number;
+	title: string;
+	artist_name: string | null;
+	album: string | null;
+	artwork_path: string | null;
+	file_path: string | null;
+	e: number;
+	d: number;
+	bpm: number;
+	listens: number;
+}
+
+export interface SonicView {
+	tracks: SonicTrack[];
+	total: number;
+	coverage: Coverage;
+}
+
+export interface RidgeRow {
+	date: string;
+	hourly: number[]; // length 24, zero-filled
+}
+
+export interface CohortRow {
+	key: 'new_this_month' | 'established' | 'deep_cuts';
+	label: string;
+	tracks: number;
+	listened_ms: number;
+	sessions: number;
+	completion: number | null;
+	skip_rate: number | null;
+	new_artists: number;
+	repeat_rate: number | null;
+}
+
+export interface AudioProfile {
+	dynamic_range_dr: number | null;
+	loudness_lufs: number | null;
+	bass_tilt: number | null;
+	treble_tilt: number | null;
+	coverage: Coverage;
+}
+
+export interface AnalyticsSignals {
+	window: SignalsWindow;
+	kpis: SignalsKpis;
+	tempo: TempoView;
+	sonic_field: SonicView;
+	ridgeline: RidgeRow[];
+	top_tracks: AnalyticsTopTrack[];
+	top_artists: AnalyticsTopArtist[];
+	top_genres: AnalyticsGenreShare[];
+	cohorts: CohortRow[];
+	audio_profile: AudioProfile;
+}
+
 export interface VibeTrack {
 	id: number;
 	title: string;
@@ -1236,7 +1407,11 @@ export const api = {
 	},
 
 	getAlbumTracks(id: number) {
-		return fetchApi<{ tracks: Track[] }>(`/api/albums/${id}/tracks`);
+		return fetchApi<{
+			tracks: Track[];
+			tidal_tracks: TidalDiscographyTrack[];
+			album_tidal_id: number | null;
+		}>(`/api/albums/${id}/tracks`);
 	},
 
 	getArtists(sortBy = 'name', sortDir = 'asc', limit = 50, offset = 0) {
@@ -1248,6 +1423,18 @@ export const api = {
 		});
 	},
 
+	getArtist(id: number) {
+		return fetchApi<{
+			id: number;
+			tidal_id: number | null;
+			name: string;
+			biography: string | null;
+			photo_url: string | null;
+			track_count: number;
+			album_count: number;
+		}>(`/api/artists/${id}`);
+	},
+
 	getArtistTracks(id: number) {
 		return fetchApi<{ tracks: Track[] }>(`/api/artists/${id}/tracks`);
 	},
@@ -1256,6 +1443,9 @@ export const api = {
 		return fetchApi<{
 			albums: TidalDiscographyAlbum[];
 			top_tracks: TidalDiscographyTrack[];
+			videos: TidalArtistVideo[];
+			similar_artists: TidalSimilarArtist[];
+			bio: TidalArtistBio | null;
 			available: boolean;
 			reason?: string;
 		}>(`/api/artists/${id}/discography`);
@@ -1488,6 +1678,36 @@ export const api = {
 			top_limit: String(topLimit),
 			days: String(days),
 		});
+	},
+
+	async getAnalyticsSignals(days = 30): Promise<AnalyticsSignals> {
+		const response = await fetchApi<{ signals: AnalyticsSignals }>(
+			'/api/analytics/signals',
+			{ days: String(days) },
+		);
+		const { signals } = response;
+
+		// Length assertions — fail fast and loud if the server ever returns sparse rows.
+		// Layout has not started rendering at this point, so a thrown error surfaces in
+		// the page-level catch rather than producing mis-aligned ridges.
+		const axis = signals.tempo.bucket_axis;
+		const expectedBuckets = (axis.max - axis.min) / axis.step;
+		for (const row of signals.tempo.rows) {
+			if (row.buckets.length !== expectedBuckets) {
+				throw new Error(
+					`tempo row "${row.label}" has ${row.buckets.length} buckets, expected ${expectedBuckets}`,
+				);
+			}
+		}
+		for (const row of signals.ridgeline) {
+			if (row.hourly.length !== 24) {
+				throw new Error(
+					`ridgeline row "${row.date}" has ${row.hourly.length} hours, expected 24`,
+				);
+			}
+		}
+
+		return signals;
 	},
 
 	getTrending(opts: {

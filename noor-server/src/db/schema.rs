@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_032,
     MIGRATION_033,
     MIGRATION_034,
+    MIGRATION_035,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -963,6 +964,14 @@ CREATE TABLE IF NOT EXISTS tidal_search_cache (
 
 CREATE INDEX IF NOT EXISTS idx_tidal_search_cache_fetched_at
     ON tidal_search_cache(fetched_at);
+"#;
+
+// Analytics signals: cohort first-listen detection runs `MIN(started_at) GROUP BY track_id`
+// over the full listen_history table. Without this covering index the cohort query scans
+// every row; with it, the planner can use the index alone.
+const MIGRATION_035: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_listen_history_track_started
+    ON listen_history(track_id, started_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -274,6 +274,186 @@ pub struct AnalyticsDashboard {
     pub behavior: AnalyticsBehavior,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics signals — response shape for GET /api/analytics/signals.
+// Spec: see plan at C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
+// JSON schema: noor-server/tests/fixtures/signals-schema.json
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Granularity {
+    Day,
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyticsSignals {
+    pub window: SignalsWindow,
+    pub kpis: SignalsKpis,
+    pub tempo: TempoView,
+    pub sonic_field: SonicView,
+    pub ridgeline: Vec<RidgeRow>,
+    pub top_tracks: Vec<AnalyticsTopTrack>,
+    pub top_artists: Vec<AnalyticsTopArtist>,
+    pub top_genres: Vec<AnalyticsGenreShare>,
+    pub cohorts: Vec<Cohort>,
+    pub audio_profile: AudioProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalsWindow {
+    pub days: i64,
+    pub started_at: String,
+    pub previous_started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalsKpis {
+    pub listened_ms: KpiPairInt,
+    pub sessions: KpiPairInt,
+    pub completion: KpiPairFloat,
+    pub skip_rate: KpiPairFloat,
+    pub daily: Vec<DailyKpi>,
+    pub hero_stats: HeroStats,
+    pub sessions_coverage: SessionsCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KpiPairInt {
+    pub current: i64,
+    pub previous: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KpiPairFloat {
+    pub current: Option<f64>,
+    pub previous: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyKpi {
+    pub day: String,
+    pub listens: i64,
+    pub listened_ms: i64,
+    pub completed: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroStats {
+    pub peak_hour: Option<i32>,
+    pub rhythm: Option<i32>,
+    pub night_share: Option<f64>,
+    pub morning_share: Option<f64>,
+    // Single-day mode (days <= 1) only — None in default mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longest_session_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_tracks: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsCoverage {
+    // Listens with non-null session_id (post-MIGRATION_023 rows).
+    pub tracked: i64,
+    // Listens with null session_id (pre-MIGRATION_023 history).
+    pub untracked: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempoView {
+    pub bucket_axis: BucketAxis,
+    pub rows: Vec<TempoRow>,
+    pub stats: TempoStats,
+    pub coverage: Coverage,
+    pub ridge_amp_max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketAxis {
+    pub min: i32,
+    pub max: i32,
+    pub step: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempoRow {
+    pub label: String,
+    pub granularity: Granularity,
+    // Dense over `bucket_axis` — every (max-min)/step + 1 bucket present, zero-filled.
+    pub buckets: Vec<BpmBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BpmBucket {
+    pub bucket: i32,
+    pub listens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempoStats {
+    pub median: Option<f64>,
+    pub mode: Option<f64>,
+    pub sigma: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Coverage {
+    pub analyzed: i64,
+    pub total_listened: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SonicView {
+    pub tracks: Vec<SonicTrack>,
+    pub total: i64,
+    pub coverage: Coverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SonicTrack {
+    pub track_id: i64,
+    pub title: String,
+    pub artist_name: Option<String>,
+    pub album: Option<String>,
+    pub artwork_path: Option<String>,
+    pub file_path: Option<String>,
+    pub e: f64,
+    pub d: f64,
+    pub bpm: f64,
+    pub listens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RidgeRow {
+    pub date: String,
+    // Always exactly 24 entries, zero-filled in Rust.
+    pub hourly: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cohort {
+    pub key: String,
+    pub label: String,
+    pub tracks: i64,
+    pub listened_ms: i64,
+    pub sessions: i64,
+    pub completion: Option<f64>,
+    pub skip_rate: Option<f64>,
+    pub new_artists: i64,
+    pub repeat_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioProfile {
+    pub dynamic_range_dr: Option<f64>,
+    pub loudness_lufs: Option<f64>,
+    pub bass_tilt: Option<f64>,
+    pub treble_tilt: Option<f64>,
+    pub coverage: Coverage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryPreset {
     pub id: i64,
