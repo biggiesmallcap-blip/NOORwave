@@ -82,7 +82,7 @@
 		padding: 8px 12px;
 		min-width: 160px;
 		max-width: 200px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 	}
 	.legend-toggle {
 		background: none;
@@ -90,14 +90,14 @@
 		color: rgba(255, 255, 255, 0.6);
 		cursor: pointer;
 		padding: 0;
-		font-size: 0.72rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 	}
 	.legend-toggle:hover { color: rgba(255,255,255,0.9); }
 	.legend-body { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
 	.legend-section { display: flex; flex-direction: column; gap: 4px; }
-	.legend-heading { color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.65rem; margin-bottom: 2px; }
-	.legend-heading.sub { font-size: 0.62rem; margin-top: 4px; }
+	.legend-heading { color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
+	.legend-heading.sub { font-size: var(--font-size-2xs); margin-top: 4px; }
 	.legend-row { display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,0.65); }
 	.swatch {
 		width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;

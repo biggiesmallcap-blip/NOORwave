@@ -27,7 +27,7 @@
 		border: 1px solid var(--panel-border);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-secondary);
-		font-size: 0.76rem;
+		font-size: var(--font-size-xs);
 		white-space: nowrap;
 	}
 
@@ -40,7 +40,7 @@
 
 	.compact {
 		padding: 5px 9px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		gap: 7px;
 	}
 

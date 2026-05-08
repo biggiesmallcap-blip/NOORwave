@@ -358,7 +358,7 @@
 		width: 40px;
 		color: var(--text-secondary);
 		font-variant-numeric: tabular-nums;
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.track-row.indexed .cell-num .play-hover {
@@ -368,7 +368,7 @@
 		place-items: center;
 		opacity: 0;
 		color: var(--text-primary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.track-row.indexed:hover .cell-num .num { opacity: 0; }
@@ -432,7 +432,7 @@
 
 	.title {
 		margin: 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -440,7 +440,7 @@
 
 	.sub {
 		color: var(--text-secondary);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -450,7 +450,7 @@
 
 	.cell-duration {
 		color: var(--text-secondary);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		text-align: right;
 		font-variant-numeric: tabular-nums;
 	}
@@ -476,7 +476,7 @@
 		border-radius: 999px;
 		cursor: pointer;
 		color: var(--text-secondary);
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 

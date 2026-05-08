@@ -80,7 +80,7 @@
 
 	.eyebrow {
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -89,7 +89,7 @@
 	.empty {
 		font-family: var(--font-body);
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		margin: 0;
 	}
 
@@ -101,14 +101,14 @@
 		width: 100%;
 		border-collapse: collapse;
 		font-family: var(--font-mono);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		font-variant-numeric: tabular-nums;
 	}
 
 	thead th {
 		text-align: right;
-		font-size: 0.66rem;
-		font-weight: 500;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-medium);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -136,7 +136,7 @@
 	tbody td.col-label {
 		text-align: left;
 		font-family: var(--font-display);
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 		color: var(--text-primary);
 	}
 

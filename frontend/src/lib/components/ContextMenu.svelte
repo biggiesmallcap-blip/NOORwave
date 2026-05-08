@@ -157,7 +157,7 @@
 			0 18px 40px -12px rgba(0, 0, 0, 0.55),
 			0 2px 6px rgba(0, 0, 0, 0.25);
 		color: var(--text-primary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		animation: context-menu-pop 120ms ease-out;
 	}
 
@@ -175,8 +175,8 @@
 	.context-menu-title {
 		padding: 6px 10px 4px;
 		margin: 0;
-		font-size: 0.68rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.45));
@@ -231,7 +231,7 @@
 	.context-menu-icon {
 		width: 18px;
 		text-align: center;
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 		opacity: 0.85;
 	}
 
@@ -246,7 +246,7 @@
 	.context-menu-caret,
 	.context-menu-hint {
 		margin-left: 8px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.45));
 	}
 

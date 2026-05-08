@@ -1311,7 +1311,7 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.clear-search:hover {
@@ -1343,7 +1343,7 @@
 		border: 1px solid var(--border-subtle);
 		background: transparent;
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 	}
 
@@ -1380,7 +1380,7 @@
 
 	.playlist-result-copy {
 		color: var(--text-tertiary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.playlist-grid {
@@ -1433,8 +1433,8 @@
 	}
 
 	.playlist-cover span {
-		font-size: 1rem;
-		font-weight: 750;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 		color: #fff;
 		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 	}
@@ -1477,8 +1477,8 @@
 
 	.playlist-meta h3 {
 		margin: 0;
-		font-size: 0.98rem;
-		line-height: 1.2;
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-snug);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1487,8 +1487,8 @@
 	.playlist-copy,
 	.smart-summary p {
 		color: var(--text-secondary);
-		font-size: 0.8rem;
-		line-height: 1.35;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
 	}
 
 	.smart-summary {
@@ -1510,8 +1510,8 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 1rem;
-		font-weight: 700;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.icon-btn:hover,
@@ -1536,13 +1536,13 @@
 	}
 
 	.playlist-count strong {
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.playlist-count span {
 		color: var(--text-tertiary);
-		font-size: 0.64rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
 	}
@@ -1561,7 +1561,7 @@
 
 	.btn-sm {
 		padding: 5px 12px;
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.danger {
@@ -1591,13 +1591,13 @@
 
 	.clause-error {
 		color: var(--state-error);
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.feedback-bar {
 		padding: 10px 14px;
 		margin-bottom: var(--gap);
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.feedback-bar.error {
@@ -1650,7 +1650,7 @@
 		flex-shrink: 0;
 	}
 
-	.editor-head h2 { font-size: 1.0625rem; font-weight: 600; }
+	.editor-head h2 { font-size: var(--font-size-md); font-weight: var(--font-weight-semibold); }
 
 	.close-btn {
 		width: 32px;
@@ -1703,8 +1703,8 @@
 	}
 
 	.field-label {
-		font-size: 0.8125rem;
-		font-weight: 500;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-secondary);
 	}
 
@@ -1715,7 +1715,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: 8px;
 		padding: 9px 12px;
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		width: 100%;
 		transition: border-color 150ms ease, box-shadow 150ms ease;
@@ -1733,7 +1733,7 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 	}
 
@@ -1749,8 +1749,8 @@
 	.logic-btn {
 		padding: 5px 14px;
 		border-radius: 6px;
-		font-size: 0.8125rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-secondary);
 		background: transparent;
 		border: none;
@@ -1795,7 +1795,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: 8px;
 		padding: 7px 10px;
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 	}
 
@@ -1844,7 +1844,7 @@
 		border-radius: 999px;
 		background: var(--accent-soft);
 		border: 1px solid var(--accent-line);
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 		color: var(--accent-strong);
 	}
 
@@ -1879,7 +1879,7 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		cursor: pointer;
 	}
@@ -1896,19 +1896,19 @@
 
 	.num-input { max-width: 90px; }
 
-	.and-label { color: var(--text-tertiary); font-size: 0.875rem; }
+	.and-label { color: var(--text-tertiary); font-size: var(--font-size-sm); }
 
 	/* ─── Playlist checklist ──────────────────────────────────── */
 
 	.playlist-checklist { display: flex; flex-direction: column; gap: 6px; }
 
-	.field-hint { font-size: 0.8125rem; color: var(--text-tertiary); }
+	.field-hint { font-size: var(--font-size-sm); color: var(--text-tertiary); }
 
 	/* ─── Add rule button ─────────────────────────────────────── */
 
 	.add-rule-btn { align-self: flex-start; }
 
-	.editor-error { font-size: 0.875rem; color: var(--state-error); }
+	.editor-error { font-size: var(--font-size-sm); color: var(--state-error); }
 
 	@media (max-width: 1120px) {
 		.playlist-card {

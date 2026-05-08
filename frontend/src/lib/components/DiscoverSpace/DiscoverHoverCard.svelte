@@ -95,14 +95,14 @@
 		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 	}
 	.card-title {
-		font-weight: 600;
-		font-size: 0.88rem;
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-sm);
 		color: rgba(255, 255, 255, 0.95);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.card-artist { font-size: 0.78rem; color: rgba(255, 255, 255, 0.5); }
+	.card-artist { font-size: var(--font-size-xs); color: rgba(255, 255, 255, 0.5); }
 
 	.card-chips {
 		display: flex;
@@ -114,7 +114,7 @@
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.07);
 		color: rgba(255, 255, 255, 0.7);
-		font-size: 0.68rem;
+		font-size: var(--font-size-2xs);
 		font-variant-numeric: tabular-nums;
 	}
 	.chip.energy {
@@ -124,13 +124,13 @@
 
 	.card-reason { display: flex; flex-direction: column; gap: 2px; }
 	.reason-badge {
-		font-size: 0.7rem;
-		font-weight: 600;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
 		color: rgba(124, 128, 255, 0.9);
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 	}
-	.reason-copy { font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); line-height: 1.4; }
+	.reason-copy { font-size: var(--font-size-xs); color: rgba(255, 255, 255, 0.4); line-height: var(--line-height-normal); }
 
 	.card-meta {
 		display: flex;
@@ -140,7 +140,7 @@
 	.source-tag, .seed-tag, .cold-tag, .genre-tag {
 		padding: 1px 6px;
 		border-radius: 4px;
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 	}
 	.source-tag { background: rgba(100,120,220,0.15); color: rgba(160,170,255,0.8); }
 	.seed-tag { background: rgba(80,80,200,0.2); color: rgba(180,180,255,0.9); }
@@ -168,5 +168,5 @@
 		background: rgba(124, 128, 255, 0.7);
 		border-radius: 999px;
 	}
-	.conf-label { font-size: 0.65rem; color: rgba(255,255,255,0.35); white-space: nowrap; }
+	.conf-label { font-size: var(--font-size-2xs); color: rgba(255,255,255,0.35); white-space: nowrap; }
 </style>

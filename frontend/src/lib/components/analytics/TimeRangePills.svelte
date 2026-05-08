@@ -88,8 +88,8 @@
 
 	.pill {
 		font-family: var(--font-mono);
-		font-size: 0.74rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 		letter-spacing: 0.04em;
 		padding: 6px 12px;
 		min-width: 36px;

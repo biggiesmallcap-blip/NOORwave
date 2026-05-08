@@ -1871,7 +1871,7 @@
 		gap: 18px;
 		background: radial-gradient(circle at 50% 35%, #1a1f2e 0%, #0a0d14 65%, #05070b 100%);
 		color: #8b93a7;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		font-family: var(--font-body);
 		z-index: 50;
 	}
 	.onboarding-check .check-mark {
@@ -1883,7 +1883,7 @@
 	}
 	.onboarding-check p {
 		margin: 0;
-		font-size: 13px;
+		font-size: var(--font-size-sm);
 		letter-spacing: 0.18em;
 		text-transform: uppercase;
 	}
@@ -2005,7 +2005,7 @@
 		align-items: center;
 		justify-content: center;
 		color: var(--text-secondary);
-		font-size: 2rem;
+		font-size: var(--font-size-2xl);
 	}
 
 	.video-panel-copy {
@@ -2017,8 +2017,8 @@
 
 	.video-panel-copy strong {
 		color: var(--text-primary);
-		font-size: 1rem;
-		line-height: 1.25;
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-snug);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -2028,7 +2028,7 @@
 	.video-panel-source,
 	.video-panel-queue-head {
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.video-panel-actions {
@@ -2044,8 +2044,8 @@
 		background: color-mix(in srgb, var(--instrument-surface) 80%, transparent);
 		color: var(--text-primary);
 		font: inherit;
-		font-size: 0.78rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		padding: 6px 10px;
 		cursor: pointer;
 	}
@@ -2058,7 +2058,7 @@
 	.video-panel-error {
 		margin: 0;
 		color: var(--state-error);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.video-panel-queue {
@@ -2084,7 +2084,7 @@
 		border: none;
 		color: var(--text-muted);
 		cursor: pointer;
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		padding: 0.15rem 0.3rem;
 		border-radius: 4px;
 		line-height: 1;
@@ -2144,7 +2144,7 @@
 		align-items: center;
 		justify-content: center;
 		color: var(--text-tertiary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.video-panel-row-copy {
@@ -2162,13 +2162,13 @@
 	}
 
 	.video-panel-row-copy strong {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 	}
 
 	.video-panel-row-copy span,
 	.video-panel-row-time {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 	}
 
@@ -2215,10 +2215,10 @@
 	.nav-zone-label {
 		padding: 0 10px 5px;
 		color: var(--signal-text);
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 	}
 
 	.nav-item {
@@ -2335,13 +2335,13 @@
 	}
 
 	.live-copy strong {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.live-copy span,
 	.status-line {
 		color: var(--signal-text);
-		font-size: 0.77rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.status-line {
@@ -2470,7 +2470,7 @@
 	}
 
 	.np-artwork.placeholder {
-		font-size: 2rem;
+		font-size: var(--font-size-2xl);
 	}
 
 	.np-quality {
@@ -2484,7 +2484,7 @@
 		top: 36px;
 		right: 10px;
 		font-variant-numeric: tabular-nums;
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.04em;
 		opacity: 0.85;
 	}
@@ -2499,10 +2499,10 @@
 
 	.np-eyebrow {
 		color: var(--signal-text);
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.13em;
 		text-transform: uppercase;
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 	}
 
 	.np-title,
@@ -2516,9 +2516,9 @@
 	}
 
 	.np-title {
-		font-size: 1.35rem;
+		font-size: var(--font-size-xl);
 		font-family: var(--font-display);
-		line-height: 1.1;
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
 	}
 
@@ -2538,16 +2538,16 @@
 
 	.np-artist {
 		color: var(--text-primary);
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.np-album {
 		color: var(--text-secondary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.np-stream-detail {
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		opacity: 0.6;
 		font-variant-numeric: tabular-nums;
@@ -2556,7 +2556,7 @@
 	}
 
 	.np-source {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		opacity: 0.75;
 		letter-spacing: 0.02em;
@@ -2626,7 +2626,7 @@
 		display: flex;
 		justify-content: space-between;
 		color: var(--text-secondary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -2753,12 +2753,12 @@
 
 	.volume-control span {
 		color: var(--text-secondary);
-		font-size: 0.76rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.volume-pct {
 		color: var(--text-tertiary);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		min-width: 3ch;
 		text-align: right;
@@ -2780,7 +2780,7 @@
 		background: color-mix(in srgb, var(--state-error) 12%, transparent);
 		border: 1px solid color-mix(in srgb, var(--state-error) 24%, transparent);
 		color: var(--state-error);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		margin-top: 8px;
 	}
 
@@ -2806,8 +2806,8 @@
 	}
 	.player-error-close {
 		padding: 0 8px;
-		font-size: 1rem;
-		line-height: 1.2;
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-snug);
 	}
 
 	.queue-section {
@@ -2866,13 +2866,13 @@
 	}
 
 	.now-playing-panel.queue-expanded :global(.np-copy .np-title) {
-		font-size: 0.95rem;
-		line-height: 1.2;
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-snug);
 		margin: 0;
 	}
 
 	.now-playing-panel.queue-expanded :global(.np-copy .np-artist) {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.now-playing-panel.queue-expanded :global(.np-progress) {
@@ -2930,8 +2930,8 @@
 
 	.queue-count-num {
 		flex: 0 0 auto;
-		font-size: 0.95rem;
-		font-weight: 600;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
 		line-height: 1;
@@ -2940,7 +2940,7 @@
 	.queue-count-unit {
 		flex: 1 1 auto;
 		min-width: 0;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -2992,7 +2992,7 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		line-height: 1;
 		flex-shrink: 0;
 		cursor: pointer;
@@ -3052,7 +3052,7 @@
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-surface);
 		color: var(--text-primary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.queue-save-input:focus {
@@ -3069,7 +3069,7 @@
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-surface);
 		color: var(--text-primary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 	}
 
@@ -3086,7 +3086,7 @@
 
 	.queue-eyebrow {
 		color: var(--text-tertiary);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		margin-bottom: 2px;
@@ -3172,7 +3172,7 @@
 		flex-shrink: 0;
 		width: 12px;
 		text-align: center;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		line-height: 1;
 		color: var(--text-tertiary);
 		cursor: grab;
@@ -3237,9 +3237,9 @@
 	}
 
 	.queue-title {
-		font-weight: 600;
-		font-size: 0.88rem;
-		line-height: 1.25;
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-snug);
 		margin: 0;
 		/* Two-line clamp lets long titles breathe instead of chopping words. */
 		display: -webkit-box;
@@ -3253,8 +3253,8 @@
 
 	.queue-artist {
 		color: var(--text-secondary);
-		font-size: 0.76rem;
-		line-height: 1.3;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
 		text-decoration: none;
 		white-space: nowrap;
 		overflow: hidden;
@@ -3292,7 +3292,7 @@
 	.queue-empty span,
 	.queue-overflow {
 		color: var(--text-secondary);
-		font-size: 0.76rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.queue-side {
@@ -3339,7 +3339,7 @@
 		background: color-mix(in srgb, var(--instrument-surface) 82%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 56%, transparent);
 		color: var(--text-primary);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
@@ -3366,7 +3366,7 @@
 		padding: 0;
 		display: inline-grid;
 		place-items: center;
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 		line-height: 1;
 	}
 
@@ -3388,7 +3388,7 @@
 	}
 
 	.queue-empty p {
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.queue-overflow {
@@ -3477,12 +3477,12 @@
 
 		.mobile-brand-name {
 			font-family: var(--font-display);
-			font-size: 1rem;
+			font-size: var(--font-size-md);
 			letter-spacing: 0.03em;
 		}
 
 		.mobile-theme-btn {
-			font-size: 0.78rem;
+			font-size: var(--font-size-xs);
 			padding: 6px 12px;
 		}
 
@@ -3556,7 +3556,7 @@
 			display: grid;
 			place-items: center;
 			color: var(--text-tertiary);
-			font-size: 1rem;
+			font-size: var(--font-size-md);
 		}
 
 		.mobile-mini-copy {
@@ -3567,8 +3567,8 @@
 		}
 
 		.mobile-mini-copy strong {
-			font-size: 0.87rem;
-			font-weight: 600;
+			font-size: var(--font-size-sm);
+			font-weight: var(--font-weight-semibold);
 			white-space: nowrap;
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -3576,7 +3576,7 @@
 		}
 
 		.mobile-mini-copy span {
-			font-size: 0.76rem;
+			font-size: var(--font-size-xs);
 			color: var(--text-secondary);
 			white-space: nowrap;
 			overflow: hidden;
@@ -3644,7 +3644,7 @@
 		.mobile-tab.active { color: var(--accent-strong); }
 
 		.mobile-tab-icon {
-			font-size: 19px;
+			font-size: var(--font-size-lg);
 			line-height: 1;
 			display: block;
 			position: relative;
@@ -3663,8 +3663,8 @@
 		}
 
 		.mobile-tab-label {
-			font-size: 10px;
-			font-weight: 600;
+			font-size: var(--font-size-2xs);
+			font-weight: var(--font-weight-semibold);
 			letter-spacing: 0.02em;
 			line-height: 1;
 			display: block;
@@ -3722,8 +3722,8 @@
 			padding: 13px 12px;
 			border-radius: var(--radius-sm);
 			color: var(--text-secondary);
-			font-size: 0.92rem;
-			font-weight: 500;
+			font-size: var(--font-size-sm);
+			font-weight: var(--font-weight-medium);
 			text-decoration: none;
 			transition: background var(--motion-fast), color var(--motion-fast);
 			-webkit-tap-highlight-color: transparent;
@@ -3743,7 +3743,7 @@
 		.mobile-more-icon {
 			width: 22px;
 			text-align: center;
-			font-size: 1rem;
+			font-size: var(--font-size-md);
 		}
 
 		/* ── Now Playing sheet ── */
@@ -3814,7 +3814,7 @@
 			display: grid;
 			place-items: center;
 			color: var(--text-tertiary);
-			font-size: 3rem;
+			font-size: var(--font-size-4xl);
 		}
 
 		.mobile-np-quality {
@@ -3828,7 +3828,7 @@
 			top: 38px;
 			right: 10px;
 			font-variant-numeric: tabular-nums;
-			font-size: 0.7rem;
+			font-size: var(--font-size-xs);
 			letter-spacing: 0.04em;
 			opacity: 0.85;
 		}
@@ -3851,8 +3851,8 @@
 
 		.mobile-np-title {
 			font-family: var(--font-display);
-			font-size: 1.25rem;
-			line-height: 1.1;
+			font-size: var(--font-size-lg);
+			line-height: var(--line-height-tight);
 			letter-spacing: -0.01em;
 			white-space: nowrap;
 			overflow: hidden;
@@ -3862,7 +3862,7 @@
 
 		.mobile-np-artist {
 			color: var(--text-secondary);
-			font-size: 0.88rem;
+			font-size: var(--font-size-sm);
 			white-space: nowrap;
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -3875,7 +3875,7 @@
 			border-radius: 50%;
 			display: grid;
 			place-items: center;
-			font-size: 20px;
+			font-size: var(--font-size-lg);
 			color: var(--text-secondary);
 			flex-shrink: 0;
 			border: none;
@@ -3923,7 +3923,7 @@
 			display: flex;
 			justify-content: space-between;
 			color: var(--text-secondary);
-			font-size: 0.74rem;
+			font-size: var(--font-size-xs);
 			font-variant-numeric: tabular-nums;
 		}
 
@@ -3943,7 +3943,7 @@
 			background: var(--bg-surface);
 			border: 1px solid var(--border-subtle);
 			color: var(--text-primary);
-			font-size: 20px;
+			font-size: var(--font-size-lg);
 			cursor: pointer;
 			transition: transform var(--motion-fast), opacity var(--motion-fast);
 			-webkit-tap-highlight-color: transparent;
@@ -3957,7 +3957,7 @@
 			background: var(--accent);
 			border-color: transparent;
 			color: #fff;
-			font-size: 24px;
+			font-size: var(--font-size-xl);
 			box-shadow: 0 8px 24px var(--accent-glow);
 		}
 
@@ -3978,8 +3978,8 @@
 			border: 1px solid var(--border-subtle);
 			background: var(--bg-surface);
 			color: var(--text-secondary);
-			font-size: 0.78rem;
-			font-weight: 600;
+			font-size: var(--font-size-xs);
+			font-weight: var(--font-weight-semibold);
 			cursor: pointer;
 			transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 			-webkit-tap-highlight-color: transparent;
@@ -4001,7 +4001,7 @@
 
 		.mobile-np-queue-count {
 			color: var(--text-secondary);
-			font-size: 0.8rem;
+			font-size: var(--font-size-sm);
 		}
 
 		.mobile-np-queue-list {
@@ -4069,22 +4069,22 @@
 	}
 
 	.connect-brand-name {
-		font-size: 1.2rem;
+		font-size: var(--font-size-lg);
 		font-weight: 800;
 		letter-spacing: 0.12em;
 		color: var(--text-primary);
 	}
 
 	.connect-title {
-		font-size: 1.25rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		color: var(--text-primary);
 	}
 
 	.connect-copy {
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
-		line-height: 1.5;
+		line-height: var(--line-height-normal);
 	}
 
 	.pin-pad {
@@ -4109,8 +4109,8 @@
 		align-items: center;
 		justify-content: center;
 		font-family: var(--font-mono, monospace);
-		font-size: 1.6rem;
-		font-weight: 600;
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		transition: border-color 0.15s ease, background 0.15s ease;
 	}
@@ -4134,7 +4134,7 @@
 	}
 
 	.connect-error {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: #ffb0b0;
 		text-align: center;
 	}
@@ -4143,7 +4143,7 @@
 		.pin-digit {
 			width: 40px;
 			height: 52px;
-			font-size: 1.4rem;
+			font-size: var(--font-size-xl);
 		}
 		.pin-pad { gap: 8px; }
 	}

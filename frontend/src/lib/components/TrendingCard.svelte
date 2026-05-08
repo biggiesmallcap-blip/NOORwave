@@ -272,7 +272,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 48px;
+		font-size: var(--font-size-4xl);
 		color: rgba(255, 255, 255, 0.55);
 	}
 
@@ -283,8 +283,8 @@
 		min-width: 22px;
 		padding: 2px 6px;
 		border-radius: var(--radius-xs);
-		font-size: 10px;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		color: rgba(255, 255, 255, 0.92);
 		background: rgba(0, 0, 0, 0.55);
 		letter-spacing: 0.04em;
@@ -318,9 +318,9 @@
 		border-radius: var(--radius-xs);
 		background: rgba(0, 0, 0, 0.58);
 		color: rgba(255, 255, 255, 0.9);
-		font-size: 11px;
-		font-weight: 700;
-		line-height: 1.2;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-snug);
 		text-align: center;
 	}
 
@@ -333,13 +333,13 @@
 
 	.title {
 		margin: 0;
-		font-size: 13.5px;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary, #fff);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		line-height: 1.3;
+		line-height: var(--line-height-snug);
 	}
 
 	.artist {
@@ -369,8 +369,8 @@
 		align-items: center;
 		padding: 2px 7px;
 		border-radius: 99px;
-		font-size: 10px;
-		font-weight: 600;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
 		white-space: nowrap;
@@ -392,14 +392,14 @@
 	}
 
 	.duration {
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		color: rgba(255, 255, 255, 0.5);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.album {
 		margin: 2px 0 0;
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		color: rgba(255, 255, 255, 0.4);
 		font-style: italic;
 		white-space: nowrap;

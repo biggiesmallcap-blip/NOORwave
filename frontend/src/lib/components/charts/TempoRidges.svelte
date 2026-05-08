@@ -346,7 +346,7 @@
 
 	.row-labels text {
 		font-family: var(--font-mono);
-		font-size: 0.6rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.04em;
 		fill: var(--text-tertiary);
 	}
@@ -378,13 +378,13 @@
 
 	.axis text {
 		font-family: var(--font-mono);
-		font-size: 0.62rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.08em;
 		fill: var(--text-tertiary);
 	}
 
 	.axis .axis-unit {
-		font-size: 0.58rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.18em;
 		fill: var(--text-muted);
 	}
@@ -404,7 +404,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-xs);
 		font-family: var(--font-mono);
-		font-size: 0.68rem;
+		font-size: var(--font-size-2xs);
 		color: var(--text-secondary);
 		pointer-events: none;
 		white-space: nowrap;
@@ -427,7 +427,7 @@
 
 	.stat-label {
 		font-family: var(--font-mono);
-		font-size: 0.62rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-tertiary);
@@ -441,15 +441,15 @@
 
 	.stat-value {
 		font-family: var(--font-display);
-		font-size: 1.25rem;
-		font-weight: 500;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
-		line-height: 1;
+		line-height: var(--line-height-tight);
 	}
 
 	.stat-value.coverage {
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 	}
 
 	.silhouette {

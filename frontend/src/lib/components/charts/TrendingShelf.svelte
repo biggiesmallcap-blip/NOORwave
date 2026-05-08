@@ -292,21 +292,21 @@
 	}
 
 	.section-title-group h2 {
-		font-size: 1.15rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 	}
 
 	.section-title-group h2 .sub {
 		color: var(--text-muted);
-		font-weight: 500;
-		font-size: 0.95rem;
+		font-weight: var(--font-weight-medium);
+		font-size: var(--font-size-md);
 		margin-left: 2px;
 	}
 
 	.eyebrow {
-		font-size: 0.7rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		color: var(--service-lastfm);
@@ -340,7 +340,7 @@
 		color: var(--text-muted);
 		font: inherit;
 		font-size: var(--font-size-xs);
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		padding: 4px 10px;
 		border-radius: 999px;
 		cursor: pointer;
@@ -371,7 +371,7 @@
 	}
 
 	.loading-indicator {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		font-style: italic;
 		/* Reserve the slot so the chip group never reflows when loading toggles. */

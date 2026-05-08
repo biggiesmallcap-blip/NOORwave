@@ -125,8 +125,8 @@
 		background: rgba(10, 10, 30, 0.82);
 		backdrop-filter: blur(6px);
 		color: rgba(255, 255, 255, 0.7);
-		font-size: 0.85rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
 		display: inline-flex;
 		align-items: center;
@@ -172,22 +172,22 @@
 	}
 	.panel-title { display: flex; flex-direction: column; gap: 2px; }
 	.panel-eyebrow {
-		font-size: 0.68rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: rgba(124, 128, 255, 0.8);
 	}
 	h2 {
 		margin: 0;
-		font-size: 1.05rem;
-		font-weight: 600;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
 		color: rgba(255, 255, 255, 0.95);
 	}
 	.close-btn {
 		background: transparent;
 		border: none;
 		color: rgba(255, 255, 255, 0.5);
-		font-size: 1.4rem;
+		font-size: var(--font-size-xl);
 		line-height: 1;
 		cursor: pointer;
 		padding: 0 6px;
@@ -204,16 +204,16 @@
 	.panel-body section { display: flex; flex-direction: column; gap: 6px; }
 	h3 {
 		margin: 0;
-		font-size: 0.78rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		color: rgba(124, 128, 255, 0.95);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
 	.panel-body p {
 		margin: 0;
-		font-size: 0.85rem;
-		line-height: 1.5;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
 		color: rgba(255, 255, 255, 0.75);
 	}
 	.panel-body ul {
@@ -222,15 +222,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		font-size: 0.83rem;
-		line-height: 1.45;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
 		color: rgba(255, 255, 255, 0.72);
 	}
-	.panel-body strong { color: rgba(255, 255, 255, 0.92); font-weight: 600; }
+	.panel-body strong { color: rgba(255, 255, 255, 0.92); font-weight: var(--font-weight-semibold); }
 	.panel-body em { color: rgba(255, 255, 255, 0.55); font-style: normal; }
 	.panel-body code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.78rem;
+		font-family: var(--font-mono);
+		font-size: var(--font-size-xs);
 		padding: 1px 5px;
 		border-radius: 4px;
 		background: rgba(255, 255, 255, 0.06);
@@ -242,7 +242,7 @@
 		border-radius: 8px;
 		background: rgba(124, 128, 255, 0.08);
 		border: 1px solid rgba(124, 128, 255, 0.18);
-		font-size: 0.78rem !important;
+		font-size: var(--font-size-xs) !important;
 		color: rgba(200, 200, 255, 0.75) !important;
 	}
 

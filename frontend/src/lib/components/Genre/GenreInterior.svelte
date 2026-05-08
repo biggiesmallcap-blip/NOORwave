@@ -449,7 +449,7 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 50%, transparent);
 		background: color-mix(in srgb, var(--instrument-surface) 60%, transparent);
 		color: var(--signal-text);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 	}
 
@@ -471,7 +471,7 @@
 	}
 
 	.header-title h2 {
-		font-size: 1.1rem;
+		font-size: var(--font-size-lg);
 		font-family: var(--font-display);
 	}
 
@@ -481,8 +481,8 @@
 		border: 1px solid rgba(255, 220, 160, 0.2);
 		background: rgba(255, 220, 160, 0.08);
 		color: rgba(255, 220, 160, 0.9);
-		font-size: 0.68rem;
-		font-weight: 600;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.header-stats {
@@ -501,13 +501,13 @@
 	}
 
 	.header-stats strong {
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 		font-family: var(--font-display);
 	}
 
 	.header-stats span {
 		color: var(--signal-text);
-		font-size: 0.6rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
@@ -521,7 +521,7 @@
 
 	.evo-label {
 		color: var(--signal-text);
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		white-space: nowrap;
@@ -547,15 +547,15 @@
 	}
 
 	.dial-value {
-		font-size: 1rem;
-		font-weight: 700;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 		font-variant-numeric: tabular-nums;
 		color: var(--text-primary);
 	}
 
 	.dial-label {
 		color: var(--signal-text);
-		font-size: 0.58rem;
+		font-size: var(--font-size-2xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
@@ -570,7 +570,7 @@
 	.artist-chip {
 		padding: 4px 10px;
 		border-radius: 999px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 36%, transparent);
 		color: var(--text-primary);
@@ -616,7 +616,7 @@
 
 	.evo-date {
 		color: var(--signal-text);
-		font-size: 0.52rem;
+		font-size: var(--font-size-2xs);
 		opacity: 0.6;
 	}
 
@@ -650,12 +650,12 @@
 
 	.galaxy-loading span {
 		color: var(--signal-text);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.galaxy-copy {
 		color: var(--signal-text);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		text-align: center;
 	}
 
@@ -665,7 +665,7 @@
 		background: rgba(28, 10, 16, 0.8);
 		border: 1px solid rgba(255, 80, 80, 0.2);
 		color: #ff6b6b;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.track-list {
@@ -682,7 +682,7 @@
 	}
 
 	.track-list-header h3 {
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 		font-family: var(--font-display);
 	}
 
@@ -692,8 +692,8 @@
 		border: none;
 		background: var(--accent-soft);
 		color: var(--text-primary);
-		font-size: 0.76rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
 	}
 
@@ -703,14 +703,14 @@
 
 	.track-loading {
 		color: var(--signal-text);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		padding: 20px 0;
 		text-align: center;
 	}
 
 	.track-error {
 		color: #ff6b6b;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		padding: 10px 0;
 	}
 
@@ -761,7 +761,7 @@
 	}
 
 	.track-meta strong {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -769,7 +769,7 @@
 
 	.track-meta span {
 		color: var(--signal-text);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.play-btn {
@@ -779,7 +779,7 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 40%, transparent);
 		background: color-mix(in srgb, var(--instrument-surface) 50%, transparent);
 		color: var(--signal-text);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		flex-shrink: 0;
 	}
@@ -791,7 +791,7 @@
 
 	.more-hint {
 		color: var(--signal-text);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		text-align: center;
 		padding: 8px 0;
 		opacity: 0.6;
@@ -805,7 +805,7 @@
 
 	.interior-empty p {
 		color: var(--signal-text);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	@media (max-width: 760px) {

@@ -564,14 +564,14 @@
 
 	.up-next-pill span {
 		color: rgba(255, 255, 255, 0.58);
-		font-size: 0.62rem;
+		font-size: var(--font-size-2xs);
 		font-weight: 800;
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 	}
 
 	.up-next-pill strong {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.top-meta strong,
@@ -582,12 +582,12 @@
 	}
 
 	.top-meta strong {
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.top-meta span {
 		color: rgba(255, 255, 255, 0.62);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.status {
@@ -595,7 +595,7 @@
 		transform: translateY(-50%);
 		text-align: center;
 		color: rgba(255, 255, 255, 0.72);
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 		pointer-events: none;
 	}
 
@@ -648,7 +648,7 @@
 	}
 
 	.time {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		color: rgba(255, 255, 255, 0.72);
 	}
@@ -667,7 +667,7 @@
 		border-radius: 999px;
 		color: rgba(255, 255, 255, 0.9);
 		padding: 6px 8px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.autoplay-pill {
@@ -678,7 +678,7 @@
 		background: rgba(255, 255, 255, 0.1);
 		border: 1px solid rgba(255, 255, 255, 0.16);
 		color: rgba(255, 255, 255, 0.84);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		font-weight: 800;
 		white-space: nowrap;
 	}

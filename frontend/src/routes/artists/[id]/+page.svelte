@@ -934,8 +934,8 @@
 		background: var(--accent-soft);
 		color: var(--accent-strong);
 		text-decoration: none;
-		font-size: 0.85rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		border: 1px solid var(--accent-line);
 	}
 	.empty-action:hover { background: var(--accent); color: #fff; }
@@ -1037,8 +1037,8 @@
 	}
 	.hero-portrait-initials {
 		font-family: var(--font-display);
-		font-size: 4.5rem;
-		font-weight: 700;
+		font-size: var(--font-size-4xl);
+		font-weight: var(--font-weight-bold);
 		color: rgba(255, 255, 255, 0.9);
 		letter-spacing: -0.02em;
 		text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -1064,28 +1064,28 @@
 			height: 140px;
 		}
 		.hero-portrait-initials {
-			font-size: 3rem;
+			font-size: var(--font-size-4xl);
 		}
 	}
 
 	.hero-library-substat {
 		margin: 0;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 	}
 
 	.hero-bio {
 		margin: 6px 0 0;
-		font-size: 0.86rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
-		line-height: 1.55;
+		line-height: var(--line-height-loose);
 		max-width: 800px;
 	}
 	.bio-toggle {
 		all: unset;
 		color: var(--accent-strong);
 		cursor: pointer;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		margin-left: 4px;
 	}
 	.bio-toggle:hover {
@@ -1093,7 +1093,7 @@
 	}
 	.hero-bio-source {
 		margin: 6px 0 0;
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
@@ -1103,8 +1103,8 @@
 	   h2 normally would, paired with the existing shelf-count). */
 	.section-eyebrow {
 		margin: 0;
-		font-size: 0.78rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--text-secondary);
@@ -1166,15 +1166,15 @@
 	}
 	.similar-portrait-initials {
 		font-family: var(--font-display);
-		font-size: 2.2rem;
-		font-weight: 700;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-bold);
 		color: rgba(255, 255, 255, 0.9);
 		letter-spacing: -0.02em;
 	}
 	.similar-name {
 		margin: 0;
-		font-size: 0.86rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		text-align: center;
 		max-width: 100%;
@@ -1184,7 +1184,7 @@
 	}
 	.similar-sub {
 		margin: 0;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 	}
 
@@ -1192,16 +1192,16 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-primary);
 		margin: 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.hero-title {
 		font-family: var(--font-display);
-		font-size: clamp(2.6rem, 6vw, 5rem);
-		line-height: 1;
+		font-size: var(--font-size-4xl);
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.03em;
 		margin: 0;
 		color: var(--text-primary);
@@ -1211,7 +1211,7 @@
 	.hero-sub {
 		color: var(--text-secondary);
 		margin: 4px 0 0;
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.filter-bar {
@@ -1223,7 +1223,7 @@
 		border: 1px solid var(--input-border);
 		border-radius: 20px;
 		padding: 7px 16px;
-		font-size: 13px;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		outline: none;
 		width: 260px;
@@ -1242,13 +1242,13 @@
 		margin: 0;
 		padding: 0 32px 8px;
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
-		line-height: 1.4;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 
 	.actions-microcopy strong {
 		color: var(--text-secondary);
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.play-fab {
@@ -1298,8 +1298,8 @@
 
 	.section-title {
 		font-family: var(--font-body);
-		font-size: 1.15rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 		letter-spacing: 0;
 	}
@@ -1312,7 +1312,7 @@
 
 	.shelf-count {
 		color: var(--text-tertiary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.popular-list {
@@ -1369,8 +1369,8 @@
 		border-radius: 999px;
 		background: rgba(0, 0, 0, 0.55);
 		color: #fff;
-		font-size: 0.62rem;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.12em;
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
@@ -1383,7 +1383,7 @@
 	.status.subtle {
 		color: var(--text-tertiary);
 		padding: 20px 32px;
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.grid-art {
@@ -1396,13 +1396,13 @@
 	.grid-art.placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 2rem;
+		font-size: var(--font-size-2xl);
 		color: var(--text-tertiary);
 	}
 
 	.grid-title {
 		margin: 6px 0 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1410,7 +1410,7 @@
 
 	.grid-sub {
 		margin: 0;
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -1419,7 +1419,7 @@
 
 	@media (max-width: 720px) {
 		.hero { padding: 36px 20px 24px; min-height: 240px; }
-		.hero-title { font-size: 2.6rem; }
+		.hero-title { font-size: var(--font-size-3xl); }
 		.actions-bar { padding: 12px 20px; }
 		.section { padding: 20px 20px 0; }
 	}
@@ -1464,7 +1464,7 @@
 	.tidal-row-num {
 		text-align: center;
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		font-variant-numeric: tabular-nums;
 	}
 	.tidal-row-art {
@@ -1489,22 +1489,22 @@
 		gap: 2px;
 	}
 	.tidal-row-title {
-		font-size: 0.92rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 	.tidal-row-album {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 	.tidal-pill {
-		font-size: 0.62rem;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.06em;
 		padding: 3px 8px;
 		border-radius: 4px;
@@ -1522,7 +1522,7 @@
 		background: rgba(255, 255, 255, 0.06);
 		border: 1px solid rgba(255, 255, 255, 0.09);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 	}
@@ -1547,9 +1547,9 @@
 		background: color-mix(in srgb, var(--service-spotify) 14%, transparent);
 		border: 1px solid color-mix(in srgb, var(--service-spotify) 32%, transparent);
 		color: color-mix(in srgb, var(--service-spotify) 95%, transparent);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		pointer-events: none;
 		z-index: 2;
 	}

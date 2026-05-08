@@ -487,7 +487,7 @@
 		background: none;
 		border: none;
 		outline: none;
-		font-size: 15px;
+		font-size: var(--font-size-md);
 		color: var(--text-primary);
 		font-family: inherit;
 	}
@@ -527,7 +527,7 @@
 		border: none;
 		color: var(--text-primary);
 		font-family: inherit;
-		font-size: 13px;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		text-align: left;
 	}
@@ -571,17 +571,17 @@
 	}
 	.row-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 	.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-	.row-sub { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.row-kind { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
-	.row-kind--spotify { color: var(--service-spotify); font-weight: 600; }
-	.row-lib { font-size: 10px; color: var(--accent); flex-shrink: 0; }
-	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: monospace; flex-shrink: 0; }
-	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: monospace; flex-shrink: 0; }
+	.row-sub { font-size: var(--font-size-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.row-kind { font-size: var(--font-size-2xs); color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
+	.row-kind--spotify { color: var(--service-spotify); font-weight: var(--font-weight-semibold); }
+	.row-lib { font-size: var(--font-size-2xs); color: var(--accent); flex-shrink: 0; }
+	.cmd-prefix { font-weight: var(--font-weight-semibold); color: var(--accent); font-family: var(--font-mono); flex-shrink: 0; }
+	.cmd-args { font-size: var(--font-size-xs); color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
 	.cmd-desc { color: var(--text-secondary); margin-left: auto; font-size: var(--font-size-xs); }
 	.palette-empty, .palette-hint {
 		padding: 20px 18px;
 		color: var(--text-muted);
-		font-size: 13px;
+		font-size: var(--font-size-sm);
 		margin: 0;
 	}
 	kbd {
@@ -589,8 +589,8 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: 4px;
 		padding: 1px 5px;
-		font-size: 11px;
-		font-family: monospace;
+		font-size: var(--font-size-xs);
+		font-family: var(--font-mono);
 		color: var(--text-secondary);
 	}
 </style>

@@ -145,7 +145,7 @@
 
   .album-title {
     font-size: var(--font-size-xs);
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     color: var(--text-primary, #fff);
     width: var(--album-card-w);
     overflow: hidden;
@@ -154,7 +154,7 @@
   }
 
   .album-artist {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-secondary, rgba(255,255,255,0.5));
     width: var(--album-card-w);
     overflow: hidden;
