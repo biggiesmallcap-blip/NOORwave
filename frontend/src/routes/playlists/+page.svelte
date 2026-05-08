@@ -12,7 +12,7 @@
 		type DateField,
 		type SampleDataSource,
 	} from '$lib/api/client';
-	import { catalogPlaylists, ensureCatalogPlaylists, invalidateCatalog } from '$lib/stores/catalog_meta';
+	import { catalogPlaylists, ensureCatalogPlaylists, invalidateCatalog, mutateCatalogPlaylists } from '$lib/stores/catalog_meta';
 	import {
 		currentTrack,
 		isPlaying,
@@ -409,7 +409,7 @@
 		e.stopPropagation();
 		try {
 			const updated = await api.togglePlaylistFavorite(playlist.id);
-			catalogPlaylists.update((ps) => ps.map((p) => (p.id === playlist.id ? updated.playlist : p)));
+			mutateCatalogPlaylists((ps) => ps.map((p) => (p.id === playlist.id ? updated.playlist : p)));
 		} catch {
 			// Button state will be corrected on the next refresh.
 		}
@@ -517,11 +517,11 @@
 			const desc = draftDescription.trim() || null;
 			if (editingPlaylistId === null) {
 				const result = await api.createSmartPlaylist(name, desc, rootClause);
-				catalogPlaylists.update((ps) => [...ps, result.playlist]);
+				mutateCatalogPlaylists((ps) => [...ps, result.playlist]);
 			} else {
 				const id = editingPlaylistId;
 				const result = await api.updateSmartPlaylist(id, name, desc, rootClause);
-				catalogPlaylists.update((ps) => ps.map((p) => (p.id === id ? result.playlist : p)));
+				mutateCatalogPlaylists((ps) => ps.map((p) => (p.id === id ? result.playlist : p)));
 				// Invalidate cached tracks so re-expand re-evaluates
 				const { [id]: _removed, ...rest } = playlistTracksById;
 				playlistTracksById = rest;
@@ -539,7 +539,7 @@
 		deleteError = '';
 		try {
 			await api.deleteSmartPlaylist(id);
-			catalogPlaylists.update((ps) => ps.filter((p) => p.id !== id));
+			mutateCatalogPlaylists((ps) => ps.filter((p) => p.id !== id));
 			expandedPlaylistIds = new Set([...expandedPlaylistIds].filter((x) => x !== id));
 		} catch (e) {
 			deleteError = String(e);

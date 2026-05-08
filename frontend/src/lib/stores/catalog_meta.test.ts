@@ -8,11 +8,12 @@ vi.mock('$lib/api/client', () => ({
     },
 }));
 
-import { api } from '$lib/api/client';
+import { api, type Playlist } from '$lib/api/client';
 import {
     catalogPlaylists, catalogGenres,
     ensureCatalogPlaylists, ensureCatalogGenres,
     invalidateCatalog,
+    mutateCatalogPlaylists,
     _resetForTest,
 } from './catalog_meta';
 
@@ -58,5 +59,24 @@ describe('catalog_meta', () => {
         await expect(ensureCatalogPlaylists()).rejects.toThrow('boom');
         await ensureCatalogPlaylists();
         expect(api.getPlaylists).toHaveBeenCalledTimes(2);
+    });
+
+    it('mutation during in-flight fetch is preserved (not overwritten on resolve)', async () => {
+        // Make the mock take a tick to resolve so we can mutate during the gap.
+        let resolveFetch!: (v: { playlists: Playlist[] }) => void;
+        (api.getPlaylists as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+            () => new Promise(r => { resolveFetch = r; })
+        );
+
+        const inflight = ensureCatalogPlaylists();
+        // Simulate user-mutation while fetch is in flight
+        mutateCatalogPlaylists(prev => [...prev, { id: 99, name: 'Optimistic', is_favorite: false } as unknown as Playlist]);
+        // Now resolve with the server's pre-mutation list
+        resolveFetch({ playlists: [{ id: 1, name: 'Server', is_favorite: false } as unknown as Playlist] });
+        await inflight;
+
+        const final = get(catalogPlaylists);
+        expect(final.find(p => p.id === 99)).toBeTruthy(); // optimistic preserved
+        expect(final.find(p => p.id === 1)).toBeFalsy();   // server overwrite suppressed
     });
 });
