@@ -81,9 +81,10 @@
 	.reason-card {
 		position: fixed;
 		background: rgba(13, 13, 26, 0.95);
-		backdrop-filter: blur(8px);
-		border: 1px solid #3a3a5c;
-		border-radius: 8px;
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
 		padding: 10px 12px;
 		z-index: 100;
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);

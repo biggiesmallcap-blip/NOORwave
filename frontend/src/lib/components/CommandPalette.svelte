@@ -461,8 +461,10 @@
 		width: min(600px, calc(100vw - 32px));
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-strong);
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		box-shadow: 0 32px 64px -16px rgba(0,0,0,0.7);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 		z-index: calc(var(--z-toast) + 1);
 		overflow: hidden;
 	}
@@ -571,7 +573,7 @@
 	.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 	.row-sub { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.row-kind { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
-	.row-kind--spotify { color: #1ed760; font-weight: 600; }
+	.row-kind--spotify { color: var(--service-spotify); font-weight: 600; }
 	.row-lib { font-size: 10px; color: var(--accent); flex-shrink: 0; }
 	.cmd-prefix { font-weight: 600; color: var(--accent); font-family: monospace; flex-shrink: 0; }
 	.cmd-args { font-size: 11px; color: var(--text-muted); font-family: monospace; flex-shrink: 0; }

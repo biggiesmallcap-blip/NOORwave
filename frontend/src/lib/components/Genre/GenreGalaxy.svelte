@@ -1253,7 +1253,7 @@
 		position: absolute;
 		inset: 0;
 		overflow: hidden;
-		border-radius: 24px;
+		border-radius: var(--radius-lg);
 		background:
 			radial-gradient(circle at 16% 20%, color-mix(in srgb, var(--atlas-haze-a) 80%, transparent), transparent 36%),
 			radial-gradient(circle at 84% 16%, color-mix(in srgb, var(--atlas-haze-b) 78%, transparent), transparent 30%),
@@ -1289,8 +1289,8 @@
 		box-shadow:
 			0 0 20px color-mix(in srgb, var(--accent-glow) 82%, transparent),
 			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 40%, transparent);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 		font-size: 0.75rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
@@ -1335,11 +1335,11 @@
 		padding: 8px 12px;
 		min-width: 160px;
 		max-width: 260px;
-		border-radius: 10px;
+		border-radius: var(--radius-sm);
 		background: rgba(10, 10, 18, 0.92);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		border: 1px solid var(--panel-border);
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 		animation: hover-card-in 140ms ease-out both;
 	}

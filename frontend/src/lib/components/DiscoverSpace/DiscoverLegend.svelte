@@ -75,9 +75,10 @@
 <style>
 	.legend {
 		background: rgba(10, 10, 20, 0.85);
-		backdrop-filter: blur(10px);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 10px;
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
 		padding: 8px 12px;
 		min-width: 160px;
 		max-width: 200px;

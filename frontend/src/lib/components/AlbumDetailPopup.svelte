@@ -132,8 +132,8 @@
 		background: linear-gradient(160deg,
 			rgba(20, 20, 32, 0.72) 0%,
 			rgba(12, 12, 20, 0.68) 100%);
-		backdrop-filter: blur(28px) saturate(160%);
-		-webkit-backdrop-filter: blur(28px) saturate(160%);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 		box-shadow:
 			0 32px 64px -16px rgba(0, 0, 0, 0.72),
 			inset 0 1px 0 rgba(255, 255, 255, 0.07);
@@ -228,8 +228,8 @@
 	.popup-chip {
 		padding: 2px 9px;
 		border-radius: 999px;
-		background: rgba(255,255,255,0.06);
-		border: 1px solid rgba(255,255,255,0.08);
+		background: var(--bg-hover);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary, rgba(255,255,255,0.7));
 		font-size: 0.78rem;
 	}

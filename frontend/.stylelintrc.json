@@ -12,11 +12,15 @@
 					"/var\\(--danger\\b/",
 					"/var\\(--color-error\\b/",
 					"/var\\(--bg-glass\\b/",
-					"/var\\(--surface-hover\\b/"
+					"/var\\(--surface-hover\\b/",
+					"/#4a6dd8/i",
+					"/#5a7ce8/i",
+					"/rgba\\(155,\\s*111,\\s*255/i",
+					"/rgba\\(74,\\s*109,\\s*216/i"
 				]
 			},
 			{
-				"message": "Use the canonical token instead: --state-error, --bg-surface, --bg-hover (see frontend/STYLING.md)."
+				"message": "Use the canonical token instead: --state-error, --bg-surface, --bg-hover, --accent, --accent-strong (see frontend/STYLING.md)."
 			}
 		],
 		"declaration-property-unit-disallowed-list": [

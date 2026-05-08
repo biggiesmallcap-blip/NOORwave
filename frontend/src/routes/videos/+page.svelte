@@ -711,7 +711,7 @@
 		margin: 0 auto;
 		background: var(--bg-raised);
 		border: 1px solid var(--border-strong);
-		border-radius: 24px;
+		border-radius: var(--radius-lg);
 		padding: 12px 22px;
 		font-size: 15px;
 		color: var(--text-primary);

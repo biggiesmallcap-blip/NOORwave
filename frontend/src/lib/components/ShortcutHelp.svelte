@@ -130,8 +130,8 @@
 		justify-content: center;
 		padding: 24px;
 		background: rgba(0, 0, 0, 0.36);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 	}
 
 	.shortcut-panel {
@@ -262,7 +262,7 @@
 		.shortcut-panel {
 			max-height: calc(100vh - 24px);
 			padding: 16px;
-			border-radius: 14px;
+			border-radius: var(--radius-md);
 		}
 
 		.shortcut-group li {

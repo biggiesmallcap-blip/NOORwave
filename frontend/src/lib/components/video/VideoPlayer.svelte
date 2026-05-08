@@ -547,7 +547,8 @@
 		background: rgba(12, 12, 16, 0.76);
 		border: 1px solid rgba(255, 255, 255, 0.18);
 		box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
-		backdrop-filter: blur(16px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 		color: rgba(255, 255, 255, 0.92);
 		transform: translate(-50%, 0);
 		animation: up-next-drop 0.24s ease both;

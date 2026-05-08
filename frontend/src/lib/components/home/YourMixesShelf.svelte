@@ -6,6 +6,7 @@
 	import { tidalStatus } from '$lib/stores/tidal';
 	import { getCachedMixes, putCachedMixes, clearCachedMixes } from '$lib/stores/tidal-mixes-cache';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -90,7 +91,11 @@
 					{:else}
 						<div class="art fallback">♫</div>
 					{/if}
-					<div class="play-overlay" aria-hidden="true">▶</div>
+					<PlayOverlay
+						position="center"
+						size="md"
+						label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+					/>
 					{#if isMixVideo(mix)}
 						<span class="video-badge">Video</span>
 					{/if}
@@ -264,21 +269,10 @@
 		border-color: var(--accent-line, rgba(125, 200, 175, 0.6));
 	}
 
-	.play-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: linear-gradient(180deg, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.55) 100%);
-		opacity: 0;
-		color: #fff;
-		font-size: var(--font-size-2xl);
-		transition: opacity 160ms ease;
-	}
-	.mix-card:hover .play-overlay,
-	.mix-card:focus-visible .play-overlay {
+	.mix-card:hover :global(.play-overlay),
+	.mix-card:focus-visible :global(.play-overlay) {
 		opacity: 1;
+		transform: translateY(0);
 	}
 	.video-badge {
 		position: absolute;

@@ -155,7 +155,7 @@
 		max-height: 85vh;
 		display: flex;
 		flex-direction: column;
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		background: rgba(14, 14, 26, 0.96);
 		border: 1px solid rgba(124, 128, 255, 0.25);
 		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
@@ -168,7 +168,7 @@
 		align-items: flex-start;
 		justify-content: space-between;
 		padding: 18px 20px 10px;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+		border-bottom: 1px solid var(--border-subtle);
 	}
 	.panel-title { display: flex; flex-direction: column; gap: 2px; }
 	.panel-eyebrow {

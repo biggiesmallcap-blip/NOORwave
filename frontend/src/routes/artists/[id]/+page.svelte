@@ -19,6 +19,7 @@
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { canPlayTrack } from '$lib/player/playable';
@@ -847,11 +848,12 @@
 										<div class="grid-art placeholder">♫</div>
 									{/if}
 									{#if album.id != null}
-										<button
-											class="art-play-overlay"
+										<PlayOverlay
+											position="center"
+											size="md"
+											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
+										/>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -881,11 +883,12 @@
 										<div class="grid-art placeholder">♫</div>
 									{/if}
 									{#if album.id != null}
-										<button
-											class="art-play-overlay"
+										<PlayOverlay
+											position="center"
+											size="md"
+											label="Play {album.title}"
 											onclick={(e) => onAlbumCardPlay({ id: album.id }, e)}
-											aria-label="Play {album.title}"
-										>▶</button>
+										/>
 									{/if}
 								</div>
 								<p class="grid-title">{album.title}</p>
@@ -1015,8 +1018,8 @@
 		justify-content: center;
 		isolation: isolate;
 		background: rgba(255, 255, 255, 0.04);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 	}
 	.hero-portrait-glass-art {
 		position: absolute;
@@ -1352,22 +1355,11 @@
 		margin-bottom: 6px;
 	}
 
-	.art-play-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: rgba(0, 0, 0, 0.45);
-		color: #fff;
-		font-size: var(--font-size-xl);
-		border: none;
-		cursor: pointer;
-		border-radius: 6px;
-		opacity: 0;
-		transition: opacity 0.15s;
+	.grid-art-wrap:hover :global(.play-overlay),
+	.grid-card:focus-within :global(.play-overlay) {
+		opacity: 1;
+		transform: translateY(0);
 	}
-	.grid-art-wrap:hover .art-play-overlay { opacity: 1; }
 
 	.badge-new {
 		position: absolute;
@@ -1380,7 +1372,8 @@
 		font-size: 0.62rem;
 		font-weight: 700;
 		letter-spacing: 0.12em;
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 	}
 
 	.grid-card.not-in-library .grid-title {
@@ -1551,9 +1544,9 @@
 		transform: translateY(-50%);
 		padding: 2px 8px;
 		border-radius: 999px;
-		background: rgba(30, 215, 96, 0.14);
-		border: 1px solid rgba(30, 215, 96, 0.32);
-		color: rgba(30, 215, 96, 0.95);
+		background: color-mix(in srgb, var(--service-spotify) 14%, transparent);
+		border: 1px solid color-mix(in srgb, var(--service-spotify) 32%, transparent);
+		color: color-mix(in srgb, var(--service-spotify) 95%, transparent);
 		font-size: 0.72rem;
 		font-variant-numeric: tabular-nums;
 		font-weight: 600;

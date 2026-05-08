@@ -243,7 +243,8 @@
 		color: #fff;
 		font-size: var(--font-size-md);
 		cursor: pointer;
-		backdrop-filter: blur(10px);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 		transition: background 160ms ease, transform 160ms ease;
 	}
 
@@ -315,7 +316,8 @@
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 		font-size: 0.78rem;
 		cursor: pointer;
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 		transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 	}
 

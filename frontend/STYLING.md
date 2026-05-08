@@ -13,12 +13,15 @@ If you're tempted to add `padding: 16px` or `border-radius: 12px` directly, ask:
 | Family | Tokens | Use for |
 | --- | --- | --- |
 | Spacing | `--space-1` … `--space-7` (3-48 px), `--gap-sm` / `--gap` / `--gap-lg` | Padding, margin, grid gap, flex gap |
-| Radii | `--radius-xs` (4-6 px), `--radius-sm` (7-10 px), `--radius` (12-16 px), `--radius-lg` (15-22 px) | Card corners, panel corners. `50%` and `999px` for circles/pills are fine raw. |
+| Radii | `--radius-xs` (4-6 px), `--radius-sm` (7-10 px), `--radius-md` (10-14 px), `--radius-lg` (15-22 px). `--radius` is a legacy alias for `--radius-md`. | Card corners, panel corners, modal corners. `50%` and `999px` for circles/pills are fine raw. |
 | Typography | `--font-size-xs` (11-13 px) … `--font-size-3xl` (28-40 px) | All component font sizes that map cleanly to a step. Odd one-offs (e.g. 13 px) stay raw. |
 | Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms) | All `transition` durations. No raw `0.13s` / `0.21s` / `0.34s`. |
-| State | `--state-error`, `--state-warning`, `--state-success`, `--state-active` | Status colours. **Never** use `--danger`, `--color-error` — they are not defined. |
+| Blur | `--blur-base` (8 px), `--blur-overlay` (16 px), `--blur-modal` (24 px) | All `backdrop-filter` values. Three tiers is the maximum that should ever exist; anything else is drift. |
+| State | `--state-error`, `--state-warning`, `--state-success`, `--state-active`, `--state-favorite`, `--state-favorite-glow` | Status colours. **Never** use `--danger`, `--color-error` — they are not defined. |
+| Service | `--service-spotify`, `--service-tidal`, `--service-lastfm` | Service brand colors for source badges and service-branded heroes only. **Stay stable across themes** — they are brand cues, not theme variables. |
 | Surface | `--bg-base`, `--bg-elevated`, `--bg-raised`, `--bg-surface`, `--bg-hover`, `--panel-bg` | Backgrounds. **Never** use `--bg-glass`, `--surface-hover` — they are not defined. |
-| Borders | `--border-subtle`, `--border-muted`, `--border-strong` | All component borders. |
+| Borders | `--border-subtle`, `--border-muted`, `--border-strong`, `--panel-border` | All component borders. Don't write raw `1px solid rgba(255,255,255,0.06)` — it won't theme. |
+| Accent | `--accent`, `--accent-soft`, `--accent-line`, `--accent-strong`, `--accent-glow` | Interactive accents (active states, primary buttons, focus rings). Tracks the user's profile palette. **Never** hardcode hex values for accents** — onboarding's `#4a6dd8` was migrated to `var(--accent)` so it follows the theme. |
 | Content | `--content-width` (clamp 1280-2400 px) | Page-shell `max-width` so content scales on wide monitors. |
 
 ## Global utility classes
@@ -28,6 +31,17 @@ Use these instead of reimplementing the surface:
 - `.glass`, `.glass-panel`, `.glass-tile` — translucent panel surfaces (backdrop-filter + bg + border + shadow). If you find yourself writing `backdrop-filter: blur(...)` plus a translucent gradient + a subtle border, replace with one of these classes.
 - `.btn`, `.btn-primary`, `.btn-glass` — pill buttons. Don't roll your own button visual unless you're building a chip or icon-only variant.
 - `.quality-badge.hires|.lossless|.lossy` — quality indicator pill.
+
+### Glass decision tree
+
+When you need a translucent surface, follow this order:
+
+1. **Compact tile or badge?** → `.glass-tile` (uses `--blur-base`, `--radius-sm`, `--panel-border`).
+2. **Elevated card / panel?** → `.glass` or `.glass-panel` (uses `--blur-overlay`, `--radius-md` or `--radius-lg`, full glass treatment).
+3. **Modal / context menu / palette?** → Don't use a class — use `backdrop-filter: var(--blur-modal)` directly with a non-translucent dark background (`rgba(12,12,24,0.96)` or similar) and `var(--radius-md)` corners. The class doesn't fit because modals tint deeper than the canonical glass.
+4. **Page scrim / dimmer behind a modal?** → Inline `backdrop-filter: blur(2-6px)` with a dim background. These are *not* glass surfaces; they're page-level dimmers and stay raw.
+
+If you reach for a 4th tier (12 px blur? 20 px blur?), pick the closest token. The whole point is three tiers, not three-plus-special-cases.
 
 ## Auto-fit grids over fixed-N columns
 
@@ -101,13 +115,16 @@ Existing raw `z-index` values from before the scale was introduced have been mig
 
 ## Linting
 
-Stylelint runs on `src/**/*.css` and forbids the legacy tokens (`--danger`, `--color-error`, `--bg-glass`, `--surface-hover`). It also disallows raw `font-size: Npx`. Run:
+Stylelint runs on `src/**/*.{css,svelte}` and:
+
+- **Errors** on legacy tokens (`--danger`, `--color-error`, `--bg-glass`, `--surface-hover`) and on hardcoded hex values that should be theme tokens (`#4a6dd8`, `#5a7ce8`, `rgba(155,111,255,...)`, `rgba(74,109,216,...)`).
+- **Warns** on raw `font-size: Npx` — prefer `var(--font-size-*)`.
 
 ```text
 npm run lint:css
 ```
 
-Failures are blocking; fix them before committing. Component-level (`.svelte`) CSS is not linted yet — that's a follow-up once `postcss-html` is wired in.
+Errors are blocking; fix them before committing. Warnings are advisory but reviewed at PR time. `.svelte` components are linted via `postcss-html`.
 
 ## Before you add a token
 

@@ -492,7 +492,7 @@
   .cover {
     width: 220px;
     height: 220px;
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     background-size: cover;
     background-position: center;
     box-shadow: 0 18px 36px -16px rgba(0, 0, 0, 0.6);
@@ -501,7 +501,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #1ed760, #1aa34a);
+    background: linear-gradient(135deg, var(--service-spotify), #1aa34a);
     font-size: 56px;
     color: #fff;
   }
@@ -510,7 +510,7 @@
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #1ed760;
+    color: var(--service-spotify);
     font-weight: 700;
   }
   .title {
@@ -547,9 +547,9 @@
     font-size: 13px;
   }
   .btn-secondary {
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--border-subtle);
     color: var(--text-primary);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--panel-border);
   }
   .btn-primary:disabled,
   .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }

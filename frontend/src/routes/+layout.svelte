@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { goto } from '$app/navigation';
+	import { goto, onNavigate } from '$app/navigation';
 	import { connectWebSocket, wsConnected } from '$lib/api/ws';
 	import {
 		currentTrack,
@@ -76,7 +76,13 @@
 
 	let { children } = $props();
 
-	let activeWallpaper = $derived(wallpaperById($wallpaper));
+	let isOnboardingRouteEarly = $derived(page.url.pathname.startsWith('/onboarding'));
+	// During onboarding, force the standing-wave wallpaper so the brand identity
+	// is consistent for every user (and so the wallpaper element persists across
+	// the navigation to home — same DOM node, no shader remount, no flash).
+	let activeWallpaper = $derived(
+		isOnboardingRouteEarly ? wallpaperById('standing-wave') : wallpaperById($wallpaper),
+	);
 
 	// ─── Auth gate ───────────────────────────────────────────────
 	let authReady = $state(false);
@@ -250,6 +256,20 @@
 		onboardingChecked = false;
 		void tryAutoSetup();
 	}
+
+	// Liquid-glass crossfade — scoped to the onboarding → home handoff only.
+	// Every other navigation uses the default (instant) transition. Falls through
+	// silently on browsers without the View Transitions API (pre-Chromium 111).
+	onNavigate((nav) => {
+		if (!nav.from?.url.pathname.startsWith('/onboarding')) return;
+		if (typeof document === 'undefined' || !('startViewTransition' in document)) return;
+		return new Promise((resolve) => {
+			(document as any).startViewTransition(async () => {
+				resolve();
+				await nav.complete;
+			});
+		});
+	});
 
 	onMount(() => {
 		// Show connect screen if no token is stored
@@ -1906,16 +1926,16 @@
 
 	.app-shell.has-wallpaper .sidebar,
 	.app-shell.has-wallpaper .now-playing-panel {
-		backdrop-filter: blur(18px) saturate(1.2);
-		-webkit-backdrop-filter: blur(18px) saturate(1.2);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 	}
 
 	/* Content pane frost: subtle dark tint + mild blur so all page content
 	   remains readable over any wallpaper, without fully hiding the animation. */
 	.app-shell.has-wallpaper .workspace {
 		background: rgba(9, 9, 14, 0.44);
-		backdrop-filter: blur(10px) saturate(1.05);
-		-webkit-backdrop-filter: blur(10px) saturate(1.05);
+		backdrop-filter: var(--blur-overlay);
+		-webkit-backdrop-filter: var(--blur-overlay);
 	}
 
 	.sidebar {
@@ -2365,7 +2385,8 @@
 		color: #fff;
 		background: rgba(0, 0, 0, 0.45);
 		border: 1px solid rgba(255, 255, 255, 0.18);
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 		opacity: 0;
 		transform: translateY(-4px);
 		transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
@@ -2396,7 +2417,8 @@
 		color: rgba(255, 255, 255, 0.92);
 		background: rgba(0, 0, 0, 0.45);
 		border: 1px solid rgba(255, 255, 255, 0.18);
-		backdrop-filter: blur(8px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 		cursor: pointer;
 		transition:
 			transform 160ms ease,
@@ -3744,7 +3766,7 @@
 			overflow-y: auto;
 			-webkit-overflow-scrolling: touch;
 			background: var(--bg-elevated);
-			border-radius: 24px 24px 0 0;
+			border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 			border-top: 1px solid var(--border-subtle);
 			z-index: 51;
 			padding: 12px 20px calc(var(--safe-bottom) + 24px);

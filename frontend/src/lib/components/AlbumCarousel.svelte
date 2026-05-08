@@ -2,6 +2,7 @@
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
   import { letterColor } from '$lib/utils/color';
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
   interface AlbumCard {
     id: number;
@@ -44,11 +45,7 @@
               <span>♫</span>
             </div>
           {/if}
-          <div class="art-play-overlay">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
-            </svg>
-          </div>
+          <PlayOverlay position="center" size="md" />
         </div>
         <span class="album-title">{album.title}</span>
         {#if album.artist_name}
@@ -140,23 +137,11 @@
     background: var(--bg-hover);
   }
 
-  .art-play-overlay {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0,0,0,0.45);
-    opacity: 0;
-    transition: opacity 0.15s;
-    border-radius: 50%;
-    width: 36px;
-    height: 36px;
-    margin: auto;
-    color: #fff;
+  .album-card:hover :global(.play-overlay),
+  .album-card:focus-visible :global(.play-overlay) {
+    opacity: 1;
+    transform: translateY(0);
   }
-
-  .album-card:hover .art-play-overlay { opacity: 1; }
 
   .album-title {
     font-size: var(--font-size-xs);

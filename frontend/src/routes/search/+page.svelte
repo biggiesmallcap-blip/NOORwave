@@ -17,6 +17,7 @@
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -1075,11 +1076,12 @@
                 {#if album.in_library}
                   <span class="lib-badge" aria-label="In your library"></span>
                 {/if}
-                <button
-                  class="art-play-overlay"
+                <PlayOverlay
+                  position="corner"
+                  size="sm"
+                  label="Play {album.title}"
                   onclick={(e) => { e.preventDefault(); e.stopPropagation(); void playTidalAlbum(album.tidal_id) }}
-                  aria-label="Play {album.title}"
-                >▶</button>
+                />
               </div>
               <p class="album-title">{album.title}</p>
               {#if album.artist_name}
@@ -1137,11 +1139,12 @@
                     <span>♫</span>
                   </div>
                 {/if}
-                <button
-                  class="art-play-overlay"
+                <PlayOverlay
+                  position="corner"
+                  size="sm"
+                  label="Play {playlist.title}"
                   onclick={(e) => { e.stopPropagation(); void playTidalPlaylist(playlist.uuid) }}
-                  aria-label="Play {playlist.title}"
-                >▶</button>
+                />
               </div>
               <p class="album-title">{playlist.title}</p>
               <p class="album-artist">TIDAL · {playlist.number_of_tracks ?? '?'} tracks</p>
@@ -1476,7 +1479,7 @@
     margin: 0 auto;
     background: var(--bg-raised);
     border: 1px solid var(--border-strong);
-    border-radius: 24px;
+    border-radius: var(--radius-lg);
     padding: 12px 22px;
     font-size: 15px;
     color: var(--text-primary);
@@ -1554,7 +1557,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--accent-line);
     color: var(--text-secondary);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 4px 12px;
     font-size: var(--font-size-xs);
     cursor: pointer;
@@ -1588,7 +1591,7 @@
     background: transparent;
     border: 1px solid var(--border-subtle);
     color: var(--text-secondary);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 5px 14px;
     font-size: var(--font-size-xs);
     cursor: pointer;
@@ -1655,7 +1658,7 @@
   .recent-chip {
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
-    border-radius: 14px;
+    border-radius: var(--radius-md);
     padding: 6px 14px;
     font-size: var(--font-size-xs);
     color: var(--text-secondary);
@@ -1813,9 +1816,10 @@
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #1ed760;
+    color: var(--service-spotify);
     background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(4px);
+    backdrop-filter: var(--blur-base);
+    -webkit-backdrop-filter: var(--blur-base);
   }
   .spotify-card { text-decoration: none; }
   .lib-dot {
@@ -1882,32 +1886,11 @@
     transition: transform 0.18s ease;
   }
   .album-card:hover { transform: translateY(-3px); }
-  .art-play-overlay {
-    position: absolute;
-    bottom: 8px;
-    right: 8px;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
-    font-size: var(--font-size-sm);
-    border: none;
-    cursor: pointer;
-    opacity: 0;
-    transform: translateY(4px);
-    transition: opacity 0.15s, transform 0.15s;
-    box-shadow: 0 6px 16px -4px rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  }
-  .art-wrap:hover .art-play-overlay {
+  .art-wrap:hover :global(.play-overlay),
+  .album-card:focus-within :global(.play-overlay) {
     opacity: 1;
     transform: translateY(0);
   }
-  .art-play-overlay:hover { transform: scale(1.08); opacity: 1; }
   .album-art {
     width: 128px;
     height: 128px;

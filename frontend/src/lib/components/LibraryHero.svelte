@@ -195,7 +195,7 @@
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1.5px;
-    color: var(--accent, #9b6fff);
+    color: var(--accent);
     text-transform: uppercase;
     transition: color 300ms ease;
   }
@@ -230,7 +230,7 @@
     align-items: center;
     gap: 7px;
     padding: 10px 22px;
-    border-radius: 24px;
+    border-radius: 999px;
     font-size: var(--font-size-sm);
     font-weight: 600;
   }

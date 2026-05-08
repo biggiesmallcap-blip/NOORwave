@@ -1839,7 +1839,7 @@
 		font-weight: 700;
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
-		color: var(--accent, #9b6fff);
+		color: var(--accent);
 		margin: 0;
 	}
 
@@ -1882,7 +1882,7 @@
 
 	.home-track-row:hover { background: var(--bg-hover); }
 
-	.home-track-row.playing .ht-title { color: var(--accent, #9b6fff); }
+	.home-track-row.playing .ht-title { color: var(--accent); }
 
 	.ht-art {
 		width: 36px;
@@ -2026,7 +2026,7 @@
 		align-items: center;
 		padding: 6px 10px;
 		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-secondary);
 		font-size: 0.78rem;
@@ -2047,11 +2047,11 @@
 	}
 	.decade-chip {
 		padding: 4px 13px;
-		border-radius: 14px;
+		border-radius: var(--radius-md);
 		font-size: 11px;
 		font-weight: 600;
 		cursor: pointer;
-		border: 1px solid rgba(255,255,255,0.08);
+		border: 1px solid var(--panel-border);
 		background: transparent;
 		color: var(--text-secondary);
 		font-family: inherit;
@@ -2242,8 +2242,8 @@
 		max-width: 640px;
 		margin: 0 auto;
 		padding: 14px 22px;
-		border-radius: 24px;
-		border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--border-subtle);
 		background: var(--panel-bg);
 		color: var(--text-primary, #fff);
 		font-size: 15px;
@@ -2252,7 +2252,7 @@
 	}
 
 	.library-search-input:focus {
-		border-color: var(--accent, #9b6fff);
+		border-color: var(--accent);
 	}
 
 	.library-status {
@@ -2295,8 +2295,8 @@
 	}
 
 	.filter-pill.active {
-		background: var(--accent, #9b6fff);
-		border-color: var(--accent, #9b6fff);
+		background: var(--accent);
+		border-color: var(--accent);
 		color: #fff;
 	}
 
@@ -2306,7 +2306,7 @@
 		padding: 2px;
 		border-radius: 8px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.view-toggle-btn {
@@ -2474,7 +2474,7 @@
 		padding: 4px 10px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
 		font-size: 0.72rem;
 		font-weight: 600;
@@ -2602,7 +2602,7 @@
 		height: 28px;
 		border-radius: 50%;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
 		font-size: 1rem;
 		display: flex;
@@ -2872,7 +2872,7 @@
 		background:
 			linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
 			var(--bg-surface);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
 		cursor: pointer;
 		transition:
@@ -2890,14 +2890,14 @@
 	}
 
 	.album-card.selected {
-		outline: 2px solid rgba(155, 111, 255, 0.85);
+		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 
 	.album-card:focus-visible,
 	.track-row:focus-visible,
 	.header-sort:focus-visible {
-		outline: 2px solid rgba(155, 111, 255, 0.9);
+		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
 
@@ -3045,7 +3045,7 @@
 		padding: 2px 7px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-muted);
 		font-size: 0.64rem;
 		font-weight: 600;
@@ -3062,7 +3062,7 @@
 		height: 32px;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 		color: var(--text-primary);
 		font-size: 1rem;
 		line-height: 1;
@@ -3079,7 +3079,7 @@
 		height: 28px;
 		border-radius: 50%;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
 		font-size: 0.85rem;
 		cursor: pointer;
@@ -3109,8 +3109,8 @@
 			0 8px 32px rgba(0, 0, 0, 0.6),
 			0 2px 8px rgba(0, 0, 0, 0.4),
 			inset 0 1px 0 rgba(255, 255, 255, 0.06);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
 	}
 
 	.track-menu {
@@ -3408,7 +3408,7 @@
 				". album quality";
 			gap: 6px 12px;
 			padding: 12px;
-			border: 1px solid rgba(255, 255, 255, 0.06);
+			border: 1px solid var(--border-subtle);
 			background: rgba(255, 255, 255, 0.02);
 		}
 

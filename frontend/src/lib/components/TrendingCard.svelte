@@ -7,6 +7,7 @@
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 	import { letterColor } from '$lib/utils/color';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	let {
 		entry,
@@ -157,22 +158,17 @@
 
 		<span class="rank" aria-label="Chart position {index + 1}">{index + 1}</span>
 
-		<div class="play-overlay" aria-hidden="true">
-			{#if resolving}
-				<span class="mini-spinner"></span>
-			{:else if !playable}
+		{#if !playable && !resolving}
+			<div class="play-overlay-scrim" aria-hidden="true">
 				<span class="play-state-label">{actionLabel}</span>
-			{:else if isCurrent && $isPlaying}
-				<svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor">
-					<rect x="3" y="2.5" width="3.5" height="11" rx="1" />
-					<rect x="9.5" y="2.5" width="3.5" height="11" rx="1" />
-				</svg>
-			{:else}
-				<svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor">
-					<path d="M3 2.5l10 5.5-10 5.5V2.5z" />
-				</svg>
-			{/if}
-		</div>
+			</div>
+		{:else}
+			<PlayOverlay
+				position="center"
+				size="lg"
+				state={resolving ? 'loading' : isCurrent && $isPlaying ? 'pause' : 'play'}
+			/>
+		{/if}
 	</div>
 
 	<div class="meta">
@@ -213,27 +209,27 @@
 		gap: 10px;
 		background: none;
 		border: 1px solid transparent;
-		padding: 8px;
-		border-radius: 12px;
+		padding: var(--space-2);
+		border-radius: var(--radius-md);
 		cursor: pointer;
 		text-align: left;
-		transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+		transition: background var(--motion-base), border-color var(--motion-base), transform var(--motion-base);
 	}
 
 	.trending-card:hover,
 	.trending-card:focus-visible {
-		background: rgba(255, 255, 255, 0.04);
-		border-color: rgba(255, 255, 255, 0.08);
+		background: var(--bg-hover);
+		border-color: var(--panel-border);
 		outline: none;
 	}
 
 	.trending-card:focus-visible {
-		border-color: var(--accent-line, rgba(125, 200, 175, 0.6));
+		border-color: var(--accent-line);
 	}
 
 	.trending-card.active {
-		border-color: var(--accent-line, rgba(125, 200, 175, 0.5));
-		background: rgba(125, 200, 175, 0.06);
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
 	}
 
 	.trending-card.disabled {
@@ -248,16 +244,16 @@
 	}
 
 	.trending-card.unresolved {
-		border-color: rgba(255, 255, 255, 0.06);
+		border-color: var(--border-subtle);
 	}
 
 	.art-wrap {
 		position: relative;
 		aspect-ratio: 1 / 1;
 		width: 100%;
-		border-radius: 8px;
+		border-radius: var(--radius-sm);
 		overflow: hidden;
-		background: rgba(255, 255, 255, 0.04);
+		background: var(--bg-hover);
 	}
 
 	.art {
@@ -286,62 +282,46 @@
 		left: 6px;
 		min-width: 22px;
 		padding: 2px 6px;
-		border-radius: 6px;
+		border-radius: var(--radius-xs);
 		font-size: 10px;
 		font-weight: 700;
 		color: rgba(255, 255, 255, 0.92);
 		background: rgba(0, 0, 0, 0.55);
 		letter-spacing: 0.04em;
 		text-align: center;
-		backdrop-filter: blur(4px);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
 	}
 
-	.play-overlay {
+	.play-overlay-scrim {
 		position: absolute;
 		inset: 0;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: linear-gradient(180deg, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.55) 100%);
-		opacity: 0;
+		opacity: 1;
 		color: #fff;
-		transition: opacity 160ms ease;
+		pointer-events: none;
 	}
 
-	.trending-card:hover .play-overlay,
-	.trending-card.active .play-overlay,
-	.trending-card.unresolved .play-overlay,
-	.trending-card.resolving .play-overlay {
+	.trending-card:hover :global(.play-overlay),
+	.trending-card.active :global(.play-overlay),
+	.trending-card.resolving :global(.play-overlay) {
 		opacity: 1;
-	}
-
-	.trending-card.disabled .play-overlay {
-		opacity: 1;
+		transform: translateY(0);
 	}
 
 	.play-state-label {
 		max-width: calc(100% - 20px);
 		padding: 5px 8px;
-		border-radius: 6px;
+		border-radius: var(--radius-xs);
 		background: rgba(0, 0, 0, 0.58);
 		color: rgba(255, 255, 255, 0.9);
 		font-size: 11px;
 		font-weight: 700;
 		line-height: 1.2;
 		text-align: center;
-	}
-
-	.mini-spinner {
-		width: 22px;
-		height: 22px;
-		border: 2px solid rgba(255, 255, 255, 0.28);
-		border-top-color: #fff;
-		border-radius: 50%;
-		animation: card-spin 0.8s linear infinite;
-	}
-
-	@keyframes card-spin {
-		to { transform: rotate(360deg); }
 	}
 
 	.meta {
@@ -397,18 +377,18 @@
 	}
 
 	.chip.genre {
-		background: rgba(125, 200, 175, 0.12);
-		color: var(--accent, #7dc8af);
+		background: var(--accent-soft);
+		color: var(--accent-strong);
 	}
 
 	.chip.lib {
-		background: rgba(125, 200, 175, 0.10);
-		color: var(--accent, #7dc8af);
+		background: var(--accent-soft);
+		color: var(--accent-strong);
 	}
 
 	.chip.src {
-		background: rgba(255, 255, 255, 0.06);
-		color: rgba(255, 255, 255, 0.6);
+		background: var(--border-subtle);
+		color: var(--text-secondary);
 	}
 
 	.duration {

@@ -289,7 +289,7 @@
 		padding: 16px;
 		border-radius: var(--radius);
 		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border: 1px solid var(--border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
@@ -312,7 +312,7 @@
 		border-radius: 12px;
 		object-fit: cover;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--panel-border);
 	}
 
 	.placeholder {
