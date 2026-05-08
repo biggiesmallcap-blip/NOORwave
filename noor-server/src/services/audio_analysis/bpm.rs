@@ -94,6 +94,65 @@ mod tests {
     }
 
     #[test]
+    fn dithered_reggae_eighths_still_resolve_to_quarter() {
+        // More realistic reggae: alternating-strength eighths (skanks vs main beats)
+        // with small amplitude jitter so the autocorrelation peaks are not as clean
+        // as the perfect-click-train case. The detector must still return Some,
+        // and the BPM must still be 80 — not 160 (octave error) and not None
+        // (false rejection by the strength gate).
+        let sr = 44_100u32;
+        let total = (sr as f64 * 8.0) as usize;
+        let mut samples = vec![0.0f32; total];
+
+        // Skank/beat amplitude pattern: every-other-eighth varies.
+        let pattern = [1.0f32, 0.55, 0.85, 0.50, 1.0, 0.55, 0.85, 0.50];
+
+        // Eighth-note period for quarter=80 BPM:
+        let eighth_period_s = 30.0 / 80.0; // = 0.375 s
+        let eighth_period = (sr as f64 * eighth_period_s) as usize;
+
+        // Deterministic LCG for jitter.
+        let mut state: u64 = 0xDEADBEEF;
+        let mut next = || -> f32 {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            // Map to [-0.15, 0.15]
+            ((state >> 33) as f32 / (i32::MAX as f32)) * 0.15 - 0.075
+        };
+
+        let mut t = 0usize;
+        let mut idx = 0usize;
+        while t < total {
+            let base = pattern[idx % pattern.len()];
+            let jittered = (base + next()).max(0.0);
+            for j in 0..32 {
+                if t + j < samples.len() {
+                    samples[t + j] = jittered;
+                }
+            }
+            t += eighth_period;
+            idx += 1;
+        }
+
+        let result = detect_bpm(&samples, sr);
+        let (bpm, conf) = result.expect(
+            "dithered reggae must not be rejected by the strength gate \
+             — if this is None, the strength formula needs to use raw-peak \
+             instead of prior-weighted score (see review notes)",
+        );
+        assert!(
+            (bpm - 80.0).abs() < 3.0,
+            "dithered reggae regression: expected ~80, got {} (conf {})",
+            bpm,
+            conf,
+        );
+        assert!(
+            conf > 0.05,
+            "dithered reggae confidence too low: {} (gate is 0.10 on beat_strength + 0.15 on tempo strength)",
+            conf,
+        );
+    }
+
+    #[test]
     fn confidence_separates_metronome_from_noise() {
         // Behavioural contract from the old detector: confidence for a clean
         // metronome must be meaningfully higher than for noise. The old test
