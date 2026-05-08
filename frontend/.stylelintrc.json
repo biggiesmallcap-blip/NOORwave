@@ -23,13 +23,32 @@
 				"message": "Use the canonical token instead: --state-error, --bg-surface, --bg-hover, --accent, --accent-strong (see frontend/STYLING.md)."
 			}
 		],
-		"declaration-property-unit-disallowed-list": [
+		"declaration-property-value-allowed-list": [
 			{
-				"font-size": ["px"]
+				"font": [
+					"inherit"
+				],
+				"font-size": [
+					"/var\\(--font-size-(2xs|xs|sm|md|lg|xl|2xl|3xl|4xl)\\)/",
+					"inherit"
+				],
+				"font-family": [
+					"/var\\(--font-(display|body|mono)\\)/",
+					"inherit"
+				],
+				"font-weight": [
+					"/var\\(--font-weight-(medium|semibold|bold)\\)/",
+					"400", "800",
+					"normal", "bold", "inherit"
+				],
+				"line-height": [
+					"/var\\(--line-height-(tight|snug|normal|loose)\\)/",
+					"inherit", "normal", "1"
+				]
 			},
 			{
 				"severity": "warning",
-				"message": "Prefer var(--font-size-xs|sm|md|lg|xl|2xl|3xl) over raw px (see frontend/STYLING.md)."
+				"message": "Use the canonical token instead (see frontend/STYLING.md). The font shorthand is reserved for `font: inherit` button-resets only — set size/family/weight/line-height individually with tokens."
 			}
 		]
 	},
