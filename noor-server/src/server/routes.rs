@@ -93,6 +93,11 @@ pub struct AnalyticsDashboardParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AnalyticsSignalsParams {
+    days: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DiscoveryPreviewRequest {
     prompt: String,
     mode: Option<String>,
@@ -314,6 +319,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/albums", get(get_albums))
         .route("/api/albums/{id}/tracks", get(get_album_tracks))
         .route("/api/artists", get(get_artists))
+        .route("/api/artists/{id}", get(get_artist))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
         .route("/api/artists/{id}/discography", get(get_artist_discography))
         .route(
@@ -353,6 +359,7 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         .route("/api/analytics/overview", get(get_analytics_overview))
         .route("/api/analytics/dashboard", get(get_analytics_dashboard))
+        .route("/api/analytics/signals", get(get_analytics_signals))
         .route("/api/analytics/listens/recent", get(get_recent_listens))
         .route("/api/discovery/preview", post(preview_discovery))
         .route("/api/discovery/new", post(discover_new_music))
@@ -843,18 +850,178 @@ async fn get_artist_tracks(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn get_artist(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let row = s
+        .db
+        .with_conn(|conn| queries::get_artist_with_counts(conn, id))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some((artist, track_count, album_count)) = row else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    Ok(Json(json!({
+        "id": artist.id,
+        "tidal_id": artist.tidal_id,
+        "name": artist.name,
+        "biography": artist.biography,
+        "photo_url": artist.photo_url,
+        "track_count": track_count,
+        "album_count": album_count,
+    })))
+}
+
 async fn get_album_tracks(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
+    // Three-pass approach so the page can render the FULL album (not just
+    // library coverage):
+    //   1. Pull the local rows + the album's TIDAL id in one DB hit.
+    //   2. If TIDAL is connected and the album maps to a TIDAL id, fetch the
+    //      full TIDAL track list.
+    //   3. Filter TIDAL tracks down to only those NOT already in `tracks`
+    //      (deduped by tidal_id) and serialize as `tidal_tracks`.
+    //
+    // The frontend renders both arrays; the user gets a single coherent track
+    // listing where library entries are styled as "owned" and pure-TIDAL
+    // entries get a TIDAL pill.
+    let (tracks, album_tidal_id) = {
+        let s = state.read().await;
+        let result = s.db.with_conn(|conn| {
             let tracks = queries::get_album_tracks(conn, id)?;
-            Ok(Json(json!({ "tracks": tracks })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            let pairs = queries::get_album_tidal_ids(conn, &[id])?;
+            let tidal_id = pairs.first().map(|(_, t)| *t);
+            Ok::<_, anyhow::Error>((tracks, tidal_id))
+        });
+        match result {
+            Ok((tracks, tidal_id)) => (tracks, tidal_id),
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    };
+
+    // No TIDAL id → can't enrich; return library tracks alone.
+    let Some(tidal_album_id) = album_tidal_id else {
+        return Ok(Json(json!({
+            "tracks": tracks,
+            "tidal_tracks": [],
+            "album_tidal_id": null,
+        })));
+    };
+
+    // TIDAL session needed for the catalog fetch — best-effort only.
+    let (tokens, tidal_http_client) = {
+        let persisted = match load_persisted_tidal_tokens(&state).await {
+            Ok(p) => p,
+            Err(_) => None,
+        };
+        let s = state.read().await;
+        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
+    };
+
+    let Some(tokens) = tokens else {
+        return Ok(Json(json!({
+            "tracks": tracks,
+            "tidal_tracks": [],
+            "album_tidal_id": tidal_album_id,
+        })));
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+
+    let tidal_tracks_payload: Vec<Value> = match client.get_album_tracks(tidal_album_id).await {
+        Ok(resp) => {
+            // Local rows that came from TIDAL carry a `tidal_id`; dedupe so
+            // the same track doesn't appear twice (once styled as library,
+            // once as TIDAL-only).
+            let local_tidal_ids: std::collections::HashSet<i64> = tracks
+                .iter()
+                .filter_map(|t| t.tidal_id)
+                .collect();
+
+            resp.items
+                .into_iter()
+                .filter(|t| !local_tidal_ids.contains(&t.id))
+                .map(|t| {
+                    let artwork = t
+                        .album
+                        .as_ref()
+                        .and_then(|al| al.cover.as_ref())
+                        .and_then(|c| {
+                            crate::services::tidal::client::TidalClient::get_artwork_url(
+                                &Some(c.clone()),
+                                160,
+                            )
+                        });
+                    json!({
+                        "tidal_id": t.id,
+                        "title": t.title,
+                        "duration_ms": t.duration * 1000,
+                        "track_number": t.track_number,
+                        "disc_number": t.volume_number,
+                        "artist_name": t.artist.name,
+                        "artist_tidal_id": t.artist.id,
+                        "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                        "album_tidal_id": t.album.as_ref().map(|al| al.id),
+                        "artwork_url": artwork,
+                    })
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!(?e, "TIDAL get_album_tracks failed; serving library only");
+            Vec::new()
+        }
+    };
+
+    Ok(Json(json!({
+        "tracks": tracks,
+        "tidal_tracks": tidal_tracks_payload,
+        "album_tidal_id": tidal_album_id,
+    })))
+}
+
+/// Pages through all entries of a single TIDAL discography filter for one
+/// artist. TIDAL's `/artists/{id}/albums` returns at most 50 per call, sorted
+/// newest-first; calling once would silently clip anything older than the 50th
+/// most-recent release per filter (i.e. anything past page 1). Stops on a
+/// short page (TIDAL's "no more" signal) or when the running count reaches
+/// `total_number_of_items`. Capped at 1000 entries per filter as a safety net.
+async fn fetch_all_artist_albums(
+    client: &TidalClient,
+    artist_id: i64,
+    filter: &str,
+) -> anyhow::Result<Vec<crate::services::tidal::client::TidalAlbum>> {
+    const PAGE: i32 = 50;
+    const MAX_PAGES: i32 = 20;
+    let mut out: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
+    let mut offset: i32 = 0;
+    for _ in 0..MAX_PAGES {
+        let page = client
+            .get_artist_albums(artist_id, PAGE, offset, Some(filter))
+            .await?;
+        let n = page.items.len() as i32;
+        let total = page.total_number_of_items;
+        out.extend(page.items);
+        if n < PAGE {
+            break;
+        }
+        if let Some(t) = total
+            && (out.len() as i64) >= t
+        {
+            break;
+        }
+        offset += PAGE;
+    }
+    Ok(out)
 }
 
 async fn get_artist_discography(
@@ -903,14 +1070,31 @@ async fn get_artist_discography(
 
     let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
 
-    let albums_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS"));
-    let eps_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("EPSANDSINGLES"));
-    let compilations_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("COMPILATIONS"));
-    let live_fut = client.get_artist_albums(tidal_artist_id, 50, 0, Some("LIVE"));
-    let top_fut = client.get_artist_top_tracks(tidal_artist_id, 10, 0);
+    // Each filter is paginated separately; previously we fetched only the first
+    // page (50 newest), which clipped any artist with a long catalog (e.g. a
+    // 50+ year discography returned only modern compilations).
+    let albums_fut = fetch_all_artist_albums(&client, tidal_artist_id, "ALBUMS");
+    let eps_fut = fetch_all_artist_albums(&client, tidal_artist_id, "EPSANDSINGLES");
+    let compilations_fut = fetch_all_artist_albums(&client, tidal_artist_id, "COMPILATIONS");
+    let live_fut = fetch_all_artist_albums(&client, tidal_artist_id, "LIVE");
+    // Top tracks raised from 10 → 50 so the merged Top Tracks list on the
+    // artist page surfaces a meaningful catalog even when the user has zero
+    // library matches; 50 is TIDAL's per-page max.
+    let top_fut = client.get_artist_top_tracks(tidal_artist_id, 50, 0);
+    let videos_fut = client.get_artist_videos(tidal_artist_id, 50, 0);
+    let similar_fut = client.get_artist_similar(tidal_artist_id, 20, 0);
+    let bio_fut = client.get_artist_bio(tidal_artist_id);
 
-    let (albums_res, eps_res, comps_res, live_res, top_res) =
-        tokio::join!(albums_fut, eps_fut, compilations_fut, live_fut, top_fut);
+    let (albums_res, eps_res, comps_res, live_res, top_res, videos_res, similar_res, bio_res) = tokio::join!(
+        albums_fut,
+        eps_fut,
+        compilations_fut,
+        live_fut,
+        top_fut,
+        videos_fut,
+        similar_fut,
+        bio_fut
+    );
 
     // TIDAL can return the same release under multiple filters (e.g. an album
     // re-issue tagged both ALBUMS and COMPILATIONS). Dedupe by tidal_id while
@@ -918,7 +1102,7 @@ async fn get_artist_discography(
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
     for r in [albums_res, eps_res, comps_res, live_res].into_iter().flatten() {
-        for item in r.items {
+        for item in r {
             if seen.insert(item.id) {
                 all_albums.push(item);
             }
@@ -980,9 +1164,93 @@ async fn get_artist_discography(
         })
         .unwrap_or_default();
 
+    let videos_payload: Vec<Value> = videos_res
+        .map(|r| {
+            r.items
+                .into_iter()
+                .map(|v| {
+                    let artwork =
+                        crate::services::tidal::client::TidalClient::get_artwork_url(
+                            &v.image_id,
+                            320,
+                        );
+                    let artist_name = v.artist.map(|a| a.name);
+                    json!({
+                        "tidal_id": v.id,
+                        "title": v.title,
+                        "duration_ms": v.duration * 1000,
+                        "artwork_url": artwork,
+                        "artist_name": artist_name,
+                        "album_tidal_id": v.album.as_ref().map(|al| al.id),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Resolve `local_id` per similar artist via the same lookup pattern used
+    // for albums above — lets the frontend route /artists/[local_id] when
+    // present (preserving library-affordances) and /tidal/artists/[id] otherwise.
+    let similar_items: Vec<crate::services::tidal::client::TidalArtist> =
+        similar_res.map(|r| r.items).unwrap_or_default();
+    let similar_tidal_ids: Vec<i64> = similar_items.iter().map(|a| a.id).collect();
+    let similar_known_map = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_known_artist_tidal_ids(conn, &similar_tidal_ids))
+            .unwrap_or_default()
+    };
+    let similar_artists_payload: Vec<Value> = similar_items
+        .into_iter()
+        .map(|a| {
+            let artwork =
+                crate::services::tidal::client::TidalClient::get_artwork_url(&a.picture, 320);
+            let local_id = similar_known_map.get(&a.id).copied();
+            json!({
+                "tidal_id": a.id,
+                "local_id": local_id,
+                "name": a.name,
+                "artwork_url": artwork,
+                "in_library": local_id.is_some(),
+            })
+        })
+        .collect();
+
+    let bio_payload = bio_res.ok().map(|b| {
+        json!({
+            "summary": b.summary,
+            "text": b.text,
+            "source": b.source,
+        })
+    });
+
+    // Best-effort persistence of bio text to the local artists row so the
+    // page can render it offline next time. Only writes when the local row
+    // had no biography of its own.
+    if let Some(b) = bio_payload.as_ref() {
+        let bio_str = b
+            .get("text")
+            .and_then(|v| v.as_str())
+            .or_else(|| b.get("summary").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        if let Some(text) = bio_str {
+            let s = state.read().await;
+            let _ = s.db.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE artists SET biography = ?1
+                     WHERE id = ?2 AND (biography IS NULL OR biography = '')",
+                    rusqlite::params![text, id],
+                )?;
+                Ok(())
+            });
+        }
+    }
+
     Ok(Json(json!({
         "albums": albums_payload,
         "top_tracks": top_tracks_payload,
+        "videos": videos_payload,
+        "similar_artists": similar_artists_payload,
+        "bio": bio_payload,
         "available": true
     })))
 }
@@ -1618,7 +1886,10 @@ async fn get_analytics_dashboard(
 ) -> Result<Json<Value>, StatusCode> {
     let recent_limit = params.recent_limit.unwrap_or(12).clamp(1, 50);
     let top_limit = params.top_limit.unwrap_or(8).clamp(1, 20);
-    let days = params.days.unwrap_or(14).clamp(1, 90);
+    // Relaxed from 90 → 36500 so the new analytics page's "All" pill can pass through to
+    // the legacy dashboard endpoint without silent truncation. Existing callers passing
+    // ≤90 are unaffected.
+    let days = params.days.unwrap_or(14).clamp(1, 36500);
 
     let state = state.read().await;
     let dashboard = state
@@ -1637,6 +1908,24 @@ async fn get_analytics_dashboard(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "dashboard": dashboard })))
+}
+
+async fn get_analytics_signals(
+    State(state): State<SharedState>,
+    Query(params): Query<AnalyticsSignalsParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let days = params.days.unwrap_or(30).clamp(1, 36500);
+
+    let state = state.read().await;
+    let signals = state
+        .db
+        .with_conn(|conn| queries::get_analytics_signals(conn, days))
+        .map_err(|err| {
+            tracing::error!(?err, days, "get_analytics_signals failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(json!({ "signals": signals })))
 }
 
 async fn preview_discovery(
