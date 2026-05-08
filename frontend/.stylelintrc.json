@@ -43,7 +43,7 @@
 				],
 				"line-height": [
 					"/var\\(--line-height-(tight|snug|normal|loose)\\)/",
-					"inherit", "normal", "1"
+					"inherit", "normal", "1", "0"
 				]
 			},
 			{
