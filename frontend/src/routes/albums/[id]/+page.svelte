@@ -436,8 +436,8 @@
 		background: var(--accent-soft);
 		color: var(--accent-strong);
 		text-decoration: none;
-		font-size: 0.85rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		border: 1px solid var(--accent-line);
 	}
 	.empty-action:hover { background: var(--accent); color: #fff; }
@@ -513,7 +513,7 @@
 	.hero-art.placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 3rem;
+		font-size: var(--font-size-4xl);
 		color: var(--text-tertiary);
 	}
 
@@ -525,18 +525,18 @@
 	}
 
 	.eyebrow {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.14em;
 		color: var(--text-primary);
 		margin: 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.hero-title {
 		font-family: var(--font-display);
-		font-size: clamp(2.15rem, 4.4vw, 3.8rem);
-		line-height: 1.02;
+		font-size: var(--font-size-4xl);
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
 		margin: 0;
 		color: var(--text-primary);
@@ -550,12 +550,12 @@
 		flex-wrap: wrap;
 		color: var(--text-secondary);
 		margin: 4px 0 0;
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.hero-link {
 		color: var(--text-primary);
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 		text-decoration: none;
 	}
 	.hero-link:hover { text-decoration: underline; }
@@ -611,20 +611,20 @@
 
 	.actions-hint {
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.actions-microcopy {
 		margin: 0;
 		padding: 0 32px 8px;
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
-		line-height: 1.4;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 
 	.actions-microcopy strong {
 		color: var(--text-secondary);
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.track-table {
@@ -642,10 +642,10 @@
 		padding: 6px 16px 10px;
 		border-bottom: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.col-num { text-align: center; }
@@ -678,12 +678,12 @@
 	.tidal-row-num {
 		text-align: center;
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		font-variant-numeric: tabular-nums;
 	}
 	.tidal-row-title {
 		color: var(--text-primary);
-		font-size: 0.92rem;
+		font-size: var(--font-size-sm);
 		min-width: 0;
 		white-space: nowrap;
 		overflow: hidden;
@@ -694,8 +694,8 @@
 		color: var(--text-tertiary);
 	}
 	.tidal-row-pill {
-		font-size: 0.62rem;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.06em;
 		padding: 3px 8px;
 		border-radius: 4px;
@@ -707,20 +707,20 @@
 	.tidal-row-duration {
 		text-align: right;
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.hero-library-substat {
 		margin: 4px 0 0;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 	}
 
 	.footnote {
 		padding: 22px 32px 4px;
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		margin: 0;
 	}
 
@@ -740,19 +740,19 @@
 
 	.more-title {
 		font-family: var(--font-body);
-		font-size: 1.1rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 		letter-spacing: 0;
 	}
 
 	.show-all {
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 		text-decoration: none;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 	.show-all:hover { color: var(--text-primary); text-decoration: underline; }
 
@@ -796,13 +796,13 @@
 	.album-card-art.placeholder {
 		display: grid;
 		place-items: center;
-		font-size: 2rem;
+		font-size: var(--font-size-2xl);
 		color: var(--text-tertiary);
 	}
 
 	.album-card-title {
 		margin: 6px 0 0;
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -810,7 +810,7 @@
 
 	.album-card-sub {
 		margin: 0;
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -821,7 +821,7 @@
 		.hero { padding: 24px 20px 20px; min-height: auto; }
 		.hero-body { grid-template-columns: 1fr; gap: 18px; }
 		.hero-art-wrap { width: 180px; height: 180px; }
-		.hero-title { font-size: 2rem; }
+		.hero-title { font-size: var(--font-size-2xl); }
 		.actions-bar { padding: 12px 20px; }
 		.track-table { padding: 8px 12px 0; }
 		.track-header { grid-template-columns: 36px 1fr auto 56px; }

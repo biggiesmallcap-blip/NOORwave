@@ -471,14 +471,14 @@
 
 	.automix-page :global(.page-header .subtitle) {
 		max-width: 62ch;
-		font-size: 0.95rem;
-		line-height: 1.55;
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-loose);
 	}
 
 	.error-banner {
 		padding: 12px 16px;
 		color: var(--state-error);
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.automix-hero {
@@ -527,8 +527,8 @@
 
 	.now-copy h2 {
 		font-family: var(--font-body);
-		font-size: clamp(1.45rem, 2.2vw, 2.35rem);
-		font-weight: 760;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0;
 		overflow-wrap: anywhere;
 	}
@@ -556,7 +556,7 @@
 		padding: 6px 9px;
 		border-radius: 999px;
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.mix-radar {
@@ -593,7 +593,7 @@
 
 	.radar-core strong {
 		font-family: var(--font-body);
-		font-size: 1.8rem;
+		font-size: var(--font-size-2xl);
 		letter-spacing: 0;
 	}
 
@@ -601,7 +601,7 @@
 	.radar-stats span,
 	.data-card span {
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.radar-stats {
@@ -647,7 +647,7 @@
 	}
 
 	.card-heading h3 {
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 	}
 
 	.crossfade-steps,
@@ -713,7 +713,7 @@
 	.policy-toggle span,
 	.shuffle-opt small {
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.policy-toggle.active {
@@ -787,7 +787,7 @@
 	.queue-index {
 		font-family: var(--font-mono);
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.queue-art {
@@ -823,7 +823,7 @@
 	.queue-meta span,
 	.queue-dsp span {
 		color: var(--text-secondary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.compat-pill {
@@ -834,7 +834,7 @@
 		padding: 4px 8px;
 		border-radius: 999px;
 		color: var(--text-secondary);
-		font-size: 0.68rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.compat-good {
@@ -872,7 +872,7 @@
 
 	.data-card strong {
 		font-family: var(--font-body);
-		font-size: 1.9rem;
+		font-size: var(--font-size-2xl);
 		letter-spacing: 0;
 	}
 

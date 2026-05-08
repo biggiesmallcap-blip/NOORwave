@@ -2148,14 +2148,14 @@
 	}
 
 	.intensity-eyebrow {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		color: var(--text-secondary);
 	}
 
 	.intensity-tagline {
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-tertiary, var(--text-secondary));
 	}
 
@@ -2194,13 +2194,13 @@
 	}
 
 	.intensity-title {
-		font-weight: 600;
-		font-size: 0.95rem;
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-md);
 	}
 
 	.intensity-detail {
-		font-size: 0.8rem;
-		line-height: 1.4;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
 		color: var(--text-secondary);
 	}
 
@@ -2210,7 +2210,7 @@
 		padding: 10px 12px;
 		border-radius: 8px;
 		border-left: 3px solid;
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.safety-panel.safety-safe {
@@ -2229,19 +2229,19 @@
 	}
 
 	.safety-headline {
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 	}
 
 	.safety-detail {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 6px;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 	}
 
 	.eta-line {
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 	}
 
@@ -2275,9 +2275,9 @@
 
 	.settings-title h1 {
 		font-family: var(--font-body);
-		font-size: 1.42rem;
-		font-weight: 700;
-		line-height: 1.15;
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		letter-spacing: 0;
 	}
 
@@ -2313,8 +2313,8 @@
 
 	.settings-status-strip span {
 		color: var(--text-tertiary);
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.09em;
 		text-transform: uppercase;
 	}
@@ -2324,7 +2324,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 0.86rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.settings-grid {
@@ -2418,7 +2418,7 @@
 	}
 
 	.settings-rail-copy strong {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -2426,7 +2426,7 @@
 	}
 
 	.settings-rail-hint {
-		font-size: 0.68rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		white-space: normal;
 		display: -webkit-box;
@@ -2480,7 +2480,7 @@
 		justify-content: center;
 	}
 	.wallpaper-big-preview-hint span {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: rgba(255, 255, 255, 0.20);
@@ -2544,8 +2544,8 @@
 	}
 
 	.wallpaper-tile-label strong {
-		font-size: 0.82rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -2558,8 +2558,8 @@
 		border-radius: 999px;
 		background: color-mix(in srgb, var(--accent-strong, #6366f1) 90%, transparent);
 		color: white;
-		font-size: 0.60rem;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
 		width: fit-content;
@@ -2575,8 +2575,8 @@
 		align-items: center;
 		gap: 6px;
 		cursor: pointer;
-		font-size: 0.76rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-secondary, rgba(255,255,255,0.45));
 		padding: 5px 2px;
 		transition: color 140ms ease;
@@ -2589,7 +2589,7 @@
 
 	.wallpaper-more-icon {
 		display: inline-block;
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 		transition: transform 180ms ease;
 	}
 
@@ -2629,12 +2629,12 @@
 
 	.inner-metrics :global(.metric-pair strong) {
 		font-family: var(--font-body);
-		font-size: 1.05rem;
+		font-size: var(--font-size-md);
 		letter-spacing: 0;
 	}
 
 	.inner-metrics :global(.metric-pair p) {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.enrichment-progress {
@@ -2649,12 +2649,12 @@
 
 	.enrichment-progress-copy p {
 		margin: 0;
-		font-size: 0.96rem;
+		font-size: var(--font-size-md);
 		color: rgba(255, 255, 255, 0.92);
 	}
 
 	.enrichment-progress-copy span {
-		font-size: 0.86rem;
+		font-size: var(--font-size-sm);
 		color: rgba(255, 255, 255, 0.62);
 	}
 
@@ -2681,14 +2681,14 @@
 	}
 
 	.discovery-warning h4 {
-		font-size: 1.05rem;
-		font-weight: 600;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
 		margin: 0 0 0.4rem;
 	}
 
 	.discovery-warning p {
 		margin: 0;
-		line-height: 1.5;
+		line-height: var(--line-height-normal);
 	}
 
 	.discovery-guide {
@@ -2698,8 +2698,8 @@
 
 	.discovery-guide > summary {
 		cursor: pointer;
-		font-size: 0.92rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-secondary);
 		list-style: none;
 	}
@@ -2725,15 +2725,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
-		font-size: 0.88rem;
-		line-height: 1.55;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-loose);
 		color: var(--text-secondary);
 	}
 
 	.guide-body h5 {
 		margin: 8px 0 0;
-		font-size: 0.92rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 	}
 
@@ -2783,7 +2783,7 @@
 		background: rgba(255, 255, 255, 0.03);
 		border: 1px solid var(--panel-border);
 		font-family: var(--font-mono);
-		font-size: 1.9rem;
+		font-size: var(--font-size-2xl);
 		letter-spacing: 0.18em;
 		text-align: center;
 	}
@@ -2799,7 +2799,7 @@
 
 	.galaxy-refresh-label {
 		margin: 4px 0 0;
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--signal-text);
 	}
 
@@ -2914,13 +2914,13 @@
 	.sync-count {
 		display: inline-block;
 		margin-left: 4px;
-		font-size: 0.85em;
+		font-size: var(--font-size-sm);
 		color: rgba(255, 255, 255, 0.5);
 		font-weight: normal;
 	}
 	.sync-error {
 		color: var(--state-error);
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		word-break: break-word;
 	}
 
@@ -2943,7 +2943,7 @@
 	}
 
 	.analysis-progress-label {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		margin: 6px 0 0;
 	}
@@ -2970,8 +2970,8 @@
 
 	.advanced-details summary {
 		cursor: pointer;
-		font-size: 0.82rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-secondary);
 	}
 
@@ -2984,7 +2984,7 @@
 	}
 
 	.setting-row label {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 	}
 
@@ -3014,7 +3014,7 @@
 	}
 
 	.acrcloud-daily-count {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 	}
 
@@ -3033,14 +3033,14 @@
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--panel-border);
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		word-break: break-all;
 		white-space: pre-wrap;
 	}
 
 	.field-error {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: #ffb0b0;
 	}
 </style>

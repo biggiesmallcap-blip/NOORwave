@@ -263,7 +263,7 @@
 
 	.refresh {
 		font-family: var(--font-mono);
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 		background: transparent;
 		border: 1px solid var(--input-border);
 		color: var(--text-secondary);

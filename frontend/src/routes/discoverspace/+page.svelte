@@ -296,14 +296,14 @@
 	}
 	.header-text { display: flex; flex-direction: column; gap: 2px; }
 	.eyebrow {
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 		text-transform: uppercase;
 		letter-spacing: 0.12em;
 		color: rgba(255,255,255,0.35);
 	}
 	h1 {
-		font-size: 1.1rem;
-		font-weight: 600;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-semibold);
 		color: rgba(255,255,255,0.9);
 		margin: 0;
 	}
@@ -322,7 +322,7 @@
 		border: 1px solid rgba(255,255,255,0.1);
 		background: rgba(255,255,255,0.05);
 		color: rgba(255,255,255,0.9);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		outline: none;
 		transition: border-color 0.15s;
 	}
@@ -336,7 +336,7 @@
 		background: rgba(124,128,255,0.2);
 		color: rgba(255,255,255,0.85);
 		cursor: pointer;
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 		transition: background 0.15s;
 	}
 	.search-btn:hover:not(:disabled) { background: rgba(124,128,255,0.35); }
@@ -351,13 +351,13 @@
 		border-radius: 999px;
 		background: rgba(91,78,248,0.08);
 		border: 1px solid rgba(91,78,248,0.3);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		width: fit-content;
 		flex-shrink: 0;
 		margin: 0 var(--space-3, 12px);
 	}
 	.seed-source { color: var(--text-secondary, #a0a0c0); letter-spacing: 0.04em; }
-	.seed-title { font-weight: 600; color: var(--text-primary, #e8e8f0); }
+	.seed-title { font-weight: var(--font-weight-semibold); color: var(--text-primary, #e8e8f0); }
 	.seed-toggle {
 		margin-left: auto;
 		background: transparent;
@@ -365,7 +365,7 @@
 		color: #a0a0e8;
 		border-radius: 999px;
 		padding: 4px 12px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		cursor: pointer;
 		transition: background 0.15s, color 0.15s;
 	}
@@ -381,7 +381,7 @@
 		background: rgba(124,128,255,0.08);
 		border: 1px solid rgba(124,128,255,0.18);
 		flex-shrink: 0;
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: rgba(255,255,255,0.6);
 		margin: 0 var(--space-3, 12px);
 	}
@@ -391,14 +391,14 @@
 		box-shadow: 0 0 6px rgba(124,128,255,0.8);
 		flex-shrink: 0;
 	}
-	.automix-label { color: rgba(255,255,255,0.8); font-weight: 500; }
+	.automix-label { color: rgba(255,255,255,0.8); font-weight: var(--font-weight-medium); }
 	.automix-tag {
 		padding: 2px 7px;
 		border-radius: 999px;
 		background: rgba(124,128,255,0.15);
 		color: rgba(124,128,255,1);
-		font-size: 0.72rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.04em;
 	}
 	.automix-seed {
@@ -409,7 +409,7 @@
 		white-space: nowrap;
 		max-width: 260px;
 	}
-	.automix-seed strong { color: rgba(255,255,255,0.6); font-weight: 500; }
+	.automix-seed strong { color: rgba(255,255,255,0.6); font-weight: var(--font-weight-medium); }
 
 	.page-layout {
 		flex: 1;
@@ -454,7 +454,7 @@
 		background: rgba(10, 10, 30, 0.82);
 		border: 1px solid rgba(124, 128, 255, 0.3);
 		backdrop-filter: blur(6px);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: rgba(255, 255, 255, 0.7);
 		white-space: nowrap;
 	}
@@ -468,7 +468,7 @@
 		flex-shrink: 0;
 	}
 	.refresh-label { color: rgba(200, 200, 255, 0.85); }
-	.refresh-pct { color: rgba(124, 128, 255, 0.9); font-weight: 600; margin-left: 2px; }
+	.refresh-pct { color: rgba(124, 128, 255, 0.9); font-weight: var(--font-weight-semibold); margin-left: 2px; }
 
 	.empty-state {
 		position: absolute;
@@ -483,7 +483,7 @@
 		padding: 24px;
 	}
 	.empty-icon {
-		font-size: 3rem;
+		font-size: var(--font-size-4xl);
 		opacity: 0.2;
 		margin-bottom: 4px;
 	}
@@ -491,12 +491,12 @@
 		animation: spin 3s linear infinite;
 	}
 	.empty-title {
-		font-weight: 600;
-		font-size: 1rem;
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-md);
 		color: rgba(255,255,255,0.5);
 	}
 	.empty-copy {
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		color: rgba(255,255,255,0.3);
 	}
 	.retry-btn {
@@ -506,7 +506,7 @@
 		border: 1px solid rgba(124,128,255,0.3);
 		background: rgba(124,128,255,0.12);
 		color: rgba(160,165,255,0.9);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: background 0.15s;
 	}
