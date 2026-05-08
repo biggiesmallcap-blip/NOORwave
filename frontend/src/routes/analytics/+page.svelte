@@ -194,7 +194,7 @@
 
 <style>
 	.analytics-tree {
-		max-width: 1280px;
+		max-width: var(--content-width);
 		margin: 0 auto;
 		padding: var(--space-5) var(--space-5) var(--space-8);
 		display: flex;

@@ -173,8 +173,8 @@
   }
 
   .hero-thumb {
-    width: 140px;
-    height: 140px;
+    width: clamp(120px, 12vw, 180px);
+    aspect-ratio: 1 / 1;
     border-radius: 8px;
     background-size: cover;
     background-position: center;

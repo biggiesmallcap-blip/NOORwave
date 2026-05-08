@@ -1460,12 +1460,12 @@
 
 <style>
   .search-page {
-    width: min(100%, 1280px);
+    width: min(100%, var(--content-width));
     margin: 0 auto;
     padding: 16px 4px 80px;
   }
   .search-header {
-    max-width: 1200px;
+    max-width: var(--content-width);
     margin: 0 auto 40px;
     padding: 0 4px;
   }
@@ -1629,7 +1629,7 @@
     text-align: center;
   }
   .search-error { color: var(--state-error); }
-  .results-section { margin-bottom: 32px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .results-section { margin-bottom: 32px; max-width: var(--content-width); margin-left: auto; margin-right: auto; }
   .recent-section { margin-top: 36px; max-width: 720px; margin-left: auto; margin-right: auto; }
   .recent-head {
     display: flex;
@@ -1667,7 +1667,7 @@
     border-color: var(--accent-line);
     color: var(--text-primary);
   }
-  .top-result-section { margin-bottom: 28px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .top-result-section { margin-bottom: 28px; max-width: var(--content-width); margin-left: auto; margin-right: auto; }
   .top-result-card {
     display: grid;
     grid-template-columns: 168px 1fr;

@@ -693,7 +693,7 @@
 
 <style>
 	.videos-page {
-		width: min(100%, 1220px);
+		width: min(100%, var(--content-width));
 		margin: 0 auto;
 		display: grid;
 		gap: 28px;

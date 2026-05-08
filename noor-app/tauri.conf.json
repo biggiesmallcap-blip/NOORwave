@@ -10,6 +10,8 @@
         "url": "http://127.0.0.1:3334",
         "width": 1280,
         "height": 800,
+        "minWidth": 720,
+        "minHeight": 500,
         "visible": true,
         "decorations": true,
         "resizable": true

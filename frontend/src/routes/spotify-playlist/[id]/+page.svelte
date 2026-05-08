@@ -485,7 +485,7 @@
 </div>
 
 <style>
-  .page { max-width: 1080px; margin: 0 auto; padding: 32px 28px 96px; }
+  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; }
   .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
 

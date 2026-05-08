@@ -487,16 +487,16 @@
 
 	.hero-body {
 		display: grid;
-		grid-template-columns: 204px 1fr;
+		grid-template-columns: clamp(160px, 16vw, 240px) 1fr;
 		gap: 24px;
 		align-items: end;
 		width: 100%;
-		max-width: 1400px;
+		max-width: var(--content-width);
 	}
 
 	.hero-art-wrap {
-		width: 204px;
-		height: 204px;
+		width: clamp(160px, 16vw, 240px);
+		aspect-ratio: 1 / 1;
 		border-radius: 8px;
 		overflow: hidden;
 		box-shadow: 0 28px 70px -14px rgba(0, 0, 0, 0.7);

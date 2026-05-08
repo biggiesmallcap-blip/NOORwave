@@ -2232,7 +2232,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
-		max-width: 1200px;
+		max-width: var(--content-width);
 		margin: 0 auto 24px;
 		padding: 0 4px;
 	}

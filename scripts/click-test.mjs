@@ -12,6 +12,11 @@
 // Optional flags:
 //   --artist 4001     Override the artist id (default: 4001 / Julio Iglesias)
 //   --query "..."     Override the search query (default: "julio iglesias")
+//   --viewport WxH    Browser viewport size (default: 1400x900). Examples:
+//                     --viewport 800x600, --viewport 1920x1080, --viewport 2560x1440
+//   --shots-suffix s  Append "-s" to every screenshot filename so a single run
+//                     doesn't overwrite a prior set. Useful for capturing
+//                     baselines at multiple viewports without losing earlier ones.
 //   --headed          Show the browser window (default: headless)
 //   --keep-open       Leave the browser open at the end for manual inspection
 //
@@ -42,9 +47,24 @@ const KEEP_OPEN = argFlag('--keep-open')
 const FRONTEND = process.env.NOOR_FRONTEND ?? 'http://localhost:5173'
 const BACKEND  = process.env.NOOR_BACKEND  ?? 'http://localhost:3334'
 
+const VIEWPORT_RAW = argVal('--viewport', '1400x900')
+const vpMatch = /^(\d+)x(\d+)$/.exec(VIEWPORT_RAW)
+if (!vpMatch) {
+	console.error(`✗ --viewport must be WxH (e.g. 1280x800), got "${VIEWPORT_RAW}"`)
+	process.exit(2)
+}
+const VIEWPORT = { width: Number(vpMatch[1]), height: Number(vpMatch[2]) }
+const SHOTS_SUFFIX = argVal('--shots-suffix', '')
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SHOTS = join(__dirname, 'click-test-screenshots')
 mkdirSync(SHOTS, { recursive: true })
+
+const shotPath = (name) => {
+	if (!SHOTS_SUFFIX) return join(SHOTS, name)
+	const dot = name.lastIndexOf('.')
+	return join(SHOTS, `${name.slice(0, dot)}-${SHOTS_SUFFIX}${name.slice(dot)}`)
+}
 
 const issues = []
 const log  = (kind, msg) => console.log(`  ${kind} ${msg}`)
@@ -62,7 +82,8 @@ try {
 } catch {}
 
 const browser = await chromium.launch({ headless: HEADLESS })
-const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } })
+const ctx = await browser.newContext({ viewport: VIEWPORT })
+console.log(`viewport: ${VIEWPORT.width}x${VIEWPORT.height}${SHOTS_SUFFIX ? ` (suffix: -${SHOTS_SUFFIX})` : ''}`)
 if (preToken) {
 	await ctx.addInitScript((tok) => localStorage.setItem('noor_api_token', tok), preToken)
 }
@@ -173,7 +194,7 @@ const step = async (name, fn) => {
 await step('Open / (home page)', async () => {
 	await page.goto(`${FRONTEND}/`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(2000)
-	await page.screenshot({ path: join(SHOTS, '01-home.png'), fullPage: true })
+	await page.screenshot({ path: shotPath('01-home.png'), fullPage: true })
 	const shell = await page.locator('.home-page').count()
 	if (shell === 0) { fail('home-page shell not rendered'); return }
 	pass('home-page shell rendered')
@@ -194,7 +215,7 @@ await step('Open / (home page)', async () => {
 await step('Open /library — tracks tab', async () => {
 	await page.goto(`${FRONTEND}/library`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(2500)
-	await page.screenshot({ path: join(SHOTS, '02-library.png') })
+	await page.screenshot({ path: shotPath('02-library.png') })
 	const rows = await page.locator('.home-track-row, .track-row').count()
 	if (rows === 0) fail('no track rows in library (library may be empty)')
 	else pass(`${rows} track rows visible`)
@@ -226,7 +247,7 @@ await step('Library — Artists tab', async () => {
 
 await step('Open /search (empty)', async () => {
 	await page.goto(`${FRONTEND}/search`, { waitUntil: 'domcontentloaded' })
-	await page.screenshot({ path: join(SHOTS, '03-search-empty.png') })
+	await page.screenshot({ path: shotPath('03-search-empty.png') })
 	pass('navigated')
 })
 
@@ -234,7 +255,7 @@ await step(`Search "${QUERY}" — Tracks tab not empty`, async () => {
 	const input = page.locator('input').first()
 	await input.fill(QUERY)
 	await page.waitForTimeout(2000)
-	await page.screenshot({ path: join(SHOTS, '04-search-results.png') })
+	await page.screenshot({ path: shotPath('04-search-results.png') })
 	const tracks = await page.locator('[class*="track-row"], [class*="search-track-row"]').count()
 	if (tracks === 0) fail(`no track rows for "${QUERY}"`)
 	else pass(`${tracks} track rows`)
@@ -247,7 +268,7 @@ await step(`Search "${QUERY}" — Tracks tab not empty`, async () => {
 await step(`Open /artists/${ARTIST_ID}`, async () => {
 	await page.goto(`${FRONTEND}/artists/${ARTIST_ID}`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(2500)
-	await page.screenshot({ path: join(SHOTS, '05-artist-hero.png'), fullPage: true })
+	await page.screenshot({ path: shotPath('05-artist-hero.png'), fullPage: true })
 	const heroTitle = await page.locator('h1.hero-title').textContent().catch(() => null)
 	if (!heroTitle?.trim()) fail('hero title empty')
 	else pass(`hero title: "${heroTitle.trim()}"`)
@@ -300,7 +321,7 @@ await step('Navigate to first discography album', async () => {
 	if (!url.includes('/albums/') && !url.includes('/tidal/albums/'))
 		fail(`unexpected URL: ${url}`)
 	else pass(`landed on ${url}`)
-	await page.screenshot({ path: join(SHOTS, '06-album-page.png'), fullPage: true })
+	await page.screenshot({ path: shotPath('06-album-page.png'), fullPage: true })
 })
 
 await step('Album page — track list (library + TIDAL rows)', async () => {
@@ -336,7 +357,7 @@ await step('Back to artist — click first similar artist', async () => {
 	if (!url.includes('/artists/') && !url.includes('/tidal/artists/'))
 		fail(`unexpected URL after similar click: ${url}`)
 	else pass(`landed on ${url}`)
-	await page.screenshot({ path: join(SHOTS, '07-tidal-artist.png'), fullPage: true })
+	await page.screenshot({ path: shotPath('07-tidal-artist.png'), fullPage: true })
 	// Verify TIDAL artist page has a name heading
 	const h1 = await page.locator('h1').first().textContent().catch(() => null)
 	if (!h1?.trim()) warn('TIDAL artist page: no h1 found')
@@ -350,7 +371,7 @@ await step('Back to artist — click first similar artist', async () => {
 await step('Open /playlists', async () => {
 	await page.goto(`${FRONTEND}/playlists`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(1500)
-	await page.screenshot({ path: join(SHOTS, '08-playlists.png') })
+	await page.screenshot({ path: shotPath('08-playlists.png') })
 	const shell  = await page.locator('.playlists-page').count()
 	const newBtn = await page.locator('button').filter({ hasText: /new smart playlist/i }).count()
 	if (shell === 0) { fail('playlists page shell not rendered'); return }
@@ -368,7 +389,7 @@ await step('Open /playlists', async () => {
 await step('Open /analytics', async () => {
 	await page.goto(`${FRONTEND}/analytics`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(3000)
-	await page.screenshot({ path: join(SHOTS, '09-analytics.png'), fullPage: true })
+	await page.screenshot({ path: shotPath('09-analytics.png'), fullPage: true })
 	const tree = await page.locator('.analytics-tree').count()
 	if (tree === 0) { fail('analytics-tree not rendered'); return }
 	pass('analytics-tree rendered')
@@ -391,7 +412,7 @@ await step('Analytics — switch time range to 7d', async () => {
 await step('Open /settings', async () => {
 	await page.goto(`${FRONTEND}/settings`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(1500)
-	await page.screenshot({ path: join(SHOTS, '10-settings.png') })
+	await page.screenshot({ path: shotPath('10-settings.png') })
 	const shell = await page.locator('.settings-page').count()
 	if (shell === 0) { fail('settings page not rendered'); return }
 	pass('settings page rendered')
@@ -417,7 +438,7 @@ await step('Settings — click second category', async () => {
 await step('Open /genres (genre galaxy)', async () => {
 	await page.goto(`${FRONTEND}/genres`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(3000)
-	await page.screenshot({ path: join(SHOTS, '11-genres.png') })
+	await page.screenshot({ path: shotPath('11-genres.png') })
 	// Galaxy renders as a WebGL canvas; check the page shell at minimum
 	const hasCanvas = await page.locator('canvas').count()
 	const hasEmpty  = await page.locator('[class*="empty"]').count()
@@ -440,7 +461,7 @@ await step('Open /genres (genre galaxy)', async () => {
 await step('Open /automix', async () => {
 	await page.goto(`${FRONTEND}/automix`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(1500)
-	await page.screenshot({ path: join(SHOTS, '12-automix.png') })
+	await page.screenshot({ path: shotPath('12-automix.png') })
 	const shell = await page.locator('.automix-page').count()
 	if (shell === 0) { fail('automix page not rendered'); return }
 	pass('automix page rendered')
@@ -455,7 +476,7 @@ await step('Open /automix', async () => {
 await step('Open /duplicates', async () => {
 	await page.goto(`${FRONTEND}/duplicates`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(1500)
-	await page.screenshot({ path: join(SHOTS, '13-duplicates.png') })
+	await page.screenshot({ path: shotPath('13-duplicates.png') })
 	const scanBtn = await page.locator('button').filter({ hasText: /scan library/i }).count()
 	if (scanBtn === 0) fail('"Scan library" button not found')
 	else pass('"Scan library" button present')
@@ -468,7 +489,7 @@ await step('Open /duplicates', async () => {
 await step('Open /videos', async () => {
 	await page.goto(`${FRONTEND}/videos`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(2000)
-	await page.screenshot({ path: join(SHOTS, '14-videos.png') })
+	await page.screenshot({ path: shotPath('14-videos.png') })
 	// The page always has a search input regardless of TIDAL auth.
 	const input = await page.locator('input[type="text"], input[type="search"], input').count()
 	if (input === 0) fail('no search input on videos page')
@@ -484,7 +505,7 @@ await step('Open /videos', async () => {
 await step('Open /discoverspace', async () => {
 	await page.goto(`${FRONTEND}/discoverspace`, { waitUntil: 'domcontentloaded' })
 	await page.waitForTimeout(2500)
-	await page.screenshot({ path: join(SHOTS, '15-discoverspace.png') })
+	await page.screenshot({ path: shotPath('15-discoverspace.png') })
 	const shell  = await page.locator('.discoverspace-page').count()
 	const canvas = await page.locator('canvas').count()
 	if (shell === 0) { fail('discoverspace page shell not rendered'); return }

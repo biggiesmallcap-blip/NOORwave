@@ -993,7 +993,7 @@
 		align-items: flex-end;
 		gap: 28px;
 		width: 100%;
-		max-width: 1400px;
+		max-width: var(--content-width);
 	}
 
 	.hero-portrait-wrap {

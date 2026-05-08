@@ -74,11 +74,24 @@
 
   .albums-row::-webkit-scrollbar { display: none; }
 
+  .albums-row {
+    /* Card width scales with viewport AND adapts to the parent container size.
+       In a wide hero context, cards stay at the viewport-clamped size; in a
+       narrow sidebar context, the @container rule below switches to a tighter
+       cqw-based scale. Artwork and labels share the same value via this var. */
+    container-type: inline-size;
+    --album-card-w: clamp(112px, 11vw, 156px);
+  }
+
+  @container (max-width: 480px) {
+    .album-card { --album-card-w: clamp(80px, 22cqw, 110px); }
+  }
+
   .album-card {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    width: 128px;
+    width: var(--album-card-w);
     flex-shrink: 0;
     background: none;
     border: none;
@@ -90,9 +103,9 @@
 
   .art-wrap {
     position: relative;
-    width: 128px;
-    height: 128px;
-    border-radius: 6px;
+    width: var(--album-card-w);
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-xs);
     overflow: hidden;
   }
 
@@ -110,9 +123,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 36px;
+    font-size: var(--font-size-3xl);
     color: rgba(255,255,255,0.5);
-    background: var(--bg-glass, rgba(255,255,255,0.08));
+    background: var(--bg-surface);
   }
 
   .art-play-overlay {
@@ -137,7 +150,7 @@
     font-size: 12px;
     font-weight: 500;
     color: var(--text-primary, #fff);
-    width: 128px;
+    width: var(--album-card-w);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -146,7 +159,7 @@
   .album-artist {
     font-size: 11px;
     color: var(--text-secondary, rgba(255,255,255,0.5));
-    width: 128px;
+    width: var(--album-card-w);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

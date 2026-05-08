@@ -76,12 +76,27 @@
 
   .artists-row::-webkit-scrollbar { display: none; }
 
+  .artists-row {
+    /* Card width scales with viewport AND adapts to parent container size.
+       In a narrow sidebar context, the @container rule below tightens. */
+    container-type: inline-size;
+    --artist-card-w:   clamp(76px, 7.5vw, 104px);
+    --artist-avatar-w: clamp(64px, 6.4vw, 92px);
+  }
+
+  @container (max-width: 480px) {
+    .artist-card {
+      --artist-card-w:   clamp(60px, 18cqw, 88px);
+      --artist-avatar-w: clamp(52px, 16cqw, 76px);
+    }
+  }
+
   .artist-card {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 8px;
-    width: 84px;
+    width: var(--artist-card-w);
     flex-shrink: 0;
     background: none;
     border: none;
@@ -95,8 +110,8 @@
   }
 
   .artist-avatar {
-    width: 72px;
-    height: 72px;
+    width: var(--artist-avatar-w);
+    aspect-ratio: 1 / 1;
     border-radius: 50%;
     object-fit: cover;
     display: block;
@@ -120,7 +135,7 @@
     font-size: 11px;
     color: var(--text-secondary, rgba(255,255,255,0.6));
     text-align: center;
-    width: 84px;
+    width: var(--artist-card-w);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
