@@ -1871,7 +1871,7 @@
 		gap: 18px;
 		background: radial-gradient(circle at 50% 35%, #1a1f2e 0%, #0a0d14 65%, #05070b 100%);
 		color: #8b93a7;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		font-family: var(--font-body);
 		z-index: 50;
 	}
 	.onboarding-check .check-mark {
