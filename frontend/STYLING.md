@@ -14,7 +14,9 @@ If you're tempted to add `padding: 16px` or `border-radius: 12px` directly, ask:
 | --- | --- | --- |
 | Spacing | `--space-1` … `--space-7` (3-48 px), `--gap-sm` / `--gap` / `--gap-lg` | Padding, margin, grid gap, flex gap |
 | Radii | `--radius-xs` (4-6 px), `--radius-sm` (7-10 px), `--radius-md` (10-14 px), `--radius-lg` (15-22 px). `--radius` is a legacy alias for `--radius-md`. | Card corners, panel corners, modal corners. `50%` and `999px` for circles/pills are fine raw. |
-| Typography | `--font-size-xs` (11-13 px) … `--font-size-3xl` (28-40 px) | All component font sizes that map cleanly to a step. Odd one-offs (e.g. 13 px) stay raw. |
+| Typography | `--font-size-2xs` (8-10 px), `--font-size-xs` (11-13 px), `--font-size-sm` (13-15 px), `--font-size-md` (15-17 px), `--font-size-lg` (17-20 px), `--font-size-xl` (20-26 px), `--font-size-2xl` (24-32 px), `--font-size-3xl` (28-40 px), `--font-size-4xl` (40-56 px) | All component font sizes — no raw px or raw rem are accepted by lint. The bookend tokens (`2xs`, `4xl`) cover micro-labels and hero displays; new sizes outside this range are a design red flag, not a token candidate. |
+| Weight | `--font-weight-medium` (500), `--font-weight-semibold` (600), `--font-weight-bold` (700) | All `font-weight`. Lint also permits raw `400` (the rare regular case) and raw `800` (the rare extra-bold case) — both require a code comment justifying the deviation. |
+| Line height | `--line-height-tight` (1.1), `--line-height-snug` (1.3), `--line-height-normal` (1.5), `--line-height-loose` (1.6) | All `line-height`. Lint also permits raw `1` for inherently single-line elements (icons, button labels, chips). |
 | Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms) | All `transition` durations. No raw `0.13s` / `0.21s` / `0.34s`. |
 | Blur | `--blur-base` (8 px), `--blur-overlay` (16 px), `--blur-modal` (24 px) | All `backdrop-filter` values. Three tiers is the maximum that should ever exist; anything else is drift. |
 | State | `--state-error`, `--state-warning`, `--state-success`, `--state-active`, `--state-favorite`, `--state-favorite-glow` | Status colours. **Never** use `--danger`, `--color-error` — they are not defined. |
@@ -118,16 +120,20 @@ Existing raw `z-index` values from before the scale was introduced have been mig
 Stylelint runs on `src/**/*.{css,svelte}` and:
 
 - **Errors** on legacy tokens (`--danger`, `--color-error`, `--bg-glass`, `--surface-hover`) and on hardcoded hex values that should be theme tokens (`#4a6dd8`, `#5a7ce8`, `rgba(155,111,255,...)`, `rgba(74,109,216,...)`).
-- **Warns** on raw `font-size: Npx` — prefer `var(--font-size-*)`.
+- **Warns** (errors after Phase 4.4) on any `font-size`, `font-family`, `font-weight`, or `line-height` value that is not a canonical token — except the small set of documented raw exceptions: weight `400`/`800` (with a code comment), line-height `1` (single-line elements only), `normal`, `inherit`.
+- **Warns** (errors after Phase 4.4) on the `font:` shorthand except `font: inherit`. Set size, family, weight, and line-height individually with tokens — the shorthand is reserved for button-reset patterns only.
+
+A separate guard, `pnpm lint:inline-styles`, scans Svelte templates for `style="font-..."` attributes (which stylelint cannot see). Use a scoped `<style>` block instead.
 
 ```text
-npm run lint:css
+pnpm lint:css
+pnpm lint:inline-styles
 ```
 
-Errors are blocking; fix them before committing. Warnings are advisory but reviewed at PR time. `.svelte` components are linted via `postcss-html`.
+Errors are blocking; fix them before committing. `.svelte` components are linted via `postcss-html`.
 
 ## Before you add a token
 
-Justify why an existing token cannot represent the value. New tokens grow the design system and become a maintenance cost. The current scale already covers spacing 3-48 px, radii 4-22 px, type 11-40 px — most additions to the system can be expressed in those.
+Justify why an existing token cannot represent the value. New tokens grow the design system and become a maintenance cost. The current scale already covers spacing 3-48 px, radii 4-22 px, type 8-56 px (9 steps), weight 500/600/700, and line-height 1.1/1.3/1.5/1.6 — most additions to the system can be expressed in those. New sizes outside the type scale (sub-8 px or above-56 px) should escalate to a design discussion rather than auto-adding a 5xl or 3xs token.
 
 If you need a value outside the scale (e.g. a 64 px hero-art floor), prefer a per-component CSS custom property scoped to the parent over a new global token.
