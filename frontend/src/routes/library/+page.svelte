@@ -21,9 +21,21 @@
 	import AlbumDetailPopup from '$lib/components/AlbumDetailPopup.svelte';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { openContextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
-	import { buildTrackMenu } from '$lib/player/track_menu';
-	import { buildAlbumMenu } from '$lib/player/album_menu';
-	import { buildArtistMenu } from '$lib/player/artist_menu';
+	type TrackMenuMod = typeof import('$lib/player/track_menu');
+	type AlbumMenuMod = typeof import('$lib/player/album_menu');
+	type ArtistMenuMod = typeof import('$lib/player/artist_menu');
+
+	let _menuMods: Promise<{ track: TrackMenuMod; album: AlbumMenuMod; artist: ArtistMenuMod }> | null = null;
+	function loadMenuMods() {
+		if (!_menuMods) {
+			_menuMods = Promise.all([
+				import('$lib/player/track_menu'),
+				import('$lib/player/album_menu'),
+				import('$lib/player/artist_menu'),
+			]).then(([track, album, artist]) => ({ track, album, artist }));
+		}
+		return _menuMods;
+	}
 	import { parseQuery } from '$lib/search/query_parser';
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
 	import { goto } from '$app/navigation';
@@ -49,10 +61,12 @@
 			}));
 	}
 
-	function handleHomeArtistContextMenu(e: MouseEvent, artistId: number) {
+	async function handleHomeArtistContextMenu(e: MouseEvent, artistId: number) {
+		e.preventDefault();
 		const card = artists.find(a => a.id === artistId);
 		const artist = card ?? { id: artistId, tidal_id: null, name: '' };
-		openContextMenu(e, buildArtistMenu(artist, {
+		const mods = await loadMenuMods();
+		openContextMenu(e, mods.artist.buildArtistMenu(artist, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
 				const { tracks: t } = await api.getArtistTracks(artistId);
@@ -61,10 +75,12 @@
 		}), artist.name);
 	}
 
-	function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number) {
+	async function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number) {
+		e.preventDefault();
 		const card = recentAlbums.find(a => a.id === albumId);
 		const album = card ?? { id: albumId, title: '' };
-		openContextMenu(e, buildAlbumMenu(album, {
+		const mods = await loadMenuMods();
+		openContextMenu(e, mods.album.buildAlbumMenu(album, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
 				const { tracks: t } = await api.getAlbumTracks(albumId);
@@ -1173,7 +1189,7 @@
 								class="home-track-row"
 								class:playing={$currentTrack?.id === track.id && $isPlaying}
 								onclick={() => void playTrackNow(track.id)}
-								oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildTrackMenu(track)); }}
+								oncontextmenu={async (e) => { e.preventDefault(); e.stopPropagation(); const mods = await loadMenuMods(); openContextMenu(e, mods.track.buildTrackMenu(track)); }}
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
 								use:lazyTidalArt={{
@@ -1240,10 +1256,11 @@
 					tabindex="0"
 					aria-pressed={$selectedAlbumIds.has(album.id)}
 					onclick={(event) => handleAlbumCardClick(album, event)}
-					oncontextmenu={(event) => {
+					oncontextmenu={async (event) => {
 						event.preventDefault();
 						event.stopPropagation();
-						openContextMenu(event, buildAlbumMenu(album, {
+						const mods = await loadMenuMods();
+						openContextMenu(event, mods.album.buildAlbumMenu(album, {
 							isLocal: true,
 							addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
 								const { tracks: t } = await api.getAlbumTracks(album.id);
@@ -1293,10 +1310,11 @@
 						<button
 							class="menu-trigger"
 							aria-label="Album actions"
-							onclick={(event) => {
+							onclick={async (event) => {
 								event.preventDefault();
 								event.stopPropagation();
-								openMenuAtElement(event.currentTarget, buildAlbumMenu(album, {
+								const mods = await loadMenuMods();
+								openMenuAtElement(event.currentTarget, mods.album.buildAlbumMenu(album, {
 									isLocal: true,
 									includeSelect: true,
 									includeRemove: true,
@@ -1363,10 +1381,11 @@
 					<button
 						class="artist-card"
 						onclick={() => void goto(`/artists/${artist.id}`)}
-						oncontextmenu={(e) => {
+						oncontextmenu={async (e) => {
 							e.preventDefault();
 							e.stopPropagation();
-							openContextMenu(e, buildArtistMenu(artist, { isLocal: true, hideOpen: true }), artist.name);
+							const mods = await loadMenuMods();
+							openContextMenu(e, mods.artist.buildArtistMenu(artist, { isLocal: true, hideOpen: true }), artist.name);
 						}}
 						title="Open {artist.name}"
 						use:lazyTidalArt={{
@@ -1514,7 +1533,7 @@
 					style="grid-template-columns: {trackGridColumns}"
 					ondblclick={() => void playTrack(track)}
 					onclick={(event) => handleTrackRowClick(track.id, event)}
-					oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(event, buildTrackMenu(track)); }}
+					oncontextmenu={async (event) => { event.preventDefault(); event.stopPropagation(); const mods = await loadMenuMods(); openContextMenu(event, mods.track.buildTrackMenu(track)); }}
 					onkeydown={(event) => handleTrackRowKeydown(track.id, event)}
 				>
 					<span class="col-num">

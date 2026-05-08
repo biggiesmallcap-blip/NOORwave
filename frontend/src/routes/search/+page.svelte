@@ -4,9 +4,21 @@
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
-  import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
-  import { buildAlbumMenu } from '$lib/player/album_menu'
-  import { buildArtistMenu } from '$lib/player/artist_menu'
+  type TrackMenuMod = typeof import('$lib/player/track_menu')
+  type AlbumMenuMod = typeof import('$lib/player/album_menu')
+  type ArtistMenuMod = typeof import('$lib/player/artist_menu')
+
+  let _menuMods: Promise<{ track: TrackMenuMod; album: AlbumMenuMod; artist: ArtistMenuMod }> | null = null
+  function loadMenuMods() {
+    if (!_menuMods) {
+      _menuMods = Promise.all([
+        import('$lib/player/track_menu'),
+        import('$lib/player/album_menu'),
+        import('$lib/player/artist_menu'),
+      ]).then(([track, album, artist]) => ({ track, album, artist }))
+    }
+    return _menuMods
+  }
   import { openContextMenu, type MenuItem } from '$lib/stores/context_menu'
   import { playTidalTrackNow, playTidalAlbum, playTidalTrackNext, addTidalTrackToQueue, startTidalSongRadio, playTrackNow, playTidalPlaylist } from '$lib/stores/player'
   import { formatTrackDuration } from '$lib/utils/format'
@@ -532,8 +544,9 @@
     return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
   }
 
-  function albumMenuItems(album: TidalSearchAlbum): MenuItem[] {
-    return buildAlbumMenu(
+  async function albumMenuItems(album: TidalSearchAlbum): Promise<MenuItem[]> {
+    const mods = await loadMenuMods()
+    return mods.album.buildAlbumMenu(
       {
         local_id: album.local_id,
         tidal_id: album.tidal_id,
@@ -545,8 +558,9 @@
     )
   }
 
-  function artistMenuItems(artist: TidalSearchArtist): MenuItem[] {
-    return buildArtistMenu(
+  async function artistMenuItems(artist: TidalSearchArtist): Promise<MenuItem[]> {
+    const mods = await loadMenuMods()
+    return mods.artist.buildArtistMenu(
       {
         local_id: artist.local_id,
         tidal_id: artist.tidal_id,
@@ -575,9 +589,10 @@
     ]
   }
 
-  function trackContextMenu(track: TidalSearchTrack): MenuItem[] {
+  async function trackContextMenu(track: TidalSearchTrack): Promise<MenuItem[]> {
+    const mods = await loadMenuMods()
     if (track.in_library && track.local_id != null) {
-      return buildTrackMenu({
+      return mods.track.buildTrackMenu({
         id: track.local_id,
         title: track.title,
         artist_id: null,
@@ -586,7 +601,7 @@
         album_title: track.album_title ?? null,
       })
     }
-    return buildTidalTrackMenu(toPlayable(track))
+    return mods.track.buildTidalTrackMenu(toPlayable(track))
   }
 
   function canPlaySearchTrack(track: TidalSearchTrack): boolean {
@@ -916,7 +931,7 @@
               tabindex="0"
               onclick={() => void playLibraryTrack(track)}
               onkeydown={(e) => e.key === 'Enter' && void playLibraryTrack(track)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
+              oncontextmenu={async (e) => { e.preventDefault(); const mods = await loadMenuMods(); openContextMenu(e, mods.track.buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
@@ -943,7 +958,7 @@
                 >▶</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
+                  onclick={async (e) => { e.stopPropagation(); const mods = await loadMenuMods(); openContextMenu(e, mods.track.buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
                   title="More options"
                   aria-label="More options"
                 >⋯</button>
@@ -974,7 +989,7 @@
           style={top.kind === 'artist' && artistBg && !topArtistImageFailed ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
-          oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry)) }}
+          oncontextmenu={async (e) => { e.preventDefault(); openContextMenu(e, await (top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry))) }}
         >
           {#if top.kind === 'artist'}
             {#if artistBg && !topArtistImageFailed}
@@ -1030,7 +1045,7 @@
               href={artist.in_library && artist.local_id != null
                 ? `/artists/${artist.local_id}`
                 : `/tidal/artists/${artist.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, artistMenuItems(artist)) }}
+              oncontextmenu={async (e) => { e.preventDefault(); openContextMenu(e, await artistMenuItems(artist)) }}
             >
               <div class="avatar-wrap">
                 {#if artist.artwork_url && !failedArtistImages.has(artist.tidal_id)}
@@ -1071,7 +1086,7 @@
               href={album.in_library && album.local_id != null
                 ? `/albums/${album.local_id}`
                 : `/tidal/albums/${album.tidal_id}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, albumMenuItems(album)) }}
+              oncontextmenu={async (e) => { e.preventDefault(); openContextMenu(e, await albumMenuItems(album)) }}
             >
               <div class="art-wrap">
                 {#if album.artwork_url}
@@ -1219,7 +1234,7 @@
                 onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
                 onmouseenter={() => { cursor = idx }}
                 onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
-                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
+                oncontextmenu={async (e) => { e.preventDefault(); openContextMenu(e, await trackContextMenu(track)) }}
               >
                 <span class="col-num">
                   <span class="track-num-label">{idx + 1}</span>
@@ -1289,7 +1304,7 @@
                   >◎</button>
                   <button
                     class="row-btn"
-                    onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
+                    onclick={async (e) => { e.stopPropagation(); openContextMenu(e, await trackContextMenu(track)) }}
                     title="More options"
                     aria-label="More options"
                   >⋯</button>
@@ -1314,7 +1329,7 @@
               onclick={() => canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track))}
               onmouseenter={() => { cursor = idx }}
               onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), canPlaySearchTrack(track) && void playTidalTrackNow(toPlayable(track)))}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
+              oncontextmenu={async (e) => { e.preventDefault(); openContextMenu(e, await trackContextMenu(track)) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
@@ -1378,7 +1393,7 @@
                 >◎</button>
                 <button
                   class="row-btn"
-                  onclick={(e) => { e.stopPropagation(); openContextMenu(e, trackContextMenu(track)) }}
+                  onclick={async (e) => { e.stopPropagation(); openContextMenu(e, await trackContextMenu(track)) }}
                   title="More options"
                   aria-label="More options"
                 >⋯</button>
@@ -1404,7 +1419,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
+              oncontextmenu={async (e) => { e.preventDefault(); const mods = await loadMenuMods(); openContextMenu(e, mods.track.buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
@@ -1436,7 +1451,7 @@
               tabindex="0"
               onclick={() => void playTrackNow(track.id)}
               onkeydown={(e) => e.key === 'Enter' && void playTrackNow(track.id)}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
+              oncontextmenu={async (e) => { e.preventDefault(); const mods = await loadMenuMods(); openContextMenu(e, mods.track.buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
                 <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
