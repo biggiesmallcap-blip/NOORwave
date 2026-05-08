@@ -112,8 +112,8 @@
 		border-radius: 999px;
 		background: rgba(0, 0, 0, 0.56);
 		color: rgba(255, 255, 255, 0.9);
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.meta {
@@ -131,12 +131,12 @@
 
 	.title {
 		color: var(--text-primary);
-		font-size: 0.86rem;
-		font-weight: 700;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.subtitle {
 		color: var(--text-tertiary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 	}
 </style>

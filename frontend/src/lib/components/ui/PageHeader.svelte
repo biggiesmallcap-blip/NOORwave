@@ -59,8 +59,8 @@
 	}
 
 	.eyebrow {
-		font-size: 0.72rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
 		color: var(--text-tertiary);
@@ -68,9 +68,9 @@
 
 	h1 {
 		font-family: var(--font-body);
-		font-size: clamp(1.55rem, 2vw, 1.9rem);
-		font-weight: 700;
-		line-height: 1.15;
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		letter-spacing: 0;
 	}
 

@@ -57,7 +57,7 @@
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--accent-line);
 		border-radius: 999px;
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: rgba(255, 255, 255, 0.6);
 	}
 	.training-dot {
@@ -81,7 +81,7 @@
 		border-radius: 999px;
 		transition: width 0.3s ease;
 	}
-	.training-count { font-size: 0.65rem; color: rgba(255,255,255,0.35); white-space: nowrap; }
+	.training-count { font-size: var(--font-size-2xs); color: rgba(255,255,255,0.35); white-space: nowrap; }
 
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }

@@ -267,7 +267,7 @@ body {
 	width: 100%;
 	font-family: var(--font-body);
 	font-size: var(--font-size-sm);
-	line-height: 1.5;
+	line-height: var(--line-height-normal);
 	color: var(--text-primary);
 	background-color: var(--bg-base);
 	overflow: hidden;
@@ -400,36 +400,36 @@ textarea {
 /* ── Typography ───────────────────────────────────────── */
 .display-face {
 	font-family: var(--font-display);
-	font-weight: 600;
-	line-height: 1.04;
+	font-weight: var(--font-weight-semibold);
+	line-height: var(--line-height-tight);
 	letter-spacing: -0.03em;
 }
 
 h1,
 h2 {
 	font-family: var(--font-body);
-	font-weight: 700;
-	line-height: 1.15;
+	font-weight: var(--font-weight-bold);
+	line-height: var(--line-height-tight);
 	letter-spacing: 0;
 }
 
-h1 { font-size: clamp(1.5rem, 2.2vw, 2rem); }
-h2 { font-size: clamp(1.15rem, 1.5vw, 1.4rem); }
+h1 { font-size: var(--font-size-2xl); }
+h2 { font-size: var(--font-size-xl); }
 
 h3 {
-	font-size: 0.95rem;
-	font-weight: 600;
+	font-size: var(--font-size-md);
+	font-weight: var(--font-weight-semibold);
 	letter-spacing: -0.01em;
 }
 
 h4 {
-	font-size: 0.875rem;
-	font-weight: 600;
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
 }
 
 .eyebrow {
-	font-size: 0.68rem;
-	font-weight: 700;
+	font-size: var(--font-size-xs);
+	font-weight: var(--font-weight-bold);
 	letter-spacing: 0.13em;
 	text-transform: uppercase;
 	color: var(--text-tertiary);
@@ -438,7 +438,7 @@ h4 {
 .page-copy,
 .muted-copy {
 	color: var(--text-secondary);
-	line-height: 1.6;
+	line-height: var(--line-height-loose);
 }
 
 /* ── Layout helpers ───────────────────────────────────── */
@@ -494,8 +494,8 @@ h4 {
 	padding: 9px 16px;
 	min-height: 2rem;            /* 32 px floor on desktop — comfortable click target */
 	border-radius: 99px;
-	font-size: 0.82rem;
-	font-weight: 600;
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
 	letter-spacing: 0.01em;
 	transition:
 		background var(--motion-fast),
@@ -590,8 +590,8 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	align-items: center;
 	padding: 3px 8px;
 	border-radius: 99px;
-	font-size: 0.6rem;
-	font-weight: 700;
+	font-size: var(--font-size-2xs);
+	font-weight: var(--font-weight-bold);
 	text-transform: uppercase;
 	letter-spacing: 0.08em;
 }

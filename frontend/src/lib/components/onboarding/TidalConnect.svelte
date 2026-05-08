@@ -129,16 +129,16 @@
 	.variant-onboarding h2 {
 		margin: 0 0 4px;
 		font-family: var(--font-display);
-		font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem);
-		font-weight: 500;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-medium);
 		letter-spacing: -0.02em;
-		line-height: 1.05;
+		line-height: var(--line-height-tight);
 	}
 	.variant-onboarding p {
 		margin: 0;
 		max-width: 420px;
 		color: var(--text-secondary);
-		line-height: 1.55;
+		line-height: var(--line-height-loose);
 		font-size: var(--font-size-md);
 	}
 	.actions {
@@ -153,7 +153,7 @@
 		border-radius: 8px;
 		border: 1px solid transparent;
 		cursor: pointer;
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		transition: background 120ms, border-color 120ms;
 	}
 	.btn-primary {
@@ -170,8 +170,8 @@
 	.btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: #e7eaf2; }
 	.code {
 		font-family: var(--font-mono);
-		font-size: clamp(2rem, 1.5rem + 2vw, 2.625rem);
-		font-weight: 600;
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.18em;
 		padding: 18px 28px;
 		background: var(--panel-bg);

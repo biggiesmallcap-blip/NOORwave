@@ -117,10 +117,10 @@
 
 	.np-eyebrow {
 		color: var(--signal-text);
-		font-size: 0.66rem;
+		font-size: var(--font-size-2xs);
 		letter-spacing: 0.13em;
 		text-transform: uppercase;
-		font-weight: 700;
+		font-weight: var(--font-weight-bold);
 	}
 
 	.np-title,
@@ -134,9 +134,9 @@
 	}
 
 	.np-title {
-		font-size: 1.35rem;
+		font-size: var(--font-size-xl);
 		font-family: var(--font-display);
-		line-height: 1.1;
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.02em;
 	}
 
@@ -153,12 +153,12 @@
 
 	.np-artist {
 		color: var(--text-primary);
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.np-album {
 		color: var(--text-secondary);
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.badge-row {
@@ -169,7 +169,7 @@
 	}
 
 	.stream-micro {
-		font-size: 0.68rem;
+		font-size: var(--font-size-2xs);
 		color: var(--text-secondary);
 		opacity: 0.55;
 		font-variant-numeric: tabular-nums;
@@ -178,7 +178,7 @@
 	}
 
 	.np-source {
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		opacity: 0.75;
 		letter-spacing: 0.02em;

@@ -431,7 +431,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		font-family: var(--font-mono);
 		color: rgba(200, 200, 220, 0.8);
 		pointer-events: none;

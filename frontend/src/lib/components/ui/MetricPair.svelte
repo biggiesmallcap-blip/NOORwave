@@ -28,15 +28,15 @@
 
 	.label {
 		color: var(--text-tertiary);
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 	}
 
 	strong {
 		font-family: var(--font-body);
-		font-size: 1.55rem;
-		font-weight: 700;
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: -0.01em;
 	}
 

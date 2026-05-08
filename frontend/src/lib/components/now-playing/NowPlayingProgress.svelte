@@ -124,12 +124,12 @@
 		display: flex;
 		justify-content: space-between;
 		color: var(--text-secondary);
-		font-size: 0.74rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.np-times.scrubbing span:first-child {
 		color: var(--accent-strong, var(--accent));
-		font-weight: 600;
+		font-weight: var(--font-weight-semibold);
 	}
 </style>

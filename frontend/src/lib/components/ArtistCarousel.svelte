@@ -137,12 +137,12 @@
     align-items: center;
     justify-content: center;
     font-size: var(--font-size-xl);
-    font-weight: 700;
+    font-weight: var(--font-weight-bold);
     color: rgba(255,255,255,0.85);
   }
 
   .artist-name {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-secondary, rgba(255,255,255,0.6));
     text-align: center;
     width: var(--artist-card-w);
