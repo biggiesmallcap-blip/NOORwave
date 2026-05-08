@@ -3,7 +3,12 @@ pub mod engine;
 pub mod features;
 pub mod fingerprint;
 pub mod key;
+pub mod beat_tracker;
+pub mod onset;
 pub mod scanner;
+pub mod tempo;
+
+pub const CURRENT_ANALYSIS_VERSION: &str = "v3";
 
 use crate::AppEvent;
 use std::sync::Arc;
@@ -60,7 +65,7 @@ pub fn spawn_actor(
                 .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
                 .ok()
                 .flatten()
-                .map(|f| f.analysis_version == "v2")
+                .map(|f| f.analysis_version == CURRENT_ANALYSIS_VERSION)
                 .unwrap_or(false);
 
             if already_analyzed {
@@ -70,7 +75,7 @@ pub fn spawn_actor(
             // CPU-heavy DSP must run off the tokio worker (Issue A).
             let db_clone = db.clone();
             let result = tokio::task::spawn_blocking(move || {
-                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id)
+                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id, 0)
             })
             .await
             .ok()

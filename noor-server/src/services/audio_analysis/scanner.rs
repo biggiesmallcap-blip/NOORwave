@@ -149,11 +149,24 @@ pub async fn run_preview_scan(
             }
         };
 
-        // ── 4. Analyze and save ───────────────────────────────────────────────
+        // ── 4. Skip the first 10 s of the preview clip ───────────────────────
+        // Track intros (fades, single-instrument opens, sustained pads) have
+        // different rhythmic content and contaminate BPM/key detection.
+        // Only skip when there are at least 4 s of audio remaining after the
+        // offset so the analyser has enough signal to work with.
+        const PREVIEW_OFFSET_SEC: usize = 10;
+        let offset_samples = sample_rate as usize * PREVIEW_OFFSET_SEC;
+        let (samples, applied_offset_ms) = if samples.len() > offset_samples + sample_rate as usize * 4 {
+            (samples[offset_samples..].to_vec(), (PREVIEW_OFFSET_SEC * 1000) as i64)
+        } else {
+            (samples, 0i64)
+        };
+
+        // ── 5. Analyze and save ───────────────────────────────────────────────
         let db = state.read().await.db.clone();
         let tid = track.id;
         let saved = tokio::task::spawn_blocking(move || {
-            super::engine::analyze_and_save(&db, &samples, sample_rate, "preview", tid)
+            super::engine::analyze_and_save(&db, &samples, sample_rate, "preview", tid, applied_offset_ms)
         })
         .await
         .ok()

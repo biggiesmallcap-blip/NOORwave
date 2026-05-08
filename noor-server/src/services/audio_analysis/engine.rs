@@ -16,11 +16,15 @@ use super::key;
 ///
 /// Individual analysis steps may return `None` if confidence is too low —
 /// those fields will be `None` in the returned struct.
+///
+/// `offset_ms` records how many milliseconds were skipped before `samples`
+/// starts (e.g. 10 000 when the first 10 s of a preview clip were dropped).
 pub fn analyze_clip(
     samples: &[f32],
     sample_rate: u32,
     source: &str,
     track_id: i64,
+    offset_ms: i64,
 ) -> AudioDspFeatures {
     // 1. BPM detection
     let (bpm, beat_strength) = detect_bpm(samples, sample_rate);
@@ -60,10 +64,10 @@ pub fn analyze_clip(
         stereo_width,
         is_instrumental: is_instrumental.unwrap_or(false),
         analysis_source: source.to_string(),
-        analysis_offset_ms: 0,
+        analysis_offset_ms: offset_ms,
         samples_analyzed: Some(samples.len() as i64),
         analyzed_at: now,
-        analysis_version: "v2".to_string(),
+        analysis_version: super::CURRENT_ANALYSIS_VERSION.to_string(),
     }
 }
 
@@ -71,14 +75,18 @@ pub fn analyze_clip(
 ///
 /// ALWAYS call this — never `analyze_clip` directly.
 /// Panics are logged at WARN level and return `None`.
+///
+/// `offset_ms` is forwarded to `analyze_clip` and recorded on the returned
+/// `AudioDspFeatures::analysis_offset_ms` field.
 pub fn analyze_clip_safe(
     samples: &[f32],
     sample_rate: u32,
     source: &str,
     track_id: i64,
+    offset_ms: i64,
 ) -> Option<AudioDspFeatures> {
     std::panic::catch_unwind(AssertUnwindSafe(|| {
-        analyze_clip(samples, sample_rate, source, track_id)
+        analyze_clip(samples, sample_rate, source, track_id, offset_ms)
     }))
     .map_err(|e| {
         let msg = if let Some(s) = e.downcast_ref::<&str>() {
@@ -96,14 +104,20 @@ pub fn analyze_clip_safe(
 /// Analyze and save to database.
 ///
 /// Calls `analyze_clip_safe`, then upserts into `audio_dsp_features`.
+///
+/// Pass `offset_ms = 0` when no intro was skipped (e.g. passive / local-file
+/// analysis).  Pass the real offset in milliseconds when the caller already
+/// dropped leading samples (e.g. the preview scan skips the first 10 s →
+/// `offset_ms = 10_000`).
 pub fn analyze_and_save(
     db: &crate::db::Database,
     samples: &[f32],
     sample_rate: u32,
     source: &str,
     track_id: i64,
+    offset_ms: i64,
 ) -> Option<AudioDspFeatures> {
-    let features = analyze_clip_safe(samples, sample_rate, source, track_id)?;
+    let features = analyze_clip_safe(samples, sample_rate, source, track_id, offset_ms)?;
 
     db.with_conn(|conn| crate::db::queries::upsert_audio_dsp_features(conn, &features))
         .map_err(|e| {
