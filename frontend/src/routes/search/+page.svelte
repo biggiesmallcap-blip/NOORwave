@@ -107,22 +107,30 @@
   const parsedQuery = $derived(parseQuery(query))
   const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
 
-  onMount(async () => {
-    try {
-      const res = await api.getGenres()
-      genreList = res.genres
-    } catch { /* ignore */ }
-    try {
-      const listens = await api.getRecentListens(20)
-      const names = listens.listens
-        .map(e => e.artist_name)
-        .filter((n): n is string => typeof n === 'string' && n.length > 0)
-      recentArtistNames = new Set(names)
-    } catch { /* ignore */ }
-    try {
-      const { playlists } = await api.getPlaylists()
+  onMount(() => {
+    // Critical-path: powers the empty-state shelf. Keep eager.
+    void api.getPlaylists().then(({ playlists }) => {
       localPlaylists = playlists
-    } catch { /* ignore */ }
+    }).catch(() => {})
+
+    // Non-critical: dropdown sources. Defer until idle so they don't
+    // push out first paint or compete with the user's first search.
+    const idle = (cb: () => void) =>
+      typeof requestIdleCallback === 'function'
+        ? requestIdleCallback(cb, { timeout: 2000 })
+        : setTimeout(cb, 200)
+
+    idle(() => {
+      void api.getGenres().then(res => {
+        genreList = res.genres
+      }).catch(() => {})
+      void api.getRecentListens(20).then(listens => {
+        const names = listens.listens
+          .map(e => e.artist_name)
+          .filter((n): n is string => typeof n === 'string' && n.length > 0)
+        recentArtistNames = new Set(names)
+      }).catch(() => {})
+    })
   })
 
   function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
