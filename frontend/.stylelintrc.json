@@ -47,7 +47,7 @@
 				]
 			},
 			{
-				"severity": "warning",
+				"severity": "error",
 				"message": "Use the canonical token instead (see frontend/STYLING.md). The font shorthand is reserved for `font: inherit` button-resets only — set size/family/weight/line-height individually with tokens."
 			}
 		]
