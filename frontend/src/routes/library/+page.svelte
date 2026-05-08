@@ -1835,8 +1835,8 @@
 	}
 
 	.section-label {
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
 		color: var(--accent);
@@ -1904,8 +1904,8 @@
 	}
 
 	.ht-title {
-		font-size: 13px;
-		font-weight: 500;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		color: var(--text-primary, #fff);
 		white-space: nowrap;
 		overflow: hidden;
@@ -1913,7 +1913,7 @@
 	}
 
 	.ht-sub {
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary, rgba(255,255,255,0.5));
 		white-space: nowrap;
 		overflow: hidden;
@@ -1963,7 +1963,7 @@
 		gap: 12px;
 		padding: 48px 0;
 		color: var(--text-secondary);
-		font-size: 0.9rem;
+		font-size: var(--font-size-md);
 	}
 
 	.spinner {
@@ -2016,8 +2016,8 @@
 	}
 
 	.library-hero-heading h1 {
-		font-size: clamp(1.55rem, 2.4vw, 2.15rem);
-		line-height: 1;
+		font-size: var(--font-size-3xl);
+		line-height: var(--line-height-tight);
 	}
 
 	.library-mode-pill,
@@ -2029,8 +2029,8 @@
 		border: 1px solid var(--panel-border);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-secondary);
-		font-size: 0.78rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.library-mode-pill {
@@ -2048,8 +2048,8 @@
 	.decade-chip {
 		padding: 4px 13px;
 		border-radius: var(--radius-md);
-		font-size: 11px;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
 		border: 1px solid var(--panel-border);
 		background: transparent;
@@ -2070,7 +2070,7 @@
 	.library-hero-subtitle {
 		max-width: 48ch;
 		color: var(--text-secondary);
-		font-size: 0.9rem;
+		font-size: var(--font-size-md);
 	}
 
 	.library-hero-actions {
@@ -2114,7 +2114,7 @@
 
 	.toolbar-note {
 		color: var(--text-secondary);
-		font-size: 0.84rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.kbd-hint {
@@ -2122,7 +2122,7 @@
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 2px;
-		font-size: 11px;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted, rgba(255,255,255,0.35));
 		padding: 4px 0 0 2px;
 		user-select: none;
@@ -2137,7 +2137,7 @@
 		border: 1px solid var(--border-subtle, rgba(255,255,255,0.15));
 		border-radius: 4px;
 		font-family: inherit;
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 		color: var(--text-secondary, rgba(255,255,255,0.5));
 		background: var(--bg-hover);
 	}
@@ -2151,7 +2151,7 @@
 	/* ─── New DSP Columns ───────────────────────── */
 
 	.col-bpm, .col-key, .col-energy, .col-dance {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary);
 		text-align: center;
 	}
@@ -2167,8 +2167,8 @@
 		border-radius: 4px;
 		background: var(--accent-soft);
 		color: var(--accent-strong);
-		font-size: 0.72rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		font-family: var(--font-mono);
 	}
 
@@ -2179,8 +2179,8 @@
 		border-radius: 4px;
 		background: var(--accent-soft);
 		color: var(--accent-strong);
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		font-family: var(--font-mono);
 		vertical-align: middle;
 	}
@@ -2192,7 +2192,7 @@
 		border-radius: 4px;
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--text-tertiary);
-		font-size: 0.68rem;
+		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		vertical-align: middle;
 	}
@@ -2222,7 +2222,7 @@
 	.mini-bar-label {
 		display: inline-block;
 		margin-left: 3px;
-		font-size: 0.72rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 		font-variant-numeric: tabular-nums;
 		vertical-align: middle;
@@ -2246,7 +2246,7 @@
 		border: 1px solid var(--border-subtle);
 		background: var(--panel-bg);
 		color: var(--text-primary, #fff);
-		font-size: 15px;
+		font-size: var(--font-size-md);
 		outline: none;
 		transition: border-color 0.15s;
 	}
@@ -2282,8 +2282,8 @@
 		border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
 		background: transparent;
 		color: var(--text-secondary, rgba(255,255,255,0.6));
-		font-size: 13px;
-		font-weight: 500;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		transition: background 0.15s, color 0.15s, border-color 0.15s;
 		white-space: nowrap;
@@ -2388,8 +2388,8 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-secondary);
-		font-size: 0.82rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
 		transition: all var(--motion-fast);
 	}
@@ -2422,7 +2422,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 2.5rem;
+		font-size: var(--font-size-3xl);
 		color: var(--accent-strong);
 	}
 
@@ -2431,7 +2431,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 2.5rem;
+		font-size: var(--font-size-3xl);
 		color: var(--accent-strong);
 	}
 
@@ -2445,20 +2445,20 @@
 
 	.detail-album-info h2,
 	.detail-track-info h2 {
-		font-size: 1.25rem;
-		font-weight: 750;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		letter-spacing: 0;
-		line-height: 1.2;
+		line-height: var(--line-height-snug);
 	}
 
 	.detail-artist {
 		color: var(--text-secondary);
-		font-size: 0.95rem;
+		font-size: var(--font-size-md);
 	}
 
 	.detail-album-name {
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.detail-meta-row {
@@ -2476,8 +2476,8 @@
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
-		font-size: 0.72rem;
-		font-weight: 600;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.detail-actions {
@@ -2503,22 +2503,22 @@
 	}
 
 	.meta-label {
-		font-size: 0.68rem;
-		font-weight: 700;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		color: var(--text-muted);
 	}
 
 	.meta-value {
-		font-size: 0.88rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-primary);
 		word-break: break-all;
 	}
 
 	.detail-album-tracks h3 {
-		font-size: 0.9rem;
-		font-weight: 600;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
 		margin-bottom: 8px;
 		color: var(--text-secondary);
 	}
@@ -2565,7 +2565,7 @@
 	.detail-track-num {
 		text-align: center;
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.detail-track-art {
@@ -2577,7 +2577,7 @@
 	}
 
 	.detail-track-title {
-		font-weight: 500;
+		font-weight: var(--font-weight-medium);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -2585,7 +2585,7 @@
 
 	.detail-track-artist {
 		color: var(--text-secondary);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -2594,7 +2594,7 @@
 
 	.detail-track-duration {
 		color: var(--text-tertiary);
-		font-size: 0.82rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.detail-track-queue {
@@ -2604,7 +2604,7 @@
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--panel-border);
 		color: var(--text-secondary);
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -2765,7 +2765,7 @@
 		background: rgba(255, 255, 255, 0.06);
 		border: 1px solid rgba(255, 255, 255, 0.1);
 		color: var(--text-secondary);
-		font-size: 0.9rem;
+		font-size: var(--font-size-md);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -2937,7 +2937,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 2rem;
+		font-size: var(--font-size-2xl);
 		color: var(--text-tertiary);
 	}
 
@@ -2965,7 +2965,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 1.1rem;
+		font-size: var(--font-size-md);
 		background: rgba(0, 0, 0, 0.45);
 		color: white;
 		opacity: 0;
@@ -3010,8 +3010,8 @@
 	}
 
 	.album-title {
-		font-weight: 600;
-		font-size: 0.9rem;
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-md);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -3019,7 +3019,7 @@
 	}
 
 	.album-artist {
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -3027,7 +3027,7 @@
 	}
 
 	.album-year {
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-tertiary);
 	}
 
@@ -3047,8 +3047,8 @@
 		background: rgba(255, 255, 255, 0.03);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-muted);
-		font-size: 0.64rem;
-		font-weight: 600;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.album-card:hover .album-title {
@@ -3064,7 +3064,7 @@
 		background: rgba(255, 255, 255, 0.08);
 		border: 1px solid var(--panel-border);
 		color: var(--text-primary);
-		font-size: 1rem;
+		font-size: var(--font-size-md);
 		line-height: 1;
 		transition: background 0.15s ease, border-color 0.15s ease;
 	}
@@ -3081,7 +3081,7 @@
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid var(--border-subtle);
 		color: var(--text-tertiary);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: all var(--motion-fast);
 	}
@@ -3125,7 +3125,7 @@
 		background: transparent;
 		border: none;
 		color: var(--text-primary);
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 		text-align: left;
 		cursor: pointer;
 		transition: background 0.1s ease;
@@ -3157,8 +3157,8 @@
 		align-items: center;
 		padding: 8px var(--gap-sm);
 		border-bottom: 1px solid var(--border-glass);
-		font-size: 0.75rem;
-		font-weight: 500;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: var(--text-tertiary);
@@ -3188,7 +3188,7 @@
 	}
 
 	.sort-arrow {
-		font-size: 0.65rem;
+		font-size: var(--font-size-2xs);
 		color: var(--text-muted);
 		transition: color var(--motion-fast);
 	}
@@ -3203,7 +3203,7 @@
 		align-items: center;
 		padding: 6px var(--gap-sm);
 		border-radius: var(--radius-xs);
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 		text-align: left;
 		width: 100%;
 		transition: background var(--motion-fast);
@@ -3237,7 +3237,7 @@
 	.col-num {
 		text-align: center;
 		color: var(--text-tertiary);
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.col-artist, .col-album {
@@ -3256,7 +3256,7 @@
 	.col-plays {
 		text-align: right;
 		color: var(--text-tertiary);
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.plays-count {
@@ -3266,7 +3266,7 @@
 	.col-date {
 		text-align: right;
 		color: var(--text-tertiary);
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.date-added {
@@ -3276,7 +3276,7 @@
 	.col-duration {
 		text-align: right;
 		color: var(--text-tertiary);
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.col-title {
@@ -3297,7 +3297,7 @@
 
 	.playing-indicator {
 		color: var(--accent);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.track-play-num {
@@ -3317,13 +3317,13 @@
 	.track-num-label {
 		display: block;
 		color: var(--text-tertiary);
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 	}
 
 	.track-num-play {
 		display: none;
 		color: var(--accent);
-		font-size: 0.7rem;
+		font-size: var(--font-size-xs);
 	}
 
 	.track-row:hover .track-num-label {
@@ -3358,7 +3358,7 @@
 	}
 
 	.load-more-count {
-		font-size: 0.8125rem;
+		font-size: var(--font-size-sm);
 		color: var(--text-tertiary);
 	}
 
@@ -3441,7 +3441,7 @@
 
 		.track-num-play {
 			display: block;
-			font-size: 0.78rem;
+			font-size: var(--font-size-xs);
 		}
 	}
 
@@ -3496,15 +3496,15 @@
 
 	.artist-initial {
 		font-family: var(--font-body);
-		font-size: 1.25rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		color: var(--accent-strong);
 		line-height: 1;
 	}
 
 	.artist-name {
-		font-size: 0.82rem;
-		font-weight: 600;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -3553,19 +3553,19 @@
 		display: grid;
 		place-items: center;
 		font-family: var(--font-body);
-		font-size: 1.15rem;
-		font-weight: 700;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
 		color: var(--accent-strong);
 	}
 
 	.artist-panel-identity h3 {
-		font-size: 1rem;
-		font-weight: 700;
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-bold);
 		margin: 0;
 	}
 
 	.artist-panel-count {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 	}
 
@@ -3577,7 +3577,7 @@
 
 	.artist-panel-loading {
 		color: var(--text-muted);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		padding: 8px 0;
 	}
 
@@ -3585,8 +3585,8 @@
 		margin-bottom: 16px;
 	}
 	.artist-discography-label {
-		font-size: 10px;
-		font-weight: 700;
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
 		text-transform: uppercase;
 		letter-spacing: 1.4px;
 		color: var(--accent);
@@ -3621,7 +3621,7 @@
 		color: rgba(255,255,255,0.3);
 	}
 	.discography-title {
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 		color: var(--text-primary);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -3629,13 +3629,13 @@
 		margin-bottom: 2px;
 	}
 	.discography-year {
-		font-size: 9px;
+		font-size: var(--font-size-2xs);
 		color: var(--text-muted);
 		margin-bottom: 5px;
 	}
 	.btn-xs {
 		padding: 3px 9px;
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 	}
 
 	.artist-track-list {
@@ -3671,7 +3671,7 @@
 		background: var(--accent-soft);
 		display: grid;
 		place-items: center;
-		font-size: 0.8rem;
+		font-size: var(--font-size-sm);
 		color: var(--accent-strong);
 	}
 
@@ -3682,15 +3682,15 @@
 	}
 
 	.artist-track-title {
-		font-size: 0.85rem;
-		font-weight: 500;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
 	.artist-track-album {
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		white-space: nowrap;
 		overflow: hidden;
@@ -3698,7 +3698,7 @@
 	}
 
 	.artist-track-dur {
-		font-size: 0.78rem;
+		font-size: var(--font-size-xs);
 		color: var(--text-muted);
 		flex-shrink: 0;
 	}

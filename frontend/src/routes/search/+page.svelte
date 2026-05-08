@@ -1481,7 +1481,7 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg);
     padding: 12px 22px;
-    font-size: 15px;
+    font-size: var(--font-size-md);
     color: var(--text-primary);
     outline: none;
     transition: border-color 0.15s, background 0.15s;
@@ -1501,7 +1501,7 @@
     color: var(--text-secondary);
     border-radius: 999px;
     padding: 4px 12px;
-    font-size: 11.5px;
+    font-size: var(--font-size-xs);
     font-family: var(--font-mono, ui-monospace, monospace);
     cursor: pointer;
     transition: background 0.12s, color 0.12s, border-color 0.12s;
@@ -1514,7 +1514,7 @@
   .inline-hint {
     margin: 8px auto 0;
     max-width: 640px;
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-tertiary);
     display: flex;
     align-items: center;
@@ -1522,7 +1522,7 @@
   }
   .inline-hint code {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--accent-strong);
   }
   .hint-tab {
@@ -1530,14 +1530,14 @@
     border: 1px solid var(--border-subtle);
     border-radius: 4px;
     padding: 0 5px;
-    font-size: 10px;
+    font-size: var(--font-size-2xs);
     color: var(--text-secondary);
   }
 
   .kbd-hint {
     margin: 10px auto 0;
     max-width: 640px;
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-tertiary);
     display: flex;
     flex-wrap: wrap;
@@ -1578,7 +1578,7 @@
   .filter-chip:hover .chip-x { color: var(--text-primary); }
   .no-audio-results {
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     margin: 0;
   }
   .filter-pills {
@@ -1606,7 +1606,7 @@
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
   .kbd-hint kbd {
     display: inline-block;
@@ -1615,9 +1615,9 @@
     border: 1px solid var(--border-subtle);
     border-radius: 4px;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10px;
+    font-size: var(--font-size-2xs);
     color: var(--text-secondary);
-    line-height: 1.4;
+    line-height: var(--line-height-normal);
     margin: 0 1px;
   }
   .search-input:focus {
@@ -1644,7 +1644,7 @@
     background: none;
     border: none;
     color: var(--text-tertiary);
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     cursor: pointer;
     padding: 2px 6px;
     border-radius: 4px;
@@ -1706,11 +1706,11 @@
   }
   .top-art--circle { border-radius: 50%; }
   .top-art.fallback span {
-    font-size: 56px;
+    font-size: var(--font-size-4xl);
     color: rgba(255,255,255,0.55);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
-  .top-art--circle.fallback span { font-size: 40px; }
+  .top-art--circle.fallback span { font-size: var(--font-size-3xl); }
   .top-meta {
     min-width: 0;
     display: flex;
@@ -1718,17 +1718,17 @@
     gap: 6px;
   }
   .top-kind {
-    font-size: 10px;
+    font-size: var(--font-size-2xs);
     text-transform: uppercase;
     letter-spacing: 1.5px;
     color: var(--text-tertiary);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
   .top-title {
     font-family: var(--font-body, inherit);
-    font-size: clamp(24px, 2.8vw, 36px);
-    font-weight: 750;
-    line-height: 1.1;
+    font-size: var(--font-size-3xl);
+    font-weight: var(--font-weight-bold);
+    line-height: var(--line-height-tight);
     letter-spacing: 0;
     margin: 0;
     color: var(--text-primary);
@@ -1737,9 +1737,9 @@
   }
   .top-title.display-face {
     font-family: var(--font-display, serif);
-    font-size: clamp(28px, 3.4vw, 42px);
-    font-weight: 600;
-    line-height: 1.05;
+    font-size: var(--font-size-3xl);
+    font-weight: var(--font-weight-semibold);
+    line-height: var(--line-height-tight);
     letter-spacing: -0.02em;
   }
   .top-sub {
@@ -1755,15 +1755,15 @@
     border: none;
     border-radius: 22px;
     padding: 9px 22px;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
     cursor: pointer;
     transition: opacity 0.15s, transform 0.15s;
   }
   .top-play-btn:hover { opacity: 0.9; transform: scale(1.03); }
   .section-label {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-semibold);
     text-transform: uppercase;
     letter-spacing: 1.5px;
     color: var(--accent);
@@ -1812,8 +1812,8 @@
     left: 6px;
     padding: 2px 6px;
     border-radius: 4px;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-bold);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--service-spotify);
@@ -1834,11 +1834,11 @@
   }
   .artist-card.in-library .artist-name {
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
   .album-card.in-library .album-title {
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
   }
   .artist-avatar {
     width: 72px;
@@ -1857,12 +1857,12 @@
   .artist-avatar.fallback span {
     font-family: var(--font-body, inherit);
     font-size: var(--font-size-xl);
-    font-weight: 600;
+    font-weight: var(--font-weight-semibold);
     color: rgba(255, 255, 255, 0.78);
     letter-spacing: 0.02em;
   }
   .artist-name {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-secondary);
     text-align: center;
     width: 84px;
@@ -1905,7 +1905,7 @@
     justify-content: center;
   }
   .album-art.fallback span {
-    font-size: 38px;
+    font-size: var(--font-size-3xl);
     color: rgba(255, 255, 255, 0.5);
   }
   .album-card:hover .album-art { opacity: 0.85; }
@@ -1918,7 +1918,7 @@
     margin: 0;
   }
   .album-artist {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1972,7 +1972,7 @@
     color: rgba(255, 255, 255, 0.5);
   }
   .track-title {
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1980,7 +1980,7 @@
     margin: 0;
   }
   .track-subtitle {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2080,8 +2080,8 @@
     border-radius: 4px;
   }
   .search-track-header {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-semibold);
     text-transform: uppercase;
     letter-spacing: 1.4px;
     color: var(--text-muted);
@@ -2091,7 +2091,7 @@
   }
   .search-track-header .col-num { text-align: center; }
   .search-track-row {
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     color: var(--text-primary);
     cursor: pointer;
     transition: background 0.12s;
@@ -2144,7 +2144,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .search-track-row.in-library .row-title-text { color: var(--text-primary); font-weight: 600; }
+  .search-track-row.in-library .row-title-text { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
   .search-track-row .col-artist,
   .search-track-row .col-album {
     color: var(--text-secondary);
@@ -2156,8 +2156,8 @@
     display: inline-block;
     padding: 2px 7px;
     border-radius: 99px;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: var(--font-size-2xs);
+    font-weight: var(--font-weight-bold);
     letter-spacing: 0.06em;
     text-transform: uppercase;
     background: rgba(125, 200, 175, 0.10);
