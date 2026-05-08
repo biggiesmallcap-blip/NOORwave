@@ -5,6 +5,7 @@ pub mod fingerprint;
 pub mod key;
 pub mod onset;
 pub mod scanner;
+pub mod tempo;
 
 pub const CURRENT_ANALYSIS_VERSION: &str = "v3";
 
