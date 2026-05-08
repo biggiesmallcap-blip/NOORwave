@@ -3,7 +3,10 @@ pub mod engine;
 pub mod features;
 pub mod fingerprint;
 pub mod key;
+pub mod onset;
 pub mod scanner;
+
+pub const CURRENT_ANALYSIS_VERSION: &str = "v3";
 
 use crate::AppEvent;
 use std::sync::Arc;
