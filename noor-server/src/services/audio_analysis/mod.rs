@@ -3,6 +3,7 @@ pub mod engine;
 pub mod features;
 pub mod fingerprint;
 pub mod key;
+pub mod beat_tracker;
 pub mod onset;
 pub mod scanner;
 pub mod tempo;
