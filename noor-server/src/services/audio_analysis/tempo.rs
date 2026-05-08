@@ -11,6 +11,16 @@
 //!      b. Else find the half-tempo candidate via lag search (target_lag = 2 ×
 //!         best_lag) and prefer it when its raw autocorrelation exceeds the
 //!         winner's (catches reggae-style dominant-sub-harmonic cases).
+//!
+//! ## Why the disambiguation is asymmetric (do NOT "simplify" this)
+//!
+//! Step (a) uses a ratio threshold (0.85) because the prior already pulls
+//! toward the slower candidate; we only flip up when the double is *almost
+//! as strong* as the winner. Step (b) uses a strict `>` because the prior
+//! has *not* helped the half-tempo candidate (it sits further from 120 BPM
+//! in log space), so any raw-correlation win is meaningful. Symmetric
+//! thresholds re-introduce the 80→160 reggae bug; see the regression test
+//! `reggae_eighths_resolve_to_quarter_tempo`.
 
 use crate::services::audio_analysis::onset::OnsetEnvelope;
 
@@ -22,6 +32,9 @@ pub const PRIOR_SIGMA_OCTAVES: f64 = 0.6;
 /// the primary estimate.  A value of 0.85 means the double must have at least
 /// 85% of the winner's (biased-normalised) correlation to be considered.
 pub const OCTAVE_RATIO_THRESHOLD: f64 = 0.85;
+/// Calibrates the strength scale: peak-to-mean ratios up to ~5× saturate to 1.0.
+/// Empirical — clean metronomes hit ~5×-mean on the prior-weighted spectrum.
+const STRENGTH_PEAK_TO_MEAN_DENOM: f64 = 4.0;
 
 #[derive(Debug)]
 pub struct TempoEstimate {
@@ -69,11 +82,13 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
             sum += centered[i] * centered[i + lag];
         }
         // Biased normalisation: divide by n (constant) instead of (n - lag).
+        // Clamp negatives: anti-correlations have no probabilistic meaning
+        // when later multiplied by the prior weight.
         raw.insert(bpm, (sum / n as f64).max(0.0));
     }
 
     // Apply log-Gaussian prior.
-    let mut weighted: Vec<(i32, f64, f64)> = (BPM_MIN..=BPM_MAX)
+    let weighted: Vec<(i32, f64, f64)> = (BPM_MIN..=BPM_MAX)
         .map(|bpm| {
             let r = *raw.get(&bpm).unwrap_or(&0.0);
             let p = log_gaussian_prior(bpm as f64, PRIOR_CENTER_BPM, PRIOR_SIGMA_OCTAVES);
@@ -82,8 +97,9 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
         .collect();
 
     // Argmax of weighted score.
-    weighted.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let (best_bpm, _best_raw, best_weighted) = weighted[0];
+    let (best_bpm, _best_raw, best_weighted) = *weighted
+        .iter()
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))?;
     if best_weighted < 1e-9 {
         return None;
     }
@@ -143,7 +159,7 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
         .map(|t| t.2)
         .unwrap_or(best_weighted);
     let strength = if mean_w > 1e-12 {
-        ((chosen_w / mean_w - 1.0) / 4.0).clamp(0.0, 1.0)
+        ((chosen_w / mean_w - 1.0) / STRENGTH_PEAK_TO_MEAN_DENOM).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -233,5 +249,20 @@ mod tests {
         if let Some(e) = est {
             assert!(e.strength < 0.1, "silence produced strength {}", e.strength);
         }
+    }
+
+    #[test]
+    fn detects_70_bpm_downtempo() {
+        // The prior is centred at 120 BPM (σ = 0.6 octaves). A signal at 70
+        // BPM sits ~0.78 octaves below centre — well into the prior's
+        // attenuation zone. The detector must still report ~70 (not 140 or 105)
+        // when the raw correlation clearly supports it.
+        let env = compute_onset_envelope(&click_train(44100, 8.0, 60.0 / 70.0), 44100).unwrap();
+        let est = estimate_tempo(&env).unwrap();
+        assert!(
+            (est.bpm - 70.0).abs() < 3.0,
+            "downtempo regression: expected ~70, got {} (prior must not overpower clear evidence)",
+            est.bpm,
+        );
     }
 }
