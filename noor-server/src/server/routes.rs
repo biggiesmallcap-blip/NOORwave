@@ -14305,8 +14305,9 @@ async fn get_audio_features_quality(
 }
 
 /// GET /api/library/analyze/reanalyze-stale — re-queue every track whose
-/// stored `analysis_version` is not the current `"v1"`. If the analysis
-/// actor isn't wired we still return the count of stale tracks so the
+/// stored `analysis_version` is not the current `CURRENT_ANALYSIS_VERSION`
+/// (see `crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION`). If the
+/// analysis actor isn't wired we still return the count of stale tracks so the
 /// caller can decide what to do next.
 async fn reanalyze_stale_tracks(
     State(state): State<SharedState>,

@@ -4120,6 +4120,7 @@ pub fn set_duplicate_group_source(
 pub struct AudioFeaturesQuality {
     pub total_tracks: i64,
     pub analyzed: i64,
+    // TODO(post-v3): rename field to analysis_current; coordinate with frontend.
     pub analysis_v1: i64,
     pub analysis_stale: i64,
     pub low_confidence_bpm: i64,
@@ -4135,19 +4136,21 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
     let analyzed: i64 = conn
         .query_row("SELECT COUNT(*) FROM audio_dsp_features", [], |r| r.get(0))
         .unwrap_or(0);
+    // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
+    let analyzed_current_sql = format!(
+        "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version = '{}'",
+        crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
+    );
     let analysis_v1: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version = 'v1'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row(&analyzed_current_sql, [], |r| r.get(0))
         .unwrap_or(0);
+    // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
+    let analysis_stale_sql = format!(
+        "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version != '{}'",
+        crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
+    );
     let analysis_stale: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version != 'v1'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row(&analysis_stale_sql, [], |r| r.get(0))
         .unwrap_or(0);
     let low_confidence_bpm: i64 = conn
         .query_row(
@@ -4190,8 +4193,8 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
     })
 }
 
-/// Return the ids of all tracks whose stored analysis_version is not 'v1'
-/// (i.e. need to be re-analysed after an analysis-version bump).
+/// Return the ids of all tracks whose stored analysis_version is not the current
+/// `CURRENT_ANALYSIS_VERSION`. Used by the re-analyze admin endpoint.
 pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
     // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
     let sql = format!(

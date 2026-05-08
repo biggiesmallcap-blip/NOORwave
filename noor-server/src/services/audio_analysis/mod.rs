@@ -65,7 +65,7 @@ pub fn spawn_actor(
                 .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
                 .ok()
                 .flatten()
-                .map(|f| f.analysis_version == "v2")
+                .map(|f| f.analysis_version == CURRENT_ANALYSIS_VERSION)
                 .unwrap_or(false);
 
             if already_analyzed {
