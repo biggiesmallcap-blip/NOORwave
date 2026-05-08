@@ -75,7 +75,7 @@ pub fn spawn_actor(
             // CPU-heavy DSP must run off the tokio worker (Issue A).
             let db_clone = db.clone();
             let result = tokio::task::spawn_blocking(move || {
-                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id)
+                engine::analyze_and_save(&db_clone, &samples, sample_rate, "passive", track_id, 0)
             })
             .await
             .ok()
