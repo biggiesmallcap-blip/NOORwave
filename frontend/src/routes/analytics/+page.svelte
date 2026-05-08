@@ -3,6 +3,7 @@
 	import { api, type AnalyticsSignals } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import { debounce } from '$lib/utils/debounce';
+	import { rafThrottle } from '$lib/utils/throttle';
 
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -79,13 +80,13 @@
 		initialized = true;
 		void fetchSignals();
 
-		const unsub = wsMessages.subscribe((msgs) => {
+		const unsub = wsMessages.subscribe(rafThrottle((msgs) => {
 			const latest = msgs.at(-1);
 			if (!latest) return;
 			if (latest.type === 'listen_history_updated' || latest.type === 'library_synced') {
 				debouncedWsRefresh();
 			}
-		});
+		}));
 
 		return () => {
 			unsub();

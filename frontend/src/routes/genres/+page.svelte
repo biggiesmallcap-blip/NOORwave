@@ -3,6 +3,7 @@
 	import type { Unsubscriber } from 'svelte/store';
 	import { api, type Genre, type GenreHeat, type GenreCohort, type GenreEvolutionPoint, type GenreAudioMetrics, type Track } from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
+	import { rafThrottle } from '$lib/utils/throttle';
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import GenreGalaxy from '$lib/components/Genre/GenreGalaxy.svelte';
@@ -486,7 +487,7 @@
 	}
 
 	onMount(() => {
-		wsUnsubscribe = wsMessages.subscribe((messages) => {
+		wsUnsubscribe = wsMessages.subscribe(rafThrottle((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
 			if (latest.type === 'listen_history_updated') {
@@ -496,7 +497,7 @@
 			if (latest.type === 'library_synced' || latest.type === 'musicbrainz_enriched') {
 				scheduleGalaxyRefresh('full');
 			}
-		});
+		}));
 
 		// Daily auto-refresh to pick up new enrichment tags.
 		galaxyDailyRefreshTimer = setInterval(() => {
