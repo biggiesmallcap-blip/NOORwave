@@ -14295,7 +14295,7 @@ async fn get_audio_features_quality(
     Ok(Json(json!({
         "total_tracks": q.total_tracks,
         "analyzed": q.analyzed,
-        "analysis_v1": q.analysis_v1,
+        "analysis_current": q.analysis_current,
         "analysis_stale": q.analysis_stale,
         "low_confidence_bpm": q.low_confidence_bpm,
         "low_confidence_key": q.low_confidence_key,

@@ -4120,8 +4120,7 @@ pub fn set_duplicate_group_source(
 pub struct AudioFeaturesQuality {
     pub total_tracks: i64,
     pub analyzed: i64,
-    // TODO(post-v3): rename field to analysis_current; coordinate with frontend.
-    pub analysis_v1: i64,
+    pub analysis_current: i64,
     pub analysis_stale: i64,
     pub low_confidence_bpm: i64,
     pub low_confidence_key: i64,
@@ -4141,7 +4140,7 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
         "SELECT COUNT(*) FROM audio_dsp_features WHERE analysis_version = '{}'",
         crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
     );
-    let analysis_v1: i64 = conn
+    let analysis_current: i64 = conn
         .query_row(&analyzed_current_sql, [], |r| r.get(0))
         .unwrap_or(0);
     // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
@@ -4184,7 +4183,7 @@ pub fn get_audio_features_quality(conn: &Connection) -> Result<AudioFeaturesQual
     Ok(AudioFeaturesQuality {
         total_tracks,
         analyzed,
-        analysis_v1,
+        analysis_current,
         analysis_stale,
         low_confidence_bpm,
         low_confidence_key,
