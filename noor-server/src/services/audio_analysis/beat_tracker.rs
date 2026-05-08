@@ -9,11 +9,17 @@ use crate::services::audio_analysis::onset::OnsetEnvelope;
 
 pub const TIGHTNESS: f64 = 100.0;
 
+/// Need at least one full 4/4 bar of beats to claim a beat track. Below this,
+/// return None so callers fall back to tempogram-only confidence.
+const MIN_BEATS: usize = 4;
+
 #[derive(Debug)]
 pub struct BeatTrack {
     /// Beat times in seconds from clip start.
     pub beats: Vec<f64>,
-    /// Average ODF value at beat positions, in [0, 1]. Used as confidence.
+    /// Average onset prominence at beat positions, in [0, 1]. Combined with
+    /// tempogram strength in `bpm.rs` (geometric mean) to form the user-facing
+    /// detector confidence.
     pub strength: f64,
 }
 
@@ -41,7 +47,7 @@ pub fn track_beats(env: &OnsetEnvelope, target_bpm: f64) -> Option<BeatTrack> {
         let start = i.saturating_sub(hi);
         let end = if i >= lo { i - lo } else { continue };
         for j in start..=end {
-            if score[j] == f64::NEG_INFINITY { continue; }
+            if !score[j].is_finite() { continue; }
             let period = (i - j) as f64;
             let log_ratio = (period / target_period).ln();
             let penalty = -TIGHTNESS * log_ratio * log_ratio;
@@ -68,7 +74,7 @@ pub fn track_beats(env: &OnsetEnvelope, target_bpm: f64) -> Option<BeatTrack> {
     }
     frames.reverse();
 
-    if frames.len() < 4 { return None; }
+    if frames.len() < MIN_BEATS { return None; }
 
     let beats: Vec<f64> = frames.iter().map(|&f| f as f64 * env.hop_seconds).collect();
     let strength: f64 =
@@ -109,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_or_low_strength_for_silence() {
+    fn silence_produces_zero_strength() {
         let env = compute_onset_envelope(&vec![0.0f32; 44100 * 4], 44100).unwrap();
         let track = track_beats(&env, 120.0);
         if let Some(t) = track {
