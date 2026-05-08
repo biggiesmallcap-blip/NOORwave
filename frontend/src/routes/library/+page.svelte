@@ -95,6 +95,13 @@
 	// Row height for virtualisation — measured from CSS: padding 6px top+bottom (12px) +
 	// menu-trigger height 32px = 44px. Must stay in sync with .track-row CSS.
 	const TRACK_ROW_HEIGHT = 44;
+	// Album grid virtualisation constants.
+	// Card min-width matches .album-grid minmax(210px, 1fr). Gap matches var(--gap) ≈ 16px.
+	// Row height: card-padding(8px×2) + image(194px) + art-margin-bottom(10px) +
+	//   meta(~68px) + actions(~46px) + row-gap(16px) ≈ 350px.
+	const ALBUM_CARD_MIN_WIDTH = 210;
+	const ALBUM_ROW_GAP = 16;
+	const ALBUM_ROW_HEIGHT = 350;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
 	let playlists = $derived($catalogPlaylists.filter((playlist) => !playlist.is_smart));
@@ -117,6 +124,26 @@
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
 	let failedArtistImages = $state(new Set<number>());
+
+	// Album grid virtualisation state
+	let albumGridEl = $state<HTMLDivElement | null>(null);
+	let albumCardsPerRow = $state(4);
+
+	$effect(() => {
+		if (!albumGridEl) return;
+		// In list mode each album occupies the full row, so force 1 column.
+		if ($viewMode === 'list') {
+			albumCardsPerRow = 1;
+			return;
+		}
+		const ro = new ResizeObserver(() => {
+			if (!albumGridEl) return;
+			const w = albumGridEl.clientWidth;
+			albumCardsPerRow = Math.max(1, Math.floor((w + ALBUM_ROW_GAP) / (ALBUM_CARD_MIN_WIDTH + ALBUM_ROW_GAP)));
+		});
+		ro.observe(albumGridEl);
+		return () => ro.disconnect();
+	});
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -697,6 +724,14 @@
 		if (!activeDecade) return base;
 		return base.filter(a => a.year != null && Math.floor(a.year / 10) * 10 === activeDecade);
 	});
+	// Chunk visibleAlbums into rows for VirtualList (2-D grid → 1-D rows).
+	let albumRows = $derived.by(() => {
+		const rows: Album[][] = [];
+		for (let i = 0; i < visibleAlbums.length; i += albumCardsPerRow) {
+			rows.push(visibleAlbums.slice(i, i + albumCardsPerRow));
+		}
+		return rows;
+	});
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
 		((activeTab === 'tracks' || activeTab === 'liked')
@@ -1257,94 +1292,112 @@
 				{/each}
 			</div>
 		{/if}
-		<!-- Album Grid -->
-		<div class="album-grid" class:album-list={$viewMode === 'list'}>
-			{#each visibleAlbums as album (album.id)}
-				{@const albumKey = `album-${album.id}`}
-				{@const albumArt = album.artwork_url ?? lazyArt[albumKey] ?? null}
-				<div
-					class="album-card"
-					class:selected={$selectedAlbumIds.has(album.id)}
-					role="button"
-					tabindex="0"
-					aria-pressed={$selectedAlbumIds.has(album.id)}
-					onclick={(event) => handleAlbumCardClick(album, event)}
-					oncontextmenu={async (event) => {
-						event.preventDefault();
-						event.stopPropagation();
-						const mods = await loadMenuMods();
-						openContextMenu(event, mods.album.buildAlbumMenu(album, {
-							isLocal: true,
-							addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-								const { tracks: t } = await api.getAlbumTracks(album.id);
-								return t.map(tr => tr.id);
-							}),
-						}), album.title);
-					}}
-					onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
-					use:lazyTidalArt={{
-						enabled: !album.artwork_url && !lazyArt[albumKey],
-						query: { artist: album.artist_name, title: album.title },
-						onResolve: (url) => (lazyArt[albumKey] = url),
-					}}
-				>
-					<div class="album-art">
-						{#if albumArt}
-							<img src={albumArt} alt={album.title} loading="lazy" />
-						{:else}
-							<div class="art-placeholder">♫</div>
-						{/if}
-						<div class="album-art-overlay">
-							<button
-								class="art-play-btn"
-								aria-label="Play {album.title}"
-								onclick={(event) => void playAlbum(album.id, event)}
-							>
-								▶
-							</button>
-							<button
-								class="art-info-btn"
-								aria-label="View {album.title} details"
-								onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
-							>
-								ℹ
-							</button>
-						</div>
-					</div>
-					<div class="album-meta">
-						<span class="album-title">{album.title}</span>
-						<span class="album-artist">{album.artist_name ?? 'Unknown'}</span>
-						<div class="album-chips">
-							{#if album.year}<span class="album-chip">{album.year}</span>{/if}
-							{#if album.release_type}<span class="album-chip">{album.release_type}</span>{/if}
-						</div>
-					</div>
-					<div class="album-actions">
+		<!-- Album Grid — row-windowed via VirtualList -->
+		{#snippet albumCard(album: Album)}
+			{@const albumKey = `album-${album.id}`}
+			{@const albumArt = album.artwork_url ?? lazyArt[albumKey] ?? null}
+			<div
+				class="album-card"
+				class:selected={$selectedAlbumIds.has(album.id)}
+				role="button"
+				tabindex="0"
+				aria-pressed={$selectedAlbumIds.has(album.id)}
+				onclick={(event) => handleAlbumCardClick(album, event)}
+				oncontextmenu={async (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					const mods = await loadMenuMods();
+					openContextMenu(event, mods.album.buildAlbumMenu(album, {
+						isLocal: true,
+						addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+							const { tracks: t } = await api.getAlbumTracks(album.id);
+							return t.map(tr => tr.id);
+						}),
+					}), album.title);
+				}}
+				onkeydown={(event) => handleAlbumCardKeydown(album.id, event)}
+				use:lazyTidalArt={{
+					enabled: !album.artwork_url && !lazyArt[albumKey],
+					query: { artist: album.artist_name, title: album.title },
+					onResolve: (url) => (lazyArt[albumKey] = url),
+				}}
+			>
+				<div class="album-art">
+					{#if albumArt}
+						<img src={albumArt} alt={album.title} loading="lazy" />
+					{:else}
+						<div class="art-placeholder">♫</div>
+					{/if}
+					<div class="album-art-overlay">
 						<button
-							class="menu-trigger"
-							aria-label="Album actions"
-							onclick={async (event) => {
-								event.preventDefault();
-								event.stopPropagation();
-								const mods = await loadMenuMods();
-								openMenuAtElement(event.currentTarget, mods.album.buildAlbumMenu(album, {
-									isLocal: true,
-									includeSelect: true,
-									includeRemove: true,
-									onSelect: () => updateAlbumSelection(album.id, false, false),
-									onRemove: () => void removeAlbumFromLibrary(album.id),
-									addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-										const { tracks: t } = await api.getAlbumTracks(album.id);
-										return t.map(tr => tr.id);
-									}),
-								}), album.title);
-							}}
+							class="art-play-btn"
+							aria-label="Play {album.title}"
+							onclick={(event) => void playAlbum(album.id, event)}
 						>
-							⋯
+							▶
+						</button>
+						<button
+							class="art-info-btn"
+							aria-label="View {album.title} details"
+							onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
+						>
+							ℹ
 						</button>
 					</div>
 				</div>
-			{/each}
+				<div class="album-meta">
+					<span class="album-title">{album.title}</span>
+					<span class="album-artist">{album.artist_name ?? 'Unknown'}</span>
+					<div class="album-chips">
+						{#if album.year}<span class="album-chip">{album.year}</span>{/if}
+						{#if album.release_type}<span class="album-chip">{album.release_type}</span>{/if}
+					</div>
+				</div>
+				<div class="album-actions">
+					<button
+						class="menu-trigger"
+						aria-label="Album actions"
+						onclick={async (event) => {
+							event.preventDefault();
+							event.stopPropagation();
+							const mods = await loadMenuMods();
+							openMenuAtElement(event.currentTarget, mods.album.buildAlbumMenu(album, {
+								isLocal: true,
+								includeSelect: true,
+								includeRemove: true,
+								onSelect: () => updateAlbumSelection(album.id, false, false),
+								onRemove: () => void removeAlbumFromLibrary(album.id),
+								addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+									const { tracks: t } = await api.getAlbumTracks(album.id);
+									return t.map(tr => tr.id);
+								}),
+							}), album.title);
+						}}
+					>
+						⋯
+					</button>
+				</div>
+			</div>
+		{/snippet}
+
+		<div class="album-grid-wrapper" bind:this={albumGridEl}>
+			<VirtualList
+				items={albumRows}
+				itemHeight={$viewMode === 'list' ? 54 : ALBUM_ROW_HEIGHT}
+				key={(row) => row[0]?.id ?? 0}
+			>
+				{#snippet children(row: Album[], _rowIndex: number)}
+					<div
+						class="album-row"
+						class:album-list={$viewMode === 'list'}
+						style:grid-template-columns={$viewMode === 'list' ? undefined : `repeat(${albumCardsPerRow}, minmax(0, 1fr))`}
+					>
+						{#each row as album (album.id)}
+							{@render albumCard(album)}
+						{/each}
+					</div>
+				{/snippet}
+			</VirtualList>
 		</div>
 
 		{#if visibleAlbums.length === 0}
@@ -2785,22 +2838,33 @@
 
 	/* ─── Album Grid ─────────────────────── */
 
-	.album-grid {
+	/* VirtualList host for album grid — same calc offset as .track-list-body.
+	   The album tab chrome (decade strip, wrapper padding) is roughly the same
+	   height as the track tab chrome, so 340px offset applies here too. */
+	.album-grid-wrapper {
+		height: calc(100dvh - 340px);
+		min-height: 400px;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Allow art-overlay buttons and ⋯ dropdown to overflow the VirtualList
+	   contain:paint boundary (same pattern as .track-list-body). */
+	:global(.album-grid-wrapper .vl-item) {
+		contain: layout style;
+		overflow: visible;
+	}
+
+	/* Each virtualised row is itself a grid — column count is set inline via style. */
+	.album-row {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
 		gap: var(--gap);
 		align-items: start;
+		margin-bottom: var(--gap);
 	}
 
-	@media (min-width: 1600px) {
-		.album-grid {
-			grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-		}
-	}
-
-	/* ─── Album List Mode ────────────────── */
-
-	.album-grid.album-list {
+	/* List-mode row: single column flex (mirrors the old .album-grid.album-list) */
+	.album-row.album-list {
 		display: flex;
 		flex-direction: column;
 		gap: 0;
@@ -2808,9 +2872,12 @@
 		overflow: hidden;
 		border: 1px solid rgba(255, 255, 255, 0.05);
 		background: rgba(255, 255, 255, 0.015);
+		margin-bottom: 0;
 	}
 
-	.album-grid.album-list .album-card {
+	/* ─── Album List Mode ────────────────── */
+
+	.album-row.album-list .album-card {
 		display: grid;
 		grid-template-columns: 40px 1fr auto;
 		gap: 12px;
@@ -2823,22 +2890,22 @@
 		box-shadow: none;
 	}
 
-	.album-grid.album-list .album-card:first-child {
+	.album-row.album-list .album-card:first-child {
 		border-top: 0;
 	}
 
-	.album-grid.album-list .album-card:hover {
+	.album-row.album-list .album-card:hover {
 		transform: none;
 		box-shadow: none;
 		background: rgba(255, 255, 255, 0.04);
 		border-color: rgba(255, 255, 255, 0.04);
 	}
 
-	.album-grid.album-list .album-card:hover .album-art {
+	.album-row.album-list .album-card:hover .album-art {
 		filter: none;
 	}
 
-	.album-grid.album-list .album-art {
+	.album-row.album-list .album-art {
 		width: 40px;
 		height: 40px;
 		aspect-ratio: unset;
@@ -2848,24 +2915,24 @@
 		box-shadow: none;
 	}
 
-	.album-grid.album-list .album-art::after {
+	.album-row.album-list .album-art::after {
 		display: none;
 	}
 
-	.album-grid.album-list .album-art-overlay {
+	.album-row.album-list .album-art-overlay {
 		display: none;
 	}
 
-	.album-grid.album-list .album-meta {
+	.album-row.album-list .album-meta {
 		padding: 0;
 		min-width: 0;
 	}
 
-	.album-grid.album-list .album-chips {
+	.album-row.album-list .album-chips {
 		margin-top: 3px;
 	}
 
-	.album-grid.album-list .album-actions {
+	.album-row.album-list .album-actions {
 		margin-top: 0;
 		padding: 0;
 	}
@@ -3385,9 +3452,9 @@
 	}
 
 	@media (max-width: 760px) {
-		.album-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+		.album-row {
 			gap: 12px;
+			margin-bottom: 12px;
 		}
 
 		.album-card {
