@@ -172,10 +172,24 @@ pub async fn run_preview_scan(
         .ok()
         .flatten();
 
-        if saved.is_some() {
-            analyzed += 1;
-        } else {
-            skipped += 1;
+        match &saved {
+            Some(f) => {
+                analyzed += 1;
+                info!(
+                    "[{}/{}] ✓ {} — BPM: {}, key: {}, energy: {:.2}, beat_strength: {:.2}",
+                    analyzed,
+                    total,
+                    track.title,
+                    f.bpm.map(|b| format!("{:.1}", b)).unwrap_or_else(|| "?".into()),
+                    f.key_signature.as_deref().unwrap_or("?"),
+                    f.energy.unwrap_or(0.0),
+                    f.beat_strength.unwrap_or(0.0),
+                );
+            }
+            None => {
+                skipped += 1;
+                info!("[{}/{}] ✗ {} — no features extracted", analyzed, total, track.title);
+            }
         }
 
         let _ = state
