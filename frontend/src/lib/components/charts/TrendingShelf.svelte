@@ -12,27 +12,22 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
-	import {
-		api,
-		type ChartEntry,
-		type Track,
-		type LastfmCountry,
-		type LastfmGenre,
-	} from '$lib/api/client';
+	import * as chartsApi from '$lib/api/charts';
+	import type { ChartEntry, Track, LastfmCountry, LastfmGenre } from '$lib/api/charts';
 
 	// Lastfm reference data (countries + genres) is static within a session.
 	// Memoize across component remounts so re-entering the empty-query branch
 	// on /search doesn't refetch.
 	let curatedRefDataPromise: Promise<{
-		countries: Awaited<ReturnType<typeof api.getLastfmCountries>>;
-		genres: Awaited<ReturnType<typeof api.getLastfmGenres>>;
+		countries: Awaited<ReturnType<typeof chartsApi.getLastfmCountries>>;
+		genres: Awaited<ReturnType<typeof chartsApi.getLastfmGenres>>;
 	}> | null = null;
 
 	function loadCuratedRefData() {
 		if (!curatedRefDataPromise) {
 			curatedRefDataPromise = Promise.all([
-				api.getLastfmCountries(),
-				api.getLastfmGenres(),
+				chartsApi.getLastfmCountries(),
+				chartsApi.getLastfmGenres(),
 			]).then(([countries, genres]) => ({ countries, genres }));
 		}
 		return curatedRefDataPromise;
@@ -153,13 +148,13 @@
 		try {
 			let data: { tracks: ChartEntry[] | null };
 			if (mode === 'tidal') {
-				data = await api.getTrending({ source: 'tidal', limit });
+				data = await chartsApi.getTrending({ source: 'tidal', limit });
 			} else if (mode === 'country') {
-				data = await api.getTrending({ source: 'lastfm', limit, country });
+				data = await chartsApi.getTrending({ source: 'lastfm', limit, country });
 			} else if (mode === 'genre') {
-				data = await api.getTrending({ source: 'lastfm', limit, tag: genre });
+				data = await chartsApi.getTrending({ source: 'lastfm', limit, tag: genre });
 			} else {
-				data = await api.getTrending({ source: 'lastfm', limit });
+				data = await chartsApi.getTrending({ source: 'lastfm', limit });
 			}
 			const next = data.tracks ?? [];
 			tracks = next;

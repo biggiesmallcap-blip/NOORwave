@@ -2,7 +2,8 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
+  import * as searchApi from '$lib/api/search'
+  import type { TidalSearchResults, TidalSearchAlbum, TidalSearchArtist, TidalSearchTrack, AudioSearchResult, AudioSearchParams, Genre, VibeTrack, BasicTrack, Playlist, TidalSearchPlaylist, SpotifyPlaylistSearchItem } from '$lib/api/search'
   import { catalogPlaylists, catalogGenres, ensureCatalogPlaylists, ensureCatalogGenres } from '$lib/stores/catalog_meta'
   const trendingShelfMod = (() => {
     let p: Promise<typeof import('$lib/components/charts/TrendingShelf.svelte')> | null = null;
@@ -136,7 +137,7 @@
 
     idle(() => {
       void ensureCatalogGenres()
-      void api.getRecentListens(20).then(listens => {
+      void searchApi.getRecentListens(20).then(listens => {
         const names = listens.listens
           .map(e => e.artist_name)
           .filter((n): n is string => typeof n === 'string' && n.length > 0)
@@ -189,7 +190,7 @@
       // "play <query>" → fire immediately and clear input
       if (intent.intent.type === 'play') {
         loading = false
-        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
+        const r = await searchApi.searchTidal(intent.free_text, 20, signal).catch(() => null)
         const first = r?.tracks[0]
         if (first) void playTidalTrackNow(toPlayable(first))
         query = ''
@@ -200,7 +201,7 @@
       // "similar to <query>" → start radio from first result
       if (intent.intent.type === 'radio') {
         loading = false
-        const r = await api.searchTidal(intent.free_text, 20, signal).catch(() => null)
+        const r = await searchApi.searchTidal(intent.free_text, 20, signal).catch(() => null)
         const first = r?.tracks[0]
         if (first) void startTidalSongRadio(toPlayable(first))
         query = ''
@@ -216,7 +217,7 @@
 
       try {
         if (effectiveHasFilters) {
-          const res = await api.searchAudio(buildAudioParams(effectiveParsed), signal)
+          const res = await searchApi.searchAudio(buildAudioParams(effectiveParsed), signal)
           audioResults = res.tracks
           results = null
           tidalPlaylistResults = []
@@ -237,9 +238,9 @@
             // Cache holds raw TIDAL only — re-run local search every time so
             // newly-favorited tracks show up without a manual refresh.
             const [localRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
-              api.search(q, SEARCH_PAGE_SIZE),
-              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
-              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
+              searchApi.search(q, SEARCH_PAGE_SIZE),
+              searchApi.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
+              searchApi.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
             ])
             const localResults = localRes.status === 'fulfilled' ? localRes.value : null
             results = localResults ? mergeLocalIntoTidal(localResults, cached) : cached
@@ -260,10 +261,10 @@
             // only one whose failure aborts — no point rendering search with
             // zero discovery results.
             const [localRes, tracksRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
-              api.search(q, SEARCH_PAGE_SIZE),
-              api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0),
-              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
-              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
+              searchApi.search(q, SEARCH_PAGE_SIZE),
+              searchApi.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0),
+              searchApi.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
+              searchApi.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
             ])
 
             if (tracksRes.status !== 'fulfilled') {
@@ -333,7 +334,7 @@
     loadingMore = true
     try {
       if (needsTidal && results) {
-        const next = await api.searchTidal(lastQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
+        const next = await searchApi.searchTidal(lastQuery, SEARCH_PAGE_SIZE, undefined, tidalOffset)
         tidalOffset += SEARCH_PAGE_SIZE
         // De-dupe by id — Tidal occasionally returns overlapping pages.
         const seenTracks = new Set(results.tracks.map((t) => t.tidal_id))
@@ -359,8 +360,7 @@
         const tasks: Promise<unknown>[] = []
         if (hasMoreTidalPlaylists) {
           tasks.push(
-            api
-              .searchTidalPlaylists(lastQuery, undefined, { limit: SEARCH_PAGE_SIZE, offset: tidalPlaylistOffset })
+            searchApi.searchTidalPlaylists(lastQuery, undefined, { limit: SEARCH_PAGE_SIZE, offset: tidalPlaylistOffset })
               .then((r) => {
                 const seen = new Set(tidalPlaylistResults.map((p) => p.uuid))
                 const fresh = r.playlists.filter((p) => !seen.has(p.uuid))
@@ -373,8 +373,7 @@
         }
         if (hasMoreSpotifyPlaylists) {
           tasks.push(
-            api
-              .searchSpotifyPlaylists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyPlaylistOffset)
+            searchApi.searchSpotifyPlaylists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyPlaylistOffset)
               .then((items) => {
                 const seen = new Set(spotifyPlaylistResults.map((p) => p.spotifyId))
                 const fresh = items.filter((p) => !seen.has(p.spotifyId))
@@ -798,11 +797,11 @@
     // "Same vibe" — only when top result is a library track with a local id
     if (top.kind === 'track' && top.entry.in_library && (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id != null) {
       const id = (top.entry as TidalSearchTrack & { local_id?: number | null }).local_id!
-      void api.getVibeTracksForTrack(id).then(r => { vibeTrack = r.tracks }).catch(() => {})
+      void searchApi.getVibeTracksForTrack(id).then(r => { vibeTrack = r.tracks }).catch(() => {})
     }
     // "Unplayed in your library" — only when top result is a library artist with a local id
     if (top.kind === 'artist' && top.entry.in_library && top.entry.local_id != null) {
-      void api.getUnderratedTracksForArtist(top.entry.local_id).then(r => { underratedTracks = r.tracks }).catch(() => {})
+      void searchApi.getUnderratedTracksForArtist(top.entry.local_id).then(r => { underratedTracks = r.tracks }).catch(() => {})
     }
   })
 

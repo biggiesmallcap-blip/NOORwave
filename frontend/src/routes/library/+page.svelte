@@ -11,7 +11,8 @@
 		selectTrackIds, selectAlbumIds, clearSelection,
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import * as libraryApi from '$lib/api/library';
+	import type { Album, Artist, Genre, Playlist, Track } from '$lib/api/library';
 	import { catalogPlaylists, catalogGenres, ensureCatalogPlaylists, ensureCatalogGenres } from '$lib/stores/catalog_meta';
 	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
@@ -57,7 +58,7 @@
 				onSelect: async () => {
 					const trackIds = await getTrackIds();
 					if (!trackIds.length) return;
-					const { added } = await api.addTracksToPlaylist(playlist.id, trackIds);
+					const { added } = await libraryApi.addTracksToPlaylist(playlist.id, trackIds);
 					showToast(`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}`, 'success');
 				},
 			}));
@@ -71,7 +72,7 @@
 		openContextMenu(e, mods.artist.buildArtistMenu(artist, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-				const { tracks: t } = await api.getArtistTracks(artistId);
+				const { tracks: t } = await libraryApi.getArtistTracks(artistId);
 				return t.map(tr => tr.id);
 			}),
 		}), artist.name);
@@ -85,7 +86,7 @@
 		openContextMenu(e, mods.album.buildAlbumMenu(album, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-				const { tracks: t } = await api.getAlbumTracks(albumId);
+				const { tracks: t } = await libraryApi.getAlbumTracks(albumId);
 				return t.map(tr => tr.id);
 			}),
 		}), album.title);
@@ -257,9 +258,9 @@
 		artistsLoading = true;
 		try {
 			// Default browse view — top 200 alphabetically. When the user types
-			// a query, the search effect calls api.search() server-side and
+			// a query, the search effect calls libraryApi.search() server-side and
 			// shows searchResults.artists (FTS). No more upfront 10k load.
-			const data = await api.getArtists('name', 'asc', 200);
+			const data = await libraryApi.getArtists('name', 'asc', 200);
 			artists = data.artists;
 		} catch (err) {
 			console.error('Failed to load artists:', err);
@@ -283,12 +284,12 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const data = await api.getAlbumTracks(albumId);
+			const data = await libraryApi.getAlbumTracks(albumId);
 			const trackIds = data.tracks.map((track) => track.id);
 			if (trackIds.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
-			await api.replacePlaybackQueue(trackIds);
+			await libraryApi.replacePlaybackQueue(trackIds);
 			await playTrackNow(trackIds[0]);
 			batchMessage = `Playing album from track 1 of ${trackIds.length}.`;
 		} catch (error) {
@@ -304,7 +305,7 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const data = await api.getAlbumTracks(albumId);
+			const data = await libraryApi.getAlbumTracks(albumId);
 			if (data.tracks.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
@@ -333,7 +334,7 @@
 		if (track.album_id) {
 			detailLoading = true;
 			try {
-				const data = await api.getAlbumTracks(track.album_id);
+				const data = await libraryApi.getAlbumTracks(track.album_id);
 				detailAlbumTracks = data.tracks;
 			} catch (err) {
 				console.error('Failed to load album tracks:', err);
@@ -355,7 +356,7 @@
 		detailAlbum = album;
 		detailAlbumLoading = true;
 		try {
-			const data = await api.getAlbumTracks(album.id);
+			const data = await libraryApi.getAlbumTracks(album.id);
 			detailAlbumTracksList = data.tracks;
 		} catch (err) {
 			console.error('Failed to load album tracks:', err);
@@ -430,7 +431,7 @@
 			artists: searchResults.artists,
 		};
 		try {
-			await api.batchDelete([], [albumId]);
+			await libraryApi.batchDelete([], [albumId]);
 			batchMessage = `Removed album from your library.`;
 		} catch (error) {
 			batchError = `Failed to remove album: ${error}`;
@@ -486,7 +487,7 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const result = await api.batchAddToPlaylist(Number(selectedPlaylistId), [...$selectedTrackIds]);
+			const result = await libraryApi.batchAddToPlaylist(Number(selectedPlaylistId), [...$selectedTrackIds]);
 			batchMessage = `Added ${result.added} of ${result.resolved_tracks} selected tracks to the playlist.`;
 			clearSelection();
 		} catch (error) {
@@ -502,7 +503,7 @@
 		batchError = null;
 		batchMessage = null;
 		try {
-			const result = await api.batchSetGenre(Number(selectedGenreId), [...$selectedTrackIds]);
+			const result = await libraryApi.batchSetGenre(Number(selectedGenreId), [...$selectedTrackIds]);
 			batchMessage = `Assigned the genre to ${result.affected} selected tracks.`;
 			clearSelection();
 		} catch (error) {
@@ -530,7 +531,7 @@
 		};
 
 		try {
-			const result = await api.batchDelete(deletedTrackIds, [...$selectedAlbumIds]);
+			const result = await libraryApi.batchDelete(deletedTrackIds, [...$selectedAlbumIds]);
 			batchMessage = `Removed ${result.removed_tracks} track favorites and ${result.removed_albums} album favorites from TIDAL.`;
 			clearSelection();
 			undoTimer = setTimeout(() => {
@@ -593,7 +594,7 @@
 			if (hasAnyFilter(parsed)) {
 				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) — route to audio search.
 				const params = buildAudioParams(parsed, genres);
-				const audio = await api.searchAudio(params);
+				const audio = await libraryApi.searchAudio(params);
 				const adaptedTracks: Track[] = audio.tracks.map((r) => ({
 					id: r.id,
 					title: r.title,
@@ -624,7 +625,7 @@
 				searchResults = { tracks: adaptedTracks, albums: [], artists: [] };
 			} else {
 				// Plain text — server-side FTS. No more preloading the full library.
-				const r = await api.search(trimmed, 100);
+				const r = await libraryApi.search(trimmed, 100);
 				searchResults = {
 					tracks: r.tracks,
 					albums: r.albums,
@@ -673,7 +674,7 @@
 			}
 
 			const randomOffset = Math.floor(Math.random() * $totalTracks);
-			const data = await api.getTracks('date_added', 'desc', 1, randomOffset);
+			const data = await libraryApi.getTracks('date_added', 'desc', 1, randomOffset);
 			const randomTrack = data.tracks[0];
 			if (!randomTrack) {
 				throw new Error('Could not resolve a random track from the library.');
@@ -1311,7 +1312,7 @@
 					openContextMenu(event, mods.album.buildAlbumMenu(album, {
 						isLocal: true,
 						addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-							const { tracks: t } = await api.getAlbumTracks(album.id);
+							const { tracks: t } = await libraryApi.getAlbumTracks(album.id);
 							return t.map(tr => tr.id);
 						}),
 					}), album.title);
@@ -1369,7 +1370,7 @@
 								onSelect: () => updateAlbumSelection(album.id, false, false),
 								onRemove: () => void removeAlbumFromLibrary(album.id),
 								addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
-									const { tracks: t } = await api.getAlbumTracks(album.id);
+									const { tracks: t } = await libraryApi.getAlbumTracks(album.id);
 									return t.map(tr => tr.id);
 								}),
 							}), album.title);
