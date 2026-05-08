@@ -16,6 +16,7 @@
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal'
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
+  import { mergeLocalIntoTidal } from '$lib/search/merge_local'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -212,15 +213,18 @@
           const cacheKey = q.toLowerCase()
           const cached = resultCache.get(cacheKey)
           if (cached) {
-            results = cached
-            tidalOffset = SEARCH_PAGE_SIZE
-            // Cached page may already cap a category — assume more exists; the
-            // next load-more attempt will discover the truth and flip the flag.
-            // Playlist results aren't cached alongside Tidal tracks — fetch them.
-            const [tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+            // Cache holds raw TIDAL only — re-run local search every time so
+            // newly-favorited tracks show up without a manual refresh.
+            const [localRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+              api.search(q, SEARCH_PAGE_SIZE),
               api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
               api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
             ])
+            const localResults = localRes.status === 'fulfilled' ? localRes.value : null
+            results = localResults ? mergeLocalIntoTidal(localResults, cached) : cached
+            tidalOffset = SEARCH_PAGE_SIZE
+            // Cached page may already cap a category — assume more exists; the
+            // next load-more attempt will discover the truth and flip the flag.
             tidalPlaylistResults = tidalPlRes.status === 'fulfilled' ? tidalPlRes.value.playlists : []
             spotifyPlaylistResults = spotifyPlRes.status === 'fulfilled' ? spotifyPlRes.value : []
             tidalPlaylistOffset = tidalPlaylistResults.length
@@ -228,10 +232,14 @@
             if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
             if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
           } else {
-            // Fan out all three upstream searches at once. Tidal-track is
-            // required (no fallback rendering without it); the two playlist
-            // lookups are best-effort and degrade to empty arrays.
-            const [tracksRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+            // Fan out all four upstream searches at once. Local DB and TIDAL
+            // both feed the unified results list (library entries float to
+            // top via the in_library sort); the two playlist lookups are
+            // best-effort and degrade to empty arrays. TIDAL-track is the
+            // only one whose failure aborts — no point rendering search with
+            // zero discovery results.
+            const [localRes, tracksRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
+              api.search(q, SEARCH_PAGE_SIZE),
               api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0),
               api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
               api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
@@ -240,15 +248,19 @@
             if (tracksRes.status !== 'fulfilled') {
               throw tracksRes.reason
             }
-            const fresh = tracksRes.value
+            const tidalResults = tracksRes.value
+            const localResults = localRes.status === 'fulfilled' ? localRes.value : null
+            const fresh = localResults ? mergeLocalIntoTidal(localResults, tidalResults) : tidalResults
             results = fresh
-            resultCache.set(cacheKey, fresh)
+            // Cache only the raw TIDAL response so subsequent hits can re-merge
+            // a fresh local snapshot (favorites change without query change).
+            resultCache.set(cacheKey, tidalResults)
             if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
             tidalOffset = SEARCH_PAGE_SIZE
             if (
-              fresh.tracks.length < SEARCH_PAGE_SIZE &&
-              fresh.albums.length < SEARCH_PAGE_SIZE &&
-              fresh.artists.length < SEARCH_PAGE_SIZE
+              tidalResults.tracks.length < SEARCH_PAGE_SIZE &&
+              tidalResults.albums.length < SEARCH_PAGE_SIZE &&
+              tidalResults.artists.length < SEARCH_PAGE_SIZE
             ) {
               hasMoreTidal = false
             }

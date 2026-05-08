@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { api, type Track } from '$lib/api/client';
+	import { api, type Track, type TidalDiscographyTrack, type TidalPlayable } from '$lib/api/client';
 	import {
 		playAlbum,
+		playTidalAlbum,
+		playTidalTrackNow,
 		shuffleAlbum,
 		startAlbumRadio,
 		toggleTrackFavorite,
@@ -11,9 +13,11 @@
 		isPlaying,
 		togglePlayback
 	} from '$lib/stores/player';
+	import { canPlayTrack } from '$lib/player/playable';
 	import TrackRow from '$lib/components/TrackRow.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -21,6 +25,8 @@
 	let albumId = $derived(Number(page.params.id));
 
 	let tracks = $state<Track[]>([]);
+	let tidalOnlyTracks = $state<TidalDiscographyTrack[]>([]);
+	let albumTidalId = $state<number | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -42,6 +48,8 @@
 		try {
 			const res = await api.getAlbumTracks(albumId);
 			tracks = res.tracks;
+			tidalOnlyTracks = res.tidal_tracks ?? [];
+			albumTidalId = res.album_tidal_id ?? null;
 		} catch (err) {
 			error = `Failed to load album: ${err}`;
 		} finally {
@@ -51,6 +59,8 @@
 
 	$effect(() => {
 		albumId;
+		tidalOnlyTracks = [];
+		albumTidalId = null;
 		void load();
 		artistTracks = [];
 		moreLoaded = false;
@@ -78,16 +88,19 @@
 	}
 
 	let header = $derived(() => {
-		const first = tracks[0];
-		if (!first) return null;
-		const totalMs = tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
+		const firstLocal = tracks[0];
+		const firstTidal = tidalOnlyTracks[0];
+		if (!firstLocal && !firstTidal) return null;
+		const totalMsLocal = tracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
+		const totalMsTidal = tidalOnlyTracks.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
 		return {
-			title: first.album_title ?? 'Unknown album',
-			artist_name: first.artist_name ?? 'Unknown artist',
-			artist_id: first.artist_id,
-			artwork_url: first.artwork_url,
-			track_count: tracks.length,
-			total_ms: totalMs
+			title: firstLocal?.album_title ?? firstTidal?.album_title ?? 'Unknown album',
+			artist_name: firstLocal?.artist_name ?? firstTidal?.artist_name ?? 'Unknown artist',
+			artist_id: firstLocal?.artist_id ?? null,
+			artwork_url: firstLocal?.artwork_url ?? firstTidal?.artwork_url ?? null,
+			library_track_count: tracks.length,
+			total_track_count: tracks.length + tidalOnlyTracks.length,
+			total_ms: totalMsLocal + totalMsTidal,
 		};
 	});
 
@@ -130,9 +143,31 @@
 		const current = $currentTrack;
 		if (current && tracks.some((t) => t.id === current.id)) {
 			void togglePlayback();
+			return;
+		}
+		// Per "show everything" philosophy: if the album exists on TIDAL, play
+		// the FULL TIDAL album so partial-library users still hear the whole
+		// thing. Local-only albums (no tidal_id) keep the old behavior so
+		// WASAPI exclusive bit-perfect output isn't routed through streaming
+		// when there's no need.
+		if (albumTidalId != null && tidalOnlyTracks.length > 0) {
+			void playTidalAlbum(albumTidalId);
 		} else {
 			void playAlbum(albumId);
 		}
+	}
+
+	function tidalDiscographyTrackToPlayable(t: TidalDiscographyTrack): TidalPlayable {
+		return {
+			tidal_id: t.tidal_id,
+			title: t.title,
+			artist_name: t.artist_name ?? null,
+			album_title: t.album_title,
+			artwork_url: t.artwork_url,
+			duration_ms: t.duration_ms,
+			artist_tidal_id: t.artist_tidal_id ?? null,
+			album_tidal_id: t.album_tidal_id ?? null,
+		};
 	}
 
 	let isAlbumPlaying = $derived(
@@ -202,20 +237,29 @@
 					<p class="eyebrow">Album</p>
 					<h1 class="hero-title display-face">{h.title}</h1>
 					<p class="hero-sub">
-						<a
-							href="/artists/{h.artist_id}"
-							class="hero-link"
-							oncontextmenu={(e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								openContextMenu(e, buildArtistMenu({ id: h.artist_id, name: h.artist_name }, { isLocal: true }), h.artist_name);
-							}}
-						>{h.artist_name}</a>
+						{#if h.artist_id != null}
+							<a
+								href="/artists/{h.artist_id}"
+								class="hero-link"
+								oncontextmenu={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									openContextMenu(e, buildArtistMenu({ id: h.artist_id, name: h.artist_name }, { isLocal: true }), h.artist_name);
+								}}
+							>{h.artist_name}</a>
+						{:else}
+							<span>{h.artist_name}</span>
+						{/if}
 						<span class="dot">·</span>
-						<span>{h.track_count} {h.track_count === 1 ? 'song' : 'songs'}</span>
+						<span>{h.total_track_count} {h.total_track_count === 1 ? 'song' : 'songs'}</span>
 						<span class="dot">·</span>
 						<span class="hero-duration">{formatTotalDuration(h.total_ms)}</span>
 					</p>
+					{#if h.library_track_count > 0 && h.library_track_count < h.total_track_count}
+						<p class="hero-library-substat">
+							{h.library_track_count} in your library
+						</p>
+					{/if}
 				</div>
 			</div>
 		</header>
@@ -282,6 +326,38 @@
 						menuOptions={{ hideAlbumActions: true }}
 					/>
 				{/each}
+				{#each tidalOnlyTracks as track, idx (`tidal-${track.tidal_id}`)}
+					{@const playable = tidalDiscographyTrackToPlayable(track)}
+					{@const ok = canPlayTrack(playable)}
+					<!-- TIDAL-only album track. Same row height as the library
+					     rows above so the listing scans as one continuous list. -->
+					<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+					<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+					<li
+						class="tidal-album-row"
+						class:disabled={!ok}
+						role="button"
+						tabindex={ok ? 0 : -1}
+						aria-disabled={!ok}
+						onclick={() => ok && void playTidalTrackNow(playable)}
+						onkeydown={(e) =>
+							(e.key === 'Enter' || e.key === ' ')
+							&& (e.preventDefault(), ok && void playTidalTrackNow(playable))}
+					>
+						<span class="tidal-row-num">{tracks.length + idx + 1}</span>
+						<span class="tidal-row-title">{track.title}</span>
+						<span class="tidal-row-plays" aria-hidden="true">—</span>
+						<span class="tidal-row-pill" aria-label="From TIDAL">TIDAL</span>
+						<span class="tidal-row-duration">
+							{#if track.duration_ms}
+								{Math.floor(track.duration_ms / 1000 / 60)}:{String(
+									Math.round((track.duration_ms / 1000) % 60),
+								).padStart(2, '0')}
+							{/if}
+						</span>
+					</li>
+				{/each}
 			</ol>
 		</section>
 
@@ -303,20 +379,22 @@
 						>Show all</a>
 					{/if}
 				</div>
-				<div class="album-grid">
-					{#each otherAlbums as album (album.id)}
+				<MediaRail items={otherAlbums} getKey={(a) => a.id ?? a.title}>
+					{#snippet card(album)}
 						<a
 							class="album-card"
-							href="/albums/{album.id}"
+							href={album.id != null ? `/albums/${album.id}` : '#'}
 							oncontextmenu={(e) => {
 								e.preventDefault();
 								e.stopPropagation();
-								openContextMenu(e, buildAlbumMenu({
-									id: album.id,
-									title: album.title,
-									artist_id: h.artist_id,
-									artist_name: h.artist_name,
-								}, { isLocal: true }), album.title);
+								if (album.id != null) {
+									openContextMenu(e, buildAlbumMenu({
+										id: album.id,
+										title: album.title,
+										artist_id: h.artist_id,
+										artist_name: h.artist_name,
+									}, { isLocal: true }), album.title);
+								}
 							}}
 						>
 							<div class="album-card-art-wrap">
@@ -331,8 +409,8 @@
 								{album.count} {album.count === 1 ? 'track' : 'tracks'}
 							</p>
 						</a>
-					{/each}
-				</div>
+					{/snippet}
+				</MediaRail>
 			</section>
 		{/if}
 	{/if}
@@ -583,6 +661,62 @@
 		gap: 0;
 	}
 
+	/* TIDAL-only row in the album track list. Matches the 5-column grid of
+	   .track-header so it lines up cleanly with TrackRow above. */
+	.tidal-album-row {
+		display: grid;
+		grid-template-columns: 40px 1fr 80px auto 64px;
+		align-items: center;
+		gap: 14px;
+		padding: 8px 16px;
+		cursor: pointer;
+		transition: background 120ms ease;
+		min-height: 44px;
+	}
+	.tidal-album-row:hover { background: rgba(255, 255, 255, 0.04); }
+	.tidal-album-row.disabled { cursor: not-allowed; opacity: 0.55; }
+	.tidal-row-num {
+		text-align: center;
+		color: var(--text-tertiary);
+		font-size: 0.85rem;
+		font-variant-numeric: tabular-nums;
+	}
+	.tidal-row-title {
+		color: var(--text-primary);
+		font-size: 0.92rem;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tidal-row-plays {
+		text-align: right;
+		color: var(--text-tertiary);
+	}
+	.tidal-row-pill {
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		padding: 3px 8px;
+		border-radius: 4px;
+		background: rgba(0, 184, 212, 0.16);
+		color: rgba(120, 220, 240, 0.95);
+		border: 1px solid rgba(0, 184, 212, 0.3);
+		text-transform: uppercase;
+	}
+	.tidal-row-duration {
+		text-align: right;
+		color: var(--text-tertiary);
+		font-size: 0.85rem;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.hero-library-substat {
+		margin: 4px 0 0;
+		font-size: 0.78rem;
+		color: var(--text-tertiary);
+	}
+
 	.footnote {
 		padding: 22px 32px 4px;
 		color: var(--text-tertiary);
@@ -622,13 +756,12 @@
 	}
 	.show-all:hover { color: var(--text-primary); text-decoration: underline; }
 
-	.album-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-		gap: 22px;
-	}
-
+	/* "More by artist" rail card — fixed width so the row stays uniform.
+	   The MediaRail container handles horizontal scroll. */
 	.album-card {
+		flex: 0 0 170px;
+		min-width: 170px;
+		max-width: 170px;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;

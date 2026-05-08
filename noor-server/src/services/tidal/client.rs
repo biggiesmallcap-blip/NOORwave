@@ -96,6 +96,32 @@ pub struct TidalArtist {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Subset of TIDAL's `/artists/{id}/videos` item shape we render in the rail.
+/// Other fields (audioQuality, explicit, releaseDate, etc.) are flattened
+/// into `extra` so deserialization stays forwards-compatible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TidalArtistVideo {
+    pub id: i64,
+    pub title: String,
+    /// Seconds. Convert to ms at the API boundary.
+    pub duration: i64,
+    #[serde(rename = "imageId")]
+    pub image_id: Option<String>,
+    pub artist: Option<TidalArtist>,
+    pub album: Option<TidalAlbumRef>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Response shape of `/artists/{id}/bio`. TIDAL marks up `text` with
+/// `[wimpLink]` tags; the frontend strips them. `summary` is plain prose.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TidalArtistBio {
+    pub source: Option<String>,
+    pub summary: Option<String>,
+    pub text: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TidalSearchTrack {
     pub id: i64,
@@ -414,6 +440,45 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalTrack>> {
         let url = format!(
             "{}/artists/{}/toptracks?countryCode={}&limit={}&offset={}",
+            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+        );
+        self.get_json(&url).await
+    }
+
+    /// Music videos for an artist. TIDAL returns the same video shape as
+    /// `/videos/{id}` here — we deserialize the subset we render in the rail.
+    pub async fn get_artist_videos(
+        &self,
+        artist_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalPaginatedResponse<TidalArtistVideo>> {
+        let url = format!(
+            "{}/artists/{}/videos?countryCode={}&limit={}&offset={}",
+            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+        );
+        self.get_json(&url).await
+    }
+
+    /// Long-form biography text. TIDAL returns `text` (with [wimpLink] markup)
+    /// + `summary`. Caller is responsible for any markup stripping.
+    pub async fn get_artist_bio(&self, artist_id: i64) -> Result<TidalArtistBio> {
+        let url = format!(
+            "{}/artists/{}/bio?countryCode={}",
+            TIDAL_API_URL, artist_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
+    /// "Fans also like" — artists similar to the given one.
+    pub async fn get_artist_similar(
+        &self,
+        artist_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<TidalPaginatedResponse<TidalArtist>> {
+        let url = format!(
+            "{}/artists/{}/similar?countryCode={}&limit={}&offset={}",
             TIDAL_API_URL, artist_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
