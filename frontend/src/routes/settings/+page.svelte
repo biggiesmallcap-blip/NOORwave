@@ -1316,7 +1316,7 @@
 					</button>
 					{#if tokenRegenError}<span class="field-error">{tokenRegenError}</span>{/if}
 				</div>
-				<p class="page-copy" style="font-size:0.8rem">
+				<p class="page-copy setting-caption">
 					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
 				</p>
 			</section>
@@ -1728,7 +1728,7 @@
 							<div class="info-row">
 								<span>
 									Bit-perfect mode
-									{#if bitPerfectActive}<em style="font-style:normal;opacity:0.6;font-size:0.75rem">&nbsp;active</em>{/if}
+									{#if bitPerfectActive}<em class="setting-em-reset">&nbsp;active</em>{/if}
 								</span>
 								<strong>
 									<label class="toggle-switch">
@@ -1741,7 +1741,7 @@
 									</label>
 								</strong>
 							</div>
-							<p class="page-copy" style="font-size:0.8rem">
+							<p class="page-copy setting-caption">
 								Sets quality to Hi-Res Lossless, takes exclusive control of the output device, and matches the device rate to each track's native rate. Equivalent to enabling the three audiophile toggles below at once. Some DACs misbehave under exclusive mode — turn off if you hear dropouts.
 							</p>
 						{/if}
@@ -1790,7 +1790,7 @@
 									</label>
 								</strong>
 							</div>
-							<p class="page-copy" style="font-size:0.8rem">
+							<p class="page-copy setting-caption">
 								Engaged only while audio plays. Releases the device after the
 								idle window below so other apps can use it; re-grabs on next play.
 								Crossfade and gapless pre-decode are disabled in exclusive mode.
@@ -1804,7 +1804,7 @@
 									<strong style="display: block; margin-bottom: 0.25rem; color: #fff; letter-spacing: 0.02em;">
 										Exclusive mode unavailable
 									</strong>
-									<span style="font-size: 0.85rem; line-height: 1.4;">
+									<span class="setting-status-line">
 										{$exclusiveStatus.failureReason} Audio is currently routed
 										through Windows shared mixing.
 									</span>
@@ -1841,12 +1841,12 @@
 										oninput={onExclusiveGraceChange}
 										style="vertical-align: middle; width: 140px;"
 									/>
-									<span style="margin-left: 0.5rem; font-variant-numeric: tabular-nums;">
+									<span class="setting-numeric">
 										{s.exclusive_release_grace_secs}s
 									</span>
 								</strong>
 							</div>
-							<p class="page-copy" style="font-size:0.8rem">
+							<p class="page-copy setting-caption">
 								Seconds of pause / silence before NOORwave releases the device
 								for other apps. Lower = friendlier; higher = sticks around.
 							</p>
@@ -1864,7 +1864,7 @@
 								</label>
 							</strong>
 						</div>
-						<p class="page-copy" style="font-size:0.8rem">
+						<p class="page-copy setting-caption">
 							Reconfigures the output device to each track's native rate (44.1 / 48 / 96 / 192 kHz). Recommended with exclusive mode.
 						</p>
 						<div class="info-row">
@@ -1881,13 +1881,13 @@
 								</select>
 							</strong>
 						</div>
-						<p class="page-copy" style="font-size:0.8rem">
+						<p class="page-copy setting-caption">
 							Max chooses the highest HLS rendition exposed by each video. Auto lets the player adapt to bandwidth.
 						</p>
 					</div>
 
 					{#if $audioSettings.pendingApply}
-						<p class="page-copy" style="font-size:0.82rem; color: var(--text-secondary)">Output reconfiguring…</p>
+						<p class="page-copy setting-caption" style="color: var(--text-secondary)">Output reconfiguring…</p>
 					{/if}
 					{#if $audioSettings.error}
 						<p class="page-copy" style="color: var(--state-error, #f87171)">{$audioSettings.error}</p>
@@ -2111,6 +2111,24 @@
 </div>
 
 <style>
+	/* Caption + status helpers — extracted from template inline styles */
+	.setting-caption {
+		font-size: var(--font-size-sm);
+	}
+	.setting-em-reset {
+		font-style: normal;
+		opacity: 0.6;
+		font-size: var(--font-size-xs);
+	}
+	.setting-status-line {
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+	}
+	.setting-numeric {
+		margin-left: 0.5rem;
+		font-variant-numeric: tabular-nums;
+	}
+
 	/* Discovery intensity selector + safety preview */
 	.intensity-block {
 		display: grid;
