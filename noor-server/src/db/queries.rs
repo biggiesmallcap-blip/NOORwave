@@ -1535,13 +1535,13 @@ pub fn get_top_genres_by_history(
 
 pub fn get_listen_activity(conn: &Connection, days: i64) -> Result<Vec<AnalyticsActivityPoint>> {
     let mut stmt = conn.prepare(
-        "SELECT DATE(started_at) AS day,
+        "SELECT DATE(started_at, 'localtime') AS day,
                 COUNT(*) AS listens,
                 COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed_listens,
                 COALESCE(SUM(duration_listened_ms), 0) AS listened_ms
          FROM listen_history
          WHERE started_at >= datetime('now', printf('-%d days', ?1))
-         GROUP BY DATE(started_at)
+         GROUP BY DATE(started_at, 'localtime')
          ORDER BY day ASC",
     )?;
 
@@ -1857,13 +1857,13 @@ pub fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
     // Daily series for the MiniSilhouette curves.
     let mut daily_stmt = conn.prepare(
         "SELECT
-            DATE(started_at) AS day,
+            DATE(started_at, 'localtime') AS day,
             COUNT(*) AS listens,
             COALESCE(SUM(duration_listened_ms), 0) AS listened_ms,
             COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed
          FROM listen_history
          WHERE started_at >= datetime('now', printf('-%d days', ?1))
-         GROUP BY DATE(started_at)
+         GROUP BY DATE(started_at, 'localtime')
          ORDER BY day ASC",
     )?;
     let daily: Vec<DailyKpi> = daily_stmt
@@ -1913,7 +1913,7 @@ fn get_signals_hero_stats(conn: &Connection, days: i64) -> Result<HeroStats> {
     // Peak hour: hour-of-day with max total listens, tie-break earliest.
     let peak_hour: Option<i32> = conn
         .query_row(
-            "SELECT CAST(strftime('%H', started_at) AS INTEGER) AS h
+            "SELECT CAST(strftime('%H', started_at, 'localtime') AS INTEGER) AS h
              FROM listen_history
              WHERE started_at >= datetime('now', printf('-%d days', ?1))
              GROUP BY h
@@ -1926,7 +1926,7 @@ fn get_signals_hero_stats(conn: &Connection, days: i64) -> Result<HeroStats> {
 
     // Per-day per-hour matrix (zero-filled) for Rhythm.
     let mut hour_stmt = conn.prepare(
-        "SELECT DATE(started_at) AS day, CAST(strftime('%H', started_at) AS INTEGER) AS h, COUNT(*) AS c
+        "SELECT DATE(started_at, 'localtime') AS day, CAST(strftime('%H', started_at, 'localtime') AS INTEGER) AS h, COUNT(*) AS c
          FROM listen_history
          WHERE started_at >= datetime('now', printf('-%d days', ?1))
          GROUP BY day, h
@@ -1954,8 +1954,8 @@ fn get_signals_hero_stats(conn: &Connection, days: i64) -> Result<HeroStats> {
     let (total, night, morning): (i64, i64, i64) = conn.query_row(
         "SELECT
             COUNT(*),
-            COUNT(*) FILTER (WHERE CAST(strftime('%H', started_at) AS INTEGER) IN (22, 23, 0, 1, 2, 3, 4)),
-            COUNT(*) FILTER (WHERE CAST(strftime('%H', started_at) AS INTEGER) IN (5, 6, 7, 8, 9))
+            COUNT(*) FILTER (WHERE CAST(strftime('%H', started_at, 'localtime') AS INTEGER) IN (22, 23, 0, 1, 2, 3, 4)),
+            COUNT(*) FILTER (WHERE CAST(strftime('%H', started_at, 'localtime') AS INTEGER) IN (5, 6, 7, 8, 9))
          FROM listen_history
          WHERE started_at >= datetime('now', printf('-%d days', ?1))",
         params![days],
@@ -2019,9 +2019,9 @@ pub fn get_signals_tempo(
 ) -> Result<TempoView> {
     // Per-row × per-bucket aggregation (label, bucket, listens) over the window.
     let label_expr = match granularity {
-        Granularity::Day => "DATE(lh.started_at)",
-        Granularity::Week => "strftime('%Y-%U', lh.started_at)", // %U = Sunday-start (NOT %W)
-        Granularity::Month => "strftime('%Y-%m', lh.started_at)",
+        Granularity::Day => "DATE(lh.started_at, 'localtime')",
+        Granularity::Week => "strftime('%Y-%U', lh.started_at, 'localtime')", // %U = Sunday-start (NOT %W)
+        Granularity::Month => "strftime('%Y-%m', lh.started_at, 'localtime')",
     };
     let sql = format!(
         "SELECT
@@ -2262,8 +2262,8 @@ pub fn get_signals_ridgeline(conn: &Connection, days: i64) -> Result<Vec<RidgeRo
     // chosen window" — a flat row IS the ridge for an empty day.
     let mut stmt = conn.prepare(
         "SELECT
-            DATE(started_at) AS day,
-            CAST(strftime('%H', started_at) AS INTEGER) AS hour,
+            DATE(started_at, 'localtime') AS day,
+            CAST(strftime('%H', started_at, 'localtime') AS INTEGER) AS hour,
             COUNT(*) AS listens
          FROM listen_history
          WHERE started_at >= datetime('now', printf('-%d days', ?1))
@@ -2290,9 +2290,9 @@ pub fn get_signals_ridgeline(conn: &Connection, days: i64) -> Result<Vec<RidgeRo
     let axis_dates: Vec<String> = conn
         .prepare(
             "WITH RECURSIVE axis(d) AS (
-                SELECT DATE(datetime('now', printf('-%d days', ?1 - 1)))
+                SELECT DATE(datetime('now', 'localtime', printf('-%d days', ?1 - 1)))
                 UNION ALL
-                SELECT DATE(d, '+1 day') FROM axis WHERE d < DATE('now')
+                SELECT DATE(d, '+1 day') FROM axis WHERE d < DATE('now', 'localtime')
             )
             SELECT d FROM axis",
         )?
@@ -2809,8 +2809,8 @@ pub fn get_genre_cohorts_filtered(
                 lh.track_id,
                 lh.started_at,
                 lh.duration_listened_ms,
-                CAST(strftime('%H', lh.started_at) AS INTEGER) AS hour,
-                CAST(strftime('%w', lh.started_at) AS INTEGER) AS dow
+                CAST(strftime('%H', lh.started_at, 'localtime') AS INTEGER) AS hour,
+                CAST(strftime('%w', lh.started_at, 'localtime') AS INTEGER) AS dow
             FROM listen_history lh
             WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
         ),
