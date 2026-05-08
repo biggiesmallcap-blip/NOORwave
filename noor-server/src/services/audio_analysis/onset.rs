@@ -71,7 +71,8 @@ pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<Onset
     // huge transient does not flatten the rest of the envelope.
     let mut sorted = flux.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p99 = sorted[(sorted.len() as f64 * 0.99) as usize];
+    let idx = ((sorted.len() as f64 * 0.99).floor() as usize).min(sorted.len() - 1);
+    let p99 = sorted[idx];
     let denom = if p99 > 1e-9 { p99 } else { 1.0 };
     for v in flux.iter_mut() { *v = (*v / denom).min(1.0); }
 
@@ -115,7 +116,7 @@ mod tests {
         let s = vec![0.0f32; 44100 * 4];
         let env = compute_onset_envelope(&s, 44100).unwrap();
         let max = env.odf.iter().cloned().fold(0.0f64, f64::max);
-        assert!(max < 0.05, "silence should produce a near-zero ODF, got peak {}", max);
+        assert_eq!(max, 0.0, "silence must produce a zero ODF, got peak {}", max);
     }
 
     #[test]
@@ -132,6 +133,28 @@ mod tests {
             above_half, total, 100.0 * above_half as f64 / total as f64,
         );
         assert!(above_half >= 8, "expected at least 8 strong onsets, got {}", above_half);
+
+        // Peak periodicity: the strong-onset frames must fall on a near-uniform grid
+        // matching the 0.5 s click period (the whole reason the ODF exists).
+        let peak_frames: Vec<usize> = env
+            .odf
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v > 0.5)
+            .map(|(i, _)| i)
+            .collect();
+        let spacings: Vec<f64> = peak_frames
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as f64 * env.hop_seconds)
+            .collect();
+        let mut sorted_spacings = spacings.clone();
+        sorted_spacings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted_spacings[sorted_spacings.len() / 2];
+        assert!(
+            (median - 0.5).abs() < 0.02,
+            "median peak spacing {:.4} s != 0.5 s (clicks should drive a 120 BPM ODF)",
+            median,
+        );
     }
 
     #[test]
