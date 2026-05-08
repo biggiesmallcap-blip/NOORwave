@@ -15,7 +15,9 @@ const MIN_BEATS: usize = 4;
 
 #[derive(Debug)]
 pub struct BeatTrack {
-    /// Beat times in seconds from clip start.
+    /// Beat times in seconds from clip start. Asserted by tests; not yet
+    /// consumed by production callers (kept for future beat-grid overlays).
+    #[allow(dead_code)]
     pub beats: Vec<f64>,
     /// Average onset prominence at beat positions, in [0, 1]. Combined with
     /// tempogram strength in `bpm.rs` (geometric mean) to form the user-facing
