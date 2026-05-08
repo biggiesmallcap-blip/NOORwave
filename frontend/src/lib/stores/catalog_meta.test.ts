@@ -52,4 +52,11 @@ describe('catalog_meta', () => {
         expect(a).toBe(b);
         expect(b).toBe(c);
     });
+
+    it('failed fetch does not poison cache; next call retries', async () => {
+        (api.getPlaylists as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+        await expect(ensureCatalogPlaylists()).rejects.toThrow('boom');
+        await ensureCatalogPlaylists();
+        expect(api.getPlaylists).toHaveBeenCalledTimes(2);
+    });
 });

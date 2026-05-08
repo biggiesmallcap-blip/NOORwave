@@ -16,6 +16,9 @@ export async function ensureCatalogPlaylists(): Promise<Playlist[]> {
     if (now - playlistsFetchedAt < TTL_MS && get(catalogPlaylists).length > 0) {
         return get(catalogPlaylists);
     }
+    // Note: invalidate() during in-flight does NOT cancel; the existing fetch
+    // resolves and updates fetchedAt. Callers that need a guaranteed-fresh
+    // fetch after a write should await this completion before invalidating.
     if (playlistsInflight) return playlistsInflight;
     playlistsInflight = (async () => {
         try {
@@ -35,6 +38,9 @@ export async function ensureCatalogGenres(): Promise<Genre[]> {
     if (now - genresFetchedAt < TTL_MS && get(catalogGenres).length > 0) {
         return get(catalogGenres);
     }
+    // Note: invalidate() during in-flight does NOT cancel; the existing fetch
+    // resolves and updates fetchedAt. Callers that need a guaranteed-fresh
+    // fetch after a write should await this completion before invalidating.
     if (genresInflight) return genresInflight;
     genresInflight = (async () => {
         try {
