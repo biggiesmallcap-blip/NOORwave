@@ -659,33 +659,10 @@
 	let isSearchMode = $derived(Boolean($searchQuery.trim()));
 	let visibleTracks = $derived.by(() => {
 		if (!$searchQuery.trim()) return $tracks;
-		// Search results don't know about liked_only, so filter client-side
-		// to keep the Liked tab's promise honest while a query is active.
-		const results = activeTab === 'liked'
+		// While searching, trust backend FTS rank. Client sort would defeat it.
+		return activeTab === 'liked'
 			? searchResults.tracks.filter(t => t.is_favorite)
 			: searchResults.tracks;
-		if (!$sortBy || $sortBy === 'relevance') return results;
-		const dir = $sortDir === 'desc' ? -1 : 1;
-		return [...results].sort((a, b) => {
-			let av: string | number | null | undefined;
-			let bv: string | number | null | undefined;
-			switch ($sortBy) {
-				case 'title':    av = a.title?.toLowerCase();      bv = b.title?.toLowerCase();      break;
-				case 'artist':   av = a.artist_name?.toLowerCase(); bv = b.artist_name?.toLowerCase(); break;
-				case 'album':    av = a.album_title?.toLowerCase(); bv = b.album_title?.toLowerCase(); break;
-				case 'play_count':     av = a.play_count;          bv = b.play_count;                 break;
-				case 'date_added':     av = a.date_added;          bv = b.date_added;                 break;
-				case 'last_played_at': av = a.last_played_at;      bv = b.last_played_at;             break;
-				case 'bpm':            av = a.bpm;                 bv = b.bpm;                        break;
-				case 'energy':         av = a.energy;              bv = b.energy;                     break;
-				case 'danceability':   av = a.danceability;        bv = b.danceability;               break;
-				default: return 0;
-			}
-			if (av == null && bv == null) return 0;
-			if (av == null) return 1;
-			if (bv == null) return -1;
-			return dir * (av < bv ? -1 : av > bv ? 1 : 0);
-		});
 	});
 	let decadeBuckets = $derived.by(() => {
 		const seen = new Set<number>();
@@ -696,23 +673,7 @@
 	});
 	let visibleAlbums = $derived.by(() => {
 		let base = $searchQuery.trim() ? searchResults.albums : $albums;
-		if ($searchQuery.trim() && $sortBy && $sortBy !== 'relevance') {
-			const dir = $sortDir === 'desc' ? -1 : 1;
-			base = [...base].sort((a, b) => {
-				let av: string | number | null | undefined;
-				let bv: string | number | null | undefined;
-				switch ($sortBy) {
-					case 'title':  av = a.title?.toLowerCase();      bv = b.title?.toLowerCase();      break;
-					case 'artist': av = a.artist_name?.toLowerCase(); bv = b.artist_name?.toLowerCase(); break;
-					case 'year':   av = a.year;                      bv = b.year;                       break;
-					default: return 0;
-				}
-				if (av == null && bv == null) return 0;
-				if (av == null) return 1;
-				if (bv == null) return -1;
-				return dir * (av < bv ? -1 : av > bv ? 1 : 0);
-			});
-		}
+		// While searching, trust backend FTS rank. Client sort would defeat it.
 		if (!activeDecade) return base;
 		return base.filter(a => a.year != null && Math.floor(a.year / 10) * 10 === activeDecade);
 	});
