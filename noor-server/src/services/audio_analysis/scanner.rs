@@ -92,39 +92,53 @@ pub async fn run_preview_scan(
 
         // ── 2. Download audio bytes (cap at 2 MB) ────────────────────────────
         // 2 MB ≈ 166 s of 96 kbps AAC — far more than the 30 s we decode.
+        //
+        // TIDAL serves modern catalogue as DASH SegmentTemplate manifests:
+        // `stream_info.url` is the init segment (codec headers, no audio
+        // frames) and the actual media is in `segment_urls`. Fetch init
+        // chained with segments — same pattern as the playback runtime.
         const MAX_BYTES: usize = 2 * 1024 * 1024;
+        let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
+        let mut fetch_failed = false;
 
-        let audio_bytes = match http_client.get(&stream_info.url).send().await {
-            Ok(resp) => {
-                let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
-                let mut stream = resp.bytes_stream();
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(c) => {
-                            let remaining = MAX_BYTES.saturating_sub(buf.len());
-                            if c.len() <= remaining {
-                                buf.extend_from_slice(&c);
-                            } else {
-                                buf.extend_from_slice(&c[..remaining]);
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(track_id = track.id, "Stream read error: {}", e);
-                            break;
+        'segments: for seg_url in std::iter::once(&stream_info.url)
+            .chain(stream_info.segment_urls.iter())
+        {
+            if buf.len() >= MAX_BYTES { break; }
+
+            let resp = match http_client.get(seg_url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(track_id = track.id, "Failed to fetch segment: {}", e);
+                    fetch_failed = true;
+                    break;
+                }
+            };
+
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(c) => {
+                        let remaining = MAX_BYTES.saturating_sub(buf.len());
+                        if c.len() <= remaining {
+                            buf.extend_from_slice(&c);
+                        } else {
+                            buf.extend_from_slice(&c[..remaining]);
+                            break 'segments;
                         }
                     }
+                    Err(e) => {
+                        tracing::warn!(track_id = track.id, "Stream read error: {}", e);
+                        fetch_failed = true;
+                        break;
+                    }
                 }
-                buf
             }
-            Err(e) => {
-                tracing::warn!(track_id = track.id, "Failed to fetch audio: {}", e);
-                skipped += 1;
-                continue;
-            }
-        };
+            if fetch_failed { break; }
+        }
 
-        if audio_bytes.is_empty() {
+        let audio_bytes = buf;
+        if audio_bytes.is_empty() || (fetch_failed && audio_bytes.len() < 32 * 1024) {
             skipped += 1;
             continue;
         }
