@@ -4,7 +4,10 @@ import type { WallpaperId } from '$lib/components/wallpaper/shaders';
 const STORAGE_KEY = 'noor-wallpaper';
 const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
                                'topo-noir', 'aurora-deep', 'chrome-brushed',
-                               'zen', 'galaxy'];
+                               'zen', 'galaxy',
+                               'joy-division', 'oscilloscope', 'spectrum', 'vinyl', 'tape',
+                               'phasing', 'spectrogram', 'lissajous', 'drone', 'reel',
+                               'standing-wave'];
 
 function readInitial(): WallpaperId {
 	if (typeof localStorage === 'undefined') return 'none';
