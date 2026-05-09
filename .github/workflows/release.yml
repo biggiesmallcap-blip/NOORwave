@@ -12,7 +12,7 @@ jobs:
       contents: write
     steps:
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           body: |
@@ -116,7 +116,7 @@ jobs:
           path: dist/windows.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
 
@@ -199,7 +199,7 @@ jobs:
           path: dist/linux-x64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-linux-x64.tar.gz
 
@@ -271,7 +271,7 @@ jobs:
           path: dist/macos-arm64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-macos-arm64.tar.gz
 
@@ -345,7 +345,7 @@ jobs:
           path: dist/macos-x64.sha256
 
       - name: Upload artifact
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/NOORwave-${{ github.ref_name }}-macos-x64.tar.gz
 
@@ -365,6 +365,6 @@ jobs:
         run: cat *.sha256 | sort > sha256sums.txt
 
       - name: Upload sha256sums.txt to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: sha256sums.txt
