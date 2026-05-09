@@ -7,6 +7,11 @@ export const DEFAULT = 1.0;
 export const WHEEL_STEP = 0.05;
 export const KEY_STEP = 0.10;
 
+type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+interface TauriWindow extends Window {
+	__TAURI_INTERNALS__?: { invoke?: TauriInvoke };
+}
+
 function clamp(value: number): number {
 	if (!Number.isFinite(value)) return DEFAULT;
 	if (value < MIN) return MIN;
@@ -27,18 +32,20 @@ function readInitial(): number {
 export const uiZoom = writable<number>(readInitial());
 
 /**
- * Apply a zoom factor to the Tauri webview. Silently no-ops outside Tauri
- * (e.g. `vite dev` in a regular browser, SSR), so the store + persistence
- * still work — only the actual visual scaling requires the webview API.
+ * Apply a zoom factor to the Tauri webview via the `set_ui_zoom` Rust command.
+ * No-ops outside Tauri (browser dev / SSR). Mirrors the openExternal pattern
+ * in lib/util/external.ts — uses the global `__TAURI_INTERNALS__.invoke` so we
+ * don't need the @tauri-apps/api npm dep or a capabilities/ config file.
  */
 export async function applyZoom(factor: number): Promise<void> {
 	const value = clamp(factor);
+	if (typeof window === 'undefined') return;
+	const invoke = (window as TauriWindow).__TAURI_INTERNALS__?.invoke;
+	if (!invoke) return; // Plain browser dev — Ctrl+/Ctrl- is handled natively by the browser.
 	try {
-		const mod = await import('@tauri-apps/api/webviewWindow');
-		const win = mod.getCurrentWebviewWindow();
-		await win.setZoom(value);
-	} catch {
-		// Not running inside Tauri (browser dev / SSR / API absent) — ignore.
+		await invoke('set_ui_zoom', { factor: value });
+	} catch (err) {
+		console.warn('set_ui_zoom failed', err);
 	}
 }
 
