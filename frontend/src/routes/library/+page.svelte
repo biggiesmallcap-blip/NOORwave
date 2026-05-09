@@ -2015,11 +2015,6 @@
 		gap: 10px;
 	}
 
-	.library-hero-heading h1 {
-		font-size: var(--font-size-3xl);
-		line-height: var(--line-height-tight);
-	}
-
 	.library-mode-pill,
 	.library-stat-chip {
 		display: inline-flex;
@@ -2443,7 +2438,6 @@
 		min-width: 0;
 	}
 
-	.detail-album-info h2,
 	.detail-track-info h2 {
 		font-size: var(--font-size-lg);
 		font-weight: var(--font-weight-bold);
@@ -3556,12 +3550,6 @@
 		font-size: var(--font-size-lg);
 		font-weight: var(--font-weight-bold);
 		color: var(--accent-strong);
-	}
-
-	.artist-panel-identity h3 {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-bold);
-		margin: 0;
 	}
 
 	.artist-panel-count {
