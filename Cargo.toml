@@ -1,3 +1,9 @@
 [workspace]
 members = ["noor-server", "noor-app"]
 resolver = "2"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = "line-tables-only"
