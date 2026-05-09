@@ -225,6 +225,7 @@ pub async fn refresh_seed_neighbors(
 
     let send_progress_for_blocking = send_progress.clone();
     let cache_for_store = Arc::clone(&embedding_cache);
+    let refreshed_for_blocking = Arc::clone(&refreshed_seeds);
 
     let result: Result<
         Option<(
@@ -248,6 +249,10 @@ pub async fn refresh_seed_neighbors(
                     let embeddings = get_model_embeddings(conn, model.id)?;
                     if embeddings.is_empty() {
                         info!("[neighbor_refresh] model {} has no embeddings", model.id);
+                        lock_refreshed(&refreshed_for_blocking).insert(
+                            seed_id,
+                            RefreshEntry { model_id: model.id, at: Instant::now() },
+                        );
                         return Ok(None);
                     }
                     let vm: HashMap<i64, Vec<f64>> = embeddings
@@ -263,6 +268,10 @@ pub async fn refresh_seed_neighbors(
                 let embeddings = get_model_embeddings(conn, model.id)?;
                 if embeddings.is_empty() {
                     info!("[neighbor_refresh] model {} has no embeddings", model.id);
+                    lock_refreshed(&refreshed_for_blocking).insert(
+                        seed_id,
+                        RefreshEntry { model_id: model.id, at: Instant::now() },
+                    );
                     return Ok(None);
                 }
                 let vm: HashMap<i64, Vec<f64>> = embeddings
@@ -276,6 +285,10 @@ pub async fn refresh_seed_neighbors(
 
             let Some(seed_vec) = vec_map.get(&seed_id) else {
                 warn!("[neighbor_refresh] seed {seed_id} not in embedding table — skipping");
+                lock_refreshed(&refreshed_for_blocking).insert(
+                    seed_id,
+                    RefreshEntry { model_id: model.id, at: Instant::now() },
+                );
                 return Ok(None);
             };
             let seed_vec = seed_vec.clone();
@@ -419,5 +432,53 @@ pub async fn refresh_seed_neighbors(
             });
         }
         Err(e) => warn!("[neighbor_refresh] error for seed {seed_id}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::broadcast;
+
+    /// Build an in-memory DB with full migrations applied and a single active
+    /// embedding model row. `track_embeddings` is empty, so refresh_seed_neighbors
+    /// hits the "model has no embeddings" early-exit arm (line 264-266 in this
+    /// module), which is one of the three Ok(None) paths that historically did
+    /// not insert a RefreshEntry.
+    fn db_with_active_model_no_embeddings() -> (Database, i64) {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        let model_id = db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO embedding_models
+                        (model_key, family, dimension, is_active, status)
+                     VALUES ('test-model', 'test-family', 32, 1, 'idle')",
+                    [],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .expect("seed embedding_models row");
+        (db, model_id)
+    }
+
+    #[tokio::test]
+    async fn refresh_seed_neighbors_marks_fresh_when_model_has_no_embeddings() {
+        let (db, model_id) = db_with_active_model_no_embeddings();
+        let refreshed: Arc<Mutex<HashMap<i64, RefreshEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let cache = Arc::new(tokio::sync::Mutex::new(None));
+        let (tx, _rx) = broadcast::channel(8);
+        let seed_id: i64 = 99999;
+
+        refresh_seed_neighbors(db, tx, seed_id, Arc::clone(&refreshed), cache).await;
+
+        assert!(
+            is_seed_fresh(&refreshed, seed_id, model_id),
+            "seed should be marked fresh on the no-embeddings early-exit so the route layer can short-circuit subsequent /api/discovery/space calls and break the WS-driven reload loop"
+        );
     }
 }
