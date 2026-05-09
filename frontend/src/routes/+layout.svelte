@@ -66,6 +66,7 @@
 	import { wallpaper } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
 	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
+	import { isTauri } from '$lib/util/external';
 	import { paletteById } from '$lib/components/wallpaper/palettes';
 	import {
 		requestVideoClear,
@@ -336,7 +337,9 @@
 
 	function handleGlobalWheel(event: WheelEvent) {
 		if (!(event.ctrlKey || event.metaKey)) return;
-		// Browser-style Ctrl+wheel zoom. Sign of deltaY: positive = scroll down = zoom out.
+		// In a regular browser, let native Ctrl+wheel zoom through — preventing it
+		// would suppress browser zoom while our store no-ops outside Tauri.
+		if (!isTauri()) return;
 		event.preventDefault();
 		nudgeZoom(event.deltaY > 0 ? -1 : 1);
 	}
@@ -355,9 +358,10 @@
 			commandPaletteOpen.update(v => !v);
 			return;
 		}
-		// Browser-style UI zoom: Ctrl/Cmd + (+ | - | 0). Allowed even while typing
-		// in inputs, matching native browser behavior.
-		if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+		// Browser-style UI zoom: Ctrl/Cmd + (+ | - | 0). Tauri-only — in a regular
+		// browser, let the native zoom shortcuts through (otherwise we'd block
+		// them and replace them with a no-op).
+		if (isTauri() && (event.ctrlKey || event.metaKey) && !event.altKey) {
 			if (event.key === '+' || event.key === '=') {
 				event.preventDefault();
 				zoomIn();
