@@ -1073,7 +1073,7 @@
 
 	<aside class="sidebar">
 		<a href="/" class="brand" aria-label="NOORwave home">
-			<img class="brand-splash" src="/noor-icon-transparent.svg" alt="NOORwave" />
+			<img class="brand-splash" src="/noor-logo-centered-transparent.svg" alt="NOORwave" />
 		</a>
 
 		<nav class="nav" aria-label="Primary">
@@ -2228,9 +2228,10 @@
 
 	.brand-splash {
 		display: block;
-		width: 88px;
-		height: 88px;
-		object-fit: contain;
+		width: 100%;
+		max-width: 160px;
+		height: auto;
+		margin: 0 auto;
 	}
 
 	.nav {
