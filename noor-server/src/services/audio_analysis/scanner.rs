@@ -90,14 +90,27 @@ pub async fn run_preview_scan(
             }
         };
 
-        // ── 2. Download audio bytes (cap at 2 MB) ────────────────────────────
-        // 2 MB ≈ 166 s of 96 kbps AAC — far more than the 30 s we decode.
+        tracing::info!(
+            track_id = track.id,
+            tidal_id,
+            codec = %stream_info.codec,
+            quality = %stream_info.audio_quality,
+            segments = stream_info.segment_urls.len(),
+            url_prefix = %stream_info.url.chars().take(60).collect::<String>(),
+            "stream resolved"
+        );
+
+        // ── 2. Download audio bytes (cap at 8 MB) ────────────────────────────
+        // 8 MB ≈ 11 min of 96 kbps AAC — covers full-length songs at LOW
+        // quality. We need the WHOLE file because TIDAL's MP4s typically
+        // place the `moov` atom (track metadata symphonia needs) at the END
+        // of the file. A smaller cap truncates moov and triggers EOF errors.
         //
-        // TIDAL serves modern catalogue as DASH SegmentTemplate manifests:
-        // `stream_info.url` is the init segment (codec headers, no audio
-        // frames) and the actual media is in `segment_urls`. Fetch init
-        // chained with segments — same pattern as the playback runtime.
-        const MAX_BYTES: usize = 2 * 1024 * 1024;
+        // For DASH SegmentTemplate manifests, `stream_info.url` is the init
+        // segment and the audio is in `segment_urls`; chain them. For BTS /
+        // JSON manifests `segment_urls` is empty and `url` points at the
+        // full file directly.
+        const MAX_BYTES: usize = 8 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
         let mut fetch_failed = false;
 
@@ -138,6 +151,19 @@ pub async fn run_preview_scan(
         }
 
         let audio_bytes = buf;
+        let magic: String = audio_bytes
+            .iter()
+            .take(16)
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        tracing::info!(
+            track_id = track.id,
+            bytes = audio_bytes.len(),
+            fetch_failed,
+            magic = %magic,
+            "audio bytes accumulated"
+        );
+
         if audio_bytes.is_empty() || (fetch_failed && audio_bytes.len() < 32 * 1024) {
             skipped += 1;
             continue;
@@ -162,6 +188,26 @@ pub async fn run_preview_scan(
                 continue;
             }
         };
+
+        // Diagnostic: report decoded buffer characteristics so we can tell
+        // silent-from-source from silent-from-mixdown-bug.
+        let n = samples.len();
+        let nonzero = samples.iter().filter(|s| s.abs() > 1e-6).count();
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let rms = if n > 0 {
+            (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / n as f64).sqrt()
+        } else {
+            0.0
+        };
+        tracing::info!(
+            track_id = track.id,
+            samples = n,
+            sample_rate,
+            nonzero_count = nonzero,
+            peak_abs = peak,
+            rms = rms,
+            "decoded audio stats"
+        );
 
         // ── 4. Skip the first 10 s of the preview clip ───────────────────────
         // Track intros (fades, single-instrument opens, sustained pads) have
@@ -394,22 +440,35 @@ pub fn decode_source_to_mono_f32(
     let sample_rate = codec_params
         .sample_rate
         .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
-    let channels = codec_params.channels.unwrap_or_default();
-    let num_channels = channels.count();
+    // codec_params.channels can be None for MP4/AAC where channel count is
+    // only available in the AAC codec-specific config (esds → AudioSpecificConfig)
+    // and the demuxer doesn't surface it on the track. Default to stereo for
+    // the upper bound; the real channel count comes from the decoded buffer below.
+    let metadata_channels = codec_params.channels.map(|c| c.count()).unwrap_or(0);
+    let channel_upper_bound = metadata_channels.max(2);
     let track_id = track.id;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &DecoderOptions::default())
         .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
-    let max_samples = (sample_rate * max_secs) as usize * num_channels;
+    let max_samples = (sample_rate * max_secs) as usize * channel_upper_bound;
     let mut samples: Vec<f32> = Vec::with_capacity(max_samples);
+    let mut decoded_channels: usize = 0;
+    let mut packet_err: Option<String> = None;
+    let mut decode_err_count: u32 = 0;
+    let mut last_decode_err: Option<String> = None;
+    let mut packets_seen: u32 = 0;
 
     while samples.len() < max_samples {
         let packet = match format.next_packet() {
             Ok(p) => p,
-            Err(_) => break,
+            Err(e) => {
+                packet_err = Some(e.to_string());
+                break;
+            }
         };
+        packets_seen += 1;
 
         if packet.track_id() != track_id {
             continue;
@@ -417,34 +476,53 @@ pub fn decode_source_to_mono_f32(
 
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                decode_err_count += 1;
+                last_decode_err = Some(e.to_string());
+                continue;
+            }
         };
 
-        let mut buf = decoded.make_equivalent::<f32>();
-        decoded.convert(&mut buf);
-
-        for plane in buf.planes().planes() {
-            for &sample in *plane {
-                samples.push(sample);
-                if samples.len() >= max_samples {
-                    break;
-                }
-            }
-            if samples.len() >= max_samples {
-                break;
-            }
+        if decoded_channels == 0 {
+            decoded_channels = decoded.spec().channels.count().max(1);
         }
+
+        // Copy to an interleaved SampleBuffer — this matches the playback
+        // runtime's pattern and gives us LRLR... ordering so the chunked
+        // downmix below is correct. The decoded AudioBuffer is planar
+        // (LLLL...RRRR...) and the previous code conflated the two.
+        let mut sb = symphonia::core::audio::SampleBuffer::<f32>::new(
+            decoded.capacity() as u64,
+            *decoded.spec(),
+        );
+        sb.copy_interleaved_ref(decoded);
+        let interleaved = sb.samples();
+        let remaining = max_samples.saturating_sub(samples.len());
+        let take = interleaved.len().min(remaining);
+        samples.extend_from_slice(&interleaved[..take]);
     }
 
-    // Downmix to mono
-    let mono = if num_channels <= 1 {
+    // Downmix to mono using the channel count we observed from the actual
+    // decoded buffers. Falls back to 1 when no packets ever decoded.
+    let downmix_channels = decoded_channels.max(1);
+    let mono = if downmix_channels <= 1 {
         samples
     } else {
         samples
-            .chunks(num_channels)
-            .map(|chunk| chunk.iter().sum::<f32>() / num_channels as f32)
+            .chunks(downmix_channels)
+            .map(|chunk| chunk.iter().sum::<f32>() / downmix_channels as f32)
             .collect()
     };
+
+    if mono.is_empty() {
+        tracing::warn!(
+            packets_seen,
+            decode_err_count,
+            packet_err = packet_err.as_deref().unwrap_or(""),
+            last_decode_err = last_decode_err.as_deref().unwrap_or(""),
+            "decode produced 0 samples"
+        );
+    }
 
     Ok((mono, sample_rate))
 }
