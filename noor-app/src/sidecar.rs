@@ -42,12 +42,29 @@ fn log_path() -> PathBuf {
         .join("noor-server.log")
 }
 
+const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024;
+
+fn rotate_log_if_oversized(path: &PathBuf) {
+    let size = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return,
+    };
+    if size <= MAX_LOG_BYTES {
+        return;
+    }
+    let rotated = path.with_extension("log.old");
+    let _ = std::fs::remove_file(&rotated);
+    let _ = std::fs::rename(path, &rotated);
+}
+
 pub fn spawn_server(state: &Arc<SidecarState>) {
     let host_mode = *state.host_mode.lock().unwrap();
+    let path = log_path();
+    rotate_log_if_oversized(&path);
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path())
+        .open(&path)
         .ok();
 
     let mut cmd = Command::new(server_exe_path());
