@@ -38,10 +38,16 @@ impl Default for AnalysisConfig {
 
 /// Spawn the analysis actor. Returns the sender for jobs.
 /// The actor runs on its own tokio task and processes jobs sequentially.
+///
+/// The actor lives for the entire process lifetime and stops when the mpsc
+/// channel closes (i.e. when the last sender is dropped on server shutdown).
+/// It does NOT honour the shared `audio_analysis_cancel` flag — that flag
+/// belongs to the bulk preview scanner. When the user stops the bulk scan,
+/// the actor must keep running so playback-driven analysis continues.
 pub fn spawn_actor(
     db: crate::db::Database,
     event_tx: broadcast::Sender<AppEvent>,
-    cancel: Arc<AtomicBool>,
+    _cancel: Arc<AtomicBool>,
     config: AnalysisConfig,
 ) -> mpsc::UnboundedSender<AnalysisJob> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AnalysisJob>();
@@ -50,11 +56,6 @@ pub fn spawn_actor(
         let mut analyzed_count: u32 = 0;
 
         while let Some((track_id, mut samples, sample_rate)) = rx.recv().await {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                info!("Analysis actor cancelled, stopping.");
-                break;
-            }
-
             let max_samples = (sample_rate * config.max_seconds) as usize;
             if samples.len() > max_samples {
                 samples.truncate(max_samples);
