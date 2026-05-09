@@ -10,13 +10,38 @@ pub mod tempo;
 
 pub const CURRENT_ANALYSIS_VERSION: &str = "v3";
 
+/// Server-config key controlling whether the playback-driven actor analyses
+/// audio at all. Defaults to enabled. Stored in the `server_config` k/v table
+/// as "1" (enabled) or "0" (disabled). When disabled, the actor still runs
+/// (consuming samples to drain the channel) but does not call analyse_and_save.
+pub const PASSIVE_DSP_ENABLED_KEY: &str = "passive_dsp_enabled";
+
 use crate::AppEvent;
+use rusqlite::Connection;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
 use crate::db::queries;
+
+pub fn is_passive_enabled(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM server_config WHERE key = ?1",
+        rusqlite::params![PASSIVE_DSP_ENABLED_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|v| v != "0")
+    .unwrap_or(true)
+}
+
+pub fn set_passive_enabled(conn: &Connection, enabled: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+        rusqlite::params![PASSIVE_DSP_ENABLED_KEY, if enabled { "1" } else { "0" }],
+    )?;
+    Ok(())
+}
 
 pub type AnalysisJob = (i64, Vec<f32>, u32); // (track_id, mono_samples, sample_rate)
 
@@ -56,6 +81,16 @@ pub fn spawn_actor(
         let mut analyzed_count: u32 = 0;
 
         while let Some((track_id, mut samples, sample_rate)) = rx.recv().await {
+            // Bail early if the user has disabled passive DSP analysis. We
+            // still consume the message so the channel drains; we just skip
+            // the work.
+            let passive_enabled = db
+                .with_conn(|conn| Ok(is_passive_enabled(conn)))
+                .unwrap_or(true);
+            if !passive_enabled {
+                continue;
+            }
+
             let max_samples = (sample_rate * config.max_seconds) as usize;
             if samples.len() > max_samples {
                 samples.truncate(max_samples);

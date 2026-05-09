@@ -612,6 +612,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(get_audio_analysis_status),
         )
         .route(
+            "/api/library/analyze/passive",
+            get(get_passive_dsp).put(set_passive_dsp),
+        )
+        .route(
             "/api/tracks/{id}/audio-features",
             get(get_track_audio_features),
         )
@@ -14852,6 +14856,36 @@ async fn get_audio_analysis_status(
         "running": s.audio_analysis_running.load(std::sync::atomic::Ordering::Relaxed),
         "analyzed": analyzed,
     })))
+}
+
+async fn get_passive_dsp(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let enabled = s
+        .db
+        .with_conn(|conn| Ok(crate::services::audio_analysis::is_passive_enabled(conn)))
+        .unwrap_or(true);
+    Ok(Json(json!({ "enabled": enabled })))
+}
+
+#[derive(Deserialize)]
+struct PassiveDspBody {
+    enabled: bool,
+}
+
+async fn set_passive_dsp(
+    State(state): State<SharedState>,
+    Json(payload): Json<PassiveDspBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    s.db.with_conn(|conn| {
+        crate::services::audio_analysis::set_passive_enabled(conn, payload.enabled)
+            .map_err(anyhow::Error::from)
+    })
+    .map_err(|e| {
+        tracing::error!("failed to persist passive_dsp_enabled: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(json!({ "enabled": payload.enabled })))
 }
 
 async fn get_track_audio_features(

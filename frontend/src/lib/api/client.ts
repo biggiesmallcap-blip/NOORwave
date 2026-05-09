@@ -2365,6 +2365,17 @@ export const api = {
 		return fetchApi<{ running: boolean; analyzed: number }>('/api/library/analyze/status');
 	},
 
+	getPassiveDsp() {
+		return fetchApi<{ enabled: boolean }>('/api/library/analyze/passive');
+	},
+
+	setPassiveDsp(enabled: boolean) {
+		return fetchApi<{ enabled: boolean }>('/api/library/analyze/passive', undefined, {
+			method: 'PUT',
+			body: JSON.stringify({ enabled }),
+		});
+	},
+
 	stopAudioAnalysis() {
 		return fetchApi<{ status: string }>('/api/library/analyze/stop', undefined, { method: 'POST' });
 	},

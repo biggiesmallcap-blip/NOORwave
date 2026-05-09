@@ -32,6 +32,8 @@
 		audioAnalysis,
 		clearAllAnalysis,
 		loadAudioStats,
+		loadPassiveDspState,
+		setPassiveDspEnabled,
 		syncAnalysisStatus
 	} from '$lib/stores/audio_analysis';
 	import {
@@ -263,6 +265,7 @@
 		void loadDiscoverySafety();
 		void loadAudioStats();
 		void syncAnalysisStatus();
+		void loadPassiveDspState();
 		void loadAudioOutput();
 		void loadAcrCloudStatus();
 		void loadSpotifyStatus();
@@ -2037,11 +2040,39 @@
 				</div>
 
 				<p class="analysis-note">
-					Tracks analyse automatically as you play them — BPM, key, and energy are
-					captured passively from the playback stream. There's no bulk scan: hammering
-					TIDAL with thousands of preview requests trips its rate limiter and breaks
-					playback for the whole account.
+					Tracks analyse automatically as you play them. The first 30 seconds of audio
+					from the live playback stream is captured into memory, run through the
+					BPM / key / energy detector, and saved alongside the track — no extra
+					network requests, no separate download.
 				</p>
+				<p class="analysis-note">
+					This means the data fills in over time as you listen rather than all at
+					once. There's no bulk-scan button: scanning the entire library would
+					require thousands of TIDAL preview requests in quick succession, which
+					trips TIDAL's rate limiter and breaks playback for the whole account
+					until the backoff clears.
+				</p>
+
+				<div class="info-row">
+					<div>
+						<span>Passive analysis</span>
+						<p class="info-row-hint">
+							{$audioAnalysis.passiveEnabled
+								? 'New tracks you play will be analysed and added to the library DSP table.'
+								: 'Disabled — playback is not being analysed. Existing data stays untouched.'}
+						</p>
+					</div>
+					<strong>
+						<label class="toggle-switch">
+							<input
+								type="checkbox"
+								checked={$audioAnalysis.passiveEnabled}
+								onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
+							/>
+							<span class="toggle-slider"></span>
+						</label>
+					</strong>
+				</div>
 
 				<div class="action-row">
 					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
@@ -2945,6 +2976,14 @@
 		color: var(--text-secondary);
 		line-height: 1.5;
 		margin: var(--space-3) 0;
+		max-width: 60ch;
+	}
+
+	.info-row-hint {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		margin: 4px 0 0;
+		line-height: 1.4;
 		max-width: 60ch;
 	}
 

@@ -7,6 +7,7 @@ interface AudioAnalysisState {
 	total: number;
 	mode: string;
 	stats: AudioFeaturesStats | null;
+	passiveEnabled: boolean;
 }
 
 export const audioAnalysis = writable<AudioAnalysisState>({
@@ -15,6 +16,7 @@ export const audioAnalysis = writable<AudioAnalysisState>({
 	total: 0,
 	mode: '',
 	stats: null,
+	passiveEnabled: true,
 });
 
 export function handleAnalysisProgress(data: { analyzed: number; total: number; mode: string }) {
@@ -79,5 +81,24 @@ export async function clearAllAnalysis() {
 		audioAnalysis.update((s) => ({ ...s, analyzed: 0, stats: null }));
 	} catch (e) {
 		console.error('Failed to reset analysis:', e);
+	}
+}
+
+export async function loadPassiveDspState() {
+	try {
+		const { enabled } = await api.getPassiveDsp();
+		audioAnalysis.update((s) => ({ ...s, passiveEnabled: enabled }));
+	} catch (e) {
+		console.error('Failed to load passive DSP setting:', e);
+	}
+}
+
+export async function setPassiveDspEnabled(enabled: boolean) {
+	audioAnalysis.update((s) => ({ ...s, passiveEnabled: enabled }));
+	try {
+		await api.setPassiveDsp(enabled);
+	} catch (e) {
+		console.error('Failed to update passive DSP setting:', e);
+		audioAnalysis.update((s) => ({ ...s, passiveEnabled: !enabled }));
 	}
 }
