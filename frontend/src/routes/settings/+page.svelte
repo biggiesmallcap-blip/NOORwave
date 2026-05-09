@@ -30,8 +30,6 @@
 	} from '$lib/stores/tidal';
 	import {
 		audioAnalysis,
-		startAnalysis,
-		stopAnalysis,
 		clearAllAnalysis,
 		loadAudioStats,
 		syncAnalysisStatus
@@ -2038,20 +2036,14 @@
 					<MetricPair label="Avg Energy" value={$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'} copy="Average energy level (0–1)." />
 				</div>
 
-				{#if $audioAnalysis.isRunning}
-					<div class="progress-bar">
-						<div class="progress-fill" style="width: {($audioAnalysis.total > 0 ? $audioAnalysis.analyzed / $audioAnalysis.total : 0) * 100}%"></div>
-					</div>
-					<p class="analysis-progress-label">
-						Analyzing... {$audioAnalysis.analyzed.toLocaleString()} / {$audioAnalysis.total.toLocaleString()} tracks ({Math.round(($audioAnalysis.total > 0 ? $audioAnalysis.analyzed / $audioAnalysis.total : 0) * 100)}%)
-					</p>
-				{/if}
+				<p class="analysis-note">
+					Tracks analyse automatically as you play them — BPM, key, and energy are
+					captured passively from the playback stream. There's no bulk scan: hammering
+					TIDAL with thousands of preview requests trips its rate limiter and breaks
+					playback for the whole account.
+				</p>
 
 				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void startAnalysis('preview')} disabled={$audioAnalysis.isRunning}>
-						{$audioAnalysis.isRunning ? 'Analyzing…' : 'Analyze Library'}
-					</button>
-					<button class="btn btn-glass" onclick={stopAnalysis} disabled={!$audioAnalysis.isRunning}>Stop</button>
 					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
 				</div>
 
@@ -2946,6 +2938,14 @@
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		margin: 6px 0 0;
+	}
+
+	.analysis-note {
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
+		line-height: 1.5;
+		margin: var(--space-3) 0;
+		max-width: 60ch;
 	}
 
 	/* Danger button */
