@@ -9,7 +9,7 @@ const APP_VERSION: &str = "2.47.0";
 
 struct JwtClaims {
     uid: i64,
-    cid: String,
+    cid: i64,
     sid: String,
 }
 
@@ -18,9 +18,19 @@ fn decode_jwt_claims(token: &str) -> Result<JwtClaims> {
     anyhow::ensure!(parts.len() >= 2, "invalid JWT: fewer than 2 segments");
     let payload = URL_SAFE_NO_PAD.decode(parts[1])?;
     let v: serde_json::Value = serde_json::from_slice(&payload)?;
+    let cid = v["cid"]
+        .as_i64()
+        .or_else(|| v["cid"].as_str().and_then(|s| s.parse::<i64>().ok()))
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "play_reporter: JWT cid claim missing or unparseable: {:?}",
+                v.get("cid")
+            );
+            0
+        });
     Ok(JwtClaims {
         uid: v["userId"].as_i64().unwrap_or(0),
-        cid: v["cid"].as_str().unwrap_or("").to_string(),
+        cid,
         sid: v["sid"].as_str().unwrap_or("").to_string(),
     })
 }
@@ -86,14 +96,11 @@ pub async fn report_play(
         "uuid": event_id,
         "user": {
             "id": claims.uid,
-            "clientId": claims.cid.parse::<i64>().unwrap_or_else(|_| {
-                tracing::warn!("play_reporter: cid '{}' is not an integer, sending 0", claims.cid);
-                0
-            }),
+            "clientId": claims.cid,
             "sessionId": claims.sid,
         },
         "client": {
-            "token": claims.cid,
+            "token": claims.cid.to_string(),
             "deviceType": "androidAuto",
             "version": APP_VERSION,
             "platform": "android",
@@ -124,7 +131,7 @@ pub async fn report_play(
     let headers_obj = serde_json::json!({
         "app-name": "TIDAL",
         "app-version": APP_VERSION,
-        "client-id": claims.cid,
+        "client-id": claims.cid.to_string(),
         "consent-category": "NECESSARY",
         "os-name": "android",
         "requested-sent-timestamp": now_ms,
@@ -153,14 +160,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jwt_decode_extracts_uid_cid_sid() {
+    fn jwt_decode_extracts_uid_cid_sid_string_form() {
         let payload_json = r#"{"userId":12345,"cid":"67890","sid":"sess-abc"}"#;
         let encoded = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let token = format!("header.{}.sig", encoded);
         let claims = decode_jwt_claims(&token).unwrap();
         assert_eq!(claims.uid, 12345);
-        assert_eq!(claims.cid, "67890");
+        assert_eq!(claims.cid, 67890);
         assert_eq!(claims.sid, "sess-abc");
+    }
+
+    #[test]
+    fn jwt_decode_extracts_cid_when_numeric() {
+        // TIDAL emits cid as a JSON number — the previous decoder dropped it to "".
+        let payload_json = r#"{"userId":12345,"cid":67890,"sid":"sess-abc"}"#;
+        let encoded = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let token = format!("header.{}.sig", encoded);
+        let claims = decode_jwt_claims(&token).unwrap();
+        assert_eq!(claims.cid, 67890);
     }
 
     #[test]
