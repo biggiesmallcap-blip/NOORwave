@@ -37,6 +37,7 @@ Thumbs.db
 
 # Local agent / design tooling — not shared
 .claude/settings.json
+.claude/settings.local.json
 .claude/skills/
 .claude/superpowers/
 .claude/worktrees/
@@ -44,3 +45,6 @@ Thumbs.db
 .superpowers/
 .worktrees/
 docs/superpowers/
+
+# Local test artifacts
+scripts/click-test-screenshots/
