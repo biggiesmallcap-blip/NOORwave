@@ -1398,6 +1398,13 @@ pub fn increment_track_play_summary(
              WHERE id = ?1",
             params![track_id, started_at],
         )?;
+    } else {
+        // Always stamp last_played_at even for partial listens so freshness
+        // weighting can distinguish "heard recently" from "never heard."
+        conn.execute(
+            "UPDATE tracks SET last_played_at = ?2 WHERE id = ?1",
+            params![track_id, started_at],
+        )?;
     }
     Ok(())
 }

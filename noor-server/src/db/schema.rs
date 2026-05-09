@@ -37,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_033,
     MIGRATION_034,
     MIGRATION_035,
+    MIGRATION_036,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -972,6 +973,21 @@ CREATE INDEX IF NOT EXISTS idx_tidal_search_cache_fetched_at
 const MIGRATION_035: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_listen_history_track_started
     ON listen_history(track_id, started_at);
+"#;
+
+// Backfill tracks.last_played_at from the most recent listen_history row for any
+// track that has listens but a NULL last_played_at. Pre-fix code only stamped
+// last_played_at on completed listens, so partial-only tracks were invisible to
+// the freshness weighting in shuffle.rs even after we'd heard them.
+const MIGRATION_036: &str = r#"
+UPDATE tracks
+SET last_played_at = (
+    SELECT MAX(started_at)
+    FROM listen_history
+    WHERE listen_history.track_id = tracks.id
+)
+WHERE last_played_at IS NULL
+  AND id IN (SELECT DISTINCT track_id FROM listen_history);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

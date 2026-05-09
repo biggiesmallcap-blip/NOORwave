@@ -43,15 +43,18 @@ impl WeightedShuffleProfile {
             weight *= self.favorite_boost.max(0.0);
         }
 
-        if track.play_count == 0 {
-            weight *= self.never_played_boost.max(0.0);
-        } else if let Some(last_played) = track.last_played_at.as_deref() {
+        // Use last_played_at (set on any listen ≥5 s) rather than play_count
+        // (only incremented for completed listens) so freshness signal fires even
+        // when the user skips tracks before the 90% completion threshold.
+        if let Some(last_played) = track.last_played_at.as_deref() {
             // Time-decay: penalty fades from full (0.8×) at <1 day to none at 30+ days.
             // Tracks played months ago get no penalty — only truly recent plays are suppressed.
             let days_since = parse_days_since(last_played);
             let decay = (days_since / 30.0).min(1.0); // 0.0 = just played, 1.0 = 30+ days ago
             let penalty = self.recent_play_penalty + (1.0 - self.recent_play_penalty) * decay;
             weight *= penalty.max(0.0);
+        } else {
+            weight *= self.never_played_boost.max(0.0);
         }
 
         weight += (track.fidelity_score.max(0) as f64) * self.fidelity_weight.max(0.0);

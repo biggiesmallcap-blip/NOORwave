@@ -5,7 +5,7 @@ pub mod ws;
 use crate::SharedState;
 use anyhow::Result;
 use axum::{
-    Router,
+    Extension, Router,
     extract::{ConnectInfo, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::Next,
@@ -14,6 +14,8 @@ use axum::{
 };
 use serde_json::json;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Notify;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -52,6 +54,12 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
             None
         });
 
+    // Coordinates graceful shutdown: the /api/shutdown handler triggers
+    // notify_one(); axum's with_graceful_shutdown future awaits it (or
+    // ctrl_c when running standalone). Notify is idempotent — multiple
+    // shutdown POSTs collapse to a single trigger.
+    let shutdown_notify = Arc::new(Notify::new());
+
     // Public — no auth required. Static file serving lives here so it is
     // never touched by the require_token middleware.
     let public_base = Router::new()
@@ -62,7 +70,9 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
             "/api/setup/onboarding/complete",
             post(onboarding_complete_handler),
         )
-        .with_state(state.clone());
+        .route("/api/shutdown", post(shutdown_handler))
+        .with_state(state.clone())
+        .layer(Extension(shutdown_notify.clone()));
 
     let public = match www_dir {
         Some(www) => {
@@ -94,8 +104,42 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        // ctrl_c arm only fires when running standalone (`cargo run -p
+        // noor-server`); in the bundled Tauri build the child has no
+        // controlling terminal, so the registered handler never fires —
+        // shutdown comes via /api/shutdown -> notify.
+        tokio::select! {
+            _ = shutdown_notify.notified() => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
+    })
     .await?;
     Ok(())
+}
+
+async fn shutdown_handler(
+    State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(shutdown_notify): Extension<Arc<Notify>>,
+) -> StatusCode {
+    if require_loopback(addr).is_err() {
+        return StatusCode::FORBIDDEN;
+    }
+    // Signal axum's graceful shutdown FIRST so a stuck write lock can't keep
+    // the server alive — the listener stops accepting new connections while
+    // we attempt the flush. If the lock is contended, the Tauri sidecar's
+    // 1s POST timeout drops us and falls through to child.kill().
+    shutdown_notify.notify_one();
+    let mut s = state.write().await;
+    if let Err(err) = routes::flush_active_listen_session_locked(
+        &mut s,
+        chrono::Utc::now(),
+        crate::playback::player::ListenSessionEndReason::Stopped,
+    ) {
+        tracing::warn!("flush on shutdown failed: {err}");
+    }
+    StatusCode::OK
 }
 
 async fn ping_handler() -> Json<serde_json::Value> {

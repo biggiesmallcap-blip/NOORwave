@@ -99,8 +99,38 @@ pub fn spawn_server(state: &Arc<SidecarState>) {
 pub fn kill_server(state: &Arc<SidecarState>) {
     let mut guard = state.child.lock().unwrap();
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+        // Best-effort graceful shutdown. POST returns once the server has
+        // flushed its in-flight listen session (and signaled axum to stop);
+        // 1s is plenty for a localhost round-trip + DB write. If the server
+        // is wedged or unreachable we fall through to child.kill().
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(1000))
+            .build()
+        {
+            let _ = client
+                .post("http://127.0.0.1:3334/api/shutdown")
+                .send();
+        }
+        // Give the server up to 2s to exit cleanly after the shutdown
+        // signal. Poll try_wait in 50ms ticks — std::process has no
+        // wait_timeout and the wait-timeout crate isn't worth a dep here.
+        let deadline = Instant::now() + Duration::from_millis(2000);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
     }
     *state.server_token.lock().unwrap() = None;
 }

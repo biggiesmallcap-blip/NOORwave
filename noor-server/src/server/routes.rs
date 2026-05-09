@@ -5746,8 +5746,21 @@ async fn start_first_radio_queue_item(
         let stream_request = match player::build_tidal_stream_request(track, user_quality.clone()) {
             Some(request) => request,
             None => {
-                let state_guard = state.read().await;
-                let _ = state_guard.db.with_conn(player::pause);
+                let paused_snapshot = {
+                    let state_guard = state.read().await;
+                    state_guard.db.with_conn(player::pause).ok()
+                };
+                // sync_session_after_snapshot above already opened a session
+                // for this (local) track; flush+drop it so we don't bill a
+                // bogus multi-minute listen the next time the user plays.
+                if let Some(snap) = paused_snapshot {
+                    sync_session_after_snapshot(
+                        state,
+                        &snap,
+                        Some(player::ListenSessionEndReason::Stopped),
+                    )
+                    .await;
+                }
                 return Err((
                     StatusCode::NOT_IMPLEMENTED,
                     Json(json!({
@@ -8034,8 +8047,22 @@ async fn play_track(
     let stream_request = match player::build_tidal_stream_request(&track, user_quality.clone()) {
         Some(request) => request,
         None => {
-            let state_guard = state.read().await;
-            let _ = state_guard.db.with_conn(player::pause);
+            let paused_snapshot = {
+                let state_guard = state.read().await;
+                state_guard.db.with_conn(player::pause).ok()
+            };
+            // Flush the prior TIDAL session before bailing — otherwise the
+            // active session keeps accumulating against the still-playing
+            // previous track, and the next successful play_track records a
+            // bogus multi-hour listen.
+            if let Some(snap) = paused_snapshot {
+                sync_session_after_snapshot(
+                    &state,
+                    &snap,
+                    Some(player::ListenSessionEndReason::Stopped),
+                )
+                .await;
+            }
             return Err((
                 StatusCode::NOT_IMPLEMENTED,
                 Json(json!({
@@ -8382,7 +8409,17 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
-    pause_active_session(&state).await;
+    // Flush the in-progress session to listen_history on pause so analytics
+    // shows partial listens without waiting for the next track-change. The
+    // snapshot has is_playing=false, so sync_session_after_snapshot won't
+    // start a new session — resume_session_after_snapshot will reopen one
+    // (reusing the same session_id if the gap is < 30 min).
+    sync_session_after_snapshot(
+        &state,
+        &snapshot,
+        Some(player::ListenSessionEndReason::Stopped),
+    )
+    .await;
 
     let state_guard = state.read().await;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
@@ -12635,6 +12672,19 @@ async fn handle_runtime_finished(
         }
         {
             let mut state_guard = state.write().await;
+            // Flush any in-flight listen session before tearing down so the
+            // last track of an ephemeral mix isn't dropped on the floor.
+            let flushed_track_id = match flush_active_listen_session_locked(
+                &mut state_guard,
+                chrono::Utc::now(),
+                player::ListenSessionEndReason::QueueEnded,
+            ) {
+                Ok(outcome) => outcome.flushed_track_id,
+                Err(err) => {
+                    tracing::warn!("flush on ephemeral teardown failed: {err}");
+                    None
+                }
+            };
             state_guard.external_playback_track = None;
             state_guard.ephemeral_tidal_track = None;
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -12649,6 +12699,11 @@ async fn handle_runtime_finished(
                 )?;
                 Ok(())
             });
+            if let Some(track_id) = flushed_track_id {
+                let _ = state_guard
+                    .event_tx
+                    .send(AppEvent::ListenHistoryUpdated { track_id });
+            }
         }
         let state_guard = state.read().await;
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
@@ -12671,6 +12726,29 @@ async fn handle_runtime_finished(
     };
 
     let Some(snapshot) = snapshot else {
+        // Track-id mismatch (e.g. user already advanced to another track via
+        // play_track, or playback was paused). The runtime-finished session
+        // is for `finished_track_id` and may still be sitting in
+        // active_listen_session — flush it before bailing so the partial
+        // listen isn't lost. Direct flush, not sync_session_after_snapshot:
+        // we don't want to start a new session for whatever DB state has now.
+        let mut state_guard = state.write().await;
+        let track_id_for_event = match flush_active_listen_session_locked(
+            &mut state_guard,
+            chrono::Utc::now(),
+            player::ListenSessionEndReason::Stopped,
+        ) {
+            Ok(outcome) => outcome.flushed_track_id,
+            Err(err) => {
+                tracing::warn!("flush on runtime-finished mismatch failed: {err}");
+                None
+            }
+        };
+        if let Some(track_id) = track_id_for_event {
+            let _ = state_guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
         return Ok(());
     };
 
@@ -12811,13 +12889,6 @@ fn report_playback_failure(state: &SharedState, message: &str) {
         let state = state.read().await;
         let _ = state.event_tx.send(AppEvent::PlaybackFailed { message });
     });
-}
-
-async fn pause_active_session(state: &SharedState) {
-    let mut state = state.write().await;
-    if let Some(session) = state.active_listen_session.as_mut() {
-        session.pause(chrono::Utc::now());
-    }
 }
 
 async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::PlaybackSnapshot) {
@@ -13352,7 +13423,7 @@ async fn sync_session_after_snapshot(
         }
 }
 
-struct FlushOutcome {
+pub(crate) struct FlushOutcome {
     flushed_track_id: Option<i64>,
     /// (artist, title, album, duration_ms, listened_ms, started_at_unix, source).
     /// `None` when there's nothing eligible to consider for a scrobble call.
@@ -13360,7 +13431,7 @@ struct FlushOutcome {
     scrobble_completed: Option<(String, String, Option<String>, i64, i64, i64, String)>,
 }
 
-fn flush_active_listen_session_locked(
+pub(crate) fn flush_active_listen_session_locked(
     state: &mut crate::AppState,
     now: chrono::DateTime<chrono::Utc>,
     _reason: player::ListenSessionEndReason,
@@ -13396,7 +13467,7 @@ fn flush_active_listen_session_locked(
     let source = session.source;
     let position_in_session = session.position_in_session;
     let transition_from_track_id = session.transition_from_track_id;
-    let (completed, scrobble_payload) = state.db.with_conn(|conn| {
+    let write_result = state.db.with_conn(|conn| {
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)
         })?;
@@ -13426,7 +13497,20 @@ fn flush_active_listen_session_locked(
             track.source.clone(),
         );
         Ok((completed, payload))
-    })?;
+    });
+    // On DB error: restore the session so the next flush attempt retries
+    // (helpful for shutdown_handler and clear_tidal_session, which don't
+    // immediately start a replacement session). Track-transition flushes
+    // are still racy — the next sync_session_after_snapshot will overwrite
+    // active_listen_session with a new track's session — but those weren't
+    // recoverable before either.
+    let (completed, scrobble_payload) = match write_result {
+        Ok(v) => v,
+        Err(err) => {
+            state.active_listen_session = Some(session);
+            return Err(err);
+        }
+    };
     state.live_listen_session = Some(session.to_live_session(now));
 
     tracing::info!(
@@ -13449,6 +13533,17 @@ async fn clear_tidal_session(state: &SharedState) -> anyhow::Result<()> {
         let _ = runtime.handle.shutdown();
     }
     s.playback_runtime_info = None;
+    // Flush any in-flight listen session so disconnecting TIDAL doesn't drop
+    // the partial listen on the floor. flush_*_locked take()s the session on
+    // success; if the DB write fails the session stays in s.active_listen_session
+    // and is cleared by the explicit None below.
+    if let Err(err) = flush_active_listen_session_locked(
+        &mut s,
+        chrono::Utc::now(),
+        player::ListenSessionEndReason::Stopped,
+    ) {
+        tracing::warn!("flush on tidal disconnect failed: {err}");
+    }
     s.active_listen_session = None;
     s.external_playback_track = None;
     s.tidal_tokens = None;

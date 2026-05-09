@@ -20,6 +20,7 @@
 	import type { RidgeRow, HeroStats } from '$lib/api/client';
 	import { formatHour, formatDate, formatCount, formatPercent, formatDuration } from '$lib/utils/format';
 	import { kde1d, ridgePath, rowMax } from './ridge-kde';
+	import { onMount } from 'svelte';
 
 	/**
 	 * KDE bandwidth in hours. Locked at 0.6 for both daily and weekly modes — the
@@ -37,6 +38,24 @@
 	const RIDGE_SIGMA_DAILY = 0.6;
 	const RIDGE_SIGMA_WEEKLY = 0.6;
 	const WEEKLY_GRANULARITY_THRESHOLD = 90;
+
+	/**
+	 * SPINE_SIGMA is the KDE bandwidth used to compute the spine "Peak hour"
+	 * stat — independent from the chart's slider so the number reflects where
+	 * the user's listening *clusters* even when the chart is rendered sharp.
+	 * 1.0 hour merges adjacent-hour clusters (9-10am or 12-13pm collapse to a
+	 * single peak) without bleeding distant hours together.
+	 */
+	const SPINE_SIGMA = 1.0;
+
+	// User-tunable chart smoothing slider (hero mode only, when no external
+	// sigma prop is provided — the dev preview route still drives sigma
+	// externally and overrides the slider). Persisted per-user.
+	const SLIDER_KEY = 'noor:analytics:listening-pulse:sigma';
+	const SLIDER_MIN = 0.3;
+	const SLIDER_MAX = 1.5;
+	const SLIDER_STEP = 0.05;
+	const SLIDER_DEFAULT = RIDGE_SIGMA_DAILY;
 
 	interface Props {
 		rows: RidgeRow[];
@@ -83,8 +102,27 @@
 		return out;
 	});
 
+	let userSigma = $state(SLIDER_DEFAULT);
+	onMount(() => {
+		const stored = localStorage.getItem(SLIDER_KEY);
+		if (stored) {
+			const parsed = Number(stored);
+			if (Number.isFinite(parsed) && parsed >= SLIDER_MIN && parsed <= SLIDER_MAX) {
+				userSigma = parsed;
+			}
+		}
+	});
+	$effect(() => {
+		// Only persist when the slider is the live source of sigma (i.e. no
+		// external sigma prop). Avoids overwriting the user's value when the
+		// preview route briefly mounts the same component with a forced sigma.
+		if (sigma === undefined) localStorage.setItem(SLIDER_KEY, String(userSigma));
+	});
+
 	const effectiveSigma = $derived(
-		sigma ?? (granularity === 'week' ? RIDGE_SIGMA_WEEKLY : RIDGE_SIGMA_DAILY),
+		sigma
+			?? (mode === 'hero' && granularity === 'day' ? userSigma : undefined)
+			?? (granularity === 'week' ? RIDGE_SIGMA_WEEKLY : RIDGE_SIGMA_DAILY),
 	);
 
 	const KDE_SAMPLES = 144; // 6 samples per hour bin (24 × 6 = 144)
@@ -171,6 +209,38 @@
 	);
 	const rowMaxes = $derived(smoothed.map(rowMax));
 
+	/**
+	 * Visual peak hour — argmax of a KDE-smoothed aggregate over every visible
+	 * row. Decoupled from the chart's `effectiveSigma` and pinned to SPINE_SIGMA
+	 * so the spine stat reflects "where listening clusters" even when the user
+	 * dials the chart sigma down to render sharp peaks.
+	 *
+	 * Granularity-invariant: weekly buckets already sum 7 days per row, so
+	 * summing across rows gives the same per-hour totals as daily granularity
+	 * would have produced.
+	 *
+	 * Known limitation: kde1d is a flat-bin Gaussian (not circular), so a true
+	 * ~23:00 peak gets dragged ~1 hour earlier. Acceptable — visual ≈ number
+	 * is the explicit goal here.
+	 */
+	const aggregateHourly = $derived.by(() => {
+		const out = new Array<number>(24).fill(0);
+		for (const r of displayRows) for (let h = 0; h < 24; h++) out[h] += r.hourly[h];
+		return out;
+	});
+	const aggregateTotal = $derived(aggregateHourly.reduce((a, b) => a + b, 0));
+	const visualPeakHour = $derived.by<number | null>(() => {
+		if (aggregateTotal === 0) return null;
+		const density = kde1d(aggregateHourly, SPINE_SIGMA, KDE_SAMPLES);
+		let best = 0;
+		for (let i = 1; i < density.length; i++) {
+			if (density[i] > density[best]) best = i;
+		}
+		return Math.round((best / (KDE_SAMPLES - 1)) * 23);
+	});
+	const peakHour = $derived(visualPeakHour ?? heroStats?.peak_hour ?? null);
+	const peakHint = 'Hour your listening clusters around (smoothed at a fixed bandwidth, independent of the chart slider).';
+
 	const TIMELINE_TICKS = [0, 6, 12, 18, 24];
 
 	// Layout — hero mode reserves a left column for the spine.
@@ -240,8 +310,8 @@
 	{#if mode === 'hero'}
 		<aside class="spine">
 			{#if variant === 'single-day'}
-				<div class="stat">
-					<div class="stat-value">{formatHour(heroStats?.peak_hour ?? null)}</div>
+				<div class="stat" title={peakHint}>
+					<div class="stat-value">{formatHour(peakHour)}</div>
 					<div class="stat-label">Peak hour</div>
 				</div>
 				<div class="stat">
@@ -257,8 +327,8 @@
 					<div class="stat-label">Tracks</div>
 				</div>
 			{:else}
-				<div class="stat">
-					<div class="stat-value">{formatHour(heroStats?.peak_hour ?? null)}</div>
+				<div class="stat" title={peakHint}>
+					<div class="stat-value">{formatHour(peakHour)}</div>
 					<div class="stat-label">Peak hour</div>
 				</div>
 				<div class="stat">
@@ -331,8 +401,24 @@
 
 		{#if mode === 'hero'}
 			<p class="caption">
-				Your day bends around <em>{formatHour(heroStats?.peak_hour ?? null)}</em>.
+				Your listening clusters around <em>{formatHour(peakHour)}</em>.
 			</p>
+			{#if sigma === undefined && granularity === 'day'}
+				<div class="sigma-row">
+					<label class="sigma-control" title="KDE bandwidth for the chart — wider smooths spikes into clusters, narrower preserves sharp single-hour peaks. The spine stat uses a fixed bandwidth and is unaffected.">
+						<span class="sigma-label">Smoothing</span>
+						<input
+							type="range"
+							min={SLIDER_MIN}
+							max={SLIDER_MAX}
+							step={SLIDER_STEP}
+							bind:value={userSigma}
+							aria-label="Chart smoothing bandwidth"
+						/>
+						<span class="sigma-value">{userSigma.toFixed(2)}</span>
+					</label>
+				</div>
+			{/if}
 		{/if}
 	</div>
 </div>
@@ -340,7 +426,7 @@
 <!-- SR-only summary for assistive tech -->
 <table class="sr-only" aria-label="Listening pulse summary">
 	<caption>
-		Peak hour {formatHour(heroStats?.peak_hour ?? null)};
+		Listening clusters around {formatHour(peakHour)};
 		Rhythm {heroStats?.rhythm ?? '--'};
 		Night {formatPercent(heroStats?.night_share ?? null, { decimals: 0 })};
 		Morning {formatPercent(heroStats?.morning_share ?? null, { decimals: 0 })}.
@@ -448,6 +534,41 @@
 		font-style: italic;
 		font-size: var(--font-size-lg);
 		color: var(--text-primary);
+	}
+
+	.sigma-row {
+		display: flex;
+		justify-content: center;
+		margin-top: var(--space-2);
+	}
+
+	.sigma-control {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+		font-family: var(--font-mono);
+		font-size: var(--font-size-2xs);
+		color: var(--text-tertiary);
+		letter-spacing: 0.08em;
+	}
+
+	.sigma-label {
+		text-transform: uppercase;
+	}
+
+	.sigma-control input[type='range'] {
+		/* Slider width scales modestly with viewport — wide enough for usable
+		   precision on a 720 px-floor window, narrow enough not to dominate
+		   the chart's footer rhythm at 4K. */
+		width: clamp(112px, 10vw, 160px);
+		accent-color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.sigma-value {
+		color: var(--text-secondary);
+		min-width: 2.5em;
+		text-align: right;
 	}
 
 	.chart {

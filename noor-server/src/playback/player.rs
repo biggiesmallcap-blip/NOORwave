@@ -897,7 +897,7 @@ pub fn listen_completion_threshold_ms(track: &Track) -> Option<i64> {
 pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
     listen_completion_threshold_ms(track)
         .map(|threshold_ms| listened_ms >= threshold_ms)
-        .unwrap_or(false)
+        .unwrap_or(listened_ms >= 240_000)
 }
 
 pub fn ensure_automix_queue_depth(
