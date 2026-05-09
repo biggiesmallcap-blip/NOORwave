@@ -15,6 +15,13 @@ import type {
 	ApiDiscoveryResponse,
 } from './discover_space_types';
 
+// In-flight guard. Each loadSpace call increments `loadSpaceSeq` and aborts
+// the previous controller, mirroring the pattern in routes/videos/+page.svelte
+// (see commit 7ac65cd). A late-arriving response from a now-stale call is
+// recognised by its mismatched seq and dropped without touching the store.
+let loadSpaceSeq = 0;
+let loadSpaceAborter: AbortController | null = null;
+
 interface DiscoverSpaceState {
 	mode: RadioMode;
 	nodes: DiscoverTrackNode[];
@@ -54,6 +61,11 @@ export async function loadSpace(
 	seedSource: 'locked' | 'playing' | null,
 	currentTrackId: number | null
 ): Promise<void> {
+	loadSpaceAborter?.abort();
+	const aborter = new AbortController();
+	loadSpaceAborter = aborter;
+	const seq = ++loadSpaceSeq;
+
 	discoverSpaceStore.update((s) => {
 		// When the active seed changes, drop any in-flight refresh progress —
 		// otherwise stale ws messages from the previous seed leave the spinner stuck.
@@ -81,13 +93,18 @@ export async function loadSpace(
 				limit: 100,
 				include_artists: mode === 'explore',
 			}),
+			signal: aborter.signal,
 		});
+
+		if (seq !== loadSpaceSeq) return;
 
 		if (!response.ok) {
 			throw new Error(`Discovery space request failed: ${response.status}`);
 		}
 
 		const data: ApiDiscoveryResponse = await response.json();
+		if (seq !== loadSpaceSeq) return;
+
 		const { nodes, edges } = adaptResponse(data, currentTrackId, seedTrackId ?? null);
 
 		if (import.meta.env.DEV) {
@@ -106,6 +123,9 @@ export async function loadSpace(
 			lastDiagnostics: data.diagnostics ?? null,
 		}));
 	} catch (e) {
+		// Aborted requests are expected when a newer call supersedes this one.
+		if (e instanceof DOMException && e.name === 'AbortError') return;
+		if (seq !== loadSpaceSeq) return;
 		const msg = e instanceof Error ? e.message : 'Unknown error';
 		console.error('[discoverspace/store] loadSpace failed:', msg);
 		discoverSpaceStore.update((s) => ({ ...s, loading: false, error: msg }));
