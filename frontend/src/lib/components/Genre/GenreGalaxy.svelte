@@ -1047,6 +1047,7 @@
 	}
 
 	function handleWheel(event: WheelEvent) {
+		if (event.ctrlKey || event.metaKey) return; // yield to global UI-zoom handler
 		if (isCompactViewport) return;
 		event.preventDefault();
 		const pointBeforeZoom = screenToWorld(event.offsetX, event.offsetY);

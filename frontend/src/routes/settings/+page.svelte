@@ -52,6 +52,7 @@
 	import { wallpaper, setWallpaper } from '$lib/stores/wallpaper';
 	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
+	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 
@@ -1215,6 +1216,47 @@
 							<span class="palette-swatch" style={`background: ${rgbCss(c)}`}></span>
 						{/each}
 					</div>
+				</div>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Scale"
+					title="Interface size"
+					subtitle="Zoom the entire UI. Also: Ctrl + scroll, Ctrl + / − , Ctrl + 0 to reset."
+				/>
+				<div class="zoom-row">
+					<button
+						type="button"
+						class="btn btn-glass btn-sm zoom-step"
+						onclick={zoomOut}
+						aria-label="Decrease interface size"
+						disabled={$uiZoom <= ZOOM_MIN + 1e-6}
+					>−</button>
+					<input
+						type="range"
+						class="zoom-slider"
+						min={ZOOM_MIN}
+						max={ZOOM_MAX}
+						step={ZOOM_STEP}
+						value={$uiZoom}
+						oninput={(e) => setZoom(parseFloat((e.currentTarget as HTMLInputElement).value))}
+						aria-label="Interface size"
+					/>
+					<button
+						type="button"
+						class="btn btn-glass btn-sm zoom-step"
+						onclick={zoomIn}
+						aria-label="Increase interface size"
+						disabled={$uiZoom >= ZOOM_MAX - 1e-6}
+					>+</button>
+					<span class="zoom-readout" aria-live="polite">{Math.round($uiZoom * 100)}%</span>
+					<button
+						type="button"
+						class="btn btn-glass btn-sm"
+						onclick={resetZoom}
+						disabled={Math.abs($uiZoom - 1) < 1e-6}
+					>Reset</button>
 				</div>
 			</section>
 
@@ -2484,6 +2526,32 @@
 		box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3) inset;
 	}
 
+	.zoom-row {
+		display: flex;
+		align-items: center;
+		gap: var(--gap);
+		flex-wrap: wrap;
+	}
+
+	.zoom-step {
+		min-width: 36px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.zoom-slider {
+		flex: 1;
+		min-width: 200px;
+		accent-color: var(--accent);
+	}
+
+	.zoom-readout {
+		min-width: 4ch;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
 	/* ── Shared preview panel ── */
 	.wallpaper-big-preview {
 		position: relative;
@@ -2974,7 +3042,7 @@
 	.analysis-note {
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
-		line-height: 1.5;
+		line-height: var(--line-height-normal);
 		margin: var(--space-3) 0;
 		max-width: 60ch;
 	}
@@ -2983,7 +3051,7 @@
 		font-size: var(--font-size-xs);
 		color: var(--text-tertiary, var(--text-secondary));
 		margin: 4px 0 0;
-		line-height: 1.4;
+		line-height: var(--line-height-snug);
 		max-width: 60ch;
 	}
 

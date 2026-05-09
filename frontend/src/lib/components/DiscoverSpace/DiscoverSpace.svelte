@@ -317,6 +317,7 @@
 	}
 
 	function onWheel(e: WheelEvent) {
+		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
 		e.preventDefault();
 		const factor = e.deltaY < 0 ? 1.1 : 0.9;
 		camera.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camera.zoom * factor));

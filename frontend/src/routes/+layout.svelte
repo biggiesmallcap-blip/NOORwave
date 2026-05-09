@@ -65,6 +65,7 @@
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
 	import { wallpaper } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
+	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
 	import { paletteById } from '$lib/components/wallpaper/palettes';
 	import {
 		requestVideoClear,
@@ -297,9 +298,15 @@
 
 		const unsubPalette = palette.subscribe((id) => applyPalette(id));
 
+		// Re-apply persisted UI zoom now that the Tauri webview is ready.
+		// In a regular browser this no-ops (and the OS Ctrl+/Ctrl- handles zoom natively).
+		void applyZoom(get(uiZoom));
+
 		window.addEventListener('keydown', handleGlobalKeydown);
+		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
+			window.removeEventListener('wheel', handleGlobalWheel);
 			unsubPalette();
 		};
 	});
@@ -327,6 +334,13 @@
 		shortcutHelpOpen = false;
 	}
 
+	function handleGlobalWheel(event: WheelEvent) {
+		if (!(event.ctrlKey || event.metaKey)) return;
+		// Browser-style Ctrl+wheel zoom. Sign of deltaY: positive = scroll down = zoom out.
+		event.preventDefault();
+		nudgeZoom(event.deltaY > 0 ? -1 : 1);
+	}
+
 	function handleGlobalKeydown(event: KeyboardEvent) {
 		if (shortcutHelpOpen) {
 			if (event.key === 'Escape') {
@@ -340,6 +354,25 @@
 			event.preventDefault();
 			commandPaletteOpen.update(v => !v);
 			return;
+		}
+		// Browser-style UI zoom: Ctrl/Cmd + (+ | - | 0). Allowed even while typing
+		// in inputs, matching native browser behavior.
+		if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+			if (event.key === '+' || event.key === '=') {
+				event.preventDefault();
+				zoomIn();
+				return;
+			}
+			if (event.key === '-' || event.key === '_') {
+				event.preventDefault();
+				zoomOut();
+				return;
+			}
+			if (event.key === '0') {
+				event.preventDefault();
+				resetZoom();
+				return;
+			}
 		}
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (isTypingTarget(event.target)) return;

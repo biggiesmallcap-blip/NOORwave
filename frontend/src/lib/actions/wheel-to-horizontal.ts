@@ -37,6 +37,7 @@ export function wheelToHorizontal(node: HTMLElement, opts: Options = {}) {
 	};
 
 	const onWheel = (e: WheelEvent) => {
+		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
 		if (!armed) return;
 		if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
 		// No horizontal overflow → let the page scroll vertically. Without this,

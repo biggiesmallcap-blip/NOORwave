@@ -150,6 +150,7 @@
 	}
 
 	function handleWheel(e: WheelEvent) {
+		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
 		if (!chartEl) return;
 		e.preventDefault();
 		const rect = chartEl.getBoundingClientRect();
