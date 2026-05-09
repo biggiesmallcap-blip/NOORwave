@@ -215,7 +215,11 @@
 		if (!assertOnline()) throw new Error('Server is reconnecting.');
 		const seq = ++streamRequestSeq;
 		const stream = await api.getTidalVideoStream(videoId);
-		if (seq !== streamRequestSeq) throw new Error('Route changed before video loaded.');
+		if (seq !== streamRequestSeq) {
+			const stale = new Error('Route changed before video loaded.');
+			stale.name = 'StaleStreamRequest';
+			throw stale;
+		}
 		streamUrl = stream.hls_url;
 		streamExpiresAt = stream.expires_at;
 		return stream.hls_url;
@@ -255,6 +259,7 @@
 			}
 			return true;
 		} catch (err) {
+			if ((err as Error)?.name === 'StaleStreamRequest') return false;
 			if (options.keepCurrentStream) {
 				selectedVideo = previousVideo;
 				streamUrl = previousStreamUrl;

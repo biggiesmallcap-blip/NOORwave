@@ -376,38 +376,6 @@
 		font-style: italic;
 	}
 
-	.trending-controls {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-	.chip-group {
-		display: inline-flex;
-		gap: 4px;
-		padding: 2px;
-		background: rgba(255, 255, 255, 0.04);
-		border-radius: 999px;
-	}
-	.chip {
-		background: transparent;
-		border: none;
-		color: var(--text-muted, #888);
-		font: inherit;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		padding: 4px 10px;
-		border-radius: 999px;
-		cursor: pointer;
-		transition: background 0.15s ease, color 0.15s ease;
-	}
-	.chip:hover {
-		color: var(--text-primary);
-	}
-	.chip.active {
-		background: rgba(255, 255, 255, 0.12);
-		color: var(--text-primary);
-	}
-
 	/* Horizontal scroll */
 	.horizontal-scroll {
 		display: flex;
@@ -493,20 +461,6 @@
 		margin: 0;
 	}
 
-	.release-source {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-	}
-
-	/* Picks grid */
-	.picks-grid {
-		display: flex;
-		flex-direction: column;
-		gap: 24px;
-	}
-
 	.picks-subsection {
 		display: flex;
 		flex-direction: column;
@@ -518,100 +472,6 @@
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-secondary);
 		margin: 0;
-	}
-
-	.track-list {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-		gap: 12px;
-	}
-
-	.trending-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-		gap: 14px;
-	}
-
-	@media (max-width: 720px) {
-		.trending-grid {
-			grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-			gap: 10px;
-		}
-	}
-
-	.track-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 12px;
-		cursor: pointer;
-		transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
-
-		&:hover {
-			transform: translateY(-3px);
-			box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-			background: var(--bg-hover);
-		}
-
-		&:active {
-			transform: translateY(-1px);
-			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-		}
-	}
-
-	.track-art {
-		width: 48px;
-		height: 48px;
-		border-radius: 6px;
-		object-fit: cover;
-		flex-shrink: 0;
-		background: var(--bg-surface);
-	}
-
-	.track-art.placeholder {
-		width: 48px;
-		height: 48px;
-		border-radius: 6px;
-		background: var(--accent-soft);
-		display: grid;
-		place-items: center;
-		color: var(--accent-strong);
-		font-size: var(--font-size-lg);
-		flex-shrink: 0;
-	}
-
-	.track-meta {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.track-title {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		margin: 0;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.track-artist {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted);
-	}
-
-	.track-stats {
-		display: flex;
-		gap: 12px;
-		flex-shrink: 0;
-	}
-
-	.stat {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted);
-		font-weight: var(--font-weight-semibold);
 	}
 
 	.genre-pills {
@@ -781,16 +641,8 @@
 		.home-page { gap: var(--space-4); }
 		.page-header { padding-top: 0; }
 
-		/* System badges and now-playing bar are shown in mobile chrome */
-		.system-badges { display: none; }
-		.now-playing-bar { display: none; }
-
 		.discovery-section { gap: 12px; }
 		.section-title-group h2 { font-size: var(--font-size-md); }
-
-		.track-list {
-			grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-		}
 
 		.news-grid {
 			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -837,10 +689,6 @@
 	}
 
 	@media (max-width: 640px) {
-		.track-list {
-			grid-template-columns: 1fr;
-		}
-
 		.news-grid {
 			grid-template-columns: 1fr;
 		}
@@ -851,11 +699,6 @@
 
 		.article-card {
 			flex: 0 0 260px;
-		}
-
-		.track-art {
-			width: 42px;
-			height: 42px;
 		}
 
 		.genre-pills {
