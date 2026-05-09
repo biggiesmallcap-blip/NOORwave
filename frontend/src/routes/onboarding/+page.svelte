@@ -123,7 +123,9 @@
 </svelte:head>
 
 <div class="onboarding">
-	<div class="card">
+	<div class="stack">
+		<img class="wordmark" src="/noor-logo-centered.svg" alt="NOORwave" />
+		<div class="card">
 		<div class="progress" role="tablist" aria-label="Onboarding steps">
 			{#each Array(5) as _, i}
 				<button
@@ -141,7 +143,6 @@
 
 		{#if step === 0}
 			<div class="step welcome">
-				<img class="wordmark" src="/mark-animated-dark.svg" alt="NOORwave" />
 				<h1>Welcome.</h1>
 				<p class="lede">Pure sound. Perfect flow.</p>
 				<button class="btn btn-primary" onclick={() => (step = 1)}>Get started</button>
@@ -173,9 +174,7 @@
 		{:else if step === 3}
 			<div class="step audio-quality">
 				<h2>How should we play it?</h2>
-				<p class="lede">
-					NOORwave can stream Tidal at full Hi-Res Lossless and bypass the OS mixer for bit-perfect output. This is the audiophile path — it works on most modern DACs, but a few quirky ones don't accept exclusive mode.
-				</p>
+				<p class="lede">Choose your output. You can change this anytime in Settings.</p>
 				<div class="audio-choices">
 					<button
 						type="button"
@@ -234,6 +233,7 @@
 			</div>
 		{/if}
 	</div>
+	</div>
 </div>
 
 <style>
@@ -244,9 +244,8 @@
 	.onboarding {
 		position: fixed;
 		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
+		display: grid;
+		place-items: center;
 		/* Transparent — the layout-level wallpaper-layer provides the
 		   standing-wave shader (forced during the /onboarding route in
 		   +layout.svelte). Persisting the same WebGL canvas across the
@@ -301,13 +300,21 @@
 		justify-content: center;
 		text-align: center;
 	}
-	.welcome .wordmark {
-		display: block;
+	.stack {
+		position: relative;
 		width: 100%;
-		max-width: 150px;
+		max-width: 520px;
+		display: flex;
+		justify-content: center;
+	}
+	.stack .wordmark {
+		position: absolute;
+		bottom: calc(100% + 16px);
+		left: 50%;
+		transform: translateX(-50%);
+		width: clamp(220px, 28vw, 320px);
 		height: auto;
-		margin: 0 auto 0.5rem;
-		filter: drop-shadow(0 8px 24px rgba(120, 150, 220, 0.15));
+		filter: drop-shadow(0 12px 32px rgba(45, 212, 212, 0.18));
 	}
 	.step h1, .step h2 {
 		margin: 0;
@@ -365,10 +372,13 @@
 	}
 	.warn { color: var(--state-warning); }
 	.error { color: var(--state-error); margin: 0; }
+	.audio-quality {
+		gap: 12px;
+	}
 	.audio-choices {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: 8px;
 		width: 100%;
 		max-width: 420px;
 	}
@@ -377,13 +387,13 @@
 		background: var(--panel-bg);
 		border: 1px solid var(--panel-border);
 		border-radius: var(--radius-md);
-		padding: 14px 16px;
+		padding: 10px 14px;
 		cursor: pointer;
 		color: inherit;
 		font: inherit;
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 2px;
 		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 	.audio-choice:hover {

@@ -144,19 +144,12 @@
 
 <div class="page-shell home-page animate-in">
 	{#if error}
-		<section class="page-header">
-			<img class="page-wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
-		</section>
 		<EmptyState title="NOOR is offline" copy={error}>
 			{#snippet actions()}
 				<button class="btn btn-glass" onclick={loadHome}>Try again</button>
 			{/snippet}
 		</EmptyState>
 	{:else}
-		<section class="page-header">
-			<img class="page-wordmark" src="/wordmark-animated-dark.svg" alt="NOORwave" />
-		</section>
-
 		<!-- Mobile quick-nav (hidden on desktop) -->
 		<nav class="mobile-quick-nav" aria-label="Quick navigation">
 			<a href="/library" class="quick-nav-tile">
@@ -325,23 +318,6 @@
 	.home-page {
 		gap: var(--space-5);
 		padding-bottom: 40px;
-	}
-
-	.page-header {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 8px;
-		padding-top: 4px;
-	}
-
-	/* Brand wordmark in the page header — replaces the old title + status
-	   badges. Centered, sized to feel like a hero rather than a label. */
-	.page-wordmark {
-		width: clamp(320px, 42vw, 640px);
-		height: auto;
-		display: block;
-		margin: 0 auto;
 	}
 
 	/* Discovery sections */
@@ -639,7 +615,6 @@
 	/* Responsive */
 	@media (max-width: 1180px) {
 		.home-page { gap: var(--space-4); }
-		.page-header { padding-top: 0; }
 
 		.discovery-section { gap: 12px; }
 		.section-title-group h2 { font-size: var(--font-size-md); }

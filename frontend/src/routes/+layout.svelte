@@ -992,7 +992,7 @@
 		<div class="connect-panel glass-panel">
 			<div class="connect-brand">
 				<span class="connect-brand-mark">
-					<img src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
+					<img src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 				</span>
 				<span class="connect-brand-name">NOOR</span>
 			</div>
@@ -1054,7 +1054,7 @@
 	{@render children()}
 {:else if authReady && !onboardingChecked}
 	<div class="onboarding-check">
-		<img class="check-mark" src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
+		<img class="check-mark" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 		<p>Checking setup…</p>
 	</div>
 {:else}
@@ -1062,7 +1062,7 @@
 	<header class="mobile-top-bar">
 		<a href="/" class="mobile-brand" aria-label="NOOR home">
 			<span class="mobile-brand-mark">
-				<img src="/mark-animated-dark.svg" alt="" aria-hidden="true" />
+				<img src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 			</span>
 			<span class="mobile-brand-name">NOOR</span>
 		</a>
@@ -1073,7 +1073,7 @@
 
 	<aside class="sidebar">
 		<a href="/" class="brand" aria-label="NOORwave home">
-			<img class="brand-splash" src="/mark-animated-dark.svg" alt="NOORwave" />
+			<img class="brand-splash" src="/noor-icon-transparent.svg" alt="NOORwave" />
 		</a>
 
 		<nav class="nav" aria-label="Primary">
@@ -1912,7 +1912,7 @@
 		z-index: 50;
 	}
 	.onboarding-check .check-mark {
-		width: 144px;
+		width: 72px;
 		height: 72px;
 		object-fit: contain;
 		opacity: 0.85;
@@ -2226,14 +2226,11 @@
 		padding: 4px 6px 18px;
 	}
 
-	/* Animated NOORwave OO mark — replaces the small icon + "NOOR /
-	   Music command center" stack. The SVG is 320x160 (2:1) so it sits
-	   cleanly in the sidebar header without pushing nav items down. */
 	.brand-splash {
 		display: block;
-		width: 100%;
-		max-width: 100px;
-		height: auto;
+		width: 88px;
+		height: 88px;
+		object-fit: contain;
 	}
 
 	.nav {
@@ -3499,7 +3496,7 @@
 		}
 
 		.mobile-brand-mark {
-			width: 56px;
+			width: 28px;
 			height: 28px;
 			display: grid;
 			place-items: center;
@@ -4092,7 +4089,7 @@
 	}
 
 	.connect-brand-mark {
-		width: 72px;
+		width: 36px;
 		height: 36px;
 		display: flex;
 		align-items: center;

@@ -23,6 +23,6 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.png", "icons/noorwave.ico", "icons/NoorWave.icns"]
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
   }
 }

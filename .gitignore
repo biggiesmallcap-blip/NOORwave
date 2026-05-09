@@ -48,3 +48,7 @@ docs/superpowers/
 
 # Local test artifacts
 scripts/click-test-screenshots/
+
+# Asset-pack swap backups — pre-swap copies kept on disk for reference
+frontend/static/svg_old/
+noor-app/icons_old/

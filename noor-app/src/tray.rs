@@ -8,15 +8,18 @@ use tauri::{
     Manager, Theme, WindowEvent,
 };
 
-const TRAY_BLACK_PNG: &[u8] = include_bytes!("../icons/tray-black-32.png");
-const TRAY_WHITE_PNG: &[u8] = include_bytes!("../icons/tray-white-32.png");
+// Multi-resolution ICOs (16/24/32/48/256). Tauri's image decoder picks the
+// largest frame, so the OS scales DOWN to whatever the system tray asks for —
+// avoiding the upscaling blur that 32-px PNG sources caused.
+const TRAY_BLACK_ICO: &[u8] = include_bytes!("../icons/noor-tray-black.ico");
+const TRAY_WHITE_ICO: &[u8] = include_bytes!("../icons/noor-tray-white.ico");
 
 // Light theme -> black icon (visible on a light system tray).
 // Dark theme (default) -> white icon (visible on a dark system tray).
-fn tray_png_for_theme(theme: Option<Theme>) -> &'static [u8] {
+fn tray_icon_bytes_for_theme(theme: Option<Theme>) -> &'static [u8] {
     match theme {
-        Some(Theme::Light) => TRAY_BLACK_PNG,
-        _ => TRAY_WHITE_PNG,
+        Some(Theme::Light) => TRAY_BLACK_ICO,
+        _ => TRAY_WHITE_ICO,
     }
 }
 
@@ -63,7 +66,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let initial_theme = app
         .get_webview_window("main")
         .and_then(|w| w.theme().ok());
-    let icon = Image::from_bytes(tray_png_for_theme(initial_theme))?;
+    let icon = Image::from_bytes(tray_icon_bytes_for_theme(initial_theme))?;
     let network_item_clone = network_item.clone();
 
     TrayIconBuilder::with_id("noorwave-tray")
@@ -156,7 +159,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         window.on_window_event(move |event| {
             if let WindowEvent::ThemeChanged(theme) = event {
                 if let Some(tray) = handle_for_theme.tray_by_id("noorwave-tray") {
-                    if let Ok(new_icon) = Image::from_bytes(tray_png_for_theme(Some(*theme))) {
+                    if let Ok(new_icon) = Image::from_bytes(tray_icon_bytes_for_theme(Some(*theme))) {
                         let _ = tray.set_icon(Some(new_icon));
                     }
                 }
