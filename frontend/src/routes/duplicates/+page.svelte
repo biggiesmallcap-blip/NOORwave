@@ -25,33 +25,96 @@
 	interface DuplicateMember {
 		track: DuplicateTrack;
 		is_preferred: boolean;
-		match_reason: string;
 	}
+
+	interface GroupDifference {
+		kind: string;
+		values: string[];
+	}
+
+	type Relationship =
+		| 'exact_duplicate'
+		| 'cross_album_reissue'
+		| 'remaster'
+		| 'alt_version'
+		| 'quality_variant';
 
 	interface DuplicateGroup {
 		id: number;
 		status: string;
+		relationship: Relationship;
+		differences: GroupDifference[];
 		members: DuplicateMember[];
 	}
 
+	const RELATIONSHIPS: Relationship[] = [
+		'exact_duplicate',
+		'cross_album_reissue',
+		'remaster',
+		'alt_version',
+		'quality_variant'
+	];
+
+	const FILTER_STORAGE_KEY = 'noor.duplicates.relationshipFilter';
+
 	let scanState = $state<'idle' | 'scanning' | 'done'>('idle');
-	let scanStats = $state<{ groups_found: number; tracks_affected: number; isrc_matches: number; title_matches: number } | null>(null);
+	let scanStats = $state<{
+		groups_found: number;
+		tracks_affected: number;
+		isrc_matches: number;
+		title_matches: number;
+	} | null>(null);
 	let groups = $state<DuplicateGroup[]>([]);
 	let total = $state(0);
 	let loading = $state(false);
 	let loadingMore = $state(false);
 	let resolving = $state<Set<number>>(new Set());
 	let errorMsg = $state('');
+	let activeRelationships = $state<Set<Relationship>>(new Set(RELATIONSHIPS));
 
 	onMount(() => {
+		try {
+			const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+			if (raw) {
+				const parsed = JSON.parse(raw) as string[];
+				const valid = parsed.filter((r): r is Relationship =>
+					RELATIONSHIPS.includes(r as Relationship)
+				);
+				if (valid.length > 0) activeRelationships = new Set(valid);
+			}
+		} catch {
+			// ignore — bad JSON or no storage; keep defaults.
+		}
 		void loadGroups();
 	});
+
+	function persistFilter() {
+		try {
+			localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...activeRelationships]));
+		} catch {
+			// no-op
+		}
+	}
+
+	function toggleRelationship(rel: Relationship) {
+		const next = new Set(activeRelationships);
+		if (next.has(rel)) {
+			if (next.size === 1) return; // never let the user hide everything.
+			next.delete(rel);
+		} else {
+			next.add(rel);
+		}
+		activeRelationships = next;
+		persistFilter();
+	}
 
 	async function runScan() {
 		scanState = 'scanning';
 		errorMsg = '';
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/duplicates/scan`, { method: 'POST' });
+			const resp = await authFetch(`${getApiBase()}/api/library/duplicates/scan`, {
+				method: 'POST'
+			});
 			if (!resp.ok) throw new Error(`Scan failed: ${resp.status}`);
 			scanStats = await resp.json();
 			scanState = 'done';
@@ -68,7 +131,9 @@
 		else loadingMore = true;
 		try {
 			const offset = append ? groups.length : 0;
-			const resp = await authFetch(`${getApiBase()}/api/library/duplicates?limit=20&offset=${offset}`);
+			const resp = await authFetch(
+				`${getApiBase()}/api/library/duplicates?limit=20&offset=${offset}`
+			);
 			const data = await resp.json();
 			total = data.total;
 			groups = append ? [...groups, ...data.groups] : data.groups;
@@ -102,7 +167,9 @@
 	async function dismissGroup(groupId: number) {
 		resolving = new Set([...resolving, groupId]);
 		try {
-			await authFetch(`${getApiBase()}/api/library/duplicates/${groupId}/dismiss`, { method: 'POST' });
+			await authFetch(`${getApiBase()}/api/library/duplicates/${groupId}/dismiss`, {
+				method: 'POST'
+			});
 			groups = groups.filter((group) => group.id !== groupId);
 			total = Math.max(0, total - 1);
 		} finally {
@@ -118,8 +185,56 @@
 		return q;
 	}
 
+	function relationshipLabel(rel: Relationship): string {
+		switch (rel) {
+			case 'exact_duplicate':
+				return 'Exact duplicate';
+			case 'cross_album_reissue':
+				return 'Cross-album re-release';
+			case 'remaster':
+				return 'Remaster';
+			case 'alt_version':
+				return 'Alt version';
+			case 'quality_variant':
+				return 'Quality variant';
+		}
+	}
+
+	function relationshipTone(
+		rel: Relationship
+	): 'success' | 'warning' | 'muted' | 'active' {
+		switch (rel) {
+			case 'exact_duplicate':
+				return 'success';
+			case 'remaster':
+			case 'alt_version':
+				return 'warning';
+			case 'quality_variant':
+			case 'cross_album_reissue':
+				return 'muted';
+		}
+	}
+
+	function differenceLabel(diff: GroupDifference): string {
+		const kindLabel: Record<string, string> = {
+			version_marker: 'Marker',
+			year: 'Year',
+			album: 'Album',
+			quality: 'Quality',
+			sample_rate: 'Sample rate',
+			source: 'Source'
+		};
+		const head = kindLabel[diff.kind] ?? diff.kind;
+		const values = diff.values.length === 0 ? '—' : diff.values.join(' · ');
+		return `${head}: ${values}`;
+	}
+
+	let visibleGroups = $derived(groups.filter((g) => activeRelationships.has(g.relationship)));
+
 	let removableCount = $derived(
-		scanStats ? Math.max(0, scanStats.tracks_affected - scanStats.groups_found) : groups.reduce((count, group) => count + Math.max(0, group.members.length - 1), 0)
+		scanStats
+			? Math.max(0, scanStats.tracks_affected - scanStats.groups_found)
+			: groups.reduce((count, group) => count + Math.max(0, group.members.length - 1), 0)
 	);
 </script>
 
@@ -141,10 +256,35 @@
 	</PageHeader>
 
 	<section class="stat-grid">
-		<MetricPair label="Groups" value={(scanStats?.groups_found ?? total).toLocaleString()} copy="Open duplicate sets." />
+		<MetricPair
+			label="Groups"
+			value={(scanStats?.groups_found ?? total).toLocaleString()}
+			copy="Open duplicate sets."
+		/>
 		<MetricPair label="Extra copies" value={removableCount.toLocaleString()} copy="Possible removals." />
-		<MetricPair label="ISRC matches" value={(scanStats?.isrc_matches ?? 0).toLocaleString()} copy="Exact recording matches." />
+		<MetricPair
+			label="ISRC matches"
+			value={(scanStats?.isrc_matches ?? 0).toLocaleString()}
+			copy="Exact recording matches."
+		/>
 	</section>
+
+	{#if groups.length > 0}
+		<div class="filter-row" role="group" aria-label="Filter by relationship">
+			{#each RELATIONSHIPS as rel (rel)}
+				{@const active = activeRelationships.has(rel)}
+				<button
+					type="button"
+					class="filter-chip"
+					class:active
+					onclick={() => toggleRelationship(rel)}
+					aria-pressed={active}
+				>
+					{relationshipLabel(rel)}
+				</button>
+			{/each}
+		</div>
+	{/if}
 
 	{#if errorMsg}
 		<EmptyState title="Duplicate review hit a problem" copy={errorMsg} />
@@ -154,26 +294,48 @@
 		<EmptyState title="No duplicate groups found" copy="The library looks clean right now." />
 	{:else if groups.length === 0}
 		<EmptyState title="No scan has been run yet" copy="Start a scan to surface repeated tracks." />
+	{:else if visibleGroups.length === 0}
+		<EmptyState
+			title="All groups filtered out"
+			copy="Re-enable a relationship chip above to see groups."
+		/>
 	{:else}
 		<div class="groups-list">
-			{#each groups as group (group.id)}
+			{#each visibleGroups as group (group.id)}
 				{@const busy = resolving.has(group.id)}
 				{@const preferred = group.members.find((member) => member.is_preferred)?.track}
 				{@const lead = group.members[0]?.track}
+				{@const isExact = group.relationship === 'exact_duplicate'}
 				<section class="group-card glass-panel" class:busy>
 					<div class="group-head">
-						<div>
+						<div class="group-title">
 							<p class="eyebrow">{lead?.artist_name ?? 'Unknown artist'}</p>
 							<h3>{lead?.title ?? 'Unknown track'}</h3>
+							{#if group.differences.length > 0}
+								<div class="diff-chips">
+									{#each group.differences as diff (diff.kind)}
+										<span class="diff-chip">{differenceLabel(diff)}</span>
+									{/each}
+								</div>
+							{/if}
 						</div>
 						<div class="group-head-right">
-							<StateBadge label={group.members[0]?.match_reason === 'isrc' ? 'ISRC match' : 'Title + duration match'} tone={group.members[0]?.match_reason === 'isrc' ? 'success' : 'muted'} />
-							{#if preferred}
-								<button class="btn btn-primary" onclick={() => resolveGroup(group.id, preferred.id)} disabled={busy}>
+							<StateBadge
+								label={relationshipLabel(group.relationship)}
+								tone={relationshipTone(group.relationship)}
+							/>
+							{#if isExact && preferred}
+								<button
+									class="btn btn-primary"
+									onclick={() => resolveGroup(group.id, preferred.id)}
+									disabled={busy}
+								>
 									{busy ? 'Resolving…' : 'Keep best'}
 								</button>
 							{/if}
-							<button class="btn btn-glass" onclick={() => dismissGroup(group.id)} disabled={busy}>Dismiss</button>
+							<button class="btn btn-glass" onclick={() => dismissGroup(group.id)} disabled={busy}>
+								Dismiss
+							</button>
 						</div>
 					</div>
 
@@ -206,6 +368,10 @@
 
 								<div class="info-list">
 									<div class="info-row">
+										<span>Title</span>
+										<strong>{member.track.title}</strong>
+									</div>
+									<div class="info-row">
 										<span>Duration</span>
 										<strong>{formatTrackDuration(member.track.duration_ms)}</strong>
 									</div>
@@ -224,7 +390,11 @@
 								</div>
 
 								{#if !member.is_preferred}
-									<button class="btn btn-glass choose-btn" onclick={() => resolveGroup(group.id, member.track.id)} disabled={busy}>
+									<button
+										class="btn btn-glass choose-btn"
+										onclick={() => resolveGroup(group.id, member.track.id)}
+										disabled={busy}
+									>
 										Keep this version
 									</button>
 								{/if}
@@ -247,6 +417,35 @@
 </div>
 
 <style>
+	.filter-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		padding: 4px 0;
+	}
+
+	.filter-chip {
+		padding: 6px 12px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.03);
+		color: var(--text-secondary);
+		font-size: 0.85rem;
+		cursor: pointer;
+		transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+	}
+
+	.filter-chip:hover {
+		background: rgba(255, 255, 255, 0.06);
+		color: var(--text-primary);
+	}
+
+	.filter-chip.active {
+		background: rgba(124, 128, 255, 0.14);
+		border-color: rgba(124, 128, 255, 0.4);
+		color: var(--text-primary);
+	}
+
 	.groups-list {
 		display: flex;
 		flex-direction: column;
@@ -272,11 +471,34 @@
 		gap: var(--space-4);
 	}
 
+	.group-title {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
+	}
+
 	.group-head-right {
 		display: flex;
 		flex-wrap: wrap;
 		justify-content: flex-end;
 		gap: var(--space-2);
+	}
+
+	.diff-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.diff-chip {
+		padding: 3px 10px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: 0.78rem;
+		white-space: nowrap;
 	}
 
 	.member-grid {
