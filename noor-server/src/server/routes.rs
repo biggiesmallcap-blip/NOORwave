@@ -9248,6 +9248,20 @@ async fn set_playback_shuffle(
         .db
         .with_conn(|conn| player::set_shuffle_mode(conn, mode))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The pending TIDAL mix queue lives in-memory outside the DB queue, so
+    // `apply_shuffle` above never sees it. Reorder it here so flipping shuffle
+    // on during a TIDAL mix actually changes what plays next. Pending entries
+    // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
+    // plain Fisher-Yates — same shape as `true` shuffle.
+    if mode != queue::ShuffleMode::Off {
+        let mut q = state_guard.pending_tidal_mix_queue.lock().unwrap();
+        if q.len() > 1 {
+            use rand::seq::SliceRandom;
+            q.make_contiguous().shuffle(&mut rand::thread_rng());
+        }
+    }
+
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
     drop(state_guard);
@@ -12559,18 +12573,65 @@ async fn handle_runtime_finished(
                 state_guard.external_playback_track = None;
                 state_guard.ephemeral_tidal_track = None;
             }
-            if let Err((status, body)) = start_ephemeral_tidal_playback(&state, next).await {
-                tracing::warn!(
-                    "Failed to advance ephemeral mix queue ({status}): {} — clearing remaining queue",
-                    body.0
-                );
-                let s = state.read().await;
-                s.pending_tidal_mix_queue.lock().unwrap().clear();
-                // Fall through to teardown so the UI doesn't get stuck on a
-                // ghost track.
-            } else {
+            // Skip-and-retry advance: a single TIDAL hiccup (especially a 429
+            // rate-limit a few tracks into a mix) used to nuke the entire
+            // remaining queue. Now we treat 429 as recoverable (sleep + retry
+            // the same track once) and any other failure as track-specific
+            // (skip to the next item). Only tear down when the deque is empty
+            // or we hit MAX_CONSEC_FAILURES distinct tracks failing in a row.
+            const MAX_CONSEC_FAILURES: u32 = 3;
+            let mut current = next;
+            let mut consecutive_failures: u32 = 0;
+            let mut started = false;
+            loop {
+                let mut result =
+                    start_ephemeral_tidal_playback(&state, current.clone()).await;
+                if let Err((status, _)) = &result
+                    && status.as_u16() == 429
+                {
+                    tracing::warn!(
+                        "TIDAL 429 advancing mix to '{}' — backing off 3s and retrying once",
+                        current.title
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    result = start_ephemeral_tidal_playback(&state, current.clone()).await;
+                }
+                match result {
+                    Ok(()) => {
+                        started = true;
+                        break;
+                    }
+                    Err((status, body)) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            "Failed to advance to '{}' ({status}, fail {consecutive_failures}/{MAX_CONSEC_FAILURES}): {} — skipping",
+                            current.title,
+                            body.0
+                        );
+                        if consecutive_failures >= MAX_CONSEC_FAILURES {
+                            tracing::warn!(
+                                "Hit max consecutive failures advancing TIDAL mix; clearing remaining queue"
+                            );
+                            let s = state.read().await;
+                            s.pending_tidal_mix_queue.lock().unwrap().clear();
+                            break;
+                        }
+                        let popped = {
+                            let s = state.read().await;
+                            s.pending_tidal_mix_queue.lock().unwrap().pop_front()
+                        };
+                        match popped {
+                            Some(p) => current = p,
+                            None => break,
+                        }
+                    }
+                }
+            }
+            if started {
                 return Ok(());
             }
+            // Fall through to teardown so the UI doesn't get stuck on a
+            // ghost track.
         }
         {
             let mut state_guard = state.write().await;
