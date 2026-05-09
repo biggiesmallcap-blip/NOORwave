@@ -132,6 +132,12 @@ pnpm lint:inline-styles
 
 Errors are blocking; fix them before committing. `.svelte` components are linted via `postcss-html`.
 
+## Removing redesigned components
+
+When you replace markup — e.g. ripping out a hand-rolled track list and dropping in `<TrendingShelf />` — delete the now-orphaned CSS rules in the same commit. The Svelte compiler emits `Unused CSS selector` warnings on `pnpm build`, and CI (`.github/workflows/pr-check.yml`) fails any PR that surfaces them. Stylelint cannot detect this on its own — only the compiler can, because it has the template AST.
+
+Genuine compose patterns (`class:foo={cond}`, `:global(...)`, classes injected at runtime) are sometimes flagged as unused even when they are not. In those cases, leave the rule and note the reason in the commit message — CI will block until you do.
+
 ## Before you add a token
 
 Justify why an existing token cannot represent the value. New tokens grow the design system and become a maintenance cost. The current scale already covers spacing 3-48 px, radii 4-22 px, type 8-56 px (9 steps), weight 500/600/700, and line-height 1.1/1.3/1.5/1.6 — most additions to the system can be expressed in those. New sizes outside the type scale (sub-8 px or above-56 px) should escalate to a design discussion rather than auto-adding a 5xl or 3xs token.
