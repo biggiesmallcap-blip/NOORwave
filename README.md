@@ -1,6 +1,7 @@
-<h1 align="center">
-<img width="1584" height="396" alt="linkedin-banner-1584x396" src="https://github.com/user-attachments/assets/ebf94044-14a7-4153-b660-9fb8e34b56c1" />
 
+<h1 align="center">
+
+<img width="1280" height="640" alt="github-card-transparent" src="https://github.com/user-attachments/assets/28c0d75b-32ed-4219-90d8-145b981a5373" />
 
 
 
