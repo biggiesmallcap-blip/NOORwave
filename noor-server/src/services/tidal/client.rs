@@ -432,6 +432,17 @@ impl TidalClient {
         self.get_json(&url).await
     }
 
+    /// Fetch the artist's own profile record — includes the canonical
+    /// `picture` URL the web client uses for the artist hero. Used by the
+    /// view-time fallback when our local DB row has no `photo_url`.
+    pub async fn get_artist(&self, artist_id: i64) -> Result<TidalArtist> {
+        let url = format!(
+            "{}/artists/{}?countryCode={}",
+            TIDAL_API_URL, artist_id, self.country_code
+        );
+        self.get_json(&url).await
+    }
+
     pub async fn get_artist_top_tracks(
         &self,
         artist_id: i64,
@@ -682,6 +693,299 @@ impl TidalClient {
         }
         Ok(mixes)
     }
+
+    /// Fetch the user's personal radio stations. They live as a single module
+    /// inside `pages/for_you` titled "Radio stations for you" — the same
+    /// module the web client renders as the "Personal radio stations" shelf.
+    pub async fn get_my_radio_stations(&self) -> Result<Vec<TidalMix>> {
+        let url = format!(
+            "{}/pages/for_you?countryCode={}&deviceType=BROWSER&locale=en_US",
+            TIDAL_API_URL, self.country_code
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        // Substring match — looser than the literal title so a Tidal rename
+        // (e.g. "Personal radio stations") still matches. `for_you` only has
+        // one radio-titled module so there's no ambiguity.
+        Ok(Self::parse_module_by_title(&payload, "radio"))
+    }
+
+    /// Fetch all editorial modules from `pages/home` — what TIDAL's web client
+    /// renders as the "discover" surface ("The Hits", "New Tracks", "New
+    /// Albums", "Spotlighted Uploads", "From our editors", etc.). Each module
+    /// gets its items parsed into a typed `TidalHomeItem` so the frontend can
+    /// dispatch shelf rendering on `kind` without re-parsing TIDAL's wire shape.
+    pub async fn get_home_modules(&self) -> Result<Vec<TidalHomeModule>> {
+        // `limit` here is per-module — TIDAL caps each shelf's pagedList at 5
+        // by default, so we ask for 12 to give the search surface room without
+        // forcing the user to engage the rail scroll for every reveal.
+        let url = format!(
+            "{}/pages/home?countryCode={}&deviceType=BROWSER&locale=en_US&limit=12",
+            TIDAL_API_URL, self.country_code
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_home_modules(&payload))
+    }
+
+    fn parse_home_modules(payload: &serde_json::Value) -> Vec<TidalHomeModule> {
+        let mut out = Vec::new();
+        let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) else {
+            return out;
+        };
+        for row in rows {
+            let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for module in modules {
+                let title = module
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if title.is_empty() {
+                    continue;
+                }
+                let id = module
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let kind = module
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let items_arr = module
+                    .get("pagedList")
+                    .and_then(|p| p.get("items"))
+                    .and_then(serde_json::Value::as_array)
+                    .or_else(|| module.get("items").and_then(serde_json::Value::as_array));
+                let Some(items_arr) = items_arr else { continue };
+                let more_path = module
+                    .get("pagedList")
+                    .and_then(|p| p.get("dataApiPath"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+
+                // Items inside `pages/home` modules are flat objects (no
+                // `{type, item}` wrapper) and don't carry a per-item type
+                // field. The module's own `kind` tells us how to parse them:
+                // TRACK_LIST / ALBUM_LIST / PLAYLIST_LIST. MIXED_TYPES_LIST
+                // (rare) falls back to per-item shape detection.
+                let items: Vec<TidalHomeItem> = items_arr
+                    .iter()
+                    .filter_map(|item| Self::parse_home_item(item, &kind))
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                tracing::warn!(
+                    "TIDAL home module '{}' (kind={}): parsed {}/{} items, more_path={:?}",
+                    title,
+                    kind,
+                    items.len(),
+                    items_arr.len(),
+                    more_path
+                );
+                out.push(TidalHomeModule { id, title, kind, more_path, items });
+            }
+        }
+        out
+    }
+
+    /// Fetch the full item set for one home module via its
+    /// `pagedList.dataApiPath`. The home `pages/home` response only ships a
+    /// 5-item preview for TRACK_LIST modules, so the per-module "View all"
+    /// detail route follows `dataApiPath` to get the rest.
+    pub async fn get_module_items_via_path(
+        &self,
+        more_path: &str,
+        module_kind: &str,
+        limit: u32,
+    ) -> Result<Vec<TidalHomeItem>> {
+        let separator = if more_path.contains('?') { '&' } else { '?' };
+        let url = format!(
+            "{}/{}{}countryCode={}&deviceType=BROWSER&locale=en_US&limit={}",
+            TIDAL_API_URL, more_path, separator, self.country_code, limit
+        );
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        // "show more" endpoints return either a top-level pagedList or a
+        // wrapped row/module shape — unwrap whichever we get.
+        let items_arr: Vec<serde_json::Value> = payload
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .or_else(|| {
+                payload
+                    .get("pagedList")
+                    .and_then(|p| p.get("items"))
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            })
+            .or_else(|| {
+                let rows = payload.get("rows").and_then(serde_json::Value::as_array)?;
+                let mut all = Vec::new();
+                for row in rows {
+                    if let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array) {
+                        for m in modules {
+                            if let Some(items) = m
+                                .get("pagedList")
+                                .and_then(|p| p.get("items"))
+                                .and_then(serde_json::Value::as_array)
+                            {
+                                all.extend(items.iter().cloned());
+                            }
+                        }
+                    }
+                }
+                Some(all)
+            })
+            .unwrap_or_default();
+        Ok(items_arr
+            .iter()
+            .filter_map(|item| Self::parse_home_item(item, module_kind))
+            .collect())
+    }
+
+    /// Decode one item from a `pages/home` module. Items are flat objects
+    /// (no wrapper/type field), so we dispatch on the module's `kind`. For
+    /// `MIXED_TYPES_LIST` we sniff the item shape — `uuid` => playlist,
+    /// `cover` => album, otherwise track.
+    fn parse_home_item(item: &serde_json::Value, module_kind: &str) -> Option<TidalHomeItem> {
+        let resolved_kind = match module_kind {
+            "TRACK_LIST" => "track",
+            "ALBUM_LIST" => "album",
+            "PLAYLIST_LIST" => "playlist",
+            _ => {
+                let obj = item.as_object()?;
+                if obj.contains_key("uuid") {
+                    "playlist"
+                } else if obj.contains_key("cover") {
+                    "album"
+                } else {
+                    "track"
+                }
+            }
+        };
+        match resolved_kind {
+            "track" => {
+                let t = Self::parse_search_track(item.clone())?;
+                Some(TidalHomeItem {
+                    kind: "track".into(),
+                    id: t.id.to_string(),
+                    title: t.title,
+                    artist_name: t.artist_name,
+                    artwork_url: t.artwork_url,
+                    duration: Some(t.duration),
+                    artist_id: t.artist_id,
+                    album_id: t.album_id,
+                    album_title: t.album_title,
+                    creator_name: None,
+                })
+            }
+            "album" => {
+                let a = Self::parse_search_album(item.clone())?;
+                let artist_id = item
+                    .get("artist")
+                    .and_then(|v| v.get("id"))
+                    .and_then(serde_json::Value::as_i64)
+                    .or_else(|| {
+                        item.get("artists")
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.get("id"))
+                            .and_then(serde_json::Value::as_i64)
+                    });
+                Some(TidalHomeItem {
+                    kind: "album".into(),
+                    id: a.id.to_string(),
+                    title: a.title,
+                    artist_name: a.artist_name,
+                    artwork_url: a.artwork_url,
+                    duration: None,
+                    artist_id,
+                    album_id: Some(a.id),
+                    album_title: None,
+                    creator_name: None,
+                })
+            }
+            "playlist" => Self::parse_home_playlist(item),
+            _ => None,
+        }
+    }
+
+    fn parse_home_playlist(value: &serde_json::Value) -> Option<TidalHomeItem> {
+        let obj = value.as_object()?;
+        let uuid = obj.get("uuid").and_then(serde_json::Value::as_str)?.to_string();
+        let title = obj.get("title").and_then(serde_json::Value::as_str)?.to_string();
+        // TIDAL ships playlist authors as a `creators[]` array; fall back to
+        // legacy `creator.name` for older payload shapes.
+        let creator_name = obj
+            .get("creators")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                obj.get("creator")
+                    .and_then(|c| c.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+        // Prefer `squareImage` (uuid keyed for the square collage), falling
+        // back to `image` (regular cover). Both feed the standard artwork
+        // builder which appends size + extension.
+        let artwork_url = obj
+            .get("squareImage")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| obj.get("image").and_then(serde_json::Value::as_str))
+            .map(|p| Self::artwork_url(p, 640));
+        Some(TidalHomeItem {
+            kind: "playlist".into(),
+            id: uuid,
+            title,
+            artist_name: None,
+            artwork_url,
+            duration: None,
+            artist_id: None,
+            album_id: None,
+            album_title: None,
+            creator_name,
+        })
+    }
+
+    /// Walk `rows[].modules[]` and return items from the first module whose
+    /// title contains `needle` (case-insensitive). Items are parsed as mixes.
+    fn parse_module_by_title(payload: &serde_json::Value, needle: &str) -> Vec<TidalMix> {
+        let needle = needle.to_ascii_lowercase();
+        let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) else {
+            return Vec::new();
+        };
+        for row in rows {
+            let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for module in modules {
+                let title = module
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !title.contains(&needle) {
+                    continue;
+                }
+                let items = module
+                    .get("pagedList")
+                    .and_then(|p| p.get("items"))
+                    .and_then(serde_json::Value::as_array)
+                    .or_else(|| module.get("items").and_then(serde_json::Value::as_array));
+                let Some(items) = items else { continue };
+                return items.iter().filter_map(Self::parse_mix_item).collect();
+            }
+        }
+        Vec::new()
+    }
+
 
     /// Fetch the items inside a TIDAL mix. The endpoint is the only public
     /// way to play a mix server-side, since mixes don't have a stable track
@@ -1131,6 +1435,52 @@ pub struct TidalMix {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix_type: Option<String>,
     pub is_video_mix: bool,
+}
+
+/// One item rendered inside a TIDAL home-page module. Flat shape (rather
+/// than a tagged enum) so the frontend can dispatch on `kind` without
+/// dealing with serde-tagged unions in TS. Per-kind fields are optional —
+/// e.g. `duration` is only set for tracks, `creator_name` only for playlists.
+#[derive(Debug, Clone, Serialize)]
+pub struct TidalHomeItem {
+    /// `"track" | "album" | "playlist"` — the only kinds we surface today.
+    pub kind: String,
+    /// Stringified for tracks/albums (numeric id), uuid for playlists.
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artwork_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_name: Option<String>,
+}
+
+/// One module on a TIDAL `pages/*` response. Editorial home shelves like
+/// "The Hits", "New Albums", "Spotlighted Uploads" are each a module.
+#[derive(Debug, Clone, Serialize)]
+pub struct TidalHomeModule {
+    pub id: String,
+    pub title: String,
+    /// TIDAL's module type — `TRACK_LIST`, `ALBUM_LIST`, `PLAYLIST_LIST`,
+    /// `MIXED_TYPES_LIST`, etc. Pass-through; the frontend only inspects
+    /// per-item `kind`, but `kind` here lets ops debug.
+    pub kind: String,
+    /// TIDAL's `pagedList.dataApiPath` — the URL the web client follows when
+    /// the user clicks "View all". We resolve `more_path` server-side in the
+    /// per-module detail handler so the frontend never needs to know the
+    /// upstream URL shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub more_path: Option<String>,
+    pub items: Vec<TidalHomeItem>,
 }
 
 /// Pull a renderable URL out of the various shapes TIDAL returns for an

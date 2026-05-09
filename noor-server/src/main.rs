@@ -68,6 +68,8 @@ pub struct AppState {
     /// daily cadence, so re-fetching on every Home remount was wasted work
     /// (and a visible skeleton flash). Cleared on app restart.
     pub tidal_mixes_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    /// 6h TTL cache for the home Personal Radio shelf. Same cadence as mixes.
+    pub tidal_radio_stations_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -531,6 +533,7 @@ async fn main() -> Result<()> {
         tidal_http_client: services::tidal::client::TidalClient::build_http_client(),
         tidal_tokens,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
+        tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,

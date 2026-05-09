@@ -67,6 +67,7 @@
 </script>
 
 <div class="page">
+	<button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
 	{#if loading}
 		<p class="status" role="status" aria-live="polite">Loading from TIDAL…</p>
 	{:else if error}
@@ -150,6 +151,11 @@
 		flex-direction: column;
 	}
 
+	.page > .back-link {
+		align-self: flex-start;
+		margin-bottom: var(--space-3);
+	}
+
 	.status {
 		padding: 48px 28px;
 		text-align: center;
@@ -159,11 +165,13 @@
 
 	.hero {
 		position: relative;
-		padding: 32px 32px 24px;
+		padding: var(--space-5) var(--space-5) var(--space-4);
 		display: flex;
 		min-height: 300px;
 		overflow: hidden;
 		isolation: isolate;
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.hero-backdrop {
@@ -187,7 +195,7 @@
 	.hero-body {
 		display: grid;
 		grid-template-columns: clamp(160px, 16vw, 240px) 1fr;
-		gap: 24px;
+		gap: var(--space-5);
 		align-items: end;
 		width: 100%;
 		max-width: var(--content-width);
@@ -196,7 +204,7 @@
 	.hero-art-wrap {
 		width: clamp(160px, 16vw, 240px);
 		aspect-ratio: 1 / 1;
-		border-radius: 8px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
 		box-shadow: 0 28px 70px -14px rgba(0, 0, 0, 0.7);
 		background: var(--bg-surface);

@@ -10,6 +10,7 @@
 	} from '$lib/api/client';
 	import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
+	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
@@ -179,6 +180,9 @@
 
 		<!-- Your Mixes (TIDAL) — replaces the prime above-Trending slot. -->
 		<YourMixesShelf />
+
+		<!-- Personal Radio Stations (TIDAL) -->
+		<PersonalRadioShelf />
 
 		<!-- Unified Trending shelf (Worldwide / Country / Genre / Tidal) -->
 		<section class="discovery-section" data-section="trending">

@@ -41,6 +41,11 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
+	// View-time fallback when our local artist row has no `photo_url` —
+	// populated from `tidal_artist_profile.picture_url`. Cleared on artist
+	// change so we don't flash the previous artist's photo on transition.
+	let tidalPictureUrl = $state<string | null>(null);
+
 	let tidalAlbums = $state<TidalDiscographyAlbum[]>([]);
 	let tidalTopTracks = $state<TidalDiscographyTrack[]>([]);
 	let tidalVideos = $state<TidalArtistVideo[]>([]);
@@ -104,14 +109,20 @@
 
 	async function loadDiscography() {
 		tidalLoading = true;
+		const requestedFor = artistId;
 		try {
 			const res = await api.getArtistDiscography(artistId);
+			if (artistId !== requestedFor) return;
 			tidalAlbums = res.albums;
 			tidalTopTracks = res.top_tracks ?? [];
 			tidalVideos = res.videos ?? [];
 			tidalSimilarArtists = res.similar_artists ?? [];
 			tidalBio = res.bio ?? null;
 			tidalAvailable = res.available;
+			// View-time portrait fallback — populated alongside the rest
+			// of the discography so a missing local `photo_url` still
+			// renders a proper hero portrait instead of the initials disc.
+			if (res.picture_url) tidalPictureUrl = res.picture_url;
 		} catch (err) {
 			console.error('Failed to load TIDAL discography', err);
 		} finally {
@@ -131,6 +142,7 @@
 	$effect(() => {
 		artistId;
 		artist = null;
+		tidalPictureUrl = null;
 		tidalAlbums = [];
 		tidalTopTracks = [];
 		tidalVideos = [];
@@ -167,9 +179,15 @@
 	//   2. The first available album cover — used as a glassmorphic backdrop
 	//      with a frosted disc on top, matching the Quiet Mode aesthetic.
 	//   3. Letter-color fallback inside the disc (handled in the markup).
-	let heroPortraitUrl = $derived(artist?.photo_url ?? null);
+	// Prefer the fresh TIDAL `picture_url` over the locally-cached
+	// `artist.photo_url`. Some legacy sync runs stored 640x640 URLs which
+	// TIDAL's CDN now returns AccessDenied for on certain artists (the
+	// picture only exists at smaller sizes for those records). The Tidal
+	// fetch in `loadDiscography` always builds at sizes we know work.
+	let heroPortraitUrl = $derived(tidalPictureUrl ?? artist?.photo_url ?? null);
 	let heroBackdropUrl = $derived(
-		artist?.photo_url
+		tidalPictureUrl
+			?? artist?.photo_url
 			?? tidalAlbums.find((a) => a.artwork_url)?.artwork_url
 			?? tracks.find((t) => t.artwork_url)?.artwork_url
 			?? null
@@ -425,6 +443,7 @@
 </script>
 
 <div class="artist-page">
+	<a class="back-link" href="/library">← Back to library</a>
 	{#if loading}
 		<div class="status-wrap"><Skeleton rows={4} label="Loading artist" /></div>
 	{:else if error}
@@ -915,6 +934,11 @@
 		flex-direction: column;
 	}
 
+	.artist-page > .back-link {
+		align-self: flex-start;
+		margin-bottom: var(--space-3);
+	}
+
 	.status {
 		padding: 48px 28px;
 		text-align: center;
@@ -957,12 +981,14 @@
 
 	.hero {
 		position: relative;
-		padding: 46px 32px 30px;
+		padding: var(--space-6) var(--space-5) var(--space-4);
 		display: flex;
 		min-height: 300px;
 		overflow: hidden;
 		isolation: isolate;
 		align-items: flex-end;
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.hero-backdrop {
@@ -988,7 +1014,7 @@
 		display: flex;
 		flex-direction: row;
 		align-items: flex-end;
-		gap: 28px;
+		gap: var(--space-5);
 		width: 100%;
 		max-width: var(--content-width);
 	}
@@ -998,13 +1024,13 @@
 	}
 
 	.hero-portrait {
-		width: 200px;
-		height: 200px;
+		width: clamp(140px, 16vw, 220px);
+		aspect-ratio: 1 / 1;
 		border-radius: 50%;
 		object-fit: cover;
 		display: block;
 		box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.7);
-		background: rgba(255, 255, 255, 0.04);
+		background: var(--bg-surface);
 	}
 
 	/* Quiet Mode-aligned glassmorphism: blurred album art behind a frosted disc.

@@ -63,6 +63,7 @@
   <div class="loading error">{error}</div>
 {:else if profile}
   <div class="artist-page">
+    <button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
     <div class="artist-hero">
       {#if heroArt}
         <div class="artist-hero-backdrop" style={`background-image: url('${heroArt}')`}></div>
@@ -145,16 +146,19 @@
 <style>
   .loading { padding: 48px; color: var(--text-muted); text-align: center; }
   .error { color: var(--state-error); }
-  .artist-page { padding: 0 48px 48px; }
+  .artist-page { padding: 0 48px 48px; display: flex; flex-direction: column; }
+  .artist-page > .back-link { align-self: flex-start; margin-bottom: var(--space-3); }
   .artist-hero {
     position: relative;
     min-height: 260px;
-    margin: 0 -48px 24px;
-    padding: 44px 48px 30px;
+    margin-bottom: var(--space-4);
+    padding: var(--space-6) var(--space-5) var(--space-4);
     display: flex;
     align-items: flex-end;
     overflow: hidden;
     isolation: isolate;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-subtle);
   }
   .artist-hero-backdrop {
     position: absolute;
@@ -174,7 +178,7 @@
   }
   .artist-hero-body {
     display: grid;
-    gap: 8px;
+    gap: var(--space-2);
   }
   .tidal-badge {
     width: fit-content;

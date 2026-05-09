@@ -435,6 +435,28 @@ h4 {
 	color: var(--text-tertiary);
 }
 
+/* "← Back to X" link used at the top of detail pages (search/discover,
+   library/album, library/artist, etc). Borderless, secondary text, fades
+   to primary on hover. Pair with `align-self: flex-start;` inside the
+   parent flex header so it doesn't stretch full-width. */
+.back-link {
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	font: inherit;
+	font-size: var(--font-size-xs);
+	font-weight: var(--font-weight-semibold);
+	color: var(--text-secondary);
+	text-decoration: none;
+	transition: color var(--motion-fast) ease;
+}
+.back-link:hover,
+.back-link:focus-visible {
+	color: var(--text-primary);
+	outline: none;
+}
+
 .page-copy,
 .muted-copy {
 	color: var(--text-secondary);

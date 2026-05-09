@@ -339,6 +339,7 @@
 </svelte:head>
 
 <div class="page">
+  <a class="back-link" href="/search">← Back to search</a>
   {#if loading}
     <div class="state">Loading playlist…</div>
   {:else if error}
@@ -478,7 +479,17 @@
 </div>
 
 <style>
-  .page { max-width: var(--content-width); margin: 0 auto; padding: 32px 28px 96px; }
+  .page {
+    max-width: var(--content-width);
+    margin: 0 auto;
+    padding: 32px 28px 96px;
+    display: flex;
+    flex-direction: column;
+  }
+  .page > .back-link {
+    align-self: flex-start;
+    margin-bottom: var(--space-3);
+  }
   .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
   .state.error { color: #ef4444; }
 

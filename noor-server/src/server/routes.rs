@@ -642,6 +642,16 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/mixes", get(get_tidal_mixes))
         .route("/api/tidal/mixes/{id}/tracks", get(get_tidal_mix_tracks))
         .route("/api/tidal/play-mix", post(play_tidal_mix))
+        // TIDAL "Personal Radio" — drives the home Personal Radio shelf.
+        .route("/api/tidal/radio-stations", get(get_tidal_radio_stations))
+        // TIDAL editorial home modules — drives the search-page discover surface.
+        .route("/api/tidal/home-modules", get(get_tidal_home_modules))
+        // Per-module detail items (View all). Resolves the module's
+        // dataApiPath server-side and returns the full item set.
+        .route(
+            "/api/tidal/discover-modules/{id}/items",
+            get(get_tidal_discover_module_items),
+        )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(get_charts))
         .route("/api/charts/lastfm/genres", get(list_lastfm_genres))
@@ -1084,8 +1094,12 @@ async fn get_artist_discography(
     let videos_fut = client.get_artist_videos(tidal_artist_id, 50, 0);
     let similar_fut = client.get_artist_similar(tidal_artist_id, 20, 0);
     let bio_fut = client.get_artist_bio(tidal_artist_id);
+    // Profile fetch in the same parallel batch — gives us the artist's
+    // canonical `picture` URL so the page hero can fall back to TIDAL
+    // when the local row has no `photo_url`.
+    let profile_fut = client.get_artist(tidal_artist_id);
 
-    let (albums_res, eps_res, comps_res, live_res, top_res, videos_res, similar_res, bio_res) = tokio::join!(
+    let (albums_res, eps_res, comps_res, live_res, top_res, videos_res, similar_res, bio_res, profile_res) = tokio::join!(
         albums_fut,
         eps_fut,
         compilations_fut,
@@ -1093,7 +1107,62 @@ async fn get_artist_discography(
         top_fut,
         videos_fut,
         similar_fut,
-        bio_fut
+        bio_fut,
+        profile_fut
+    );
+
+    // Picture URL fallback chain. TIDAL's `/artists/{id}` record is the
+    // canonical source, but it ships `picture: null` for many artists.
+    // We then try the artist's own `picture` as embedded in their top
+    // tracks, then finally fall back to an album cover — same trick the
+    // library Recently Played Artists rail uses to keep tiles populated
+    // when no artist photo exists. Extracted *before* the result-bearing
+    // _res values are consumed by the payload builders below.
+    let direct_picture_id = profile_res
+        .as_ref()
+        .ok()
+        .and_then(|a| a.picture.clone());
+    let top_track_picture_id = top_res
+        .as_ref()
+        .ok()
+        .and_then(|tr| {
+            tr.items
+                .iter()
+                .filter(|t| t.artist.id == tidal_artist_id)
+                .find_map(|t| t.artist.picture.clone())
+        });
+    let album_cover_picture_id = [&albums_res, &eps_res, &comps_res, &live_res]
+        .iter()
+        .filter_map(|res| res.as_ref().ok())
+        .flat_map(|list| list.iter())
+        .find_map(|a| a.cover.clone());
+
+    let direct_some = direct_picture_id.is_some();
+    let top_track_some = top_track_picture_id.is_some();
+    let album_cover_some = album_cover_picture_id.is_some();
+    // TIDAL's CDN ships `640x640.jpg` reliably for album covers but not
+    // for artist pictures — many artist images are stored at 320 max.
+    // Pick the size that matches whichever tier resolved.
+    let (resolved_picture_id, picture_size) = if let Some(id) = direct_picture_id {
+        (Some(id), 320)
+    } else if let Some(id) = top_track_picture_id {
+        (Some(id), 320)
+    } else if let Some(id) = album_cover_picture_id {
+        (Some(id), 640)
+    } else {
+        (None, 320)
+    };
+    let picture_url = TidalClient::get_artwork_url(&resolved_picture_id, picture_size);
+    if let Err(e) = profile_res.as_ref() {
+        tracing::debug!("TIDAL artist {} profile fetch failed: {}", tidal_artist_id, e);
+    }
+    tracing::warn!(
+        "TIDAL artist {} picture resolution: direct={}, top_track={}, album_cover={}, resolved={}",
+        tidal_artist_id,
+        direct_some,
+        top_track_some,
+        album_cover_some,
+        picture_url.is_some()
     );
 
     // TIDAL can return the same release under multiple filters (e.g. an album
@@ -1245,12 +1314,30 @@ async fn get_artist_discography(
         }
     }
 
+    // Backfill the local artists row's `photo_url` so other surfaces in the
+    // app (Library Recently Played Artists, search results, etc.) get the
+    // working URL too. Older sync runs sometimes stored sizes TIDAL no
+    // longer serves (e.g. 640x640 returning AccessDenied for some artists);
+    // overwriting whenever the resolved URL differs keeps the cache fresh.
+    if let Some(url) = picture_url.as_deref() {
+        let s = state.read().await;
+        let _ = s.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE artists SET photo_url = ?1
+                 WHERE id = ?2 AND (photo_url IS NULL OR photo_url != ?1)",
+                rusqlite::params![url, id],
+            )?;
+            Ok(())
+        });
+    }
+
     Ok(Json(json!({
         "albums": albums_payload,
         "top_tracks": top_tracks_payload,
         "videos": videos_payload,
         "similar_artists": similar_artists_payload,
         "bio": bio_payload,
+        "picture_url": picture_url,
         "available": true
     })))
 }
@@ -10959,7 +11046,7 @@ async fn tidal_artist_profile(
                     )
                 })?;
             let retry_client = TidalClient::with_http(
-                tidal_http_client,
+                tidal_http_client.clone(),
                 refreshed.access_token.clone(),
                 refreshed.country_code.clone(),
             );
@@ -10982,7 +11069,35 @@ async fn tidal_artist_profile(
         }
     };
 
-    let artist_name = top_tracks_page.items.first().map(|t| t.artist.name.clone());
+    // Fetch the artist's own profile separately so a transient failure
+    // (rate-limit, 404 on the artist endpoint) doesn't kill the whole
+    // route — top-tracks/albums already loaded successfully above.
+    let artist_profile = {
+        let probe = TidalClient::with_http(
+            tidal_http_client.clone(),
+            tokens.access_token.clone(),
+            tokens.country_code.clone(),
+        );
+        match probe.get_artist(tidal_artist_id).await {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::debug!(
+                    "tidal_artist_profile: artist record fetch failed for {}: {}",
+                    tidal_artist_id,
+                    e
+                );
+                None
+            }
+        }
+    };
+
+    let artist_name = artist_profile
+        .as_ref()
+        .map(|a| a.name.clone())
+        .or_else(|| top_tracks_page.items.first().map(|t| t.artist.name.clone()));
+    let picture_url = artist_profile
+        .as_ref()
+        .and_then(|a| TidalClient::get_artwork_url(&a.picture, 320));
 
     let top_tracks: Vec<serde_json::Value> = top_tracks_page
         .items
@@ -11024,6 +11139,7 @@ async fn tidal_artist_profile(
 
     Ok(Json(json!({
         "artist_name": artist_name,
+        "picture_url": picture_url,
         "top_tracks": top_tracks,
         "albums": albums,
     })))
@@ -13568,6 +13684,224 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
     Ok(Json(json!({ "mixes": mixes, "source": "tidal" })))
 }
 
+// ─── TIDAL: Personal Radio Stations ──────────────────────────────────────────
+
+/// Returns the user's personal TIDAL radio stations for the home shelf.
+/// Same pattern as `get_tidal_mixes` — 503 when disconnected, 6h TTL cache.
+async fn get_tidal_radio_stations(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client, radio_cache) = {
+        let in_memory = {
+            let s = state.read().await;
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+                s.tidal_radio_stations_cache.clone(),
+            )
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
+            None => {
+                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
+                (persisted, in_memory.1, in_memory.2, in_memory.3)
+            }
+        }
+    };
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    {
+        let guard = radio_cache.lock().unwrap();
+        if let Some((stored_at, cached)) = guard.as_ref()
+            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+        {
+            return Ok(Json(
+                json!({ "stations": cached, "source": "tidal", "cached": true }),
+            ));
+        }
+    }
+
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let stations = match client.get_my_radio_stations().await {
+        Ok(s) => s,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_my_radio_stations().await.map_err(|e| {
+                tracing::warn!("TIDAL get_my_radio_stations failed after token refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_my_radio_stations failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    {
+        let mut guard = radio_cache.lock().unwrap();
+        *guard = Some((Instant::now(), stations.clone()));
+    }
+    Ok(Json(json!({ "stations": stations, "source": "tidal" })))
+}
+
+// ─── TIDAL: Home discover modules ────────────────────────────────────────────
+
+/// Returns the editorial modules from `pages/home` (what the TIDAL web client
+/// renders as the "discover" surface — The Hits, New Tracks, New Albums,
+/// Spotlighted Uploads, From our editors). 503 when TIDAL is disconnected so
+/// the frontend can render its connect prompt instead of an error toast.
+async fn get_tidal_home_modules(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client) = {
+        let in_memory = {
+            let s = state.read().await;
+            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            None => {
+                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
+                (persisted, in_memory.1, in_memory.2)
+            }
+        }
+    };
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let modules = match client.get_home_modules().await {
+        Ok(m) => m,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_home_modules().await.map_err(|e| {
+                tracing::warn!("TIDAL get_home_modules failed after token refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_home_modules failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    Ok(Json(json!({ "modules": modules, "source": "tidal" })))
+}
+
+/// Returns the full item set for one home discover module, used by the
+/// per-module "View all" detail route. The home preview only ships 5 items
+/// for TRACK_LIST modules; this handler resolves the module id back to the
+/// upstream `dataApiPath` and follows it to load the complete list.
+async fn get_tidal_discover_module_items(
+    State(state): State<SharedState>,
+    Path(module_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .min(200);
+
+    let (tokens, http_client, tidal_http_client) = {
+        let in_memory = {
+            let s = state.read().await;
+            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            None => {
+                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
+                (persisted, in_memory.1, in_memory.2)
+            }
+        }
+    };
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+
+    let modules = match client.get_home_modules().await {
+        Ok(m) => m,
+        Err(e) if error_looks_like_auth(&e) => {
+            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client.clone(),
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_home_modules().await.map_err(|e| {
+                tracing::warn!("get_home_modules failed after refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("get_home_modules failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+
+    let Some(module) = modules.into_iter().find(|m| m.id == module_id) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let module_kind = module.kind.clone();
+    let module_title = module.title.clone();
+    // Modules without a `dataApiPath` (e.g. ALBUM_LIST already returning all
+    // items inline) just echo back the preview items — that's the whole set.
+    let items = if let Some(path) = module.more_path.as_deref() {
+        let access_token = tokens.access_token.clone();
+        let country_code = tokens.country_code.clone();
+        let live = TidalClient::with_http(tidal_http_client, access_token, country_code);
+        match live.get_module_items_via_path(path, &module_kind, limit).await {
+            Ok(items) if !items.is_empty() => items,
+            _ => module.items, // fall back to the preview if the show-more call fails or returns 0
+        }
+    } else {
+        module.items
+    };
+
+    Ok(Json(json!({
+        "module": {
+            "id": module_id,
+            "title": module_title,
+            "kind": module_kind,
+            "items": items,
+        },
+        "source": "tidal",
+    })))
+}
+
 /// Returns the playable tracks inside a TIDAL mix. Frontend calls this when
 /// the user clicks a mix card on the home Your Mixes shelf, then queues +
 /// plays the first track via the existing TIDAL playback path.
@@ -15506,6 +15840,7 @@ mod tests {
             tidal_http_client: reqwest::Client::new(),
             tidal_tokens: None,
             tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
+            tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,

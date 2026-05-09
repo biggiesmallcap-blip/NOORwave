@@ -408,6 +408,7 @@ export interface ResolveStatusEntry {
 
 export interface TidalArtistProfile {
 	artist_name: string | null;
+	picture_url: string | null;
 	top_tracks: TidalDiscographyTrack[];
 	albums: TidalDiscographyAlbum[];
 }
@@ -1166,6 +1167,44 @@ export interface TidalMixesResponse {
 	source: string;
 }
 
+export interface TidalRadioStationsResponse {
+	stations: TidalMix[];
+	source: string;
+}
+
+/** One item inside a TIDAL home discover module. Per-kind fields are optional —
+ *  the frontend dispatches on `kind` to pick the right shelf renderer. */
+export interface TidalHomeItem {
+	kind: 'track' | 'album' | 'playlist';
+	id: string;
+	title: string;
+	artist_name?: string | null;
+	artwork_url?: string | null;
+	duration?: number | null;        // tracks only (seconds)
+	artist_id?: number | null;
+	album_id?: number | null;
+	album_title?: string | null;
+	creator_name?: string | null;    // playlists only
+}
+
+export interface TidalHomeModule {
+	id: string;
+	title: string;
+	kind: string;                     // TRACK_LIST | ALBUM_LIST | PLAYLIST_LIST | MIXED_TYPES_LIST | …
+	more_path?: string | null;        // upstream `pagedList.dataApiPath` — used by per-module detail route
+	items: TidalHomeItem[];
+}
+
+export interface TidalHomeModulesResponse {
+	modules: TidalHomeModule[];
+	source: string;
+}
+
+export interface TidalDiscoverModuleResponse {
+	module: TidalHomeModule;          // module returned without `more_path` (already resolved); `items` is the full set
+	source: string;
+}
+
 export interface LastfmStatus {
 	configured: boolean;
 	enrichment: boolean;
@@ -1446,6 +1485,7 @@ export const api = {
 			videos: TidalArtistVideo[];
 			similar_artists: TidalSimilarArtist[];
 			bio: TidalArtistBio | null;
+			picture_url: string | null;
 			available: boolean;
 			reason?: string;
 		}>(`/api/artists/${id}/discography`);
@@ -2242,6 +2282,25 @@ export const api = {
 	// connect prompt rather than an error toast.
 	getTidalMixes() {
 		return fetchApi<TidalMixesResponse>('/api/tidal/mixes');
+	},
+
+	// Personal Radio Stations — same 503/connect-prompt contract as getTidalMixes.
+	getTidalRadioStations() {
+		return fetchApi<TidalRadioStationsResponse>('/api/tidal/radio-stations');
+	},
+
+	// Editorial home modules from TIDAL pages/home — drives the search-page
+	// discover surface. 503 when TIDAL is disconnected.
+	getTidalHomeModules() {
+		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules');
+	},
+
+	// Full item set for one home discover module (used by the "View all"
+	// detail route). Backend follows the module's `dataApiPath` server-side.
+	getTidalDiscoverModule(moduleId: string, limit = 50) {
+		return fetchApi<TidalDiscoverModuleResponse>(
+			`/api/tidal/discover-modules/${encodeURIComponent(moduleId)}/items?limit=${limit}`
+		);
 	},
 
 	// Mix track list — used to queue + play a mix when a card is clicked.
