@@ -60,6 +60,7 @@
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
@@ -583,22 +584,6 @@
 		return q.replaceAll('_', ' ');
 	}
 
-	// Compact resolution pill for the now-playing area: "24/96", "16/44.1", etc.
-	// Reflects what the server reports the stream resolved to — independent of
-	// the user's quality preference, so the user can see when Tidal silently
-	// downgraded a track that didn't have a Hi-Res asset.
-	function formatResolutionShort(stream: { sample_rate: number | null; bit_depth: number | null } | null): string {
-		if (!stream) return '';
-		const bd = stream.bit_depth;
-		const sr = stream.sample_rate;
-		if (!bd && !sr) return '';
-		const khz = sr ? (sr / 1000) : null;
-		const khzStr = khz === null ? '' : (Number.isInteger(khz) ? `${khz}` : khz.toFixed(1));
-		if (bd && sr) return `${bd}/${khzStr}`;
-		if (sr) return `${khzStr} kHz`;
-		return `${bd}-bit`;
-	}
-
 	function formatQueueSource(source: string): string {
 		const normalized = source.trim().toLowerCase();
 		if (normalized.includes('automix')) return 'Automix';
@@ -899,30 +884,11 @@
 	let playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
-	let streamDetailLabel = $derived((() => {
-		const s = $currentStreamDisplay;
-		const rt = $playbackRuntimeInfo;
-		const parts: string[] = [];
-		// Prefer manifest values; fall back to device output rate / inferred depth
-		// when Tidal doesn't include them (common for non-HiRes tracks).
-		const sampleRate = s?.sample_rate ?? rt?.sample_rate ?? null;
-		const bitDepth = s?.bit_depth ?? inferBitDepth(s?.audio_quality, sampleRate);
-		if (sampleRate) {
-			const khz = sampleRate / 1000;
-			parts.push(Number.isInteger(khz) ? `${khz} kHz` : `${khz.toFixed(1)} kHz`);
-		}
-		if (bitDepth) parts.push(`${bitDepth}-bit`);
-		if ($exclusiveStatus.engaged) parts.push('Excl');
-		return parts.join(' · ');
-	})());
-
-	function inferBitDepth(quality: string | null | undefined, sampleRate: number | null): number | null {
-		// High sample rates are only used for Hi-Res content → 24-bit
-		if (sampleRate && sampleRate > 48000) return 24;
-		if (quality === 'HI_RES_LOSSLESS' || quality === 'HI_RES') return 24;
-		if (quality === 'LOSSLESS') return 16;
-		return null;
-	}
+	let streamDetailLabel = $derived(formatPlayerStreamDetail({
+		stream: $currentStreamDisplay,
+		runtime: $playbackRuntimeInfo,
+		exclusiveEngaged: $exclusiveStatus.engaged,
+	}));
 	let videoRouteActive = $derived(page.url.pathname.startsWith('/videos'));
 	let videoChromeActive = $derived(videoRouteActive && $videoSession.active);
 	let mobilePlayerVisible = $derived(Boolean($currentTrack) && !videoChromeActive);

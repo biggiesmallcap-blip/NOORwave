@@ -9810,6 +9810,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                     queue::clear_queue(conn)?;
                 }
             }
+            state.pending_tidal_mix_queue.lock().unwrap().clear();
             // Return the full PlaybackSnapshot ({state, queue}) so the UI can
             // refresh both at once — additive over the prior `{queue}` shape:
             // existing consumers keep reading `queue`, new ones read
@@ -13341,6 +13342,21 @@ async fn put_audio_settings(
         warn!("Audio settings update: re-issue at new quality failed: {e}");
     }
 
+    // Clear live state here so the UI cannot keep showing Excl if the runtime
+    // release event races or never arrives.
+    if old.exclusive_mode && !new.exclusive_mode {
+        let mut guard = state.write().await;
+        let released_device = guard.playback_runtime_info.as_mut().map(|info| {
+            info.exclusive_engaged = false;
+            info.device_name.clone()
+        });
+        if let Some(device) = released_device {
+            let _ = guard
+                .event_tx
+                .send(AppEvent::AudioExclusiveReleased { device });
+        }
+    }
+
     Ok(Json(new))
 }
 
@@ -16465,6 +16481,136 @@ mod tests {
             })
             .unwrap();
         assert_eq!(persisted_queue_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn clear_queue_clears_pending_tidal_mix_overlay() {
+        let (db, db_path) = fresh_migrated_db();
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+        {
+            let guard = state.read().await;
+            guard.pending_tidal_mix_queue.lock().unwrap().push_back(
+                crate::PendingEphemeralTidalTrack {
+                    tidal_track_id: 987_654,
+                    title: "Queued TIDAL Mix Track".to_string(),
+                    artist_name: Some("TIDAL Artist".to_string()),
+                    album_title: Some("TIDAL Mix".to_string()),
+                    artwork_url: None,
+                    duration_ms: Some(180_000),
+                },
+            );
+        }
+        let app = api_routes(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/queue/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/playback/queue")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let queue = body["queue"].as_array().expect("queue array");
+        assert!(
+            queue.is_empty(),
+            "pending TIDAL mix overlay must not reappear after clear"
+        );
+        assert!(
+            state
+                .read()
+                .await
+                .pending_tidal_mix_queue
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "pending TIDAL mix deque must be cleared"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn disabling_exclusive_clears_runtime_engaged_state() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let mut settings = crate::db::audio_settings::AudioSettings::default();
+            settings.exclusive_mode = true;
+            crate::db::audio_settings::save(conn, &settings)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+        {
+            let mut guard = state.write().await;
+            guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+                device_name: "Test DAC".to_string(),
+                sample_rate: 96_000,
+                channels: 2,
+                active_track_id: Some(1),
+                last_error: None,
+                exclusive_engaged: true,
+            });
+        }
+        let app = api_routes(state);
+
+        let mut next_settings = crate::db::audio_settings::AudioSettings::default();
+        next_settings.exclusive_mode = false;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/audio/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&next_settings).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/playback/runtime")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["runtime"]["exclusive_engaged"], false);
 
         let _ = std::fs::remove_file(db_path);
     }
