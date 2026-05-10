@@ -377,6 +377,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/discovery/train/intensity",
             get(get_discovery_intensity).post(set_discovery_intensity),
         )
+        .route(
+            "/api/discovery/train/engine",
+            get(get_discovery_engine).post(set_discovery_engine),
+        )
         .route("/api/discovery/train/safety", get(get_discovery_safety))
         .route("/api/discovery/feedback", post(record_discovery_feedback))
         .route(
@@ -2591,17 +2595,49 @@ async fn start_discovery_training(
         })));
     }
 
+    let engine = discovery_learning::load_discovery_engine(&db);
+    if !engine.supports_training() {
+        return Ok(Json(json!({
+            "status": "legacy_trainer_unavailable",
+            "mode": mode,
+            "engine": engine.as_str(),
+            "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
+        })));
+    }
+
     // Reset cancel flag synchronously before spawning so that a Stop request
     // arriving immediately after this call reaches the spawned task.
     cancel.store(false, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let event_tx = {
+        let (event_tx, http_client, tidal_http_client, tidal_tokens) = {
             let guard = state.read().await;
-            guard.event_tx.clone()
+            (
+                guard.event_tx.clone(),
+                guard.http_client.clone(),
+                guard.tidal_http_client.clone(),
+                guard.tidal_tokens.clone(),
+            )
         };
-        if let Err(error) =
-            discovery_learning::start_training(db, event_tx, full_mode, rebuild_audio, cancel).await
+        let lastfm = LastFmClient::load(http_client, &db);
+        let tokens = match tidal_tokens {
+            Some(tokens) => Some(tokens),
+            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
+        };
+        let tidal = tokens.map(|tokens| {
+            TidalClient::with_http(tidal_http_client, tokens.access_token, tokens.country_code)
+        });
+        let external_refresh_clients =
+            discovery_learning::ExternalProviderRefreshClients { lastfm, tidal };
+        if let Err(error) = discovery_learning::start_training(
+            db,
+            event_tx,
+            full_mode,
+            rebuild_audio,
+            cancel,
+            external_refresh_clients,
+        )
+        .await
         {
             tracing::error!(
                 target: "noor.discovery.training",
@@ -2662,6 +2698,43 @@ async fn set_discovery_intensity(
     let parsed = DiscoveryIntensity::parse(&payload.intensity);
     save_intensity(&s.db, parsed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "intensity": parsed.as_str() })))
+}
+
+async fn get_discovery_engine(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::DiscoveryEngine;
+    let s = state.read().await;
+    let engine = discovery_learning::load_discovery_engine(&s.db);
+    Ok(Json(json!({
+        "engine": engine.as_str(),
+        "label": engine.label(),
+        "family": engine.family(),
+        "trainable": engine.supports_training(),
+        "available": [
+            DiscoveryEngine::V2.as_str(),
+            DiscoveryEngine::V1.as_str(),
+        ],
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineRequest {
+    engine: String,
+}
+
+async fn set_discovery_engine(
+    State(state): State<SharedState>,
+    Json(payload): Json<EngineRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let s = state.read().await;
+    let parsed = discovery_learning::DiscoveryEngine::parse(&payload.engine);
+    discovery_learning::set_discovery_engine(&s.db, parsed)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "engine": parsed.as_str(),
+        "label": parsed.label(),
+        "family": parsed.family(),
+        "trainable": parsed.supports_training(),
+    })))
 }
 
 // Safety estimate: tells the UI how long training is expected to take and
@@ -2895,7 +2968,7 @@ async fn get_radio_tracks(
 
         let model = state
             .db
-            .with_conn(queries::get_active_embedding_model)
+            .with_conn(queries::get_selected_discovery_embedding_model)
             .ok()
             .flatten();
         return Ok(Json(json!({
@@ -5538,7 +5611,7 @@ async fn get_discovery_space(
         let active_model_id: Option<i64> = guard
             .db
             .with_conn(|conn| {
-                Ok(crate::db::queries::get_active_embedding_model(conn)?.map(|m| m.id))
+                Ok(crate::db::queries::get_selected_discovery_embedding_model(conn)?.map(|m| m.id))
             })
             .unwrap_or(None);
         let already_fresh = match active_model_id {
@@ -8626,13 +8699,43 @@ fn promote_pending_row_emit(
 ) -> bool {
     let promoted = db
         .with_conn(move |conn| {
-            Ok(conn.execute(
+            let pending_identity: Option<(Option<i64>, String, String)> = conn
+                .query_row(
+                    "SELECT tidal_id_hint, pending_title, pending_artist
+                     FROM queue
+                     WHERE id = ?1 AND track_id IS NULL",
+                    rusqlite::params![queue_item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let promoted = conn.execute(
                 "UPDATE queue
                  SET track_id = ?1, resolved_at = datetime('now'),
                      tidal_match_score = ?2, resolving_at = NULL
                  WHERE id = ?3 AND track_id IS NULL",
                 rusqlite::params![local_track_id, score_stored, queue_item_id],
-            )? == 1)
+            )? == 1;
+            if promoted
+                && let Some((tidal_id_hint, pending_title, pending_artist)) = pending_identity
+            {
+                let resolved_tidal_id = conn
+                    .query_row(
+                        "SELECT tidal_id FROM tracks WHERE id = ?1",
+                        rusqlite::params![local_track_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten()
+                    .or(tidal_id_hint);
+                let _ = queries::mark_external_candidate_resolved(
+                    conn,
+                    resolved_tidal_id,
+                    &pending_title,
+                    &pending_artist,
+                    local_track_id,
+                );
+            }
+            Ok(promoted)
         })
         .unwrap_or(false);
     if promoted {
@@ -8969,6 +9072,44 @@ async fn advance_ephemeral_next_if_needed(
     Ok(None)
 }
 
+fn automix_discover_new_fallback_seed(
+    snapshot: &crate::playback::player::PlaybackSnapshot,
+) -> Option<crate::db::models::Track> {
+    if !snapshot.state.automix_discover_new {
+        return None;
+    }
+    let current_pos = snapshot
+        .state
+        .current_queue_item_id
+        .and_then(|qid| {
+            snapshot
+                .queue
+                .iter()
+                .find(|item| item.id == qid)
+                .map(|item| item.position)
+        })
+        .or_else(|| {
+            snapshot.state.current_track.as_ref().and_then(|track| {
+                snapshot
+                    .queue
+                    .iter()
+                    .find(|item| item.track.id == track.id)
+                    .map(|item| item.position)
+            })
+        })
+        .unwrap_or(0);
+    let automix_new_upcoming = snapshot
+        .queue
+        .iter()
+        .filter(|item| item.position > current_pos && item.source == "automix-new")
+        .count();
+    if automix_new_upcoming < 2 {
+        snapshot.state.current_track.clone()
+    } else {
+        None
+    }
+}
+
 async fn next_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -9027,40 +9168,11 @@ async fn next_track(
     // When "Include New" is enabled, search TIDAL for genre/artist-matched tracks and
     // inject any that aren't already in the library. Runs as a detached background task
     // so the next_track response returns immediately without blocking on TIDAL API calls.
-    if snapshot.state.automix_discover_new {
-        let current_pos = snapshot
-            .state
-            .current_queue_item_id
-            .and_then(|qid| {
-                snapshot
-                    .queue
-                    .iter()
-                    .find(|q| q.id == qid)
-                    .map(|q| q.position)
-            })
-            .or_else(|| {
-                snapshot.state.current_track.as_ref().and_then(|t| {
-                    snapshot
-                        .queue
-                        .iter()
-                        .find(|q| q.track.id == t.id)
-                        .map(|q| q.position)
-                })
-            })
-            .unwrap_or(0);
-        let new_upcoming = snapshot
-            .queue
-            .iter()
-            .filter(|q| q.position > current_pos && q.source == "automix-new")
-            .count();
-        if new_upcoming < 2
-            && let Some(track) = snapshot.state.current_track.clone()
-        {
-            let bg_state = state.clone();
-            tokio::spawn(async move {
-                inject_discovery_tracks(&bg_state, &track).await;
-            });
-        }
+    if let Some(track) = automix_discover_new_fallback_seed(&snapshot) {
+        let bg_state = state.clone();
+        tokio::spawn(async move {
+            inject_discovery_tracks(&bg_state, &track).await;
+        });
     }
 
     // A resolved pending track counts as Replaced, not QueueEnded.
@@ -16056,6 +16168,49 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    fn test_track(id: i64, title: &str) -> crate::db::models::Track {
+        crate::db::models::Track {
+            id,
+            title: title.to_string(),
+            artist_id: 1,
+            artist_name: Some("Artist".to_string()),
+            album_id: None,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: Some(180_000),
+            isrc: None,
+            tidal_id: Some(id),
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: Some("LOSSLESS".to_string()),
+            best_source: Some("tidal".to_string()),
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "tidal".to_string(),
+            artwork_url: None,
+        }
+    }
+
+    fn test_queue_item(
+        id: i64,
+        track: crate::db::models::Track,
+        position: i32,
+        source: &str,
+    ) -> crate::db::models::QueueItem {
+        crate::db::models::QueueItem {
+            id,
+            track,
+            position,
+            source: source.to_string(),
+            reason: None,
+            is_pending: source == "automix-new",
+        }
+    }
+
     #[test]
     fn stream_error_mapping_marks_session_expired_as_unauthorized() {
         let (status, Json(body)) = tidal_playback_error_response(
@@ -16722,6 +16877,101 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn promote_pending_row_emit_marks_external_candidate_resolved() {
+        let db_path = std::env::temp_dir().join(format!("noor-test-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&db_path).expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("schema migrations");
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Resolved Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, tidal_id, source, fidelity_score
+                 ) VALUES (1, 'Resolved Title', 1, 4242, 'tidal_stream', 0)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO external_track_candidates (
+                    tidal_id, dedupe_key, title, artist_name, expires_at
+                 ) VALUES (4242, 'tidal:4242', 'Resolved Title', 'Resolved Artist', '2026-03-01 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at, tidal_id_hint
+                 ) VALUES (NULL, 0, 'automix-new', 'Resolved Artist', 'Resolved Title', datetime('now'), 4242)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let queue_item_id: i64 = db
+            .with_conn(|conn| {
+                Ok(
+                    conn.query_row("SELECT id FROM queue WHERE track_id IS NULL", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+
+        let (event_tx, _rx) = tokio::sync::broadcast::channel(8);
+        let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, 1, 990);
+        assert!(promoted);
+
+        let resolved: Option<i64> = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT resolved_track_id FROM external_track_candidates WHERE tidal_id = 4242",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(resolved, Some(1));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn automix_discover_new_fallback_waits_when_sidecar_new_rows_fill_slots() {
+        let current = test_track(1, "Current");
+        let mut snapshot = crate::playback::player::PlaybackSnapshot {
+            state: crate::db::models::PlaybackState {
+                current_track: Some(current.clone()),
+                current_queue_item_id: Some(10),
+                position_ms: 0,
+                is_playing: true,
+                volume: 1.0,
+                shuffle_mode: "off".to_string(),
+                repeat_mode: "off".to_string(),
+                automix_enabled: true,
+                crossfade_ms: 0,
+                automix_discover_new: true,
+                automix_use_learning: true,
+                automix_allow_external: true,
+            },
+            queue: vec![
+                test_queue_item(10, current, 0, "manual"),
+                test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
+                test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
+            ],
+        };
+
+        assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
+
+        snapshot.queue.pop();
+
+        assert!(automix_discover_new_fallback_seed(&snapshot).is_some());
     }
 
     #[tokio::test]

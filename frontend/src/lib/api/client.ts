@@ -1046,6 +1046,9 @@ export interface DiscoveryTrainingRun {
 export interface DiscoveryStatus {
 	fallback_active: boolean;
 	active_model: EmbeddingModel | null;
+	selected_engine: DiscoveryEngine;
+	selected_engine_family: string;
+	selected_engine_trainable: boolean;
 	latest_run: DiscoveryTrainingRun | null;
 	coverage_ratio: number;
 	playable_tracks: number;
@@ -1053,6 +1056,8 @@ export interface DiscoveryStatus {
 	neighbor_tracks: number;
 	clip_cache_tracks: number;
 }
+
+export type DiscoveryEngine = 'v2' | 'v1';
 
 export interface DiscoveryRadioResult {
 	track_id: number;
@@ -1813,7 +1818,7 @@ export const api = {
 	},
 
 	startDiscoveryTraining(mode: 'full' | 'incremental', rebuild_audio = false) {
-		return fetchApi<{ status: string; mode: string }>('/api/discovery/train', undefined, {
+		return fetchApi<{ status: string; mode: string; engine?: DiscoveryEngine; message?: string }>('/api/discovery/train', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ mode, rebuild_audio }),
 		});
@@ -1834,6 +1839,28 @@ export const api = {
 			include_audio_proxy: boolean;
 			available: Array<'max' | 'medium' | 'low'>;
 		}>('/api/discovery/train/intensity');
+	},
+
+	getDiscoveryEngine() {
+		return fetchApi<{
+			engine: DiscoveryEngine;
+			label: string;
+			family: string;
+			trainable: boolean;
+			available: DiscoveryEngine[];
+		}>('/api/discovery/train/engine');
+	},
+
+	setDiscoveryEngine(engine: DiscoveryEngine) {
+		return fetchApi<{
+			engine: DiscoveryEngine;
+			label: string;
+			family: string;
+			trainable: boolean;
+		}>('/api/discovery/train/engine', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ engine }),
+		});
 	},
 
 	setDiscoveryIntensity(intensity: 'max' | 'medium' | 'low') {

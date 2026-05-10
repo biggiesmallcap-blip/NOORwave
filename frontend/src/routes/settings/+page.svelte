@@ -10,6 +10,7 @@
 		type AudioDevice,
 		type AudioQuality,
 		type VideoQualityMode,
+		type DiscoveryEngine,
 		type DiscoveryStatus,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
@@ -224,6 +225,7 @@
 				void loadMbStatus();
 				void loadPortableSnapshot();
 				void loadDiscoveryStatus();
+				void loadDiscoveryEngine();
 				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}
@@ -275,6 +277,7 @@
 		void loadMbStatus();
 		void loadPortableSnapshot();
 		void loadDiscoveryStatus();
+		void loadDiscoveryEngine();
 		void loadDiscoveryIntensity();
 		void loadDiscoverySafety();
 		void loadAudioStats();
@@ -709,6 +712,8 @@
 		try {
 			const response = await api.getDiscoveryStatus();
 			discoveryStatus = response.status;
+			discoveryEngine = response.status.selected_engine;
+			discoveryEngineTrainable = response.status.selected_engine_trainable;
 			markServerOnline();
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
@@ -719,7 +724,12 @@
 
 	async function startDiscoveryTraining(mode: 'full' | 'incremental') {
 		try {
-			await api.startDiscoveryTraining(mode);
+			const response = await api.startDiscoveryTraining(mode);
+			if (response.status === 'legacy_trainer_unavailable') {
+				errorMsg = response.message ?? 'Switch to V2 to train discovery.';
+			} else {
+				errorMsg = '';
+			}
 			await loadDiscoveryStatus();
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
@@ -749,8 +759,11 @@
 	// after the intensity changes so the safety preview reflects the new
 	// setting before the user clicks Start.
 	let discoveryIntensity: 'max' | 'medium' | 'low' = $state('medium');
+	let discoveryEngine: DiscoveryEngine = $state('v2');
+	let discoveryEngineTrainable = $state(true);
 	let discoverySafety: Awaited<ReturnType<typeof api.getDiscoverySafety>> | null = $state(null);
 	let intensityBusy = $state(false);
+	let engineBusy = $state(false);
 
 	async function loadDiscoveryIntensity() {
 		try {
@@ -761,11 +774,38 @@
 		}
 	}
 
+	async function loadDiscoveryEngine() {
+		try {
+			const r = await api.getDiscoveryEngine();
+			discoveryEngine = r.engine;
+			discoveryEngineTrainable = r.trainable;
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		}
+	}
+
 	async function loadDiscoverySafety() {
 		try {
 			discoverySafety = await api.getDiscoverySafety();
 		} catch (err) {
 			if (isFetchConnectionError(err)) markServerOffline();
+		}
+	}
+
+	async function changeDiscoveryEngine(next: DiscoveryEngine) {
+		if (engineBusy) return;
+		const previous = discoveryEngine;
+		engineBusy = true;
+		try {
+			const r = await api.setDiscoveryEngine(next);
+			discoveryEngine = r.engine;
+			discoveryEngineTrainable = r.trainable;
+			await loadDiscoveryStatus();
+		} catch (err) {
+			discoveryEngine = previous;
+			if (isFetchConnectionError(err)) markServerOffline();
+		} finally {
+			engineBusy = false;
 		}
 	}
 
@@ -817,6 +857,24 @@
 			tagline: 'Fastest. Pure behavioral.',
 			detail:
 				'48-dim, 24 neighbors, 3-track window. Skips the audio-proxy stage entirely — cold tracks lose their metadata anchor, but the engine stays usable on modest hardware. Roughly 25% of Max’s time.',
+		},
+	};
+
+	const DISCOVERY_ENGINE_PRESETS: Record<
+		DiscoveryEngine,
+		{ title: string; tagline: string; detail: string }
+	> = {
+		v2: {
+			title: 'V2 recommended',
+			tagline: 'Default engine. Directional, skip-aware, and external-aware.',
+			detail:
+				'Uses transition direction, weighted skips, expanded DSP tokens, support diagnostics, and sidecar external candidates. Recommended for automix and radio.',
+		},
+		v1: {
+			title: 'V1 legacy',
+			tagline: 'Optional fallback for older trained models.',
+			detail:
+				'Reads existing library-only V1 models for comparison or fallback. This build does not train V1, so V2 stays the default training path.',
 		},
 	};
 
@@ -1955,6 +2013,35 @@
 					</div>
 				</div>
 
+				<div class="engine-block">
+					<div class="engine-copy">
+						<label class="engine-label" for="discovery-engine-select">Discovery engine</label>
+						<p>
+							V2 is the recommended default. V1 is optional and only reads existing legacy models.
+						</p>
+					</div>
+					<select
+						id="discovery-engine-select"
+						class="engine-select"
+						bind:value={discoveryEngine}
+						disabled={discoveryIsRunning || engineBusy}
+						onchange={(event) => void changeDiscoveryEngine((event.currentTarget as HTMLSelectElement).value as DiscoveryEngine)}
+					>
+						<option value="v2">V2 recommended</option>
+						<option value="v1">V1 legacy</option>
+					</select>
+					<div class="engine-detail glass-tile">
+						<strong>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].title}</strong>
+						<span>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].tagline}</span>
+						<p>{DISCOVERY_ENGINE_PRESETS[discoveryEngine].detail}</p>
+					</div>
+					{#if !discoveryEngineTrainable}
+						<div class="legacy-engine-note">
+							V1 is read-only in this build. Switch to V2 to train or refresh discovery.
+						</div>
+					{/if}
+				</div>
+
 				<div class="intensity-block">
 					<div class="intensity-header">
 						<span class="intensity-eyebrow">Training intensity</span>
@@ -2017,8 +2104,8 @@
 				</div>
 
 				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning}>Incremental refresh</button>
-					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning}>Full retrain</button>
+					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Incremental refresh</button>
+					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Full retrain</button>
 					{#if discoveryIsRunning}
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
 					{/if}
@@ -2196,6 +2283,84 @@
 	.setting-numeric {
 		margin-left: 0.5rem;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.engine-block {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+		gap: var(--gap);
+		align-items: start;
+		padding: var(--space-4);
+		margin-bottom: var(--space-3);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.engine-copy {
+		display: grid;
+		gap: var(--space-2);
+	}
+
+	.engine-label {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.engine-copy p,
+	.engine-detail p {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		color: var(--text-secondary);
+	}
+
+	.engine-select {
+		width: 100%;
+		padding: var(--space-3) var(--space-4);
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--border-muted);
+		background: var(--bg-elevated);
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+	}
+
+	.engine-select:disabled {
+		cursor: not-allowed;
+		opacity: 0.6;
+	}
+
+	.engine-detail {
+		grid-column: 1 / -1;
+		display: grid;
+		gap: var(--space-2);
+		padding: var(--space-3);
+	}
+
+	.engine-detail strong {
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-snug);
+	}
+
+	.engine-detail span,
+	.legacy-engine-note {
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		color: var(--text-secondary);
+	}
+
+	.legacy-engine-note {
+		grid-column: 1 / -1;
+		padding: var(--space-3);
+		border-left: 3px solid var(--state-warning);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--state-warning) 12%, transparent);
 	}
 
 	/* Discovery intensity selector + safety preview */

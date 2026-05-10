@@ -1,6 +1,6 @@
 use crate::db::queries::{
-    EmbeddingTrackRow, NeighborWriteRow, get_active_embedding_model, get_embedding_track_rows,
-    get_model_embeddings, replace_seed_neighbors,
+    EmbeddingTrackRow, NeighborWriteRow, get_embedding_track_rows, get_model_embeddings,
+    get_selected_discovery_embedding_model, replace_seed_neighbors,
 };
 use crate::services::learning::unpack_vector_blob;
 /// Background per-seed neighbor computation for DiscoverSpace.
@@ -239,7 +239,7 @@ pub async fn refresh_seed_neighbors(
         anyhow::Error,
     > = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| {
-            let Some(model) = get_active_embedding_model(conn)? else {
+            let Some(model) = get_selected_discovery_embedding_model(conn)? else {
                 info!("[neighbor_refresh] no active model — skipping seed {seed_id}");
                 return Ok::<_, anyhow::Error>(None);
             };
@@ -386,6 +386,10 @@ pub async fn refresh_seed_neighbors(
                         primary_reason,
                         confidence,
                         support_count: 0,
+                        support_transition: 0.0,
+                        support_colisten: 0.0,
+                        support_structure: 0.0,
+                        support_metadata: 0.0,
                         candidate_in_degree: 0,
                         candidate_in_degree_percentile: 0.5,
                         play_count_seed: seed_play_count,
@@ -468,8 +472,8 @@ mod tests {
                 conn.execute(
                     "INSERT INTO embedding_models
                         (model_key, family, dimension, is_active, status)
-                     VALUES ('test-model', 'test-family', 32, 1, 'idle')",
-                    [],
+                     VALUES ('discovery-fusion-v2:test-model', ?1, 32, 1, 'ready')",
+                    rusqlite::params![crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY],
                 )?;
                 Ok(conn.last_insert_rowid())
             })

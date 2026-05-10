@@ -1,10 +1,15 @@
 use super::models::*;
 use crate::services::discovery::DiscoveryCandidateSeed;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+
+pub const DISCOVERY_ENGINE_V2: &str = "v2";
+pub const DISCOVERY_ENGINE_V1: &str = "v1";
+pub const DISCOVERY_ENGINE_V2_FAMILY: &str = "discovery-fusion-v2";
+pub const DISCOVERY_ENGINE_V1_FAMILY: &str = "discovery-fusion";
 
 // ─── Server Config ────────────────────────────────────────
 
@@ -3934,6 +3939,9 @@ pub struct EmbeddingTrackRow {
     pub bpm: Option<f64>,
     pub energy: Option<f64>,
     pub camelot_key: Option<String>,
+    pub danceability: Option<f64>,
+    pub beat_strength: Option<f64>,
+    pub loudness_lufs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3952,6 +3960,10 @@ pub struct EmbeddingNeighborRow {
     pub reason_json: Option<String>,
     pub confidence: f64,
     pub support_count: i64,
+    pub support_transition: f64,
+    pub support_colisten: f64,
+    pub support_structure: f64,
+    pub support_metadata: f64,
     pub candidate_in_degree: i64,
     pub candidate_in_degree_percentile: f64,
     pub play_count_seed: i64,
@@ -3975,10 +3987,89 @@ pub struct NeighborWriteRow {
     pub primary_reason: Option<String>,
     pub confidence: f64,
     pub support_count: i64,
+    pub support_transition: f64,
+    pub support_colisten: f64,
+    pub support_structure: f64,
+    pub support_metadata: f64,
     pub candidate_in_degree: i64,
     pub candidate_in_degree_percentile: f64,
     pub play_count_seed: i64,
     pub play_count_candidate: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalTrackCandidateRow {
+    pub id: i64,
+    pub tidal_id: Option<i64>,
+    pub mbid: Option<String>,
+    pub dedupe_key: String,
+    pub title: String,
+    pub artist_name: String,
+    pub genre_tags_json: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub expires_at: String,
+    pub updated_at: String,
+    pub source_tags_json: Option<String>,
+    pub resolved_track_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalCandidateFallbackIdentity {
+    normalized_artist_name: String,
+    normalized_title: String,
+    duration_bucket: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalTrackCandidateUpsert {
+    pub tidal_id: Option<i64>,
+    pub mbid: Option<String>,
+    pub dedupe_key: String,
+    pub title: String,
+    pub artist_name: String,
+    pub genre_tags_json: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalCandidateSightingUpsert {
+    pub candidate_id: i64,
+    pub seed_track_id: i64,
+    pub source: String,
+    pub source_payload_json: Option<String>,
+    pub similarity: Option<f64>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalCandidateNeighborWriteRow {
+    pub candidate_id: i64,
+    pub rank: i32,
+    pub score: f64,
+    pub audio_score: f64,
+    pub metadata_score: f64,
+    pub reason_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalCandidateNeighborRow {
+    pub candidate_id: i64,
+    pub tidal_id: Option<i64>,
+    pub title: String,
+    pub artist_name: String,
+    pub duration_ms: Option<i64>,
+    pub rank: i32,
+    pub score: f64,
+    pub audio_score: f64,
+    pub metadata_score: f64,
+    pub reason_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExternalPruneResult {
+    pub sightings_deleted: i64,
+    pub candidates_deleted: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3988,6 +4079,7 @@ pub struct ModelEmbeddingRow {
     pub l2_norm: f64,
 }
 
+#[allow(dead_code)]
 pub fn upsert_embedding_model(
     conn: &Connection,
     model_key: &str,
@@ -4029,6 +4121,42 @@ pub fn upsert_embedding_model(
     .map_err(Into::into)
 }
 
+pub fn create_embedding_model(
+    conn: &Connection,
+    model_key: &str,
+    family: &str,
+    dimension: i32,
+    status: &str,
+    config_json: Option<&str>,
+) -> Result<EmbeddingModel> {
+    conn.execute(
+        "INSERT INTO embedding_models (model_key, family, dimension, status, config_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![model_key, family, dimension, status, config_json],
+    )?;
+    let id = conn.last_insert_rowid();
+    conn.query_row(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(EmbeddingModel {
+                id: row.get(0)?,
+                model_key: row.get(1)?,
+                family: row.get(2)?,
+                dimension: row.get(3)?,
+                status: row.get(4)?,
+                is_active: row.get(5)?,
+                trained_at: row.get(6)?,
+                config_json: row.get(7)?,
+                metrics_json: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
 pub fn update_embedding_model_metrics(
     conn: &Connection,
     model_id: i64,
@@ -4042,6 +4170,97 @@ pub fn update_embedding_model_metrics(
         params![model_id, status, metrics_json],
     )?;
     Ok(())
+}
+
+fn read_embedding_model(row: &Row<'_>) -> rusqlite::Result<EmbeddingModel> {
+    Ok(EmbeddingModel {
+        id: row.get(0)?,
+        model_key: row.get(1)?,
+        family: row.get(2)?,
+        dimension: row.get(3)?,
+        status: row.get(4)?,
+        is_active: row.get(5)?,
+        trained_at: row.get(6)?,
+        config_json: row.get(7)?,
+        metrics_json: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+pub fn get_embedding_model_by_key(
+    conn: &Connection,
+    model_key: &str,
+) -> Result<Option<EmbeddingModel>> {
+    conn.query_row(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models
+         WHERE model_key = ?1
+         LIMIT 1",
+        params![model_key],
+        read_embedding_model,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn get_embedding_models_by_family(
+    conn: &Connection,
+    family: &str,
+) -> Result<Vec<EmbeddingModel>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models
+         WHERE family = ?1
+         ORDER BY trained_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![family], read_embedding_model)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_ready_embedding_model_for_family(
+    conn: &Connection,
+    family: &str,
+) -> Result<Option<EmbeddingModel>> {
+    conn.query_row(
+        "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
+         FROM embedding_models
+         WHERE family = ?1 AND status = 'ready'
+         ORDER BY is_active DESC, trained_at DESC, id DESC
+         LIMIT 1",
+        params![family],
+        read_embedding_model,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn discovery_model_family_for_engine(engine: &str) -> &'static str {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        DISCOVERY_ENGINE_V1 => DISCOVERY_ENGINE_V1_FAMILY,
+        _ => DISCOVERY_ENGINE_V2_FAMILY,
+    }
+}
+
+pub fn selected_discovery_engine(conn: &Connection) -> Result<String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'discovery_engine'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let normalized = match raw.as_deref().map(str::trim) {
+        Some(DISCOVERY_ENGINE_V1) => DISCOVERY_ENGINE_V1,
+        _ => DISCOVERY_ENGINE_V2,
+    };
+    Ok(normalized.to_string())
+}
+
+pub fn get_selected_discovery_embedding_model(conn: &Connection) -> Result<Option<EmbeddingModel>> {
+    let engine = selected_discovery_engine(conn)?;
+    get_ready_embedding_model_for_family(conn, discovery_model_family_for_engine(&engine))
 }
 
 pub fn deactivate_embedding_models(conn: &Connection) -> Result<()> {
@@ -4059,6 +4278,28 @@ pub fn activate_embedding_model(conn: &Connection, model_id: i64) -> Result<()> 
     Ok(())
 }
 
+pub fn rollback_to_ready_embedding_model(conn: &Connection, model_id: i64) -> Result<()> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM embedding_models WHERE id = ?1",
+            params![model_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if status.as_deref() != Some("ready") {
+        bail!("cannot roll back to embedding model {model_id}: model is not ready");
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE embedding_models SET is_active = 0", [])?;
+    tx.execute(
+        "UPDATE embedding_models SET is_active = 1, status = 'ready', trained_at = datetime('now')
+         WHERE id = ?1",
+        params![model_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_active_embedding_model(conn: &Connection) -> Result<Option<EmbeddingModel>> {
     conn.query_row(
         "SELECT id, model_key, family, dimension, status, is_active, trained_at, config_json, metrics_json, created_at
@@ -4067,20 +4308,7 @@ pub fn get_active_embedding_model(conn: &Connection) -> Result<Option<EmbeddingM
          ORDER BY trained_at DESC, id DESC
          LIMIT 1",
         [],
-        |row| {
-            Ok(EmbeddingModel {
-                id: row.get(0)?,
-                model_key: row.get(1)?,
-                family: row.get(2)?,
-                dimension: row.get(3)?,
-                status: row.get(4)?,
-                is_active: row.get(5)?,
-                trained_at: row.get(6)?,
-                config_json: row.get(7)?,
-                metrics_json: row.get(8)?,
-                created_at: row.get(9)?,
-            })
-        },
+        read_embedding_model,
     )
     .optional()
     .map_err(Into::into)
@@ -4099,6 +4327,14 @@ pub fn create_training_run(
     )?;
     let id = conn.last_insert_rowid();
     get_training_run(conn, id)?.ok_or_else(|| anyhow::anyhow!("training run missing after insert"))
+}
+
+pub fn update_training_run_model(conn: &Connection, run_id: i64, model_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE training_runs SET model_id = ?2 WHERE id = ?1",
+        params![run_id, model_id],
+    )?;
+    Ok(())
 }
 
 pub fn get_training_run(conn: &Connection, run_id: i64) -> Result<Option<DiscoveryTrainingRun>> {
@@ -4401,9 +4637,10 @@ pub fn replace_track_neighbors(
             "INSERT INTO track_neighbors
              (track_id, neighbor_track_id, model_id, rank, score,
               behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
-              confidence, support_count, candidate_in_degree, candidate_in_degree_percentile,
+              confidence, support_count, support_transition, support_colisten, support_structure,
+              support_metadata, candidate_in_degree, candidate_in_degree_percentile,
               play_count_seed, play_count_candidate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         )?;
         for n in neighbors {
             stmt.execute(params![
@@ -4419,6 +4656,10 @@ pub fn replace_track_neighbors(
                 n.primary_reason,
                 n.confidence,
                 n.support_count,
+                n.support_transition,
+                n.support_colisten,
+                n.support_structure,
+                n.support_metadata,
                 n.candidate_in_degree,
                 n.candidate_in_degree_percentile,
                 n.play_count_seed,
@@ -4448,9 +4689,10 @@ pub fn replace_seed_neighbors(
             "INSERT INTO track_neighbors
              (track_id, neighbor_track_id, model_id, rank, score,
               behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
-              confidence, support_count, candidate_in_degree, candidate_in_degree_percentile,
+              confidence, support_count, support_transition, support_colisten, support_structure,
+              support_metadata, candidate_in_degree, candidate_in_degree_percentile,
               play_count_seed, play_count_candidate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         )?;
         for n in rows {
             stmt.execute(params![
@@ -4466,6 +4708,10 @@ pub fn replace_seed_neighbors(
                 n.primary_reason,
                 n.confidence,
                 n.support_count,
+                n.support_transition,
+                n.support_colisten,
+                n.support_structure,
+                n.support_metadata,
                 n.candidate_in_degree,
                 n.candidate_in_degree_percentile,
                 n.play_count_seed,
@@ -4489,7 +4735,8 @@ pub fn get_track_neighbors(
                       n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json,
                       n.confidence, n.support_count, n.candidate_in_degree,
                       n.candidate_in_degree_percentile, n.play_count_seed, n.play_count_candidate,
-                      n.primary_reason
+                      n.primary_reason, n.support_transition, n.support_colisten,
+                      n.support_structure, n.support_metadata
                FROM track_neighbors n
                JOIN tracks t ON t.id = n.neighbor_track_id
                LEFT JOIN artists a ON a.id = t.artist_id
@@ -4520,6 +4767,10 @@ pub fn get_track_neighbors(
                 play_count_seed: row.get(16)?,
                 play_count_candidate: row.get(17)?,
                 primary_reason: row.get(18)?,
+                support_transition: row.get(19)?,
+                support_colisten: row.get(20)?,
+                support_structure: row.get(21)?,
+                support_metadata: row.get(22)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4528,6 +4779,568 @@ pub fn get_track_neighbors(
         rows.retain(|row| !exclude.contains(&row.track_id));
     }
     Ok(rows)
+}
+
+pub fn get_track_neighbors_for_seeds(
+    conn: &Connection,
+    model_id: i64,
+    seed_ids: &[i64],
+    limit_per_seed: i64,
+) -> Result<HashMap<i64, Vec<EmbeddingNeighborRow>>> {
+    if seed_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (0..seed_ids.len())
+        .map(|idx| format!("?{}", idx + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT n.track_id, t.id, t.title, a.name, al.title, al.artwork_url, t.duration_ms, t.best_quality,
+                n.score, n.behavioral_score, n.audio_score, n.metadata_score, n.reason_json,
+                n.confidence, n.support_count, n.candidate_in_degree,
+                n.candidate_in_degree_percentile, n.play_count_seed, n.play_count_candidate,
+                n.primary_reason, n.support_transition, n.support_colisten,
+                n.support_structure, n.support_metadata
+         FROM track_neighbors n
+         JOIN tracks t ON t.id = n.neighbor_track_id
+         LEFT JOIN artists a ON a.id = t.artist_id
+         LEFT JOIN albums al ON al.id = t.album_id
+         WHERE n.model_id = ?1
+           AND n.rank <= ?2
+           AND n.track_id IN ({placeholders})
+         ORDER BY n.track_id ASC, n.rank ASC"
+    );
+    let mut values = vec![model_id, limit_per_seed.max(1)];
+    values.extend(seed_ids.iter().copied());
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(values.iter()), |row| {
+            let seed_id = row.get::<_, i64>(0)?;
+            let neighbor = EmbeddingNeighborRow {
+                track_id: row.get(1)?,
+                title: row.get(2)?,
+                artist_name: row.get(3)?,
+                album_title: row.get(4)?,
+                artwork_url: row.get(5)?,
+                duration_ms: row.get(6)?,
+                best_quality: row.get(7)?,
+                score: row.get(8)?,
+                behavioral_score: row.get(9)?,
+                audio_score: row.get(10)?,
+                metadata_score: row.get(11)?,
+                reason_json: row.get(12)?,
+                confidence: row.get(13)?,
+                support_count: row.get(14)?,
+                candidate_in_degree: row.get(15)?,
+                candidate_in_degree_percentile: row.get(16)?,
+                play_count_seed: row.get(17)?,
+                play_count_candidate: row.get(18)?,
+                primary_reason: row.get(19)?,
+                support_transition: row.get(20)?,
+                support_colisten: row.get(21)?,
+                support_structure: row.get(22)?,
+                support_metadata: row.get(23)?,
+            };
+            Ok((seed_id, neighbor))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: HashMap<i64, Vec<EmbeddingNeighborRow>> = HashMap::new();
+    for (seed_id, neighbor) in rows {
+        grouped.entry(seed_id).or_default().push(neighbor);
+    }
+    Ok(grouped)
+}
+
+fn get_external_track_candidate_by_id(
+    conn: &Connection,
+    id: i64,
+) -> Result<ExternalTrackCandidateRow> {
+    conn.query_row(
+        "SELECT id, tidal_id, mbid, dedupe_key, title, artist_name, genre_tags_json,
+                duration_ms, expires_at, updated_at, NULL AS source_tags_json, resolved_track_id
+         FROM external_track_candidates
+         WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(ExternalTrackCandidateRow {
+                id: row.get(0)?,
+                tidal_id: row.get(1)?,
+                mbid: row.get(2)?,
+                dedupe_key: row.get(3)?,
+                title: row.get(4)?,
+                artist_name: row.get(5)?,
+                genre_tags_json: row.get(6)?,
+                duration_ms: row.get(7)?,
+                expires_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                source_tags_json: row.get(10)?,
+                resolved_track_id: row.get(11)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+pub fn get_external_track_candidates_for_training(
+    conn: &Connection,
+    now: &str,
+    limit: i64,
+) -> Result<Vec<ExternalTrackCandidateRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tidal_id, mbid, dedupe_key, title, artist_name, genre_tags_json,
+                duration_ms, expires_at, updated_at,
+                (
+                    SELECT json_group_array(source)
+                    FROM (
+                        SELECT DISTINCT source
+                        FROM external_track_candidate_sightings s
+                        WHERE s.candidate_id = c.id
+                          AND s.expires_at > ?1
+                        ORDER BY source
+                    )
+                ) AS source_tags_json,
+                resolved_track_id
+         FROM external_track_candidates c
+         WHERE c.expires_at > ?1
+           AND c.resolved_track_id IS NULL
+         ORDER BY c.updated_at DESC, c.id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![now, limit.max(1)], |row| {
+            Ok(ExternalTrackCandidateRow {
+                id: row.get(0)?,
+                tidal_id: row.get(1)?,
+                mbid: row.get(2)?,
+                dedupe_key: row.get(3)?,
+                title: row.get(4)?,
+                artist_name: row.get(5)?,
+                genre_tags_json: row.get(6)?,
+                duration_ms: row.get(7)?,
+                expires_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                source_tags_json: row.get(10)?,
+                resolved_track_id: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn upsert_external_track_candidate(
+    conn: &Connection,
+    input: &ExternalTrackCandidateUpsert,
+) -> Result<ExternalTrackCandidateRow> {
+    let fallback_identity =
+        external_candidate_fallback_identity(&input.artist_name, &input.title, input.duration_ms);
+    let existing_id = if let Some(tidal_id) = input.tidal_id {
+        conn.query_row(
+            "SELECT id FROM external_track_candidates WHERE tidal_id = ?1",
+            params![tidal_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else if let Some(mbid) = input.mbid.as_deref() {
+        conn.query_row(
+            "SELECT id FROM external_track_candidates WHERE mbid = ?1",
+            params![mbid],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT id FROM external_track_candidates
+             WHERE dedupe_key = ?1
+                OR (
+                    tidal_id IS NULL
+                    AND mbid IS NULL
+                    AND
+                    normalized_artist_name = ?2
+                    AND normalized_title = ?3
+                    AND duration_bucket = ?4
+                )
+             LIMIT 1",
+            params![
+                input.dedupe_key,
+                &fallback_identity.normalized_artist_name,
+                &fallback_identity.normalized_title,
+                fallback_identity.duration_bucket,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?
+    };
+
+    let id = if let Some(id) = existing_id {
+        conn.execute(
+            "UPDATE external_track_candidates
+             SET tidal_id = COALESCE(?2, tidal_id),
+                 mbid = COALESCE(?3, mbid),
+                 dedupe_key = ?4,
+                 normalized_artist_name = ?5,
+                 normalized_title = ?6,
+                 duration_bucket = ?7,
+                 title = ?8,
+                 artist_name = ?9,
+                 genre_tags_json = ?10,
+                 duration_ms = ?11,
+                 expires_at = ?12,
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+            params![
+                id,
+                input.tidal_id,
+                input.mbid,
+                input.dedupe_key,
+                &fallback_identity.normalized_artist_name,
+                &fallback_identity.normalized_title,
+                fallback_identity.duration_bucket,
+                input.title,
+                input.artist_name,
+                input.genre_tags_json,
+                input.duration_ms,
+                input.expires_at,
+            ],
+        )?;
+        id
+    } else {
+        conn.execute(
+            "INSERT INTO external_track_candidates
+             (tidal_id, mbid, dedupe_key, normalized_artist_name, normalized_title,
+              duration_bucket, title, artist_name, genre_tags_json, duration_ms, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                input.tidal_id,
+                input.mbid,
+                input.dedupe_key,
+                &fallback_identity.normalized_artist_name,
+                &fallback_identity.normalized_title,
+                fallback_identity.duration_bucket,
+                input.title,
+                input.artist_name,
+                input.genre_tags_json,
+                input.duration_ms,
+                input.expires_at,
+            ],
+        )?;
+        conn.last_insert_rowid()
+    };
+
+    get_external_track_candidate_by_id(conn, id)
+}
+
+fn external_candidate_fallback_identity(
+    artist_name: &str,
+    title: &str,
+    duration_ms: Option<i64>,
+) -> ExternalCandidateFallbackIdentity {
+    ExternalCandidateFallbackIdentity {
+        normalized_artist_name: normalize_external_candidate_text(artist_name),
+        normalized_title: normalize_external_candidate_text(title),
+        duration_bucket: duration_ms.map(|value| value / 30_000).unwrap_or(0),
+    }
+}
+
+fn normalize_external_candidate_text(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn upsert_external_candidate_sighting(
+    conn: &Connection,
+    input: &ExternalCandidateSightingUpsert,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO external_track_candidate_sightings
+         (candidate_id, seed_track_id, source, source_payload_json, similarity, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(candidate_id, seed_track_id, source) DO UPDATE SET
+             source_payload_json = excluded.source_payload_json,
+             similarity = excluded.similarity,
+             seen_at = datetime('now'),
+             expires_at = excluded.expires_at",
+        params![
+            input.candidate_id,
+            input.seed_track_id,
+            input.source,
+            input.source_payload_json,
+            input.similarity,
+            input.expires_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn replace_external_candidate_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    library_track_id: i64,
+    rows: &[ExternalCandidateNeighborWriteRow],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_neighbors
+         WHERE model_id = ?1 AND library_track_id = ?2",
+        params![model_id, library_track_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO external_track_candidate_neighbors
+             (library_track_id, candidate_id, model_id, rank, score, audio_score, metadata_score, reason_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                library_track_id,
+                row.candidate_id,
+                model_id,
+                row.rank,
+                row.score,
+                row.audio_score,
+                row.metadata_score,
+                row.reason_json,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn get_external_candidate_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    library_track_id: i64,
+    limit: i64,
+    require_tidal: bool,
+) -> Result<Vec<ExternalCandidateNeighborRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.tidal_id, c.title, c.artist_name, c.duration_ms,
+                n.rank, n.score, n.audio_score, n.metadata_score, n.reason_json
+         FROM external_track_candidate_neighbors n
+         JOIN external_track_candidates c ON c.id = n.candidate_id
+         WHERE n.model_id = ?1
+           AND n.library_track_id = ?2
+           AND (?3 = 0 OR c.tidal_id IS NOT NULL)
+         ORDER BY n.rank ASC
+         LIMIT ?4",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                model_id,
+                library_track_id,
+                require_tidal as i32,
+                limit.max(1)
+            ],
+            |row| {
+                Ok(ExternalCandidateNeighborRow {
+                    candidate_id: row.get(0)?,
+                    tidal_id: row.get(1)?,
+                    title: row.get(2)?,
+                    artist_name: row.get(3)?,
+                    duration_ms: row.get(4)?,
+                    rank: row.get(5)?,
+                    score: row.get(6)?,
+                    audio_score: row.get(7)?,
+                    metadata_score: row.get(8)?,
+                    reason_json: row.get(9)?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn mark_external_candidate_resolved(
+    conn: &Connection,
+    tidal_id: Option<i64>,
+    title: &str,
+    artist_name: &str,
+    resolved_track_id: i64,
+) -> Result<usize> {
+    let mut changed = 0usize;
+    if let Some(tidal_id) = tidal_id.filter(|id| *id > 0) {
+        changed += conn.execute(
+            "UPDATE external_track_candidates
+             SET resolved_track_id = ?2
+             WHERE tidal_id = ?1",
+            params![tidal_id, resolved_track_id],
+        )?;
+        if changed > 0 {
+            return Ok(changed);
+        }
+    }
+
+    changed += conn.execute(
+        "UPDATE OR IGNORE external_track_candidates
+         SET tidal_id = COALESCE(?1, tidal_id),
+             resolved_track_id = ?4
+         WHERE resolved_track_id IS NULL
+           AND tidal_id IS NULL
+           AND lower(trim(title)) = lower(trim(?2))
+           AND lower(trim(artist_name)) = lower(trim(?3))",
+        params![tidal_id, title, artist_name, resolved_track_id],
+    )?;
+    Ok(changed)
+}
+
+pub fn replace_external_candidate_audio_feature(
+    conn: &Connection,
+    candidate_id: i64,
+    feature_version: &str,
+    vector_blob: &[u8],
+    clip_start_ms: i64,
+    clip_duration_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO external_track_candidate_audio_features
+         (candidate_id, feature_version, vector_blob, clip_start_ms, clip_duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(candidate_id) DO UPDATE SET
+             feature_version = excluded.feature_version,
+             vector_blob = excluded.vector_blob,
+             clip_start_ms = excluded.clip_start_ms,
+             clip_duration_ms = excluded.clip_duration_ms,
+             computed_at = datetime('now')",
+        params![
+            candidate_id,
+            feature_version,
+            vector_blob,
+            clip_start_ms,
+            clip_duration_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn replace_external_candidate_embedding(
+    conn: &Connection,
+    candidate_id: i64,
+    model_id: i64,
+    vector_blob: &[u8],
+    l2_norm: f64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO external_track_candidate_embeddings
+         (candidate_id, model_id, vector_blob, l2_norm)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(candidate_id, model_id) DO UPDATE SET
+             vector_blob = excluded.vector_blob,
+             l2_norm = excluded.l2_norm,
+             generated_at = datetime('now')",
+        params![candidate_id, model_id, vector_blob, l2_norm],
+    )?;
+    Ok(())
+}
+
+pub fn prune_expired_external_candidates(
+    conn: &Connection,
+    now: &str,
+) -> Result<ExternalPruneResult> {
+    let tx = conn.unchecked_transaction()?;
+    let sightings_deleted = tx.execute(
+        "DELETE FROM external_track_candidate_sightings WHERE expires_at <= ?1",
+        params![now],
+    )? as i64;
+    tx.execute(
+        "DELETE FROM external_track_candidate_neighbors
+         WHERE candidate_id IN (
+             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
+         )",
+        params![now],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_embeddings
+         WHERE candidate_id IN (
+             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
+         )",
+        params![now],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_audio_features
+         WHERE candidate_id IN (
+             SELECT id FROM external_track_candidates WHERE expires_at <= ?1
+         )",
+        params![now],
+    )?;
+    let candidates_deleted = tx.execute(
+        "DELETE FROM external_track_candidates WHERE expires_at <= ?1",
+        params![now],
+    )? as i64;
+    tx.commit()?;
+    Ok(ExternalPruneResult {
+        sightings_deleted,
+        candidates_deleted,
+    })
+}
+
+pub fn merge_external_track_candidates(
+    conn: &Connection,
+    winner_id: i64,
+    loser_id: i64,
+) -> Result<()> {
+    if winner_id == loser_id {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute(
+        "UPDATE OR IGNORE external_track_candidate_sightings
+         SET candidate_id = ?1
+         WHERE candidate_id = ?2",
+        params![winner_id, loser_id],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_sightings WHERE candidate_id = ?1",
+        params![loser_id],
+    )?;
+
+    tx.execute(
+        "UPDATE OR IGNORE external_track_candidate_audio_features
+         SET candidate_id = ?1
+         WHERE candidate_id = ?2",
+        params![winner_id, loser_id],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_audio_features WHERE candidate_id = ?1",
+        params![loser_id],
+    )?;
+
+    tx.execute(
+        "UPDATE OR IGNORE external_track_candidate_embeddings
+         SET candidate_id = ?1
+         WHERE candidate_id = ?2",
+        params![winner_id, loser_id],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_embeddings WHERE candidate_id = ?1",
+        params![loser_id],
+    )?;
+
+    tx.execute(
+        "UPDATE OR IGNORE external_track_candidate_neighbors
+         SET candidate_id = ?1
+         WHERE candidate_id = ?2",
+        params![winner_id, loser_id],
+    )?;
+    tx.execute(
+        "DELETE FROM external_track_candidate_neighbors WHERE candidate_id = ?1",
+        params![loser_id],
+    )?;
+
+    tx.execute(
+        "DELETE FROM external_track_candidates WHERE id = ?1",
+        params![loser_id],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn get_model_embeddings(conn: &Connection, model_id: i64) -> Result<Vec<ModelEmbeddingRow>> {
@@ -4561,7 +5374,7 @@ pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackR
         "SELECT t.id, t.title, a.name, al.title, t.duration_ms, t.best_quality, t.source,
                 t.play_count, t.is_favorite,
                 (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.track_id = t.id) AS playlist_memberships,
-                d.bpm, d.energy, d.camelot_key
+                d.bpm, d.energy, d.camelot_key, d.danceability, d.beat_strength, d.loudness_lufs
          FROM tracks t
          LEFT JOIN artists a ON a.id = t.artist_id
          LEFT JOIN albums al ON al.id = t.album_id
@@ -4586,6 +5399,9 @@ pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackR
                 bpm: row.get(10)?,
                 energy: row.get(11)?,
                 camelot_key: row.get(12)?,
+                danceability: row.get(13)?,
+                beat_strength: row.get(14)?,
+                loudness_lufs: row.get(15)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4594,7 +5410,9 @@ pub fn get_embedding_track_rows(conn: &Connection) -> Result<Vec<EmbeddingTrackR
 }
 
 pub fn get_discovery_status(conn: &Connection) -> Result<DiscoveryStatus> {
-    let active_model = get_active_embedding_model(conn)?;
+    let selected_engine = selected_discovery_engine(conn)?;
+    let selected_engine_family = discovery_model_family_for_engine(&selected_engine).to_string();
+    let active_model = get_selected_discovery_embedding_model(conn)?;
     let latest_run = get_latest_training_run(conn)?;
     let playable_tracks: i64 = conn.query_row(
         "SELECT COUNT(*)
@@ -4629,9 +5447,13 @@ pub fn get_discovery_status(conn: &Connection) -> Result<DiscoveryStatus> {
         neighbor_tracks as f64 / playable_tracks as f64
     };
 
+    let selected_engine_trainable = selected_engine == DISCOVERY_ENGINE_V2;
     Ok(DiscoveryStatus {
         fallback_active: active_model.is_none(),
         active_model,
+        selected_engine,
+        selected_engine_family,
+        selected_engine_trainable,
         latest_run,
         coverage_ratio,
         playable_tracks,
@@ -4692,6 +5514,7 @@ pub fn record_discovery_feedback(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn get_playback_transition_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
     let mut stmt = conn.prepare(
         "SELECT from_track_id, to_track_id
@@ -4704,6 +5527,133 @@ pub fn get_playback_transition_sequences(conn: &Connection) -> Result<Vec<Vec<i6
     Ok(pairs.into_iter().map(|(a, b)| vec![a, b]).collect())
 }
 
+#[derive(Debug, Clone)]
+pub struct WeightedTrackPairRow {
+    pub event_id: String,
+    pub from_track_id: i64,
+    pub to_track_id: i64,
+    pub weight: f64,
+    pub source: Option<String>,
+    pub completed_prev: Option<bool>,
+}
+
+pub fn get_playback_transition_edges(conn: &Connection) -> Result<Vec<WeightedTrackPairRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            'playback_transition:' || id,
+            from_track_id,
+            to_track_id,
+            1.0,
+            transition_source,
+            completed_prev
+         FROM playback_transitions
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(WeightedTrackPairRow {
+                event_id: row.get(0)?,
+                from_track_id: row.get(1)?,
+                to_track_id: row.get(2)?,
+                weight: row.get(3)?,
+                source: row.get(4)?,
+                completed_prev: Some(row.get::<_, bool>(5)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_completion_weighted_listen_edges(
+    conn: &Connection,
+    session_window_minutes: i64,
+) -> Result<Vec<WeightedTrackPairRow>> {
+    let mut stmt = conn.prepare(
+        "WITH weighted AS (
+            SELECT
+                lh.id,
+                lh.track_id,
+                lh.started_at,
+                lh.session_id,
+                lh.source,
+                CASE
+                    WHEN t.duration_ms IS NOT NULL AND t.duration_ms > 0 THEN
+                        MIN(1.0, CAST(COALESCE(lh.duration_listened_ms, 0) AS REAL) / CAST(t.duration_ms AS REAL))
+                    WHEN COALESCE(lh.completed, 0) = 1 THEN 1.0
+                    ELSE 0.25
+                END AS completion_weight
+            FROM listen_history lh
+            JOIN tracks t ON t.id = lh.track_id
+        )
+        SELECT
+            'listen_history_pair:' || a.id || ':' || b.id,
+            a.track_id,
+            b.track_id,
+            MIN(a.completion_weight, b.completion_weight),
+            COALESCE(b.source, a.source)
+        FROM weighted a
+        JOIN weighted b
+            ON b.id > a.id
+           AND b.track_id != a.track_id
+           AND (
+                (a.session_id IS NOT NULL AND a.session_id = b.session_id)
+                OR (
+                    (a.session_id IS NULL OR b.session_id IS NULL)
+                    AND b.started_at BETWEEN a.started_at AND datetime(a.started_at, printf('+%d minutes', ?1))
+                )
+           )
+        ORDER BY a.started_at ASC, a.id ASC, b.started_at ASC, b.id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![session_window_minutes.max(1)], |row| {
+            Ok(WeightedTrackPairRow {
+                event_id: row.get(0)?,
+                from_track_id: row.get(1)?,
+                to_track_id: row.get(2)?,
+                weight: row.get(3)?,
+                source: row.get(4)?,
+                completed_prev: None,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_listen_history_transition_edges(conn: &Connection) -> Result<Vec<WeightedTrackPairRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            'listen_history:' || lh.id,
+            lh.transition_from_track_id,
+            lh.track_id,
+            CASE
+                WHEN t.duration_ms IS NOT NULL AND t.duration_ms > 0 THEN
+                    MIN(1.0, CAST(COALESCE(lh.duration_listened_ms, 0) AS REAL) / CAST(t.duration_ms AS REAL))
+                WHEN COALESCE(lh.completed, 0) = 1 THEN 1.0
+                ELSE 0.25
+            END AS completion_weight,
+            lh.source
+         FROM listen_history lh
+         JOIN tracks t ON t.id = lh.track_id
+         WHERE lh.transition_from_track_id IS NOT NULL
+           AND lh.transition_from_track_id != lh.track_id
+         ORDER BY lh.started_at ASC, lh.id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(WeightedTrackPairRow {
+                event_id: row.get(0)?,
+                from_track_id: row.get(1)?,
+                to_track_id: row.get(2)?,
+                weight: row.get(3)?,
+                source: row.get(4)?,
+                completed_prev: None,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+#[allow(dead_code)]
 pub fn get_listen_history_sequences(
     conn: &Connection,
     session_window_minutes: i64,
@@ -5356,6 +6306,905 @@ mod tests {
 
         assert!(get_onboarding_complete(&conn).expect("read flag"));
         assert_eq!(read_onboarding_value(&conn).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn create_embedding_model_inserts_run_scoped_rows_without_overwriting_active_model() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let active = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:1",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            Some(r#"{"run":1}"#),
+        )
+        .expect("create active");
+        activate_embedding_model(&conn, active.id).expect("activate active");
+
+        let candidate = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:2",
+            "discovery-fusion-v2",
+            64,
+            "training",
+            Some(r#"{"run":2}"#),
+        )
+        .expect("create candidate");
+
+        assert_ne!(active.id, candidate.id);
+        let still_active = get_active_embedding_model(&conn)
+            .expect("active lookup")
+            .expect("active model");
+        assert_eq!(still_active.id, active.id);
+        assert_eq!(still_active.model_key, "discovery-fusion-v2:1");
+    }
+
+    #[test]
+    fn neighbor_support_breakdown_round_trips_through_full_and_seed_replacement() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id, duration_ms)
+             VALUES (1, 'Seed', 1, 101, 180000),
+                    (2, 'Neighbor', 1, 102, 181000),
+                    (3, 'Refresh', 1, 103, 182000)",
+            [],
+        )
+        .expect("seed tracks");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:1",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create model");
+
+        replace_track_neighbors(
+            &conn,
+            model.id,
+            &[NeighborWriteRow {
+                track_id: 1,
+                neighbor_track_id: 2,
+                rank: 1,
+                score: 0.91,
+                behavioral_score: 0.4,
+                audio_score: 0.3,
+                metadata_score: 0.2,
+                reason_json: None,
+                primary_reason: Some("direct_transition".to_string()),
+                confidence: 0.8,
+                support_count: 4,
+                support_transition: 2.5,
+                support_colisten: 1.25,
+                support_structure: 0.75,
+                support_metadata: 0.5,
+                candidate_in_degree: 7,
+                candidate_in_degree_percentile: 0.7,
+                play_count_seed: 10,
+                play_count_candidate: 3,
+            }],
+        )
+        .expect("replace neighbors");
+
+        let rows = get_track_neighbors(&conn, model.id, 1, 10, &[]).expect("read neighbors");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].support_count, 4);
+        assert_eq!(rows[0].support_transition, 2.5);
+        assert_eq!(rows[0].support_colisten, 1.25);
+        assert_eq!(rows[0].support_structure, 0.75);
+        assert_eq!(rows[0].support_metadata, 0.5);
+
+        replace_seed_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[NeighborWriteRow {
+                track_id: 1,
+                neighbor_track_id: 3,
+                rank: 1,
+                score: 0.88,
+                behavioral_score: 0.35,
+                audio_score: 0.35,
+                metadata_score: 0.18,
+                reason_json: None,
+                primary_reason: Some("session_colisten".to_string()),
+                confidence: 0.77,
+                support_count: 3,
+                support_transition: 0.0,
+                support_colisten: 2.0,
+                support_structure: 1.0,
+                support_metadata: 0.25,
+                candidate_in_degree: 5,
+                candidate_in_degree_percentile: 0.6,
+                play_count_seed: 10,
+                play_count_candidate: 4,
+            }],
+        )
+        .expect("replace seed neighbors");
+
+        let refreshed =
+            get_track_neighbors(&conn, model.id, 1, 10, &[]).expect("read refreshed neighbors");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].track_id, 3);
+        assert_eq!(refreshed[0].support_count, 3);
+        assert_eq!(refreshed[0].support_transition, 0.0);
+        assert_eq!(refreshed[0].support_colisten, 2.0);
+        assert_eq!(refreshed[0].support_structure, 1.0);
+        assert_eq!(refreshed[0].support_metadata, 0.25);
+    }
+
+    #[test]
+    fn embedding_model_lookup_and_rollback_keep_rows_intact() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let prior = create_embedding_model(
+            &conn,
+            "discovery-fusion-v1",
+            "discovery-fusion-v1",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create prior");
+        let candidate = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:7",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create candidate");
+        activate_embedding_model(&conn, candidate.id).expect("activate candidate");
+
+        let by_key = get_embedding_model_by_key(&conn, "discovery-fusion-v2:7")
+            .expect("lookup by key")
+            .expect("model by key");
+        assert_eq!(by_key.id, candidate.id);
+
+        let v2_rows =
+            get_embedding_models_by_family(&conn, "discovery-fusion-v2").expect("lookup by family");
+        assert_eq!(v2_rows.len(), 1);
+        assert_eq!(v2_rows[0].id, candidate.id);
+
+        rollback_to_ready_embedding_model(&conn, prior.id).expect("rollback");
+        let active = get_active_embedding_model(&conn)
+            .expect("active lookup")
+            .expect("active model");
+        assert_eq!(active.id, prior.id);
+        assert!(
+            get_embedding_model_by_key(&conn, "discovery-fusion-v2:7")
+                .expect("candidate lookup")
+                .is_some(),
+            "rollback must not delete the newer model row"
+        );
+    }
+
+    #[test]
+    fn selected_discovery_model_lookup_uses_configured_engine_family() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let legacy = create_embedding_model(
+            &conn,
+            "discovery-fusion:legacy",
+            "discovery-fusion",
+            96,
+            "ready",
+            None,
+        )
+        .expect("create legacy model");
+        let v2 = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:default",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create v2 model");
+        activate_embedding_model(&conn, v2.id).expect("activate v2");
+
+        let selected = get_selected_discovery_embedding_model(&conn)
+            .expect("selected lookup")
+            .expect("selected default model");
+        assert_eq!(selected.id, v2.id);
+
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('discovery_engine', 'v1')",
+            [],
+        )
+        .expect("select legacy engine");
+
+        let selected = get_selected_discovery_embedding_model(&conn)
+            .expect("selected lookup")
+            .expect("selected legacy model");
+        assert_eq!(selected.id, legacy.id);
+        assert_eq!(selected.family, "discovery-fusion");
+    }
+
+    #[test]
+    fn bulk_neighbor_loading_groups_by_seed_and_preserves_support_columns() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed A', 1, 201),
+                    (2, 'Seed B', 1, 202),
+                    (3, 'Candidate A', 1, 203),
+                    (4, 'Candidate B', 1, 204)",
+            [],
+        )
+        .expect("seed tracks");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:bulk",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create model");
+
+        let mk = |track_id, neighbor_track_id, rank, support_transition: f64| NeighborWriteRow {
+            track_id,
+            neighbor_track_id,
+            rank,
+            score: 0.9,
+            behavioral_score: 0.4,
+            audio_score: 0.3,
+            metadata_score: 0.2,
+            reason_json: None,
+            primary_reason: None,
+            confidence: 0.8,
+            support_count: support_transition.round() as i64,
+            support_transition,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: 0.0,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+        };
+        replace_track_neighbors(&conn, model.id, &[mk(1, 3, 1, 2.0), mk(2, 4, 1, 3.0)])
+            .expect("replace neighbors");
+
+        let grouped =
+            get_track_neighbors_for_seeds(&conn, model.id, &[1, 2], 10).expect("bulk load");
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped.get(&1).unwrap()[0].track_id, 3);
+        assert_eq!(grouped.get(&1).unwrap()[0].support_transition, 2.0);
+        assert_eq!(grouped.get(&2).unwrap()[0].track_id, 4);
+        assert_eq!(grouped.get(&2).unwrap()[0].support_transition, 3.0);
+    }
+
+    #[test]
+    fn completion_weighted_listen_edges_downweight_skipped_tracks() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id, duration_ms)
+             VALUES (1, 'Half Listen', 1, 301, 180000),
+                    (2, 'Complete Listen', 1, 302, 180000)",
+            [],
+        )
+        .expect("seed tracks");
+        conn.execute(
+            "INSERT INTO listen_history
+                (id, track_id, started_at, duration_listened_ms, completed, session_id, source, position_in_session)
+             VALUES
+                (1, 1, '2026-01-01 00:00:00', 90000, 0, 's1', 'manual', 1),
+                (2, 2, '2026-01-01 00:03:00', 180000, 1, 's1', 'manual', 2)",
+            [],
+        )
+        .expect("seed listens");
+
+        let rows = get_completion_weighted_listen_edges(&conn, 45).expect("weighted edges");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].from_track_id, 1);
+        assert_eq!(rows[0].to_track_id, 2);
+        assert!((rows[0].weight - 0.5).abs() < 1e-9);
+        assert_eq!(rows[0].source.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn listen_history_transition_edges_preserve_source_and_completion_weight() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id, duration_ms)
+             VALUES (1, 'Before', 1, 401, 200000),
+                    (2, 'After', 1, 402, 200000)",
+            [],
+        )
+        .expect("seed tracks");
+        conn.execute(
+            "INSERT INTO listen_history
+                (id, track_id, started_at, duration_listened_ms, completed, source, transition_from_track_id)
+             VALUES
+                (10, 2, '2026-01-01 00:04:00', 50000, 0, 'automix-new', 1)",
+            [],
+        )
+        .expect("seed transition listen");
+
+        let rows = get_listen_history_transition_edges(&conn).expect("transition edges");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, "listen_history:10");
+        assert_eq!(rows[0].from_track_id, 1);
+        assert_eq!(rows[0].to_track_id, 2);
+        assert!((rows[0].weight - 0.25).abs() < 1e-9);
+        assert_eq!(rows[0].source.as_deref(), Some("automix-new"));
+    }
+
+    #[test]
+    fn external_candidate_upsert_dedupes_unresolved_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let first = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "artist:unknown|title:signal|dur:180".to_string(),
+                title: "Signal".to_string(),
+                artist_name: "Unknown Artist".to_string(),
+                genre_tags_json: Some(r#"["electronic"]"#.to_string()),
+                duration_ms: Some(180_000),
+                expires_at: "2026-02-01 00:00:00".to_string(),
+            },
+        )
+        .expect("insert candidate");
+        let second = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "artist:unknown|title:signal|dur:180".to_string(),
+                title: "Signal".to_string(),
+                artist_name: "Unknown Artist".to_string(),
+                genre_tags_json: Some(r#"["electronic","fresh"]"#.to_string()),
+                duration_ms: Some(180_000),
+                expires_at: "2026-02-02 00:00:00".to_string(),
+            },
+        )
+        .expect("upsert candidate");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            second.genre_tags_json.as_deref(),
+            Some(r#"["electronic","fresh"]"#)
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidates",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count candidates");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn external_candidate_upsert_dedupes_unresolved_rows_by_normalized_identity() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let first = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "provider-a:signal".to_string(),
+                title: "Signal!".to_string(),
+                artist_name: "Unknown Artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(181_000),
+                expires_at: "2026-02-01 00:00:00".to_string(),
+            },
+        )
+        .expect("insert candidate");
+        let second = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "provider-b:signal".to_string(),
+                title: "signal".to_string(),
+                artist_name: "unknown-artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(185_000),
+                expires_at: "2026-02-02 00:00:00".to_string(),
+            },
+        )
+        .expect("upsert candidate");
+
+        assert_eq!(first.id, second.id);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidates",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count candidates");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn external_sightings_and_neighbors_replace_without_stale_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed', 1, 501)",
+            [],
+        )
+        .expect("seed track");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:external",
+            "discovery-fusion-v2",
+            64,
+            "ready",
+            None,
+        )
+        .expect("create model");
+        let candidate = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: Some(9001),
+                mbid: Some("mbid-9001".to_string()),
+                dedupe_key: "tidal:9001".to_string(),
+                title: "External".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(200_000),
+                expires_at: "2026-02-01 00:00:00".to_string(),
+            },
+        )
+        .expect("candidate");
+
+        upsert_external_candidate_sighting(
+            &conn,
+            &ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: Some(r#"{"match":0.9}"#.to_string()),
+                similarity: Some(0.9),
+                expires_at: "2026-02-01 00:00:00".to_string(),
+            },
+        )
+        .expect("insert sighting");
+        upsert_external_candidate_sighting(
+            &conn,
+            &ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: Some(r#"{"match":0.95}"#.to_string()),
+                similarity: Some(0.95),
+                expires_at: "2026-02-02 00:00:00".to_string(),
+            },
+        )
+        .expect("update sighting");
+        let sighting_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_sightings",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count sightings");
+        assert_eq!(sighting_count, 1);
+
+        replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[ExternalCandidateNeighborWriteRow {
+                candidate_id: candidate.id,
+                rank: 1,
+                score: 0.91,
+                audio_score: 0.8,
+                metadata_score: 0.11,
+                reason_json: Some(r#"[{"key":"lastfm_similar"}]"#.to_string()),
+            }],
+        )
+        .expect("write neighbor");
+        replace_external_candidate_neighbors(&conn, model.id, 1, &[])
+            .expect("remove stale neighbors");
+        let neighbor_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_neighbors",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count neighbors");
+        assert_eq!(neighbor_count, 0);
+    }
+
+    #[test]
+    fn external_features_embeddings_and_expired_rows_prune_transactionally() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed', 1, 601)",
+            [],
+        )
+        .expect("seed track");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:external-features",
+            "discovery-fusion-v2",
+            2,
+            "ready",
+            None,
+        )
+        .expect("create model");
+        let expired = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "expired".to_string(),
+                title: "Expired".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-01-01 00:00:00".to_string(),
+            },
+        )
+        .expect("expired candidate");
+        let fresh = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "fresh".to_string(),
+                title: "Fresh".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("fresh candidate");
+
+        replace_external_candidate_audio_feature(
+            &conn,
+            fresh.id,
+            "metadata-audio-proxy-v2",
+            &[1, 2, 3, 4],
+            0,
+            20_000,
+        )
+        .expect("feature");
+        replace_external_candidate_embedding(&conn, fresh.id, model.id, &[5, 6, 7, 8], 1.0)
+            .expect("embedding");
+        replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[ExternalCandidateNeighborWriteRow {
+                candidate_id: expired.id,
+                rank: 1,
+                score: 0.5,
+                audio_score: 0.5,
+                metadata_score: 0.0,
+                reason_json: None,
+            }],
+        )
+        .expect("neighbor");
+
+        let pruned =
+            prune_expired_external_candidates(&conn, "2026-02-01 00:00:00").expect("prune expired");
+        assert_eq!(pruned.sightings_deleted, 0);
+        assert_eq!(pruned.candidates_deleted, 1);
+
+        let candidate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidates",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count candidates");
+        let feature_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_audio_features",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count features");
+        let embedding_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_embeddings",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count embeddings");
+        let neighbor_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_neighbors",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count neighbors");
+        assert_eq!(candidate_count, 1);
+        assert_eq!(feature_count, 1);
+        assert_eq!(embedding_count, 1);
+        assert_eq!(neighbor_count, 0);
+    }
+
+    #[test]
+    fn external_candidate_merge_moves_sidecar_rows_before_deleting_loser() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed', 1, 701)",
+            [],
+        )
+        .expect("seed track");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:external-merge",
+            "discovery-fusion-v2",
+            2,
+            "ready",
+            None,
+        )
+        .expect("create model");
+        let winner = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: Some(9100),
+                mbid: None,
+                dedupe_key: "tidal:9100".to_string(),
+                title: "Winner".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("winner");
+        let loser = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "fallback:winner".to_string(),
+                title: "Winner".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("loser");
+        upsert_external_candidate_sighting(
+            &conn,
+            &ExternalCandidateSightingUpsert {
+                candidate_id: loser.id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: None,
+                similarity: Some(0.8),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("sighting");
+        replace_external_candidate_audio_feature(&conn, loser.id, "v", &[1, 2], 0, 1)
+            .expect("feature");
+        replace_external_candidate_embedding(&conn, loser.id, model.id, &[3, 4], 1.0)
+            .expect("embedding");
+        replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[ExternalCandidateNeighborWriteRow {
+                candidate_id: loser.id,
+                rank: 1,
+                score: 0.7,
+                audio_score: 0.7,
+                metadata_score: 0.0,
+                reason_json: None,
+            }],
+        )
+        .expect("neighbor");
+
+        merge_external_track_candidates(&conn, winner.id, loser.id).expect("merge");
+
+        let loser_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidates WHERE id = ?1",
+                params![loser.id],
+                |row| row.get(0),
+            )
+            .expect("loser count");
+        let moved_sightings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_sightings WHERE candidate_id = ?1",
+                params![winner.id],
+                |row| row.get(0),
+            )
+            .expect("sighting count");
+        let moved_features: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_audio_features WHERE candidate_id = ?1",
+                params![winner.id],
+                |row| row.get(0),
+            )
+            .expect("feature count");
+        let moved_embeddings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_embeddings WHERE candidate_id = ?1",
+                params![winner.id],
+                |row| row.get(0),
+            )
+            .expect("embedding count");
+        let moved_neighbors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_track_candidate_neighbors WHERE candidate_id = ?1",
+                params![winner.id],
+                |row| row.get(0),
+            )
+            .expect("neighbor count");
+        assert_eq!(loser_count, 0);
+        assert_eq!(moved_sightings, 1);
+        assert_eq!(moved_features, 1);
+        assert_eq!(moved_embeddings, 1);
+        assert_eq!(moved_neighbors, 1);
+    }
+
+    #[test]
+    fn external_candidates_for_training_skip_expired_and_resolved_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Resolved Track', 1, 801)",
+            [],
+        )
+        .expect("seed resolved track");
+        for (key, title, expires_at, resolved_track_id) in [
+            ("fresh", "Fresh", "2026-03-01 00:00:00", None),
+            ("expired", "Expired", "2026-01-01 00:00:00", None),
+            ("resolved", "Resolved", "2026-03-01 00:00:00", Some(1)),
+        ] {
+            conn.execute(
+                "INSERT INTO external_track_candidates
+                 (dedupe_key, title, artist_name, expires_at, resolved_track_id)
+                 VALUES (?1, ?2, 'Outside', ?3, ?4)",
+                params![key, title, expires_at, resolved_track_id],
+            )
+            .expect("seed candidate");
+        }
+        conn.execute(
+            "INSERT INTO external_track_candidate_sightings
+             (candidate_id, seed_track_id, source, expires_at)
+             SELECT id, 1, 'lastfm_similar', '2026-03-01 00:00:00'
+             FROM external_track_candidates
+             WHERE dedupe_key = 'fresh'",
+            [],
+        )
+        .expect("seed sighting");
+
+        let rows = get_external_track_candidates_for_training(&conn, "2026-02-01 00:00:00", 10)
+            .expect("training candidates");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dedupe_key, "fresh");
+        assert_eq!(
+            rows[0].source_tags_json.as_deref(),
+            Some(r#"["lastfm_similar"]"#)
+        );
+    }
+
+    #[test]
+    fn external_neighbor_lookup_returns_only_tidal_resolved_candidates_by_default() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed', 1, 901)",
+            [],
+        )
+        .expect("seed track");
+        let model = create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:external-read",
+            "discovery-fusion-v2",
+            2,
+            "ready",
+            None,
+        )
+        .expect("create model");
+        let unresolved = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "unresolved-read".to_string(),
+                title: "Unresolved".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("unresolved");
+        let resolved = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: Some(9901),
+                mbid: None,
+                dedupe_key: "tidal:9901".to_string(),
+                title: "Resolved".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(100_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("resolved");
+        replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[
+                ExternalCandidateNeighborWriteRow {
+                    candidate_id: unresolved.id,
+                    rank: 1,
+                    score: 0.95,
+                    audio_score: 0.95,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                },
+                ExternalCandidateNeighborWriteRow {
+                    candidate_id: resolved.id,
+                    rank: 2,
+                    score: 0.9,
+                    audio_score: 0.9,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                },
+            ],
+        )
+        .expect("write neighbors");
+
+        let rows = get_external_candidate_neighbors(&conn, model.id, 1, 10, true)
+            .expect("read external neighbors");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].candidate_id, resolved.id);
+        assert_eq!(rows[0].tidal_id, Some(9901));
     }
 
     #[test]
@@ -6262,7 +8111,12 @@ mod tests {
         assert_eq!(s.tempo.bucket_axis.max, BPM_MAX);
         assert_eq!(s.tempo.bucket_axis.step, BPM_STEP);
         assert_eq!(s.sonic_field.total, 0);
-        assert!(s.ridgeline.is_empty());
+        assert_eq!(s.ridgeline.len(), 30);
+        assert!(
+            s.ridgeline
+                .iter()
+                .all(|row| row.hourly.iter().all(|count| *count == 0))
+        );
         assert_eq!(s.cohorts.len(), 3);
         assert!(s.audio_profile.loudness_lufs.is_none());
     }

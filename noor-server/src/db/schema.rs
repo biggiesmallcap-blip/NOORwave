@@ -38,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_034,
     MIGRATION_035,
     MIGRATION_036,
+    MIGRATION_037,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -988,6 +989,98 @@ SET last_played_at = (
 )
 WHERE last_played_at IS NULL
   AND id IN (SELECT DISTINCT track_id FROM listen_history);
+"#;
+
+const MIGRATION_037: &str = r#"
+ALTER TABLE track_neighbors ADD COLUMN support_transition REAL NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN support_colisten REAL NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN support_structure REAL NOT NULL DEFAULT 0;
+ALTER TABLE track_neighbors ADD COLUMN support_metadata REAL NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS external_track_candidates (
+    id INTEGER PRIMARY KEY,
+    tidal_id INTEGER,
+    mbid TEXT,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    normalized_artist_name TEXT NOT NULL DEFAULT '',
+    normalized_title TEXT NOT NULL DEFAULT '',
+    duration_bucket INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    artist_name TEXT NOT NULL,
+    genre_tags_json TEXT,
+    duration_ms INTEGER,
+    expires_at TEXT NOT NULL,
+    resolved_track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_candidates_tidal_id
+    ON external_track_candidates(tidal_id)
+    WHERE tidal_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_candidates_mbid
+    ON external_track_candidates(mbid)
+    WHERE mbid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_candidates_dedupe_key
+    ON external_track_candidates(dedupe_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_candidates_fallback_identity
+    ON external_track_candidates(normalized_artist_name, normalized_title, duration_bucket)
+    WHERE tidal_id IS NULL
+      AND mbid IS NULL
+      AND normalized_artist_name <> ''
+      AND normalized_title <> '';
+CREATE INDEX IF NOT EXISTS idx_external_candidates_expires_at
+    ON external_track_candidates(expires_at);
+
+CREATE TABLE IF NOT EXISTS external_track_candidate_sightings (
+    candidate_id INTEGER NOT NULL REFERENCES external_track_candidates(id) ON DELETE CASCADE,
+    seed_track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    source_payload_json TEXT,
+    similarity REAL,
+    seen_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, seed_track_id, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_sightings_seed_source
+    ON external_track_candidate_sightings(seed_track_id, source);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_expires_at
+    ON external_track_candidate_sightings(expires_at);
+
+CREATE TABLE IF NOT EXISTS external_track_candidate_audio_features (
+    candidate_id INTEGER PRIMARY KEY REFERENCES external_track_candidates(id) ON DELETE CASCADE,
+    feature_version TEXT NOT NULL,
+    vector_blob BLOB NOT NULL,
+    clip_start_ms INTEGER NOT NULL DEFAULT 0,
+    clip_duration_ms INTEGER NOT NULL DEFAULT 0,
+    computed_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS external_track_candidate_embeddings (
+    candidate_id INTEGER NOT NULL REFERENCES external_track_candidates(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector_blob BLOB NOT NULL,
+    l2_norm REAL NOT NULL DEFAULT 0,
+    generated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (candidate_id, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS external_track_candidate_neighbors (
+    library_track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL REFERENCES external_track_candidates(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    audio_score REAL NOT NULL DEFAULT 0,
+    metadata_score REAL NOT NULL DEFAULT 0,
+    reason_json TEXT,
+    computed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (library_track_id, candidate_id, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_neighbors_library_model_rank
+    ON external_track_candidate_neighbors(library_track_id, model_id, rank);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

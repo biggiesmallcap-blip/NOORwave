@@ -7,11 +7,16 @@ use crate::db::{
     },
     queries::{self, EmbeddingTrackRow, TrackSimilarityResult},
 };
+use crate::metadata::lastfm::{LastFmClient, LastFmSimilarTrack};
 use crate::services::discovery::DiscoveryCandidateTrack;
 use crate::services::discovery_trainer::{
-    TrainerInput, TrainerSequenceGroup, TrainingProgressUpdate, run_discovery_training,
+    AUDIO_PROXY_FEATURE_VERSION, EvidenceKind, HeldoutExample, TrainerEdge, TrainerEvidenceGroup,
+    TrainerExternalCandidate, TrainerExternalNeighbor, TrainerInput, TrainerSequenceGroup,
+    TrainingProgressUpdate, run_discovery_training,
 };
-use anyhow::{Context, Result};
+use crate::services::tidal::client::{TidalClient, TidalSearchTrack};
+use anyhow::{Context, Result, bail};
+use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -19,7 +24,459 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
-const MODEL_KEY: &str = "discovery-fusion-v1";
+const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
+const EXTERNAL_TRAINING_CANDIDATE_LIMIT: i64 = 1_000;
+const EXTERNAL_REFRESH_MAX_SEED_TRACKS: usize = 100;
+const EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED: usize = 20;
+const EXTERNAL_REFRESH_TIDAL_NEW_RELEASE_ROWS: usize = 500;
+const EXTERNAL_REFRESH_STALE_HOURS: i64 = 24;
+const EXTERNAL_REFRESH_LASTFM_DELAY_MS: u64 = 500;
+const EXTERNAL_REFRESH_LASTFM_RATE_LIMIT_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalProviderRefreshBudget {
+    pub should_refresh: bool,
+    pub seed_tracks: usize,
+    pub lastfm_rows_per_seed: usize,
+    pub tidal_new_release_rows: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct ExternalProviderRefreshClients {
+    pub lastfm: Option<LastFmClient>,
+    pub tidal: Option<TidalClient>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalLastfmCandidate {
+    pub artist: String,
+    pub title: String,
+    pub mbid: Option<String>,
+    pub match_score: f64,
+}
+
+impl From<LastFmSimilarTrack> for ExternalLastfmCandidate {
+    fn from(value: LastFmSimilarTrack) -> Self {
+        Self {
+            artist: value.artist,
+            title: value.title,
+            mbid: value.mbid,
+            match_score: value.match_score,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalTidalCandidate {
+    pub tidal_id: i64,
+    pub artist_name: String,
+    pub title: String,
+    pub genre_tags: Vec<String>,
+    pub duration_ms: Option<i64>,
+}
+
+impl From<TidalSearchTrack> for ExternalTidalCandidate {
+    fn from(value: TidalSearchTrack) -> Self {
+        let genre_tags = collect_tidal_candidate_genres(&value.extra);
+        Self {
+            tidal_id: value.id,
+            artist_name: value
+                .artist_name
+                .unwrap_or_else(|| "Unknown Artist".to_string()),
+            title: value.title,
+            genre_tags,
+            duration_ms: Some(value.duration.saturating_mul(1000)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExternalProviderRefreshReport {
+    pub seed_tracks_scanned: usize,
+    pub lastfm_rows_seen: usize,
+    pub tidal_new_release_rows_seen: usize,
+    pub candidates_upserted: usize,
+    pub sightings_upserted: usize,
+    pub lastfm_candidates_upserted: usize,
+    pub lastfm_sightings_upserted: usize,
+    pub lastfm_skipped_rows: usize,
+    pub tidal_new_release_candidates_upserted: usize,
+    pub tidal_new_release_sightings_upserted: usize,
+    pub tidal_new_release_skipped_rows: usize,
+    pub skipped_rows: usize,
+    pub rate_limited: bool,
+    pub cooldown_ms: u64,
+}
+
+pub fn plan_external_provider_refresh(
+    full_mode: bool,
+    last_refresh_at: Option<chrono::NaiveDateTime>,
+    available_seed_tracks: usize,
+) -> ExternalProviderRefreshBudget {
+    plan_external_provider_refresh_at(
+        full_mode,
+        last_refresh_at,
+        available_seed_tracks,
+        chrono::Utc::now().naive_utc(),
+    )
+}
+
+fn plan_external_provider_refresh_at(
+    full_mode: bool,
+    last_refresh_at: Option<chrono::NaiveDateTime>,
+    available_seed_tracks: usize,
+    now: chrono::NaiveDateTime,
+) -> ExternalProviderRefreshBudget {
+    let stale = last_refresh_at
+        .map(|last| now.signed_duration_since(last).num_hours() >= EXTERNAL_REFRESH_STALE_HOURS)
+        .unwrap_or(true);
+    if !full_mode && !stale {
+        return ExternalProviderRefreshBudget {
+            should_refresh: false,
+            seed_tracks: 0,
+            lastfm_rows_per_seed: 0,
+            tidal_new_release_rows: 0,
+        };
+    }
+    ExternalProviderRefreshBudget {
+        should_refresh: true,
+        seed_tracks: available_seed_tracks.min(EXTERNAL_REFRESH_MAX_SEED_TRACKS),
+        lastfm_rows_per_seed: EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED,
+        tidal_new_release_rows: EXTERNAL_REFRESH_TIDAL_NEW_RELEASE_ROWS,
+    }
+}
+
+pub async fn refresh_external_provider_candidates(
+    db: &Database,
+    clients: &ExternalProviderRefreshClients,
+    full_mode: bool,
+) -> Result<ExternalProviderRefreshReport> {
+    let last_refresh_at = load_external_provider_last_refresh(db)?;
+    let seed_rows = db.with_conn(queries::get_embedding_track_rows)?;
+    let budget = plan_external_provider_refresh(full_mode, last_refresh_at, seed_rows.len());
+    if !budget.should_refresh {
+        return Ok(ExternalProviderRefreshReport::default());
+    }
+    if clients.lastfm.is_none() && clients.tidal.is_none() {
+        return Ok(ExternalProviderRefreshReport::default());
+    }
+
+    let seed_rows = seed_rows
+        .into_iter()
+        .take(budget.seed_tracks)
+        .collect::<Vec<_>>();
+    let mut lastfm_rows: HashMap<i64, Vec<ExternalLastfmCandidate>> = HashMap::new();
+    if let Some(lastfm) = clients.lastfm.as_ref() {
+        for (index, seed) in seed_rows.iter().enumerate() {
+            let Some(artist) = seed
+                .artist_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                continue;
+            };
+            if index > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    EXTERNAL_REFRESH_LASTFM_DELAY_MS,
+                ))
+                .await;
+            }
+            match lastfm
+                .track_get_similar(artist, &seed.title, budget.lastfm_rows_per_seed)
+                .await
+            {
+                Ok(rows) => {
+                    lastfm_rows.insert(
+                        seed.track_id,
+                        rows.into_iter()
+                            .take(budget.lastfm_rows_per_seed)
+                            .map(ExternalLastfmCandidate::from)
+                            .collect(),
+                    );
+                }
+                Err(error) => {
+                    if is_provider_rate_limit_error(&error) {
+                        tracing::warn!(
+                            target: "noor.discovery.external",
+                            seed_track_id = seed.track_id,
+                            error = %error,
+                            "Last.fm similar refresh hit rate limit"
+                        );
+                        let mut report = db.with_conn(|conn| {
+                            persist_external_provider_refresh(
+                                conn,
+                                &seed_rows,
+                                &lastfm_rows,
+                                &[],
+                                chrono::Utc::now().naive_utc(),
+                            )
+                        })?;
+                        report.rate_limited = true;
+                        report.cooldown_ms = EXTERNAL_REFRESH_LASTFM_RATE_LIMIT_COOLDOWN_MS;
+                        return Ok(report);
+                    }
+                    tracing::warn!(
+                        target: "noor.discovery.external",
+                        seed_track_id = seed.track_id,
+                        error = %error,
+                        "Last.fm similar refresh failed"
+                    );
+                }
+            }
+        }
+    }
+
+    let tidal_rows = if let Some(tidal) = clients.tidal.as_ref() {
+        match tidal
+            .get_editorial_top_tracks(budget.tidal_new_release_rows as i32)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .take(budget.tidal_new_release_rows)
+                .map(ExternalTidalCandidate::from)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.discovery.external",
+                    error = %error,
+                    "TIDAL new-release refresh failed"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    db.with_conn(|conn| {
+        persist_external_provider_refresh(
+            conn,
+            &seed_rows,
+            &lastfm_rows,
+            &tidal_rows,
+            chrono::Utc::now().naive_utc(),
+        )
+    })
+}
+
+fn is_provider_rate_limit_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let text = cause.to_string().to_ascii_lowercase();
+        text.contains("429") || text.contains("rate limit") || text.contains("too many requests")
+    })
+}
+
+pub fn persist_external_provider_refresh(
+    conn: &rusqlite::Connection,
+    seeds: &[EmbeddingTrackRow],
+    lastfm_by_seed: &HashMap<i64, Vec<ExternalLastfmCandidate>>,
+    tidal_candidates: &[ExternalTidalCandidate],
+    now: chrono::NaiveDateTime,
+) -> Result<ExternalProviderRefreshReport> {
+    let expires_at = now + chrono::Duration::days(30);
+    let expires_at = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
+    let now_string = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut report = ExternalProviderRefreshReport {
+        seed_tracks_scanned: seeds.len(),
+        lastfm_rows_seen: lastfm_by_seed.values().map(Vec::len).sum(),
+        tidal_new_release_rows_seen: tidal_candidates.len(),
+        candidates_upserted: 0,
+        sightings_upserted: 0,
+        skipped_rows: 0,
+        rate_limited: false,
+        cooldown_ms: 0,
+        ..ExternalProviderRefreshReport::default()
+    };
+
+    let seed_ids = seeds
+        .iter()
+        .map(|seed| seed.track_id)
+        .collect::<HashSet<_>>();
+    for (&seed_track_id, rows) in lastfm_by_seed {
+        if !seed_ids.contains(&seed_track_id) {
+            report.skipped_rows += rows.len();
+            report.lastfm_skipped_rows += rows.len();
+            continue;
+        }
+        for row in rows {
+            if row.title.trim().is_empty() || row.artist.trim().is_empty() {
+                report.skipped_rows += 1;
+                report.lastfm_skipped_rows += 1;
+                continue;
+            }
+            let candidate = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: None,
+                    mbid: row.mbid.clone(),
+                    dedupe_key: external_candidate_dedupe_key(
+                        None,
+                        row.mbid.as_deref(),
+                        &row.artist,
+                        &row.title,
+                        None,
+                    ),
+                    title: row.title.clone(),
+                    artist_name: row.artist.clone(),
+                    genre_tags_json: None,
+                    duration_ms: None,
+                    expires_at: expires_at.clone(),
+                },
+            )?;
+            report.candidates_upserted += 1;
+            report.lastfm_candidates_upserted += 1;
+            queries::upsert_external_candidate_sighting(
+                conn,
+                &queries::ExternalCandidateSightingUpsert {
+                    candidate_id: candidate.id,
+                    seed_track_id,
+                    source: "lastfm_similar".to_string(),
+                    source_payload_json: Some(
+                        serde_json::json!({
+                            "match_score": row.match_score,
+                            "mbid": row.mbid,
+                        })
+                        .to_string(),
+                    ),
+                    similarity: Some(row.match_score),
+                    expires_at: expires_at.clone(),
+                },
+            )?;
+            report.sightings_upserted += 1;
+            report.lastfm_sightings_upserted += 1;
+        }
+    }
+
+    let tidal_seed_track_id = seeds.first().map(|seed| seed.track_id);
+    for row in tidal_candidates {
+        if row.tidal_id <= 0 || row.title.trim().is_empty() || row.artist_name.trim().is_empty() {
+            report.skipped_rows += 1;
+            report.tidal_new_release_skipped_rows += 1;
+            continue;
+        }
+        let genre_tags_json = if row.genre_tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&row.genre_tags)?)
+        };
+        let candidate = queries::upsert_external_track_candidate(
+            conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(row.tidal_id),
+                mbid: None,
+                dedupe_key: external_candidate_dedupe_key(
+                    Some(row.tidal_id),
+                    None,
+                    &row.artist_name,
+                    &row.title,
+                    row.duration_ms,
+                ),
+                title: row.title.clone(),
+                artist_name: row.artist_name.clone(),
+                genre_tags_json,
+                duration_ms: row.duration_ms,
+                expires_at: expires_at.clone(),
+            },
+        )?;
+        report.candidates_upserted += 1;
+        report.tidal_new_release_candidates_upserted += 1;
+        if let Some(seed_track_id) = tidal_seed_track_id {
+            queries::upsert_external_candidate_sighting(
+                conn,
+                &queries::ExternalCandidateSightingUpsert {
+                    candidate_id: candidate.id,
+                    seed_track_id,
+                    source: "tidal_new_release".to_string(),
+                    source_payload_json: Some(
+                        serde_json::json!({
+                            "tidal_id": row.tidal_id,
+                        })
+                        .to_string(),
+                    ),
+                    similarity: None,
+                    expires_at: expires_at.clone(),
+                },
+            )?;
+            report.sightings_upserted += 1;
+            report.tidal_new_release_sightings_upserted += 1;
+        }
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value)
+         VALUES ('discovery_external_refresh_at', ?1)",
+        rusqlite::params![now_string],
+    )?;
+    Ok(report)
+}
+
+fn external_candidate_dedupe_key(
+    tidal_id: Option<i64>,
+    mbid: Option<&str>,
+    artist_name: &str,
+    title: &str,
+    duration_ms: Option<i64>,
+) -> String {
+    if let Some(tidal_id) = tidal_id.filter(|id| *id > 0) {
+        return format!("tidal:{tidal_id}");
+    }
+    if let Some(mbid) = mbid.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("mbid:{}", mbid.to_ascii_lowercase());
+    }
+    format!(
+        "text:{}:{}:{}",
+        normalize_external_component(artist_name),
+        normalize_external_component(title),
+        duration_ms.map(|value| value / 30_000).unwrap_or(0)
+    )
+}
+
+fn normalize_external_component(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collect_tidal_candidate_genres(extra: &HashMap<String, serde_json::Value>) -> Vec<String> {
+    let mut tags = Vec::new();
+    for key in ["genre", "genres", "category", "categories"] {
+        if let Some(value) = extra.get(key) {
+            collect_json_strings(value, &mut tags);
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    tags.truncate(8);
+    tags
+}
+
+fn collect_json_strings(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if !text.trim().is_empty() => {
+            out.push(text.trim().to_string());
+        }
+        serde_json::Value::Array(values) => {
+            for item in values {
+                collect_json_strings(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["name", "title", "label"] {
+                if let Some(value) = map.get(key) {
+                    collect_json_strings(value, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 // Training intensity tier. Drives the cost/quality knobs the user picked in
 // settings. Higher tiers train a richer model at the cost of CPU time and
@@ -120,6 +577,88 @@ pub fn set_discovery_intensity(db: &Database, intensity: DiscoveryIntensity) -> 
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryEngine {
+    V2,
+    V1,
+}
+
+impl DiscoveryEngine {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "v1" | "legacy" => DiscoveryEngine::V1,
+            _ => DiscoveryEngine::V2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscoveryEngine::V2 => queries::DISCOVERY_ENGINE_V2,
+            DiscoveryEngine::V1 => queries::DISCOVERY_ENGINE_V1,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DiscoveryEngine::V2 => "V2 recommended",
+            DiscoveryEngine::V1 => "V1 legacy",
+        }
+    }
+
+    pub fn family(self) -> &'static str {
+        match self {
+            DiscoveryEngine::V2 => queries::DISCOVERY_ENGINE_V2_FAMILY,
+            DiscoveryEngine::V1 => queries::DISCOVERY_ENGINE_V1_FAMILY,
+        }
+    }
+
+    pub fn supports_training(self) -> bool {
+        matches!(self, DiscoveryEngine::V2)
+    }
+}
+
+pub fn load_discovery_engine(db: &Database) -> DiscoveryEngine {
+    db.with_conn(|conn| {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'discovery_engine'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(raw)
+    })
+    .ok()
+    .flatten()
+    .map(|s| DiscoveryEngine::parse(&s))
+    .unwrap_or(DiscoveryEngine::V2)
+}
+
+pub fn set_discovery_engine(db: &Database, engine: DiscoveryEngine) -> Result<()> {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('discovery_engine', ?1)",
+            rusqlite::params![engine.as_str()],
+        )?;
+        Ok(())
+    })
+}
+
+fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::NaiveDateTime>> {
+    db.with_conn(|conn| {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'discovery_external_refresh_at'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|value| {
+            chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").ok()
+        }))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveLearningModel {
     pub model_id: i64,
@@ -139,28 +678,38 @@ pub async fn start_training(
     full_mode: bool,
     rebuild_audio: bool,
     cancel: Arc<AtomicBool>,
+    external_refresh_clients: ExternalProviderRefreshClients,
 ) -> Result<()> {
+    let engine = load_discovery_engine(&db);
+    if !engine.supports_training() {
+        bail!("legacy discovery engine cannot be trained in this build");
+    }
     let intensity = load_discovery_intensity(&db);
     let intensity_params = intensity.params();
     let (model, run) = db.with_conn(|conn| {
+        let run = queries::create_training_run(conn, None, "corpus", "running")?;
+        let model_key = format!("{MODEL_FAMILY}:{}", run.id);
         let config_json = serde_json::json!({
             "mode": if full_mode { "full" } else { "incremental" },
             "rebuild_audio": rebuild_audio,
             "dimension": intensity_params.dimension,
             "top_k": intensity_params.top_k,
             "intensity": intensity.as_str(),
+            "engine": engine.as_str(),
             "trainer": "rust",
+            "trainer_config_version": 2,
+            "run_id": run.id,
         })
         .to_string();
-        let model = queries::upsert_embedding_model(
+        let model = queries::create_embedding_model(
             conn,
-            MODEL_KEY,
-            "fusion",
+            &model_key,
+            MODEL_FAMILY,
             intensity_params.dimension,
             "training",
             Some(&config_json),
         )?;
-        let run = queries::create_training_run(conn, Some(model.id), "corpus", "running")?;
+        queries::update_training_run_model(conn, run.id, model.id)?;
         Ok((model, run))
     })?;
 
@@ -199,10 +748,28 @@ pub async fn start_training(
         );
     }
 
+    let external_last_refresh_at = load_external_provider_last_refresh(&db)?;
+    let external_refresh_report =
+        match refresh_external_provider_candidates(&db, &external_refresh_clients, full_mode).await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(
+                    target: "noor.discovery.external",
+                    error = %error,
+                    "external provider refresh failed"
+                );
+                ExternalProviderRefreshReport::default()
+            }
+        };
+
     // Build trainer input directly from DB (no JSON round-trip). The intensity
     // tier overrides dimension / top_k / window_size and decides whether to
     // include the audio-proxy stage (Low skips it).
     let input = db.with_conn(|conn| build_trainer_input(conn, intensity_params, full_mode))?;
+    let provider_budget =
+        plan_external_provider_refresh(full_mode, external_last_refresh_at, input.tracks.len());
+    let heldout_examples = input.heldout_examples.clone();
 
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
@@ -246,11 +813,91 @@ pub async fn start_training(
     // Run the trainer directly — no subprocess
     let progress_tx_clone = progress_tx.clone();
     let cancel_for_trainer = cancel.clone();
-    let output = tokio::task::spawn_blocking(move || {
+    let mut output = tokio::task::spawn_blocking(move || {
         run_discovery_training(input, Some(&progress_tx_clone), Some(&cancel_for_trainer))
     })
     .await
     .context("discovery trainer panicked")?;
+    output.metrics.insert(
+        "external_refresh_budget.should_refresh".to_string(),
+        if provider_budget.should_refresh {
+            1.0
+        } else {
+            0.0
+        },
+    );
+    output.metrics.insert(
+        "external_refresh_budget.seed_tracks".to_string(),
+        provider_budget.seed_tracks as f64,
+    );
+    output.metrics.insert(
+        "external_refresh_budget.lastfm_rows_per_seed".to_string(),
+        provider_budget.lastfm_rows_per_seed as f64,
+    );
+    output.metrics.insert(
+        "external_refresh_budget.tidal_new_release_rows".to_string(),
+        provider_budget.tidal_new_release_rows as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.seed_tracks_scanned".to_string(),
+        external_refresh_report.seed_tracks_scanned as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.lastfm_rows_seen".to_string(),
+        external_refresh_report.lastfm_rows_seen as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_new_release_rows_seen".to_string(),
+        external_refresh_report.tidal_new_release_rows_seen as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.candidates_upserted".to_string(),
+        external_refresh_report.candidates_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.sightings_upserted".to_string(),
+        external_refresh_report.sightings_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.skipped_rows".to_string(),
+        external_refresh_report.skipped_rows as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.lastfm_similar.candidates_upserted".to_string(),
+        external_refresh_report.lastfm_candidates_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.lastfm_similar.sightings_upserted".to_string(),
+        external_refresh_report.lastfm_sightings_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.lastfm_similar.skipped_rows".to_string(),
+        external_refresh_report.lastfm_skipped_rows as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_new_release.candidates_upserted".to_string(),
+        external_refresh_report.tidal_new_release_candidates_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_new_release.sightings_upserted".to_string(),
+        external_refresh_report.tidal_new_release_sightings_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_new_release.skipped_rows".to_string(),
+        external_refresh_report.tidal_new_release_skipped_rows as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.rate_limited".to_string(),
+        if external_refresh_report.rate_limited {
+            1.0
+        } else {
+            0.0
+        },
+    );
+    output.metrics.insert(
+        "external_refresh.cooldown_ms".to_string(),
+        external_refresh_report.cooldown_ms as f64,
+    );
 
     // Wait for progress logging to finish
     drop(progress_tx);
@@ -324,6 +971,10 @@ pub async fn start_training(
                 primary_reason: neighbor.primary_reason.clone(),
                 confidence: neighbor.confidence,
                 support_count: neighbor.support_count,
+                support_transition: neighbor.support_transition,
+                support_colisten: neighbor.support_colisten,
+                support_structure: neighbor.support_structure,
+                support_metadata: neighbor.support_metadata,
                 candidate_in_degree: neighbor.candidate_in_degree,
                 candidate_in_degree_percentile: neighbor.candidate_in_degree_percentile,
                 play_count_seed: neighbor.play_count_seed,
@@ -336,7 +987,8 @@ pub async fn start_training(
     }
     db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
-        queries::replace_track_neighbors(conn, model.id, &neighbors)
+        queries::replace_track_neighbors(conn, model.id, &neighbors)?;
+        persist_external_neighbors(conn, model.id, &output.external_neighbors)
     })?;
 
     // Persist per-reason hit-rate diagnostics. The trainer's primary_reason
@@ -358,9 +1010,16 @@ pub async fn start_training(
         .collect();
     db.with_conn(|conn| queries::replace_discovery_diagnostics(conn, model.id, &reason_rows))?;
 
+    append_active_baseline_metrics(&db, &mut output.metrics, &heldout_examples)?;
+
     let metrics_json = serde_json::to_string(&output.metrics)?;
     let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
-    let recall = output.metrics.get("recall_at_10").copied().unwrap_or(0.0);
+    let recall = output
+        .metrics
+        .get("transition_recall_at_10")
+        .or_else(|| output.metrics.get("recall_at_10"))
+        .copied()
+        .unwrap_or(0.0);
     // Thresholds scale with how much real playback signal exists. The strict
     // recall@10 gate is only meaningful when the held-out set is big enough
     // for the metric to be stable — `build_trainer_input` carves held-out
@@ -389,14 +1048,29 @@ pub async fn start_training(
         .get("sequence_count.listen_history")
         .copied()
         .unwrap_or(0.0);
-    let real_play_seqs = playback_seqs + listen_seqs;
-    let should_activate = if real_play_seqs >= 50.0 {
-        coverage >= 0.85 && recall >= 0.15
-    } else if real_play_seqs >= 1.0 {
-        coverage >= 0.7
-    } else {
-        coverage >= 0.5
-    };
+    let playback_evidence = output
+        .metrics
+        .get("evidence_count.playback_transitions")
+        .copied()
+        .unwrap_or(0.0);
+    let listen_evidence = output
+        .metrics
+        .get("evidence_count.listen_history")
+        .copied()
+        .unwrap_or(0.0);
+    let real_play_seqs = playback_seqs + listen_seqs + playback_evidence + listen_evidence;
+    let baseline_gate = output
+        .metrics
+        .get("baseline_transition_recall_at_10")
+        .is_none_or(|baseline| recall >= *baseline);
+    let should_activate = baseline_gate
+        && if real_play_seqs >= 50.0 {
+            coverage >= 0.85 && recall >= 0.15
+        } else if real_play_seqs >= 1.0 {
+            coverage >= 0.7
+        } else {
+            coverage >= 0.5
+        };
     if bail_if_cancelled("evaluate")? {
         return Ok(());
     }
@@ -414,7 +1088,7 @@ pub async fn start_training(
 
 pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearningModel>> {
     db.with_conn(|conn| {
-        let Some(model) = queries::get_active_embedding_model(conn)? else {
+        let Some(model) = queries::get_selected_discovery_embedding_model(conn)? else {
             return Ok(None);
         };
         let vectors = queries::get_model_embeddings(conn, model.id)?
@@ -615,14 +1289,169 @@ pub fn inject_query_seeds_from_neighbors(
     })
 }
 
+fn stable_edge_bucket(
+    event_id: &str,
+    from_track_id: i64,
+    to_track_id: i64,
+    kind: EvidenceKind,
+) -> u64 {
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in event_id
+        .bytes()
+        .chain(from_track_id.to_le_bytes())
+        .chain(to_track_id.to_le_bytes())
+        .chain((kind as u8).to_le_bytes())
+    {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash % 10
+}
+
+fn trainer_edge_with_heldout(
+    event_id: String,
+    from_track_id: i64,
+    to_track_id: i64,
+    weight: f64,
+    evidence_kind: EvidenceKind,
+) -> (TrainerEdge, Option<HeldoutExample>) {
+    let edge = TrainerEdge {
+        event_id,
+        from_track_id,
+        to_track_id,
+        weight,
+        evidence_kind,
+    };
+    let heldout = if stable_edge_bucket(
+        &edge.event_id,
+        edge.from_track_id,
+        edge.to_track_id,
+        edge.evidence_kind,
+    ) == 0
+    {
+        Some(HeldoutExample {
+            event_id: edge.event_id.clone(),
+            from_track_id: edge.from_track_id,
+            to_track_id: edge.to_track_id,
+            evidence_kind: edge.evidence_kind,
+            weight: edge.weight,
+        })
+    } else {
+        None
+    };
+    (edge, heldout)
+}
+
+fn transition_evidence_weight(source: Option<&str>, completed_prev: bool, base_weight: f64) -> f64 {
+    let source_multiplier = match source.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "manual" | "queue" | "user" | "command" => 1.2,
+        "playlist" | "playlist_track" => 1.0,
+        "album" | "album_track" => 0.9,
+        "radio" | "lastfm" | "lastfm_radio" => 0.75,
+        "automix" | "automix-new" | "automix_new" => 0.65,
+        "" => 0.85,
+        _ => 0.85,
+    };
+    let completion_multiplier = if completed_prev { 1.0 } else { 0.75 };
+    (base_weight * source_multiplier * completion_multiplier).clamp(0.05, 1.5)
+}
+
+fn trainer_external_candidates_from_rows(
+    rows: Vec<queries::ExternalTrackCandidateRow>,
+) -> Vec<TrainerExternalCandidate> {
+    rows.into_iter()
+        .map(|row| {
+            let genre_tags = row
+                .genre_tags_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                .unwrap_or_default();
+            let source_tags = row
+                .source_tags_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                .unwrap_or_default();
+            TrainerExternalCandidate {
+                candidate_id: row.id,
+                tidal_id: row.tidal_id,
+                title: row.title,
+                artist_name: row.artist_name,
+                genre_tags,
+                source_tags,
+                freshness_bucket: external_freshness_bucket(&row.updated_at),
+                duration_ms: row.duration_ms,
+            }
+        })
+        .collect()
+}
+
+fn external_freshness_bucket(updated_at: &str) -> Option<String> {
+    let updated = chrono::NaiveDateTime::parse_from_str(updated_at, "%Y-%m-%d %H:%M:%S").ok()?;
+    let now = chrono::Utc::now().naive_utc();
+    let age_days = now.signed_duration_since(updated).num_days();
+    let bucket = if age_days <= 7 {
+        "fresh_7d"
+    } else if age_days <= 30 {
+        "fresh_30d"
+    } else {
+        "fresh_old"
+    };
+    Some(bucket.to_string())
+}
+
+fn persist_external_neighbors(
+    conn: &rusqlite::Connection,
+    model_id: i64,
+    neighbors: &[TrainerExternalNeighbor],
+) -> Result<()> {
+    let mut grouped: HashMap<i64, Vec<queries::ExternalCandidateNeighborWriteRow>> = HashMap::new();
+    for neighbor in neighbors {
+        let reason_json = if neighbor.reason_tags.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(
+                    &neighbor
+                        .reason_tags
+                        .iter()
+                        .map(|key| serde_json::json!({ "key": key }))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_default(),
+            )
+        };
+        grouped.entry(neighbor.library_track_id).or_default().push(
+            queries::ExternalCandidateNeighborWriteRow {
+                candidate_id: neighbor.candidate_id,
+                rank: neighbor.rank,
+                score: neighbor.score,
+                audio_score: neighbor.audio_score,
+                metadata_score: neighbor.metadata_score,
+                reason_json,
+            },
+        );
+    }
+    for (library_track_id, rows) in grouped {
+        queries::replace_external_candidate_neighbors(conn, model_id, library_track_id, &rows)?;
+    }
+    Ok(())
+}
+
 fn build_trainer_input(
     conn: &rusqlite::Connection,
     intensity: IntensityParams,
     full_mode: bool,
 ) -> Result<TrainerInput> {
     let tracks = queries::get_embedding_track_rows(conn)?;
-    let transition_sequences = queries::get_playback_transition_sequences(conn)?;
-    let listen_sequences = queries::get_listen_history_sequences(conn, 45)?;
+    let external_candidates =
+        trainer_external_candidates_from_rows(queries::get_external_track_candidates_for_training(
+            conn,
+            &chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            EXTERNAL_TRAINING_CANDIDATE_LIMIT,
+        )?);
+    let playback_transition_rows = queries::get_playback_transition_edges(conn)?;
+    let listen_transition_rows = queries::get_listen_history_transition_edges(conn)?;
+    let listen_colisten_rows = queries::get_completion_weighted_listen_edges(conn, 45)?;
     let playlist_sequences = queries::get_playlist_sequences(conn)?;
     let album_sequences = queries::get_album_sequences(conn)?;
     let artist_sequences = queries::get_artist_sequences(conn)?;
@@ -634,16 +1463,61 @@ fn build_trainer_input(
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
 
-    let heldout_pairs = transition_sequences
-        .iter()
-        .chain(playlist_sequences.iter())
-        .enumerate()
-        .filter_map(|(index, sequence)| {
-            if index % 10 == 0 && sequence.len() >= 2 {
-                Some((sequence[0], sequence[1]))
-            } else {
-                None
+    let mut heldout_examples = Vec::new();
+    let mut heldout_pairs = Vec::new();
+    let playback_transition_edges = playback_transition_rows
+        .into_iter()
+        .map(|row| {
+            let (edge, heldout) = trainer_edge_with_heldout(
+                row.event_id,
+                row.from_track_id,
+                row.to_track_id,
+                transition_evidence_weight(
+                    row.source.as_deref(),
+                    row.completed_prev.unwrap_or(true),
+                    row.weight,
+                ),
+                EvidenceKind::DirectTransition,
+            );
+            if let Some(example) = heldout {
+                heldout_pairs.push((example.from_track_id, example.to_track_id));
+                heldout_examples.push(example);
             }
+            edge
+        })
+        .collect::<Vec<_>>();
+    let listen_transition_edges = listen_transition_rows
+        .into_iter()
+        .map(|row| {
+            let (edge, heldout) = trainer_edge_with_heldout(
+                row.event_id,
+                row.from_track_id,
+                row.to_track_id,
+                transition_evidence_weight(row.source.as_deref(), true, row.weight),
+                EvidenceKind::DirectTransition,
+            );
+            if let Some(example) = heldout {
+                heldout_pairs.push((example.from_track_id, example.to_track_id));
+                heldout_examples.push(example);
+            }
+            edge
+        })
+        .collect::<Vec<_>>();
+    let listen_colisten_edges = listen_colisten_rows
+        .into_iter()
+        .map(|row| {
+            let (edge, heldout) = trainer_edge_with_heldout(
+                row.event_id,
+                row.from_track_id,
+                row.to_track_id,
+                transition_evidence_weight(row.source.as_deref(), true, row.weight),
+                EvidenceKind::SessionCoListen,
+            );
+            if let Some(example) = heldout {
+                heldout_pairs.push((example.from_track_id, example.to_track_id));
+                heldout_examples.push(example);
+            }
+            edge
         })
         .collect::<Vec<_>>();
 
@@ -654,26 +1528,7 @@ fn build_trainer_input(
     // when intensity skips audio entirely (Low), or when no cache rows match.
     let cached_audio_features = if !full_mode && intensity.include_audio_proxy {
         let expected_dim = intensity.dimension as usize;
-        let rows = queries::get_cached_audio_features(conn)?;
-        let map: HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature> = rows
-            .into_iter()
-            .filter_map(|row| {
-                let vector = unpack_vector_blob(&row.vector_blob);
-                if vector.len() != expected_dim {
-                    return None;
-                }
-                Some((
-                    row.track_id,
-                    crate::services::discovery_trainer::TrainerAudioFeature {
-                        vector,
-                        clip_start_ms: row.clip_start_ms,
-                        clip_duration_ms: row.clip_duration_ms,
-                        feature_version: row.feature_version,
-                    },
-                ))
-            })
-            .collect();
-        if map.is_empty() { None } else { Some(map) }
+        hydrate_cached_audio_features(queries::get_cached_audio_features(conn)?, expected_dim)
     } else {
         None
     };
@@ -686,17 +1541,8 @@ fn build_trainer_input(
         top_k: intensity.top_k,
         include_audio_proxy: intensity.include_audio_proxy,
         tracks,
+        external_candidates,
         sequences: vec![
-            TrainerSequenceGroup {
-                label: "playback_transitions".to_string(),
-                weight: 1.6,
-                sequences: transition_sequences,
-            },
-            TrainerSequenceGroup {
-                label: "listen_history".to_string(),
-                weight: 1.3,
-                sequences: listen_sequences,
-            },
             TrainerSequenceGroup {
                 label: "playlist_tracks".to_string(),
                 weight: 1.1,
@@ -723,9 +1569,55 @@ fn build_trainer_input(
                 sequences: favorite_sequences,
             },
         ],
+        evidence_groups: vec![
+            TrainerEvidenceGroup {
+                label: "playback_transitions".to_string(),
+                base_weight: 2.0,
+                edges: playback_transition_edges,
+            },
+            TrainerEvidenceGroup {
+                label: "listen_history".to_string(),
+                base_weight: 2.0,
+                edges: listen_transition_edges,
+            },
+            TrainerEvidenceGroup {
+                label: "listen_history".to_string(),
+                base_weight: 1.3,
+                edges: listen_colisten_edges,
+            },
+        ],
         heldout_pairs,
+        heldout_examples,
         cached_audio_features,
     })
+}
+
+fn hydrate_cached_audio_features(
+    rows: Vec<queries::CachedAudioFeatureRow>,
+    expected_dim: usize,
+) -> Option<HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature>> {
+    let map: HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature> = rows
+        .into_iter()
+        .filter_map(|row| {
+            if row.feature_version != AUDIO_PROXY_FEATURE_VERSION {
+                return None;
+            }
+            let vector = unpack_vector_blob(&row.vector_blob);
+            if vector.len() != expected_dim {
+                return None;
+            }
+            Some((
+                row.track_id,
+                crate::services::discovery_trainer::TrainerAudioFeature {
+                    vector,
+                    clip_start_ms: row.clip_start_ms,
+                    clip_duration_ms: row.clip_duration_ms,
+                    feature_version: row.feature_version,
+                },
+            ))
+        })
+        .collect();
+    if map.is_empty() { None } else { Some(map) }
 }
 
 fn centroid_for_ids(active: &ActiveLearningModel, anchor_ids: &[i64]) -> Vec<f64> {
@@ -921,6 +1813,332 @@ fn hashed_token_vector(tokens: &[String], dim: usize) -> Vec<f64> {
         }
     }
     normalize_vector(&vector)
+}
+
+fn evaluate_stored_neighbors_for_heldout(
+    grouped_neighbors: &HashMap<i64, Vec<queries::EmbeddingNeighborRow>>,
+    heldout_examples: &[HeldoutExample],
+) -> HashMap<String, f64> {
+    let mut metrics = HashMap::new();
+    let transition_examples = heldout_examples
+        .iter()
+        .filter(|example| example.evidence_kind == EvidenceKind::DirectTransition)
+        .collect::<Vec<_>>();
+    if transition_examples.is_empty() {
+        return metrics;
+    }
+
+    let mut hits = 0usize;
+    let mut reciprocal_rank = 0.0f64;
+    for example in &transition_examples {
+        let ranked = grouped_neighbors
+            .get(&example.from_track_id)
+            .map(|rows| rows.as_slice())
+            .unwrap_or(&[]);
+        if ranked
+            .iter()
+            .take(10)
+            .any(|row| row.track_id == example.to_track_id)
+        {
+            hits += 1;
+        }
+        if let Some(pos) = ranked
+            .iter()
+            .take(20)
+            .position(|row| row.track_id == example.to_track_id)
+        {
+            reciprocal_rank += 1.0 / (pos as f64 + 1.0);
+        }
+    }
+
+    let total = transition_examples.len() as f64;
+    metrics.insert("baseline_heldout_count.transition".to_string(), total);
+    metrics.insert(
+        "baseline_transition_recall_at_10".to_string(),
+        hits as f64 / total,
+    );
+    metrics.insert(
+        "baseline_transition_mrr_at_20".to_string(),
+        reciprocal_rank / total,
+    );
+    metrics
+}
+
+fn append_active_baseline_metrics(
+    db: &Database,
+    metrics: &mut HashMap<String, f64>,
+    heldout_examples: &[HeldoutExample],
+) -> Result<()> {
+    let seed_ids = heldout_examples
+        .iter()
+        .map(|example| example.from_track_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if seed_ids.is_empty() {
+        return Ok(());
+    }
+    let baseline = db.with_conn(|conn| {
+        let Some(active) = queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(None);
+        };
+        let grouped = queries::get_track_neighbors_for_seeds(conn, active.id, &seed_ids, 20)?;
+        Ok(Some((
+            active.id,
+            evaluate_stored_neighbors_for_heldout(&grouped, heldout_examples),
+        )))
+    })?;
+    let Some((model_id, baseline_metrics)) = baseline else {
+        return Ok(());
+    };
+    metrics.insert("baseline_active_model_id".to_string(), model_id as f64);
+    metrics.extend(baseline_metrics);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_audio_features_reject_old_feature_version() {
+        let rows = vec![queries::CachedAudioFeatureRow {
+            track_id: 1,
+            feature_version: "metadata-audio-proxy-v1".to_string(),
+            vector_blob: pack_vector_f64(&[0.5, 0.5]),
+            clip_start_ms: 0,
+            clip_duration_ms: 20_000,
+        }];
+
+        let hydrated = hydrate_cached_audio_features(rows, 2);
+
+        assert!(
+            hydrated.is_none(),
+            "v1 proxy vectors must not be reused after v2 DSP token expansion"
+        );
+    }
+
+    #[test]
+    fn stored_neighbor_baseline_uses_same_typed_heldout_examples() {
+        let mut grouped = HashMap::new();
+        grouped.insert(
+            1,
+            vec![queries::EmbeddingNeighborRow {
+                track_id: 2,
+                title: "Target".to_string(),
+                artist_name: None,
+                album_title: None,
+                artwork_url: None,
+                duration_ms: None,
+                best_quality: None,
+                score: 1.0,
+                behavioral_score: 1.0,
+                audio_score: 0.0,
+                metadata_score: 0.0,
+                reason_json: None,
+                confidence: 1.0,
+                support_count: 1,
+                support_transition: 1.0,
+                support_colisten: 0.0,
+                support_structure: 0.0,
+                support_metadata: 0.0,
+                candidate_in_degree: 0,
+                candidate_in_degree_percentile: 0.0,
+                play_count_seed: 0,
+                play_count_candidate: 0,
+                primary_reason: None,
+            }],
+        );
+        let examples = vec![HeldoutExample {
+            event_id: "transition:1".to_string(),
+            from_track_id: 1,
+            to_track_id: 2,
+            evidence_kind: EvidenceKind::DirectTransition,
+            weight: 1.0,
+        }];
+
+        let metrics = evaluate_stored_neighbors_for_heldout(&grouped, &examples);
+
+        assert_eq!(metrics.get("baseline_heldout_count.transition"), Some(&1.0));
+        assert_eq!(metrics.get("baseline_transition_recall_at_10"), Some(&1.0));
+        assert_eq!(metrics.get("baseline_transition_mrr_at_20"), Some(&1.0));
+    }
+
+    #[test]
+    fn external_provider_refresh_budget_caps_full_runs() {
+        let budget = plan_external_provider_refresh(true, None, 400);
+
+        assert!(budget.should_refresh);
+        assert_eq!(budget.seed_tracks, 100);
+        assert_eq!(budget.lastfm_rows_per_seed, 20);
+        assert_eq!(budget.tidal_new_release_rows, 500);
+    }
+
+    #[test]
+    fn discovery_engine_defaults_to_v2_and_round_trips_legacy_choice() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+
+        assert_eq!(load_discovery_engine(&db), DiscoveryEngine::V2);
+
+        set_discovery_engine(&db, DiscoveryEngine::V1).expect("set legacy engine");
+
+        assert_eq!(load_discovery_engine(&db), DiscoveryEngine::V1);
+        assert_eq!(load_discovery_engine(&db).family(), "discovery-fusion");
+        assert!(!load_discovery_engine(&db).supports_training());
+    }
+
+    #[tokio::test]
+    async fn start_training_refuses_legacy_engine_without_starting_v2() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        set_discovery_engine(&db, DiscoveryEngine::V1).expect("select legacy engine");
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AppEvent>(1);
+
+        let err = start_training(
+            db.clone(),
+            event_tx,
+            false,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            ExternalProviderRefreshClients::default(),
+        )
+        .await
+        .expect_err("legacy engine must not train through v2 path");
+
+        assert!(
+            err.to_string().contains("legacy discovery engine"),
+            "unexpected error: {err}"
+        );
+        let model_count = db
+            .with_conn(|conn| {
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM embedding_models", [], |row| {
+                        row.get(0)
+                    })?;
+                Ok(count)
+            })
+            .expect("count models");
+        assert_eq!(model_count, 0);
+    }
+
+    #[test]
+    fn external_provider_refresh_budget_skips_fresh_incremental_runs() {
+        let now = chrono::NaiveDateTime::parse_from_str("2026-02-02 12:00:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap();
+        let last_refresh =
+            chrono::NaiveDateTime::parse_from_str("2026-02-02 01:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+
+        let budget = plan_external_provider_refresh_at(false, Some(last_refresh), 400, now);
+
+        assert!(!budget.should_refresh);
+        assert_eq!(budget.seed_tracks, 0);
+        assert_eq!(budget.lastfm_rows_per_seed, 0);
+        assert_eq!(budget.tidal_new_release_rows, 0);
+    }
+
+    #[test]
+    fn external_provider_refresh_persists_lastfm_and_tidal_candidates() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+             VALUES (1, 'Seed Track', 1, 200000, 101)",
+            [],
+        )
+        .unwrap();
+        let seeds = vec![EmbeddingTrackRow {
+            track_id: 1,
+            title: "Seed Track".to_string(),
+            artist_name: Some("Seed Artist".to_string()),
+            album_title: None,
+            duration_ms: Some(200_000),
+            best_quality: Some("LOSSLESS".to_string()),
+            source: "tidal".to_string(),
+            play_count: 0,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: vec![],
+            bpm: None,
+            energy: None,
+            camelot_key: None,
+            danceability: None,
+            beat_strength: None,
+            loudness_lufs: None,
+        }];
+        let mut lastfm = HashMap::new();
+        lastfm.insert(
+            1,
+            vec![ExternalLastfmCandidate {
+                artist: "Similar Artist".to_string(),
+                title: "Similar Track".to_string(),
+                mbid: Some("mbid-1".to_string()),
+                match_score: 0.91,
+            }],
+        );
+        let tidal = vec![ExternalTidalCandidate {
+            tidal_id: 9001,
+            artist_name: "New Artist".to_string(),
+            title: "New Track".to_string(),
+            genre_tags: vec!["new-release".to_string()],
+            duration_ms: Some(180_000),
+        }];
+
+        let report = persist_external_provider_refresh(
+            &conn,
+            &seeds,
+            &lastfm,
+            &tidal,
+            chrono::NaiveDateTime::parse_from_str("2026-02-02 12:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(report.candidates_upserted, 2);
+        assert_eq!(report.sightings_upserted, 2);
+        assert_eq!(report.lastfm_candidates_upserted, 1);
+        assert_eq!(report.lastfm_sightings_upserted, 1);
+        assert_eq!(report.tidal_new_release_candidates_upserted, 1);
+        assert_eq!(report.tidal_new_release_sightings_upserted, 1);
+        let sources = conn
+            .prepare("SELECT source FROM external_track_candidate_sightings ORDER BY source")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(sources, vec!["lastfm_similar", "tidal_new_release"]);
+        let refresh_at: String = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'discovery_external_refresh_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(refresh_at, "2026-02-02 12:00:00");
+    }
+
+    #[test]
+    fn provider_rate_limit_errors_are_detected_for_cooldown() {
+        let error = anyhow::anyhow!("Last.fm HTTP 429: too many requests");
+
+        assert!(is_provider_rate_limit_error(&error));
+    }
+
+    #[test]
+    fn transition_source_weighting_prefers_manual_completed_edges() {
+        let manual = transition_evidence_weight(Some("queue"), true, 1.0);
+        let passive = transition_evidence_weight(Some("automix"), false, 1.0);
+
+        assert!(manual > passive);
+        assert!(passive < 1.0);
+    }
 }
 
 fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {

@@ -950,12 +950,111 @@ pub fn ensure_automix_queue_depth(
         state.automix_use_learning,
     )?;
 
-    if extension.is_empty() {
+    let mut appended = false;
+    if !extension.is_empty() {
+        queue::append_tracks(conn, &extension, "automix")?;
+        appended = true;
+    }
+
+    if state.automix_allow_external
+        && let Some(model) = queries::get_selected_discovery_embedding_model(conn)
+            .ok()
+            .flatten()
+    {
+        let external_needed = needed.saturating_sub(extension.len()).max(1);
+        let appended_external =
+            append_automix_external_candidates(conn, model.id, current_track.id, external_needed)?;
+        appended |= appended_external > 0;
+    }
+
+    if !appended {
         return Ok(queue_items);
     }
 
-    queue::append_tracks(conn, &extension, "automix")?;
     queue::load_queue(conn)
+}
+
+fn append_automix_external_candidates(
+    conn: &Connection,
+    model_id: i64,
+    seed_track_id: i64,
+    limit: usize,
+) -> Result<usize> {
+    let (queued_tidal_ids, queued_pairs) = load_queued_external_identities(conn)?;
+    let rows = queries::get_external_candidate_neighbors(
+        conn,
+        model_id,
+        seed_track_id,
+        (limit.max(1) * 4).max(12) as i64,
+        true,
+    )?;
+    let mut appended = 0usize;
+    for row in rows {
+        if let Some(tidal_id) = row.tidal_id
+            && queued_tidal_ids.contains(&tidal_id)
+        {
+            continue;
+        }
+        let pair = normalize_external_pair(&row.artist_name, &row.title);
+        if queued_pairs.contains(&pair) {
+            continue;
+        }
+        queue::append_external_track(
+            conn,
+            &queue::ExternalTrackInsert {
+                artist: &row.artist_name,
+                title: &row.title,
+                source: "automix-new",
+                reason: Some("external similarity"),
+                tidal_id_hint: row.tidal_id,
+                local_track_id: None,
+            },
+        )?;
+        appended += 1;
+        if appended >= limit {
+            break;
+        }
+    }
+    Ok(appended)
+}
+
+fn load_queued_external_identities(
+    conn: &Connection,
+) -> Result<(HashSet<i64>, HashSet<(String, String)>)> {
+    let mut stmt = conn.prepare(
+        "SELECT pending_artist, pending_title, tidal_id_hint
+         FROM queue
+         WHERE source = 'automix-new'
+           AND track_id IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut tidal_ids = HashSet::new();
+    let mut pairs = HashSet::new();
+    for (artist, title, tidal_id) in rows {
+        if let Some(tidal_id) = tidal_id.filter(|id| *id > 0) {
+            tidal_ids.insert(tidal_id);
+        }
+        if let (Some(artist), Some(title)) = (artist, title) {
+            pairs.insert(normalize_external_pair(&artist, &title));
+        }
+    }
+    Ok((tidal_ids, pairs))
+}
+
+fn normalize_external_pair(artist: &str, title: &str) -> (String, String) {
+    (
+        artist.trim().to_ascii_lowercase(),
+        title.trim().to_ascii_lowercase(),
+    )
 }
 
 fn build_automix_extension(
@@ -966,7 +1065,11 @@ fn build_automix_extension(
     needed: usize,
     use_learning: bool,
 ) -> Result<Vec<Track>> {
-    if use_learning && let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
+    if use_learning
+        && let Some(model) = queries::get_selected_discovery_embedding_model(conn)
+            .ok()
+            .flatten()
+    {
         let excluded = queue_items
             .iter()
             .map(|item| item.track.id)
@@ -1555,7 +1658,7 @@ mod tests {
         conn.execute_batch(
             "
             CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
-            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT);
+            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, year INTEGER, artwork_url TEXT);
             CREATE TABLE tracks (
                 id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -1620,7 +1723,40 @@ mod tests {
                 trained_at TEXT,
                 config_json TEXT,
                 metrics_json TEXT,
-                created_at TEXT
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE server_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE external_track_candidates (
+                id INTEGER PRIMARY KEY,
+                tidal_id INTEGER,
+                mbid TEXT,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                normalized_artist_name TEXT NOT NULL DEFAULT '',
+                normalized_title TEXT NOT NULL DEFAULT '',
+                duration_bucket INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                artist_name TEXT NOT NULL,
+                genre_tags_json TEXT,
+                duration_ms INTEGER,
+                expires_at TEXT NOT NULL,
+                resolved_track_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE external_track_candidate_neighbors (
+                library_track_id INTEGER NOT NULL,
+                candidate_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                audio_score REAL NOT NULL DEFAULT 0,
+                metadata_score REAL NOT NULL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (library_track_id, candidate_id, model_id)
             );
             CREATE TABLE track_similarity (
                 track_a INTEGER NOT NULL,
@@ -1946,6 +2082,180 @@ mod tests {
             2,
             "DB queue must be untouched while suppressed"
         );
+    }
+
+    #[test]
+    fn ensure_automix_external_enabled_appends_pending_sidecar_rows() {
+        let conn = conn();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1,
+                 automix_enabled = 1, automix_allow_external = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let model = queries::create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:test-external",
+            "discovery-fusion-v2",
+            32,
+            "ready",
+            None,
+        )
+        .unwrap();
+        queries::activate_embedding_model(&conn, model.id).unwrap();
+        let candidate = queries::upsert_external_track_candidate(
+            &conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(99001),
+                mbid: None,
+                dedupe_key: "tidal:99001".to_string(),
+                title: "Outside Track".to_string(),
+                artist_name: "Outside Artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(180_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+        queries::replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[queries::ExternalCandidateNeighborWriteRow {
+                candidate_id: candidate.id,
+                rank: 1,
+                score: 0.9,
+                audio_score: 0.9,
+                metadata_score: 0.0,
+                reason_json: None,
+            }],
+        )
+        .unwrap();
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+        let pending = queue
+            .iter()
+            .find(|item| item.source == "automix-new")
+            .expect("pending external automix row");
+        assert!(pending.is_pending);
+        assert_eq!(pending.track.title, "Outside Track");
+        let tidal_hint: Option<i64> = conn
+            .query_row(
+                "SELECT tidal_id_hint FROM queue WHERE id = ?1",
+                params![pending.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tidal_hint, Some(99001));
+    }
+
+    #[test]
+    fn ensure_automix_external_overfetches_past_already_queued_candidates() {
+        let conn = conn();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        queue::append_external_track(
+            &conn,
+            &queue::ExternalTrackInsert {
+                artist: "Outside Artist",
+                title: "Already Queued",
+                source: "automix-new",
+                reason: Some("external similarity"),
+                tidal_id_hint: Some(99001),
+                local_track_id: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1,
+                 automix_enabled = 1, automix_allow_external = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let model = queries::create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:test-external-overfetch",
+            "discovery-fusion-v2",
+            32,
+            "ready",
+            None,
+        )
+        .unwrap();
+        queries::activate_embedding_model(&conn, model.id).unwrap();
+        let first = queries::upsert_external_track_candidate(
+            &conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(99001),
+                mbid: None,
+                dedupe_key: "tidal:99001".to_string(),
+                title: "Already Queued".to_string(),
+                artist_name: "Outside Artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(180_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+        let second = queries::upsert_external_track_candidate(
+            &conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(99002),
+                mbid: None,
+                dedupe_key: "tidal:99002".to_string(),
+                title: "Fresh External".to_string(),
+                artist_name: "Outside Artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(181_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+        queries::replace_external_candidate_neighbors(
+            &conn,
+            model.id,
+            1,
+            &[
+                queries::ExternalCandidateNeighborWriteRow {
+                    candidate_id: first.id,
+                    rank: 1,
+                    score: 0.95,
+                    audio_score: 0.95,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                },
+                queries::ExternalCandidateNeighborWriteRow {
+                    candidate_id: second.id,
+                    rank: 2,
+                    score: 0.9,
+                    audio_score: 0.9,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        ensure_automix_queue_depth(&conn, 2, false).unwrap();
+
+        let hints = conn
+            .prepare(
+                "SELECT tidal_id_hint
+                 FROM queue
+                 WHERE source = 'automix-new'
+                 ORDER BY position",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, Option<i64>>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(hints.iter().filter(|hint| **hint == Some(99001)).count(), 1);
+        assert!(hints.iter().any(|hint| *hint == Some(99002)));
     }
 
     #[test]
