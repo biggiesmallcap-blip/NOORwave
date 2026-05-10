@@ -23,6 +23,7 @@ export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 		artwork_url: track.artwork_url,
 		duration_ms: track.duration_ms,
 		artist_tidal_id: track.artist_tidal_id ?? null,
+		album_tidal_id: track.album_tidal_id ?? null,
 	};
 }
 

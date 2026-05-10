@@ -21,9 +21,10 @@
 	} from '$lib/stores/player';
 	import { quietModeOpen, closeQuietMode } from '$lib/stores/quiet_mode';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
-	import { contextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { trackToTidalPlayable } from '$lib/utils/track';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { getCmdOrCtrlLabel } from '$lib/util/platform';
 	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
@@ -36,6 +37,13 @@
 	const playerState = $derived(
 		$currentTrack ? ($isPlaying ? 'Playing' : 'Paused') : $playerReady ? 'Ready' : 'Connecting'
 	);
+	let quietAlbumHref = $derived.by(() => {
+		const track = $currentTrack;
+		if (!track) return null;
+		if (track.album_id != null) return `/albums/${track.album_id}`;
+		if (track.album_tidal_id != null) return `/tidal/albums/${track.album_tidal_id}`;
+		return null;
+	});
 
 	// Esc handler — defers to context menu and palette if either is open.
 	function onWindowKeydown(e: KeyboardEvent) {
@@ -91,6 +99,20 @@
 		openMenuAtElement(anchor, items, track.title);
 	}
 
+	function openQuietAlbumContextMenu(e: MouseEvent) {
+		const track = $currentTrack;
+		if (!track || (track.album_id == null && track.album_tidal_id == null)) return;
+		e.preventDefault();
+		e.stopPropagation();
+		openContextMenu(e, buildAlbumMenu({
+			id: track.album_id,
+			tidal_id: track.album_tidal_id,
+			title: track.album_title ?? track.title,
+			artist_id: track.artist_id > 0 ? track.artist_id : null,
+			artist_name: track.artist_name,
+		}, { isLocal: track.album_id != null }), track.album_title ?? track.title);
+	}
+
 	function openSearch() {
 		commandPaletteOpen.set(true);
 	}
@@ -134,6 +156,13 @@
 
 		{#if $currentTrack}
 			<div class="quiet-art-wrap">
+				{#if quietAlbumHref}
+					<a
+						class="quiet-art-link"
+						href={quietAlbumHref}
+						aria-label="Open {$currentTrack.album_title ?? $currentTrack.title}"
+						oncontextmenu={openQuietAlbumContextMenu}
+					>
 				{#key $currentTrack.artwork_url}
 					{#if $currentTrack.artwork_url}
 						<img class="quiet-art" src={$currentTrack.artwork_url} alt="" />
@@ -141,6 +170,16 @@
 						<div class="quiet-art quiet-art-placeholder">♫</div>
 					{/if}
 				{/key}
+					</a>
+				{:else}
+					{#key $currentTrack.artwork_url}
+						{#if $currentTrack.artwork_url}
+							<img class="quiet-art" src={$currentTrack.artwork_url} alt="" />
+						{:else}
+							<div class="quiet-art quiet-art-placeholder">♫</div>
+						{/if}
+					{/key}
+				{/if}
 			</div>
 
 			<div class="quiet-meta">
@@ -271,6 +310,14 @@
 		object-fit: cover;
 		display: block;
 		animation: quiet-art-fade 360ms ease both;
+	}
+
+	.quiet-art-link {
+		display: block;
+		width: 100%;
+		height: 100%;
+		color: inherit;
+		text-decoration: none;
 	}
 
 	@keyframes quiet-art-fade {

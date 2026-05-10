@@ -4,6 +4,7 @@
   import TidalTrackRow from '$lib/components/TidalTrackRow.svelte'
   import { openContextMenu } from '$lib/stores/context_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
+  import { firstArtworkUrl } from '$lib/utils/artwork'
 
   let tidalArtistId = $derived(Number(page.params.id))
   let profile = $state<TidalArtistProfile | null>(null)
@@ -38,10 +39,12 @@
     ) ?? []
   )
 
-  const heroArt = $derived(
-    profile?.albums.find((album) => album.artwork_url)?.artwork_url ??
-    profile?.top_tracks.find((track) => track.artwork_url)?.artwork_url ??
-    null
+  const heroPortrait = $derived(
+    firstArtworkUrl(profile?.picture_url)
+  )
+
+  const heroBackdrop = $derived(
+    firstArtworkUrl(profile?.picture_url, profile?.albums, profile?.top_tracks)
   )
 
   function trackAsPlayable(t: TidalDiscographyTrack) {
@@ -65,14 +68,25 @@
   <div class="artist-page">
     <button class="back-link" type="button" onclick={() => history.back()}>← Back</button>
     <div class="artist-hero">
-      {#if heroArt}
-        <div class="artist-hero-backdrop" style={`background-image: url('${heroArt}')`}></div>
+      {#if heroBackdrop}
+        <div class="artist-hero-backdrop" style={`background-image: url('${heroBackdrop}')`}></div>
       {/if}
       <div class="artist-hero-veil"></div>
       <div class="artist-hero-body">
-        <span class="tidal-badge">TIDAL preview</span>
-        <h1 class="artist-name display-face">{profile.artist_name ?? 'Artist'}</h1>
-        <p class="artist-meta">{profile.top_tracks.length} top tracks / {profile.albums.length} releases</p>
+        <div class="artist-portrait-wrap">
+          {#if heroPortrait}
+            <img class="artist-portrait" src={heroPortrait} alt="" />
+          {:else}
+            <div class="artist-portrait artist-portrait-fallback" aria-hidden="true">
+              {(profile.artist_name ?? 'A').slice(0, 1)}
+            </div>
+          {/if}
+        </div>
+        <div class="artist-hero-copy">
+          <span class="tidal-badge">TIDAL preview</span>
+          <h1 class="artist-name display-face">{profile.artist_name ?? 'Artist'}</h1>
+          <p class="artist-meta">{profile.top_tracks.length} top tracks / {profile.albums.length} releases</p>
+        </div>
       </div>
     </div>
 
@@ -177,8 +191,36 @@
     z-index: -1;
   }
   .artist-hero-body {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-2);
+  }
+  .artist-portrait-wrap {
+    width: clamp(112px, 14vw, 180px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--bg-surface);
+    box-shadow: 0 28px 70px -16px rgba(0, 0, 0, 0.7);
+    flex: 0 0 auto;
+  }
+  .artist-portrait {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .artist-portrait-fallback {
+    display: grid;
+    place-items: center;
+    color: var(--text-tertiary);
+    font-size: var(--font-size-4xl);
+    font-weight: var(--font-weight-semibold);
+  }
+  .artist-hero-copy {
     display: grid;
     gap: var(--space-2);
+    min-width: 0;
   }
   .tidal-badge {
     width: fit-content;
@@ -250,4 +292,9 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .empty { color: var(--text-muted); font-size: var(--font-size-sm); margin-top: 32px; }
+  @media (max-width: 720px) {
+    .artist-page { padding: 0 20px 48px; }
+    .artist-hero-body { align-items: flex-start; flex-direction: column; }
+    .artist-portrait-wrap { width: 120px; }
+  }
 </style>

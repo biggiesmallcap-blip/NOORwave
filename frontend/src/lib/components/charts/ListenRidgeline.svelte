@@ -245,7 +245,7 @@
 
 	// Layout — hero mode reserves a left column for the spine.
 	const SPINE_WIDTH = $derived(mode === 'hero' ? 140 : 0);
-	const PADDING = { top: 56, bottom: 40, left: SPINE_WIDTH + 16, right: 24 };
+	const PADDING = $derived.by(() => ({ top: 56, bottom: 40, left: SPINE_WIDTH + 16, right: 24 }));
 	const PLOT_HEIGHT = $derived(CHART_HEIGHT - PADDING.top - PADDING.bottom);
 
 	// Convert mouse x in plot coords to an hour 0..24 (continuous).

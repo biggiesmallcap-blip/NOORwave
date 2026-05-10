@@ -3,6 +3,8 @@
 	import { currentTrack, playTrackNow, playAlbum, shuffleAlbum } from '$lib/stores/player';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatTrackDuration } from '$lib/utils/format';
 
 	let { album, tracks, loading, onClose }: {
@@ -22,15 +24,44 @@
 	function trackMenu(track: Track) {
 		return buildTrackMenu(track);
 	}
+
+	function openAlbumContextMenu(event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(event, buildAlbumMenu(album, { isLocal: true }), album.title);
+	}
+
+	function openAlbumArtistContextMenu(event: MouseEvent) {
+		if (!album.artist_name) return;
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(
+			event,
+			buildArtistMenu({ id: album.artist_id, name: album.artist_name, in_library: true }, { isLocal: true }),
+			album.artist_name
+		);
+	}
+
+	function openTrackArtistContextMenu(event: MouseEvent, track: Track) {
+		if (!track.artist_name || !track.artist_id) return;
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(
+			event,
+			buildArtistMenu({ id: track.artist_id, name: track.artist_name, in_library: true }, { isLocal: true }),
+			track.artist_name
+		);
+	}
 </script>
 
 <svelte:window onkeydown={handleKey} />
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="popup-backdrop" onclick={onClose}>
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div class="popup-backdrop" role="presentation" onclick={onClose}>
 	<div
 		class="popup-panel"
 		role="dialog"
+		tabindex="-1"
 		aria-modal="true"
 		aria-label={album.title}
 		onclick={(e) => e.stopPropagation()}
@@ -39,7 +70,8 @@
 			<button class="popup-close" aria-label="Close" onclick={onClose}>✕</button>
 		</div>
 
-		<div class="popup-hero">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="popup-hero" oncontextmenu={openAlbumContextMenu}>
 			{#if album.artwork_url}
 				<img class="popup-art" src={album.artwork_url} alt={album.title} />
 			{:else}
@@ -47,7 +79,11 @@
 			{/if}
 			<div class="popup-info">
 				<h2>{album.title}</h2>
-				<p class="popup-artist">{album.artist_name ?? 'Unknown Artist'}</p>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<p
+					class="popup-artist"
+					oncontextmenu={openAlbumArtistContextMenu}
+				>{album.artist_name ?? 'Unknown Artist'}</p>
 				<div class="popup-meta-row">
 					{#if album.year}<span class="popup-chip">{album.year}</span>{/if}
 					{#if album.release_type}<span class="popup-chip">{album.release_type}</span>{/if}
@@ -83,7 +119,11 @@
 					>
 						<span class="popup-track-num">{i + 1}</span>
 						<span class="popup-track-title">{track.title}</span>
-						<span class="popup-track-artist">{track.artist_name ?? ''}</span>
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<span
+							class="popup-track-artist"
+							oncontextmenu={(e) => openTrackArtistContextMenu(e, track)}
+						>{track.artist_name ?? ''}</span>
 						<span class="popup-track-duration">{formatTrackDuration(track.duration_ms)}</span>
 						<button
 							class="popup-track-menu"

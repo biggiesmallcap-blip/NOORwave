@@ -1,19 +1,25 @@
 <script lang="ts">
-	import { contextMenu, closeContextMenu, type MenuItem } from '$lib/stores/context_menu';
+	import {
+		contextMenu,
+		closeContextMenu,
+		cancelContextMenuClose,
+		type MenuItem
+	} from '$lib/stores/context_menu';
 
 	let menuEl = $state<HTMLDivElement | null>(null);
 	let openSubmenu = $state<number | null>(null);
 
 	// Derived position keeps the menu inside the viewport.
 	const MENU_W = 240;
-	const MENU_H_ESTIMATE = 320;
+	const MENU_H_ESTIMATE = 480;
 
 	let position = $derived.by(() => {
 		if (!$contextMenu.open) return { left: 0, top: 0 };
 		const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
 		const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
+		const menuHeight = menuEl?.offsetHeight ?? MENU_H_ESTIMATE;
 		const left = Math.min($contextMenu.x, vw - MENU_W - 8);
-		const top = Math.min($contextMenu.y, vh - MENU_H_ESTIMATE - 8);
+		const top = Math.min($contextMenu.y, vh - menuHeight - 8);
 		return { left: Math.max(8, left), top: Math.max(8, top) };
 	});
 
@@ -35,6 +41,16 @@
 			event.stopPropagation();
 			closeContextMenu();
 		}
+	}
+
+	function handlePointerLeave() {
+		if (!$contextMenu.open) return;
+		closeContextMenu();
+	}
+
+	function handlePointerEnter() {
+		if (!$contextMenu.open) return;
+		cancelContextMenuClose();
 	}
 
 	// Position is a snapshot taken at open time, so any scroll desyncs the menu
@@ -73,8 +89,12 @@
 	<div
 		bind:this={menuEl}
 		class="context-menu"
+		class:closing={$contextMenu.closing}
 		style="left: {position.left}px; top: {position.top}px;"
 		role="menu"
+		tabindex="-1"
+		onpointerenter={handlePointerEnter}
+		onpointerleave={handlePointerLeave}
 	>
 		{#if $contextMenu.title}
 			<p class="context-menu-title">{$contextMenu.title}</p>
@@ -144,9 +164,11 @@
 <style>
 	.context-menu {
 		position: fixed;
-		z-index: var(--z-modal);
+		z-index: var(--z-toast);
 		min-width: 220px;
 		max-width: 280px;
+		max-height: calc(100dvh - 16px);
+		overflow-y: auto;
 		padding: 6px;
 		background: color-mix(in srgb, var(--bg-surface-strong, #14162a) 94%, transparent);
 		backdrop-filter: var(--blur-modal);
@@ -158,17 +180,38 @@
 			0 2px 6px rgba(0, 0, 0, 0.25);
 		color: var(--text-primary);
 		font-size: var(--font-size-sm);
-		animation: context-menu-pop 120ms ease-out;
+		scrollbar-width: thin;
+		will-change: opacity, transform, filter;
+		animation: context-menu-enter 160ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
 	}
 
-	@keyframes context-menu-pop {
+	.context-menu.closing {
+		animation: context-menu-exit 160ms ease-in both;
+	}
+
+	@keyframes context-menu-enter {
 		from {
 			opacity: 0;
-			transform: translateY(-4px) scale(0.98);
+			filter: blur(6px);
+			transform: translateY(-5px) scale(0.98);
 		}
 		to {
 			opacity: 1;
+			filter: blur(0);
 			transform: translateY(0) scale(1);
+		}
+	}
+
+	@keyframes context-menu-exit {
+		from {
+			opacity: 1;
+			filter: blur(0);
+			transform: translateY(0) scale(1);
+		}
+		to {
+			opacity: 0;
+			filter: blur(5px);
+			transform: translateY(-3px) scale(0.985);
 		}
 	}
 

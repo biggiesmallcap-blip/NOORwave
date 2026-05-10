@@ -22,6 +22,8 @@
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { canPlayTrack } from '$lib/player/playable';
 
 	type ArtistRow = {
@@ -275,6 +277,7 @@
 			const existing = map.get(t.album_id);
 			if (existing) {
 				existing.count += 1;
+				if (!existing.artwork_url && t.artwork_url) existing.artwork_url = t.artwork_url;
 			} else {
 				map.set(t.album_id, {
 					id: t.album_id,
@@ -325,6 +328,7 @@
 			const existing = map.get(key);
 			if (existing) {
 				existing.tracks.push(t);
+				if (!existing.artwork_url && t.artwork_url) existing.artwork_url = t.artwork_url;
 			} else {
 				map.set(key, {
 					id: t.album_id,
@@ -438,6 +442,32 @@
 				in_library: album.in_library,
 			},
 			{ isLocal: album.in_library && album.local_id != null }
+		);
+	}
+
+	function similarArtistMenu(similar: TidalSimilarArtist) {
+		return buildArtistMenu(
+			{
+				local_id: similar.local_id,
+				tidal_id: similar.tidal_id,
+				name: similar.name,
+				in_library: similar.in_library,
+			},
+			{ isLocal: similar.in_library && similar.local_id != null }
+		);
+	}
+
+	function fallbackAlbumMenu(album: { id: number | null; title: string; tracks: Track[] }) {
+		const firstTrack = album.tracks[0];
+		return buildAlbumMenu(
+			{
+				id: album.id,
+				title: album.title,
+				artist_id: artistId,
+				artist_name: firstTrack?.artist_name ?? header()?.name ?? null,
+				in_library: album.id != null,
+			},
+			{ isLocal: album.id != null }
 		);
 	}
 </script>
@@ -626,6 +656,7 @@
 							tabindex={playable_ok ? 0 : -1}
 							aria-disabled={!playable_ok}
 							onclick={() => playable_ok && void playTidalTrackNow(playable)}
+							oncontextmenu={(e) => openContextMenu(e, buildTidalTrackMenu(playable), track.title)}
 							onkeydown={(e) =>
 								(e.key === 'Enter' || e.key === ' ')
 								&& (e.preventDefault(), playable_ok && void playTidalTrackNow(playable))}
@@ -729,6 +760,7 @@
 				href={similar.local_id != null
 					? `/artists/${similar.local_id}`
 					: `/tidal/artists/${similar.tidal_id}`}
+				oncontextmenu={(e) => openContextMenu(e, similarArtistMenu(similar), similar.name)}
 			>
 				<div class="similar-portrait-wrap">
 					{#if similar.artwork_url}
@@ -859,7 +891,11 @@
 						getKey={(a) => a.id ?? a.title}
 					>
 						{#snippet card(album)}
-							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
+							<a
+								class="grid-card"
+								href={album.id != null ? `/albums/${album.id}` : undefined}
+								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
+							>
 								<div class="grid-art-wrap">
 									{#if album.artwork_url}
 										<img class="grid-art" src={album.artwork_url} alt="" />
@@ -894,7 +930,11 @@
 						getKey={(a) => a.id ?? a.title}
 					>
 						{#snippet card(album)}
-							<a class="grid-card" href={album.id != null ? `/albums/${album.id}` : '#'}>
+							<a
+								class="grid-card"
+								href={album.id != null ? `/albums/${album.id}` : undefined}
+								oncontextmenu={(e) => openContextMenu(e, fallbackAlbumMenu(album), album.title)}
+							>
 								<div class="grid-art-wrap">
 									{#if album.artwork_url}
 										<img class="grid-art" src={album.artwork_url} alt="" />

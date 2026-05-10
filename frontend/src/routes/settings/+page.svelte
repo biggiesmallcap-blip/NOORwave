@@ -441,23 +441,26 @@
 	}
 
 	async function loadSpotifyStatus() {
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/spotify/status`);
+		const [configResp, enrichResp] = await Promise.allSettled([
+			authFetch(`${getApiBase()}/api/spotify/status`),
+			authFetch(`${getApiBase()}/api/library/enrich/spotify/status`)
+		]);
+		if (configResp.status === 'fulfilled') {
 			markServerOnline();
-			const data = await resp.json();
+			const data = await configResp.value.json();
 			spotifyConfigured = data.configured === true;
-		} catch (e) {
-			if (isFetchConnectionError(e)) markServerOffline();
+		} else if (isFetchConnectionError(configResp.reason)) {
+			markServerOffline();
 		}
-		try {
-			const resp2 = await authFetch(`${getApiBase()}/api/library/enrich/spotify/status`);
-			const data2 = await resp2.json();
+
+		if (enrichResp.status === 'fulfilled') {
+			const data2 = await enrichResp.value.json();
 			spotifyEnrichedCount = data2.enriched_tracks ?? 0;
 			spotifyRemaining = data2.remaining_tracks ?? 0;
 			spotifyIsRunning = data2.is_running === true;
 			spotifyRunTotal = data2.run_total ?? 0;
 			spotifyRunProcessed = data2.run_processed ?? 0;
-		} catch {}
+		}
 	}
 
 	async function saveSpotifyConfig() {
@@ -562,17 +565,20 @@
 	}
 
 	async function loadLastfmStatus() {
-		try {
-			const resp = await authFetch(`${getApiBase()}/api/lastfm/status`);
+		const [configResp, enrichResp] = await Promise.allSettled([
+			authFetch(`${getApiBase()}/api/lastfm/status`),
+			authFetch(`${getApiBase()}/api/library/enrich/lastfm/status`)
+		]);
+		if (configResp.status === 'fulfilled') {
 			markServerOnline();
-			const data = await resp.json();
+			const data = await configResp.value.json();
 			lastfmConfigured = data.configured === true;
-		} catch (e) {
-			if (isFetchConnectionError(e)) markServerOffline();
+		} else if (isFetchConnectionError(configResp.reason)) {
+			markServerOffline();
 		}
-		try {
-			const resp2 = await authFetch(`${getApiBase()}/api/library/enrich/lastfm/status`);
-			const data2 = await resp2.json();
+
+		if (enrichResp.status === 'fulfilled') {
+			const data2 = await enrichResp.value.json();
 			lastfmEnrichedCount = data2.enriched_tracks ?? 0;
 			lastfmRemaining = data2.remaining_tracks ?? 0;
 			lastfmIsRunning = data2.is_running === true;
@@ -581,7 +587,7 @@
 			lastfmPrefetchTotal = data2.prefetch_total ?? 0;
 			lastfmPrefetchDone = data2.prefetch_done ?? 0;
 			lastfmRunStartedAt = data2.run_started_at ?? 0;
-		} catch {}
+		}
 	}
 
 	async function saveLastfmConfig() {

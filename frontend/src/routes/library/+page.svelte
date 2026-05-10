@@ -95,7 +95,7 @@
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
-	let failedArtistImages = $state(new Set<number>());
+	let failedArtistImages = $state(new Set<string>());
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -743,6 +743,7 @@
 		id: number;
 		name: string;
 		photo_url: string | null;
+		fallback_art_url: string | null;
 		playCount: number;
 		trackCount: number;
 		albumCount: number;
@@ -762,12 +763,15 @@
 			if (info) {
 				info.playCount += track.play_count ?? 0;
 				info.trackCount++;
-				if (!info.photo_url && track.artwork_url) info.photo_url = track.artwork_url;
+				if (!info.fallback_art_url && track.artwork_url) {
+					info.fallback_art_url = track.artwork_url;
+				}
 			} else {
 				countMap.set(track.artist_id, {
 					id: track.artist_id,
 					name: track.artist_name ?? 'Unknown Artist',
-					photo_url: storeArtist?.photo_url ?? track.artwork_url ?? null,
+					photo_url: storeArtist?.photo_url ?? null,
+					fallback_art_url: track.artwork_url ?? null,
 					playCount: track.play_count ?? 0,
 					trackCount: 1,
 					albumCount: 0,
@@ -790,9 +794,9 @@
 		// Tidal-favourited artists) that the user has barely listened to.
 		const topIds = new Set(top.map(a => a.id));
 		const candidates = all
-			.filter(a => !topIds.has(a.id) && !!a.photo_url && a.playCount === 0);
+			.filter(a => !topIds.has(a.id) && !!(a.photo_url ?? a.fallback_art_url) && a.playCount === 0);
 		const fallback = candidates.length === 0
-			? all.filter(a => !topIds.has(a.id) && !!a.photo_url && a.playCount < 2)
+			? all.filter(a => !topIds.has(a.id) && !!(a.photo_url ?? a.fallback_art_url) && a.playCount < 2)
 			: candidates;
 		if (fallback.length > 0) {
 			const pick = fallback[Math.floor(Math.random() * fallback.length)];
@@ -806,6 +810,7 @@
 		id: number;
 		name: string;
 		photo_url: string | null;
+		fallback_art_url: string | null;
 	}
 
 	let recentArtists = $derived.by<HomeArtistCard[]>(() => {
@@ -827,16 +832,27 @@
 			result.push({
 				id: track.artist_id,
 				name: track.artist_name ?? 'Unknown',
-				photo_url: storeArtist?.photo_url ?? track.artwork_url ?? null,
+				photo_url: storeArtist?.photo_url ?? null,
+				fallback_art_url: track.artwork_url ?? null,
 			});
 			if (result.length >= 20) break;
 		}
 		return result;
 	});
 
+	let artistArtworkById = $derived.by(() => {
+		const map = new Map<number, string>();
+		for (const track of $tracks) {
+			if (!track.artist_id || !track.artwork_url) continue;
+			if (!map.has(track.artist_id)) map.set(track.artist_id, track.artwork_url);
+		}
+		return map;
+	});
+
 	interface HomeAlbumCard {
 		id: number;
 		title: string;
+		artist_id: number | null;
 		artist_name: string | null;
 		artwork_url: string | null;
 	}
@@ -852,6 +868,7 @@
 					card: {
 						id: track.album_id,
 						title: track.album_title ?? 'Unknown Album',
+						artist_id: track.artist_id ?? null,
 						artist_name: track.artist_name,
 						artwork_url: track.artwork_url,
 					},
@@ -877,17 +894,7 @@
 	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
 	// when a tile without baked artwork scrolls into view.
 	let lazyArt = $state<Record<string, string>>({});
-
-	// First non-null track artwork keyed by artist_id — used as a fallback when
-	// the artist row has no photo_url (most do not, since Tidal sync doesn't populate it).
-	let artistArtworkById = $derived.by(() => {
-		const map = new Map<number, string>();
-		for (const t of $tracks) {
-			if (!t.artist_id || !t.artwork_url) continue;
-			if (!map.has(t.artist_id)) map.set(t.artist_id, t.artwork_url);
-		}
-		return map;
-	});
+	let artistLazyArt = $state<Record<number, string>>({});
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
@@ -1169,6 +1176,8 @@
 					artists={heroArtists}
 					onPlayAll={playAllForArtist}
 					onShuffle={shuffleArtist}
+					onArtistClick={handleHomeArtistClick}
+					onContextMenu={handleHomeArtistContextMenu}
 				/>
 			{:else if $isLoading}
 				<div class="home-loading">Loading your library…</div>
@@ -1192,6 +1201,8 @@
 						albums={recentAlbums}
 						onAlbumClick={handleHomeAlbumClick}
 						onContextMenu={handleHomeAlbumContextMenu}
+						onArtistClick={handleHomeArtistClick}
+						onArtistContextMenu={handleHomeArtistContextMenu}
 					/>
 				</section>
 			{/if}
@@ -1207,10 +1218,10 @@
 							{@const trackKey = `track-${track.id}`}
 							{@const trackArt = track.artwork_url ?? lazyArt[trackKey] ?? null}
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
-							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 							<div
 								class="home-track-row"
 								class:playing={$currentTrack?.id === track.id && $isPlaying}
+								role="button"
 								onclick={() => void playTrackNow(track.id)}
 								oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildTrackMenu(track)); }}
 								tabindex="0"
@@ -1396,9 +1407,11 @@
 				: artists}
 			<div class="artist-grid">
 				{#each filteredArtists as artist (artist.id)}
-					{@const artistKey = `artist-${artist.id}`}
-					{@const baseArtistImg = !failedArtistImages.has(artist.id) ? (artist.photo_url ?? artistArtworkById.get(artist.id) ?? null) : null}
-					{@const artistImg = baseArtistImg ?? lazyArt[artistKey] ?? null}
+					{@const photoSrc = artist.photo_url && !failedArtistImages.has(artist.photo_url) ? artist.photo_url : null}
+					{@const lazyArtistImg = artistLazyArt[artist.id] && !failedArtistImages.has(artistLazyArt[artist.id]) ? artistLazyArt[artist.id] : null}
+					{@const fallbackSrc = artistArtworkById.get(artist.id)}
+					{@const fallbackArtistImg = fallbackSrc && !failedArtistImages.has(fallbackSrc) ? fallbackSrc : null}
+					{@const artistImg = photoSrc ?? lazyArtistImg ?? fallbackArtistImg}
 					<button
 						class="artist-card"
 						onclick={() => void goto(`/artists/${artist.id}`)}
@@ -1409,14 +1422,14 @@
 						}}
 						title="Open {artist.name}"
 						use:lazyTidalArt={{
-							enabled: !baseArtistImg && !lazyArt[artistKey],
+							enabled: !photoSrc && !artistLazyArt[artist.id],
 							query: { artist: artist.name },
-							onResolve: (url) => (lazyArt[artistKey] = url),
+							onResolve: (url) => (artistLazyArt[artist.id] = url),
 						}}
 					>
 						<div class="artist-photo">
 							{#if artistImg}
-								<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artist.id]); }} />
+								<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artistImg]); }} />
 							{:else}
 								<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
 							{/if}
@@ -1701,12 +1714,13 @@
 
 <!-- ─── Track Detail Modal ─────────────────────── -->
 {#if expandedTrackId !== null && detailTrack}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
 		class="modal-backdrop"
+		role="presentation"
 		onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}
 	>
-		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={detailTrack.title}>
+		<div class="modal-panel glass-panel" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true" aria-label={detailTrack.title}>
 			<div class="modal-topbar">
 				<button class="modal-close" aria-label="Close" onclick={() => { expandedTrackId = null; detailTrack = null; detailAlbumTracks = []; }}>✕</button>
 			</div>

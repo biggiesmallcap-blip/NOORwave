@@ -83,10 +83,10 @@
 	);
 	let activeModeCopy = $derived.by(() => {
 		switch (viewMode) {
-			case 'heat': return 'Momentum halos reflecting recent listening.';
-			case 'vibe': return 'Audio character: energy, BPM, danceability.';
-			case 'rediscover': return 'Stocked but unplayed — what you’re sleeping on.';
-			default: return 'Canonical galaxy map of your library.';
+			case 'heat': return 'Recent listening heat.';
+			case 'vibe': return 'Energy, BPM, and dance.';
+			case 'rediscover': return 'Stocked but unplayed.';
+			default: return 'Canonical library map.';
 		}
 	});
 	let selectedNodeCohort = $derived(
@@ -164,24 +164,27 @@
 	};
 
 	async function fetchGalaxySnapshot(): Promise<GalaxySnapshot> {
-		const genreResponse = await api.getGenres();
-		const heatResponse = await api.getGenreHeat(90).catch((reason) => {
-			if (isNotFoundError(reason)) {
-				console.warn('Genre heat endpoint unavailable; rendering galaxy with zero heat.');
-				return { heat: buildZeroHeat(genreResponse.genres) };
-			}
-			throw reason;
-		});
-
-		const [cohortsResp, evolutionResp, metricsResp] = await Promise.allSettled([
+		const [genreResp, heatResp, cohortsResp, evolutionResp, metricsResp] = await Promise.allSettled([
+			api.getGenres(),
+			api.getGenreHeat(90),
 			api.getGenreCohorts(90),
 			api.getGenreEvolution(90),
 			api.getGenreAudioMetrics()
 		]);
+		if (genreResp.status !== 'fulfilled') throw genreResp.reason;
+		const genres = genreResp.value.genres;
+		const heatResult = heatResp.status === 'fulfilled'
+			? heatResp.value.heat
+			: isNotFoundError(heatResp.reason)
+				? buildZeroHeat(genres)
+				: (() => { throw heatResp.reason; })();
+		if (heatResp.status === 'rejected' && isNotFoundError(heatResp.reason)) {
+			console.warn('Genre heat endpoint unavailable; rendering galaxy with zero heat.');
+		}
 
 		return {
-			genres: genreResponse.genres,
-			heat: heatResponse.heat,
+			genres,
+			heat: heatResult,
 			cohorts: cohortsResp.status === 'fulfilled' ? cohortsResp.value.cohorts : [],
 			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : [],
 			metrics: metricsResp.status === 'fulfilled' ? metricsResp.value.metrics : []
@@ -557,31 +560,24 @@
 				/>
 			</div>
 
-			<div class="hud glass-panel">
+			<div class="hud glass-panel" aria-label="Galaxy summary">
 				<div class="hud-topline">
-					<div>
-						<h1 class="display-face">Genre Galaxy</h1>
-						<p class="hud-copy">Navigate the library by genre gravity.</p>
-					</div>
+					<span class="hud-card-title">Genre Galaxy</span>
 					<span class="mode-chip">{viewMode}</span>
 				</div>
-
-				<div class="hud-status">
-					<span>
-						{refreshingTopology
-							? 'Refreshing mapped genres...'
-							: refreshingHeat
-								? 'Refreshing heat...'
-								: activeModeCopy}
-					</span>
-				</div>
-
-				<div class="hud-stats compact">
-					<div title="Top-level genre families"><strong>{taxonomy.length}</strong><span>families</span></div>
-					<div title="Total genre nodes mapped to your library"><strong>{galaxyData.nodes.length}</strong><span>genres</span></div>
-					<div title="Genres listened to in the last 90 days"><strong>{activeThisMonthCount}</strong><span>active 90d</span></div>
-					<div title="Genres with tracks but no recent listens"><strong>{rediscoveryCount}</strong><span>rediscover</span></div>
-				</div>
+				<p class="hud-status">
+					{refreshingTopology
+						? 'Refreshing mapped genres...'
+						: refreshingHeat
+							? 'Refreshing heat...'
+							: activeModeCopy}
+				</p>
+				<p class="hud-meta-line">
+					<strong>{taxonomy.length}</strong> families
+					<span>{galaxyData.nodes.length}</span> genres
+					<span>{activeThisMonthCount}</span> active
+					<span>{rediscoveryCount}</span> rediscover
+				</p>
 			</div>
 
 			<div class="mode-switcher glass-panel" role="tablist" aria-label="Galaxy views">
@@ -738,90 +734,74 @@
 	.hud {
 		top: 20px;
 		left: 20px;
-		width: min(480px, calc(100% - 40px));
-		padding: 12px 14px;
+		width: min(292px, calc(100% - 40px));
+		padding: 10px 12px;
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: 7px;
 		border-color: color-mix(in srgb, var(--instrument-border) 72%, transparent);
 		background:
-			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 42%, transparent), color-mix(in srgb, var(--instrument-surface) 34%, transparent)),
+			linear-gradient(180deg, color-mix(in srgb, var(--instrument-surface-strong) 38%, transparent), color-mix(in srgb, var(--instrument-surface) 26%, transparent)),
 			var(--panel-bg);
 		box-shadow:
-			0 16px 44px rgba(0, 0, 0, 0.28),
-			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 32%, transparent);
-	}
-
-	.hud h1 {
-		font-size: var(--font-size-2xl);
-		line-height: var(--line-height-tight);
+			0 12px 32px rgba(0, 0, 0, 0.24),
+			inset 0 1px 0 color-mix(in srgb, var(--instrument-edge) 28%, transparent);
 	}
 
 	.hud-topline {
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
 		justify-content: space-between;
-		gap: 12px;
+		gap: 10px;
+	}
+
+	.hud-card-title {
+		color: var(--text-primary);
+		font-family: var(--font-display);
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 	}
 
 	.mode-chip {
-		padding: 5px 10px;
+		padding: 4px 8px;
 		border-radius: 999px;
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 58%, transparent);
 		background: color-mix(in srgb, var(--instrument-surface-strong) 70%, transparent);
 		color: var(--text-primary);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		white-space: nowrap;
 	}
 
-	.hud-copy,
-	.hud-status span {
+	.hud-status,
+	.hud-meta-line {
+		margin: 0;
 		color: var(--signal-text);
-	}
-
-	.hud-copy {
-		font-size: var(--font-size-sm);
-	}
-
-	.hud-stats {
-		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
-		gap: 8px;
-	}
-
-	.hud-stats:has(> :nth-child(6)) {
-		grid-template-columns: repeat(6, minmax(0, 1fr));
-	}
-
-	.hud-stats div {
-		display: flex;
-		align-items: baseline;
-		gap: 6px;
-		padding: 6px 8px;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--instrument-surface) 62%, transparent);
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 36%, transparent);
-		justify-content: center;
-	}
-
-	.hud-stats strong {
-		font-size: var(--font-size-md);
-		font-family: var(--font-body);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.hud-stats span {
-		color: var(--signal-text);
-		font-size: var(--font-size-2xs);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
 	}
 
 	.hud-status {
-		padding-top: 2px;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
+	}
+
+	.hud-meta-line {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		flex-wrap: wrap;
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.hud-meta-line strong,
+	.hud-meta-line span {
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.mode-switcher {
@@ -952,7 +932,7 @@
 
 	@media (max-width: 1180px) {
 		.hud {
-			width: min(420px, calc(100% - 40px));
+			width: min(292px, calc(100% - 32px));
 		}
 	}
 
@@ -969,7 +949,7 @@
 		.hud {
 			top: 16px;
 			left: 16px;
-			width: min(100%, calc(100% - 32px));
+			width: min(292px, calc(100% - 32px));
 		}
 
 		.mode-switcher {
@@ -1033,12 +1013,8 @@
 
 		.hud {
 			order: 1;
-			gap: 12px;
-			padding: 14px;
-		}
-
-		.hud-stats {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 8px;
+			padding: 12px;
 		}
 
 		.mode-switcher {

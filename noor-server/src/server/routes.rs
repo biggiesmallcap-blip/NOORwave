@@ -866,7 +866,7 @@ async fn get_artist_tracks(
     state
         .db
         .with_conn(|conn| {
-            let tracks = queries::get_artist_tracks(conn, artist_id)?;
+            let tracks = queries::get_artist_library_tracks(conn, artist_id)?;
             Ok(Json(json!({ "tracks": tracks })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -1477,6 +1477,7 @@ async fn get_tidal_album_tracks(
                 "artist_name": t.artist.name,
                 "artist_tidal_id": t.artist.id,
                 "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                "album_tidal_id": t.album.as_ref().map(|al| al.id),
                 "artwork_url": artwork,
             })
         })
@@ -14499,6 +14500,7 @@ async fn get_tidal_mix_tracks(
                 "artist_name": t.artist.name,
                 "artist_tidal_id": t.artist.id,
                 "album_title": t.album.as_ref().map(|al| al.title.clone()),
+                "album_tidal_id": t.album.as_ref().map(|al| al.id),
                 "artwork_url": artwork,
             })
         })

@@ -60,6 +60,7 @@
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
 	import { trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -652,7 +653,7 @@
 		event.stopPropagation();
 		const tidal = queueItemTidalPlayable(item);
 		const items = tidal
-			? buildTidalTrackMenu(tidal)
+			? buildTidalTrackMenu(tidal, { inQueue: true })
 			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openContextMenu(event, items, item.track.title);
 	}
@@ -661,9 +662,25 @@
 		event.stopPropagation();
 		const tidal = queueItemTidalPlayable(item);
 		const items = tidal
-			? buildTidalTrackMenu(tidal)
+			? buildTidalTrackMenu(tidal, { inQueue: true })
 			: pickMenuBuilder(item.track, { queueItemId: item.id, isPending: item.is_pending });
 		openMenuAtElement(event.currentTarget as HTMLElement, items, item.track.title);
+	}
+
+	function openQueueArtistContextMenu(item: QueueItemType, event: MouseEvent) {
+		const artistId = item.track.artist_id;
+		if (artistId == null || artistId <= 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(
+			event,
+			buildArtistMenu({
+				id: artistId,
+				name: item.track.artist_name ?? 'Unknown artist',
+				in_library: true
+			}),
+			item.track.artist_name ?? 'Unknown artist'
+		);
 	}
 
 	async function handleQueueRowFavorite(trackId: number, event: MouseEvent) {
@@ -1457,6 +1474,7 @@
 										class="queue-artist"
 										href="/artists/{aid}"
 										onclick={stopPropagation}
+										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
@@ -1537,6 +1555,7 @@
 					type="button"
 					aria-label="Open now playing"
 					onclick={() => { nowPlayingOpen = true; }}
+					oncontextmenu={openNowPlayingContextMenu}
 				>
 					{#if $currentTrack.artwork_url}
 						<img class="mobile-mini-art" src={$currentTrack.artwork_url} alt="" />
@@ -1817,6 +1836,7 @@
 										class="queue-artist"
 										href="/artists/{aid}"
 										onclick={stopPropagation}
+										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
 									>{item.track.artist_name ?? 'Unknown artist'}</a>
 								{:else}
 									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>

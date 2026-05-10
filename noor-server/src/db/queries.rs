@@ -362,6 +362,12 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
 
 // ─── Artists ──────────────────────────────────────────────
 
+const ARTIST_LIBRARY_TRACK_WHERE: &str = "(t.is_favorite = 1 OR COALESCE(al.is_favorite, 0) = 1)";
+
+fn artist_library_track_predicate() -> &'static str {
+    ARTIST_LIBRARY_TRACK_WHERE
+}
+
 pub fn get_artists(
     conn: &Connection,
     sort_by: &str,
@@ -404,7 +410,7 @@ pub fn get_artists(
 
 /// Single artist row plus library-side counts (tracks belonging to this
 /// artist, distinct albums those tracks span). Counts reflect the local
-/// library only — TIDAL-side totals come from the discography handler.
+/// library only. TIDAL-side totals come from the discography handler.
 pub fn get_artist_with_counts(
     conn: &Connection,
     artist_id: i64,
@@ -435,13 +441,24 @@ pub fn get_artist_with_counts(
     };
 
     let track_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tracks WHERE artist_id = ?1",
+        &format!(
+            "SELECT COUNT(*) FROM tracks t
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE t.artist_id = ?1 AND {}",
+            artist_library_track_predicate()
+        ),
         params![artist_id],
         |row| row.get(0),
     )?;
     let album_count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT album_id) FROM tracks
-         WHERE artist_id = ?1 AND album_id IS NOT NULL",
+        &format!(
+            "SELECT COUNT(DISTINCT t.album_id) FROM tracks t
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE t.artist_id = ?1
+               AND t.album_id IS NOT NULL
+               AND {}",
+            artist_library_track_predicate()
+        ),
         params![artist_id],
         |row| row.get(0),
     )?;
@@ -502,8 +519,12 @@ pub fn get_known_album_tidal_ids(
     Ok(map)
 }
 
-pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
+fn get_artist_tracks_matching(
+    conn: &Connection,
+    artist_id: i64,
+    extra_where: &str,
+) -> Result<Vec<Track>> {
+    let sql = format!(
         "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
                 t.album_id, al.title as album_title,
                 t.disc_number, t.track_number, t.duration_ms, t.isrc,
@@ -514,13 +535,14 @@ pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
-         WHERE t.artist_id = ?1
+         WHERE t.artist_id = ?1{extra_where}
          ORDER BY
             al.year ASC,
             COALESCE(t.disc_number, 1) ASC,
             COALESCE(t.track_number, 999999) ASC,
-            t.title COLLATE NOCASE ASC",
-    )?;
+            t.title COLLATE NOCASE ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let tracks = stmt
         .query_map(params![artist_id], track_from_row)?
@@ -530,6 +552,18 @@ pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>
 }
 
 // ─── Playlists ────────────────────────────────────────────
+
+pub fn get_artist_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>> {
+    get_artist_tracks_matching(conn, artist_id, "")
+}
+
+pub fn get_artist_library_tracks(conn: &Connection, artist_id: i64) -> Result<Vec<Track>> {
+    get_artist_tracks_matching(
+        conn,
+        artist_id,
+        &format!(" AND {}", artist_library_track_predicate()),
+    )
+}
 
 pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
     let mut stmt = conn.prepare(
@@ -7497,6 +7531,38 @@ mod tests {
     }
 
     #[test]
+    fn artist_library_tracks_and_counts_use_library_union_behavior() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, is_favorite, source)
+             VALUES (2, 'Not Saved', 1, 0, 'tidal')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source)
+             VALUES (4, 'Cache Only', 1, 2, 199000, 104, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        )
+        .unwrap();
+
+        let all_tracks = get_artist_tracks(&conn, 1).expect("all artist tracks");
+        assert_eq!(all_tracks.len(), 4);
+
+        let library_tracks = get_artist_library_tracks(&conn, 1).expect("library artist tracks");
+        assert_eq!(library_tracks.len(), 3);
+
+        let (_, track_count, album_count) = get_artist_with_counts(&conn, 1)
+            .expect("artist counts")
+            .expect("artist exists");
+        assert_eq!(track_count, 3);
+        assert_eq!(album_count, 1);
+    }
+
+    #[test]
     fn liked_only_takes_precedence_over_favorite_only() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -8154,7 +8220,7 @@ mod tests {
         assert!(
             s.ridgeline
                 .iter()
-                .all(|row| row.hourly.iter().all(|count| *count == 0))
+                .all(|row| row.hourly.len() == 24 && row.hourly.iter().all(|count| *count == 0))
         );
         assert_eq!(s.cohorts.len(), 3);
         assert!(s.audio_profile.loudness_lufs.is_none());

@@ -2,6 +2,7 @@ import { goto } from '$app/navigation';
 import type { MenuItem } from '$lib/stores/context_menu';
 import {
 	addTrackToQueue,
+	moveQueueTrackNext,
 	playAlbum,
 	playTrackNext,
 	removeTrackFromQueue,
@@ -45,6 +46,10 @@ export interface BuildTrackMenuOptions {
 	isPending?: boolean;
 }
 
+export interface BuildTidalTrackMenuOptions {
+	inQueue?: boolean;
+}
+
 const SEPARATOR: MenuItem = { separator: true, label: '' };
 
 /**
@@ -73,17 +78,26 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	const items: MenuItem[] = [];
 	const hasAlbum = !options.hideAlbumActions && track.album_id != null;
 	const hasArtist = !options.hideArtistActions && track.artist_id != null;
+	const isQueueItem = options.queueItemId != null;
 
 	items.push({
-		label: 'Play next',
+		label: isQueueItem ? 'Move next' : 'Play next',
 		icon: '⤴',
-		onSelect: () => void playTrackNext(track.id)
+		onSelect: () => {
+			if (isQueueItem) {
+				void moveQueueTrackNext(options.queueItemId!);
+				return;
+			}
+			void playTrackNext(track.id);
+		}
 	});
-	items.push({
-		label: 'Add to queue',
-		icon: '＋',
-		onSelect: () => void addTrackToQueue(track.id)
-	});
+	if (!isQueueItem) {
+		items.push({
+			label: 'Add to queue',
+			icon: '＋',
+			onSelect: () => void addTrackToQueue(track.id)
+		});
+	}
 
 	items.push(SEPARATOR);
 
@@ -155,7 +169,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	return items;
 }
 
-export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
+export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTrackMenuOptions = {}): MenuItem[] {
 	const playable = canPlayTrack(track);
 	const playableLabel = getPlayableLabel(track);
 	const items: MenuItem[] = [
@@ -166,13 +180,15 @@ export function buildTidalTrackMenu(track: TidalPlayable): MenuItem[] {
 			hint: playable ? undefined : playableLabel,
 			onSelect: () => void playTidalTrackNext(track),
 		},
-		{
-			label: 'Add to queue',
-			icon: '＋',
-			disabled: !playable,
-			hint: playable ? undefined : playableLabel,
-			onSelect: () => void addTidalTrackToQueue(track),
-		},
+		...(options.inQueue
+			? []
+			: [{
+					label: 'Add to queue',
+					icon: '＋',
+					disabled: !playable,
+					hint: playable ? undefined : playableLabel,
+					onSelect: () => void addTidalTrackToQueue(track),
+				}]),
 		SEPARATOR,
 		{
 			label: 'Song radio',

@@ -426,6 +426,7 @@
 		font-weight: var(--font-weight-semibold);
 		margin: 0;
 		display: -webkit-box;
+		line-clamp: 2;
 		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
@@ -507,6 +508,7 @@
 		font-weight: var(--font-weight-bold);
 		margin: 0;
 		display: -webkit-box;
+		line-clamp: 2;
 		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
@@ -517,6 +519,7 @@
 		color: var(--text-muted);
 		margin: 0;
 		display: -webkit-box;
+		line-clamp: 3;
 		-webkit-line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
@@ -572,6 +575,7 @@
 		font-weight: var(--font-weight-bold);
 		margin: 0;
 		display: -webkit-box;
+		line-clamp: 2;
 		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
@@ -582,6 +586,7 @@
 		color: var(--text-muted);
 		margin: 0;
 		display: -webkit-box;
+		line-clamp: 3;
 		-webkit-line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;

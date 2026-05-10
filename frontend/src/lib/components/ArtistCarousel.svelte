@@ -7,6 +7,7 @@
     id: number;
     name: string;
     photo_url: string | null;
+    fallback_art_url?: string | null;
   }
 
   let { artists, onArtistClick, onContextMenu }: {
@@ -15,7 +16,7 @@
     onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
-  let failedImages = $state(new Set<number>());
+  let failedImages = $state(new Set<string>());
   let lazyArt = $state<Record<number, string>>({});
 
   function initials(name: string): string {
@@ -27,8 +28,10 @@
   <div class="artist-carousel">
   <div class="artists-row" use:wheelToHorizontal>
     {#each artists as artist (artist.id)}
-      {@const baseSrc = artist.photo_url && !failedImages.has(artist.id) ? artist.photo_url : null}
-      {@const resolved = baseSrc ?? lazyArt[artist.id] ?? null}
+      {@const baseSrc = artist.photo_url && !failedImages.has(artist.photo_url) ? artist.photo_url : null}
+      {@const lazySrc = lazyArt[artist.id] && !failedImages.has(lazyArt[artist.id]) ? lazyArt[artist.id] : null}
+      {@const fallbackSrc = artist.fallback_art_url && !failedImages.has(artist.fallback_art_url) ? artist.fallback_art_url : null}
+      {@const resolvedSrc = baseSrc ?? lazySrc ?? fallbackSrc}
       <button
         class="artist-card"
         onclick={() => onArtistClick?.(artist.id)}
@@ -41,12 +44,12 @@
         }}
       >
         <div class="avatar-wrap">
-          {#if resolved}
+          {#if resolvedSrc}
             <img
               class="artist-avatar"
-              src={resolved}
+              src={resolvedSrc}
               alt={artist.name}
-              onerror={() => { failedImages = new Set([...failedImages, artist.id]); }}
+              onerror={() => { failedImages = new Set([...failedImages, resolvedSrc]); }}
             />
           {:else}
             <div class="artist-avatar fallback" style="background: {letterColor(artist.name)}">

@@ -7,17 +7,40 @@
   interface AlbumCard {
     id: number;
     title: string;
+    artist_id: number | null;
     artist_name: string | null;
     artwork_url: string | null;
   }
 
-  let { albums, onAlbumClick, onContextMenu }: {
+  let { albums, onAlbumClick, onContextMenu, onArtistClick, onArtistContextMenu }: {
     albums: AlbumCard[];
     onAlbumClick?: (id: number) => void;
     onContextMenu?: (e: MouseEvent, id: number) => void;
+    onArtistClick?: (id: number) => void;
+    onArtistContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
   let lazyArt = $state<Record<number, string>>({});
+
+  function handleAlbumKeydown(event: KeyboardEvent, albumId: number) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onAlbumClick?.(albumId);
+  }
+
+  function openArtistContextMenu(event: MouseEvent, artistId: number | null) {
+    if (artistId == null || !onArtistContextMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onArtistContextMenu(event, artistId);
+  }
+
+  function openArtist(event: MouseEvent, artistId: number | null) {
+    if (artistId == null || !onArtistClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onArtistClick(artistId);
+  }
 
 </script>
 
@@ -26,11 +49,14 @@
   <div class="albums-row" use:wheelToHorizontal>
     {#each albums as album (album.id)}
       {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
-      <button
+      <div
         class="album-card"
         onclick={() => onAlbumClick?.(album.id)}
         oncontextmenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, album.id); } }}
+        onkeydown={(e) => handleAlbumKeydown(e, album.id)}
         title={album.title}
+        role="button"
+        tabindex="0"
         use:lazyTidalArt={{
           enabled: !album.artwork_url && !lazyArt[album.id],
           query: { artist: album.artist_name, title: album.title },
@@ -49,9 +75,15 @@
         </div>
         <span class="album-title">{album.title}</span>
         {#if album.artist_name}
-          <span class="album-artist">{album.artist_name}</span>
+          <button
+            class="album-artist album-artist-link"
+            type="button"
+            onclick={(e) => openArtist(e, album.artist_id)}
+            oncontextmenu={(e) => openArtistContextMenu(e, album.artist_id)}
+            disabled={album.artist_id == null}
+          >{album.artist_name}</button>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
   </div>
@@ -110,6 +142,12 @@
     text-align: left;
   }
 
+  .album-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: var(--radius-xs);
+  }
+
   .art-wrap {
     position: relative;
     width: var(--album-card-w);
@@ -160,5 +198,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    text-align: left;
+  }
+
+  .album-artist-link {
+    cursor: pointer;
+  }
+
+  .album-artist-link:hover:not(:disabled),
+  .album-artist-link:focus-visible:not(:disabled) {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 0.12em;
+  }
+
+  .album-artist-link:disabled {
+    cursor: default;
   }
 </style>

@@ -6,16 +6,19 @@
     id: number;
     name: string;
     photo_url: string | null;
+    fallback_art_url?: string | null;
     playCount: number;
     trackCount: number;
     albumCount: number;
     kind: 'top' | 'forgotten_favorite';
   }
 
-  let { artists, onPlayAll, onShuffle }: {
+  let { artists, onPlayAll, onShuffle, onArtistClick, onContextMenu }: {
     artists: Artist[];
     onPlayAll: (artistId: number) => void;
     onShuffle: (artistId: number) => void;
+    onArtistClick?: (artistId: number) => void;
+    onContextMenu?: (e: MouseEvent, id: number) => void;
   } = $props();
 
   const ROTATE_MS = 8000;
@@ -49,6 +52,13 @@
     startTimer();
   }
 
+  function openHeroContextMenu(event: MouseEvent) {
+    if (!current || !onContextMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onContextMenu(event, current.id);
+  }
+
   $effect(() => {
     startTimer();
     return stopTimer;
@@ -61,19 +71,21 @@
 </script>
 
 {#if current}
+  {@const heroArt = current.photo_url ?? current.fallback_art_url ?? null}
   <div
     class="library-hero-card"
-    class:has-image={!!current.photo_url}
+    class:has-image={!!heroArt}
     onmouseenter={() => paused = true}
     onmouseleave={() => paused = false}
+    oncontextmenu={openHeroContextMenu}
     role="region"
     aria-label="Featured artist"
   >
     {#key currentIndex}
       <div
         class="hero-bg"
-        style={current.photo_url
-          ? `background-image: url('${current.photo_url}')`
+        style={heroArt
+          ? `background-image: url('${heroArt}')`
           : `background: ${letterColor(current.name)}`}
         in:fade={{ duration: 600 }}
       ></div>
@@ -82,21 +94,30 @@
     <div class="hero-overlay"></div>
 
     <div class="hero-content">
-      <div class="hero-art">
-        {#if current.photo_url}
-          <div class="hero-thumb" style="background-image: url('{current.photo_url}')"></div>
+      <button
+        class="hero-art hero-artist-link"
+        type="button"
+        onclick={() => onArtistClick?.(current.id)}
+        aria-label={`Open ${current.name}`}
+      >
+        {#if heroArt}
+          <div class="hero-thumb" style="background-image: url('{heroArt}')"></div>
         {:else}
           <div class="hero-thumb hero-thumb--fallback" style="background: {letterColor(current.name)}">
             <span>{initials(current.name)}</span>
           </div>
         {/if}
-      </div>
+      </button>
 
       <div class="hero-meta">
         <span class="hero-kind" class:hero-kind--forgotten={current.kind === 'forgotten_favorite'}>
           {current.kind === 'forgotten_favorite' ? 'FORGOTTEN FAVORITE' : 'YOUR TOP ARTIST'}
         </span>
-        <h2 class="hero-title">{current.name}</h2>
+        <h2 class="hero-title">
+          <button class="hero-title-link" type="button" onclick={() => onArtistClick?.(current.id)}>
+            {current.name}
+          </button>
+        </h2>
         <p class="hero-sub">{current.trackCount} tracks &nbsp;·&nbsp; {current.albumCount} albums</p>
         <div class="hero-actions">
           <button class="btn btn-primary hero-play" onclick={() => onPlayAll(current.id)}>
@@ -176,6 +197,28 @@
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
 
+  .hero-artist-link,
+  .hero-title-link {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .hero-artist-link {
+    display: block;
+  }
+
+  .hero-artist-link:focus-visible,
+  .hero-title-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: 8px;
+  }
+
   .hero-thumb--fallback {
     display: flex;
     align-items: center;
@@ -210,6 +253,12 @@
     line-height: var(--line-height-tight);
     color: var(--text-primary, #fff);
     margin: 0;
+  }
+
+  .hero-title-link:hover {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.12em;
   }
 
   .hero-sub {
