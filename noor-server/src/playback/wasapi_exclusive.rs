@@ -27,6 +27,10 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 use wasapi::{Direction, SampleType, StreamMode, WasapiError, WaveFormat, initialize_mta};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::Threading::{
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+};
 
 use super::runtime::{
     PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared,
@@ -128,6 +132,47 @@ enum Format {
     I16,
 }
 
+struct MmcssGuard {
+    handle: HANDLE,
+    task_name: &'static str,
+}
+
+impl Drop for MmcssGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if AvRevertMmThreadCharacteristics(self.handle) == 0 {
+                warn!(
+                    target: "playback",
+                    "WASAPI render thread failed to revert MMCSS task {}",
+                    self.task_name
+                );
+            }
+        }
+    }
+}
+
+fn enter_mmcss() -> Option<MmcssGuard> {
+    for task_name in ["Pro Audio", "Audio"] {
+        let mut wide: Vec<u16> = task_name.encode_utf16().collect();
+        wide.push(0);
+        let mut task_index = 0_u32;
+        let handle = unsafe { AvSetMmThreadCharacteristicsW(wide.as_ptr(), &mut task_index) };
+        if !handle.is_null() {
+            info!(
+                target: "playback",
+                "WASAPI render thread entered MMCSS task {}",
+                task_name
+            );
+            return Some(MmcssGuard { handle, task_name });
+        }
+    }
+    warn!(
+        target: "playback",
+        "WASAPI render thread failed to enter MMCSS Pro Audio/Audio tasks"
+    );
+    None
+}
+
 /// Build and start an exclusive-mode output stream targeting `device_pref`
 /// (None = system default) at `desired_sample_rate` Hz, `channels`-channel.
 ///
@@ -211,6 +256,7 @@ fn run_render_thread(
     released: Arc<AtomicBool>,
     init_tx: mpsc::SyncSender<std::result::Result<(u32, u16), ExclusiveInitFailure>>,
 ) {
+    let _mmcss = enter_mmcss();
     let init_result = init_audio_client(device_pref.as_deref(), desired_sample_rate, channels);
     let (audio_client, render_client, event_handle, blockalign, fmt_tag) = match init_result {
         Ok(v) => v,
@@ -220,21 +266,58 @@ fn run_render_thread(
             return;
         }
     };
-    let _ = init_tx.send(Ok((desired_sample_rate, channels)));
+
+    let mut f32_scratch: Vec<f32> = Vec::new();
+    let mut byte_buf: Vec<u8> = Vec::new();
+    match write_available_wasapi_frames(
+        &audio_client,
+        &render_client,
+        channels,
+        blockalign,
+        fmt_tag,
+        &shared,
+        &command_tx,
+        &event_tx,
+        &mut f32_scratch,
+        &mut byte_buf,
+    ) {
+        Ok(Some(report)) => {
+            info!(
+                target: "playback",
+                "WASAPI exclusive primed first buffer: {} frames, nonzero_audio={}",
+                report.frames,
+                report.nonzero_audio
+            );
+        }
+        Ok(None) => {
+            warn!(target: "playback", "WASAPI exclusive first-buffer prime found no writable frames");
+        }
+        Err(e) => {
+            let _ = init_tx.send(Err(ExclusiveInitFailure::Other(format!(
+                "prime initial WASAPI buffer: {e}"
+            ))));
+            released.store(true, Ordering::Release);
+            return;
+        }
+    }
 
     if let Err(e) = audio_client.start_stream() {
         warn!("WASAPI start_stream failed: {e}");
+        let _ = init_tx.send(Err(ExclusiveInitFailure::Other(format!(
+            "start WASAPI stream: {e}"
+        ))));
         released.store(true, Ordering::Release);
         let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeReleased {
             device_name: device_label.clone(),
         });
         return;
     }
+    let _ = init_tx.send(Ok((desired_sample_rate, channels)));
 
-    let mut f32_scratch: Vec<f32> = Vec::new();
-    let mut byte_buf: Vec<u8> = Vec::new();
     let grace = Duration::from_secs(grace_secs.max(1) as u64);
     let mut paused_since: Option<Instant> = None;
+    let mut logged_post_start_fill = false;
+    let mut logged_first_nonzero_fill = false;
 
     while !shutdown.load(Ordering::SeqCst) {
         // Idle-release: when paused for >= grace_secs, exit the loop and let
@@ -259,37 +342,6 @@ fn run_render_thread(
             paused_since = None;
         }
 
-        let frames = match audio_client.get_available_space_in_frames() {
-            Ok(n) => n as usize,
-            Err(e) => {
-                warn!("WASAPI get_available_space failed: {e}");
-                break;
-            }
-        };
-
-        if frames > 0 {
-            let interleaved = frames * channels as usize;
-            f32_scratch.resize(interleaved, 0.0);
-            f32_scratch.fill(0.0);
-
-            fill_f32_from_shared(&mut f32_scratch, &shared, &command_tx, &event_tx);
-
-            let bytes_needed = frames * blockalign;
-            byte_buf.resize(bytes_needed, 0);
-            convert_f32_to_bytes(
-                &f32_scratch,
-                &mut byte_buf,
-                fmt_tag,
-                blockalign,
-                channels as usize,
-            );
-
-            if let Err(e) = render_client.write_to_device(frames, &byte_buf, None) {
-                warn!("WASAPI write_to_device failed: {e}");
-                break;
-            }
-        }
-
         if event_handle.wait_for_event(2000).is_err() {
             if shutdown.load(Ordering::SeqCst) {
                 break;
@@ -299,6 +351,44 @@ fn run_render_thread(
             // DeviceSwap rebuild on whatever's there now.
             warn!("WASAPI render thread: event wait timed out, exiting render loop");
             break;
+        }
+
+        match write_available_wasapi_frames(
+            &audio_client,
+            &render_client,
+            channels,
+            blockalign,
+            fmt_tag,
+            &shared,
+            &command_tx,
+            &event_tx,
+            &mut f32_scratch,
+            &mut byte_buf,
+        ) {
+            Ok(Some(report)) => {
+                if !logged_post_start_fill {
+                    info!(
+                        target: "playback",
+                        "WASAPI exclusive post-start fill: {} frames, nonzero_audio={}",
+                        report.frames,
+                        report.nonzero_audio
+                    );
+                    logged_post_start_fill = true;
+                }
+                if report.nonzero_audio && !logged_first_nonzero_fill {
+                    info!(
+                        target: "playback",
+                        "WASAPI exclusive first nonzero audio fill: {} frames",
+                        report.frames
+                    );
+                    logged_first_nonzero_fill = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("WASAPI write_to_device failed: {e}");
+                break;
+            }
         }
     }
 
@@ -315,6 +405,59 @@ fn run_render_thread(
             device_name: device_label.clone(),
         });
     }
+}
+
+struct RenderWriteReport {
+    frames: usize,
+    nonzero_audio: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_available_wasapi_frames(
+    audio_client: &wasapi::AudioClient,
+    render_client: &wasapi::AudioRenderClient,
+    channels: u16,
+    blockalign: usize,
+    fmt_tag: Format,
+    shared: &Arc<PlaybackSharedState>,
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    f32_scratch: &mut Vec<f32>,
+    byte_buf: &mut Vec<u8>,
+) -> std::result::Result<Option<RenderWriteReport>, String> {
+    let frames = audio_client
+        .get_available_space_in_frames()
+        .map_err(|e| format!("get_available_space: {e}"))? as usize;
+
+    if frames == 0 {
+        return Ok(None);
+    }
+
+    let interleaved = frames * channels as usize;
+    f32_scratch.resize(interleaved, 0.0);
+    f32_scratch.fill(0.0);
+
+    fill_f32_from_shared(f32_scratch, shared, command_tx, event_tx);
+    let nonzero_audio = f32_scratch.iter().any(|sample| sample.abs() > f32::EPSILON);
+
+    let bytes_needed = frames * blockalign;
+    byte_buf.resize(bytes_needed, 0);
+    convert_f32_to_bytes(
+        f32_scratch.as_slice(),
+        byte_buf.as_mut_slice(),
+        fmt_tag,
+        blockalign,
+        channels as usize,
+    );
+
+    render_client
+        .write_to_device(frames, byte_buf.as_slice(), None)
+        .map_err(|e| format!("write_to_device: {e}"))?;
+
+    Ok(Some(RenderWriteReport {
+        frames,
+        nonzero_audio,
+    }))
 }
 
 /// Try every candidate format in turn, attempting `initialize_client` directly
@@ -505,32 +648,64 @@ fn try_initialize_one(
 
     let blockalign = format.get_blockalign() as usize;
 
-    let (_def_period, min_period) = audio_client
+    let (def_period, min_period) = audio_client
         .get_device_period()
         .map_err(|e| ExclusiveInitFailure::Other(format!("get_device_period: {e}")))?;
+    let mut chosen_period = audio_client
+        .calculate_aligned_period_near(3 * min_period / 2, Some(128), &format)
+        .map_err(|e| ExclusiveInitFailure::Other(format!("calculate aligned period: {e}")))?;
     let mode = StreamMode::EventsExclusive {
-        period_hns: min_period,
+        period_hns: chosen_period,
     };
 
     if let Err(e) = audio_client.initialize_client(&format, &Direction::Render, &mode) {
-        let classified = classify_init_error(&e);
+        let classification = classify_init_error_kind(&e);
         // Always log the raw HRESULT so we have ground-truth diagnostic data
         // when classification falls through to "Other" (i.e. something we
         // didn't recognize and aren't retrying).
         if let WasapiError::Windows(win_err) = &e {
             tracing::debug!(
                 target: "playback",
-                "WASAPI initialize_client returned HRESULT 0x{:08x} ({:?}, {} Hz \u{00d7} {} ch) \u{2192} {:?}",
+                "WASAPI initialize_client returned HRESULT 0x{:08x} ({:?}, {} Hz \u{00d7} {} ch, period {} hns) \u{2192} {:?}",
                 win_err.code().0 as u32,
                 fmt_tag_label(fmt_tag),
                 desired_sample_rate,
                 channels,
-                std::mem::discriminant(&classified)
+                chosen_period,
+                classification
             );
         }
-        return Err(classified);
+        if classification == InitErrorClassification::RepairAlignedPeriod {
+            let aligned_frames = audio_client.get_buffer_size().map_err(|err| {
+                ExclusiveInitFailure::Other(format!("get aligned buffer size: {err}"))
+            })?;
+            let aligned_period =
+                wasapi::calculate_period_100ns(aligned_frames as i64, desired_sample_rate as i64);
+            info!(
+                target: "playback",
+                "WASAPI exclusive retrying aligned buffer: {} frames, period {} hns",
+                aligned_frames,
+                aligned_period
+            );
+            let mut retry_client = device.get_iaudioclient().map_err(|err| {
+                ExclusiveInitFailure::Other(format!("get_iaudioclient retry: {err}"))
+            })?;
+            let retry_mode = StreamMode::EventsExclusive {
+                period_hns: aligned_period,
+            };
+            if let Err(retry_err) =
+                retry_client.initialize_client(&format, &Direction::Render, &retry_mode)
+            {
+                return Err(classify_init_error(&retry_err));
+            }
+            audio_client = retry_client;
+            chosen_period = aligned_period;
+        } else {
+            return Err(classify_init_error(&e));
+        }
     }
 
+    let buffer_frames = audio_client.get_buffer_size().unwrap_or(0);
     let event_handle = audio_client
         .set_get_eventhandle()
         .map_err(|e| ExclusiveInitFailure::Other(format!("set_get_eventhandle: {e}")))?;
@@ -541,12 +716,15 @@ fn try_initialize_one(
 
     info!(
         target: "playback",
-        "WASAPI exclusive stream initialized: {} Hz \u{00d7} {} ch ({:?}), {} bytes/frame, period {} hns",
+        "WASAPI exclusive stream initialized: {} Hz \u{00d7} {} ch ({:?}), {} bytes/frame, default period {} hns, min period {} hns, chosen period {} hns, buffer {} frames",
         desired_sample_rate,
         channels,
         fmt_tag_label(fmt_tag),
         blockalign,
-        min_period
+        def_period,
+        min_period,
+        chosen_period,
+        buffer_frames
     );
 
     Ok((
@@ -566,27 +744,54 @@ fn fmt_tag_label(fmt: Format) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitErrorClassification {
+    DeviceInUse,
+    ExclusiveDisabled,
+    RepairAlignedPeriod,
+    FormatRejected,
+    Other,
+}
+
+fn classify_init_hresult(code: i32) -> InitErrorClassification {
+    if code == AUDCLNT_E_DEVICE_IN_USE {
+        InitErrorClassification::DeviceInUse
+    } else if code == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED {
+        InitErrorClassification::ExclusiveDisabled
+    } else if code == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED {
+        InitErrorClassification::RepairAlignedPeriod
+    } else if code == AUDCLNT_E_UNSUPPORTED_FORMAT || code == AUDCLNT_E_INVALID_DEVICE_PERIOD {
+        InitErrorClassification::FormatRejected
+    } else {
+        InitErrorClassification::Other
+    }
+}
+
+fn classify_init_error_kind(err: &WasapiError) -> InitErrorClassification {
+    match err {
+        WasapiError::Windows(win_err) => classify_init_hresult(win_err.code().0),
+        WasapiError::UnsupportedFormat => InitErrorClassification::FormatRejected,
+        _ => InitErrorClassification::Other,
+    }
+}
+
 fn classify_init_error(err: &WasapiError) -> ExclusiveInitFailure {
     match err {
         WasapiError::Windows(win_err) => {
             let code: i32 = win_err.code().0;
-            if code == AUDCLNT_E_DEVICE_IN_USE {
-                ExclusiveInitFailure::DeviceInUse
-            } else if code == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED {
-                ExclusiveInitFailure::ExclusiveDisabled
-            } else if code == AUDCLNT_E_UNSUPPORTED_FORMAT
-                || code == AUDCLNT_E_INVALID_DEVICE_PERIOD
-                || code == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
-            {
-                ExclusiveInitFailure::Other(format!(
-                    "format rejected (HRESULT 0x{:08x})",
-                    code as u32
-                ))
-            } else {
-                ExclusiveInitFailure::Other(format!(
+            match classify_init_hresult(code) {
+                InitErrorClassification::DeviceInUse => ExclusiveInitFailure::DeviceInUse,
+                InitErrorClassification::ExclusiveDisabled => {
+                    ExclusiveInitFailure::ExclusiveDisabled
+                }
+                InitErrorClassification::FormatRejected
+                | InitErrorClassification::RepairAlignedPeriod => ExclusiveInitFailure::Other(
+                    format!("format rejected (HRESULT 0x{:08x})", code as u32),
+                ),
+                InitErrorClassification::Other => ExclusiveInitFailure::Other(format!(
                     "initialize_client failed: HRESULT 0x{:08x}: {win_err}",
                     code as u32
-                ))
+                )),
             }
         }
         WasapiError::UnsupportedFormat => {
@@ -617,16 +822,105 @@ fn convert_f32_to_bytes(
             // i32 range is acceptable; the bottom 8 bits are ignored.
             debug_assert_eq!(blockalign, channels * 4);
             for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
-                let v = (s.clamp(-1.0, 1.0) * (i32::MAX as f32)) as i32;
+                let v = f32_to_i32_pcm(s);
                 chunk.copy_from_slice(&v.to_le_bytes());
             }
         }
         Format::I16 => {
             debug_assert_eq!(blockalign, channels * 2);
             for (chunk, &s) in dst.chunks_exact_mut(2).zip(src.iter()) {
-                let v = (s.clamp(-1.0, 1.0) * (i16::MAX as f32)) as i16;
+                let v = f32_to_i16_pcm(s);
                 chunk.copy_from_slice(&v.to_le_bytes());
             }
         }
+    }
+}
+
+fn f32_to_i16_pcm(sample: f32) -> i16 {
+    if sample <= -1.0 {
+        i16::MIN
+    } else if sample >= 1.0 {
+        i16::MAX
+    } else {
+        (sample * i16::MAX as f32) as i16
+    }
+}
+
+fn f32_to_i32_pcm(sample: f32) -> i32 {
+    if sample <= -1.0 {
+        i32::MIN
+    } else if sample >= 1.0 {
+        i32::MAX
+    } else {
+        (sample * i32::MAX as f32) as i32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_init_hresult_maps_device_in_use() {
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_DEVICE_IN_USE),
+            InitErrorClassification::DeviceInUse
+        );
+    }
+
+    #[test]
+    fn classify_init_hresult_maps_exclusive_disabled() {
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED),
+            InitErrorClassification::ExclusiveDisabled
+        );
+    }
+
+    #[test]
+    fn classify_init_hresult_marks_buffer_alignment_as_repairable() {
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED),
+            InitErrorClassification::RepairAlignedPeriod
+        );
+    }
+
+    #[test]
+    fn classify_init_hresult_marks_invalid_period_as_format_rejection() {
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_INVALID_DEVICE_PERIOD),
+            InitErrorClassification::FormatRejected
+        );
+    }
+
+    #[test]
+    fn convert_f32_to_bytes_writes_f32_little_endian() {
+        let mut dst = vec![0_u8; 8];
+
+        convert_f32_to_bytes(&[0.5, -0.5], &mut dst, Format::F32, 8, 2);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0.5_f32.to_le_bytes());
+        expected.extend_from_slice(&(-0.5_f32).to_le_bytes());
+        assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn convert_f32_to_bytes_clamps_integer_formats() {
+        let mut i16_bytes = vec![0_u8; 4];
+        convert_f32_to_bytes(&[2.0, -2.0], &mut i16_bytes, Format::I16, 4, 2);
+        assert_eq!(&i16_bytes[0..2], &i16::MAX.to_le_bytes());
+        assert_eq!(&i16_bytes[2..4], &i16::MIN.to_le_bytes());
+
+        let mut i32_bytes = vec![0_u8; 8];
+        convert_f32_to_bytes(&[2.0, -2.0], &mut i32_bytes, Format::I32, 8, 2);
+        assert_eq!(&i32_bytes[0..4], &i32::MAX.to_le_bytes());
+        assert_eq!(&i32_bytes[4..8], &i32::MIN.to_le_bytes());
+    }
+
+    #[test]
+    fn format_labels_match_candidate_formats() {
+        assert_eq!(fmt_tag_label(Format::F32), "f32");
+        assert_eq!(fmt_tag_label(Format::I32), "i24-in-32");
+        assert_eq!(fmt_tag_label(Format::I16), "i16");
     }
 }
