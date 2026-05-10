@@ -247,6 +247,19 @@
 				void loadLastfmStatus();
 			}
 
+			if (latest.type === 'training_progress' && discoveryStatus?.latest_run) {
+				discoveryStatus = {
+					...discoveryStatus,
+					latest_run: {
+						...discoveryStatus.latest_run,
+						progress: typeof latest.progress === 'number' ? latest.progress : discoveryStatus.latest_run.progress,
+						stage: typeof latest.stage === 'string' ? latest.stage : discoveryStatus.latest_run.stage,
+						items_done: typeof latest.tracks_done === 'number' ? latest.tracks_done : discoveryStatus.latest_run.items_done,
+						items_total: typeof latest.tracks_total === 'number' ? latest.tracks_total : discoveryStatus.latest_run.items_total,
+					}
+				};
+			}
+
 			if (
 				latest.type === 'playback_changed' ||
 				latest.type === 'track_changed' ||
@@ -787,7 +800,7 @@
 		const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z';
 		const startedMs = Date.parse(withTz);
 		if (Number.isNaN(startedMs)) return null;
-		const elapsed = (Date.now() - startedMs) / 1000;
+		const elapsed = (nowEpochSeconds * 1000 - startedMs) / 1000;
 		if (elapsed <= 0) return null;
 		const progress = Math.max(0.01, Math.min(0.99, r.progress ?? 0));
 		const total = elapsed / progress;

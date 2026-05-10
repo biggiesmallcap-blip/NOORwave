@@ -1022,4 +1022,131 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn gc_deletes_stale_pending_rows() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_at)
+             VALUES (NULL, 0, 'test', datetime('now', '-7 hours'))",
+            [],
+        )
+        .unwrap();
+
+        let (deleted, unlocked) = super::gc_pending_queue(&conn).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(unlocked, 0);
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn gc_keeps_fresh_pending_rows() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_at)
+             VALUES (NULL, 0, 'test', datetime('now', '-1 hour'))",
+            [],
+        )
+        .unwrap();
+
+        let (deleted, unlocked) = super::gc_pending_queue(&conn).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(unlocked, 0);
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn gc_clears_stale_resolving_lock() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_at, resolving_at)
+             VALUES (NULL, 0, 'test', datetime('now', '-1 hour'), datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        let row_id: i32 = conn
+            .query_row("SELECT id FROM queue", [], |row| row.get(0))
+            .unwrap();
+
+        let (deleted, unlocked) = super::gc_pending_queue(&conn).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(unlocked, 1);
+
+        let resolving_at: Option<String> = conn
+            .query_row(
+                "SELECT resolving_at FROM queue WHERE id = ?",
+                params![row_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolving_at, None::<String>);
+    }
+
+    #[test]
+    fn gc_keeps_fresh_resolving_lock() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_at, resolving_at)
+             VALUES (NULL, 0, 'test', datetime('now', '-1 hour'), datetime('now', '-10 seconds'))",
+            [],
+        )
+        .unwrap();
+        let row_id: i32 = conn
+            .query_row("SELECT id FROM queue", [], |row| row.get(0))
+            .unwrap();
+
+        let (deleted, unlocked) = super::gc_pending_queue(&conn).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(unlocked, 0);
+
+        let resolving_at: Option<String> = conn
+            .query_row(
+                "SELECT resolving_at FROM queue WHERE id = ?",
+                params![row_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(resolving_at.is_some());
+    }
+
+    #[test]
+    fn gc_does_not_touch_resolved_rows() {
+        let conn = conn();
+        // track_id is set (resolved), but pending_at is old and resolving_at is stale.
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source, pending_at, resolving_at)
+             VALUES (1, 0, 'test', datetime('now', '-7 hours'), datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        let row_id: i32 = conn
+            .query_row("SELECT id FROM queue", [], |row| row.get(0))
+            .unwrap();
+
+        let (deleted, unlocked) = super::gc_pending_queue(&conn).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(unlocked, 0);
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let resolving_at: Option<String> = conn
+            .query_row(
+                "SELECT resolving_at FROM queue WHERE id = ?",
+                params![row_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(resolving_at.is_some());
+    }
 }
