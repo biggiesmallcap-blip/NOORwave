@@ -1863,118 +1863,6 @@
 				</div>
 			</section>
 			{/if}
-		</div>
-
-		<div class="settings-side">
-			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and format." />
-				<div class="info-list">
-					<div class="info-row">
-						<span>Device</span>
-						<strong>{playbackRuntime?.device_name ?? 'No device reported yet'}</strong>
-					</div>
-					<div class="info-row">
-						<span>Format</span>
-						<strong>
-							{#if playbackRuntime}
-								{playbackRuntime.sample_rate} Hz · {playbackRuntime.channels} ch
-							{:else}
-								Waiting for runtime
-							{/if}
-						</strong>
-					</div>
-					<div class="info-row">
-						<span>Active track</span>
-						<strong>{playbackRuntime?.active_track_id ?? 'None'}</strong>
-					</div>
-				</div>
-
-				{#if playbackRuntime?.last_error}
-					<p class="runtime-error">{playbackRuntime.last_error}</p>
-				{/if}
-			</section>
-			{/if}
-
-			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
-				<div class="roadmap-list">
-					<div class="roadmap-item">
-						<h4>YouTube Music</h4>
-						<p>Library sync and metadata, without playback.</p>
-					</div>
-					<div class="roadmap-item">
-						<h4>SoundCloud</h4>
-						<p>Experimental discovery support and lighter-weight source coverage.</p>
-					</div>
-				</div>
-			</section>
-			{/if}
-
-			{#if activeCategory === 'audio'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="DSP" title="Audio analysis" subtitle="BPM, key, energy, danceability." />
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
-					<MetricPair label="Avg BPM" value={$audioAnalysis.stats?.avg_bpm?.toFixed(1) ?? '—'} copy="Average tempo across analyzed tracks." />
-					<MetricPair label="Top Key" value={$audioAnalysis.stats?.top_key ?? '—'} copy="Most common key signature." />
-					<MetricPair label="Avg Energy" value={$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'} copy="Average energy level (0–1)." />
-				</div>
-
-				<p class="analysis-note">
-					Tracks analyse automatically as you play them. The first 30 seconds of audio
-					from the live playback stream is captured into memory, run through the
-					BPM / key / energy detector, and saved alongside the track — no extra
-					network requests, no separate download.
-				</p>
-				<p class="analysis-note">
-					This means the data fills in over time as you listen rather than all at
-					once. There's no bulk-scan button: scanning the entire library would
-					require thousands of TIDAL preview requests in quick succession, which
-					trips TIDAL's rate limiter and breaks playback for the whole account
-					until the backoff clears.
-				</p>
-
-				<div class="info-row">
-					<div>
-						<span>Passive analysis</span>
-						<p class="info-row-hint">
-							{$audioAnalysis.passiveEnabled
-								? 'New tracks you play will be analysed and added to the library DSP table.'
-								: 'Disabled — playback is not being analysed. Existing data stays untouched.'}
-						</p>
-					</div>
-					<strong>
-						<label class="toggle-switch">
-							<input
-								type="checkbox"
-								checked={$audioAnalysis.passiveEnabled}
-								onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
-							/>
-							<span class="toggle-slider"></span>
-						</label>
-					</strong>
-				</div>
-
-				<div class="action-row">
-					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
-				</div>
-
-				<details class="advanced-details">
-					<summary>Advanced Settings</summary>
-					<div class="setting-row">
-						<label for="dsp-max-duration">Max duration per track (seconds)</label>
-						<input id="dsp-max-duration" type="number" value="30" min="10" max="120" />
-					</div>
-					<div class="setting-row">
-						<label for="dsp-reanalyze-interval">Re-analyze interval (days)</label>
-						<input id="dsp-reanalyze-interval" type="number" value="30" min="1" max="365" />
-					</div>
-				</details>
-			</section>
-			{/if}
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
@@ -2135,6 +2023,118 @@
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
 					{/if}
 				</div>
+			</section>
+			{/if}
+		</div>
+
+		<div class="settings-side">
+			{#if activeCategory === 'audio'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and format." />
+				<div class="info-list">
+					<div class="info-row">
+						<span>Device</span>
+						<strong>{playbackRuntime?.device_name ?? 'No device reported yet'}</strong>
+					</div>
+					<div class="info-row">
+						<span>Format</span>
+						<strong>
+							{#if playbackRuntime}
+								{playbackRuntime.sample_rate} Hz · {playbackRuntime.channels} ch
+							{:else}
+								Waiting for runtime
+							{/if}
+						</strong>
+					</div>
+					<div class="info-row">
+						<span>Active track</span>
+						<strong>{playbackRuntime?.active_track_id ?? 'None'}</strong>
+					</div>
+				</div>
+
+				{#if playbackRuntime?.last_error}
+					<p class="runtime-error">{playbackRuntime.last_error}</p>
+				{/if}
+			</section>
+			{/if}
+
+			{#if activeCategory === 'sources'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Later" title="Additional services" subtitle="Planned source coverage." />
+				<div class="roadmap-list">
+					<div class="roadmap-item">
+						<h4>YouTube Music</h4>
+						<p>Library sync and metadata, without playback.</p>
+					</div>
+					<div class="roadmap-item">
+						<h4>SoundCloud</h4>
+						<p>Experimental discovery support and lighter-weight source coverage.</p>
+					</div>
+				</div>
+			</section>
+			{/if}
+
+			{#if activeCategory === 'audio'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="DSP" title="Audio analysis" subtitle="BPM, key, energy, danceability." />
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
+					<MetricPair label="Avg BPM" value={$audioAnalysis.stats?.avg_bpm?.toFixed(1) ?? '—'} copy="Average tempo across analyzed tracks." />
+					<MetricPair label="Top Key" value={$audioAnalysis.stats?.top_key ?? '—'} copy="Most common key signature." />
+					<MetricPair label="Avg Energy" value={$audioAnalysis.stats?.avg_energy?.toFixed(2) ?? '—'} copy="Average energy level (0–1)." />
+				</div>
+
+				<p class="analysis-note">
+					Tracks analyse automatically as you play them. The first 30 seconds of audio
+					from the live playback stream is captured into memory, run through the
+					BPM / key / energy detector, and saved alongside the track — no extra
+					network requests, no separate download.
+				</p>
+				<p class="analysis-note">
+					This means the data fills in over time as you listen rather than all at
+					once. There's no bulk-scan button: scanning the entire library would
+					require thousands of TIDAL preview requests in quick succession, which
+					trips TIDAL's rate limiter and breaks playback for the whole account
+					until the backoff clears.
+				</p>
+
+				<div class="info-row">
+					<div>
+						<span>Passive analysis</span>
+						<p class="info-row-hint">
+							{$audioAnalysis.passiveEnabled
+								? 'New tracks you play will be analysed and added to the library DSP table.'
+								: 'Disabled — playback is not being analysed. Existing data stays untouched.'}
+						</p>
+					</div>
+					<strong>
+						<label class="toggle-switch">
+							<input
+								type="checkbox"
+								checked={$audioAnalysis.passiveEnabled}
+								onchange={(e) => void setPassiveDspEnabled((e.currentTarget as HTMLInputElement).checked)}
+							/>
+							<span class="toggle-slider"></span>
+						</label>
+					</strong>
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear All</button>
+				</div>
+
+				<details class="advanced-details">
+					<summary>Advanced Settings</summary>
+					<div class="setting-row">
+						<label for="dsp-max-duration">Max duration per track (seconds)</label>
+						<input id="dsp-max-duration" type="number" value="30" min="10" max="120" />
+					</div>
+					<div class="setting-row">
+						<label for="dsp-reanalyze-interval">Re-analyze interval (days)</label>
+						<input id="dsp-reanalyze-interval" type="number" value="30" min="1" max="365" />
+					</div>
+				</details>
 			</section>
 			{/if}
 
