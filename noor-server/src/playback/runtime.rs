@@ -690,16 +690,30 @@ fn run_runtime_loop(
                     .fading_out_engine
                     .as_ref()
                     .map(|e| (e.track_id, e.generation));
-                if fading == Some((track_id, generation)) {
-                    if let Some(mut engine) = state.fading_out_engine.take() {
-                        engine.stop();
+                let next = state
+                    .next_engine
+                    .as_ref()
+                    .map(|engine| (engine.track_id, engine.generation));
+                let active = state
+                    .engine
+                    .as_ref()
+                    .map(|engine| (engine.track_id, engine.generation));
+
+                match terminal_engine_slot(active, next, fading, track_id, generation) {
+                    Some(TerminalEngineSlot::FadingOut) => {
+                        if let Some(mut engine) = state.fading_out_engine.take() {
+                            engine.stop();
+                        }
                     }
-                } else {
-                    let active = state
-                        .engine
-                        .as_ref()
-                        .map(|engine| (engine.track_id, engine.generation));
-                    if handle_terminal_event(active, track_id, generation) {
+                    Some(TerminalEngineSlot::Next) => {
+                        if let PlaybackTerminalReason::Error(message) = &outcome {
+                            warn!("Discarding failed pre-buffered track {track_id}: {message}");
+                        }
+                        if let Some(mut engine) = state.next_engine.take() {
+                            engine.stop();
+                        }
+                    }
+                    Some(TerminalEngineSlot::Active) => {
                         stop_current_engine(&mut state);
                         match outcome {
                             PlaybackTerminalReason::Finished => {
@@ -713,6 +727,7 @@ fn run_runtime_loop(
                             }
                         }
                     }
+                    None => {}
                 }
             }
             PlaybackRuntimeCommand::TrackStatus {
@@ -968,11 +983,10 @@ fn transition_to_job(
                 true,
                 None,
                 state.current_exclusive_release_grace_secs,
-            ) {
-                warn!(
-                    "transition_to_job: swap_stream errored cold-starting new engine: {err:?}"
-                );
-            }
+            )
+        {
+            warn!("transition_to_job: swap_stream errored cold-starting new engine: {err:?}");
+        }
         eng
     };
 
@@ -1276,9 +1290,7 @@ impl PlaybackEngine {
                 }
                 Err(failure) => {
                     let reason = failure.user_message();
-                    warn!(
-                        "WASAPI exclusive grab failed; falling back to cpal shared: {reason}"
-                    );
+                    warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
                     let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
                         reason,
                         device_name: device_label.clone(),
@@ -2428,8 +2440,35 @@ fn estimate_total_samples_from_duration_ms(
     Some((duration_ms as u64 * sample_rate as u64 * channels as u64) / 1_000)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalEngineSlot {
+    Active,
+    Next,
+    FadingOut,
+}
+
+fn terminal_engine_slot(
+    active: Option<(i64, u64)>,
+    next: Option<(i64, u64)>,
+    fading: Option<(i64, u64)>,
+    track_id: i64,
+    generation: u64,
+) -> Option<TerminalEngineSlot> {
+    let target = Some((track_id, generation));
+    if fading == target {
+        Some(TerminalEngineSlot::FadingOut)
+    } else if next == target {
+        Some(TerminalEngineSlot::Next)
+    } else if active == target {
+        Some(TerminalEngineSlot::Active)
+    } else {
+        None
+    }
+}
+
 fn handle_terminal_event(active: Option<(i64, u64)>, track_id: i64, generation: u64) -> bool {
-    active == Some((track_id, generation))
+    terminal_engine_slot(active, None, None, track_id, generation)
+        == Some(TerminalEngineSlot::Active)
 }
 
 #[cfg(test)]
@@ -2507,6 +2546,22 @@ mod tests {
         assert!(handle_terminal_event(Some((7, 1)), 7, 1));
         assert!(!handle_terminal_event(Some((7, 1)), 8, 1));
         assert!(!handle_terminal_event(Some((7, 2)), 7, 1));
+    }
+
+    #[test]
+    fn terminal_engine_slot_identifies_prebuffered_track() {
+        assert_eq!(
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), None, 2, 1),
+            Some(TerminalEngineSlot::Next)
+        );
+        assert_eq!(
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 3, 1),
+            Some(TerminalEngineSlot::FadingOut)
+        );
+        assert_eq!(
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 4, 1),
+            None
+        );
     }
 
     #[test]

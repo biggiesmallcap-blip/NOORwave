@@ -146,6 +146,11 @@ fn session_expired_body(body: &str) -> bool {
         || lower.contains("\"substatus\":6001")
 }
 
+fn asset_not_ready_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("asset is not ready for playback") || lower.contains("\"substatus\":4005")
+}
+
 fn xml_entity_decode(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -184,9 +189,10 @@ fn extract_dash_codec(xml: &str) -> String {
 fn parse_video_expiry(resp: &serde_json::Value) -> Option<DateTime<Utc>> {
     for key in ["expiresAt", "expires_at", "expirationDate", "expiration"] {
         if let Some(raw) = resp.get(key).and_then(serde_json::Value::as_str)
-            && let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-                return Some(dt.with_timezone(&Utc));
-            }
+            && let Ok(dt) = DateTime::parse_from_rfc3339(raw)
+        {
+            return Some(dt.with_timezone(&Utc));
+        }
     }
     None
 }
@@ -417,6 +423,12 @@ pub async fn resolve_stream(
     if !status.is_success() {
         crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
+        if asset_not_ready_body(&raw) {
+            return Err(StreamResolveError::StreamRejected {
+                message: format!("TIDAL rejected playback request with {status}: {raw}"),
+            });
+        }
+
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
                 message: format!("TIDAL returned {status}: {raw}"),
@@ -607,6 +619,12 @@ pub async fn resolve_video_stream(
     if !status.is_success() {
         crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
+        if asset_not_ready_body(&raw) {
+            return Err(StreamResolveError::StreamRejected {
+                message: format!("TIDAL rejected video playback request with {status}: {raw}"),
+            });
+        }
+
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
                 message: format!("TIDAL returned {status}: {raw}"),
@@ -659,6 +677,16 @@ mod tests {
         ));
         assert!(session_expired_body(r#"{"subStatus":6001}"#));
         assert!(!session_expired_body(r#"{"ok":true}"#));
+    }
+
+    #[test]
+    fn classifies_asset_not_ready_as_stream_rejection_clue() {
+        assert!(asset_not_ready_body(
+            r#"{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+        ));
+        assert!(!session_expired_body(
+            r#"{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+        ));
     }
 
     #[test]
