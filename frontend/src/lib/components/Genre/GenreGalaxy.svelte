@@ -13,6 +13,7 @@
 	} from './galaxy.types';
 
 	type ArtistChipMap = Map<number, string[]>;
+	type HoverCardPosition = { x: number; y: number; align: 'left' | 'right' };
 
 	let {
 		nodes = [],
@@ -65,6 +66,7 @@
 	let zoomLevel = $state<ZoomLevel>('galaxy');
 	let isDragging = $state(false);
 	let mixPillPosition = $state<{ x: number; y: number } | null>(null);
+	let hoverCardPosition = $state<HoverCardPosition | null>(null);
 	let camera = $state<Camera>({
 		x: 0,
 		y: 0,
@@ -149,6 +151,10 @@
 	let pendingConnectionRedraw = true;
 
 	const MAX_PARTICLES = 120;
+	const HOVER_CARD_CURSOR_CLEARANCE_X = 28;
+	const HOVER_CARD_CURSOR_CLEARANCE_Y = 24;
+	const HOVER_CARD_EDGE_MARGIN = 12;
+	const HOVER_CARD_ESTIMATED_WIDTH = 260;
 	const fontBody = '600 12px "Avenir Next", "Segoe UI", sans-serif';
 	const fontDisplay = '600 13px "Iowan Old Style", Georgia, serif';
 
@@ -449,31 +455,37 @@
 		ctx.clearRect(0, 0, width, height);
 
 		// Deep space gradient
-		const fill = ctx.createRadialGradient(width * 0.5, height * 0.5, 40, width * 0.5, height * 0.5, width * 0.78);
-		fill.addColorStop(0, 'rgba(17, 19, 34, 0.98)');
-		fill.addColorStop(0.55, 'rgba(10, 12, 22, 0.98)');
-		fill.addColorStop(1, 'rgba(6, 8, 15, 1)');
+		const fill = ctx.createRadialGradient(width * 0.48, height * 0.48, 24, width * 0.5, height * 0.5, width * 0.86);
+		fill.addColorStop(0, 'rgba(18, 20, 38, 0.99)');
+		fill.addColorStop(0.38, 'rgba(10, 13, 27, 0.99)');
+		fill.addColorStop(0.74, 'rgba(5, 8, 18, 1)');
+		fill.addColorStop(1, 'rgba(2, 4, 10, 1)');
 		ctx.fillStyle = fill;
 		ctx.fillRect(0, 0, width, height);
 
 		// Nebula clouds
 		const nebulaA = ctx.createRadialGradient(width * 0.22, height * 0.28, 0, width * 0.22, height * 0.28, width * 0.32);
-		nebulaA.addColorStop(0, 'rgba(124, 128, 255, 0.16)');
+		nebulaA.addColorStop(0, 'rgba(88, 144, 255, 0.22)');
+		nebulaA.addColorStop(0.5, 'rgba(124, 128, 255, 0.1)');
 		nebulaA.addColorStop(1, 'rgba(124, 128, 255, 0)');
 		ctx.fillStyle = nebulaA;
 		ctx.fillRect(0, 0, width, height);
 
 		const nebulaB = ctx.createRadialGradient(width * 0.76, height * 0.18, 0, width * 0.76, height * 0.18, width * 0.26);
-		nebulaB.addColorStop(0, 'rgba(179, 123, 244, 0.12)');
+		nebulaB.addColorStop(0, 'rgba(236, 180, 98, 0.14)');
+		nebulaB.addColorStop(0.42, 'rgba(179, 123, 244, 0.11)');
 		nebulaB.addColorStop(1, 'rgba(247, 37, 133, 0)');
 		ctx.fillStyle = nebulaB;
 		ctx.fillRect(0, 0, width, height);
 
 		const nebulaC = ctx.createRadialGradient(width * 0.72, height * 0.8, 0, width * 0.72, height * 0.8, width * 0.34);
-		nebulaC.addColorStop(0, 'rgba(6, 214, 160, 0.08)');
+		nebulaC.addColorStop(0, 'rgba(6, 214, 160, 0.12)');
+		nebulaC.addColorStop(0.46, 'rgba(59, 130, 246, 0.06)');
 		nebulaC.addColorStop(1, 'rgba(6, 214, 160, 0)');
 		ctx.fillStyle = nebulaC;
 		ctx.fillRect(0, 0, width, height);
+
+		drawNebulaVeins(ctx);
 
 		// Subtle grid texture
 		ctx.save();
@@ -502,12 +514,12 @@
 			return seed / 4294967296;
 		};
 
-		const starCount = isCompactViewport ? 180 : 350;
+		const starCount = isCompactViewport ? 220 : 430;
 		for (let index = 0; index < starCount; index += 1) {
 			const x = random() * width;
 			const y = random() * height;
-			const size = 0.5 + random() * 2.2;
-			const alpha = 0.3 + random() * 0.7;
+			const size = 0.35 + random() * 2.45;
+			const alpha = 0.24 + random() * 0.68;
 			// Some stars are slightly warm or cool
 			const tint = random() > 0.85 ? `rgba(200, 210, 255, ${alpha})` :
 			             random() > 0.85 ? `rgba(255, 230, 200, ${alpha})` :
@@ -517,6 +529,31 @@
 			ctx.arc(x, y, size, 0, Math.PI * 2);
 			ctx.fill();
 		}
+	}
+
+	function drawNebulaVeins(ctx: CanvasRenderingContext2D) {
+		ctx.save();
+		ctx.globalCompositeOperation = 'screen';
+		for (let index = 0; index < 18; index += 1) {
+			const t = index / 17;
+			const startX = width * (-0.08 + t * 1.16);
+			const startY = height * (0.14 + Math.sin(index * 1.7) * 0.08);
+			const endX = width * (0.18 + t * 0.95);
+			const endY = height * (0.92 + Math.cos(index * 1.13) * 0.12);
+			const controlX = width * (0.5 + Math.sin(index * 0.93) * 0.32);
+			const controlY = height * (0.42 + Math.cos(index * 1.27) * 0.25);
+			const gradient = ctx.createLinearGradient(startX, startY, endX, endY);
+			gradient.addColorStop(0, 'rgba(88, 166, 255, 0)');
+			gradient.addColorStop(0.44, index % 2 === 0 ? 'rgba(128, 118, 255, 0.075)' : 'rgba(6, 214, 160, 0.052)');
+			gradient.addColorStop(1, 'rgba(236, 180, 98, 0)');
+			ctx.strokeStyle = gradient;
+			ctx.lineWidth = 0.7 + (index % 4) * 0.18;
+			ctx.beginPath();
+			ctx.moveTo(startX, startY);
+			ctx.quadraticCurveTo(controlX, controlY, endX, endY);
+			ctx.stroke();
+		}
+		ctx.restore();
 	}
 
 	function drawConnectionsLayer() {
@@ -677,7 +714,51 @@
 		ctx.restore();
 	}
 
+	function nodeFillGradient(
+		ctx: CanvasRenderingContext2D,
+		node: GalaxyNode,
+		screen: { x: number; y: number },
+		radius: number,
+		baseColor: string
+	): CanvasGradient {
+		const gradient = ctx.createRadialGradient(
+			screen.x - radius * 0.34,
+			screen.y - radius * 0.42,
+			radius * 0.08,
+			screen.x,
+			screen.y,
+			radius * 1.12
+		);
+		gradient.addColorStop(0, 'rgba(255, 255, 255, 0.42)');
+		gradient.addColorStop(0.22, baseColor);
+		gradient.addColorStop(0.72, hexToRgba(node.color, 0.82));
+		gradient.addColorStop(1, 'rgba(3, 5, 12, 0.86)');
+		return gradient;
+	}
+
+	function drawNodeTexture(ctx: CanvasRenderingContext2D, node: GalaxyNode, screen: { x: number; y: number }, radius: number, activity: number) {
+		if (radius < 8) return;
+		ctx.save();
+		ctx.globalAlpha = clamp(activity * (node.depth === 0 ? 0.22 : 0.14), 0.08, 0.24);
+		ctx.lineWidth = 1;
+		ctx.strokeStyle = 'rgba(255, 255, 255, 0.72)';
+		const ringCount = node.depth === 0 ? 3 : 2;
+		for (let index = 1; index <= ringCount; index += 1) {
+			ctx.beginPath();
+			ctx.arc(screen.x, screen.y, radius * (index / (ringCount + 1)), 0, Math.PI * 2);
+			ctx.stroke();
+		}
+		ctx.globalAlpha = clamp(activity * 0.12, 0.05, 0.16);
+		ctx.beginPath();
+		ctx.moveTo(screen.x - radius * 0.62, screen.y + radius * 0.16);
+		ctx.quadraticCurveTo(screen.x, screen.y - radius * 0.5, screen.x + radius * 0.66, screen.y - radius * 0.02);
+		ctx.stroke();
+		ctx.restore();
+	}
+
 	function labelAlphaForNode(node: GalaxyNode): number {
+		const inActiveFamily = activeFamilyId !== null && node.familyId === activeFamilyId;
+
 		if (isCompactViewport) {
 			if (selectedId === node.id) return 0.96;
 			if (selectedLineageHas(node.id) && node.depth <= 1) return 0.8;
@@ -688,12 +769,73 @@
 			if (node.depth === 0) return 0.74;
 			return 0;
 		}
+		if (selectedId === node.id) return 0.96;
+		if (inActiveFamily && node.depth === 0) return 0.94;
+		if (inActiveFamily && node.depth === 1) return 0.86;
+		if (inActiveFamily && selectedLineageHas(node.id)) return 0.82;
+		if (inActiveFamily && node.depth === 2 && zoomLevel !== 'galaxy') {
+			return clamp(0.62 + node.heatNorm * 0.16, 0.62, 0.78);
+		}
+		if (inActiveFamily && camera.scale > 1.35 && node.trackCount >= 20) {
+			return clamp(0.32 + node.heatNorm * 0.2, 0.32, 0.56);
+		}
 		if (camera.scale < 0.8) return node.depth === 0 ? 0.92 : 0;
 		if (camera.scale < 2) {
 			if (node.depth > 1) return 0;
 			return node.depth === 0 ? 0.94 : clamp((camera.scale - 0.8) / 1.2, 0.15, 0.88);
 		}
+		if (node.depth > 1) {
+			if (activeFamilyId !== null && node.trackCount >= 25 && camera.scale > 2.8) {
+				return clamp(0.34 + node.heatNorm * 0.22, 0.34, 0.58);
+			}
+			return 0;
+		}
 		return clamp(0.6 + node.heatNorm * 0.25, 0.6, 0.95);
+	}
+
+	function labelUsesChip(node: GalaxyNode): boolean {
+		const inActiveFamily = activeFamilyId !== null && node.familyId === activeFamilyId;
+		return node.depth <= 1 || (inActiveFamily && node.depth === 2 && zoomLevel !== 'galaxy');
+	}
+
+	function clampLabelRect(x: number, y: number, rectWidth: number, rectHeight: number) {
+		const margin = 8;
+		return {
+			x: clamp(x, margin, Math.max(margin, width - rectWidth - margin)),
+			y: clamp(y, margin, Math.max(margin, height - rectHeight - margin))
+		};
+	}
+
+	function placeHoverCard(screen: { x: number; y: number }, nodeRadius: number): HoverCardPosition {
+		const rightX = screen.x + nodeRadius + HOVER_CARD_CURSOR_CLEARANCE_X;
+		const leftX = screen.x - nodeRadius - HOVER_CARD_CURSOR_CLEARANCE_X;
+		const bottomY = clamp(
+			screen.y - nodeRadius - HOVER_CARD_CURSOR_CLEARANCE_Y,
+			HOVER_CARD_EDGE_MARGIN + 72,
+			Math.max(HOVER_CARD_EDGE_MARGIN + 72, height - HOVER_CARD_EDGE_MARGIN)
+		);
+
+		if (rightX + HOVER_CARD_ESTIMATED_WIDTH + HOVER_CARD_EDGE_MARGIN <= width) {
+			return {
+				x: clamp(
+					rightX,
+					HOVER_CARD_EDGE_MARGIN,
+					Math.max(HOVER_CARD_EDGE_MARGIN, width - HOVER_CARD_ESTIMATED_WIDTH - HOVER_CARD_EDGE_MARGIN)
+				),
+				y: bottomY,
+				align: 'left'
+			};
+		}
+
+		return {
+			x: clamp(
+				leftX,
+				HOVER_CARD_ESTIMATED_WIDTH + HOVER_CARD_EDGE_MARGIN,
+				Math.max(HOVER_CARD_ESTIMATED_WIDTH + HOVER_CARD_EDGE_MARGIN, width - HOVER_CARD_EDGE_MARGIN)
+			),
+			y: bottomY,
+			align: 'right'
+		};
 	}
 
 	function drawNodesAndLabels(ctx: CanvasRenderingContext2D) {
@@ -767,30 +909,31 @@
 				radius = node.radius * 1.28 * pulse;
 			}
 
+			let baseColor = node.color;
 			if (viewMode === 'vibe') {
 				const eColor = energyColor(node.avgEnergy);
 				if (eColor) {
 					ctx.globalAlpha = activity;
-					ctx.fillStyle = eColor;
+					baseColor = eColor;
 				} else {
 					// No DSP coverage — render desaturated so Vibe is honest about its data.
 					ctx.globalAlpha = activity * 0.55;
-					ctx.fillStyle = '#4a4d5e';
+					baseColor = '#4a4d5e';
 				}
 			} else if (viewMode === 'heat') {
 				// Cold nodes fade, hot nodes stay full bright.
 				ctx.globalAlpha = activity * (0.5 + node.heatNorm * 0.6);
-				ctx.fillStyle = node.color;
 			} else if (viewMode === 'rediscover') {
 				ctx.globalAlpha = activity;
-				ctx.fillStyle = isRediscoverCandidate(node) ? node.color : '#3a3d4e';
+				baseColor = isRediscoverCandidate(node) ? node.color : '#3a3d4e';
 			} else {
 				ctx.globalAlpha = activity;
-				ctx.fillStyle = node.color;
 			}
+			ctx.fillStyle = nodeFillGradient(ctx, node, screen, radius, baseColor);
 			ctx.beginPath();
 			ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
 			ctx.fill();
+			drawNodeTexture(ctx, node, screen, radius, activity);
 		}
 		ctx.globalAlpha = 1;
 
@@ -837,37 +980,44 @@
 		}
 
 		for (const node of visibleNodes) {
+			if (hoveredNodeId === node.id && !isDragging) continue;
 			const alpha = labelAlphaForNode(node);
 			if (alpha <= 0) continue;
 			const activity = nodeActivity(node);
-			if (activity < 0.22) continue;
+			const activeFamilyLabel = activeFamilyId !== null && node.familyId === activeFamilyId;
+			const labelActivity = activeFamilyLabel && labelUsesChip(node) ? Math.max(activity, 0.82) : activity;
+			if (labelActivity < 0.22) continue;
 
 			const screen = worldToScreen(node.x, node.y);
-			const fontSize = node.depth === 0 ? 13 : node.depth === 1 ? 11.5 : 10;
+			const fontSize = node.depth === 0 ? 13 : node.depth === 1 ? 11.5 : 11;
 			const label = node.depth === 0 ? node.name.toUpperCase() : node.name;
 			ctx.save();
-			ctx.globalAlpha = alpha * activity;
+			ctx.globalAlpha = alpha * labelActivity;
 			ctx.font = node.depth === 0 ? fontDisplay : fontBody.replace('12px', `${fontSize}px`);
 			ctx.textAlign = 'center';
 			ctx.textBaseline = 'top';
 
-			if (node.depth <= 1) {
+			if (labelUsesChip(node)) {
 				const textWidth = ctx.measureText(label).width;
-				const chipWidth = textWidth + (node.depth === 0 ? 18 : 14);
-				const chipHeight = node.depth === 0 ? 22 : 19;
-				const chipX = screen.x - chipWidth / 2;
-				const chipY = screen.y + node.radius + 8;
+				const chipWidth = textWidth + (node.depth === 0 ? 18 : node.depth === 1 ? 14 : 12);
+				const chipHeight = node.depth === 0 ? 22 : node.depth === 1 ? 19 : 18;
+				const { x: chipX, y: chipY } = clampLabelRect(
+					screen.x - chipWidth / 2,
+					screen.y + node.radius + 8,
+					chipWidth,
+					chipHeight
+				);
 				roundedRectPath(ctx, chipX, chipY, chipWidth, chipHeight, 10);
-				ctx.fillStyle = 'rgba(8, 10, 18, 0.74)';
+				ctx.fillStyle = node.depth === 2 ? 'rgba(7, 9, 18, 0.9)' : 'rgba(8, 10, 18, 0.8)';
 				ctx.fill();
 				ctx.lineWidth = 1;
-				ctx.strokeStyle = hexToRgba(node.color, node.depth === 0 ? 0.4 : 0.28);
+				ctx.strokeStyle = hexToRgba(node.color, node.depth === 0 ? 0.5 : node.depth === 1 ? 0.4 : 0.42);
 				ctx.stroke();
 				ctx.textBaseline = 'middle';
-				ctx.fillStyle = 'rgba(244, 247, 255, 0.95)';
-				ctx.shadowBlur = 8;
-				ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
-				ctx.fillText(label, screen.x, chipY + chipHeight / 2);
+				ctx.fillStyle = node.depth === 2 ? 'rgba(248, 250, 255, 0.98)' : 'rgba(246, 248, 255, 0.96)';
+				ctx.shadowBlur = node.depth === 2 ? 12 : 8;
+				ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+				ctx.fillText(label, chipX + chipWidth / 2, chipY + chipHeight / 2);
 			} else {
 				ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
 				ctx.shadowBlur = 10;
@@ -875,44 +1025,6 @@
 				ctx.fillText(label, screen.x, screen.y + node.radius + 8);
 			}
 			ctx.restore();
-		}
-	}
-
-	function drawArtistChips(ctx: CanvasRenderingContext2D) {
-		if (isCompactViewport || activeFamilyId === null || camera.scale < 1.25) return;
-
-		const familyNodes = nodes.filter(
-			(node) => node.familyId === activeFamilyId && node.depth === 1 && artistChipMap.has(node.id)
-		);
-
-		for (const node of familyNodes) {
-			if (!nodeIsVisible(node)) continue;
-			const artists = artistChipMap.get(node.id) ?? [];
-			if (artists.length === 0) continue;
-			const screen = worldToScreen(node.x, node.y);
-			const chipX = screen.x + node.radius + 18;
-			const chipWidth = 142;
-			const chipHeight = 22;
-			const totalHeight = artists.length * chipHeight + (artists.length - 1) * 6;
-			const startY = screen.y - totalHeight / 2;
-
-			artists.slice(0, 3).forEach((artist, index) => {
-				const chipY = startY + index * (chipHeight + 6);
-				ctx.save();
-				ctx.globalAlpha = 0.92;
-				roundedRectPath(ctx, chipX, chipY, chipWidth, chipHeight, 11);
-				ctx.fillStyle = 'rgba(8, 9, 18, 0.82)';
-				ctx.fill();
-				ctx.lineWidth = 1;
-				ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-				ctx.stroke();
-				ctx.font = '600 10px "Avenir Next", "Segoe UI", sans-serif';
-				ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-				ctx.textAlign = 'left';
-				ctx.textBaseline = 'middle';
-				ctx.fillText(artist, chipX + 10, chipY + chipHeight / 2);
-				ctx.restore();
-			});
 		}
 	}
 
@@ -933,14 +1045,15 @@
 
 		drawParticles(ctx);
 		drawNodesAndLabels(ctx);
-		drawArtistChips(ctx);
 		drawVignette(ctx);
 
 		if (hoveredNode && !isDragging) {
 			const screen = worldToScreen(hoveredNode.x, hoveredNode.y);
 			mixPillPosition = { x: screen.x, y: screen.y - hoveredNode.radius - 18 };
+			hoverCardPosition = placeHoverCard(screen, hoveredNode.radius);
 		} else {
 			mixPillPosition = null;
+			hoverCardPosition = null;
 		}
 	}
 
@@ -1043,6 +1156,7 @@
 		if (activePointerId === null) {
 			hoveredNodeId = null;
 			mixPillPosition = null;
+			hoverCardPosition = null;
 		}
 	}
 
@@ -1216,14 +1330,15 @@
 		</button>
 	{/if}
 
-	{#if hoverCardNode && mixPillPosition && !isDragging && hoverCardId === hoveredNodeId}
+	{#if hoverCardNode && hoverCardPosition && !isDragging && hoverCardId === hoveredNodeId}
 		{@const hoverArtists = artistChipMap.get(hoverCardNode.id) ?? []}
 		{@const hoverListenSec = Math.floor(hoverCardNode.totalListenedMs / 1000)}
 		{@const hoverHours = Math.floor(hoverListenSec / 3600)}
 		{@const hoverMinutes = Math.floor((hoverListenSec % 3600) / 60)}
+		{@const hoverCardTransform = hoverCardPosition.align === 'right' ? 'translate(-100%, -100%)' : 'translate(0, -100%)'}
 		<div
 			class="hover-card"
-			style={`transform: translate(${mixPillPosition.x}px, ${mixPillPosition.y + 16}px) translate(-50%, 0);`}
+			style={`transform: translate(${hoverCardPosition.x}px, ${hoverCardPosition.y}px) ${hoverCardTransform};`}
 		>
 			<div class="hover-head">
 				<span class="hover-dot" style={`background: ${hoverCardNode.color}`}></span>

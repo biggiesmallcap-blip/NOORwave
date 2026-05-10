@@ -102,75 +102,11 @@
 	const PADDING = { top: 24, bottom: 48, left: 56, right: 36 };
 	const PLOT_W = VIEWBOX_W - PADDING.left - PADDING.right;
 	const PLOT_H = VIEWBOX_H - PADDING.top - PADDING.bottom;
-	const ZOOM_MIN_W = 80; // ~12.5x max zoom
-	const ZOOM_FACTOR = 1.18;
-	const DRAG_THRESHOLD = 4; // px
 
 	/** Unique clip-path id — prevents collisions if multiple instances exist. */
 	const clipId = `sonic-clip-${Math.floor(Math.random() * 1e9)}`;
 
-	let chartEl: SVGSVGElement | undefined = $state(undefined);
 	let hoveredId: number | null = $state(null);
-
-	/** Current visible window over the data-space (SVG coords). Full extent = no zoom. */
-	let view = $state({ x: 0, y: 0, w: VIEWBOX_W, h: VIEWBOX_H });
-	const isZoomed = $derived(view.w < VIEWBOX_W - 0.5 || view.h < VIEWBOX_H - 0.5);
-
-	/** Transform applied to the data layer so axis/legend stay static. */
-	const dataTransform = $derived(
-		`scale(${VIEWBOX_W / view.w},${VIEWBOX_H / view.h}) translate(${-view.x},${-view.y})`,
-	);
-
-	// ── Drag panning ──────────────────────────────────────────────────────────
-	let dragStart: { x: number; y: number; view: typeof view } | null = $state(null);
-	let dragDist = 0; // total px moved in the current drag — NOT reactive (checked synchronously)
-
-	function handleMouseDown(e: MouseEvent) {
-		if (e.button !== 0) return;
-		if (!chartEl) return;
-		dragStart = { x: e.clientX, y: e.clientY, view: { ...view } };
-		dragDist = 0;
-	}
-
-	function handleMouseMove(e: MouseEvent) {
-		if (!dragStart || !chartEl) return;
-		const totalDist = Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y);
-		dragDist = totalDist;
-		if (totalDist < DRAG_THRESHOLD) return;
-		const rect = chartEl.getBoundingClientRect();
-		const dx = ((e.clientX - dragStart.x) / rect.width) * dragStart.view.w;
-		const dy = ((e.clientY - dragStart.y) / rect.height) * dragStart.view.h;
-		const newX = Math.max(0, Math.min(VIEWBOX_W - dragStart.view.w, dragStart.view.x - dx));
-		const newY = Math.max(0, Math.min(VIEWBOX_H - dragStart.view.h, dragStart.view.y - dy));
-		view = { ...view, x: newX, y: newY };
-	}
-
-	function handleMouseUp() {
-		dragStart = null;
-	}
-
-	function handleWheel(e: WheelEvent) {
-		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
-		if (!chartEl) return;
-		e.preventDefault();
-		const rect = chartEl.getBoundingClientRect();
-		const mxNorm = (e.clientX - rect.left) / rect.width; // 0..1 along chart width
-		const myNorm = (e.clientY - rect.top) / rect.height;
-		const factor = e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
-
-		// Anchor: data point under the cursor stays under the cursor.
-		const cursorDataX = view.x + mxNorm * view.w;
-		const cursorDataY = view.y + myNorm * view.h;
-		const newW = Math.max(ZOOM_MIN_W, Math.min(VIEWBOX_W, view.w * factor));
-		const newH = newW * (VIEWBOX_H / VIEWBOX_W); // preserve aspect ratio
-		const newX = Math.max(0, Math.min(VIEWBOX_W - newW, cursorDataX - mxNorm * newW));
-		const newY = Math.max(0, Math.min(VIEWBOX_H - newH, cursorDataY - myNorm * newH));
-		view = { x: newX, y: newY, w: newW, h: newH };
-	}
-
-	function resetZoom() {
-		view = { x: 0, y: 0, w: VIEWBOX_W, h: VIEWBOX_H };
-	}
 
 	const tracks = $derived(field.tracks);
 
@@ -184,12 +120,17 @@
 	}
 
 	function handleClick(track: SonicTrack) {
-		if (dragDist > DRAG_THRESHOLD) return; // suppress click when drag occurred
 		if (onplay) {
 			onplay(track.track_id);
 		} else {
 			void playTrackNow(track.track_id);
 		}
+	}
+
+	function handleDotKeydown(event: KeyboardEvent, track: SonicTrack) {
+		if (event.key !== 'Enter' && event.key !== ' ') return;
+		event.preventDefault();
+		handleClick(track);
 	}
 
 	function handleContext(event: MouseEvent, track: SonicTrack) {
@@ -215,17 +156,9 @@
 
 	<div class="chart-grid">
 		<svg
-			bind:this={chartEl}
 			class="chart"
-			class:zoomed={isZoomed}
-			class:dragging={dragStart !== null && dragDist >= DRAG_THRESHOLD}
 			viewBox="0 0 {VIEWBOX_W} {VIEWBOX_H}"
 			preserveAspectRatio="xMidYMid meet"
-			onwheel={handleWheel}
-			onmousedown={handleMouseDown}
-			onmousemove={handleMouseMove}
-			onmouseup={handleMouseUp}
-			onmouseleave={handleMouseUp}
 			role="img"
 			aria-label="Energy by danceability scatter, {field.total} tracks"
 		>
@@ -258,11 +191,9 @@
 				</text>
 			</g>
 
-			<!-- Data layer: clipped to plot area, then scaled/translated for zoom+pan.
-			     The outer <g> provides the clip; the inner <g> provides the transform.
-			     This keeps the clip-path in SVG-root coordinates (not affected by transform). -->
+			<!-- Data layer: clipped to plot area so dots do not bleed into axes. -->
 			<g clip-path="url(#{clipId})">
-				<g class="data-layer" transform={dataTransform}>
+				<g class="data-layer">
 					<!-- Crosshair at 0.5 / 0.5 — follows data space. -->
 					<g class="crosshair" aria-hidden="true">
 						<line x1={cx(0.5)} x2={cx(0.5)} y1={PADDING.top} y2={PADDING.top + PLOT_H} />
@@ -291,9 +222,10 @@
 								onmouseenter={() => (hoveredId = track.track_id)}
 								onmouseleave={() => (hoveredId = null)}
 								onclick={() => handleClick(track)}
+								onkeydown={(event) => handleDotKeydown(event, track)}
 								oncontextmenu={(e) => handleContext(e, track)}
 								role="button"
-								tabindex="-1"
+								tabindex="0"
 								aria-label={`${track.title} by ${track.artist_name ?? 'Unknown artist'}, ${track.listens} ${track.listens === 1 ? 'play' : 'plays'}`}
 							/>
 						{/each}
@@ -325,12 +257,6 @@
 			</div>
 		</aside>
 	</div>
-
-	{#if isZoomed}
-		<button type="button" class="reset-zoom" onclick={resetZoom} aria-label="Reset zoom">
-			Reset
-		</button>
-	{/if}
 
 	{#if hoveredTrack}
 		<div class="tooltip" role="status" aria-live="polite">
@@ -427,36 +353,6 @@
 		width: 100%;
 		height: auto;
 		display: block;
-	}
-
-	.chart.zoomed {
-		cursor: grab;
-	}
-
-	.chart.zoomed.dragging {
-		cursor: grabbing;
-	}
-
-	.reset-zoom {
-		position: absolute;
-		top: 8px;
-		right: 200px; /* clear the legend on desktop */
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-		padding: 5px 12px;
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		border-radius: var(--radius-xs);
-		cursor: pointer;
-		z-index: 1;
-	}
-
-	.reset-zoom:hover {
-		color: var(--text-primary);
-		border-color: var(--border-strong);
 	}
 
 	.crosshair line {

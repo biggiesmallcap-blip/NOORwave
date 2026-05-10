@@ -4,10 +4,22 @@
 	import { playTrackNow, setPlayerAutomixEnabled, setPlayerShuffleMode } from '$lib/stores/player';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import type { GalaxyNode } from './galaxy.types';
 
 	function handleTrackContextMenu(event: MouseEvent, track: Track) {
 		openContextMenu(event, buildTrackMenu(track));
+	}
+
+	function handleArtistContextMenu(event: MouseEvent, artist: ArtistCluster) {
+		if (artist.artistId == null) return;
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(
+			event,
+			buildArtistMenu({ id: artist.artistId, name: artist.name, in_library: true }, { isLocal: true }),
+			artist.name
+		);
 	}
 
 	type ArtistCluster = {
@@ -359,7 +371,11 @@
 				<div class="artist-chip-row">
 					{#each artistClusters.slice(0, 8) as artist}
 						{#if artist.artistId != null}
-							<a class="artist-chip" href={`/artists/${artist.artistId}`}>{artist.name}</a>
+							<a
+								class="artist-chip"
+								href={`/artists/${artist.artistId}`}
+								oncontextmenu={(event) => handleArtistContextMenu(event, artist)}
+							>{artist.name}</a>
 						{:else}
 							<span class="artist-chip artist-chip-static">{artist.name}</span>
 						{/if}
