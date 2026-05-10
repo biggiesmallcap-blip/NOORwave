@@ -1058,6 +1058,7 @@ export interface DiscoveryStatus {
 }
 
 export type DiscoveryEngine = 'v2' | 'v1';
+export type DiscoveryTrainingSafetyProfile = 'laptop_safe' | 'balanced' | 'performance';
 
 export interface DiscoveryRadioResult {
 	track_id: number;
@@ -1879,6 +1880,9 @@ export const api = {
 			estimated_ram_mb: number;
 			last_run_seconds: number | null;
 			recommendation: 'safe' | 'moderate' | 'high_cost';
+			safety_profile: DiscoveryTrainingSafetyProfile;
+			safety_timeout_seconds: number;
+			worker_threads: number;
 			params: {
 				dimension: number;
 				top_k: number;
@@ -1886,6 +1890,26 @@ export const api = {
 				include_audio_proxy: boolean;
 			};
 		}>('/api/discovery/train/safety');
+	},
+
+	getDiscoverySafetyProfile() {
+		return fetchApi<{
+			profile: DiscoveryTrainingSafetyProfile;
+			label: string;
+			worker_threads: number;
+			available: DiscoveryTrainingSafetyProfile[];
+		}>('/api/discovery/train/safety-profile');
+	},
+
+	setDiscoverySafetyProfile(profile: DiscoveryTrainingSafetyProfile) {
+		return fetchApi<{
+			profile: DiscoveryTrainingSafetyProfile;
+			label: string;
+			worker_threads: number;
+		}>('/api/discovery/train/safety-profile', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ profile }),
+		});
 	},
 
 	recordDiscoveryFeedback(

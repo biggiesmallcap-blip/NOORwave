@@ -12,6 +12,7 @@
 		type VideoQualityMode,
 		type DiscoveryEngine,
 		type DiscoveryStatus,
+		type DiscoveryTrainingSafetyProfile,
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
 		type PortableMusicBrainzSnapshotStatus
@@ -192,6 +193,7 @@
 	// Constant fall-back rate when a run hasn't produced enough samples yet.
 	// Mirrors PER_TRACK_DELAY_MS in services/lastfm/enrichment.rs.
 	const LASTFM_FALLBACK_SECONDS_PER_TRACK = 0.5;
+	const DISCOVERY_SAFETY_TIMEOUT_MESSAGE = 'Laptop safety timeout stopped discovery training.';
 
 	let lastfmEtaSeconds = $derived.by(() => {
 		const remainingInRun = Math.max(0, lastfmRunTotal - lastfmRunProcessed);
@@ -226,6 +228,7 @@
 				void loadPortableSnapshot();
 				void loadDiscoveryStatus();
 				void loadDiscoveryEngine();
+				void loadDiscoverySafetyProfile();
 				void loadSpotifyStatus();
 				void loadLastfmStatus();
 			}
@@ -279,6 +282,7 @@
 		void loadDiscoveryStatus();
 		void loadDiscoveryEngine();
 		void loadDiscoveryIntensity();
+		void loadDiscoverySafetyProfile();
 		void loadDiscoverySafety();
 		void loadAudioStats();
 		void syncAnalysisStatus();
@@ -762,8 +766,19 @@
 	let discoveryEngine: DiscoveryEngine = $state('v2');
 	let discoveryEngineTrainable = $state(true);
 	let discoverySafety: Awaited<ReturnType<typeof api.getDiscoverySafety>> | null = $state(null);
+	let discoverySafetyProfile: DiscoveryTrainingSafetyProfile = $state('balanced');
+	let safetyProfileBusy = $state(false);
 	let intensityBusy = $state(false);
 	let engineBusy = $state(false);
+	let dismissedSafetyRunId: number | null = $state(null);
+	let discoverySafetyWatchdogRun = $derived.by(() => {
+		const run = discoveryStatus?.latest_run;
+		if (!run) return null;
+		if (run.id === dismissedSafetyRunId) return null;
+		if (run.status !== 'cancelled') return null;
+		if (run.error_text !== DISCOVERY_SAFETY_TIMEOUT_MESSAGE) return null;
+		return run;
+	});
 
 	async function loadDiscoveryIntensity() {
 		try {
@@ -787,6 +802,16 @@
 	async function loadDiscoverySafety() {
 		try {
 			discoverySafety = await api.getDiscoverySafety();
+			discoverySafetyProfile = discoverySafety.safety_profile;
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		}
+	}
+
+	async function loadDiscoverySafetyProfile() {
+		try {
+			const r = await api.getDiscoverySafetyProfile();
+			discoverySafetyProfile = r.profile;
 		} catch (err) {
 			if (isFetchConnectionError(err)) markServerOffline();
 		}
@@ -820,6 +845,20 @@
 			if (isFetchConnectionError(err)) markServerOffline();
 		} finally {
 			intensityBusy = false;
+		}
+	}
+
+	async function changeSafetyProfile(next: DiscoveryTrainingSafetyProfile) {
+		if (safetyProfileBusy || next === discoverySafetyProfile) return;
+		safetyProfileBusy = true;
+		try {
+			const r = await api.setDiscoverySafetyProfile(next);
+			discoverySafetyProfile = r.profile;
+			await loadDiscoverySafety();
+		} catch (err) {
+			if (isFetchConnectionError(err)) markServerOffline();
+		} finally {
+			safetyProfileBusy = false;
 		}
 	}
 
@@ -875,6 +914,27 @@
 			tagline: 'Optional fallback for older trained models.',
 			detail:
 				'Reads existing library-only V1 models for comparison or fallback. This build does not train V1, so V2 stays the default training path.',
+		},
+	};
+
+	const DISCOVERY_SAFETY_PROFILES: Record<
+		DiscoveryTrainingSafetyProfile,
+		{ title: string; tagline: string; detail: string }
+	> = {
+		laptop_safe: {
+			title: 'Laptop-safe',
+			tagline: 'Cooler. Leaves more headroom.',
+			detail: 'Uses up to 4 workers and keeps at least one core free. Best for battery, heat, and thin laptops.',
+		},
+		balanced: {
+			title: 'Balanced',
+			tagline: 'Default. Protects headroom without wasting desktops.',
+			detail: 'Uses up to 8 workers and keeps two cores free when available. Recommended for most computers.',
+		},
+		performance: {
+			title: 'Performance',
+			tagline: 'Fastest. Opt in for strong cooling.',
+			detail: 'Uses up to 16 workers and keeps one core free. Best for desktops, plugged-in workstations, and overnight runs.',
 		},
 	};
 
@@ -1199,6 +1259,20 @@
 
 	{#if errorMsg}
 		<EmptyState title="Something needs attention" copy={errorMsg} />
+	{/if}
+
+	{#if discoverySafetyWatchdogRun}
+		<div class="safety-watchdog-popup glass-panel" role="status">
+			<div>
+				<strong>Discovery training paused for laptop safety.</strong>
+				<p>
+					Your computer was protected from a long high-CPU run. Try Medium or Low, keep the laptop plugged in, or run it later.
+				</p>
+			</div>
+			<button class="btn btn-glass" type="button" onclick={() => dismissedSafetyRunId = discoverySafetyWatchdogRun?.id ?? null}>
+				Close
+			</button>
+		</div>
 	{/if}
 
 	<section class="settings-status-strip">
@@ -2047,6 +2121,23 @@
 						<span class="intensity-eyebrow">Training intensity</span>
 						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
 					</div>
+					<div class="safety-profile-row">
+						<div>
+							<label class="engine-label" for="discovery-safety-profile">CPU safety profile</label>
+							<p>{DISCOVERY_SAFETY_PROFILES[discoverySafetyProfile].detail}</p>
+						</div>
+						<select
+							id="discovery-safety-profile"
+							class="engine-select"
+							bind:value={discoverySafetyProfile}
+							disabled={discoveryIsRunning || safetyProfileBusy}
+							onchange={(event) => void changeSafetyProfile((event.currentTarget as HTMLSelectElement).value as DiscoveryTrainingSafetyProfile)}
+						>
+							<option value="laptop_safe">Laptop-safe</option>
+							<option value="balanced">Balanced</option>
+							<option value="performance">Performance</option>
+						</select>
+					</div>
 					<div class="intensity-grid">
 						{#each (['max', 'medium', 'low'] as const) as tier (tier)}
 							<button
@@ -2082,6 +2173,10 @@
 								<span>{safety.track_count.toLocaleString()} tracks</span>
 								<span>·</span>
 								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
+								<span>·</span>
+								<span>{safety.worker_threads} worker{safety.worker_threads === 1 ? '' : 's'}</span>
+								<span>·</span>
+								<span>{formatDurationSeconds(safety.safety_timeout_seconds)} safety cap</span>
 								{#if safety.last_run_seconds !== null}
 									<span>·</span>
 									<span>last run {formatDurationSeconds(safety.last_run_seconds)}</span>
@@ -2361,6 +2456,45 @@
 		border-left: 3px solid var(--state-warning);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--state-warning) 12%, transparent);
+	}
+
+	.safety-profile-row {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+		gap: var(--gap);
+		align-items: start;
+	}
+
+	.safety-profile-row p {
+		margin: var(--space-2) 0 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		color: var(--text-secondary);
+	}
+
+	.safety-watchdog-popup {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--gap);
+		margin-bottom: var(--space-4);
+		padding: var(--space-4);
+		border-left: 3px solid var(--state-warning);
+	}
+
+	.safety-watchdog-popup strong {
+		display: block;
+		margin-bottom: var(--space-2);
+		font-size: var(--font-size-md);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-snug);
+	}
+
+	.safety-watchdog-popup p {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		color: var(--text-secondary);
 	}
 
 	/* Discovery intensity selector + safety preview */

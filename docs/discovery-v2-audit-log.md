@@ -321,3 +321,49 @@ Sign-off:
 - No past migration was edited.
 - No bare `cargo update` was run.
 - No dual-run behavior was added.
+
+## Laptop Safety Follow-up
+
+Files changed:
+- `frontend/src/lib/api/client.ts`
+- `frontend/src/routes/settings/+page.svelte`
+- `noor-server/src/db/queries.rs`
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/services/learning.rs`
+
+Behavior added:
+- Discovery training now runs inside a dedicated Rayon pool instead of the global pool.
+- Added training safety profiles: `laptop_safe`, `balanced`, and `performance`.
+- `balanced` is the default and uses up to 8 workers while keeping two cores free when available.
+- `laptop_safe` uses up to 4 workers while keeping one core free.
+- `performance` is opt-in and uses up to 16 workers while keeping one core free.
+- Added a cooperative watchdog timeout: 30 minutes for Low and Medium, 60 minutes for Max.
+- Watchdog cancellation persists a clear cancellation reason in `training_runs.error_text`.
+- Settings shows the selected CPU safety profile, worker count, and watchdog cap.
+- Settings shows a calm safety notice if discovery training is cancelled by the watchdog.
+
+Tests run:
+- `cargo test -p noor-server training_safety_timeout_scales_by_intensity`
+- `cargo test -p noor-server training_worker_cap_adapts_by_safety_profile`
+- `cargo test -p noor-server training_safety_profile_defaults_to_balanced_and_round_trips`
+- `cargo test -p noor-server finish_training_run_with_error_preserves_cancel_reason`
+- `cargo test -p noor-server learning`
+- `cargo test -p noor-server db::queries`
+- `cargo test -p noor-server discovery`
+- `cargo fmt --all -- --check`
+- `git diff --check`
+
+Audit findings:
+- No universal 4-worker cap remains.
+- Balanced default avoids full CPU saturation but does not unnecessarily punish high-core machines.
+- Performance mode is explicit opt-in.
+- The watchdog is cooperative and uses the existing trainer cancel checks.
+- Frontend `pnpm lint` and `pnpm check` remain blocked because `frontend/node_modules` is absent in this worktree.
+
+Known follow-up items:
+- Install frontend dependencies before running Svelte and stylelint checks.
+
+Sign-off:
+- Follow-up did not touch playback runtime, gapless, or WASAPI exclusive files.
+- No past migration was edited.
+- No bare `cargo update` was run.

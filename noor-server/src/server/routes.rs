@@ -382,6 +382,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(get_discovery_engine).post(set_discovery_engine),
         )
         .route("/api/discovery/train/safety", get(get_discovery_safety))
+        .route(
+            "/api/discovery/train/safety-profile",
+            get(get_discovery_safety_profile).post(set_discovery_safety_profile),
+        )
         .route("/api/discovery/feedback", post(record_discovery_feedback))
         .route(
             "/api/discovery/presets",
@@ -2737,13 +2741,61 @@ async fn set_discovery_engine(
     })))
 }
 
+async fn get_discovery_safety_profile(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::{
+        DiscoveryTrainingSafetyProfile, discovery_training_worker_threads,
+        load_discovery_training_safety_profile,
+    };
+    let s = state.read().await;
+    let profile = load_discovery_training_safety_profile(&s.db);
+    Ok(Json(json!({
+        "profile": profile.as_str(),
+        "label": profile.label(),
+        "worker_threads": discovery_training_worker_threads(profile),
+        "available": [
+            DiscoveryTrainingSafetyProfile::LaptopSafe.as_str(),
+            DiscoveryTrainingSafetyProfile::Balanced.as_str(),
+            DiscoveryTrainingSafetyProfile::Performance.as_str(),
+        ],
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SafetyProfileRequest {
+    profile: String,
+}
+
+async fn set_discovery_safety_profile(
+    State(state): State<SharedState>,
+    Json(payload): Json<SafetyProfileRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    use crate::services::learning::{
+        DiscoveryTrainingSafetyProfile, discovery_training_worker_threads,
+        set_discovery_training_safety_profile,
+    };
+    let s = state.read().await;
+    let parsed = DiscoveryTrainingSafetyProfile::parse(&payload.profile);
+    set_discovery_training_safety_profile(&s.db, parsed)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "profile": parsed.as_str(),
+        "label": parsed.label(),
+        "worker_threads": discovery_training_worker_threads(parsed),
+    })))
+}
+
 // Safety estimate: tells the UI how long training is expected to take and
 // how much memory it'll claim, derived from the current track count, the
 // active intensity tier, and the duration of the most recent successful run
 // (if any). Frontend uses this to gate the user with a "this'll take ~X min"
 // preview before they hit Start.
 async fn get_discovery_safety(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::load_discovery_intensity;
+    use crate::services::learning::{
+        discovery_training_safety_timeout, discovery_training_worker_threads,
+        load_discovery_intensity, load_discovery_training_safety_profile,
+    };
     let s = state.read().await;
 
     let (track_count, last_run_seconds): (i64, Option<f64>) =
@@ -2773,6 +2825,9 @@ async fn get_discovery_safety(State(state): State<SharedState>) -> Result<Json<V
 
     let intensity = load_discovery_intensity(&s.db);
     let params = intensity.params();
+    let safety_profile = load_discovery_training_safety_profile(&s.db);
+    let safety_timeout_seconds = discovery_training_safety_timeout(intensity).as_secs();
+    let worker_threads = discovery_training_worker_threads(safety_profile);
 
     // Cost model: similarity_neighbors is O(n²) on track count. Constant
     // factor scales roughly with `dim × top_k`. Calibrated against the
@@ -2823,6 +2878,9 @@ async fn get_discovery_safety(State(state): State<SharedState>) -> Result<Json<V
         "estimated_ram_mb": ram_mb.round() as i64,
         "last_run_seconds": last_run_seconds.map(|s| s.round() as i64),
         "recommendation": recommendation,
+        "safety_profile": safety_profile.as_str(),
+        "safety_timeout_seconds": safety_timeout_seconds,
+        "worker_threads": worker_threads,
         "params": {
             "dimension": params.dimension,
             "top_k": params.top_k,

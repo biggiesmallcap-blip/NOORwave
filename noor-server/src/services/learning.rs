@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
@@ -32,6 +33,13 @@ const EXTERNAL_REFRESH_TIDAL_NEW_RELEASE_ROWS: usize = 500;
 const EXTERNAL_REFRESH_STALE_HOURS: i64 = 24;
 const EXTERNAL_REFRESH_LASTFM_DELAY_MS: u64 = 500;
 const EXTERNAL_REFRESH_LASTFM_RATE_LIMIT_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+pub const DISCOVERY_TRAINING_SAFETY_TIMEOUT_MESSAGE: &str =
+    "Laptop safety timeout stopped discovery training.";
+const DISCOVERY_TRAINING_TIMEOUT_STANDARD_SECS: u64 = 30 * 60;
+const DISCOVERY_TRAINING_TIMEOUT_MAX_SECS: u64 = 60 * 60;
+const DISCOVERY_TRAINING_LAPTOP_MAX_WORKERS: usize = 4;
+const DISCOVERY_TRAINING_BALANCED_MAX_WORKERS: usize = 8;
+const DISCOVERY_TRAINING_PERFORMANCE_MAX_WORKERS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalProviderRefreshBudget {
@@ -644,6 +652,106 @@ pub fn set_discovery_engine(db: &Database, engine: DiscoveryEngine) -> Result<()
     })
 }
 
+pub fn discovery_training_safety_timeout(intensity: DiscoveryIntensity) -> Duration {
+    let seconds = match intensity {
+        DiscoveryIntensity::Max => DISCOVERY_TRAINING_TIMEOUT_MAX_SECS,
+        DiscoveryIntensity::Medium | DiscoveryIntensity::Low => {
+            DISCOVERY_TRAINING_TIMEOUT_STANDARD_SECS
+        }
+    };
+    Duration::from_secs(seconds)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryTrainingSafetyProfile {
+    LaptopSafe,
+    Balanced,
+    Performance,
+}
+
+impl DiscoveryTrainingSafetyProfile {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "laptop_safe" | "laptop-safe" | "safe" => DiscoveryTrainingSafetyProfile::LaptopSafe,
+            "performance" | "fast" => DiscoveryTrainingSafetyProfile::Performance,
+            _ => DiscoveryTrainingSafetyProfile::Balanced,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscoveryTrainingSafetyProfile::LaptopSafe => "laptop_safe",
+            DiscoveryTrainingSafetyProfile::Balanced => "balanced",
+            DiscoveryTrainingSafetyProfile::Performance => "performance",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DiscoveryTrainingSafetyProfile::LaptopSafe => "Laptop-safe",
+            DiscoveryTrainingSafetyProfile::Balanced => "Balanced",
+            DiscoveryTrainingSafetyProfile::Performance => "Performance",
+        }
+    }
+}
+
+pub fn load_discovery_training_safety_profile(db: &Database) -> DiscoveryTrainingSafetyProfile {
+    db.with_conn(|conn| {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'discovery_training_safety_profile'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(raw)
+    })
+    .ok()
+    .flatten()
+    .map(|s| DiscoveryTrainingSafetyProfile::parse(&s))
+    .unwrap_or(DiscoveryTrainingSafetyProfile::Balanced)
+}
+
+pub fn set_discovery_training_safety_profile(
+    db: &Database,
+    profile: DiscoveryTrainingSafetyProfile,
+) -> Result<()> {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('discovery_training_safety_profile', ?1)",
+            rusqlite::params![profile.as_str()],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn discovery_training_worker_threads_for_available(
+    profile: DiscoveryTrainingSafetyProfile,
+    available_threads: usize,
+) -> usize {
+    match profile {
+        DiscoveryTrainingSafetyProfile::LaptopSafe => available_threads
+            .saturating_sub(1)
+            .max(1)
+            .min(DISCOVERY_TRAINING_LAPTOP_MAX_WORKERS),
+        DiscoveryTrainingSafetyProfile::Balanced => available_threads
+            .saturating_sub(2)
+            .max(1)
+            .min(DISCOVERY_TRAINING_BALANCED_MAX_WORKERS),
+        DiscoveryTrainingSafetyProfile::Performance => available_threads
+            .saturating_sub(1)
+            .max(1)
+            .min(DISCOVERY_TRAINING_PERFORMANCE_MAX_WORKERS),
+    }
+}
+
+pub fn discovery_training_worker_threads(profile: DiscoveryTrainingSafetyProfile) -> usize {
+    let available_threads = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    discovery_training_worker_threads_for_available(profile, available_threads)
+}
+
 fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::NaiveDateTime>> {
     db.with_conn(|conn| {
         let raw: Option<String> = conn
@@ -686,6 +794,9 @@ pub async fn start_training(
     }
     let intensity = load_discovery_intensity(&db);
     let intensity_params = intensity.params();
+    let safety_profile = load_discovery_training_safety_profile(&db);
+    let safety_timeout = discovery_training_safety_timeout(intensity);
+    let worker_threads = discovery_training_worker_threads(safety_profile);
     let (model, run) = db.with_conn(|conn| {
         let run = queries::create_training_run(conn, None, "corpus", "running")?;
         let model_key = format!("{MODEL_FAMILY}:{}", run.id);
@@ -696,6 +807,9 @@ pub async fn start_training(
             "top_k": intensity_params.top_k,
             "intensity": intensity.as_str(),
             "engine": engine.as_str(),
+            "safety_profile": safety_profile.as_str(),
+            "safety_timeout_seconds": safety_timeout.as_secs(),
+            "worker_threads": worker_threads,
             "trainer": "rust",
             "trainer_config_version": 2,
             "run_id": run.id,
@@ -716,15 +830,34 @@ pub async fn start_training(
     // If cancel is requested at any stage boundary, mark the run as cancelled
     // and skip remaining persistence + model activation. Callers MUST `return Ok(())`
     // when this returns `Ok(true)` — otherwise a later stage may double-finish the run.
+    let watchdog_tripped = Arc::new(AtomicBool::new(false));
     let bail_if_cancelled = |stage: &str| -> Result<bool> {
         if cancel.load(Ordering::Relaxed) {
-            tracing::info!(
-                target: "noor.discovery.training",
-                run_id = run.id,
-                stage = stage,
-                "discovery training cancelled by user"
-            );
-            db.with_conn(|conn| queries::finish_training_run(conn, run.id, "cancelled"))?;
+            if watchdog_tripped.load(Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "noor.discovery.training",
+                    run_id = run.id,
+                    stage = stage,
+                    timeout_seconds = safety_timeout.as_secs(),
+                    "discovery training stopped by laptop safety timeout"
+                );
+                db.with_conn(|conn| {
+                    queries::finish_training_run_with_error(
+                        conn,
+                        run.id,
+                        "cancelled",
+                        DISCOVERY_TRAINING_SAFETY_TIMEOUT_MESSAGE,
+                    )
+                })?;
+            } else {
+                tracing::info!(
+                    target: "noor.discovery.training",
+                    run_id = run.id,
+                    stage = stage,
+                    "discovery training cancelled by user"
+                );
+                db.with_conn(|conn| queries::finish_training_run(conn, run.id, "cancelled"))?;
+            }
             return Ok(true);
         }
         Ok(false)
@@ -813,11 +946,34 @@ pub async fn start_training(
     // Run the trainer directly — no subprocess
     let progress_tx_clone = progress_tx.clone();
     let cancel_for_trainer = cancel.clone();
-    let mut output = tokio::task::spawn_blocking(move || {
-        run_discovery_training(input, Some(&progress_tx_clone), Some(&cancel_for_trainer))
+    let watchdog_cancel = cancel.clone();
+    let watchdog_flag = watchdog_tripped.clone();
+    let watchdog_task = tokio::spawn(async move {
+        tokio::time::sleep(safety_timeout).await;
+        watchdog_flag.store(true, Ordering::Relaxed);
+        watchdog_cancel.store(true, Ordering::Relaxed);
+    });
+    let output_result = tokio::task::spawn_blocking(move || -> Result<_> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_threads)
+            .thread_name(|idx| format!("discovery-v2-{idx}"))
+            .build()
+            .context("create discovery trainer worker pool")?;
+        Ok(pool.install(|| {
+            run_discovery_training(input, Some(&progress_tx_clone), Some(&cancel_for_trainer))
+        }))
     })
     .await
-    .context("discovery trainer panicked")?;
+    .context("discovery trainer panicked");
+    watchdog_task.abort();
+    let mut output = output_result??;
+    output.metrics.insert(
+        "safety.timeout_seconds".to_string(),
+        safety_timeout.as_secs() as f64,
+    );
+    output
+        .metrics
+        .insert("safety.worker_threads".to_string(), worker_threads as f64);
     output.metrics.insert(
         "external_refresh_budget.should_refresh".to_string(),
         if provider_budget.should_refresh {
@@ -1986,6 +2142,73 @@ mod tests {
         assert_eq!(load_discovery_engine(&db), DiscoveryEngine::V1);
         assert_eq!(load_discovery_engine(&db).family(), "discovery-fusion");
         assert!(!load_discovery_engine(&db).supports_training());
+    }
+
+    #[test]
+    fn training_safety_timeout_scales_by_intensity() {
+        assert_eq!(
+            discovery_training_safety_timeout(DiscoveryIntensity::Low).as_secs(),
+            30 * 60
+        );
+        assert_eq!(
+            discovery_training_safety_timeout(DiscoveryIntensity::Medium).as_secs(),
+            30 * 60
+        );
+        assert_eq!(
+            discovery_training_safety_timeout(DiscoveryIntensity::Max).as_secs(),
+            60 * 60
+        );
+    }
+
+    #[test]
+    fn training_worker_cap_adapts_by_safety_profile() {
+        assert_eq!(
+            discovery_training_worker_threads_for_available(
+                DiscoveryTrainingSafetyProfile::LaptopSafe,
+                16
+            ),
+            4
+        );
+        assert_eq!(
+            discovery_training_worker_threads_for_available(
+                DiscoveryTrainingSafetyProfile::Balanced,
+                16
+            ),
+            8
+        );
+        assert_eq!(
+            discovery_training_worker_threads_for_available(
+                DiscoveryTrainingSafetyProfile::Performance,
+                24
+            ),
+            16
+        );
+        assert_eq!(
+            discovery_training_worker_threads_for_available(
+                DiscoveryTrainingSafetyProfile::Balanced,
+                2
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn training_safety_profile_defaults_to_balanced_and_round_trips() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+
+        assert_eq!(
+            load_discovery_training_safety_profile(&db),
+            DiscoveryTrainingSafetyProfile::Balanced
+        );
+
+        set_discovery_training_safety_profile(&db, DiscoveryTrainingSafetyProfile::Performance)
+            .expect("set profile");
+
+        assert_eq!(
+            load_discovery_training_safety_profile(&db),
+            DiscoveryTrainingSafetyProfile::Performance
+        );
     }
 
     #[tokio::test]

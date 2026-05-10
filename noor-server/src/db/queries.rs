@@ -4415,6 +4415,21 @@ pub fn finish_training_run(conn: &Connection, run_id: i64, status: &str) -> Resu
     Ok(())
 }
 
+pub fn finish_training_run_with_error(
+    conn: &Connection,
+    run_id: i64,
+    status: &str,
+    error_text: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE training_runs
+         SET status = ?2, progress = 1.0, error_text = ?3, finished_at = datetime('now')
+         WHERE id = ?1",
+        params![run_id, status, error_text],
+    )?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn fail_training_run(conn: &Connection, run_id: i64, error_text: &str) -> Result<()> {
     conn.execute(
@@ -6529,6 +6544,30 @@ mod tests {
             .expect("selected legacy model");
         assert_eq!(selected.id, legacy.id);
         assert_eq!(selected.family, "discovery-fusion");
+    }
+
+    #[test]
+    fn finish_training_run_with_error_preserves_cancel_reason() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        let run = create_training_run(&conn, None, "behavioral", "running").expect("create run");
+
+        finish_training_run_with_error(
+            &conn,
+            run.id,
+            "cancelled",
+            "Laptop safety timeout stopped discovery training.",
+        )
+        .expect("finish with reason");
+
+        let stored = get_training_run(&conn, run.id)
+            .expect("load run")
+            .expect("stored run");
+        assert_eq!(stored.status, "cancelled");
+        assert_eq!(
+            stored.error_text.as_deref(),
+            Some("Laptop safety timeout stopped discovery training.")
+        );
     }
 
     #[test]
