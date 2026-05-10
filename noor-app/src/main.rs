@@ -16,15 +16,6 @@ fn open_external(url: String) -> Result<(), String> {
     open::that(url).map_err(|e| e.to_string())
 }
 
-// Browser-style content zoom on the main webview. Exposed as a custom command
-// rather than via @tauri-apps/api so we don't need a capabilities/ file or a
-// frontend npm dep — matches the open_external pattern.
-#[tauri::command]
-fn set_ui_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), String> {
-    let clamped = factor.clamp(0.5, 2.0);
-    window.set_zoom(clamped).map_err(|e| e.to_string())
-}
-
 fn main() {
     let cfg = config::load();
     let state = SidecarState::new(cfg.host_mode);
@@ -41,7 +32,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![open_external, set_ui_zoom])
+        .invoke_handler(tauri::generate_handler![open_external])
         .manage(state.clone() as Arc<SidecarState>)
         .setup(move |app| {
             let handle = app.handle().clone();
