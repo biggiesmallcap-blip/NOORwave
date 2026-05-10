@@ -32,6 +32,7 @@ pub const PRIOR_SIGMA_OCTAVES: f64 = 0.6;
 /// the primary estimate.  A value of 0.85 means the double must have at least
 /// 85% of the winner's (biased-normalised) correlation to be considered.
 pub const OCTAVE_RATIO_THRESHOLD: f64 = 0.85;
+const OCTAVE_WEIGHTED_RATIO_MAX: f64 = 0.85;
 /// Calibrates the strength scale: peak-to-mean ratios up to ~5× saturate to 1.0.
 /// Empirical — clean metronomes hit ~5×-mean on the prior-weighted spectrum.
 const STRENGTH_PEAK_TO_MEAN_DENOM: f64 = 4.0;
@@ -115,7 +116,15 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
     let double_bpm = best_bpm * 2;
     if (BPM_MIN..=BPM_MAX).contains(&double_bpm) {
         let r_double = *raw.get(&double_bpm).unwrap_or(&0.0);
-        if winner_raw > 0.0 && r_double >= OCTAVE_RATIO_THRESHOLD * winner_raw {
+        let weighted_double = weighted
+            .iter()
+            .find(|t| t.0 == double_bpm)
+            .map(|t| t.2)
+            .unwrap_or(0.0);
+        if winner_raw > 0.0
+            && r_double >= OCTAVE_RATIO_THRESHOLD * winner_raw
+            && weighted_double <= OCTAVE_WEIGHTED_RATIO_MAX * best_weighted
+        {
             chosen = double_bpm;
         }
     }
@@ -186,7 +195,11 @@ mod tests {
         let mut out = vec![0.0f32; total];
         let mut t = 0usize;
         while t < total {
-            for j in 0..32 { if t + j < out.len() { out[t + j] = 1.0; } }
+            for j in 0..32 {
+                if t + j < out.len() {
+                    out[t + j] = 1.0;
+                }
+            }
             t += period;
         }
         out
@@ -214,7 +227,11 @@ mod tests {
         let env = compute_onset_envelope(&click_train(44100, 8.0, 0.5), 44100).unwrap();
         let est = estimate_tempo(&env).unwrap();
         assert!((est.bpm - 120.0).abs() < 2.5, "got {}", est.bpm);
-        assert!(est.strength > 0.3, "strength {} too low for clean metronome", est.strength);
+        assert!(
+            est.strength > 0.3,
+            "strength {} too low for clean metronome",
+            est.strength
+        );
     }
 
     #[test]
@@ -224,7 +241,8 @@ mod tests {
         // 174 must NOT be reported as 87 (the half).
         assert!(
             (est.bpm - 174.0).abs() < 4.0,
-            "DnB regression: expected ~174, got {}", est.bpm,
+            "DnB regression: expected ~174, got {}",
+            est.bpm,
         );
     }
 

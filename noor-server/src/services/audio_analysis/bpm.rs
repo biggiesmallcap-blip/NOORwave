@@ -24,13 +24,14 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
         return None;
     }
 
-    let BeatTrack { strength: beat_strength, .. } = beat_tracker::track_beats(&env, bpm)?;
+    let BeatTrack {
+        strength: beat_strength,
+        ..
+    } = beat_tracker::track_beats(&env, bpm)?;
     if beat_strength < MIN_BEAT_STRENGTH {
         return None;
     }
 
-    // Combine the two confidence scores: geometric mean keeps either failing
-    // from ever producing a high final score.
     let combined = (strength * beat_strength).sqrt();
     Some((bpm, combined))
 }
@@ -114,7 +115,9 @@ mod tests {
         // Deterministic LCG for jitter.
         let mut state: u64 = 0xDEADBEEF;
         let mut next = || -> f32 {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             // Map to [-0.15, 0.15]
             ((state >> 33) as f32 / (i32::MAX as f32)) * 0.15 - 0.075
         };
@@ -149,6 +152,45 @@ mod tests {
             conf > 0.05,
             "dithered reggae confidence too low: {} (gate is 0.10 on beat_strength + 0.15 on tempo strength)",
             conf,
+        );
+    }
+
+    #[test]
+    fn folk_downstroke_upstroke_resolves_to_quarter() {
+        // Regression for "Handy Man" (James Taylor, ~91 BPM) being reported as 182 BPM.
+        // The doubled candidate can win on raw autocorrelation because both the
+        // downstroke (quarter note) and upstroke (8th off-beat) create ODF flux.
+        // estimate_tempo step (a) now requires the doubled candidate to remain
+        // meaningfully below the slower winner after the prior is applied, which
+        // preserves genuine 87 -> 174 DnB promotion but blocks this 91 -> 182 error.
+        let sr = 44_100u32;
+        let total = (sr as f64 * 8.0) as usize;
+        let mut samples = vec![0.0f32; total];
+
+        let quarter_bpm = 91.0_f64;
+        let eighth_period = (sr as f64 * 30.0 / 91.0) as usize;
+
+        let mut t = 0usize;
+        let mut idx = 0usize;
+        while t < total {
+            // Even indices are quarter-note downstrokes (loud), odd are upstrokes (quieter).
+            let amp = if idx % 2 == 0 { 1.0f32 } else { 0.6 };
+            for j in 0..32 {
+                if t + j < samples.len() {
+                    samples[t + j] = amp;
+                }
+            }
+            t += eighth_period;
+            idx += 1;
+        }
+
+        let (bpm, _) = detect_bpm(&samples, sr).expect("should detect tempo");
+        assert!(
+            (bpm - quarter_bpm).abs() < 4.0,
+            "folk downstroke/upstroke regression: expected ~{}, got {} \
+             (step-a octave promotion misfired — this is the Handy Man bug)",
+            quarter_bpm,
+            bpm,
         );
     }
 
