@@ -71,6 +71,14 @@ export function openMenuAtElement(el: HTMLElement, items: MenuItem[], title?: st
 	});
 }
 
+export function cancelContextMenuClose() {
+	clearCloseTimer();
+	contextMenu.update((state) => {
+		if (!state.open || !state.closing) return state;
+		return { ...state, closing: false };
+	});
+}
+
 export function closeContextMenu() {
 	clearCloseTimer();
 	let shouldClose = false;

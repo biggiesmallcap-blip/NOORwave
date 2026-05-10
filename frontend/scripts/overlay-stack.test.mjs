@@ -16,7 +16,9 @@ describe('overlay stack contract', () => {
 		const contextMenu = readFileSync('src/lib/components/ContextMenu.svelte', 'utf8');
 
 		expect(contextMenu).toContain('function handlePointerLeave');
+		expect(contextMenu).toContain('function handlePointerEnter');
 		expect(contextMenu).toContain('onpointerleave={handlePointerLeave}');
+		expect(contextMenu).toContain('onpointerenter={handlePointerEnter}');
 		expect(contextMenu).toContain('closeContextMenu();');
 	});
 
@@ -26,12 +28,15 @@ describe('overlay stack contract', () => {
 
 		expect(store).toContain('closing: boolean');
 		expect(store).toContain('CONTEXT_MENU_EXIT_MS = 160');
+		expect(store).toContain('cancelContextMenuClose');
 		expect(store).toContain('closing: true');
+		expect(store).toContain('closing: false');
 		expect(component).toContain('class:closing={$contextMenu.closing}');
 		expect(component).toContain('context-menu-enter');
 		expect(component).toContain('context-menu-exit');
 		expect(component).toContain('animation: context-menu-enter 160ms');
 		expect(component).toContain('animation: context-menu-exit 160ms');
 		expect(component).toContain('.context-menu.closing');
+		expect(component).not.toContain('pointer-events: none;');
 	});
 });

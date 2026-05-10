@@ -1,5 +1,10 @@
 <script lang="ts">
-	import { contextMenu, closeContextMenu, type MenuItem } from '$lib/stores/context_menu';
+	import {
+		contextMenu,
+		closeContextMenu,
+		cancelContextMenuClose,
+		type MenuItem
+	} from '$lib/stores/context_menu';
 
 	let menuEl = $state<HTMLDivElement | null>(null);
 	let openSubmenu = $state<number | null>(null);
@@ -43,6 +48,11 @@
 		closeContextMenu();
 	}
 
+	function handlePointerEnter() {
+		if (!$contextMenu.open) return;
+		cancelContextMenuClose();
+	}
+
 	// Position is a snapshot taken at open time, so any scroll desyncs the menu
 	// from its trigger. A transformed/will-change ancestor can also turn
 	// `position: fixed` into ancestor-relative, making the menu drift visually.
@@ -83,6 +93,7 @@
 		style="left: {position.left}px; top: {position.top}px;"
 		role="menu"
 		tabindex="-1"
+		onpointerenter={handlePointerEnter}
 		onpointerleave={handlePointerLeave}
 	>
 		{#if $contextMenu.title}
@@ -175,7 +186,6 @@
 	}
 
 	.context-menu.closing {
-		pointer-events: none;
 		animation: context-menu-exit 160ms ease-in both;
 	}
 
