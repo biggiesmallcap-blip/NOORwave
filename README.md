@@ -1,7 +1,7 @@
 
 <h1 align="center">
 
-<img width="1280" height="640" alt="github-card-transparent" src="https://github.com/user-attachments/assets/28c0d75b-32ed-4219-90d8-145b981a5373" />
+<img width="1280" height="640" alt="NOORwave animated card" src="frontend/static/social/source-animated.svg" />
 
 
 
