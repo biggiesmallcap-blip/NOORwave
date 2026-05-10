@@ -13,6 +13,9 @@
 		"lint": "pnpm lint:css && pnpm lint:inline-styles",
 		"lint:css": "stylelint \"src/**/*.{css,svelte}\"",
 		"lint:inline-styles": "node scripts/lint-inline-styles.mjs",
+		"smoke": "node scripts/smoke.mjs",
+		"smoke:full": "node scripts/smoke.mjs --phase full",
+		"smoke:headed": "node scripts/smoke.mjs --headed",
 		"test": "vitest run",
 		"test:watch": "vitest"
 	},
