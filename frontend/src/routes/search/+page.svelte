@@ -109,21 +109,27 @@
   const hasFilters = $derived(Object.keys(parsedQuery.filters).length > 0)
 
   onMount(async () => {
-    try {
-      const res = await api.getGenres()
-      genreList = res.genres
-    } catch { /* ignore */ }
-    try {
-      const listens = await api.getRecentListens(20)
+    const [genresRes, listensRes, playlistsRes] = await Promise.allSettled([
+      api.getGenres(),
+      api.getRecentListens(20),
+      api.getPlaylists(),
+    ])
+
+    if (genresRes.status === 'fulfilled') {
+      genreList = genresRes.value.genres
+    }
+
+    if (listensRes.status === 'fulfilled') {
+      const listens = listensRes.value
       const names = listens.listens
         .map(e => e.artist_name)
         .filter((n): n is string => typeof n === 'string' && n.length > 0)
       recentArtistNames = new Set(names)
-    } catch { /* ignore */ }
-    try {
-      const { playlists } = await api.getPlaylists()
-      localPlaylists = playlists
-    } catch { /* ignore */ }
+    }
+
+    if (playlistsRes.status === 'fulfilled') {
+      localPlaylists = playlistsRes.value.playlists
+    }
   })
 
   function buildAudioParams(pq: ParsedQuery): AudioSearchParams {
@@ -582,6 +588,37 @@
     return buildTidalTrackMenu(toPlayable(track))
   }
 
+  function openTidalArtistContextMenu(event: MouseEvent, track: TidalSearchTrack) {
+    if (!track.artist_name || track.artist_id == null) return
+    event.preventDefault()
+    event.stopPropagation()
+    openContextMenu(
+      event,
+      buildArtistMenu({
+        tidal_id: track.artist_id,
+        name: track.artist_name,
+        in_library: false,
+      }),
+      track.artist_name
+    )
+  }
+
+  function openTidalAlbumContextMenu(event: MouseEvent, track: TidalSearchTrack) {
+    if (!track.album_title || track.album_tidal_id == null) return
+    event.preventDefault()
+    event.stopPropagation()
+    openContextMenu(
+      event,
+      buildAlbumMenu({
+        tidal_id: track.album_tidal_id,
+        title: track.album_title,
+        artist_name: track.artist_name,
+        in_library: false,
+      }),
+      track.album_title
+    )
+  }
+
   function canPlaySearchTrack(track: TidalSearchTrack): boolean {
     return canPlayTrack(toPlayable(track))
   }
@@ -805,7 +842,6 @@
       }}
       onfocus={() => { inputFocused = true }}
       onblur={() => { inputFocused = false }}
-      autofocus
     />
     {#if inputFocused && !query.trim()}
       <div class="hint-chips" aria-label="Search filter examples">
@@ -1242,6 +1278,7 @@
                       href={`/tidal/artists/${track.artist_id}`}
                       class="subtitle-link"
                       onclick={(e) => e.stopPropagation()}
+                      oncontextmenu={(e) => openTidalArtistContextMenu(e, track)}
                     >{track.artist_name}</a>
                   {:else if track.artist_name}
                     {track.artist_name}
@@ -1255,6 +1292,7 @@
                       href={`/tidal/albums/${track.album_tidal_id}`}
                       class="subtitle-link"
                       onclick={(e) => e.stopPropagation()}
+                      oncontextmenu={(e) => openTidalAlbumContextMenu(e, track)}
                     >{track.album_title}</a>
                   {:else if track.album_title}
                     {track.album_title}
@@ -1332,6 +1370,7 @@
                         href={`/tidal/artists/${track.artist_id}`}
                         class="subtitle-link"
                         onclick={(e) => e.stopPropagation()}
+                        oncontextmenu={(e) => openTidalArtistContextMenu(e, track)}
                       >{track.artist_name}</a>
                     {:else}
                       <span>{track.artist_name}</span>
@@ -1344,6 +1383,7 @@
                         href={`/tidal/albums/${track.album_tidal_id}`}
                         class="subtitle-link"
                         onclick={(e) => e.stopPropagation()}
+                        oncontextmenu={(e) => openTidalAlbumContextMenu(e, track)}
                       >{track.album_title}</a>
                     {:else}
                       <span>{track.album_title}</span>

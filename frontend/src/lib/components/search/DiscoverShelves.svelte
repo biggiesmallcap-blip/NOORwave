@@ -17,6 +17,10 @@
 	} from '$lib/stores/tidal-home-modules-cache';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -90,6 +94,51 @@
 		}
 	}
 
+	function handleItemKeydown(event: KeyboardEvent, item: TidalHomeItem) {
+		if (event.key !== 'Enter' && event.key !== ' ') return;
+		event.preventDefault();
+		handleItemClick(item);
+	}
+
+	function openArtist(event: MouseEvent, item: TidalHomeItem) {
+		if (item.artist_id == null) return;
+		event.preventDefault();
+		event.stopPropagation();
+		void goto(`/tidal/artists/${item.artist_id}`);
+	}
+
+	function openAlbumContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		const tidalId = item.kind === 'album' ? (item.album_id ?? Number(item.id)) : item.album_id;
+		const title = item.kind === 'album' ? item.title : item.album_title;
+		if (!title || tidalId == null) return;
+		openContextMenu(event, buildAlbumMenu({
+			tidal_id: tidalId,
+			title,
+			artist_id: item.artist_id ?? null,
+			artist_name: item.artist_name ?? null,
+			in_library: false
+		}, { isLocal: false }), title);
+	}
+
+	function openArtistContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		if (!item.artist_name) return;
+		openContextMenu(event, buildArtistMenu({
+			tidal_id: item.artist_id ?? null,
+			name: item.artist_name,
+			in_library: false
+		}, { isLocal: false }), item.artist_name);
+	}
+
+	function handleItemContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		if (item.kind === 'track') {
+			openContextMenu(event, buildTidalTrackMenu(itemToPlayable(item)), item.title);
+			return;
+		}
+		if (item.kind === 'album') {
+			openAlbumContextMenu(event, item);
+		}
+	}
+
 	function subtitleFor(item: TidalHomeItem): string | null {
 		return item.artist_name ?? item.creator_name ?? null;
 	}
@@ -124,12 +173,15 @@
 	     own "Recommended new tracks" panel and reuses the screen better. -->
 	<div class="track-grid">
 		{#each mod.items as item (`${mod.id}-${item.id}`)}
-			<button
-				type="button"
+			<div
 				class="track-row"
 				title={item.artist_name ? `${item.title} — ${item.artist_name}` : item.title}
 				aria-label={`Play ${item.title}`}
 				onclick={() => handleItemClick(item)}
+				onkeydown={(e) => handleItemKeydown(e, item)}
+				oncontextmenu={(e) => handleItemContextMenu(e, item)}
+				role="button"
+				tabindex="0"
 			>
 				<div class="art-wrap">
 					{#if item.artwork_url}
@@ -142,10 +194,16 @@
 				<div class="meta">
 					<span class="title">{item.title}</span>
 					{#if item.artist_name}
-						<span class="sub">{item.artist_name}</span>
+						<button
+							class="sub sub-link"
+							type="button"
+							onclick={(e) => openArtist(e, item)}
+							oncontextmenu={(e) => openArtistContextMenu(e, item)}
+							disabled={item.artist_id == null}
+						>{item.artist_name}</button>
 					{/if}
 				</div>
-			</button>
+			</div>
 		{/each}
 	</div>
 {/snippet}
@@ -153,12 +211,15 @@
 {#snippet cardRail(mod: TidalHomeModule)}
 	<div class="rail" use:wheelToHorizontal>
 		{#each mod.items as item (`${mod.id}-${item.id}`)}
-			<button
-				type="button"
+			<div
 				class="card"
 				title={subtitleFor(item) ?? item.title}
 				aria-label={ariaLabelFor(item)}
 				onclick={() => handleItemClick(item)}
+				onkeydown={(e) => handleItemKeydown(e, item)}
+				oncontextmenu={(e) => handleItemContextMenu(e, item)}
+				role="button"
+				tabindex="0"
 			>
 				<div class="art-wrap">
 					{#if item.artwork_url}
@@ -175,10 +236,19 @@
 				<div class="meta">
 					<h3 class="title">{item.title}</h3>
 					{#if subtitleFor(item)}
-						<p class="sub">{subtitleFor(item)}</p>
+						{#if item.artist_id != null && item.artist_name}
+							<button
+								class="sub sub-link"
+								type="button"
+								onclick={(e) => openArtist(e, item)}
+								oncontextmenu={(e) => openArtistContextMenu(e, item)}
+							>{subtitleFor(item)}</button>
+						{:else}
+							<p class="sub">{subtitleFor(item)}</p>
+						{/if}
 					{/if}
 				</div>
-			</button>
+			</div>
 		{/each}
 	</div>
 {/snippet}
@@ -355,6 +425,24 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.sub-link {
+		background: transparent;
+		border: 0;
+		padding: 0;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.sub-link:hover:not(:disabled),
+	.sub-link:focus-visible:not(:disabled) {
+		color: var(--text-primary);
+		text-decoration: underline;
+		text-underline-offset: 0.12em;
+		outline: none;
+	}
+	.sub-link:disabled {
+		cursor: default;
 	}
 	.track-row:hover .art {
 		transform: scale(1.05);

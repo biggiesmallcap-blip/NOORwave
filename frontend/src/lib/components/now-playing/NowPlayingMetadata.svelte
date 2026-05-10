@@ -2,8 +2,13 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import type { Track } from '$lib/api/client';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import {
+		albumRefFromTrack,
+		artistRefFromTrack,
+		buildMediaMenu,
+		mediaHref,
+		trackRefFromTrack,
+	} from '$lib/player/media_link';
 
 	type Stream = {
 		audio_quality?: string | null;
@@ -32,55 +37,59 @@
 		showStateBadge?: boolean;
 		stateBadgeCompact?: boolean;
 	} = $props();
+
+	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
+	const titleHref = $derived(mediaHref(titleRef));
+	const artistRef = $derived(track ? artistRefFromTrack(track) : null);
+	const artistHref = $derived(mediaHref(artistRef));
+	const albumRef = $derived(track ? albumRefFromTrack(track) : null);
+	const albumHref = $derived(mediaHref(albumRef));
 </script>
 
 <div class="np-info">
 	<div class="np-copy">
 		<p class="np-eyebrow">{eyebrow}</p>
-		<h2 class="np-title">{track?.title ?? 'Nothing queued'}</h2>
-		{#if track?.artist_id && track.artist_id > 0}
+		{#if track && titleRef && titleHref}
 			<a
-				class="np-artist np-link"
-				href="/artists/{track.artist_id}"
+				class="np-title np-title-link"
+				href={titleHref}
 				oncontextmenu={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					openContextMenu(e, buildArtistMenu({ id: track.artist_id, name: track.artist_name ?? '' }, { isLocal: true }), track.artist_name ?? undefined);
+					openContextMenu(e, buildMediaMenu(titleRef), titleRef.label);
 				}}
 			>
-				{track.artist_name ?? 'Unknown artist'}
+				{track.title}
 			</a>
-		{:else if track?.artist_tidal_id}
+		{:else}
+			<h2 class="np-title">{track?.title ?? 'Nothing queued'}</h2>
+		{/if}
+		{#if artistRef && artistHref}
 			<a
 				class="np-artist np-link"
-				href="/tidal/artists/{track.artist_tidal_id}"
+				href={artistHref}
 				oncontextmenu={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					openContextMenu(e, buildArtistMenu({ tidal_id: track.artist_tidal_id, name: track.artist_name ?? '' }, { isLocal: false }), track.artist_name ?? undefined);
+					openContextMenu(e, buildMediaMenu(artistRef), artistRef.label);
 				}}
 			>
-				{track.artist_name ?? 'Unknown artist'}
+				{artistRef.label}
 			</a>
 		{:else}
 			<p class="np-artist">{track?.artist_name ?? 'Choose a track to begin playback.'}</p>
 		{/if}
-		{#if track?.album_id}
+		{#if albumRef && albumHref}
 			<a
 				class="np-album np-link"
-				href="/albums/{track.album_id}"
+				href={albumHref}
 				oncontextmenu={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					openContextMenu(e, buildAlbumMenu({
-						id: track.album_id,
-						title: track.album_title ?? '',
-						artist_id: track.artist_id,
-						artist_name: track.artist_name,
-					}, { isLocal: true }), track.album_title ?? undefined);
+					openContextMenu(e, buildMediaMenu(albumRef), albumRef.label);
 				}}
 			>
-				{track.album_title ?? 'Unknown album'}
+				{albumRef.label}
 			</a>
 		{:else}
 			<p class="np-album">{track?.album_title ?? 'Playback controls stay docked here.'}</p>
@@ -195,7 +204,15 @@
 		transition: color var(--motion-fast);
 	}
 
-	a.np-link:hover {
+	a.np-title-link {
+		color: inherit;
+		text-decoration: none;
+		cursor: pointer;
+		transition: color var(--motion-fast);
+	}
+
+	a.np-link:hover,
+	a.np-title-link:hover {
 		color: var(--accent-strong, #6366f1);
 		text-decoration: underline;
 	}

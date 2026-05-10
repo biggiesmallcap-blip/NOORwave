@@ -34,6 +34,27 @@ Use these instead of reimplementing the surface:
 - `.btn`, `.btn-primary`, `.btn-glass` — pill buttons. Don't roll your own button visual unless you're building a chip or icon-only variant.
 - `.quality-badge.hires|.lossless|.lossy` — quality indicator pill.
 
+## Media links and context menus
+
+Track, album, artist, and video references should resolve inside NOORwave whenever the app has a route for them. Do not send media-reference clicks to `tidal.com` from cards, rows, now-playing metadata, quiet mode, or context menus.
+
+- Local artists use `/artists/:id`.
+- Local albums use `/albums/:id`.
+- TIDAL artists use `/tidal/artists/:id`.
+- TIDAL albums use `/tidal/albums/:id`.
+- TIDAL videos use `/videos?videoId=:id`.
+- TIDAL track titles do not open an external TIDAL page. Link them only when there is a useful in-app destination, such as the local album page.
+
+Use `$lib/player/media_link.ts` for canonical media hrefs and menu delegation when rendering mixed local/TIDAL metadata. Use the shared menu builders (`buildTrackMenu`, `buildTidalTrackMenu`, `buildAlbumMenu`, `buildArtistMenu`, `buildVideoMenu`) instead of inline menu arrays. Queue rows are already in the queue, so queue-context menus must not show duplicate `Add to queue` actions.
+
+All right-click menus are rendered by `ContextMenu.svelte`; do not create one-off menu animation styles in callers. Menus should enter and exit through the shared context-menu motion:
+
+- Enter with a short opacity, blur, and scale transition.
+- Exit through the shared `closing` state in `context_menu.ts`, then remove after `CONTEXT_MENU_EXIT_MS`.
+- Keep shared enter/exit timing short enough for compact queue menus while preserving the soft fade/blur exit.
+- Close on pointer leave, outside click, Escape, scroll, and successful action selection.
+- Keep submenus inside the root menu surface so pointer-leave dismissal does not fire while moving into a submenu.
+
 ### Glass decision tree
 
 When you need a translucent surface, follow this order:

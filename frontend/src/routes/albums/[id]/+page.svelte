@@ -21,6 +21,8 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { firstArtworkUrl } from '$lib/utils/artwork';
 
 	let albumId = $derived(Number(page.params.id));
 
@@ -97,7 +99,7 @@
 			title: firstLocal?.album_title ?? firstTidal?.album_title ?? 'Unknown album',
 			artist_name: firstLocal?.artist_name ?? firstTidal?.artist_name ?? 'Unknown artist',
 			artist_id: firstLocal?.artist_id ?? null,
-			artwork_url: firstLocal?.artwork_url ?? firstTidal?.artwork_url ?? null,
+			artwork_url: firstArtworkUrl(tracks, tidalOnlyTracks),
 			library_track_count: tracks.length,
 			total_track_count: tracks.length + tidalOnlyTracks.length,
 			total_ms: totalMsLocal + totalMsTidal,
@@ -114,6 +116,7 @@
 			const existing = map.get(t.album_id);
 			if (existing) {
 				existing.count += 1;
+				if (!existing.artwork_url && t.artwork_url) existing.artwork_url = t.artwork_url;
 			} else {
 				map.set(t.album_id, {
 					id: t.album_id,
@@ -342,6 +345,7 @@
 						tabindex={ok ? 0 : -1}
 						aria-disabled={!ok}
 						onclick={() => ok && void playTidalTrackNow(playable)}
+						oncontextmenu={(e) => openContextMenu(e, buildTidalTrackMenu(playable), track.title)}
 						onkeydown={(e) =>
 							(e.key === 'Enter' || e.key === ' ')
 							&& (e.preventDefault(), ok && void playTidalTrackNow(playable))}
@@ -384,7 +388,7 @@
 					{#snippet card(album)}
 						<a
 							class="album-card"
-							href={album.id != null ? `/albums/${album.id}` : '#'}
+							href={album.id != null ? `/albums/${album.id}` : undefined}
 							oncontextmenu={(e) => {
 								e.preventDefault();
 								e.stopPropagation();

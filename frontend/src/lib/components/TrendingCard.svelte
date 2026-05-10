@@ -3,6 +3,8 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { currentTrack, isPlaying } from '$lib/stores/player';
 	import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
@@ -27,7 +29,10 @@
 	let title = $derived(local?.title ?? tidal?.title ?? 'Unknown track');
 	let artistName = $derived(local?.artist_name ?? tidal?.artist_name ?? null);
 	let artistId = $derived(local?.artist_id ?? null);
+	let tidalArtistId = $derived(local?.artist_tidal_id ?? tidal?.artist_tidal_id ?? null);
 	let albumTitle = $derived(local?.album_title ?? tidal?.album_title ?? null);
+	let albumId = $derived(local?.album_id ?? null);
+	let tidalAlbumId = $derived(tidal?.album_tidal_id ?? null);
 
 	let lazyArtwork = $state<string | null>(null);
 	let artwork = $derived(
@@ -119,6 +124,40 @@
 		}
 	}
 
+	function openArtistContextMenu(e: MouseEvent) {
+		if (!artistName || (artistId == null && tidalArtistId == null)) return;
+		e.preventDefault();
+		e.stopPropagation();
+		openContextMenu(
+			e,
+			buildArtistMenu({
+				id: artistId,
+				tidal_id: tidalArtistId,
+				name: artistName,
+				in_library: artistId != null,
+			}),
+			artistName
+		);
+	}
+
+	function openAlbumContextMenu(e: MouseEvent) {
+		if (!albumTitle || (albumId == null && tidalAlbumId == null)) return;
+		e.preventDefault();
+		e.stopPropagation();
+		openContextMenu(
+			e,
+			buildAlbumMenu({
+				id: albumId,
+				tidal_id: tidalAlbumId,
+				title: albumTitle,
+				artist_id: artistId,
+				artist_name: artistName,
+				in_library: albumId != null,
+			}),
+			albumTitle
+		);
+	}
+
 	function stop(e: Event) {
 		e.stopPropagation();
 	}
@@ -174,7 +213,19 @@
 	<div class="meta">
 		<p class="title">{title}</p>
 		{#if artistId !== null}
-			<a class="artist" href="/artists/{artistId}" onclick={stop}>{artistName ?? 'Unknown artist'}</a>
+			<a
+				class="artist"
+				href="/artists/{artistId}"
+				onclick={stop}
+				oncontextmenu={openArtistContextMenu}
+			>{artistName ?? 'Unknown artist'}</a>
+		{:else if tidalArtistId !== null && artistName}
+			<a
+				class="artist"
+				href="/tidal/artists/{tidalArtistId}"
+				onclick={stop}
+				oncontextmenu={openArtistContextMenu}
+			>{artistName}</a>
 		{:else if artistName}
 			<span class="artist">{artistName}</span>
 		{/if}
@@ -196,8 +247,23 @@
 			{/if}
 		</div>
 
-		{#if albumTitle}
-			<p class="album">{albumTitle}</p>
+		{#if albumId !== null && albumTitle}
+			<a
+				class="album"
+				href="/albums/{albumId}"
+				onclick={stop}
+				oncontextmenu={openAlbumContextMenu}
+			>{albumTitle}</a>
+		{:else if tidalAlbumId !== null && albumTitle}
+			<a
+				class="album"
+				href="/tidal/albums/{tidalAlbumId}"
+				onclick={stop}
+				oncontextmenu={openAlbumContextMenu}
+			>{albumTitle}</a>
+		{:else if albumTitle}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<p class="album" oncontextmenu={openAlbumContextMenu}>{albumTitle}</p>
 		{/if}
 	</div>
 </article>
@@ -405,5 +471,12 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		text-decoration: none;
+	}
+
+	a.album:hover {
+		color: var(--text-primary, #fff);
+		text-decoration: underline;
+		text-underline-offset: 0.12em;
 	}
 </style>

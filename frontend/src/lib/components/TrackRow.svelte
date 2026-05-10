@@ -7,6 +7,7 @@
 		type MenuTrack
 	} from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import {
 		addTrackToQueue,
 		startSongRadio,
@@ -83,6 +84,29 @@
 		openContextMenu(e, buildTrackMenu(track, menuOptions), track.title);
 	}
 
+	function openArtistContextMenu(e: MouseEvent) {
+		if (track.artist_id == null || !track.artist_name) return;
+		openContextMenu(
+			e,
+			buildArtistMenu({ id: track.artist_id, name: track.artist_name }, { isLocal: true }),
+			track.artist_name
+		);
+	}
+
+	function openAlbumContextMenu(e: MouseEvent) {
+		if (track.album_id == null || !track.album_title) return;
+		openContextMenu(
+			e,
+			buildAlbumMenu({
+				id: track.album_id,
+				title: track.album_title,
+				artist_id: track.artist_id ?? null,
+				artist_name: track.artist_name ?? null,
+			}, { isLocal: true }),
+			track.album_title
+		);
+	}
+
 	function handleMoreClick(e: MouseEvent) {
 		e.stopPropagation();
 		openMenuAtElement(
@@ -144,7 +168,8 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<span class="sub">{track.artist_name}</span>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 			{/if}
 		</div>
 		{#if showPlayCount}
@@ -222,11 +247,7 @@
 						class="sub link"
 						href="/artists/{track.artist_id}"
 						onclick={(e) => e.stopPropagation()}
-						oncontextmenu={(e) => {
-							e.preventDefault();
-							e.stopPropagation();
-							openContextMenu(e, buildArtistMenu({ id: track.artist_id, name: track.artist_name ?? '' }, { isLocal: true }), track.artist_name ?? undefined);
-						}}
+						oncontextmenu={openArtistContextMenu}
 					>{track.artist_name}</a>
 				{:else}
 					<span class="sub">{track.artist_name}</span>
@@ -294,9 +315,15 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			<p class="sub">
-				{#if showArtist && track.artist_name}{track.artist_name}{/if}
+				{#if showArtist && track.artist_name}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+				{/if}
 				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
-				{#if showAlbum && track.album_title}{track.album_title}{/if}
+				{#if showAlbum && track.album_title}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
+				{/if}
 			</p>
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -353,7 +380,8 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<span class="sub">{track.artist_name}</span>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 			{/if}
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -526,6 +554,15 @@
 	}
 
 	.sub.link:hover {
+		color: var(--text-primary);
+		text-decoration: underline;
+	}
+
+	.sub-link {
+		text-decoration: none;
+	}
+
+	.sub-link:hover {
 		color: var(--text-primary);
 		text-decoration: underline;
 	}

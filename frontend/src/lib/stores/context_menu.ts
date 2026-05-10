@@ -13,13 +13,23 @@ export interface MenuItem {
 
 export interface ContextMenuState {
 	open: boolean;
+	closing: boolean;
 	x: number;
 	y: number;
 	items: MenuItem[];
 	title?: string;
 }
 
-const initial: ContextMenuState = { open: false, x: 0, y: 0, items: [], title: undefined };
+export const CONTEXT_MENU_EXIT_MS = 160;
+
+const initial: ContextMenuState = { open: false, closing: false, x: 0, y: 0, items: [], title: undefined };
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearCloseTimer() {
+	if (!closeTimer) return;
+	clearTimeout(closeTimer);
+	closeTimer = null;
+}
 
 export const contextMenu = writable<ContextMenuState>(initial);
 
@@ -28,6 +38,7 @@ export function openContextMenu(
 	items: MenuItem[],
 	title?: string
 ) {
+	clearCloseTimer();
 	if ('preventDefault' in event && typeof event.preventDefault === 'function') {
 		event.preventDefault();
 	}
@@ -39,6 +50,7 @@ export function openContextMenu(
 	}
 	contextMenu.set({
 		open: true,
+		closing: false,
 		x: event.clientX,
 		y: event.clientY,
 		items,
@@ -47,9 +59,11 @@ export function openContextMenu(
 }
 
 export function openMenuAtElement(el: HTMLElement, items: MenuItem[], title?: string) {
+	clearCloseTimer();
 	const rect = el.getBoundingClientRect();
 	contextMenu.set({
 		open: true,
+		closing: false,
 		x: rect.right,
 		y: rect.bottom + 4,
 		items,
@@ -58,5 +72,16 @@ export function openMenuAtElement(el: HTMLElement, items: MenuItem[], title?: st
 }
 
 export function closeContextMenu() {
-	contextMenu.set(initial);
+	clearCloseTimer();
+	let shouldClose = false;
+	contextMenu.update((state) => {
+		if (!state.open || state.closing) return state;
+		shouldClose = true;
+		return { ...state, closing: true };
+	});
+	if (!shouldClose) return;
+	closeTimer = setTimeout(() => {
+		contextMenu.set(initial);
+		closeTimer = null;
+	}, CONTEXT_MENU_EXIT_MS);
 }

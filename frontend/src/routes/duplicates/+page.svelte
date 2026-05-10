@@ -6,6 +6,8 @@
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
+	import { buildTrackMenu } from '$lib/player/track_menu';
+	import { openContextMenu } from '$lib/stores/context_menu';
 
 	interface DuplicateTrack {
 		id: number;
@@ -229,6 +231,22 @@
 		return `${head}: ${values}`;
 	}
 
+	function openDuplicateTrackContextMenu(event: MouseEvent, track: DuplicateTrack) {
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(
+			event,
+			buildTrackMenu({
+				id: track.id,
+				title: track.title,
+				artist_name: track.artist_name,
+				album_title: track.album_title,
+				is_favorite: track.is_favorite
+			}),
+			track.title
+		);
+	}
+
 	let visibleGroups = $derived(groups.filter((g) => activeRelationships.has(g.relationship)));
 
 	let removableCount = $derived(
@@ -341,7 +359,12 @@
 
 					<div class="member-grid">
 						{#each group.members as member (member.track.id)}
-							<article class="member-card" class:preferred={member.is_preferred}>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<article
+								class="member-card"
+								class:preferred={member.is_preferred}
+								oncontextmenu={(event) => openDuplicateTrackContextMenu(event, member.track)}
+							>
 								<div class="member-card-head">
 									{#if member.track.artwork_url}
 										<img class="member-art" src={member.track.artwork_url} alt="" />

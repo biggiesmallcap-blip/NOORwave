@@ -47,6 +47,7 @@ export interface Track {
 	artist_tidal_id?: number | null;
 	album_id: number | null;
 	album_title: string | null;
+	album_tidal_id?: number | null;
 	disc_number: number | null;
 	track_number: number | null;
 	duration_ms: number | null;
@@ -441,6 +442,8 @@ export interface QueueExternalRequest {
 	artist: string;
 	title: string;
 	album_title?: string | null;
+	artist_tidal_id?: number | null;
+	album_tidal_id?: number | null;
 	duration_ms?: number | null;
 }
 
@@ -2320,7 +2323,9 @@ export const api = {
 					tidal_track_id: t.tidal_id,
 					title: t.title,
 					artist_name: t.artist_name ?? null,
+					artist_tidal_id: t.artist_tidal_id ?? null,
 					album_title: t.album_title ?? null,
+					album_tidal_id: t.album_tidal_id ?? null,
 					artwork_url: t.artwork_url ?? null,
 					duration_ms: t.duration_ms ?? null,
 				})),

@@ -32,6 +32,8 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTrackMenu, type MenuTrack } from '$lib/player/track_menu';
 	import type { Snapshot } from './$types';
 
 	let saving = $state(false);
@@ -224,6 +226,12 @@
 		if (value == null || !Number.isFinite(value)) return '--';
 		return `${Math.round(value * 100)}%`;
 	}
+
+	function openTrackContextMenu(event: MouseEvent, track: MenuTrack, queueItemId?: number) {
+		event.preventDefault();
+		event.stopPropagation();
+		openContextMenu(event, buildTrackMenu(track, { queueItemId }), track.title);
+	}
 </script>
 
 <svelte:head>
@@ -253,7 +261,13 @@
 	{/if}
 
 	<section class="automix-hero glass-panel">
-		<div class="now-card">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="now-card"
+			oncontextmenu={(e) => {
+				if ($currentTrack) openTrackContextMenu(e, $currentTrack);
+			}}
+		>
 			<div class="now-art-shell">
 				{#if $currentTrack?.artwork_url}
 					<img src={$currentTrack.artwork_url} alt="" />
@@ -399,7 +413,11 @@
 				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (`${item.id}-${i}`)}
 					{@const previousTrackId = i === 0 ? $currentTrack?.id : queueUpcoming[i - 1].track.id}
 					{@const compat = harmonicCompat(featuresFor(previousTrackId), featuresFor(item.track.id))}
-					<div class="queue-row">
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div
+						class="queue-row"
+						oncontextmenu={(e) => openTrackContextMenu(e, item.track, item.id)}
+					>
 						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
 						{#if item.track.artwork_url}
 							<img class="queue-art" src={item.track.artwork_url} alt="" />

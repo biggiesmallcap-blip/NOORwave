@@ -5,6 +5,7 @@
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { firstArtworkUrl } from '$lib/utils/artwork';
 
 	function trackAsPlayable(t: TidalDiscographyTrack) {
 		return {
@@ -51,7 +52,7 @@
 			title: first.album_title ?? 'Album',
 			artist_name: first.artist_name ?? 'Unknown artist',
 			artist_tidal_id: first.artist_tidal_id ?? null,
-			artwork_url: first.artwork_url,
+			artwork_url: firstArtworkUrl(tracks),
 			track_count: tracks.length,
 			total_ms: totalMs
 		};

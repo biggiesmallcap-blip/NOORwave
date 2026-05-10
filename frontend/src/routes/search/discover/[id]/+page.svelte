@@ -11,6 +11,10 @@
 	import { playTidalTrackNow, playTidalPlaylist } from '$lib/stores/player';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 
 	const moduleId = $derived(page.params.id ?? '');
 
@@ -71,6 +75,43 @@
 		}
 	}
 
+	function handleContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		if (item.kind !== 'track' && item.kind !== 'album') return;
+		event.preventDefault();
+		event.stopPropagation();
+		if (item.kind === 'track') {
+			openContextMenu(event, buildTidalTrackMenu(itemToPlayable(item)), item.title);
+			return;
+		}
+		openContextMenu(event, buildAlbumMenu({
+			tidal_id: item.album_id ?? Number(item.id),
+			title: item.title,
+			artist_id: item.artist_id ?? null,
+			artist_name: item.artist_name ?? null,
+			in_library: false
+		}, { isLocal: false }), item.title);
+	}
+
+	function openArtistContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		if (!item.artist_name) return;
+		openContextMenu(event, buildArtistMenu({
+			tidal_id: item.artist_id ?? null,
+			name: item.artist_name,
+			in_library: false
+		}, { isLocal: false }), item.artist_name);
+	}
+
+	function openAlbumContextMenu(event: MouseEvent, item: TidalHomeItem) {
+		if (!item.album_title || item.album_id == null) return;
+		openContextMenu(event, buildAlbumMenu({
+			tidal_id: item.album_id,
+			title: item.album_title,
+			artist_id: item.artist_id ?? null,
+			artist_name: item.artist_name ?? null,
+			in_library: false
+		}, { isLocal: false }), item.album_title);
+	}
+
 	function fallbackGlyph(kind: TidalHomeItem['kind']): string {
 		return kind === 'playlist' ? '☰' : '♫';
 	}
@@ -114,6 +155,7 @@
 						class="track-row"
 						aria-label={`Play ${item.title}`}
 						onclick={() => handleClick(item)}
+						oncontextmenu={(e) => handleContextMenu(e, item)}
 					>
 						<span class="track-index">{i + 1}</span>
 						<div class="art-wrap">
@@ -130,11 +172,13 @@
 						<div class="meta">
 							<span class="title">{item.title}</span>
 							{#if item.artist_name}
-								<span class="sub">{item.artist_name}</span>
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
+								<span class="sub" oncontextmenu={(e) => openArtistContextMenu(e, item)}>{item.artist_name}</span>
 							{/if}
 						</div>
 						{#if item.album_title}
-							<span class="album">{item.album_title}</span>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<span class="album" oncontextmenu={(e) => openAlbumContextMenu(e, item)}>{item.album_title}</span>
 						{/if}
 						{#if item.duration != null}
 							<span class="duration">{formatTrackDuration(item.duration * 1000)}</span>
@@ -151,6 +195,7 @@
 					class="card"
 					aria-label={ariaLabelFor(item)}
 					onclick={() => handleClick(item)}
+					oncontextmenu={(e) => handleContextMenu(e, item)}
 				>
 					<div class="art-wrap">
 						{#if item.artwork_url}
@@ -166,7 +211,7 @@
 					<div class="meta">
 						<h3 class="title">{item.title}</h3>
 						{#if item.artist_name}
-							<p class="sub">{item.artist_name}</p>
+							<p class="sub" oncontextmenu={(e) => openArtistContextMenu(e, item)}>{item.artist_name}</p>
 						{:else if item.creator_name}
 							<p class="sub">{item.creator_name}</p>
 						{/if}

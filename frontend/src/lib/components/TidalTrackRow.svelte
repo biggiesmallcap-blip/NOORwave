@@ -2,6 +2,8 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import {
 		addTidalTrackToQueue,
 		startTidalSongRadio,
@@ -61,6 +63,29 @@
 		openContextMenu(e, buildTidalTrackMenu(track), track.title);
 	}
 
+	function openArtistContextMenu(e: MouseEvent) {
+		if (track.artist_tidal_id == null || !track.artist_name) return;
+		openContextMenu(
+			e,
+			buildArtistMenu({ tidal_id: track.artist_tidal_id, name: track.artist_name, in_library: false }, { isLocal: false }),
+			track.artist_name
+		);
+	}
+
+	function openAlbumContextMenu(e: MouseEvent) {
+		if (track.album_tidal_id == null || !track.album_title) return;
+		openContextMenu(
+			e,
+			buildAlbumMenu({
+				tidal_id: track.album_tidal_id,
+				title: track.album_title,
+				artist_name: track.artist_name ?? null,
+				in_library: false,
+			}, { isLocal: false }),
+			track.album_title
+		);
+	}
+
 	function handleMoreClick(e: MouseEvent) {
 		e.stopPropagation();
 		openMenuAtElement(
@@ -115,9 +140,15 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			<p class="sub">
-				{#if showArtist && track.artist_name}{track.artist_name}{/if}
+				{#if showArtist && track.artist_name}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+				{/if}
 				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
-				{#if showAlbum && track.album_title}{track.album_title}{/if}
+				{#if showAlbum && track.album_title}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
+				{/if}
 			</p>
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -177,7 +208,8 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<span class="sub">{track.artist_name}</span>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 			{/if}
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -234,9 +266,15 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			<p class="sub">
-				{#if showArtist && track.artist_name}{track.artist_name}{/if}
+				{#if showArtist && track.artist_name}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
+				{/if}
 				{#if showArtist && track.artist_name && showAlbum && track.album_title} — {/if}
-				{#if showAlbum && track.album_title}{track.album_title}{/if}
+				{#if showAlbum && track.album_title}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<span class="sub-link" oncontextmenu={openAlbumContextMenu}>{track.album_title}</span>
+				{/if}
 			</p>
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -289,7 +327,8 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				<span class="sub">{track.artist_name}</span>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<span class="sub" oncontextmenu={openArtistContextMenu}>{track.artist_name}</span>
 			{/if}
 		</div>
 		<span class="cell-duration">{formatTrackDuration(track.duration_ms)}</span>
@@ -446,6 +485,15 @@
 		text-overflow: ellipsis;
 		max-width: 100%;
 		margin: 0;
+	}
+
+	.sub-link {
+		text-decoration: none;
+	}
+
+	.sub-link:hover {
+		color: var(--text-primary);
+		text-decoration: underline;
 	}
 
 	.cell-duration {

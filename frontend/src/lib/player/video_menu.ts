@@ -16,8 +16,8 @@ export function isVideoMix(video: VideoLike): video is TidalVideoMix {
 	return 'id' in video && video.type === 'mix';
 }
 
-export function tidalVideoUrl(videoId: number | string): string {
-	return `https://tidal.com/browse/video/${videoId}`;
+export function videoPageUrl(videoId: number | string): string {
+	return `/videos?videoId=${videoId}`;
 }
 
 export function buildVideoMenu(video: TidalSearchVideo | TidalVideoMixItem): MenuItem[] {
@@ -25,7 +25,7 @@ export function buildVideoMenu(video: TidalSearchVideo | TidalVideoMixItem): Men
 		{
 			label: 'Play video',
 			icon: '▶',
-			onSelect: () => void goto(`/videos?videoId=${video.tidal_id}`),
+			onSelect: () => void goto(videoPageUrl(video.tidal_id)),
 		},
 		{
 			label: 'Copy link',
@@ -45,11 +45,9 @@ export function buildVideoMenu(video: TidalSearchVideo | TidalVideoMixItem): Men
 
 	items.push(SEPARATOR);
 	items.push({
-		label: 'Open on TIDAL',
+		label: 'Open video',
 		icon: '↗',
-		onSelect: () => {
-			if (typeof window !== 'undefined') window.open(tidalVideoUrl(video.tidal_id), '_blank', 'noopener');
-		},
+		onSelect: () => void goto(videoPageUrl(video.tidal_id)),
 	});
 
 	return items;
