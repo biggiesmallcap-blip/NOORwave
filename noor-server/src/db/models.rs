@@ -574,6 +574,9 @@ pub struct DiscoveryNeighborReason {
 pub struct DiscoveryStatus {
     pub fallback_active: bool,
     pub active_model: Option<EmbeddingModel>,
+    pub selected_engine: String,
+    pub selected_engine_family: String,
+    pub selected_engine_trainable: bool,
     pub latest_run: Option<DiscoveryTrainingRun>,
     pub coverage_ratio: f64,
     pub playable_tracks: i64,

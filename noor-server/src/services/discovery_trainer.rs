@@ -14,6 +14,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v2";
+
 // ── Progress update struct ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -50,6 +52,63 @@ pub struct TrainerSequenceGroup {
     pub sequences: Vec<Vec<i64>>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+pub enum EvidenceKind {
+    DirectTransition,
+    SessionCoListen,
+    PlaylistAdjacency,
+    AlbumAdjacency,
+    ArtistAffinity,
+    GenreAffinity,
+    FavoriteAffinity,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct SupportBreakdown {
+    pub transition: f64,
+    pub colisten: f64,
+    pub structure: f64,
+    pub metadata: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainerEdge {
+    pub event_id: String,
+    pub from_track_id: i64,
+    pub to_track_id: i64,
+    pub weight: f64,
+    pub evidence_kind: EvidenceKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainerEvidenceGroup {
+    pub label: String,
+    pub base_weight: f64,
+    pub edges: Vec<TrainerEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeldoutExample {
+    pub event_id: String,
+    pub from_track_id: i64,
+    pub to_track_id: i64,
+    pub evidence_kind: EvidenceKind,
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainerExternalCandidate {
+    pub candidate_id: i64,
+    pub tidal_id: Option<i64>,
+    pub title: String,
+    pub artist_name: String,
+    pub genre_tags: Vec<String>,
+    pub source_tags: Vec<String>,
+    pub freshness_bucket: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TrainerInput {
     pub seed: u64,
@@ -64,7 +123,13 @@ pub struct TrainerInput {
     pub include_audio_proxy: bool,
     pub tracks: Vec<EmbeddingTrackRow>,
     pub sequences: Vec<TrainerSequenceGroup>,
+    #[serde(default)]
+    pub evidence_groups: Vec<TrainerEvidenceGroup>,
+    #[serde(default)]
+    pub external_candidates: Vec<TrainerExternalCandidate>,
     pub heldout_pairs: Vec<(i64, i64)>,
+    #[serde(default)]
+    pub heldout_examples: Vec<HeldoutExample>,
     /// Pre-computed audio-proxy features hydrated from `track_audio_features`.
     /// When present, the trainer reuses these instead of running Stage 2.
     /// Drives the Incremental Refresh mode — Stage 2 is the most expensive
@@ -104,6 +169,10 @@ pub struct TrainerNeighbor {
     pub primary_reason: Option<String>,
     pub confidence: f64,
     pub support_count: i64,
+    pub support_transition: f64,
+    pub support_colisten: f64,
+    pub support_structure: f64,
+    pub support_metadata: f64,
     pub play_count_seed: i64,
     pub play_count_candidate: i64,
     // Filled in by a second pass (compute_in_degree) after neighbor lists are
@@ -113,11 +182,23 @@ pub struct TrainerNeighbor {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TrainerExternalNeighbor {
+    pub library_track_id: i64,
+    pub candidate_id: i64,
+    pub rank: i32,
+    pub score: f64,
+    pub audio_score: f64,
+    pub metadata_score: f64,
+    pub reason_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TrainerOutput {
     pub behavioral_embeddings: HashMap<i64, Vec<f64>>,
     pub audio_features: HashMap<i64, TrainerAudioFeature>,
     pub fusion_embeddings: HashMap<i64, Vec<f64>>,
     pub neighbors: Vec<TrainerNeighbor>,
+    pub external_neighbors: Vec<TrainerExternalNeighbor>,
     pub metrics: HashMap<String, f64>,
     pub reason_hit_rates: Vec<ReasonHitRate>,
 }
@@ -211,6 +292,18 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         // 10 buckets: 0.0-0.1 = e0, 0.1-0.2 = e1, …
         tokens.push(format!("energy_{}", (energy * 10.0).floor() as i64));
     }
+    if let Some(danceability) = track.danceability {
+        tokens.push(format!("dance_{}", (danceability * 10.0).floor() as i64));
+    }
+    if let Some(beat_strength) = track.beat_strength {
+        tokens.push(format!("beat_{}", (beat_strength * 10.0).floor() as i64));
+    }
+    if let Some(loudness_lufs) = track.loudness_lufs {
+        tokens.push(format!(
+            "lufs_{}",
+            ((loudness_lufs / 3.0).round() as i64) * 3
+        ));
+    }
     if let Some(ref key) = track.camelot_key {
         tokens.push(format!("key_{}", key.to_lowercase()));
         // Also add the adjacent keys on the Camelot wheel so harmonically compatible
@@ -225,6 +318,41 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
             let alt = if suffix == "a" { "b" } else { "a" };
             tokens.push(format!("key_{}{}", n, alt));
         }
+    }
+    tokens
+}
+
+fn external_candidate_tokens(candidate: &TrainerExternalCandidate) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for value in [&candidate.title, &candidate.artist_name] {
+        let normalized = value.to_lowercase().replace(['/', '-'], " ");
+        tokens.extend(normalized.split_whitespace().map(String::from));
+    }
+    if let Some(duration) = candidate.duration_ms {
+        tokens.push(format!("dur_{}", duration / 30_000));
+    }
+    if candidate.tidal_id.is_some() {
+        tokens.push("tidal_resolved".to_string());
+    }
+    for source in &candidate.source_tags {
+        let normalized = source.to_lowercase().replace(['/', '-', '>'], " ");
+        tokens.extend(
+            normalized
+                .split_whitespace()
+                .map(|part| format!("source_{part}")),
+        );
+    }
+    if let Some(bucket) = candidate.freshness_bucket.as_deref() {
+        let normalized = bucket.to_lowercase().replace(['/', '-', '>'], " ");
+        tokens.extend(
+            normalized
+                .split_whitespace()
+                .map(|part| format!("freshness_{part}")),
+        );
+    }
+    for genre in &candidate.genre_tags {
+        let normalized = genre.to_lowercase().replace('>', " ");
+        tokens.extend(normalized.split_whitespace().map(String::from));
     }
     tokens
 }
@@ -253,7 +381,12 @@ fn build_behavioral_embeddings(
     input: &TrainerInput,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> (HashMap<i64, Vec<f64>>, HashMap<i64, HashMap<i64, i64>>) {
+) -> (
+    HashMap<i64, Vec<f64>>,
+    HashMap<i64, HashMap<i64, f64>>,
+    HashMap<i64, HashMap<i64, i64>>,
+    HashMap<i64, HashMap<i64, SupportBreakdown>>,
+) {
     let dim = input.dimension;
     let window = input.window_size;
     let min_count = input.min_count;
@@ -267,10 +400,28 @@ fn build_behavioral_embeddings(
             }
         }
     }
+    for group in &input.evidence_groups {
+        for edge in &group.edges {
+            *counts.entry(edge.from_track_id).or_default() += 1;
+            *counts.entry(edge.to_track_id).or_default() += 1;
+        }
+    }
 
     let allowed: HashSet<i64> = counts
         .into_iter()
         .filter_map(|(id, count)| if count >= min_count { Some(id) } else { None })
+        .collect();
+    let heldout_evidence: HashSet<(String, i64, i64, EvidenceKind)> = input
+        .heldout_examples
+        .iter()
+        .map(|example| {
+            (
+                example.event_id.clone(),
+                example.from_track_id,
+                example.to_track_id,
+                example.evidence_kind,
+            )
+        })
         .collect();
 
     // Total sequence count for progress reporting. The caller's stage
@@ -283,6 +434,7 @@ fn build_behavioral_embeddings(
     // Plus raw counts for support/confidence computation downstream.
     let mut co: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
     let mut co_count: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
+    let mut support_buckets: HashMap<i64, HashMap<i64, SupportBreakdown>> = HashMap::new();
     let mut sequences_seen: usize = 0;
     'outer: for source in &input.sequences {
         let weight = source.weight;
@@ -335,15 +487,73 @@ fn build_behavioral_embeddings(
                     }
                     let other = filtered[j];
                     let distance = (i as isize - j as isize).unsigned_abs();
-                    *entry.entry(other).or_default() += weight / (distance as f64).max(1.0);
+                    let weighted = weight / (distance as f64).max(1.0);
+                    *entry.entry(other).or_default() += weighted;
                     *count_entry.entry(other).or_default() += 1;
+                    support_buckets
+                        .entry(track_id)
+                        .or_default()
+                        .entry(other)
+                        .or_default()
+                        .colisten += weighted;
                 }
             }
         }
     }
 
+    for group in &input.evidence_groups {
+        for edge in &group.edges {
+            if !allowed.contains(&edge.from_track_id) || !allowed.contains(&edge.to_track_id) {
+                continue;
+            }
+            if heldout_evidence.contains(&(
+                edge.event_id.clone(),
+                edge.from_track_id,
+                edge.to_track_id,
+                edge.evidence_kind,
+            )) {
+                continue;
+            }
+            let weighted = group.base_weight * edge.weight;
+            *co.entry(edge.from_track_id)
+                .or_default()
+                .entry(edge.to_track_id)
+                .or_default() += weighted;
+            *co_count
+                .entry(edge.from_track_id)
+                .or_default()
+                .entry(edge.to_track_id)
+                .or_default() += 1;
+            add_support_bucket(
+                &mut support_buckets,
+                edge.from_track_id,
+                edge.to_track_id,
+                edge.evidence_kind,
+                weighted,
+            );
+            if edge.evidence_kind != EvidenceKind::DirectTransition {
+                *co.entry(edge.to_track_id)
+                    .or_default()
+                    .entry(edge.from_track_id)
+                    .or_default() += weighted;
+                *co_count
+                    .entry(edge.to_track_id)
+                    .or_default()
+                    .entry(edge.from_track_id)
+                    .or_default() += 1;
+                add_support_bucket(
+                    &mut support_buckets,
+                    edge.to_track_id,
+                    edge.from_track_id,
+                    edge.evidence_kind,
+                    weighted,
+                );
+            }
+        }
+    }
+
     if cancel_requested(cancel) {
-        return (HashMap::new(), co_count);
+        return (HashMap::new(), co, co_count, support_buckets);
     }
 
     // Hash-project each track's neighbor scores into a dense vector. Cancel is
@@ -356,6 +566,7 @@ fn build_behavioral_embeddings(
     // emit when we cross multiples of 256. Maps into [0.30, 0.40].
     let projection_total = co.len();
     let projected_done = std::sync::atomic::AtomicUsize::new(0);
+    let co_score = co.clone();
     let embeddings = co
         .into_par_iter()
         .map(|(track_id, neighbors)| {
@@ -396,7 +607,30 @@ fn build_behavioral_embeddings(
             (track_id, normalize(&vec).0)
         })
         .collect();
-    (embeddings, co_count)
+    (embeddings, co_score, co_count, support_buckets)
+}
+
+fn add_support_bucket(
+    buckets: &mut HashMap<i64, HashMap<i64, SupportBreakdown>>,
+    from_track_id: i64,
+    to_track_id: i64,
+    evidence_kind: EvidenceKind,
+    weight: f64,
+) {
+    let bucket = buckets
+        .entry(from_track_id)
+        .or_default()
+        .entry(to_track_id)
+        .or_default();
+    match evidence_kind {
+        EvidenceKind::DirectTransition => bucket.transition += weight,
+        EvidenceKind::SessionCoListen => bucket.colisten += weight,
+        EvidenceKind::PlaylistAdjacency
+        | EvidenceKind::AlbumAdjacency
+        | EvidenceKind::ArtistAffinity
+        | EvidenceKind::GenreAffinity
+        | EvidenceKind::FavoriteAffinity => bucket.structure += weight,
+    }
 }
 
 // ── Stage 2: Audio proxy features (hashed metadata) ───────────────────────────
@@ -450,7 +684,7 @@ fn build_audio_proxy_features(
                     vector: vec,
                     clip_start_ms: clip_start,
                     clip_duration_ms: clip_duration,
-                    feature_version: "metadata-audio-proxy-v1".to_string(),
+                    feature_version: AUDIO_PROXY_FEATURE_VERSION.to_string(),
                 },
             ))
         })
@@ -498,6 +732,21 @@ fn fuse_embeddings(
 
 // ── Stage 4: Full O(n²) neighbor graph (parallelized with rayon) ─────────────
 
+fn build_external_proxy_features(
+    candidates: &[TrainerExternalCandidate],
+    dim: usize,
+) -> HashMap<i64, Vec<f64>> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.candidate_id,
+                hashed_projection(&external_candidate_tokens(candidate), dim),
+            )
+        })
+        .collect()
+}
+
 /// Pre-computed metadata for a single track — built once, read millions of times.
 struct TrackMeta {
     track_id: i64,
@@ -521,7 +770,9 @@ fn similarity_neighbors(
     behavioral: &HashMap<i64, Vec<f64>>,
     audio: &HashMap<i64, TrainerAudioFeature>,
     fusion: &HashMap<i64, Vec<f64>>,
+    _co_score: &HashMap<i64, HashMap<i64, f64>>,
     co_count: &HashMap<i64, HashMap<i64, i64>>,
+    support_buckets: &HashMap<i64, HashMap<i64, SupportBreakdown>>,
     play_counts: &HashMap<i64, i64>,
     top_k: usize,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<TrainingProgressUpdate>>,
@@ -622,6 +873,7 @@ fn similarity_neighbors(
             let b_current = behavioral_vecs[idx];
             let a_current = audio_vecs[idx];
             let seed_co_counts = co_count.get(&meta.track_id);
+            let seed_support_buckets = support_buckets.get(&meta.track_id);
             let play_count_seed = play_counts.get(&meta.track_id).copied().unwrap_or(0);
 
             // Per-pair candidate row: includes the new fields except in-degree
@@ -638,6 +890,10 @@ fn similarity_neighbors(
                 Option<String>,
                 f64,
                 i64,
+                f64,
+                f64,
+                f64,
+                f64,
                 i64,
             )> = Vec::new();
 
@@ -765,7 +1021,18 @@ fn similarity_neighbors(
                     contributions.push(("audio_texture", audio_score));
                 }
 
-                let total_score = score + metadata_score;
+                let support_breakdown = seed_support_buckets
+                    .and_then(|m| m.get(&other_meta.track_id))
+                    .copied()
+                    .unwrap_or_default();
+                let directional_behavior_bonus =
+                    (support_breakdown.transition.ln_1p() * 0.05).clamp(0.0, 0.18);
+                if directional_behavior_bonus > 0.0 {
+                    reason_tags.push("direct_transition".to_string());
+                    contributions.push(("direct_transition", directional_behavior_bonus));
+                }
+
+                let total_score = score + metadata_score + directional_behavior_bonus;
                 reason_tags.sort();
                 reason_tags.dedup();
 
@@ -810,6 +1077,10 @@ fn similarity_neighbors(
                     primary_reason,
                     confidence,
                     support_count,
+                    support_breakdown.transition,
+                    support_breakdown.colisten,
+                    support_breakdown.structure,
+                    support_breakdown.metadata,
                     play_count_candidate,
                 ));
             }
@@ -832,6 +1103,10 @@ fn similarity_neighbors(
                             primary,
                             conf,
                             support,
+                            support_transition,
+                            support_colisten,
+                            support_structure,
+                            support_metadata,
                             play_count_candidate,
                         ),
                     )| TrainerNeighbor {
@@ -846,6 +1121,10 @@ fn similarity_neighbors(
                         primary_reason: primary,
                         confidence: conf,
                         support_count: support,
+                        support_transition,
+                        support_colisten,
+                        support_structure,
+                        support_metadata,
                         play_count_seed,
                         play_count_candidate,
                         candidate_in_degree: 0,
@@ -857,6 +1136,51 @@ fn similarity_neighbors(
         .collect();
 
     neighbor_chunks.into_iter().flatten().collect()
+}
+
+fn external_similarity_neighbors(
+    fusion: &HashMap<i64, Vec<f64>>,
+    external_features: &HashMap<i64, Vec<f64>>,
+    top_k: usize,
+) -> Vec<TrainerExternalNeighbor> {
+    if fusion.is_empty() || external_features.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+
+    let external = external_features.iter().collect::<Vec<_>>();
+    fusion
+        .par_iter()
+        .flat_map(|(&library_track_id, library_vector)| {
+            let mut scores = external
+                .iter()
+                .filter_map(|&(candidate_id, candidate_vector)| {
+                    let candidate_id = *candidate_id;
+                    let score = cosine(library_vector, candidate_vector);
+                    if score <= 0.0 {
+                        return None;
+                    }
+                    Some((candidate_id, score))
+                })
+                .collect::<Vec<_>>();
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scores
+                .into_iter()
+                .take(top_k)
+                .enumerate()
+                .map(
+                    move |(rank, (candidate_id, score))| TrainerExternalNeighbor {
+                        library_track_id,
+                        candidate_id,
+                        rank: (rank + 1) as i32,
+                        score,
+                        audio_score: score,
+                        metadata_score: 0.0,
+                        reason_tags: vec!["external_audio_proxy".to_string()],
+                    },
+                )
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 // Second pass over the assembled neighbor graph: counts how many seeds list
@@ -940,6 +1264,133 @@ fn evaluate(neighbors: &[TrainerNeighbor], heldout_pairs: &[(i64, i64)]) -> Hash
     HashMap::from([
         ("recall_at_10".to_string(), hits as f64 / total),
         ("mrr_at_20".to_string(), reciprocal_rank / total),
+    ])
+}
+
+fn heldout_metric_label(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::DirectTransition => "transition",
+        EvidenceKind::SessionCoListen => "colisten",
+        EvidenceKind::PlaylistAdjacency => "playlist",
+        EvidenceKind::AlbumAdjacency => "album",
+        EvidenceKind::ArtistAffinity => "artist",
+        EvidenceKind::GenreAffinity => "genre",
+        EvidenceKind::FavoriteAffinity => "favorite",
+    }
+}
+
+fn evaluate_typed_heldout(
+    neighbors: &[TrainerNeighbor],
+    heldout_examples: &[HeldoutExample],
+    play_counts: &HashMap<i64, i64>,
+) -> HashMap<String, f64> {
+    if heldout_examples.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut grouped_neighbors: HashMap<i64, Vec<i64>> = HashMap::new();
+    for neighbor in neighbors {
+        grouped_neighbors
+            .entry(neighbor.track_id)
+            .or_default()
+            .push(neighbor.neighbor_track_id);
+    }
+
+    let mut grouped_examples: HashMap<&'static str, Vec<&HeldoutExample>> = HashMap::new();
+    for example in heldout_examples {
+        grouped_examples
+            .entry(heldout_metric_label(example.evidence_kind))
+            .or_default()
+            .push(example);
+    }
+
+    let mut metrics = HashMap::new();
+    let mut skip_weighted_total = 0.0f64;
+    let mut skip_weighted_hits = 0.0f64;
+    let mut skipped_input_rows = 0usize;
+    let mut cold_total = 0usize;
+    let mut cold_hits = 0usize;
+    for (label, examples) in grouped_examples {
+        let mut hits = 0usize;
+        let mut reciprocal_rank = 0.0f64;
+        for example in &examples {
+            let ranked = grouped_neighbors
+                .get(&example.from_track_id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let top_20 = &ranked[..ranked.len().min(20)];
+            let hit_at_10 = top_20.iter().take(10).any(|&id| id == example.to_track_id);
+            if hit_at_10 {
+                hits += 1;
+            }
+            if let Some(pos) = top_20.iter().position(|&id| id == example.to_track_id) {
+                reciprocal_rank += 1.0 / (pos as f64 + 1.0);
+            }
+            if example.evidence_kind == EvidenceKind::SessionCoListen {
+                let weight = example.weight.clamp(0.0, 1.0);
+                skip_weighted_total += weight;
+                if hit_at_10 {
+                    skip_weighted_hits += weight;
+                }
+                if weight < 0.5 {
+                    skipped_input_rows += 1;
+                }
+            }
+            if play_counts.get(&example.to_track_id).copied().unwrap_or(0) <= 1 {
+                cold_total += 1;
+                if hit_at_10 {
+                    cold_hits += 1;
+                }
+            }
+        }
+        let total = examples.len() as f64;
+        metrics.insert(format!("heldout_count.{label}"), total);
+        metrics.insert(format!("{label}_recall_at_10"), hits as f64 / total);
+        metrics.insert(format!("{label}_mrr_at_20"), reciprocal_rank / total);
+    }
+    if skip_weighted_total > 0.0 {
+        metrics.insert(
+            "skip_aware_recall_at_10".to_string(),
+            skip_weighted_hits / skip_weighted_total,
+        );
+        metrics.insert("skipped_input_rows".to_string(), skipped_input_rows as f64);
+    }
+    if cold_total > 0 {
+        metrics.insert(
+            "cold_track_recall_at_10".to_string(),
+            cold_hits as f64 / cold_total as f64,
+        );
+        metrics.insert("cold_track_heldout_count".to_string(), cold_total as f64);
+    }
+    metrics
+}
+
+fn evaluate_discovery_lift(neighbors: &[TrainerNeighbor]) -> HashMap<String, f64> {
+    let top_rows = neighbors
+        .iter()
+        .filter(|neighbor| neighbor.rank <= 10)
+        .collect::<Vec<_>>();
+    if top_rows.is_empty() {
+        return HashMap::new();
+    }
+    let total = top_rows.len() as f64;
+    let low_play = top_rows
+        .iter()
+        .filter(|neighbor| neighbor.play_count_candidate <= 1)
+        .count() as f64;
+    let never_played = top_rows
+        .iter()
+        .filter(|neighbor| neighbor.play_count_candidate == 0)
+        .count() as f64;
+    HashMap::from([
+        (
+            "discovery_lift.low_play_neighbor_share_at_10".to_string(),
+            low_play / total,
+        ),
+        (
+            "discovery_lift.never_played_neighbor_share_at_10".to_string(),
+            never_played / total,
+        ),
     ])
 }
 
@@ -1041,13 +1492,15 @@ pub fn run_discovery_training(
     }
 
     // Stage 1 — also returns raw co-occurrence counts for support/confidence.
-    let (behavioral, co_count) = build_behavioral_embeddings(&input, progress_tx, cancel);
+    let (behavioral, co_score, co_count, support_buckets) =
+        build_behavioral_embeddings(&input, progress_tx, cancel);
     if cancel_requested(cancel) {
         return TrainerOutput {
             behavioral_embeddings: HashMap::new(),
             audio_features: HashMap::new(),
             fusion_embeddings: HashMap::new(),
             neighbors: Vec::new(),
+            external_neighbors: Vec::new(),
             metrics: HashMap::new(),
             reason_hit_rates: Vec::new(),
         };
@@ -1098,6 +1551,7 @@ pub fn run_discovery_training(
             audio_features: audio,
             fusion_embeddings: HashMap::new(),
             neighbors: Vec::new(),
+            external_neighbors: Vec::new(),
             metrics: HashMap::new(),
             reason_hit_rates: Vec::new(),
         };
@@ -1113,6 +1567,11 @@ pub fn run_discovery_training(
 
     // Stage 3
     let fusion = fuse_embeddings(&tracks, &behavioral, &audio);
+    let external_features = if input.include_audio_proxy {
+        build_external_proxy_features(&input.external_candidates, dim)
+    } else {
+        HashMap::new()
+    };
 
     if let Some(tx) = progress_tx {
         let _ = tx.send(TrainingProgressUpdate::stage_only(
@@ -1136,7 +1595,9 @@ pub fn run_discovery_training(
         &behavioral,
         &audio,
         &fusion,
+        &co_score,
         &co_count,
+        &support_buckets,
         &play_counts,
         top_k,
         progress_tx,
@@ -1154,9 +1615,17 @@ pub fn run_discovery_training(
         ));
     }
     compute_in_degree(&mut neighbors);
+    let external_neighbors =
+        external_similarity_neighbors(&fusion, &external_features, top_k.min(8));
 
     // Stage 5 — recall/MRR overall, plus per-reason hit-rate breakdown.
     let mut metrics = evaluate(&neighbors, &input.heldout_pairs);
+    metrics.extend(evaluate_typed_heldout(
+        &neighbors,
+        &input.heldout_examples,
+        &play_counts,
+    ));
+    metrics.extend(evaluate_discovery_lift(&neighbors));
     let reason_hit_rates = compute_reason_hit_rates(&neighbors, &input.heldout_pairs);
 
     let playable = tracks.len() as f64;
@@ -1183,6 +1652,17 @@ pub fn run_discovery_training(
             group.sequences.len() as f64,
         );
     }
+    let total_evidence: usize = input
+        .evidence_groups
+        .iter()
+        .map(|group| group.edges.len())
+        .sum();
+    metrics.insert("evidence_count".to_string(), total_evidence as f64);
+    for group in &input.evidence_groups {
+        *metrics
+            .entry(format!("evidence_count.{}", group.label))
+            .or_default() += group.edges.len() as f64;
+    }
     metrics.insert(
         "neighbor_tracks".to_string(),
         neighbors
@@ -1190,6 +1670,14 @@ pub fn run_discovery_training(
             .map(|n| n.track_id)
             .collect::<HashSet<_>>()
             .len() as f64,
+    );
+    metrics.insert(
+        "external_candidate_count".to_string(),
+        input.external_candidates.len() as f64,
+    );
+    metrics.insert(
+        "external_neighbor_count".to_string(),
+        external_neighbors.len() as f64,
     );
 
     if let Some(tx) = progress_tx {
@@ -1210,6 +1698,7 @@ pub fn run_discovery_training(
         audio_features: audio,
         fusion_embeddings: fusion,
         neighbors,
+        external_neighbors,
         metrics,
         reason_hit_rates,
     }
@@ -1246,6 +1735,9 @@ mod tests {
                 bpm: None,
                 energy: None,
                 camelot_key: None,
+                danceability: None,
+                beat_strength: None,
+                loudness_lufs: None,
             })
             .collect();
 
@@ -1280,7 +1772,9 @@ mod tests {
     fn similarity_neighbors_aborts_when_cancel_flag_set() {
         let (tracks, behavioral, audio, fusion) = make_test_input(200, 32);
         let cancel = Arc::new(AtomicBool::new(true));
+        let co_score = HashMap::new();
         let co_count = HashMap::new();
+        let support_buckets = HashMap::new();
         let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
@@ -1288,7 +1782,9 @@ mod tests {
             &behavioral,
             &audio,
             &fusion,
+            &co_score,
             &co_count,
+            &support_buckets,
             &play_counts,
             10,
             None,
@@ -1303,10 +1799,41 @@ mod tests {
     }
 
     #[test]
+    fn metadata_tokens_include_expanded_dsp_buckets() {
+        let track = EmbeddingTrackRow {
+            track_id: 1,
+            title: "Pulse Test".to_string(),
+            artist_name: Some("NOOR".to_string()),
+            album_title: None,
+            duration_ms: Some(180_000),
+            best_quality: Some("HI_RES".to_string()),
+            source: "tidal".to_string(),
+            play_count: 0,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: Vec::new(),
+            bpm: Some(123.0),
+            energy: Some(0.74),
+            camelot_key: Some("8B".to_string()),
+            danceability: Some(0.83),
+            beat_strength: Some(0.42),
+            loudness_lufs: Some(-11.2),
+        };
+
+        let tokens = metadata_tokens(&track);
+
+        assert!(tokens.iter().any(|token| token == "dance_8"));
+        assert!(tokens.iter().any(|token| token == "beat_4"));
+        assert!(tokens.iter().any(|token| token == "lufs_-12"));
+    }
+
+    #[test]
     fn similarity_neighbors_runs_normally_without_cancel() {
         let (tracks, behavioral, audio, fusion) = make_test_input(50, 32);
         let cancel = Arc::new(AtomicBool::new(false));
+        let co_score = HashMap::new();
         let co_count = HashMap::new();
+        let support_buckets = HashMap::new();
         let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
@@ -1314,7 +1841,9 @@ mod tests {
             &behavioral,
             &audio,
             &fusion,
+            &co_score,
             &co_count,
+            &support_buckets,
             &play_counts,
             10,
             None,
@@ -1326,11 +1855,21 @@ mod tests {
     }
 
     #[test]
-    fn confidence_floors_for_metadata_only_edges() {
-        // No co_count entries → every edge is "pure metadata", confidence = 0.25.
-        let (tracks, behavioral, audio, fusion) = make_test_input(20, 16);
+    fn direct_transition_support_boosts_only_seed_to_candidate_direction() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(4, 16);
         let cancel = Arc::new(AtomicBool::new(false));
-        let co_count = HashMap::new();
+        let mut co_score: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
+        co_score.entry(1).or_default().insert(2, 8.0);
+        let mut co_count: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
+        co_count.entry(1).or_default().insert(2, 8);
+        let mut support_buckets: HashMap<i64, HashMap<i64, SupportBreakdown>> = HashMap::new();
+        support_buckets.entry(1).or_default().insert(
+            2,
+            SupportBreakdown {
+                transition: 8.0,
+                ..Default::default()
+            },
+        );
         let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
@@ -1338,7 +1877,423 @@ mod tests {
             &behavioral,
             &audio,
             &fusion,
+            &co_score,
             &co_count,
+            &support_buckets,
+            &play_counts,
+            3,
+            None,
+            Some(&cancel),
+        );
+
+        let seed_one = result
+            .iter()
+            .find(|n| n.track_id == 1 && n.rank == 1)
+            .expect("seed 1 top neighbor");
+        assert_eq!(seed_one.neighbor_track_id, 2);
+
+        let reverse = result
+            .iter()
+            .find(|n| n.track_id == 2 && n.neighbor_track_id == 1)
+            .expect("reverse edge still present");
+        let unrelated = result
+            .iter()
+            .find(|n| n.track_id == 2 && n.neighbor_track_id == 3)
+            .expect("unrelated edge present");
+        assert!(
+            reverse.score <= unrelated.score,
+            "reverse direction must not inherit the direct transition bonus"
+        );
+    }
+
+    #[test]
+    fn typed_direct_evidence_builds_one_way_weighted_support() {
+        let (tracks, _, _, _) = make_test_input(3, 16);
+        let input = TrainerInput {
+            seed: 13,
+            dimension: 16,
+            window_size: 3,
+            min_count: 1,
+            top_k: 3,
+            include_audio_proxy: false,
+            tracks,
+            external_candidates: Vec::new(),
+            sequences: Vec::new(),
+            evidence_groups: vec![TrainerEvidenceGroup {
+                label: "direct".to_string(),
+                base_weight: 2.0,
+                edges: vec![TrainerEdge {
+                    event_id: "transition:1".to_string(),
+                    from_track_id: 1,
+                    to_track_id: 2,
+                    weight: 1.0,
+                    evidence_kind: EvidenceKind::DirectTransition,
+                }],
+            }],
+            heldout_pairs: Vec::new(),
+            heldout_examples: Vec::new(),
+            cached_audio_features: None,
+        };
+
+        let (_, co_score, co_count, support_buckets) =
+            build_behavioral_embeddings(&input, None, None);
+
+        assert_eq!(co_score.get(&1).and_then(|m| m.get(&2)).copied(), Some(2.0));
+        assert_eq!(co_count.get(&1).and_then(|m| m.get(&2)).copied(), Some(1));
+        assert_eq!(
+            support_buckets
+                .get(&1)
+                .and_then(|m| m.get(&2))
+                .map(|support| support.transition),
+            Some(2.0)
+        );
+        assert!(
+            co_score.get(&2).and_then(|m| m.get(&1)).is_none(),
+            "direct transitions must not create reverse evidence"
+        );
+    }
+
+    #[test]
+    fn heldout_exclusion_removes_only_matching_event_evidence() {
+        let (tracks, _, _, _) = make_test_input(3, 16);
+        let input = TrainerInput {
+            seed: 13,
+            dimension: 16,
+            window_size: 3,
+            min_count: 1,
+            top_k: 3,
+            include_audio_proxy: false,
+            tracks,
+            external_candidates: Vec::new(),
+            sequences: Vec::new(),
+            evidence_groups: vec![
+                TrainerEvidenceGroup {
+                    label: "direct".to_string(),
+                    base_weight: 2.0,
+                    edges: vec![TrainerEdge {
+                        event_id: "transition:1".to_string(),
+                        from_track_id: 1,
+                        to_track_id: 2,
+                        weight: 1.0,
+                        evidence_kind: EvidenceKind::DirectTransition,
+                    }],
+                },
+                TrainerEvidenceGroup {
+                    label: "colisten".to_string(),
+                    base_weight: 1.0,
+                    edges: vec![TrainerEdge {
+                        event_id: "pair:1:2".to_string(),
+                        from_track_id: 1,
+                        to_track_id: 2,
+                        weight: 0.5,
+                        evidence_kind: EvidenceKind::SessionCoListen,
+                    }],
+                },
+            ],
+            heldout_pairs: Vec::new(),
+            heldout_examples: vec![HeldoutExample {
+                event_id: "transition:1".to_string(),
+                from_track_id: 1,
+                to_track_id: 2,
+                evidence_kind: EvidenceKind::DirectTransition,
+                weight: 1.0,
+            }],
+            cached_audio_features: None,
+        };
+
+        let (_, co_score, co_count, support_buckets) =
+            build_behavioral_embeddings(&input, None, None);
+
+        assert_eq!(co_score.get(&1).and_then(|m| m.get(&2)).copied(), Some(0.5));
+        assert_eq!(co_score.get(&2).and_then(|m| m.get(&1)).copied(), Some(0.5));
+        assert_eq!(co_count.get(&1).and_then(|m| m.get(&2)).copied(), Some(1));
+        let support = support_buckets
+            .get(&1)
+            .and_then(|m| m.get(&2))
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(support.transition, 0.0);
+        assert_eq!(support.colisten, 0.5);
+    }
+
+    #[test]
+    fn typed_heldout_metrics_are_labeled_by_evidence_kind() {
+        let neighbors = vec![TrainerNeighbor {
+            track_id: 1,
+            neighbor_track_id: 2,
+            rank: 1,
+            score: 1.0,
+            behavioral_score: 1.0,
+            audio_score: 0.0,
+            metadata_score: 0.0,
+            reason_tags: vec!["direct_transition".to_string()],
+            primary_reason: Some("direct_transition".to_string()),
+            confidence: 1.0,
+            support_count: 1,
+            support_transition: 2.0,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
+            play_count_seed: 0,
+            play_count_candidate: 0,
+            candidate_in_degree: 0,
+            candidate_in_degree_percentile: 0.0,
+        }];
+        let examples = vec![HeldoutExample {
+            event_id: "transition:1".to_string(),
+            from_track_id: 1,
+            to_track_id: 2,
+            evidence_kind: EvidenceKind::DirectTransition,
+            weight: 1.0,
+        }];
+
+        let metrics = evaluate_typed_heldout(&neighbors, &examples, &HashMap::new());
+
+        assert_eq!(metrics.get("heldout_count.transition").copied(), Some(1.0));
+        assert_eq!(metrics.get("transition_recall_at_10").copied(), Some(1.0));
+        assert_eq!(metrics.get("transition_mrr_at_20").copied(), Some(1.0));
+        assert!(
+            !metrics.contains_key("colisten_recall_at_10"),
+            "typed metrics must not be computed from unrelated or unlabeled pairs"
+        );
+    }
+
+    #[test]
+    fn typed_diagnostics_include_skip_aware_and_cold_track_recall() {
+        let neighbors = vec![
+            TrainerNeighbor {
+                track_id: 1,
+                neighbor_track_id: 2,
+                rank: 1,
+                score: 1.0,
+                behavioral_score: 1.0,
+                audio_score: 0.0,
+                metadata_score: 0.0,
+                reason_tags: vec!["session_colisten".to_string()],
+                primary_reason: Some("session_colisten".to_string()),
+                confidence: 1.0,
+                support_count: 1,
+                support_transition: 0.0,
+                support_colisten: 0.8,
+                support_structure: 0.0,
+                support_metadata: 0.0,
+                play_count_seed: 10,
+                play_count_candidate: 0,
+                candidate_in_degree: 0,
+                candidate_in_degree_percentile: 0.0,
+            },
+            TrainerNeighbor {
+                track_id: 1,
+                neighbor_track_id: 3,
+                rank: 2,
+                score: 0.9,
+                behavioral_score: 0.9,
+                audio_score: 0.0,
+                metadata_score: 0.0,
+                reason_tags: vec!["session_colisten".to_string()],
+                primary_reason: Some("session_colisten".to_string()),
+                confidence: 0.8,
+                support_count: 1,
+                support_transition: 0.0,
+                support_colisten: 0.1,
+                support_structure: 0.0,
+                support_metadata: 0.0,
+                play_count_seed: 10,
+                play_count_candidate: 5,
+                candidate_in_degree: 0,
+                candidate_in_degree_percentile: 0.0,
+            },
+        ];
+        let examples = vec![
+            HeldoutExample {
+                event_id: "full-listen".to_string(),
+                from_track_id: 1,
+                to_track_id: 2,
+                evidence_kind: EvidenceKind::SessionCoListen,
+                weight: 0.9,
+            },
+            HeldoutExample {
+                event_id: "skip".to_string(),
+                from_track_id: 1,
+                to_track_id: 4,
+                evidence_kind: EvidenceKind::SessionCoListen,
+                weight: 0.1,
+            },
+        ];
+        let play_counts = HashMap::from([(2, 0), (4, 0)]);
+
+        let metrics = evaluate_typed_heldout(&neighbors, &examples, &play_counts);
+
+        assert_eq!(metrics.get("skipped_input_rows").copied(), Some(1.0));
+        assert_eq!(metrics.get("skip_aware_recall_at_10").copied(), Some(0.9));
+        assert_eq!(metrics.get("cold_track_recall_at_10").copied(), Some(0.5));
+    }
+
+    #[test]
+    fn discovery_lift_counts_low_play_neighbor_share() {
+        let neighbors = vec![
+            TrainerNeighbor {
+                track_id: 1,
+                neighbor_track_id: 2,
+                rank: 1,
+                score: 1.0,
+                behavioral_score: 0.0,
+                audio_score: 1.0,
+                metadata_score: 0.0,
+                reason_tags: Vec::new(),
+                primary_reason: None,
+                confidence: 0.5,
+                support_count: 0,
+                support_transition: 0.0,
+                support_colisten: 0.0,
+                support_structure: 0.0,
+                support_metadata: 1.0,
+                play_count_seed: 9,
+                play_count_candidate: 0,
+                candidate_in_degree: 0,
+                candidate_in_degree_percentile: 0.0,
+            },
+            TrainerNeighbor {
+                track_id: 1,
+                neighbor_track_id: 3,
+                rank: 2,
+                score: 0.9,
+                behavioral_score: 0.0,
+                audio_score: 0.9,
+                metadata_score: 0.0,
+                reason_tags: Vec::new(),
+                primary_reason: None,
+                confidence: 0.5,
+                support_count: 0,
+                support_transition: 0.0,
+                support_colisten: 0.0,
+                support_structure: 0.0,
+                support_metadata: 1.0,
+                play_count_seed: 9,
+                play_count_candidate: 8,
+                candidate_in_degree: 0,
+                candidate_in_degree_percentile: 0.0,
+            },
+        ];
+
+        let metrics = evaluate_discovery_lift(&neighbors);
+
+        assert_eq!(
+            metrics.get("discovery_lift.low_play_neighbor_share_at_10"),
+            Some(&0.5)
+        );
+        assert_eq!(
+            metrics.get("discovery_lift.never_played_neighbor_share_at_10"),
+            Some(&0.5)
+        );
+    }
+
+    #[test]
+    fn external_candidates_emit_sidecar_neighbors_without_library_rows() {
+        let track = EmbeddingTrackRow {
+            track_id: 1,
+            title: "Signal Bloom".to_string(),
+            artist_name: Some("Outside Artist".to_string()),
+            album_title: None,
+            duration_ms: Some(180_000),
+            best_quality: Some("HI_RES".to_string()),
+            source: "tidal".to_string(),
+            play_count: 0,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: vec!["electronic > ambient".to_string()],
+            bpm: Some(120.0),
+            energy: Some(0.5),
+            camelot_key: None,
+            danceability: Some(0.6),
+            beat_strength: Some(0.4),
+            loudness_lufs: Some(-12.0),
+        };
+        let input = TrainerInput {
+            seed: 13,
+            dimension: 32,
+            window_size: 3,
+            min_count: 1,
+            top_k: 3,
+            include_audio_proxy: true,
+            tracks: vec![track],
+            external_candidates: vec![TrainerExternalCandidate {
+                candidate_id: 99,
+                tidal_id: Some(90099),
+                title: "Signal Bloom".to_string(),
+                artist_name: "Outside Artist".to_string(),
+                genre_tags: vec!["electronic".to_string(), "ambient".to_string()],
+                source_tags: vec!["lastfm_similar".to_string()],
+                freshness_bucket: Some("fresh_30d".to_string()),
+                duration_ms: Some(180_000),
+            }],
+            sequences: Vec::new(),
+            evidence_groups: Vec::new(),
+            heldout_pairs: Vec::new(),
+            heldout_examples: Vec::new(),
+            cached_audio_features: None,
+        };
+
+        let output = run_discovery_training(input, None, None);
+
+        assert!(output.neighbors.is_empty());
+        assert_eq!(output.external_neighbors.len(), 1);
+        assert_eq!(output.external_neighbors[0].library_track_id, 1);
+        assert_eq!(output.external_neighbors[0].candidate_id, 99);
+        assert_eq!(output.external_neighbors[0].rank, 1);
+        assert!(
+            output.external_neighbors[0]
+                .reason_tags
+                .iter()
+                .any(|tag| tag == "external_audio_proxy")
+        );
+    }
+
+    #[test]
+    fn external_candidate_tokens_include_provenance_and_freshness() {
+        let candidate = TrainerExternalCandidate {
+            candidate_id: 77,
+            tidal_id: None,
+            title: "Future Signal".to_string(),
+            artist_name: "Outside Artist".to_string(),
+            genre_tags: vec!["ambient".to_string()],
+            source_tags: vec![
+                "lastfm_similar".to_string(),
+                "tidal_new_release".to_string(),
+            ],
+            freshness_bucket: Some("fresh_7d".to_string()),
+            duration_ms: Some(181_000),
+        };
+
+        let tokens = external_candidate_tokens(&candidate);
+
+        assert!(tokens.iter().any(|token| token == "source_lastfm_similar"));
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token == "source_tidal_new_release")
+        );
+        assert!(tokens.iter().any(|token| token == "freshness_fresh_7d"));
+    }
+
+    #[test]
+    fn confidence_floors_for_metadata_only_edges() {
+        // No co_count entries → every edge is "pure metadata", confidence = 0.25.
+        let (tracks, behavioral, audio, fusion) = make_test_input(20, 16);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let co_score = HashMap::new();
+        let co_count = HashMap::new();
+        let support_buckets = HashMap::new();
+        let play_counts = HashMap::new();
+
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &co_score,
+            &co_count,
+            &support_buckets,
             &play_counts,
             5,
             None,
@@ -1363,6 +2318,12 @@ mod tests {
             .entry(tracks[0].track_id)
             .or_default()
             .insert(tracks[1].track_id, 50);
+        let mut co_score: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
+        co_score
+            .entry(tracks[0].track_id)
+            .or_default()
+            .insert(tracks[1].track_id, 50.0);
+        let support_buckets = HashMap::new();
         let play_counts = HashMap::new();
 
         let result = similarity_neighbors(
@@ -1370,7 +2331,9 @@ mod tests {
             &behavioral,
             &audio,
             &fusion,
+            &co_score,
             &co_count,
+            &support_buckets,
             &play_counts,
             5,
             None,
@@ -1403,6 +2366,10 @@ mod tests {
             primary_reason: Some(primary.to_string()),
             confidence: 0.0,
             support_count: 0,
+            support_transition: 0.0,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
             play_count_seed: 0,
             play_count_candidate: 0,
             candidate_in_degree: 0,
@@ -1450,6 +2417,10 @@ mod tests {
             primary_reason: Some(primary.to_string()),
             confidence: 0.0,
             support_count: 0,
+            support_transition: 0.0,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
             play_count_seed: 0,
             play_count_candidate: 0,
             candidate_in_degree: 0,
@@ -1476,6 +2447,10 @@ mod tests {
             primary_reason: None,
             confidence: 0.0,
             support_count: 0,
+            support_transition: 0.0,
+            support_colisten: 0.0,
+            support_structure: 0.0,
+            support_metadata: 0.0,
             play_count_seed: 0,
             play_count_candidate: 0,
             candidate_in_degree: 0,

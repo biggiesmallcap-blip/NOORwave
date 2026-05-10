@@ -1046,6 +1046,9 @@ export interface DiscoveryTrainingRun {
 export interface DiscoveryStatus {
 	fallback_active: boolean;
 	active_model: EmbeddingModel | null;
+	selected_engine: DiscoveryEngine;
+	selected_engine_family: string;
+	selected_engine_trainable: boolean;
 	latest_run: DiscoveryTrainingRun | null;
 	coverage_ratio: number;
 	playable_tracks: number;
@@ -1053,6 +1056,9 @@ export interface DiscoveryStatus {
 	neighbor_tracks: number;
 	clip_cache_tracks: number;
 }
+
+export type DiscoveryEngine = 'v2' | 'v1';
+export type DiscoveryTrainingSafetyProfile = 'laptop_safe' | 'balanced' | 'performance';
 
 export interface DiscoveryRadioResult {
 	track_id: number;
@@ -1813,7 +1819,7 @@ export const api = {
 	},
 
 	startDiscoveryTraining(mode: 'full' | 'incremental', rebuild_audio = false) {
-		return fetchApi<{ status: string; mode: string }>('/api/discovery/train', undefined, {
+		return fetchApi<{ status: string; mode: string; engine?: DiscoveryEngine; message?: string }>('/api/discovery/train', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ mode, rebuild_audio }),
 		});
@@ -1836,6 +1842,28 @@ export const api = {
 		}>('/api/discovery/train/intensity');
 	},
 
+	getDiscoveryEngine() {
+		return fetchApi<{
+			engine: DiscoveryEngine;
+			label: string;
+			family: string;
+			trainable: boolean;
+			available: DiscoveryEngine[];
+		}>('/api/discovery/train/engine');
+	},
+
+	setDiscoveryEngine(engine: DiscoveryEngine) {
+		return fetchApi<{
+			engine: DiscoveryEngine;
+			label: string;
+			family: string;
+			trainable: boolean;
+		}>('/api/discovery/train/engine', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ engine }),
+		});
+	},
+
 	setDiscoveryIntensity(intensity: 'max' | 'medium' | 'low') {
 		return fetchApi<{ intensity: string }>('/api/discovery/train/intensity', undefined, {
 			method: 'POST',
@@ -1852,6 +1880,9 @@ export const api = {
 			estimated_ram_mb: number;
 			last_run_seconds: number | null;
 			recommendation: 'safe' | 'moderate' | 'high_cost';
+			safety_profile: DiscoveryTrainingSafetyProfile;
+			safety_timeout_seconds: number;
+			worker_threads: number;
 			params: {
 				dimension: number;
 				top_k: number;
@@ -1859,6 +1890,26 @@ export const api = {
 				include_audio_proxy: boolean;
 			};
 		}>('/api/discovery/train/safety');
+	},
+
+	getDiscoverySafetyProfile() {
+		return fetchApi<{
+			profile: DiscoveryTrainingSafetyProfile;
+			label: string;
+			worker_threads: number;
+			available: DiscoveryTrainingSafetyProfile[];
+		}>('/api/discovery/train/safety-profile');
+	},
+
+	setDiscoverySafetyProfile(profile: DiscoveryTrainingSafetyProfile) {
+		return fetchApi<{
+			profile: DiscoveryTrainingSafetyProfile;
+			label: string;
+			worker_threads: number;
+		}>('/api/discovery/train/safety-profile', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ profile }),
+		});
 	},
 
 	recordDiscoveryFeedback(
