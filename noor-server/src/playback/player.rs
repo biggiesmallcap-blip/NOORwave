@@ -1025,19 +1025,22 @@ fn build_automix_extension(
     // Phase 2c hotfix: if we got here, the embedding fast-path produced
     // nothing usable (model missing, no neighbours, or filtered to
     // empty). If the precomputed similarity table is also empty for
-    // this seed, the track has no recommendation signal at all.
-    // Filling with a 500-track random library pool below would produce
-    // a kitchen-sink queue that reads as "the system is broken" — most
-    // commonly seen on fresh `tidal_stream` imports that haven't been
-    // enriched yet. Skip the extension and let the queue end gracefully.
-    // Seeds with sparse-but-non-empty signal still fall through to the
-    // random pool below; only the truly-empty case is guarded.
+    // this seed, the track has no learned recommendation signal. Rather
+    // than filling with a 500-track random library pool (which reads as
+    // "the system is broken"), cascade through metadata: same-artist,
+    // then same-album, then shared genre. This keeps the queue alive
+    // for seeds that haven't been embedded yet (e.g. tracks without a
+    // service ID, or library additions since the last training run).
     if similar.is_empty() {
-        tracing::debug!(
-            seed_track_id = current_track.id,
-            "automix: skipping extension — seed has no recommendation signal (no embedding neighbours, no track_similarity rows)"
-        );
-        return Ok(Vec::new());
+        let fallback =
+            build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        if fallback.is_empty() {
+            tracing::debug!(
+                seed_track_id = current_track.id,
+                "automix: skipping extension — seed has no recommendation signal and no artist/album/genre matches"
+            );
+        }
+        return Ok(fallback);
     }
 
     let mut candidates: Vec<Track> = if similar.len() >= needed {
@@ -1084,6 +1087,97 @@ fn build_automix_extension(
     );
     let ordered = decluster_by_album(ordered);
     Ok(ordered.into_iter().take(needed).collect())
+}
+
+// Metadata-only fallback for seeds with no embedding neighbours and no
+// precomputed similarity rows. Cascades: same-artist → same-album →
+// shared-genre, stopping once `needed` tracks are collected. Excludes the
+// seed itself plus anything already in `excluded`. Returns up to `needed`
+// tracks; may return fewer or empty if the library has nothing to offer.
+fn build_metadata_fallback(
+    conn: &Connection,
+    seed: &Track,
+    excluded: &[i64],
+    needed: usize,
+) -> Result<Vec<Track>> {
+    let mut seen: HashSet<i64> = excluded.iter().copied().collect();
+    seen.insert(seed.id);
+    let mut result: Vec<Track> = Vec::new();
+    let mut stage_hit: Option<&str> = None;
+
+    // Stage 1: same artist.
+    if seed.artist_id != 0 {
+        let artist_tracks = queries::get_artist_tracks(conn, seed.artist_id)?;
+        for t in artist_tracks {
+            if seen.insert(t.id) {
+                if stage_hit.is_none() {
+                    stage_hit = Some("artist");
+                }
+                result.push(t);
+                if result.len() >= needed {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Stage 2: same album — appends to whatever stage 1 produced.
+    if result.len() < needed {
+        if let Some(album_id) = seed.album_id {
+            let album_tracks = queries::get_album_tracks(conn, album_id)?;
+            for t in album_tracks {
+                if seen.insert(t.id) {
+                    if stage_hit.is_none() {
+                        stage_hit = Some("album");
+                    }
+                    result.push(t);
+                    if result.len() >= needed {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Stage 3: shared genre — queries each genre_id the seed belongs to.
+    if result.len() < needed {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ?1")?;
+        let genre_ids: Vec<i64> = stmt
+            .query_map(params![seed.id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        'genre: for genre_id in genre_ids {
+            let genre_tracks = queries::get_tracks_by_genre_filtered(
+                conn,
+                genre_id,
+                false,
+                crate::genre::filter::GalaxyFilterRule::default_rule(),
+            )?;
+            for t in genre_tracks {
+                if seen.insert(t.id) {
+                    if stage_hit.is_none() {
+                        stage_hit = Some("genre");
+                    }
+                    result.push(t);
+                    if result.len() >= needed {
+                        break 'genre;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(stage) = stage_hit {
+        tracing::info!(
+            seed_track_id = seed.id,
+            stage,
+            count = result.len(),
+            "automix: metadata fallback hit"
+        );
+    }
+
+    Ok(result)
 }
 
 pub(crate) fn build_session_taste_profile(
@@ -2070,7 +2164,7 @@ mod tests {
         conn.execute_batch(
             "
             CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
-            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT);
+            CREATE TABLE albums (id INTEGER PRIMARY KEY, title TEXT, artwork_url TEXT, year INTEGER);
             CREATE TABLE tracks (
                 id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -2232,6 +2326,73 @@ mod tests {
         assert!(
             !extension.is_empty(),
             "expected non-empty extension once a similarity row exists"
+        );
+    }
+
+    /// Metadata fallback: seed has no embedding/similarity signal but the
+    /// artist has other tracks in the library. The cascade should return
+    /// same-artist tracks rather than ending the queue.
+    #[test]
+    fn build_automix_extension_falls_back_to_same_artist_when_no_signal() {
+        let (conn, seed) = empty_signal_conn();
+        // Add four more tracks by the same artist (id=1).
+        for i in 2..=5 {
+            conn.execute(
+                &format!(
+                    "INSERT INTO tracks (id, title, artist_id, source, fidelity_score) \
+                     VALUES ({i}, 'Track {i}', 1, 'tidal_stream', 0)"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+
+        let extension = build_automix_extension(
+            &conn,
+            &seed,
+            &[],
+            ShuffleMode::Off,
+            12,
+            true,
+        )
+        .expect("extension call");
+
+        assert!(
+            !extension.is_empty(),
+            "expected same-artist tracks in fallback, got empty extension"
+        );
+        assert!(
+            extension.iter().all(|t| t.artist_id == seed.artist_id),
+            "expected all fallback tracks to share the seed's artist_id"
+        );
+        // Seed itself must not appear.
+        assert!(
+            !extension.iter().any(|t| t.id == seed.id),
+            "seed track must not appear in its own extension"
+        );
+    }
+
+    /// Metadata fallback: seed has no signal AND is the only track by its
+    /// artist/album, with no genre tags — the truly-orphan path. The
+    /// extension must stay empty (no random kitchen-sink fill).
+    #[test]
+    fn build_automix_extension_returns_empty_when_no_artist_album_or_genre() {
+        let (conn, seed) = empty_signal_conn();
+        // No additional tracks, no genre rows — seed is completely isolated.
+        let extension = build_automix_extension(
+            &conn,
+            &seed,
+            &[],
+            ShuffleMode::Off,
+            12,
+            true,
+        )
+        .expect("extension call");
+
+        assert!(
+            extension.is_empty(),
+            "expected empty extension for a fully isolated seed, got {} tracks",
+            extension.len()
         );
     }
 }

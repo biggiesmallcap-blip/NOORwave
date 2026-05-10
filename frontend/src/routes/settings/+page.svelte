@@ -1100,7 +1100,7 @@
 	];
 
 	let visibleSettingsCategories = $derived(
-		settingsCategories.filter((category) => category.id !== 'discovery' && category.id !== 'data')
+		settingsCategories.filter((category) => category.id !== 'data')
 	);
 
 	let activeCategoryMeta = $derived(
