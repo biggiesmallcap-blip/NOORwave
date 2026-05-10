@@ -659,7 +659,10 @@ fn run_runtime_loop(
                         command_tx.clone(),
                         event_tx.clone(),
                         true,
-                        None,
+                        exclusive_rebuild_rate(
+                            state.current_sample_rate_follow,
+                            state.device_sample_rate,
+                        ),
                         state.current_exclusive_release_grace_secs,
                     );
                 }
@@ -806,6 +809,7 @@ fn run_runtime_loop(
                     None if sample_rate_follow => Some(new_config.sample_rate.0),
                     _ => None,
                 };
+                let effective_config = effective_output_config(&new_config, desired_rate);
 
                 // In exclusive mode only one stream can hold the device, so
                 // drop the pre-buffered + fading engines and only swap the
@@ -864,12 +868,11 @@ fn run_runtime_loop(
                 // engines spin up at the new rate (their initial
                 // `target_sample_rate` is seeded from this value).
                 device = new_device;
-                output_config = new_config;
+                output_config = effective_config;
                 output_sample_format = new_format;
                 state.device_name = new_name.clone();
-                if let Some(rate) = desired_rate {
-                    state.device_sample_rate = rate;
-                }
+                state.device_sample_rate = output_config.sample_rate.0;
+                state.device_channels = output_config.channels;
                 state.current_exclusive = exclusive;
                 state.current_sample_rate_follow = sample_rate_follow;
                 state.current_device_selection = selection;
@@ -981,7 +984,7 @@ fn transition_to_job(
                 command_tx.clone(),
                 event_tx.clone(),
                 true,
-                None,
+                exclusive_rebuild_rate(state.current_sample_rate_follow, state.device_sample_rate),
                 state.current_exclusive_release_grace_secs,
             )
         {
@@ -1345,12 +1348,20 @@ impl PlaybackEngine {
 /// is on we bypass cpal entirely (see `wasapi_exclusive::build_exclusive_stream`)
 /// so the cpal config never gets used. We only consume the desired sample rate
 /// to plumb through to the WASAPI session.
-fn build_stream_config(base: &StreamConfig, desired_sample_rate: Option<u32>) -> StreamConfig {
+fn effective_output_config(base: &StreamConfig, desired_sample_rate: Option<u32>) -> StreamConfig {
     let mut config = base.clone();
     if let Some(rate) = desired_sample_rate {
         config.sample_rate = cpal::SampleRate(rate);
     }
     config
+}
+
+fn build_stream_config(base: &StreamConfig, desired_sample_rate: Option<u32>) -> StreamConfig {
+    effective_output_config(base, desired_sample_rate)
+}
+
+fn exclusive_rebuild_rate(sample_rate_follow: bool, device_sample_rate: u32) -> Option<u32> {
+    sample_rate_follow.then_some(device_sample_rate)
 }
 
 fn build_output_stream(
@@ -2487,6 +2498,101 @@ mod tests {
         // documents the contract for callers — same-rate inputs should not
         // construct a resampler.
         assert_eq!(48_000_u32, 48_000_u32);
+    }
+
+    #[test]
+    fn effective_output_config_applies_desired_sample_rate() {
+        let base = StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48_000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let effective = effective_output_config(&base, Some(96_000));
+
+        assert_eq!(effective.sample_rate.0, 96_000);
+        assert_eq!(effective.channels, 2);
+    }
+
+    #[test]
+    fn effective_output_config_keeps_base_rate_without_override() {
+        let base = StreamConfig {
+            channels: 6,
+            sample_rate: cpal::SampleRate(44_100),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let effective = effective_output_config(&base, None);
+
+        assert_eq!(effective.sample_rate.0, 44_100);
+        assert_eq!(effective.channels, 6);
+    }
+
+    #[test]
+    fn exclusive_rebuild_rate_follows_current_output_rate_only_when_enabled() {
+        assert_eq!(exclusive_rebuild_rate(true, 96_000), Some(96_000));
+        assert_eq!(exclusive_rebuild_rate(false, 96_000), None);
+    }
+
+    #[test]
+    fn write_output_f32_drains_ready_buffer_at_96khz() {
+        let (command_tx, _command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let position = Arc::new(AtomicU64::new(0));
+        let shared = Arc::new(PlaybackSharedState::new(
+            42,
+            0,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            96_000,
+            2,
+            None,
+            command_tx.clone(),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::clone(&position),
+        ));
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+            buffer.mark_finished();
+        }
+
+        let mut out = vec![0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(out, vec![0.25, -0.25, 0.5, -0.5]);
+        assert_eq!(position.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn write_output_f32_outputs_silence_when_paused_at_96khz() {
+        let (command_tx, _command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let position = Arc::new(AtomicU64::new(0));
+        let shared = Arc::new(PlaybackSharedState::new(
+            42,
+            0,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            96_000,
+            2,
+            None,
+            command_tx.clone(),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::clone(&position),
+        ));
+        shared.paused.store(true, Ordering::SeqCst);
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+            buffer.mark_finished();
+        }
+
+        let mut out = vec![1.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(out, vec![0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(position.load(Ordering::Relaxed), 0);
     }
 
     #[test]

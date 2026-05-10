@@ -2258,12 +2258,10 @@ async fn play_discovery_track(
     }
 
     let track = discovery_result_to_track(&payload)?;
+    let user_quality = current_user_audio_quality(&state).await;
     let stream_request = tidal_stream::StreamRequest::new(
         parse_provider_track_id(&payload.provider_track_id)?,
-        payload
-            .audio_quality
-            .clone()
-            .unwrap_or_else(|| tidal_stream::DEFAULT_AUDIO_QUALITY.to_string()),
+        requested_tidal_quality(user_quality.clone(), payload.audio_quality.as_deref()),
     );
     let stream_info = resolve_tidal_playback_stream(&state, &track, &stream_request)
         .await
@@ -2276,7 +2274,6 @@ async fn play_discovery_track(
         })?;
     let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
     let crossfade_ms = current_crossfade_ms(&state).await;
-    let user_quality = current_user_audio_quality(&state).await;
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(playback_generation);
@@ -10993,6 +10990,53 @@ async fn play_tidal_mix(
     Ok(Json(json!({ "ok": true })))
 }
 
+fn requested_tidal_quality(
+    user_quality: Option<crate::db::audio_settings::AudioQuality>,
+    fallback_quality: Option<&str>,
+) -> String {
+    user_quality
+        .map(|quality| quality.as_tidal_str().to_string())
+        .or_else(|| fallback_quality.map(str::to_string))
+        .unwrap_or_else(|| tidal_stream::DEFAULT_AUDIO_QUALITY.to_string())
+}
+
+fn build_ephemeral_tidal_stream_request(
+    tidal_track_id: i64,
+    user_quality: Option<crate::db::audio_settings::AudioQuality>,
+) -> tidal_stream::StreamRequest {
+    tidal_stream::StreamRequest::new(tidal_track_id, requested_tidal_quality(user_quality, None))
+}
+
+fn build_ephemeral_synthetic_track(
+    track: &crate::PendingEphemeralTidalTrack,
+    stream_info: &tidal_stream::StreamInfo,
+) -> crate::db::models::Track {
+    crate::db::models::Track {
+        id: -track.tidal_track_id,
+        title: track.title.clone(),
+        artist_id: 0,
+        artist_name: track.artist_name.clone(),
+        album_id: None,
+        album_title: track.album_title.clone(),
+        disc_number: None,
+        track_number: None,
+        duration_ms: track.duration_ms,
+        isrc: None,
+        tidal_id: Some(track.tidal_track_id),
+        ytmusic_id: None,
+        soundcloud_id: None,
+        best_quality: Some(stream_info.audio_quality.clone()),
+        best_source: Some("tidal".to_string()),
+        fidelity_score: 0,
+        is_favorite: false,
+        play_count: 0,
+        last_played_at: None,
+        date_added: None,
+        source: "tidal_ephemeral".to_string(),
+        artwork_url: track.artwork_url.clone(),
+    }
+}
+
 /// Resolve a TIDAL stream URL and start ephemeral playback. Shared by the
 /// single-track entry point (`play_tidal_ephemeral`), the mix entry point
 /// (`play_tidal_mix`), and the auto-advance hook (`handle_runtime_finished`)
@@ -11044,7 +11088,9 @@ async fn start_ephemeral_tidal_playback(
         }
     }
 
-    let stream_req = tidal_stream::StreamRequest::new(track.tidal_track_id, "LOSSLESS");
+    let user_quality = current_user_audio_quality(state).await;
+    let stream_req =
+        build_ephemeral_tidal_stream_request(track.tidal_track_id, user_quality.clone());
     let stream_info =
         match tidal_stream::resolve_stream(&http_client, &tokens.access_token, &stream_req).await {
             Ok(info) => info,
@@ -11076,31 +11122,7 @@ async fn start_ephemeral_tidal_playback(
             }
         };
 
-    // Build a synthetic Track with a negative id to avoid any DB collision
-    let synthetic = crate::db::models::Track {
-        id: -track.tidal_track_id,
-        title: track.title.clone(),
-        artist_id: 0,
-        artist_name: track.artist_name.clone(),
-        album_id: None,
-        album_title: track.album_title.clone(),
-        disc_number: None,
-        track_number: None,
-        duration_ms: track.duration_ms,
-        isrc: None,
-        tidal_id: Some(track.tidal_track_id),
-        ytmusic_id: None,
-        soundcloud_id: None,
-        best_quality: Some("LOSSLESS".to_string()),
-        best_source: Some("tidal".to_string()),
-        fidelity_score: 0,
-        is_favorite: false,
-        play_count: 0,
-        last_played_at: None,
-        date_added: None,
-        source: "tidal_ephemeral".to_string(),
-        artwork_url: track.artwork_url.clone(),
-    };
+    let synthetic = build_ephemeral_synthetic_track(&track, &stream_info);
 
     let playback_generation = bump_playback_generation(state).await;
     let snapshot = {
@@ -11139,9 +11161,13 @@ async fn start_ephemeral_tidal_playback(
 
     // Build the playback job and start it via the runtime
     let crossfade_ms = current_crossfade_ms(state).await;
-    let job =
-        player::build_playback_preparation(&synthetic, Some(&stream_info), crossfade_ms, None)
-            .with_generation(playback_generation);
+    let job = player::build_playback_preparation(
+        &synthetic,
+        Some(&stream_info),
+        crossfade_ms,
+        user_quality,
+    )
+    .with_generation(playback_generation);
     let runtime_handle = match ensure_playback_runtime_for_track(state, &synthetic).await {
         Ok(handle) => handle,
         Err(error) => {
@@ -16103,6 +16129,71 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["status"], "stream_rejected");
         assert_eq!(body["track_id"], 11);
+    }
+
+    #[test]
+    fn ephemeral_stream_request_uses_user_audio_quality() {
+        let request = build_ephemeral_tidal_stream_request(
+            123,
+            Some(crate::db::audio_settings::AudioQuality::HiResLossless),
+        );
+
+        assert_eq!(request.track_id, 123);
+        assert_eq!(request.audio_quality, "HI_RES_LOSSLESS");
+        assert_eq!(request.playback_mode, "STREAM");
+        assert_eq!(request.asset_presentation, "FULL");
+    }
+
+    #[test]
+    fn ephemeral_stream_request_defaults_to_lossless_without_user_quality() {
+        let request = build_ephemeral_tidal_stream_request(123, None);
+
+        assert_eq!(request.audio_quality, tidal_stream::DEFAULT_AUDIO_QUALITY);
+    }
+
+    #[test]
+    fn requested_tidal_quality_prefers_user_setting_over_payload_quality() {
+        let quality = requested_tidal_quality(
+            Some(crate::db::audio_settings::AudioQuality::Lossless),
+            Some("HI_RES_LOSSLESS"),
+        );
+
+        assert_eq!(quality, "LOSSLESS");
+    }
+
+    #[test]
+    fn requested_tidal_quality_uses_payload_quality_without_user_setting() {
+        let quality = requested_tidal_quality(None, Some("HI_RES_LOSSLESS"));
+
+        assert_eq!(quality, "HI_RES_LOSSLESS");
+    }
+
+    #[test]
+    fn ephemeral_synthetic_track_keeps_resolved_stream_quality() {
+        let track = crate::PendingEphemeralTidalTrack {
+            tidal_track_id: 456,
+            title: "Resolved Track".to_string(),
+            artist_name: Some("Artist".to_string()),
+            album_title: Some("Album".to_string()),
+            artwork_url: None,
+            duration_ms: Some(180_000),
+        };
+        let stream = tidal_stream::StreamInfo {
+            url: "https://cdn.example.test/audio.flac".to_string(),
+            segment_urls: vec![],
+            track_id: 456,
+            audio_quality: "HI_RES_LOSSLESS".to_string(),
+            codec: "audio/flac".to_string(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        };
+
+        let synthetic = build_ephemeral_synthetic_track(&track, &stream);
+
+        assert_eq!(synthetic.id, -456);
+        assert_eq!(synthetic.tidal_id, Some(456));
+        assert_eq!(synthetic.best_quality.as_deref(), Some("HI_RES_LOSSLESS"));
+        assert_eq!(synthetic.source, "tidal_ephemeral");
     }
 
     #[test]

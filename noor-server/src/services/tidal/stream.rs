@@ -51,6 +51,32 @@ pub struct VideoStreamInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioQualityAgreement {
+    Agreed,
+    Changed,
+    Unreported,
+}
+
+fn resolved_audio_quality(
+    response: &serde_json::Value,
+    requested_quality: &str,
+) -> (String, AudioQualityAgreement) {
+    match response
+        .get("audioQuality")
+        .and_then(|value| value.as_str())
+    {
+        Some(returned_quality) if returned_quality == requested_quality => {
+            (returned_quality.to_string(), AudioQualityAgreement::Agreed)
+        }
+        Some(returned_quality) => (returned_quality.to_string(), AudioQualityAgreement::Changed),
+        None => (
+            requested_quality.to_string(),
+            AudioQualityAgreement::Unreported,
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamCodec {
     Flac,
     Aac,
@@ -536,32 +562,74 @@ pub async fn resolve_stream(
         }
     };
 
+    let (audio_quality, quality_agreement) = resolved_audio_quality(&resp, &request.audio_quality);
+    let sample_rate = resp
+        .get("sampleRate")
+        .and_then(|value| value.as_i64())
+        .map(|v| v as i32);
+    let bit_depth = resp
+        .get("bitDepth")
+        .and_then(|value| value.as_i64())
+        .map(|v| v as i32);
+    // For DASH, use the codec extracted from codecs= attribute (e.g. "flac", "mp4a.40.2")
+    // so codec_kind() returns the right audio type for gapless decisions.
+    // For JSON manifests, use manifestMimeType as before.
+    let codec = dash_codec.unwrap_or_else(|| {
+        resp.get("manifestMimeType")
+            .and_then(|value| value.as_str())
+            .unwrap_or("audio/flac")
+            .to_string()
+    });
+
+    match quality_agreement {
+        AudioQualityAgreement::Agreed => {
+            tracing::info!(
+                target: "noor.playback.tidal",
+                event = "playback_quality_agreed",
+                track_id = request.track_id,
+                requested_quality = %request.audio_quality,
+                returned_quality = %audio_quality,
+                sample_rate = ?sample_rate,
+                bit_depth = ?bit_depth,
+                codec = %codec,
+                "TIDAL playback quality agreed"
+            );
+        }
+        AudioQualityAgreement::Changed => {
+            tracing::warn!(
+                target: "noor.playback.tidal",
+                event = "playback_quality_changed",
+                track_id = request.track_id,
+                requested_quality = %request.audio_quality,
+                returned_quality = %audio_quality,
+                sample_rate = ?sample_rate,
+                bit_depth = ?bit_depth,
+                codec = %codec,
+                "TIDAL playback quality differed from request"
+            );
+        }
+        AudioQualityAgreement::Unreported => {
+            tracing::warn!(
+                target: "noor.playback.tidal",
+                event = "playback_quality_unreported",
+                track_id = request.track_id,
+                requested_quality = %request.audio_quality,
+                sample_rate = ?sample_rate,
+                bit_depth = ?bit_depth,
+                codec = %codec,
+                "TIDAL playback response omitted audio quality"
+            );
+        }
+    }
+
     Ok(StreamInfo {
         url: stream_url,
         segment_urls,
         track_id: request.track_id,
-        audio_quality: resp
-            .get("audioQuality")
-            .and_then(|value| value.as_str())
-            .unwrap_or(request.audio_quality.as_str())
-            .to_string(),
-        // For DASH, use the codec extracted from codecs= attribute (e.g. "flac", "mp4a.40.2")
-        // so codec_kind() returns the right audio type for gapless decisions.
-        // For JSON manifests, use manifestMimeType as before.
-        codec: dash_codec.unwrap_or_else(|| {
-            resp.get("manifestMimeType")
-                .and_then(|value| value.as_str())
-                .unwrap_or("audio/flac")
-                .to_string()
-        }),
-        sample_rate: resp
-            .get("sampleRate")
-            .and_then(|value| value.as_i64())
-            .map(|v| v as i32),
-        bit_depth: resp
-            .get("bitDepth")
-            .and_then(|value| value.as_i64())
-            .map(|v| v as i32),
+        audio_quality,
+        codec,
+        sample_rate,
+        bit_depth,
     })
 }
 
@@ -727,6 +795,40 @@ mod tests {
 
         assert_eq!(info.hls_manifest_url, "https://cdn.example.test/video.m3u8");
         assert_eq!(info.video_quality, "MEDIUM");
+    }
+
+    #[test]
+    fn resolved_audio_quality_marks_matching_response_as_agreed() {
+        let (quality, agreement) = resolved_audio_quality(
+            &json!({
+                "audioQuality": "HI_RES_LOSSLESS"
+            }),
+            "HI_RES_LOSSLESS",
+        );
+
+        assert_eq!(quality, "HI_RES_LOSSLESS");
+        assert_eq!(agreement, AudioQualityAgreement::Agreed);
+    }
+
+    #[test]
+    fn resolved_audio_quality_marks_different_response_as_changed() {
+        let (quality, agreement) = resolved_audio_quality(
+            &json!({
+                "audioQuality": "LOSSLESS"
+            }),
+            "HI_RES_LOSSLESS",
+        );
+
+        assert_eq!(quality, "LOSSLESS");
+        assert_eq!(agreement, AudioQualityAgreement::Changed);
+    }
+
+    #[test]
+    fn resolved_audio_quality_marks_missing_response_as_unreported() {
+        let (quality, agreement) = resolved_audio_quality(&json!({}), "LOSSLESS");
+
+        assert_eq!(quality, "LOSSLESS");
+        assert_eq!(agreement, AudioQualityAgreement::Unreported);
     }
 
     fn resolve_manifest_url(
