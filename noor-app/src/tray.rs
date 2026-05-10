@@ -1,11 +1,13 @@
 use crate::{config, sidecar::SidecarState};
 use std::sync::{Arc, Mutex};
 use tauri::{
-    Wry,
     image::Image,
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem},
+    menu::{
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+        PredefinedMenuItem,
+    },
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, Theme, WindowEvent,
+    Manager, Theme, WindowEvent, Wry,
 };
 
 // Multi-resolution ICOs (16/24/32/48/256). Tauri's image decoder picks the
@@ -63,9 +65,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         update_url: Mutex::new(None),
     });
 
-    let initial_theme = app
-        .get_webview_window("main")
-        .and_then(|w| w.theme().ok());
+    let initial_theme = app.get_webview_window("main").and_then(|w| w.theme().ok());
     let icon = Image::from_bytes(tray_icon_bytes_for_theme(initial_theme))?;
     let network_item_clone = network_item.clone();
 
@@ -76,7 +76,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_tray_icon_event({
             let handle = app.handle().clone();
             move |_tray, event| {
-                if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    ..
+                } = event
+                {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
@@ -159,7 +163,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         window.on_window_event(move |event| {
             if let WindowEvent::ThemeChanged(theme) = event {
                 if let Some(tray) = handle_for_theme.tray_by_id("noorwave-tray") {
-                    if let Ok(new_icon) = Image::from_bytes(tray_icon_bytes_for_theme(Some(*theme))) {
+                    if let Ok(new_icon) = Image::from_bytes(tray_icon_bytes_for_theme(Some(*theme)))
+                    {
                         let _ = tray.set_icon(Some(new_icon));
                     }
                 }

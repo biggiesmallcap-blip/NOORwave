@@ -1,9 +1,9 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -107,9 +107,7 @@ pub fn kill_server(state: &Arc<SidecarState>) {
             .timeout(Duration::from_millis(1000))
             .build()
         {
-            let _ = client
-                .post("http://127.0.0.1:3334/api/shutdown")
-                .send();
+            let _ = client.post("http://127.0.0.1:3334/api/shutdown").send();
         }
         // Give the server up to 2s to exit cleanly after the shutdown
         // signal. Poll try_wait in 50ms ticks — std::process has no

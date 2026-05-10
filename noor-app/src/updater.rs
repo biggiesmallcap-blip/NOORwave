@@ -24,15 +24,16 @@ pub fn check() -> Option<UpdateInfo> {
     let url = body["html_url"].as_str()?.to_owned();
 
     if is_newer(latest, current) {
-        Some(UpdateInfo { version: latest.to_owned(), url })
+        Some(UpdateInfo {
+            version: latest.to_owned(),
+            url,
+        })
     } else {
         None
     }
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
-    let to_parts = |s: &str| -> Vec<u32> {
-        s.split('.').filter_map(|n| n.parse().ok()).collect()
-    };
+    let to_parts = |s: &str| -> Vec<u32> { s.split('.').filter_map(|n| n.parse().ok()).collect() };
     to_parts(latest) > to_parts(current)
 }
