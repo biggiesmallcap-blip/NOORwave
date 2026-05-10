@@ -2466,10 +2466,6 @@ fn terminal_engine_slot(
     }
 }
 
-fn handle_terminal_event(active: Option<(i64, u64)>, track_id: i64, generation: u64) -> bool {
-    active == Some((track_id, generation))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2537,14 +2533,6 @@ mod tests {
         assert!(!buffer.is_ready());
         buffer.mark_finished();
         assert!(buffer.is_ready());
-    }
-
-    #[test]
-    fn terminal_events_only_apply_to_active_track() {
-        assert!(!handle_terminal_event(None, 7, 1));
-        assert!(handle_terminal_event(Some((7, 1)), 7, 1));
-        assert!(!handle_terminal_event(Some((7, 1)), 8, 1));
-        assert!(!handle_terminal_event(Some((7, 2)), 7, 1));
     }
 
     #[test]
