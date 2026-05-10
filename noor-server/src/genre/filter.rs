@@ -104,7 +104,9 @@ impl GalaxyFilterRule {
 /// enum — so this is not an injection risk.
 pub fn filter_subquery(rule: GalaxyFilterRule) -> Cow<'static, str> {
     match rule {
-        GalaxyFilterRule::All => Cow::Borrowed("SELECT track_id, genre_id, source, confidence FROM track_genres"),
+        GalaxyFilterRule::All => {
+            Cow::Borrowed("SELECT track_id, genre_id, source, confidence FROM track_genres")
+        }
         GalaxyFilterRule::ConfidenceMin(min) => Cow::Owned(format!(
             "SELECT track_id, genre_id, source, confidence FROM track_genres WHERE confidence >= {:.4}",
             min.clamp(0.0, 10.0)
@@ -309,7 +311,9 @@ pub fn filter_subquery_with_fallback_for_tracks(
         // Empty IN-list would parse to a syntax error and is meaningless
         // anyway — match shape of the unfiltered cascade so the caller can
         // safely substitute regardless of count. Caller will bind nothing.
-        return Cow::Borrowed("SELECT NULL AS track_id, NULL AS genre_id, NULL AS source, NULL AS confidence WHERE 0");
+        return Cow::Borrowed(
+            "SELECT NULL AS track_id, NULL AS genre_id, NULL AS source, NULL AS confidence WHERE 0",
+        );
     }
     let inner_sql = filter_subquery(rule);
     let album_mult = ALBUM_FALLBACK_CONF;
@@ -586,7 +590,9 @@ mod tests {
         .expect("seed fixtures");
 
         let frag = filter_subquery_with_fallback(GalaxyFilterRule::All);
-        let sql = format!("SELECT track_id, genre_id, source, confidence FROM ({frag}) tg ORDER BY track_id, genre_id");
+        let sql = format!(
+            "SELECT track_id, genre_id, source, confidence FROM ({frag}) tg ORDER BY track_id, genre_id"
+        );
 
         let mut stmt = conn.prepare(&sql).expect("prepare cascade SQL");
         let rows: Vec<(i64, i64, String, f64)> = stmt
@@ -599,7 +605,8 @@ mod tests {
 
         // Track 100: direct genre, untouched.
         assert!(
-            rows.iter().any(|(t, g, s, _)| *t == 100 && *g == 2 && s == "musicbrainz"),
+            rows.iter()
+                .any(|(t, g, s, _)| *t == 100 && *g == 2 && s == "musicbrainz"),
             "track 100 should keep its direct genre",
         );
 

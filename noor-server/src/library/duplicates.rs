@@ -46,7 +46,15 @@ pub struct ScanStats {
 
 /// Performance / cut markers — different recording.
 const ALT_VERSION_TOKENS: &[&str] = &[
-    "remix", "live", "acoustic", "instrumental", "dub", "edit", "demo", "vip", "rework",
+    "remix",
+    "live",
+    "acoustic",
+    "instrumental",
+    "dub",
+    "edit",
+    "demo",
+    "vip",
+    "rework",
 ];
 
 /// Phrase-level alt-version markers detected via substring (post-normalize).

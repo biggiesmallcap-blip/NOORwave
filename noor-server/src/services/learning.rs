@@ -189,9 +189,7 @@ pub async fn start_training(
     // database lifetime. The trainer is the natural trigger — sequence-aware
     // features depend on session_id and transition_from_track_id, so we do
     // this before the corpus build runs.
-    if let Some(report) =
-        db.with_conn(crate::services::listen_history_backfill::run_if_needed)?
-    {
+    if let Some(report) = db.with_conn(crate::services::listen_history_backfill::run_if_needed)? {
         tracing::info!(
             target: "noor.discovery.training",
             rows_updated = report.rows_updated,

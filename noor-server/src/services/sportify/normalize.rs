@@ -369,15 +369,16 @@ pub fn enrich_tracks_with_tidal_cache(
             continue;
         }
         if let Some(record) = sp_cache::get_unresolved(conn, spotify_id)?
-            && sp_cache::unresolved_is_cold(&record, cfg) {
-                track.tidal = TidalState {
-                    status: ResolutionStatus::Unresolved.as_str().to_string(),
-                    id: None,
-                    confidence: 0.0,
-                    match_reason: record.reason,
-                    from_cache: true,
-                };
-            }
+            && sp_cache::unresolved_is_cold(&record, cfg)
+        {
+            track.tidal = TidalState {
+                status: ResolutionStatus::Unresolved.as_str().to_string(),
+                id: None,
+                confidence: 0.0,
+                match_reason: record.reason,
+                from_cache: true,
+            };
+        }
     }
     Ok(())
 }

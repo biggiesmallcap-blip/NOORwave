@@ -526,9 +526,10 @@ pub fn normalize_to_camelot(key: &str) -> Option<String> {
     if upper.len() >= 2 && (upper.ends_with('A') || upper.ends_with('B')) {
         let num_part = &upper[..upper.len() - 1];
         if let Ok(n) = num_part.parse::<u32>()
-            && (1..=12).contains(&n) {
-                return Some(upper);
-            }
+            && (1..=12).contains(&n)
+        {
+            return Some(upper);
+        }
     }
 
     // Key signature. Strip optional "maj"/"major"/"min"/"minor"/"m".

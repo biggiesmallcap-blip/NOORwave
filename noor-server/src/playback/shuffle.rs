@@ -482,10 +482,7 @@ mod tests {
         // A valid arrangement of 4×A + 3×B has at most one same-A adjacency
         // (e.g. A B A B A B A). Our fixed-point iteration should reach that
         // shape; before the fix, the single pass left two A-A adjacencies.
-        let same_pairs = keys
-            .windows(2)
-            .filter(|w| w[0] == w[1])
-            .count();
+        let same_pairs = keys.windows(2).filter(|w| w[0] == w[1]).count();
         assert!(
             same_pairs <= 1,
             "expected at most one same-key adjacency in {:?}, got {same_pairs}",

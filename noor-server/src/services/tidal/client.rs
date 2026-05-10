@@ -257,11 +257,7 @@ impl TidalClient {
         if !status.is_success() {
             let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            crate::services::tidal::backoff::global().classify(
-                status.as_u16(),
-                &body,
-                retry_after,
-            );
+            crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
             anyhow::bail!("TIDAL API error {}: {}", status, body);
         }
 
@@ -786,7 +782,13 @@ impl TidalClient {
                     items_arr.len(),
                     more_path
                 );
-                out.push(TidalHomeModule { id, title, kind, more_path, items });
+                out.push(TidalHomeModule {
+                    id,
+                    title,
+                    kind,
+                    more_path,
+                    items,
+                });
             }
         }
         out
@@ -825,7 +827,8 @@ impl TidalClient {
                 let rows = payload.get("rows").and_then(serde_json::Value::as_array)?;
                 let mut all = Vec::new();
                 for row in rows {
-                    if let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array) {
+                    if let Some(modules) = row.get("modules").and_then(serde_json::Value::as_array)
+                    {
                         for m in modules {
                             if let Some(items) = m
                                 .get("pagedList")
@@ -915,8 +918,14 @@ impl TidalClient {
 
     fn parse_home_playlist(value: &serde_json::Value) -> Option<TidalHomeItem> {
         let obj = value.as_object()?;
-        let uuid = obj.get("uuid").and_then(serde_json::Value::as_str)?.to_string();
-        let title = obj.get("title").and_then(serde_json::Value::as_str)?.to_string();
+        let uuid = obj
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)?
+            .to_string();
+        let title = obj
+            .get("title")
+            .and_then(serde_json::Value::as_str)?
+            .to_string();
         // TIDAL ships playlist authors as a `creators[]` array; fall back to
         // legacy `creator.name` for older payload shapes.
         let creator_name = obj
@@ -985,7 +994,6 @@ impl TidalClient {
         }
         Vec::new()
     }
-
 
     /// Fetch the items inside a TIDAL mix. The endpoint is the only public
     /// way to play a mix server-side, since mixes don't have a stable track
@@ -1077,23 +1085,25 @@ impl TidalClient {
 
         // Shape 2 (older TIDAL): top-level items[]
         if out.is_empty()
-            && let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
-                for item in items {
-                    if let Some(mix) = Self::parse_mix_item(item) {
-                        out.push(mix);
-                    }
+            && let Some(items) = payload.get("items").and_then(serde_json::Value::as_array)
+        {
+            for item in items {
+                if let Some(mix) = Self::parse_mix_item(item) {
+                    out.push(mix);
                 }
             }
+        }
 
         // Shape 3 (some regions): top-level mixes[]
         if out.is_empty()
-            && let Some(items) = payload.get("mixes").and_then(serde_json::Value::as_array) {
-                for item in items {
-                    if let Some(mix) = Self::parse_mix_item(item) {
-                        out.push(mix);
-                    }
+            && let Some(items) = payload.get("mixes").and_then(serde_json::Value::as_array)
+        {
+            for item in items {
+                if let Some(mix) = Self::parse_mix_item(item) {
+                    out.push(mix);
                 }
             }
+        }
 
         out
     }
@@ -1165,9 +1175,10 @@ impl TidalClient {
             // Prefer SQUARE > MEDIUM > LARGE > whatever-comes-first
             for key in ["SQUARE", "MEDIUM", "LARGE"] {
                 if let Some(v) = obj.get(key)
-                    && let Some(u) = direct_url_or_image_id(v) {
-                        return Some(u);
-                    }
+                    && let Some(u) = direct_url_or_image_id(v)
+                {
+                    return Some(u);
+                }
             }
             for v in obj.values() {
                 if let Some(u) = direct_url_or_image_id(v) {

@@ -365,9 +365,10 @@ pub fn apply_shuffle(
     let mut shuffled_qids: Vec<i64> = Vec::with_capacity(reordered_tracks.len());
     for t in &reordered_tracks {
         if let Some(bucket) = qid_buckets.get_mut(&t.id)
-            && let Some(qid) = bucket.pop_front() {
-                shuffled_qids.push(qid);
-            }
+            && let Some(qid) = bucket.pop_front()
+        {
+            shuffled_qids.push(qid);
+        }
     }
     // Defensive: if reorder_tracks dropped any rows (it shouldn't), append
     // remaining qids in their original order so the queue stays intact.
@@ -377,10 +378,7 @@ pub fn apply_shuffle(
         }
     }
 
-    let final_qids: Vec<i64> = locked_qids
-        .into_iter()
-        .chain(shuffled_qids)
-        .collect();
+    let final_qids: Vec<i64> = locked_qids.into_iter().chain(shuffled_qids).collect();
 
     let tx = conn.unchecked_transaction()?;
     {

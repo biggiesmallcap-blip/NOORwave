@@ -54,9 +54,10 @@ pub async fn fetch_new_releases_cached(
     {
         let guard = CACHE.lock().unwrap();
         if let Some((items, fetched_at)) = guard.as_ref()
-            && fetched_at.elapsed() < CACHE_TTL {
-                return Ok(items.clone());
-            }
+            && fetched_at.elapsed() < CACHE_TTL
+        {
+            return Ok(items.clone());
+        }
     }
     match fetch_new_releases(http, api_key).await {
         Ok(items) => {
@@ -367,9 +368,10 @@ fn pick_image(images: Option<&serde_json::Value>, sizes: &[&str]) -> Option<Stri
             let url = img.get("#text").and_then(serde_json::Value::as_str);
             if s == Some(*size)
                 && let Some(u) = url
-                    && !u.is_empty() {
-                        return Some(u.to_string());
-                    }
+                && !u.is_empty()
+            {
+                return Some(u.to_string());
+            }
         }
     }
     None
@@ -381,9 +383,10 @@ fn dedupe_candidates(candidates: &mut Vec<AlbumCandidate>) {
     let mut seen_pair: HashSet<(String, String)> = HashSet::new();
     candidates.retain(|c| {
         if let Some(mbid) = c.mbid.as_ref()
-            && !seen_mbid.insert(mbid.clone()) {
-                return false;
-            }
+            && !seen_mbid.insert(mbid.clone())
+        {
+            return false;
+        }
         let key = (c.artist.to_lowercase(), c.album.to_lowercase());
         if !seen_pair.insert(key) {
             return false;

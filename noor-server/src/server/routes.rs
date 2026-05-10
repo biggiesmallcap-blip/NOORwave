@@ -869,10 +869,9 @@ async fn get_artist(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let row = s
-        .db
-        .with_conn(|conn| queries::get_artist_with_counts(conn, id))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row =
+        s.db.with_conn(|conn| queries::get_artist_with_counts(conn, id))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let Some((artist, track_count, album_count)) = row else {
         return Err(StatusCode::NOT_FOUND);
@@ -934,7 +933,10 @@ async fn get_album_tracks(
             Err(_) => None,
         };
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -956,10 +958,8 @@ async fn get_album_tracks(
             // Local rows that came from TIDAL carry a `tidal_id`; dedupe so
             // the same track doesn't appear twice (once styled as library,
             // once as TIDAL-only).
-            let local_tidal_ids: std::collections::HashSet<i64> = tracks
-                .iter()
-                .filter_map(|t| t.tidal_id)
-                .collect();
+            let local_tidal_ids: std::collections::HashSet<i64> =
+                tracks.iter().filter_map(|t| t.tidal_id).collect();
 
             resp.items
                 .into_iter()
@@ -1070,7 +1070,10 @@ async fn get_artist_discography(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -1082,7 +1085,11 @@ async fn get_artist_discography(
         })));
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     // Each filter is paginated separately; previously we fetched only the first
     // page (50 newest), which clipped any artist with a long catalog (e.g. a
@@ -1103,7 +1110,17 @@ async fn get_artist_discography(
     // when the local row has no `photo_url`.
     let profile_fut = client.get_artist(tidal_artist_id);
 
-    let (albums_res, eps_res, comps_res, live_res, top_res, videos_res, similar_res, bio_res, profile_res) = tokio::join!(
+    let (
+        albums_res,
+        eps_res,
+        comps_res,
+        live_res,
+        top_res,
+        videos_res,
+        similar_res,
+        bio_res,
+        profile_res,
+    ) = tokio::join!(
         albums_fut,
         eps_fut,
         compilations_fut,
@@ -1122,19 +1139,13 @@ async fn get_artist_discography(
     // library Recently Played Artists rail uses to keep tiles populated
     // when no artist photo exists. Extracted *before* the result-bearing
     // _res values are consumed by the payload builders below.
-    let direct_picture_id = profile_res
-        .as_ref()
-        .ok()
-        .and_then(|a| a.picture.clone());
-    let top_track_picture_id = top_res
-        .as_ref()
-        .ok()
-        .and_then(|tr| {
-            tr.items
-                .iter()
-                .filter(|t| t.artist.id == tidal_artist_id)
-                .find_map(|t| t.artist.picture.clone())
-        });
+    let direct_picture_id = profile_res.as_ref().ok().and_then(|a| a.picture.clone());
+    let top_track_picture_id = top_res.as_ref().ok().and_then(|tr| {
+        tr.items
+            .iter()
+            .filter(|t| t.artist.id == tidal_artist_id)
+            .find_map(|t| t.artist.picture.clone())
+    });
     let album_cover_picture_id = [&albums_res, &eps_res, &comps_res, &live_res]
         .iter()
         .filter_map(|res| res.as_ref().ok())
@@ -1158,7 +1169,11 @@ async fn get_artist_discography(
     };
     let picture_url = TidalClient::get_artwork_url(&resolved_picture_id, picture_size);
     if let Err(e) = profile_res.as_ref() {
-        tracing::debug!("TIDAL artist {} profile fetch failed: {}", tidal_artist_id, e);
+        tracing::debug!(
+            "TIDAL artist {} profile fetch failed: {}",
+            tidal_artist_id,
+            e
+        );
     }
     tracing::warn!(
         "TIDAL artist {} picture resolution: direct={}, top_track={}, album_cover={}, resolved={}",
@@ -1174,7 +1189,10 @@ async fn get_artist_discography(
     // preserving the order of first appearance.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
-    for r in [albums_res, eps_res, comps_res, live_res].into_iter().flatten() {
+    for r in [albums_res, eps_res, comps_res, live_res]
+        .into_iter()
+        .flatten()
+    {
         for item in r {
             if seen.insert(item.id) {
                 all_albums.push(item);
@@ -1242,11 +1260,10 @@ async fn get_artist_discography(
             r.items
                 .into_iter()
                 .map(|v| {
-                    let artwork =
-                        crate::services::tidal::client::TidalClient::get_artwork_url(
-                            &v.image_id,
-                            320,
-                        );
+                    let artwork = crate::services::tidal::client::TidalClient::get_artwork_url(
+                        &v.image_id,
+                        320,
+                    );
                     let artist_name = v.artist.map(|a| a.name);
                     json!({
                         "tidal_id": v.id,
@@ -1404,7 +1421,10 @@ async fn get_tidal_album_tracks(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -1414,7 +1434,11 @@ async fn get_tidal_album_tracks(
         ));
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let result = client.get_album_tracks(tidal_album_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -1465,7 +1489,11 @@ async fn import_tidal_album(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.db.clone(), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.db.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -1475,7 +1503,11 @@ async fn import_tidal_album(
         ));
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let imported = tidal_import::import_album(&db, &client, tidal_album_id)
         .await
         .map_err(|e| {
@@ -1608,12 +1640,11 @@ async fn get_genre_co_occurrence(
     state
         .db
         .with_conn(|conn| {
-            let pairs =
-                queries::get_genre_co_occurrence_filtered(conn, days, window, min, filter)
-                    .map_err(|e| {
-                        tracing::error!("co-occurrence query failed: {e:#}");
-                        anyhow::anyhow!("co-occurrence query failed: {e:#}")
-                    })?;
+            let pairs = queries::get_genre_co_occurrence_filtered(conn, days, window, min, filter)
+                .map_err(|e| {
+                    tracing::error!("co-occurrence query failed: {e:#}");
+                    anyhow::anyhow!("co-occurrence query failed: {e:#}")
+                })?;
             Ok(Json(json!({
                 "pairs": pairs,
                 "filter": filter.label().as_ref(),
@@ -3093,20 +3124,21 @@ async fn resolve_tidal_track(
             .with_conn(|conn| sp_cache::get_unresolved(conn, spotify_id))
             .map_err(internal)?;
         if let Some(record) = unresolved.as_ref()
-            && sp_cache::unresolved_is_cold(record, &cache_cfg) {
-                return Ok(Json(json!({
-                    "spotify_id": spotify_id,
-                    "tidal": {
-                        "status": "unresolved",
-                        "id": null,
-                        "confidence": 0.0,
-                        "match_reason": record.reason,
-                        "last_attempt_at": record.last_attempt_at,
-                        "attempts": record.attempts,
-                        "from_cache": true,
-                    }
-                })));
-            }
+            && sp_cache::unresolved_is_cold(record, &cache_cfg)
+        {
+            return Ok(Json(json!({
+                "spotify_id": spotify_id,
+                "tidal": {
+                    "status": "unresolved",
+                    "id": null,
+                    "confidence": 0.0,
+                    "match_reason": record.reason,
+                    "last_attempt_at": record.last_attempt_at,
+                    "attempts": record.attempts,
+                    "from_cache": true,
+                }
+            })));
+        }
     }
 
     let sportify_track = match db
@@ -3136,7 +3168,10 @@ async fn resolve_tidal_track(
             .await
             .map_err(internal)?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.tidal_http_client.clone(),
+        )
     };
     let Some(tokens) = tokens else {
         return Ok(Json(json!({
@@ -3150,7 +3185,11 @@ async fn resolve_tidal_track(
         })));
     };
 
-    let tidal_client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let tidal_client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let outcome = resolver::resolve_track(&tidal_client, &sportify_track)
         .await
         .map_err(|e| {
@@ -3267,20 +3306,21 @@ async fn resolve_tidal_bulk(
                     continue;
                 }
                 if let Some(record) = sp_cache::get_unresolved(conn, id)?
-                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
-                        unresolved_payload.push(json!({
-                            "spotifyId": id,
-                            "tidal": {
-                                "status": "unresolved",
-                                "id": null,
-                                "confidence": 0.0,
-                                "matchReason": record.reason,
-                                "attempts": record.attempts,
-                                "fromCache": true,
-                            }
-                        }));
-                        continue;
-                    }
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg)
+                {
+                    unresolved_payload.push(json!({
+                        "spotifyId": id,
+                        "tidal": {
+                            "status": "unresolved",
+                            "id": null,
+                            "confidence": 0.0,
+                            "matchReason": record.reason,
+                            "attempts": record.attempts,
+                            "fromCache": true,
+                        }
+                    }));
+                    continue;
+                }
             }
             needs_fetch.push(id.clone());
         }
@@ -3358,7 +3398,11 @@ async fn resolve_tidal_bulk(
         })));
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let outcomes = resolver::resolve_many(&client, &to_resolve, resolve_cfg.bulk_concurrency).await;
 
     db.with_conn(|conn| {
@@ -3445,19 +3489,20 @@ async fn resolve_tidal_status(
                     continue;
                 }
                 if let Some(record) = sp_cache::get_unresolved(conn, id)?
-                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
-                        out.push(json!({
-                            "spotifyId": id,
-                            "tidal": {
-                                "status": "unresolved",
-                                "id": null,
-                                "confidence": 0.0,
-                                "matchReason": record.reason,
-                                "fromCache": true,
-                            }
-                        }));
-                        continue;
-                    }
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg)
+                {
+                    out.push(json!({
+                        "spotifyId": id,
+                        "tidal": {
+                            "status": "unresolved",
+                            "id": null,
+                            "confidence": 0.0,
+                            "matchReason": record.reason,
+                            "fromCache": true,
+                        }
+                    }));
+                    continue;
+                }
                 out.push(json!({
                     "spotifyId": id,
                     "tidal": {
@@ -3517,9 +3562,10 @@ async fn eager_and_lazy_resolve_for_list(
                     continue;
                 }
                 if let Some(record) = sp_cache::get_unresolved(conn, id)?
-                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
-                        continue;
-                    }
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg)
+                {
+                    continue;
+                }
                 keep.push((id.clone(), track.clone()));
             }
             Ok::<_, anyhow::Error>(keep)
@@ -3552,7 +3598,11 @@ async fn eager_and_lazy_resolve_for_list(
     let Some(tokens) = tokens else {
         return Vec::new();
     };
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     let eager_count = needs_resolve.len().min(resolve_cfg.eager_n);
     let (eager, lazy) = needs_resolve.split_at(eager_count);
@@ -3621,9 +3671,10 @@ async fn spawn_background_resolve_for_list(
                     continue;
                 }
                 if let Some(record) = sp_cache::get_unresolved(conn, id)?
-                    && sp_cache::unresolved_is_cold(&record, &cache_cfg) {
-                        continue;
-                    }
+                    && sp_cache::unresolved_is_cold(&record, &cache_cfg)
+                {
+                    continue;
+                }
                 keep.push((id.clone(), track.clone()));
             }
             Ok::<_, anyhow::Error>(keep)
@@ -3656,7 +3707,11 @@ async fn spawn_background_resolve_for_list(
     };
 
     tokio::spawn(async move {
-        let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+        let client = TidalClient::with_http(
+            tidal_http_client,
+            tokens.access_token.clone(),
+            tokens.country_code.clone(),
+        );
         let outcomes =
             resolver::resolve_many(&client, &needs_resolve, resolve_cfg.bulk_concurrency).await;
         let _ = db.with_conn(|conn| {
@@ -5723,13 +5778,14 @@ async fn start_first_radio_queue_item(
 
     let mut play_track = snapshot.state.current_track.clone();
     if play_track.is_none()
-        && let Some(resolved) = resolve_pending_current_queue_item(state).await {
-            play_track = Some(resolved);
-            let state_guard = state.read().await;
-            if let Ok(reloaded) = state_guard.db.with_conn(player::load_snapshot) {
-                snapshot = reloaded;
-            }
+        && let Some(resolved) = resolve_pending_current_queue_item(state).await
+    {
+        play_track = Some(resolved);
+        let state_guard = state.read().await;
+        if let Ok(reloaded) = state_guard.db.with_conn(player::load_snapshot) {
+            snapshot = reloaded;
         }
+    }
 
     let end_reason = if play_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
@@ -6881,9 +6937,10 @@ async fn overlay_snapshot_with_external_track_and_position(
     if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
         snapshot.state.current_track = Some(ephemeral.clone());
     } else if snapshot.state.current_track.is_none()
-        && let Some(track) = state_guard.external_playback_track.as_ref() {
-            snapshot.state.current_track = Some(track.clone());
-        }
+        && let Some(track) = state_guard.external_playback_track.as_ref()
+    {
+        snapshot.state.current_track = Some(track.clone());
+    }
     // Surface the pending TIDAL mix queue (auto-advance items behind the
     // currently-playing ephemeral track) into the visible queue so UP NEXT
     // shows the rest of the mix instead of "empty".
@@ -7620,22 +7677,23 @@ async fn resolve_duplicate_group(
                 // If it looks like a session expiry, try to refresh and retry once.
                 if (e.to_string().contains("401")
                     || e.to_string().to_lowercase().contains("unauthorized"))
-                    && let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await {
-                        if let Err(e2) = tidal_mutations::remove_favorite_track(
-                            &http,
-                            &refreshed.access_token,
-                            &refreshed.user_id,
-                            *tidal_id,
-                            &refreshed.country_code,
-                        )
-                        .await
-                        {
-                            error!(
-                                "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
-                            );
-                        }
-                        continue;
+                    && let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await
+                {
+                    if let Err(e2) = tidal_mutations::remove_favorite_track(
+                        &http,
+                        &refreshed.access_token,
+                        &refreshed.user_id,
+                        *tidal_id,
+                        &refreshed.country_code,
+                    )
+                    .await
+                    {
+                        error!(
+                            "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
+                        );
                     }
+                    continue;
+                }
                 warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");
             }
         }
@@ -7680,26 +7738,22 @@ async fn search(
     // best-effort (upstream may break).
     let q = params.q.clone();
     let db_for_local = db.clone();
-    let local_fut = async move {
-        db_for_local.with_conn(|conn| queries::search(conn, &q, limit))
-    };
+    let local_fut = async move { db_for_local.with_conn(|conn| queries::search(conn, &q, limit)) };
 
     let spotify_fut = async {
         match sportify_client {
-            Some(client) => {
-                fetch_spotify_playlist_search_compact(
-                    &client,
-                    &db,
-                    &cache_cfg,
-                    &params.q,
-                    limit.min(20).max(1) as u32,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("sportify playlist search failed: {}", e);
-                    Vec::new()
-                })
-            }
+            Some(client) => fetch_spotify_playlist_search_compact(
+                &client,
+                &db,
+                &cache_cfg,
+                &params.q,
+                limit.min(20).max(1) as u32,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("sportify playlist search failed: {}", e);
+                Vec::new()
+            }),
             None => Vec::new(),
         }
     };
@@ -8395,11 +8449,12 @@ fn tidal_playback_error_response(
 
 async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     if let Some(runtime_handle) = current_playback_runtime(&state).await
-        && let Err(error) = runtime_handle.pause() {
-            let message = format!("Failed to pause host audio playback: {error}");
-            report_playback_failure(&state, &message);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        && let Err(error) = runtime_handle.pause()
+    {
+        let message = format!("Failed to pause host audio playback: {error}");
+        report_playback_failure(&state, &message);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     let snapshot = {
         let state = state.read().await;
@@ -8430,11 +8485,12 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     if let Some(runtime_handle) = current_playback_runtime(&state).await
-        && let Err(error) = runtime_handle.resume() {
-            let message = format!("Failed to resume host audio playback: {error}");
-            report_playback_failure(&state, &message);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        && let Err(error) = runtime_handle.resume()
+    {
+        let message = format!("Failed to resume host audio playback: {error}");
+        report_playback_failure(&state, &message);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     let snapshot = {
         let state = state.read().await;
@@ -8639,7 +8695,11 @@ async fn resolve_pending_row(
         });
     };
 
-    let client = TidalClient::with_http(http, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        http,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let resolved = match find_pending_tidal_match(
         &client,
         &pending_artist,
@@ -8766,10 +8826,17 @@ async fn resolve_pending_current_queue_item(
             }
         };
         let s = state.read().await;
-        (s.tidal_tokens.clone().unwrap_or(persisted), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().unwrap_or(persisted),
+            s.tidal_http_client.clone(),
+        )
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let resolved =
         match find_pending_tidal_match(&client, &pending_artist, &pending_title, tidal_id_hint)
             .await
@@ -8987,12 +9054,13 @@ async fn next_track(
             .filter(|q| q.position > current_pos && q.source == "automix-new")
             .count();
         if new_upcoming < 2
-            && let Some(track) = snapshot.state.current_track.clone() {
-                let bg_state = state.clone();
-                tokio::spawn(async move {
-                    inject_discovery_tracks(&bg_state, &track).await;
-                });
-            }
+            && let Some(track) = snapshot.state.current_track.clone()
+        {
+            let bg_state = state.clone();
+            tokio::spawn(async move {
+                inject_discovery_tracks(&bg_state, &track).await;
+            });
+        }
     }
 
     // A resolved pending track counts as Replaced, not QueueEnded.
@@ -9102,18 +9170,15 @@ async fn previous_track(
     let previous_track_id = current_playback_track_id(&state).await;
     let mut snapshot = {
         let state = state.read().await;
-        state
-            .db
-            .with_conn(player::previous_track)
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to move to the previous track.",
-                    })),
-                )
-            })?
+        state.db.with_conn(player::previous_track).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "playback_state_update_failed",
+                    "message": "Failed to move to the previous track.",
+                })),
+            )
+        })?
     };
 
     set_external_playback_track(&state, None).await;
@@ -9467,7 +9532,11 @@ async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
 
     let (db, event_tx, tidal_http_client) = {
         let s = state.read().await;
-        (s.db.clone(), s.event_tx.clone(), s.tidal_http_client.clone())
+        (
+            s.db.clone(),
+            s.event_tx.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
     tokio::spawn(async move {
         resolve_pending_row(db, tokens, queue_item_id, event_tx, tidal_http_client).await;
@@ -9668,18 +9737,19 @@ async fn replace_playback_queue(
             };
             // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
             if let Some(pending) = &payload.pending_candidates
-                && !pending.is_empty() {
-                    use crate::playback::queue::{PendingCandidate, append_pending_tracks};
-                    let candidates: Vec<PendingCandidate> = pending
-                        .iter()
-                        .map(|p| PendingCandidate {
-                            artist: p.artist.clone(),
-                            title: p.title.clone(),
-                            reason: p.reason.clone(),
-                        })
-                        .collect();
-                    append_pending_tracks(conn, &candidates)?;
-                }
+                && !pending.is_empty()
+            {
+                use crate::playback::queue::{PendingCandidate, append_pending_tracks};
+                let candidates: Vec<PendingCandidate> = pending
+                    .iter()
+                    .map(|p| PendingCandidate {
+                        artist: p.artist.clone(),
+                        title: p.title.clone(),
+                        reason: p.reason.clone(),
+                    })
+                    .collect();
+                append_pending_tracks(conn, &candidates)?;
+            }
             let final_queue = crate::playback::queue::load_queue(conn)?;
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
             Ok(Json(json!({ "queue": final_queue })))
@@ -9881,8 +9951,7 @@ fn build_smart_playlist_context(
 
     let mut context = PlaylistEvaluationContext::new();
     for (track_id, rows) in genre_map {
-        context =
-            context.with_track_genres(track_id, queries::ResolvedGenre::paths_only(&rows));
+        context = context.with_track_genres(track_id, queries::ResolvedGenre::paths_only(&rows));
     }
     for (playlist_id, track_ids) in playlist_memberships {
         context = context.with_playlist_tracks(playlist_id, track_ids);
@@ -10183,7 +10252,11 @@ async fn tidal_search(
     // Snapshot what we need from state in one lock acquisition.
     let (db, http_client, tidal_http_client) = {
         let s = state.read().await;
-        (s.db.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+        (
+            s.db.clone(),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
@@ -10196,7 +10269,11 @@ async fn tidal_search(
         .ok()
         .flatten();
 
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     let results = if let Some(hit) = cached {
         hit
@@ -10209,7 +10286,9 @@ async fn tidal_search(
                     .map_err(|re| {
                         (
                             StatusCode::BAD_GATEWAY,
-                            Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
+                            Json(
+                                json!({ "error": format!("TIDAL session refresh failed: {}", re) }),
+                            ),
                         )
                     })?;
                 let retry_client = TidalClient::with_http(
@@ -10378,7 +10457,11 @@ async fn tidal_video_search(
         let s = state.read().await;
         (s.http_client.clone(), s.tidal_http_client.clone())
     };
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let videos = match client.search_videos(&params.q, limit, offset).await {
         Ok(videos) => videos,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10599,7 +10682,11 @@ async fn tidal_video_mix_items(
         let s = state.read().await;
         (s.http_client.clone(), s.tidal_http_client.clone())
     };
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let items = match client.get_video_mix_items(&mix_id).await {
         Ok(items) => items,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10675,7 +10762,11 @@ async fn tidal_playlist_search(
         let s = state.read().await;
         (s.http_client.clone(), s.tidal_http_client.clone())
     };
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let playlists = match client.search_playlists(&params.q, limit, offset).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10750,7 +10841,11 @@ async fn tidal_playlist_tracks(
         let s = state.read().await;
         (s.http_client.clone(), s.tidal_http_client.clone())
     };
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let resp = match client.get_playlist_tracks(&uuid, 100, 0).await {
         Ok(r) => r,
         Err(e) if error_looks_like_auth(&e) => {
@@ -10787,20 +10882,24 @@ async fn tidal_playlist_tracks(
 
     // TidalTrack: id (i64), title (String), duration (i64), artist (TidalArtist, not Option),
     // album: Option<TidalAlbumRef> with cover: Option<String>
-    let playable: Vec<serde_json::Value> = resp.items.iter().map(|t| {
-        json!({
-            "tidal_id": t.id,
-            "title": t.title,
-            "artist_name": t.artist.name,
-            "album_title": t.album.as_ref().map(|a| &a.title),
-            "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).and_then(|c| {
-                TidalClient::get_artwork_url(&Some(c.clone()), 640)
-            }),
-            "duration_ms": t.duration * 1000,
-            "track_id": 0,
-            "is_in_library": false,
+    let playable: Vec<serde_json::Value> = resp
+        .items
+        .iter()
+        .map(|t| {
+            json!({
+                "tidal_id": t.id,
+                "title": t.title,
+                "artist_name": t.artist.name,
+                "album_title": t.album.as_ref().map(|a| &a.title),
+                "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).and_then(|c| {
+                    TidalClient::get_artwork_url(&Some(c.clone()), 640)
+                }),
+                "duration_ms": t.duration * 1000,
+                "track_id": 0,
+                "is_in_library": false,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(json!({ "tracks": playable })))
 }
@@ -10826,7 +10925,10 @@ async fn play_tidal_ephemeral(
     {
         let s = state.read().await;
         let mut q = s.pending_tidal_mix_queue.lock().unwrap();
-        match q.iter().position(|p| p.tidal_track_id == body.tidal_track_id) {
+        match q
+            .iter()
+            .position(|p| p.tidal_track_id == body.tidal_track_id)
+        {
             Some(idx) => {
                 q.drain(..=idx);
             }
@@ -10907,7 +11009,11 @@ async fn start_ephemeral_tidal_playback(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.http_client.clone(), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -10923,8 +11029,11 @@ async fn start_ephemeral_tidal_playback(
     // reuse its album cover at the standard 640×640 size.
     let mut track = track;
     if track.artwork_url.is_none() {
-        let lookup_client =
-            TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+        let lookup_client = TidalClient::with_http(
+            tidal_http_client.clone(),
+            tokens.access_token.clone(),
+            tokens.country_code.clone(),
+        );
         if let Ok(t) = lookup_client.get_track(track.tidal_track_id).await {
             track.artwork_url = t
                 .album
@@ -11075,7 +11184,11 @@ async fn tidal_artist_profile(
             )
         })?;
         let s = state.read().await;
-        (s.tidal_tokens.clone().or(persisted), s.http_client.clone(), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone().or(persisted),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
 
     let Some(tokens) = tokens else {
@@ -11085,7 +11198,11 @@ async fn tidal_artist_profile(
         ));
     };
 
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let (top_tracks_page, albums_page) = match tokio::try_join!(
         client.get_artist_top_tracks(tidal_artist_id, 10, 0),
         client.get_artist_albums(tidal_artist_id, 50, 0, Some("ALBUMS")),
@@ -11284,7 +11401,11 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     cancel_flag.store(false, Ordering::SeqCst);
     let _running = TidalSyncRunningGuard(running_flag);
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     // Run sync
     let result = run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag).await;
@@ -11356,7 +11477,11 @@ async fn tidal_sync_library(
     let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
 
     // Create TIDAL client
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
@@ -11389,8 +11514,7 @@ async fn tidal_sync_library(
             sync_tokens.access_token.clone(),
             sync_tokens.country_code.clone(),
         );
-        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens, &cancel_for_task)
-            .await
+        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens, &cancel_for_task).await
         {
             Ok(stats) => {
                 tracing::info!(
@@ -11446,14 +11570,14 @@ async fn tidal_sync_library(
 /// observes it between pages and returns early. Always returns 200 — the
 /// frontend uses this idempotently and doesn't care whether a sync was actually
 /// running.
-async fn tidal_sync_cancel(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
+async fn tidal_sync_cancel(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
     let s = state.read().await;
     let was_running = s.tidal_sync_running.load(Ordering::SeqCst);
     s.tidal_sync_cancel.store(true, Ordering::SeqCst);
-    Ok(Json(json!({ "status": if was_running { "cancelling" } else { "idle" } })))
+    Ok(Json(
+        json!({ "status": if was_running { "cancelling" } else { "idle" } }),
+    ))
 }
 
 /// Perform the actual TIDAL sync (runs in background task).
@@ -11990,8 +12114,7 @@ struct TidalSyncRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for TidalSyncRunningGuard {
     fn drop(&mut self) {
-        self.0
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -12338,14 +12461,16 @@ fn spawn_playback_runtime_listener(
                         warn!("Failed to pre-buffer next track: {err:?}");
                     }
                 }
-                Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged { device_name }) => {
+                Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    device_name,
+                }) => {
                     let mut state_guard = state.write().await;
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = true;
                     }
-                    let _ = state_guard
-                        .event_tx
-                        .send(AppEvent::AudioExclusiveEngaged { device: device_name });
+                    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveEngaged {
+                        device: device_name,
+                    });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
                     reason,
@@ -12367,9 +12492,9 @@ fn spawn_playback_runtime_listener(
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
                     }
-                    let _ = state_guard
-                        .event_tx
-                        .send(AppEvent::AudioExclusiveReleased { device: device_name });
+                    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
+                        device: device_name,
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");
@@ -12446,19 +12571,35 @@ async fn handle_near_end(
         None => return Ok(()), // local library — skip pre-buffer for now
     };
 
-    let (stream_info, access_token) = {
+    let stream_info = match resolve_tidal_playback_stream(&state, &next, &stream_request).await {
+        Ok(info) => Some(info),
+        Err(error) => {
+            warn!(
+                "Skipping pre-buffer for next track {}: {}",
+                next.id,
+                describe_tidal_playback_error(&error)
+            );
+            return Ok(());
+        }
+    };
+
+    {
         let state_guard = state.read().await;
-        let token = state_guard
+        let runtime_token = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.access_token.as_str());
+        let current_token = state_guard
             .tidal_tokens
             .as_ref()
-            .map(|t| t.access_token.clone())
-            .unwrap_or_default();
-        let http = state_guard.http_client.clone();
-        drop(state_guard);
-        let info = crate::services::tidal::stream::resolve_stream(&http, &token, &stream_request)
-            .await
-            .ok();
-        (info, token)
+            .map(|tokens| tokens.access_token.as_str());
+        if runtime_token != current_token {
+            info!(
+                "Skipping pre-buffer for next track {} after TIDAL session refresh; next transition will cold-start",
+                next.id
+            );
+            return Ok(());
+        }
     };
 
     {
@@ -12502,30 +12643,31 @@ async fn handle_near_end(
                 .ok();
             if let Some(settings) = audio_settings
                 && settings.sample_rate_follow
-                    && let Some(next_rate) = stream.sample_rate {
-                        let current_rate = info.sample_rate;
-                        if next_rate as u32 != current_rate {
-                            let device_sel = match settings.output_device {
-                                Some(device_id) => {
-                                    playback_runtime::OutputDeviceSelection::Named(device_id)
-                                }
-                                None => playback_runtime::OutputDeviceSelection::Default,
-                            };
-                            // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
-                            if let Err(e) = handle.device_swap(
-                                device_sel,
-                                settings.exclusive_mode,
-                                settings.sample_rate_follow,
-                                Some(next_rate as u32),
-                                settings.exclusive_release_grace_secs,
-                            ) {
-                                warn!(
-                                    "Failed to rebuild stream for next track {} at {} Hz: {e}",
-                                    next.id, next_rate
-                                );
-                            }
+                && let Some(next_rate) = stream.sample_rate
+            {
+                let current_rate = info.sample_rate;
+                if next_rate as u32 != current_rate {
+                    let device_sel = match settings.output_device {
+                        Some(device_id) => {
+                            playback_runtime::OutputDeviceSelection::Named(device_id)
                         }
+                        None => playback_runtime::OutputDeviceSelection::Default,
+                    };
+                    // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
+                    if let Err(e) = handle.device_swap(
+                        device_sel,
+                        settings.exclusive_mode,
+                        settings.sample_rate_follow,
+                        Some(next_rate as u32),
+                        settings.exclusive_release_grace_secs,
+                    ) {
+                        warn!(
+                            "Failed to rebuild stream for next track {} at {} Hz: {e}",
+                            next.id, next_rate
+                        );
                     }
+                }
+            }
         }
     }
 
@@ -12536,7 +12678,6 @@ async fn handle_near_end(
     let job =
         player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms, user_quality)
             .with_generation(generation);
-    let _ = access_token; // already embedded in the config held by the runtime
 
     {
         let state_guard = state.read().await;
@@ -12621,8 +12762,7 @@ async fn handle_runtime_finished(
             let mut consecutive_failures: u32 = 0;
             let mut started = false;
             loop {
-                let mut result =
-                    start_ephemeral_tidal_playback(&state, current.clone()).await;
+                let mut result = start_ephemeral_tidal_playback(&state, current.clone()).await;
                 if let Err((status, _)) = &result
                     && status.as_u16() == 429
                 {
@@ -13046,9 +13186,7 @@ async fn post_audio_exclusive_retry(
     let guard = state.read().await;
     let settings = guard
         .db
-        .with_conn(|conn| {
-            crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
-        })
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -13153,17 +13291,16 @@ async fn put_audio_settings(
 
         if needs_swap
             && let Some(runtime) = guard.playback_runtime.as_ref()
-                && let Err(e) = runtime.handle.device_swap(
-                    playback_runtime::OutputDeviceSelection::from_pref(
-                        saved.output_device.as_deref(),
-                    ),
-                    saved.exclusive_mode,
-                    saved.sample_rate_follow,
-                    None,
-                    saved.exclusive_release_grace_secs,
-                ) {
-                    warn!("Audio settings update: live device_swap failed: {e}");
-                }
+            && let Err(e) = runtime.handle.device_swap(
+                playback_runtime::OutputDeviceSelection::from_pref(saved.output_device.as_deref()),
+                saved.exclusive_mode,
+                saved.sample_rate_follow,
+                None,
+                saved.exclusive_release_grace_secs,
+            )
+        {
+            warn!("Audio settings update: live device_swap failed: {e}");
+        }
 
         (old, saved)
     };
@@ -13173,9 +13310,10 @@ async fn put_audio_settings(
     // 0; preserving position would require partial-stream offset support that
     // TIDAL's playbackinfo API doesn't expose.
     if old.quality != new.quality
-        && let Err(e) = reissue_current_track_at_new_quality(&state).await {
-            warn!("Audio settings update: re-issue at new quality failed: {e}");
-        }
+        && let Err(e) = reissue_current_track_at_new_quality(&state).await
+    {
+        warn!("Audio settings update: re-issue at new quality failed: {e}");
+    }
 
     Ok(Json(new))
 }
@@ -13398,29 +13536,33 @@ async fn sync_session_after_snapshot(
     // when LASTFM_API_SECRET is unset, or when no session_key is stored.
     if let Some((artist, title, album, duration_ms, listened_ms, started_at_unix, source)) =
         scrobble_completed_payload
-        && !artist.is_empty() && !title.is_empty() {
-            crate::services::lastfm::scrobble::spawn_scrobble_completed(
-                state.clone(),
-                artist,
-                title,
-                album,
-                duration_ms,
-                listened_ms,
-                started_at_unix,
-                &source,
-            );
-        }
+        && !artist.is_empty()
+        && !title.is_empty()
+    {
+        crate::services::lastfm::scrobble::spawn_scrobble_completed(
+            state.clone(),
+            artist,
+            title,
+            album,
+            duration_ms,
+            listened_ms,
+            started_at_unix,
+            &source,
+        );
+    }
     if let Some((artist, title, album, duration_ms, source)) = now_playing_payload
-        && !artist.is_empty() && !title.is_empty() {
-            crate::services::lastfm::scrobble::spawn_now_playing(
-                state.clone(),
-                artist,
-                title,
-                album,
-                duration_ms,
-                &source,
-            );
-        }
+        && !artist.is_empty()
+        && !title.is_empty()
+    {
+        crate::services::lastfm::scrobble::spawn_now_playing(
+            state.clone(),
+            artist,
+            title,
+            album,
+            duration_ms,
+            &source,
+        );
+    }
 }
 
 pub(crate) struct FlushOutcome {
@@ -13669,8 +13811,7 @@ fn apply_tidal_favorite_flags(
         let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(", ");
-        let sql =
-            format!("UPDATE {table} SET is_favorite = 1 WHERE tidal_id IN ({placeholders})");
+        let sql = format!("UPDATE {table} SET is_favorite = 1 WHERE tidal_id IN ({placeholders})");
         conn.execute(&sql, rusqlite::params_from_iter(chunk.iter()))?;
     }
 
@@ -13791,7 +13932,12 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
     let (tokens, http_client, tidal_http_client, mixes_cache) = {
         let in_memory = {
             let s = state.read().await;
-            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone(), s.tidal_mixes_cache.clone())
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+                s.tidal_mixes_cache.clone(),
+            )
         };
         match in_memory.0 {
             Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
@@ -13812,10 +13958,16 @@ async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>
         if let Some((stored_at, cached)) = guard.as_ref()
             && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
         {
-            return Ok(Json(json!({ "mixes": cached, "source": "tidal", "cached": true })));
+            return Ok(Json(
+                json!({ "mixes": cached, "source": "tidal", "cached": true }),
+            ));
         }
     }
-    let client = TidalClient::with_http(tidal_http_client.clone(), tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
         Err(e) if error_looks_like_auth(&e) => {
@@ -13929,7 +14081,11 @@ async fn get_tidal_home_modules(
     let (tokens, http_client, tidal_http_client) = {
         let in_memory = {
             let s = state.read().await;
-            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+            )
         };
         match in_memory.0 {
             Some(t) => (Some(t), in_memory.1, in_memory.2),
@@ -13990,7 +14146,11 @@ async fn get_tidal_discover_module_items(
     let (tokens, http_client, tidal_http_client) = {
         let in_memory = {
             let s = state.read().await;
-            (s.tidal_tokens.clone(), s.http_client.clone(), s.tidal_http_client.clone())
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+            )
         };
         match in_memory.0 {
             Some(t) => (Some(t), in_memory.1, in_memory.2),
@@ -14043,7 +14203,10 @@ async fn get_tidal_discover_module_items(
         let access_token = tokens.access_token.clone();
         let country_code = tokens.country_code.clone();
         let live = TidalClient::with_http(tidal_http_client, access_token, country_code);
-        match live.get_module_items_via_path(path, &module_kind, limit).await {
+        match live
+            .get_module_items_via_path(path, &module_kind, limit)
+            .await
+        {
             Ok(items) if !items.is_empty() => items,
             _ => module.items, // fall back to the preview if the show-more call fails or returns 0
         }
@@ -14088,7 +14251,11 @@ async fn get_tidal_mix_tracks(
             Json(json!({ "error": "TIDAL not connected" })),
         ));
     };
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -15016,10 +15183,9 @@ async fn get_audio_analysis_status(
 
 async fn get_passive_dsp(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let s = state.read().await;
-    let enabled = s
-        .db
-        .with_conn(|conn| Ok(crate::services::audio_analysis::is_passive_enabled(conn)))
-        .unwrap_or(true);
+    let enabled =
+        s.db.with_conn(|conn| Ok(crate::services::audio_analysis::is_passive_enabled(conn)))
+            .unwrap_or(true);
     Ok(Json(json!({ "enabled": enabled })))
 }
 
@@ -15295,7 +15461,11 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
         return;
     };
 
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
 
     let mut tasks = FuturesUnordered::new();
     for (idx, artist, title) in needs {
@@ -15317,9 +15487,10 @@ async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryD
                 entry.image_url = Some(url.clone());
             }
             if let Some(tp) = entry.tidal_playable.as_mut()
-                && is_unusable(tp.artwork_url.as_deref()) {
-                    tp.artwork_url = Some(url);
-                }
+                && is_unusable(tp.artwork_url.as_deref())
+            {
+                tp.artwork_url = Some(url);
+            }
         }
     }
 }
@@ -15683,7 +15854,12 @@ async fn fetch_lastfm_chart(
 async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Vec<ChartEntryDto>> {
     let (tokens_opt, http, db, tidal_http_client) = {
         let s = state.read().await;
-        (s.tidal_tokens.clone(), s.http_client.clone(), s.db.clone(), s.tidal_http_client.clone())
+        (
+            s.tidal_tokens.clone(),
+            s.http_client.clone(),
+            s.db.clone(),
+            s.tidal_http_client.clone(),
+        )
     };
     let persisted = load_persisted_tidal_tokens(state).await?;
     let tokens = tokens_opt.or(persisted);
@@ -15692,7 +15868,11 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
         tracing::warn!("Tidal chart requested but Tidal not connected");
         return Ok(Vec::new());
     };
-    let client = TidalClient::with_http(tidal_http_client, tokens.access_token.clone(), tokens.country_code.clone());
+    let client = TidalClient::with_http(
+        tidal_http_client,
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
     let tracks = match client.get_editorial_top_tracks(limit).await {
         Ok(t) => t,
         Err(e) => {

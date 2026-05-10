@@ -40,7 +40,6 @@ pub enum VideoQualityMode {
     Auto,
 }
 
-
 impl VideoQualityMode {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -110,9 +109,10 @@ impl Default for AudioSettings {
 pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
     let mut s = AudioSettings::default();
     if let Some(v) = read_kv(conn, "audio.quality")?
-        && let Some(q) = AudioQuality::from_tidal_str(&v) {
-            s.quality = q;
-        }
+        && let Some(q) = AudioQuality::from_tidal_str(&v)
+    {
+        s.quality = q;
+    }
     if let Some(v) = read_kv(conn, "audio.output_device")? {
         s.output_device = if v == "default" { None } else { Some(v) };
     }
@@ -123,13 +123,15 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
         s.sample_rate_follow = v == "true";
     }
     if let Some(v) = read_kv(conn, "video.quality_mode")?
-        && let Some(mode) = VideoQualityMode::from_str(&v) {
-            s.video_quality_mode = mode;
-        }
+        && let Some(mode) = VideoQualityMode::from_str(&v)
+    {
+        s.video_quality_mode = mode;
+    }
     if let Some(v) = read_kv(conn, "audio.exclusive_release_grace_secs")?
-        && let Ok(parsed) = v.parse::<u32>() {
-            s.exclusive_release_grace_secs = clamp_exclusive_release_grace_secs(parsed);
-        }
+        && let Ok(parsed) = v.parse::<u32>()
+    {
+        s.exclusive_release_grace_secs = clamp_exclusive_release_grace_secs(parsed);
+    }
     Ok(s)
 }
 

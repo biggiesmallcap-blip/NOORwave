@@ -125,10 +125,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
     let mut tags: Vec<(&'static str, f64)> = Vec::new();
 
     if let (Some(a), Some(b)) = (&seed.artist_lower, &cand.artist_lower)
-        && a == b {
-            score += 0.20;
-            tags.push(("artist_affinity", 0.20));
-        }
+        && a == b
+    {
+        score += 0.20;
+        tags.push(("artist_affinity", 0.20));
+    }
 
     if !seed.genre_set.is_empty()
         && !cand.genre_set.is_empty()
@@ -143,10 +144,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
     }
 
     if let (Some(a), Some(b)) = (&seed.album, &cand.album)
-        && a == b {
-            score += 0.12;
-            tags.push(("album_context", 0.12));
-        }
+        && a == b
+    {
+        score += 0.12;
+        tags.push(("album_context", 0.12));
+    }
 
     if let (Some(a), Some(b)) = (seed.bpm, cand.bpm) {
         let diff = (a - b).abs();
@@ -184,10 +186,11 @@ fn metadata_bonus(seed: &TrackMeta, cand: &TrackMeta) -> (f64, Vec<(&'static str
     }
 
     if let (Some(a), Some(b)) = (seed.energy, cand.energy)
-        && (a - b).abs() <= 0.1 {
-            score += 0.08;
-            tags.push(("energy_match", 0.08));
-        }
+        && (a - b).abs() <= 0.1
+    {
+        score += 0.08;
+        tags.push(("energy_match", 0.08));
+    }
 
     (score, tags)
 }
@@ -251,7 +254,10 @@ pub async fn refresh_seed_neighbors(
                         info!("[neighbor_refresh] model {} has no embeddings", model.id);
                         lock_refreshed(&refreshed_for_blocking).insert(
                             seed_id,
-                            RefreshEntry { model_id: model.id, at: Instant::now() },
+                            RefreshEntry {
+                                model_id: model.id,
+                                at: Instant::now(),
+                            },
                         );
                         return Ok(None);
                     }
@@ -270,7 +276,10 @@ pub async fn refresh_seed_neighbors(
                     info!("[neighbor_refresh] model {} has no embeddings", model.id);
                     lock_refreshed(&refreshed_for_blocking).insert(
                         seed_id,
-                        RefreshEntry { model_id: model.id, at: Instant::now() },
+                        RefreshEntry {
+                            model_id: model.id,
+                            at: Instant::now(),
+                        },
                     );
                     return Ok(None);
                 }
@@ -287,7 +296,10 @@ pub async fn refresh_seed_neighbors(
                 warn!("[neighbor_refresh] seed {seed_id} not in embedding table — skipping");
                 lock_refreshed(&refreshed_for_blocking).insert(
                     seed_id,
-                    RefreshEntry { model_id: model.id, at: Instant::now() },
+                    RefreshEntry {
+                        model_id: model.id,
+                        at: Instant::now(),
+                    },
                 );
                 return Ok(None);
             };

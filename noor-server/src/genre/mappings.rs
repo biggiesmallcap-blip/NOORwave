@@ -252,14 +252,16 @@ impl GenreCatalog {
         }
 
         if let Some(canonical) = self.exact_lookup.get(&normalized)
-            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0) {
-                return Some(m);
-            }
+            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactCanonical, 1.0)
+        {
+            return Some(m);
+        }
 
         if let Some(canonical) = self.alias_lookup.get(&normalized)
-            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactAlias, 1.0) {
-                return Some(m);
-            }
+            && let Some(m) = self.match_for_name(canonical, MatchKind::ExactAlias, 1.0)
+        {
+            return Some(m);
+        }
 
         self.best_fuzzy_match(&normalized)
     }
@@ -328,8 +330,8 @@ impl GenreCatalog {
         // catching single-token typos like "shoegazee" → "shoegaze".
         let candidate_tokens: Vec<&str> = best_norm.split_whitespace().collect();
         let shares_token = input_tokens.iter().any(|t| candidate_tokens.contains(t));
-        let substring_match = normalized.contains(best_norm.as_str())
-            || best_norm.contains(normalized);
+        let substring_match =
+            normalized.contains(best_norm.as_str()) || best_norm.contains(normalized);
         if !shares_token && !substring_match {
             return None;
         }
@@ -350,8 +352,7 @@ impl GenreCatalog {
 
 pub fn normalize_key(value: &str) -> String {
     let expanded = value.trim().to_ascii_lowercase().replace('&', " and ");
-    let no_apostrophes = expanded
-        .replace(['\'', '\u{2019}', '\u{2018}'], "");
+    let no_apostrophes = expanded.replace(['\'', '\u{2019}', '\u{2018}'], "");
 
     no_apostrophes
         .chars()

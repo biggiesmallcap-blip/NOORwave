@@ -26,32 +26,32 @@ const MINOR_PROFILE: [f64; 12] = [
 // sequential mapping (Bug 9) was wrong for every odd-index entry, throwing
 // every harmonic-compatibility decision into garbage.
 const MAJOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "8B"),    // 0
-    ("C#", "3B"),   // 1
-    ("D", "10B"),   // 2
-    ("D#", "5B"),   // 3
-    ("E", "12B"),   // 4
-    ("F", "7B"),    // 5
-    ("F#", "2B"),   // 6
-    ("G", "9B"),    // 7
-    ("G#", "4B"),   // 8
-    ("A", "11B"),   // 9
-    ("A#", "6B"),   // 10
-    ("B", "1B"),    // 11
+    ("C", "8B"),  // 0
+    ("C#", "3B"), // 1
+    ("D", "10B"), // 2
+    ("D#", "5B"), // 3
+    ("E", "12B"), // 4
+    ("F", "7B"),  // 5
+    ("F#", "2B"), // 6
+    ("G", "9B"),  // 7
+    ("G#", "4B"), // 8
+    ("A", "11B"), // 9
+    ("A#", "6B"), // 10
+    ("B", "1B"),  // 11
 ];
 const MINOR_CAMELOT: [(&str, &str); 12] = [
-    ("C", "5A"),    // 0
-    ("C#", "12A"),  // 1
-    ("D", "7A"),    // 2
-    ("D#", "2A"),   // 3
-    ("E", "9A"),    // 4
-    ("F", "4A"),    // 5
-    ("F#", "11A"),  // 6
-    ("G", "6A"),    // 7
-    ("G#", "1A"),   // 8
-    ("A", "8A"),    // 9
-    ("A#", "3A"),   // 10
-    ("B", "10A"),   // 11
+    ("C", "5A"),   // 0
+    ("C#", "12A"), // 1
+    ("D", "7A"),   // 2
+    ("D#", "2A"),  // 3
+    ("E", "9A"),   // 4
+    ("F", "4A"),   // 5
+    ("F#", "11A"), // 6
+    ("G", "6A"),   // 7
+    ("G#", "1A"),  // 8
+    ("A", "8A"),   // 9
+    ("A#", "3A"),  // 10
+    ("B", "10A"),  // 11
 ];
 
 const NOTE_NAMES: [&str; 12] = [
@@ -214,10 +214,7 @@ mod tests {
         let samples: Vec<f32> = (0..total)
             .map(|n| {
                 let t = n as f64 / sr as f64;
-                let s: f64 = freqs
-                    .iter()
-                    .map(|f| (2.0 * PI * f * t).sin())
-                    .sum::<f64>()
+                let s: f64 = freqs.iter().map(|f| (2.0 * PI * f * t).sin()).sum::<f64>()
                     / freqs.len() as f64;
                 (s * 0.5) as f32
             })

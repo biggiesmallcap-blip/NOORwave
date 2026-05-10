@@ -26,7 +26,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
-use wasapi::{Direction, SampleType, StreamMode, WaveFormat, WasapiError, initialize_mta};
+use wasapi::{Direction, SampleType, StreamMode, WasapiError, WaveFormat, initialize_mta};
 
 use super::runtime::{
     PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared,
@@ -549,7 +549,13 @@ fn try_initialize_one(
         min_period
     );
 
-    Ok((audio_client, render_client, event_handle, blockalign, fmt_tag))
+    Ok((
+        audio_client,
+        render_client,
+        event_handle,
+        blockalign,
+        fmt_tag,
+    ))
 }
 
 fn fmt_tag_label(fmt: Format) -> &'static str {
@@ -624,4 +630,3 @@ fn convert_f32_to_bytes(
         }
     }
 }
-

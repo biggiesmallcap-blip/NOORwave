@@ -526,17 +526,16 @@ fn rank_candidates(
 
             if let Some(confidence) = candidate.discogs_confidence
                 && confidence > 0.0
-                    && (!candidate.discogs_styles.is_empty()
-                        || !candidate.discogs_genres.is_empty())
-                {
-                    let discogs_bonus = if prompt_genre_words.is_empty() {
-                        4.0 + confidence * 6.0
-                    } else {
-                        (discogs_matches as f64 * 4.0) + (confidence * 6.0)
-                    };
-                    score += discogs_bonus;
-                    tags.push("discogs style".to_string());
-                }
+                && (!candidate.discogs_styles.is_empty() || !candidate.discogs_genres.is_empty())
+            {
+                let discogs_bonus = if prompt_genre_words.is_empty() {
+                    4.0 + confidence * 6.0
+                } else {
+                    (discogs_matches as f64 * 4.0) + (confidence * 6.0)
+                };
+                score += discogs_bonus;
+                tags.push("discogs style".to_string());
+            }
 
             if recent_artist_penalty > 0.0 {
                 score -= recent_artist_penalty * taste_mesh.novelty_bias;
@@ -936,10 +935,11 @@ fn mood_mode_adjustment(
     }
 
     if let Some(duration_ms) = candidate.duration_ms
-        && (240_000..=540_000).contains(&duration_ms) {
-            adjustment.score_delta += 4.0;
-            adjustment.tags.push("immersive length".to_string());
-        }
+        && (240_000..=540_000).contains(&duration_ms)
+    {
+        adjustment.score_delta += 4.0;
+        adjustment.tags.push("immersive length".to_string());
+    }
 
     if looks_mix_friendly(candidate) {
         adjustment.score_delta -= 8.0;

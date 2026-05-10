@@ -67,9 +67,11 @@ pub struct AppState {
     /// 6h TTL cache for the home Your Mixes shelf. TIDAL builds these on a
     /// daily cadence, so re-fetching on every Home remount was wasted work
     /// (and a visible skeleton flash). Cleared on app restart.
-    pub tidal_mixes_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    pub tidal_mixes_cache:
+        Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
     /// 6h TTL cache for the home Personal Radio shelf. Same cadence as mixes.
-    pub tidal_radio_stations_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    pub tidal_radio_stations_cache:
+        Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -279,9 +281,10 @@ fn parse_usize_env(var: &str, default: usize) -> usize {
 fn resolve_bind_addr(db: &db::Database) -> String {
     // NOOR_ADDR env var always wins (power-user override)
     if let Ok(addr) = std::env::var("NOOR_ADDR")
-        && !addr.trim().is_empty() {
-            return addr;
-        }
+        && !addr.trim().is_empty()
+    {
+        return addr;
+    }
     // --host flag forces 0.0.0.0
     if std::env::args().any(|a| a == "--host") {
         return "0.0.0.0:3334".to_string();

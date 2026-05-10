@@ -114,10 +114,12 @@ pub async fn run_preview_scan(
         let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
         let mut fetch_failed = false;
 
-        'segments: for seg_url in std::iter::once(&stream_info.url)
-            .chain(stream_info.segment_urls.iter())
+        'segments: for seg_url in
+            std::iter::once(&stream_info.url).chain(stream_info.segment_urls.iter())
         {
-            if buf.len() >= MAX_BYTES { break; }
+            if buf.len() >= MAX_BYTES {
+                break;
+            }
 
             let resp = match http_client.get(seg_url).send().await {
                 Ok(r) => r,
@@ -147,7 +149,9 @@ pub async fn run_preview_scan(
                     }
                 }
             }
-            if fetch_failed { break; }
+            if fetch_failed {
+                break;
+            }
         }
 
         let audio_bytes = buf;
@@ -216,17 +220,28 @@ pub async fn run_preview_scan(
         // offset so the analyser has enough signal to work with.
         const PREVIEW_OFFSET_SEC: usize = 10;
         let offset_samples = sample_rate as usize * PREVIEW_OFFSET_SEC;
-        let (samples, applied_offset_ms) = if samples.len() > offset_samples + sample_rate as usize * 4 {
-            (samples[offset_samples..].to_vec(), (PREVIEW_OFFSET_SEC * 1000) as i64)
-        } else {
-            (samples, 0i64)
-        };
+        let (samples, applied_offset_ms) =
+            if samples.len() > offset_samples + sample_rate as usize * 4 {
+                (
+                    samples[offset_samples..].to_vec(),
+                    (PREVIEW_OFFSET_SEC * 1000) as i64,
+                )
+            } else {
+                (samples, 0i64)
+            };
 
         // ── 5. Analyze and save ───────────────────────────────────────────────
         let db = state.read().await.db.clone();
         let tid = track.id;
         let saved = tokio::task::spawn_blocking(move || {
-            super::engine::analyze_and_save(&db, &samples, sample_rate, "preview", tid, applied_offset_ms)
+            super::engine::analyze_and_save(
+                &db,
+                &samples,
+                sample_rate,
+                "preview",
+                tid,
+                applied_offset_ms,
+            )
         })
         .await
         .ok()
@@ -240,7 +255,9 @@ pub async fn run_preview_scan(
                     analyzed,
                     total,
                     track.title,
-                    f.bpm.map(|b| format!("{:.1}", b)).unwrap_or_else(|| "?".into()),
+                    f.bpm
+                        .map(|b| format!("{:.1}", b))
+                        .unwrap_or_else(|| "?".into()),
                     f.key_signature.as_deref().unwrap_or("?"),
                     f.energy.unwrap_or(0.0),
                     f.beat_strength.unwrap_or(0.0),
@@ -248,7 +265,10 @@ pub async fn run_preview_scan(
             }
             None => {
                 skipped += 1;
-                info!("[{}/{}] ✗ {} — no features extracted", analyzed, total, track.title);
+                info!(
+                    "[{}/{}] ✗ {} — no features extracted",
+                    analyzed, total, track.title
+                );
             }
         }
 

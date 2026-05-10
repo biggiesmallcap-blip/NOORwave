@@ -68,9 +68,10 @@ pub fn write_track_playcount(conn: &Connection, track: &SportifyTrack) {
                 spotify_track_id = excluded.spotify_track_id,
                 resolved_at = excluded.resolved_at",
             params![isrc, spotify_id, now_secs()],
-        ) {
-            tracing::warn!("spotify_isrc_map writeback for {} failed: {}", isrc, e);
-        }
+        )
+    {
+        tracing::warn!("spotify_isrc_map writeback for {} failed: {}", isrc, e);
+    }
 }
 
 /// If the Sportify artist payload carries `monthly_listeners`, upsert it

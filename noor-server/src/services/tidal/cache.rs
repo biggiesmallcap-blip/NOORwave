@@ -21,7 +21,9 @@ pub struct TidalSearchCacheConfig {
 
 impl Default for TidalSearchCacheConfig {
     fn default() -> Self {
-        Self { ttl_secs: DEFAULT_TTL_SECS }
+        Self {
+            ttl_secs: DEFAULT_TTL_SECS,
+        }
     }
 }
 
@@ -121,9 +123,17 @@ mod tests {
         let cfg = TidalSearchCacheConfig::default();
         let payload = TidalSearchCatalog::default();
         put_search(&conn, "daft punk", 10, 0, &payload).unwrap();
-        assert!(get_search(&conn, &cfg, "daft punk", 10, 0).unwrap().is_some());
+        assert!(
+            get_search(&conn, &cfg, "daft punk", 10, 0)
+                .unwrap()
+                .is_some()
+        );
         // Casing/trim-insensitive.
-        assert!(get_search(&conn, &cfg, " Daft Punk ", 10, 0).unwrap().is_some());
+        assert!(
+            get_search(&conn, &cfg, " Daft Punk ", 10, 0)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

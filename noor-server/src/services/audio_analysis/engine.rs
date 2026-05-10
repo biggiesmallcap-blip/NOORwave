@@ -139,9 +139,7 @@ pub fn analyze_and_save(
 }
 
 fn is_empty_analysis(f: &AudioDspFeatures) -> bool {
-    f.bpm.is_none()
-        && f.key_signature.is_none()
-        && f.energy.map(|e| e < 0.001).unwrap_or(true)
+    f.bpm.is_none() && f.key_signature.is_none() && f.energy.map(|e| e < 0.001).unwrap_or(true)
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────

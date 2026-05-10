@@ -26,7 +26,6 @@ pub enum RadioBlend {
     Adventurous,
 }
 
-
 impl RadioBlend {
     /// Returns (library_weight, lastfm_weight, engine_weight) summing to 1.0.
     pub fn weights(self) -> (f64, f64, f64) {
@@ -935,9 +934,10 @@ fn apply_confidence_penalty(candidates: &mut [RadioCandidate], min_confidence: f
     const PENALTY_MULTIPLIER: f64 = 0.75;
     for cand in candidates.iter_mut() {
         if let Some(conf) = cand.confidence
-            && conf < min_confidence {
-                cand.similarity_score *= PENALTY_MULTIPLIER;
-            }
+            && conf < min_confidence
+        {
+            cand.similarity_score *= PENALTY_MULTIPLIER;
+        }
     }
 }
 
@@ -1234,9 +1234,10 @@ fn apply_genre_signals(
 
         // Mode-based hard reject.
         if let Some(threshold) = hard_reject_threshold
-            && jaccard < threshold {
-                return false;
-            }
+            && jaccard < threshold
+        {
+            return false;
+        }
 
         // Multiplier per the locked Phase 2b formula.
         let bonus = jaccard * 0.30;
@@ -1497,40 +1498,46 @@ fn score_candidate_for_slot(
         }
     }
 
-    if !drop_album && profile.same_album_penalty > 0.0 && weight > 0.0
-        && let Some(my_album) = cand.album_title.as_deref() {
-            let lo = queue.len().saturating_sub(8);
-            if queue[lo..].iter().any(|q| {
-                q.album_title
-                    .as_deref()
-                    .map(|a| a.eq_ignore_ascii_case(my_album))
-                    .unwrap_or(false)
-            }) {
-                score -= profile.same_album_penalty * weight;
-                hits.album = true;
-            }
+    if !drop_album
+        && profile.same_album_penalty > 0.0
+        && weight > 0.0
+        && let Some(my_album) = cand.album_title.as_deref()
+    {
+        let lo = queue.len().saturating_sub(8);
+        if queue[lo..].iter().any(|q| {
+            q.album_title
+                .as_deref()
+                .map(|a| a.eq_ignore_ascii_case(my_album))
+                .unwrap_or(false)
+        }) {
+            score -= profile.same_album_penalty * weight;
+            hits.album = true;
         }
+    }
 
-    if !drop_genre && profile.genre_saturation_penalty > 0.0 && weight > 0.0
-        && let Some(my_genre) = primary_genres.get(&cand.track_id) {
-            let lo = queue.len().saturating_sub(10);
-            let count = queue[lo..]
-                .iter()
-                .filter(|q| {
-                    primary_genres
-                        .get(&q.track_id)
-                        .map(|g| g == my_genre)
-                        .unwrap_or(false)
-                })
-                .count();
-            // Threshold: penalty fires only above 3 in the last 10. Saturating
-            // sub avoids underflow for counts < 3.
-            let excess = count.saturating_sub(3) as f64;
-            if excess > 0.0 {
-                score -= profile.genre_saturation_penalty * weight * excess;
-                hits.genre_saturation = true;
-            }
+    if !drop_genre
+        && profile.genre_saturation_penalty > 0.0
+        && weight > 0.0
+        && let Some(my_genre) = primary_genres.get(&cand.track_id)
+    {
+        let lo = queue.len().saturating_sub(10);
+        let count = queue[lo..]
+            .iter()
+            .filter(|q| {
+                primary_genres
+                    .get(&q.track_id)
+                    .map(|g| g == my_genre)
+                    .unwrap_or(false)
+            })
+            .count();
+        // Threshold: penalty fires only above 3 in the last 10. Saturating
+        // sub avoids underflow for counts < 3.
+        let excess = count.saturating_sub(3) as f64;
+        if excess > 0.0 {
+            score -= profile.genre_saturation_penalty * weight * excess;
+            hits.genre_saturation = true;
         }
+    }
 
     (score, hits)
 }

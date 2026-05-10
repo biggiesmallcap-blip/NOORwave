@@ -216,14 +216,15 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
         // Also add the adjacent keys on the Camelot wheel so harmonically compatible
         // tracks cluster together (e.g. 8B is compatible with 7B, 9B, 8A).
         if let Some(num_end) = key.find(|c: char| c.is_alphabetic())
-            && let Ok(n) = key[..num_end].parse::<i64>() {
-                let suffix = &key[num_end..].to_lowercase();
-                tokens.push(format!("key_{}{}", ((n - 2).rem_euclid(12) + 1), suffix));
-                tokens.push(format!("key_{}{}", (n % 12) + 1, suffix));
-                // Relative major/minor (same number, opposite A/B)
-                let alt = if suffix == "a" { "b" } else { "a" };
-                tokens.push(format!("key_{}{}", n, alt));
-            }
+            && let Ok(n) = key[..num_end].parse::<i64>()
+        {
+            let suffix = &key[num_end..].to_lowercase();
+            tokens.push(format!("key_{}{}", ((n - 2).rem_euclid(12) + 1), suffix));
+            tokens.push(format!("key_{}{}", (n % 12) + 1, suffix));
+            // Relative major/minor (same number, opposite A/B)
+            let alt = if suffix == "a" { "b" } else { "a" };
+            tokens.push(format!("key_{}{}", n, alt));
+        }
     }
     tokens
 }
@@ -298,22 +299,24 @@ fn build_behavioral_embeddings(
             // check: keep the atomic/channel cost out of the inner loop, but
             // fire often enough that the UI bar visibly moves and a 30-second
             // pause doesn't look like a hang.
-            if sequences_seen.is_multiple_of(1024) && total_sequences > 0
-                && let Some(tx) = progress_tx {
-                    let frac = (sequences_seen as f32 / total_sequences as f32).min(1.0);
-                    let _ = tx.send(TrainingProgressUpdate {
-                        stage: "behavioral".to_string(),
-                        progress: 0.20 + frac * 0.10,
-                        message: format!(
-                            "Co-occurrence: {}/{} sequences",
-                            sequences_seen, total_sequences
-                        ),
-                        current_track_id: None,
-                        current_track_title: None,
-                        tracks_done: sequences_seen as u32,
-                        tracks_total: total_sequences as u32,
-                    });
-                }
+            if sequences_seen.is_multiple_of(1024)
+                && total_sequences > 0
+                && let Some(tx) = progress_tx
+            {
+                let frac = (sequences_seen as f32 / total_sequences as f32).min(1.0);
+                let _ = tx.send(TrainingProgressUpdate {
+                    stage: "behavioral".to_string(),
+                    progress: 0.20 + frac * 0.10,
+                    message: format!(
+                        "Co-occurrence: {}/{} sequences",
+                        sequences_seen, total_sequences
+                    ),
+                    current_track_id: None,
+                    current_track_title: None,
+                    tracks_done: sequences_seen as u32,
+                    tracks_total: total_sequences as u32,
+                });
+            }
             let filtered: Vec<i64> = sequence
                 .iter()
                 .copied()
@@ -374,25 +377,22 @@ fn build_behavioral_embeddings(
                     vec[bucket] += sign * score;
                 }
             }
-            let done = projected_done
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            if done.is_multiple_of(256) && projection_total > 0
-                && let Some(tx) = progress_tx {
-                    let frac = (done as f32 / projection_total as f32).min(1.0);
-                    let _ = tx.send(TrainingProgressUpdate {
-                        stage: "behavioral".to_string(),
-                        progress: 0.30 + frac * 0.10,
-                        message: format!(
-                            "Projecting vectors: {}/{}",
-                            done, projection_total
-                        ),
-                        current_track_id: None,
-                        current_track_title: None,
-                        tracks_done: done as u32,
-                        tracks_total: projection_total as u32,
-                    });
-                }
+            let done = projected_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done.is_multiple_of(256)
+                && projection_total > 0
+                && let Some(tx) = progress_tx
+            {
+                let frac = (done as f32 / projection_total as f32).min(1.0);
+                let _ = tx.send(TrainingProgressUpdate {
+                    stage: "behavioral".to_string(),
+                    progress: 0.30 + frac * 0.10,
+                    message: format!("Projecting vectors: {}/{}", done, projection_total),
+                    current_track_id: None,
+                    current_track_title: None,
+                    tracks_done: done as u32,
+                    tracks_total: projection_total as u32,
+                });
+            }
             (track_id, normalize(&vec).0)
         })
         .collect();
@@ -429,19 +429,21 @@ fn build_audio_proxy_features(
             let tokens = metadata_tokens(track);
             let vec = hashed_projection(&tokens, dim);
             let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if completed.is_multiple_of(512) && total > 0
-                && let Some(tx) = progress_tx {
-                    let frac = (completed as f32 / total as f32).min(1.0);
-                    let _ = tx.send(TrainingProgressUpdate {
-                        stage: "audio".to_string(),
-                        progress: 0.40 + frac * 0.15,
-                        message: format!("Audio proxy: {}/{}", completed, total),
-                        current_track_id: None,
-                        current_track_title: None,
-                        tracks_done: completed as u32,
-                        tracks_total: total as u32,
-                    });
-                }
+            if completed.is_multiple_of(512)
+                && total > 0
+                && let Some(tx) = progress_tx
+            {
+                let frac = (completed as f32 / total as f32).min(1.0);
+                let _ = tx.send(TrainingProgressUpdate {
+                    stage: "audio".to_string(),
+                    progress: 0.40 + frac * 0.15,
+                    message: format!("Audio proxy: {}/{}", completed, total),
+                    current_track_id: None,
+                    current_track_title: None,
+                    tracks_done: completed as u32,
+                    tracks_total: total as u32,
+                });
+            }
             Some((
                 track.track_id,
                 TrainerAudioFeature {
@@ -592,25 +594,28 @@ fn similarity_neighbors(
         .map(|idx| {
             // Cancel check — cheap atomic load, runs every iteration so Stop is responsive.
             if let Some(flag) = cancel
-                && flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Vec::<TrainerNeighbor>::new();
-                }
+                && flag.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Vec::<TrainerNeighbor>::new();
+            }
 
             // Progress every 500 tracks
-            if idx % 500 == 0 && total > 0
-                && let Some(tx) = progress_tx {
-                    let pct = (idx + 1) * 100 / total;
-                    let progress = 0.70 + (pct as f32 / 100.0) * 0.25; // 0.70 to 0.95
-                    let _ = tx.send(TrainingProgressUpdate {
-                        stage: "neighbors".to_string(),
-                        progress,
-                        message: format!("{}/{} ({}%)", idx + 1, total, pct),
-                        current_track_id: None,
-                        current_track_title: None,
-                        tracks_done: (idx + 1) as u32,
-                        tracks_total: total as u32,
-                    });
-                }
+            if idx % 500 == 0
+                && total > 0
+                && let Some(tx) = progress_tx
+            {
+                let pct = (idx + 1) * 100 / total;
+                let progress = 0.70 + (pct as f32 / 100.0) * 0.25; // 0.70 to 0.95
+                let _ = tx.send(TrainingProgressUpdate {
+                    stage: "neighbors".to_string(),
+                    progress,
+                    message: format!("{}/{} ({}%)", idx + 1, total, pct),
+                    current_track_id: None,
+                    current_track_title: None,
+                    tracks_done: (idx + 1) as u32,
+                    tracks_total: total as u32,
+                });
+            }
 
             let meta = &track_metas[idx];
             let vector = fusion_vecs[idx];
@@ -666,11 +671,12 @@ fn similarity_neighbors(
 
                 // Artist affinity
                 if let (Some(cur), Some(oth)) = (&meta.artist_lower, &other_meta.artist_lower)
-                    && cur == oth {
-                        metadata_score += 0.2;
-                        reason_tags.push("artist_affinity".to_string());
-                        contributions.push(("artist_affinity", 0.2));
-                    }
+                    && cur == oth
+                {
+                    metadata_score += 0.2;
+                    reason_tags.push("artist_affinity".to_string());
+                    contributions.push(("artist_affinity", 0.2));
+                }
 
                 // Genre branch (pre-computed HashSets, no tokenization)
                 if !meta.genre_tokens.is_empty()
@@ -688,11 +694,12 @@ fn similarity_neighbors(
 
                 // Album context
                 if let (Some(cur), Some(oth)) = (&meta.album, &other_meta.album)
-                    && cur == oth {
-                        metadata_score += 0.12;
-                        reason_tags.push("album_context".to_string());
-                        contributions.push(("album_context", 0.12));
-                    }
+                    && cur == oth
+                {
+                    metadata_score += 0.12;
+                    reason_tags.push("album_context".to_string());
+                    contributions.push(("album_context", 0.12));
+                }
 
                 // BPM proximity — scaled bonus: 0.15 within 3 BPM, 0.08 within 8 BPM
                 if let (Some(a_bpm), Some(b_bpm)) = (meta.bpm, other_meta.bpm) {

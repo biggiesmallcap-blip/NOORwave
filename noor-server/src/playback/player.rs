@@ -485,30 +485,31 @@ pub fn reconcile_after_track_delete(
     let mut new_current_track_id = current_track_id;
 
     if let Some(ctid) = current_track_id
-        && deleted_set.contains(&ctid) {
-            current_changed = true;
-            if let Some((qid, tid, _)) = new_current_row.copied() {
-                tx.execute(
-                    "UPDATE playback_state
+        && deleted_set.contains(&ctid)
+    {
+        current_changed = true;
+        if let Some((qid, tid, _)) = new_current_row.copied() {
+            tx.execute(
+                "UPDATE playback_state
                      SET current_track_id = ?1, current_queue_item_id = ?2, position_ms = 0
                      WHERE id = 1",
-                    params![tid, qid],
-                )?;
-                new_current_track_id = tid;
-            } else {
-                tx.execute(
-                    "UPDATE playback_state
+                params![tid, qid],
+            )?;
+            new_current_track_id = tid;
+        } else {
+            tx.execute(
+                "UPDATE playback_state
                      SET current_track_id = NULL,
                          current_queue_item_id = NULL,
                          position_ms = 0,
                          is_playing = 0
                      WHERE id = 1",
-                    [],
-                )?;
-                stopped_playback = true;
-                new_current_track_id = None;
-            }
+                [],
+            )?;
+            stopped_playback = true;
+            new_current_track_id = None;
         }
+    }
 
     if queue_changed {
         let surviving_ids: Vec<i64> = {
@@ -774,21 +775,22 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
 
     // Nothing was playing — jump to the first item rather than doing nothing.
     if current_index.is_none()
-        && let Some(first_item) = queue_items.first() {
-            let new_track_id: Option<i64> = if first_item.track.id != 0 {
-                Some(first_item.track.id)
-            } else {
-                None
-            };
-            conn.execute(
-                "UPDATE playback_state
+        && let Some(first_item) = queue_items.first()
+    {
+        let new_track_id: Option<i64> = if first_item.track.id != 0 {
+            Some(first_item.track.id)
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE playback_state
                  SET current_track_id = ?1, current_queue_item_id = ?2,
                      position_ms = 0, is_playing = 1
                  WHERE id = 1",
-                params![new_track_id, first_item.id],
-            )?;
-            return load_snapshot(conn);
-        }
+            params![new_track_id, first_item.id],
+        )?;
+        return load_snapshot(conn);
+    }
 
     // Already at the start of the queue — just restart position.
     conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
@@ -964,36 +966,35 @@ fn build_automix_extension(
     needed: usize,
     use_learning: bool,
 ) -> Result<Vec<Track>> {
-    if use_learning
-        && let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
-            let excluded = queue_items
-                .iter()
-                .map(|item| item.track.id)
+    if use_learning && let Some(model) = queries::get_active_embedding_model(conn).ok().flatten() {
+        let excluded = queue_items
+            .iter()
+            .map(|item| item.track.id)
+            .collect::<Vec<_>>();
+        let neighbors = queries::get_track_neighbors(
+            conn,
+            model.id,
+            current_track.id,
+            (needed * 4).max(24) as i64,
+            &excluded,
+        )?;
+        if !neighbors.is_empty() {
+            let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
+            let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
+            let track_map = tracks
+                .into_iter()
+                .map(|track| (track.id, track))
+                .collect::<HashMap<_, _>>();
+            let ordered = neighbor_ids
+                .into_iter()
+                .filter_map(|track_id| track_map.get(&track_id).cloned())
+                .take(needed)
                 .collect::<Vec<_>>();
-            let neighbors = queries::get_track_neighbors(
-                conn,
-                model.id,
-                current_track.id,
-                (needed * 4).max(24) as i64,
-                &excluded,
-            )?;
-            if !neighbors.is_empty() {
-                let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
-                let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
-                let track_map = tracks
-                    .into_iter()
-                    .map(|track| (track.id, track))
-                    .collect::<HashMap<_, _>>();
-                let ordered = neighbor_ids
-                    .into_iter()
-                    .filter_map(|track_id| track_map.get(&track_id).cloned())
-                    .take(needed)
-                    .collect::<Vec<_>>();
-                if !ordered.is_empty() {
-                    return Ok(ordered);
-                }
+            if !ordered.is_empty() {
+                return Ok(ordered);
             }
         }
+    }
 
     let session_profile = build_session_taste_profile(conn, current_track)?;
     let mut excluded_track_ids = queue_items
@@ -1032,8 +1033,7 @@ fn build_automix_extension(
     // for seeds that haven't been embedded yet (e.g. tracks without a
     // service ID, or library additions since the last training run).
     if similar.is_empty() {
-        let fallback =
-            build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        let fallback = build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
         if fallback.is_empty() {
             tracing::debug!(
                 seed_track_id = current_track.id,
@@ -1141,8 +1141,8 @@ fn build_metadata_fallback(
 
     // Stage 3: shared genre — queries each genre_id the seed belongs to.
     if result.len() < needed {
-        let mut stmt = conn
-            .prepare("SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ?1")?;
         let genre_ids: Vec<i64> = stmt
             .query_map(params![seed.id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1461,10 +1461,11 @@ fn automix_score(
     }
 
     if track.artist_id != 0
-        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id) {
-            score += affinity.pos * 0.5;
-            score -= affinity.neg * 0.65;
-        }
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
+    {
+        score += affinity.pos * 0.5;
+        score -= affinity.neg * 0.65;
+    }
 
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
@@ -1492,9 +1493,10 @@ fn automix_score(
 
         // Energy whiplash penalty.
         if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
-            && (seed_energy - cand_energy).abs() > 0.5 {
-                score *= 0.7;
-            }
+            && (seed_energy - cand_energy).abs() > 0.5
+        {
+            score *= 0.7;
+        }
     }
 
     score.max(0.05)
@@ -2347,15 +2349,8 @@ mod tests {
             .unwrap();
         }
 
-        let extension = build_automix_extension(
-            &conn,
-            &seed,
-            &[],
-            ShuffleMode::Off,
-            12,
-            true,
-        )
-        .expect("extension call");
+        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+            .expect("extension call");
 
         assert!(
             !extension.is_empty(),
@@ -2379,15 +2374,8 @@ mod tests {
     fn build_automix_extension_returns_empty_when_no_artist_album_or_genre() {
         let (conn, seed) = empty_signal_conn();
         // No additional tracks, no genre rows — seed is completely isolated.
-        let extension = build_automix_extension(
-            &conn,
-            &seed,
-            &[],
-            ShuffleMode::Off,
-            12,
-            true,
-        )
-        .expect("extension call");
+        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+            .expect("extension call");
 
         assert!(
             extension.is_empty(),

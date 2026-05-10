@@ -27,10 +27,14 @@ pub struct BeatTrack {
 
 pub fn track_beats(env: &OnsetEnvelope, target_bpm: f64) -> Option<BeatTrack> {
     let n = env.odf.len();
-    if n < 32 || target_bpm <= 0.0 || env.hop_seconds <= 0.0 { return None; }
+    if n < 32 || target_bpm <= 0.0 || env.hop_seconds <= 0.0 {
+        return None;
+    }
 
     let target_period = 60.0 / target_bpm / env.hop_seconds; // in ODF samples
-    if target_period < 2.0 || target_period > n as f64 / 2.0 { return None; }
+    if target_period < 2.0 || target_period > n as f64 / 2.0 {
+        return None;
+    }
 
     // Score[i] = best cumulative score for a beat ending at frame i.
     // Backptr[i] = previous beat frame for frame i, or -1 if start.
@@ -49,7 +53,9 @@ pub fn track_beats(env: &OnsetEnvelope, target_bpm: f64) -> Option<BeatTrack> {
         let start = i.saturating_sub(hi);
         let end = if i >= lo { i - lo } else { continue };
         for j in start..=end {
-            if !score[j].is_finite() { continue; }
+            if !score[j].is_finite() {
+                continue;
+            }
             let period = (i - j) as f64;
             let log_ratio = (period / target_period).ln();
             let penalty = -TIGHTNESS * log_ratio * log_ratio;
@@ -71,16 +77,19 @@ pub fn track_beats(env: &OnsetEnvelope, target_bpm: f64) -> Option<BeatTrack> {
     let mut frames = Vec::new();
     loop {
         frames.push(cur);
-        if backptr[cur] < 0 { break; }
+        if backptr[cur] < 0 {
+            break;
+        }
         cur = backptr[cur] as usize;
     }
     frames.reverse();
 
-    if frames.len() < MIN_BEATS { return None; }
+    if frames.len() < MIN_BEATS {
+        return None;
+    }
 
     let beats: Vec<f64> = frames.iter().map(|&f| f as f64 * env.hop_seconds).collect();
-    let strength: f64 =
-        frames.iter().map(|&f| env.odf[f]).sum::<f64>() / frames.len() as f64;
+    let strength: f64 = frames.iter().map(|&f| env.odf[f]).sum::<f64>() / frames.len() as f64;
 
     Some(BeatTrack { beats, strength })
 }
@@ -96,7 +105,11 @@ mod tests {
         let mut out = vec![0.0f32; total];
         let mut t = 0usize;
         while t < total {
-            for j in 0..32 { if t + j < out.len() { out[t + j] = 1.0; } }
+            for j in 0..32 {
+                if t + j < out.len() {
+                    out[t + j] = 1.0;
+                }
+            }
             t += period;
         }
         out
@@ -107,12 +120,19 @@ mod tests {
         let env = compute_onset_envelope(&click_train(44100, 8.0, 0.5), 44100).unwrap();
         let track = track_beats(&env, 120.0).expect("should track 120 BPM clicks");
         // ~16 beats over 8 s.
-        assert!(track.beats.len() >= 14 && track.beats.len() <= 18,
-            "expected ~16 beats, got {}", track.beats.len());
+        assert!(
+            track.beats.len() >= 14 && track.beats.len() <= 18,
+            "expected ~16 beats, got {}",
+            track.beats.len()
+        );
         // Inter-beat intervals should average ~0.5 s.
         let ibis: Vec<f64> = track.beats.windows(2).map(|w| w[1] - w[0]).collect();
         let mean_ibi = ibis.iter().sum::<f64>() / ibis.len() as f64;
-        assert!((mean_ibi - 0.5).abs() < 0.05, "mean IBI {} != 0.5", mean_ibi);
+        assert!(
+            (mean_ibi - 0.5).abs() < 0.05,
+            "mean IBI {} != 0.5",
+            mean_ibi
+        );
         assert!(track.strength > 0.3, "strength too low: {}", track.strength);
     }
 
@@ -121,7 +141,11 @@ mod tests {
         let env = compute_onset_envelope(&vec![0.0f32; 44100 * 4], 44100).unwrap();
         let track = track_beats(&env, 120.0);
         if let Some(t) = track {
-            assert!(t.strength < 0.05, "silence produced strength {}", t.strength);
+            assert!(
+                t.strength < 0.05,
+                "silence produced strength {}",
+                t.strength
+            );
         }
     }
 }

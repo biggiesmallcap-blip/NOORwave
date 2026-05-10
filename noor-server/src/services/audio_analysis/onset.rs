@@ -56,11 +56,15 @@ pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<Onset
             let log_mag = (1.0 + LOG_COMPRESS_GAMMA * mag).ln();
             if f > 0 {
                 let d = log_mag - prev_log_mag[k];
-                if d > 0.0 { sf += d; }
+                if d > 0.0 {
+                    sf += d;
+                }
             }
             prev_log_mag[k] = log_mag;
         }
-        if f > 0 { flux.push(sf); }
+        if f > 0 {
+            flux.push(sf);
+        }
     }
 
     if flux.is_empty() {
@@ -74,7 +78,9 @@ pub fn compute_onset_envelope(samples: &[f32], sample_rate: u32) -> Option<Onset
     let idx = ((sorted.len() as f64 * 0.99).floor() as usize).min(sorted.len() - 1);
     let p99 = sorted[idx];
     let denom = if p99 > 1e-9 { p99 } else { 1.0 };
-    for v in flux.iter_mut() { *v = (*v / denom).min(1.0); }
+    for v in flux.iter_mut() {
+        *v = (*v / denom).min(1.0);
+    }
 
     Some(OnsetEnvelope {
         odf: flux,
@@ -93,7 +99,9 @@ mod tests {
         let mut t = 0usize;
         while t < total {
             for j in 0..32 {
-                if t + j < out.len() { out[t + j] = 1.0; }
+                if t + j < out.len() {
+                    out[t + j] = 1.0;
+                }
             }
             t += period;
         }
@@ -116,7 +124,11 @@ mod tests {
         let s = vec![0.0f32; 44100 * 4];
         let env = compute_onset_envelope(&s, 44100).unwrap();
         let max = env.odf.iter().cloned().fold(0.0f64, f64::max);
-        assert_eq!(max, 0.0, "silence must produce a zero ODF, got peak {}", max);
+        assert_eq!(
+            max, 0.0,
+            "silence must produce a zero ODF, got peak {}",
+            max
+        );
     }
 
     #[test]
@@ -130,9 +142,15 @@ mod tests {
         assert!(
             above_half * 30 < total,
             "fewer than ~3% of frames should exceed 0.5 (got {}/{} = {:.1}%)",
-            above_half, total, 100.0 * above_half as f64 / total as f64,
+            above_half,
+            total,
+            100.0 * above_half as f64 / total as f64,
         );
-        assert!(above_half >= 8, "expected at least 8 strong onsets, got {}", above_half);
+        assert!(
+            above_half >= 8,
+            "expected at least 8 strong onsets, got {}",
+            above_half
+        );
 
         // Peak periodicity: the strong-onset frames must fall on a near-uniform grid
         // matching the 0.5 s click period (the whole reason the ODF exists).
@@ -164,7 +182,9 @@ mod tests {
         let expected = ODF_HOP as f64 / 44100.0;
         assert!(
             (env.hop_seconds - expected).abs() < 1e-12,
-            "hop_seconds {} != {}", env.hop_seconds, expected,
+            "hop_seconds {} != {}",
+            env.hop_seconds,
+            expected,
         );
     }
 }

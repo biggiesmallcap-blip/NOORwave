@@ -268,10 +268,8 @@ pub fn compute_stft_features(samples: &[f32], sample_rate: u32) -> Option<StftFe
         let start = frame_idx * STFT_HOP;
 
         for i in 0..STFT_FFT_SIZE {
-            fft_input[i] = rustfft::num_complex::Complex::new(
-                samples[start + i] * hann[i] as f32,
-                0.0,
-            );
+            fft_input[i] =
+                rustfft::num_complex::Complex::new(samples[start + i] * hann[i] as f32, 0.0);
         }
 
         fft.process(&mut fft_input);

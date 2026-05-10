@@ -20,9 +20,10 @@ pub fn ensure_server_token(conn: &Connection) -> Result<String> {
     // Keep the existing token only if it matches the current 6-digit PIN format.
     // Legacy hex/word-phrase tokens are auto-upgraded on next startup.
     if let Some(token) = existing
-        && is_valid_pin(&token) {
-            return Ok(token);
-        }
+        && is_valid_pin(&token)
+    {
+        return Ok(token);
+    }
 
     let token = generate_readable_token();
     conn.execute(
@@ -812,8 +813,9 @@ pub fn get_genres_for_tracks_with_fallback(
 pub fn get_track_genre_paths_with_fallback(
     conn: &Connection,
 ) -> Result<HashMap<i64, Vec<ResolvedGenre>>> {
-    let cascade =
-        crate::genre::filter::filter_subquery_with_fallback(crate::genre::filter::GalaxyFilterRule::All);
+    let cascade = crate::genre::filter::filter_subquery_with_fallback(
+        crate::genre::filter::GalaxyFilterRule::All,
+    );
     let sql = format!(
         "WITH RECURSIVE genre_paths(id, parent_id, path) AS (
             SELECT id, parent_id, name
@@ -1888,9 +1890,18 @@ pub fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
     let prev_completion = ratio_or_none(prev_completed, prev_listens);
 
     let kpis = SignalsKpis {
-        listened_ms: KpiPairInt { current: cur_ms, previous: prev_ms },
-        sessions: KpiPairInt { current: cur_sessions, previous: prev_sessions },
-        completion: KpiPairFloat { current: completion, previous: prev_completion },
+        listened_ms: KpiPairInt {
+            current: cur_ms,
+            previous: prev_ms,
+        },
+        sessions: KpiPairInt {
+            current: cur_sessions,
+            previous: prev_sessions,
+        },
+        completion: KpiPairFloat {
+            current: completion,
+            previous: prev_completion,
+        },
         skip_rate: KpiPairFloat {
             current: completion.map(|c| 1.0 - c),
             previous: prev_completion.map(|c| 1.0 - c),
@@ -2049,7 +2060,11 @@ pub fn get_signals_tempo(
     let mut stmt = conn.prepare(&sql)?;
     let rows: Vec<(String, i32, i64)> = stmt
         .query_map(params![days], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -2086,7 +2101,11 @@ pub fn get_signals_tempo(
 
     let tempo_rows: Vec<TempoRow> = per_label
         .into_iter()
-        .map(|(label, buckets)| TempoRow { label, granularity, buckets })
+        .map(|(label, buckets)| TempoRow {
+            label,
+            granularity,
+            buckets,
+        })
         .collect();
 
     // Per-listen weighted stats. Same query, but the (bpm, listens) pairs aggregate
@@ -2098,10 +2117,13 @@ pub fn get_signals_tempo(
          WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))
            AND adf.bpm >= {min} AND adf.bpm < {max}
          GROUP BY adf.bpm",
-        min = BPM_MIN, max = BPM_MAX
+        min = BPM_MIN,
+        max = BPM_MAX
     ))?;
     let weighted: Vec<(f64, i64)> = weighted_stmt
-        .query_map(params![days], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?)))?
+        .query_map(params![days], |row| {
+            Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
 
     let median = weighted_median_bpm(&weighted);
@@ -2109,7 +2131,11 @@ pub fn get_signals_tempo(
     // Mode = bucket centre (lower-edge + step/2) of the listens-argmax bucket.
     let mode = mode_bucket_centre(&tempo_rows);
 
-    let stats = TempoStats { median, mode, sigma };
+    let stats = TempoStats {
+        median,
+        mode,
+        sigma,
+    };
 
     // Coverage: analysed tracks / total listened tracks within the window.
     let total_listened: i64 = conn.query_row(
@@ -2138,10 +2164,17 @@ pub fn get_signals_tempo(
     let ridge_amp_max = percentile_i64(&all_listens, 95.0).unwrap_or(0.0);
 
     Ok(TempoView {
-        bucket_axis: BucketAxis { min: BPM_MIN, max: BPM_MAX, step: BPM_STEP },
+        bucket_axis: BucketAxis {
+            min: BPM_MIN,
+            max: BPM_MAX,
+            step: BPM_STEP,
+        },
         rows: tempo_rows,
         stats,
-        coverage: Coverage { analyzed, total_listened },
+        coverage: Coverage {
+            analyzed,
+            total_listened,
+        },
         ridge_amp_max,
     })
 }
@@ -2254,7 +2287,10 @@ pub fn get_signals_sonic_field(conn: &Connection, days: i64) -> Result<SonicView
     Ok(SonicView {
         tracks,
         total,
-        coverage: Coverage { analyzed, total_listened },
+        coverage: Coverage {
+            analyzed,
+            total_listened,
+        },
     })
 }
 
@@ -2277,7 +2313,8 @@ pub fn get_signals_ridgeline(conn: &Connection, days: i64) -> Result<Vec<RidgeRo
          GROUP BY day, hour
          ORDER BY day, hour",
     )?;
-    let mut by_day_map: std::collections::BTreeMap<String, [i64; 24]> = std::collections::BTreeMap::new();
+    let mut by_day_map: std::collections::BTreeMap<String, [i64; 24]> =
+        std::collections::BTreeMap::new();
     let rows = stmt.query_map(params![effective], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -2489,10 +2526,8 @@ pub fn get_signals_cohorts(conn: &Connection, days: i64) -> Result<Vec<Cohort>> 
     ];
     let mut out: Vec<Cohort> = Vec::with_capacity(3);
     for (key, label) in labels {
-        let (tracks, listened_ms, sessions, listens, completed, new_artists) = rows
-            .get(key)
-            .copied()
-            .unwrap_or((0, 0, 0, 0, 0, 0));
+        let (tracks, listened_ms, sessions, listens, completed, new_artists) =
+            rows.get(key).copied().unwrap_or((0, 0, 0, 0, 0, 0));
         let completion = ratio_or_none(completed, listens);
         let skip_rate = completion.map(|c| 1.0 - c);
         let repeat_rate = if tracks == 0 {
@@ -2580,7 +2615,10 @@ pub fn get_signals_audio_profile(conn: &Connection, days: i64) -> Result<AudioPr
         loudness_lufs,
         bass_tilt,
         treble_tilt,
-        coverage: Coverage { analyzed, total_listened },
+        coverage: Coverage {
+            analyzed,
+            total_listened,
+        },
     })
 }
 
@@ -5254,10 +5292,7 @@ pub fn get_stale_analysis_track_ids(conn: &Connection) -> Result<Vec<i64>> {
         .map_err(Into::into)
 }
 
-pub fn find_tracks_by_hash(
-    conn: &Connection,
-    hashes: &[u32],
-) -> Result<Vec<(i64, u32, u32)>> {
+pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64, u32, u32)>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
@@ -5423,12 +5458,8 @@ mod tests {
         )
         .expect("listen inserted");
 
-        let heat = get_genre_heat_filtered(
-            &conn,
-            90,
-            crate::genre::filter::GalaxyFilterRule::All,
-        )
-        .expect("genre heat");
+        let heat = get_genre_heat_filtered(&conn, 90, crate::genre::filter::GalaxyFilterRule::All)
+            .expect("genre heat");
         let electronic = heat
             .iter()
             .find(|entry| entry.genre_id == 1)
@@ -5457,12 +5488,8 @@ mod tests {
         )
         .expect("genres inserted");
 
-        let heat = get_genre_heat_filtered(
-            &conn,
-            90,
-            crate::genre::filter::GalaxyFilterRule::All,
-        )
-        .expect("genre heat");
+        let heat = get_genre_heat_filtered(&conn, 90, crate::genre::filter::GalaxyFilterRule::All)
+            .expect("genre heat");
         assert_eq!(heat.len(), 2);
         assert!(heat.iter().all(|entry| entry.listen_count == 0));
         assert!(heat.iter().all(|entry| entry.total_listened_ms == 0));
@@ -5621,7 +5648,8 @@ mod tests {
         //          (Today's LIKE on "the strokes" would MISS this — substring fail.)
         //   1002 — title "The Anthem": only "the". Missing "strokes". Should NOT match.
         //   1003 — title "Strokes": only "strokes". Missing "the". Should NOT match.
-        conn.execute("INSERT INTO artists (id, name) VALUES (1001, 'Test')", []).expect("artist");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1001, 'Test')", [])
+            .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (1001, 'Plain', 1001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5635,16 +5663,15 @@ mod tests {
         )
         .expect("tracks");
 
-        let results = search_with_audio_filters(
-            &conn,
-            "the strokes",
-            &AudioFilters::default(),
-            50,
-        )
-        .expect("library search");
+        let results = search_with_audio_filters(&conn, "the strokes", &AudioFilters::default(), 50)
+            .expect("library search");
 
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
-        assert_eq!(ids, vec![1001], "expected only 1001 (both tokens in title, non-contiguous); got {ids:?}");
+        assert_eq!(
+            ids,
+            vec![1001],
+            "expected only 1001 (both tokens in title, non-contiguous); got {ids:?}"
+        );
     }
 
     #[test]
@@ -5652,7 +5679,11 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (2001, 'Frank Ocean')", []).expect("artist");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (2001, 'Frank Ocean')",
+            [],
+        )
+        .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (2001, 'Blonde', 2001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5663,7 +5694,8 @@ mod tests {
         )
         .expect("track");
 
-        let results = search_with_audio_filters(&conn, "blonde", &AudioFilters::default(), 50).expect("search");
+        let results = search_with_audio_filters(&conn, "blonde", &AudioFilters::default(), 50)
+            .expect("search");
         let titles: Vec<&str> = results.iter().map(|r| r.title.as_str()).collect();
         assert!(
             titles.contains(&"Pink + White"),
@@ -5676,7 +5708,11 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (3001, 'Miles Davis')", []).expect("artist");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (3001, 'Miles Davis')",
+            [],
+        )
+        .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (3001, 'Kind of Blue', 3001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5694,11 +5730,18 @@ mod tests {
         )
         .expect("dsp features");
 
-        let filters = AudioFilters { bpm_min: Some(100.0), ..Default::default() };
+        let filters = AudioFilters {
+            bpm_min: Some(100.0),
+            ..Default::default()
+        };
 
         let results = search_with_audio_filters(&conn, "miles", &filters, 50).expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
-        assert_eq!(ids, vec![3001], "expected only the 120-BPM track; got {ids:?}");
+        assert_eq!(
+            ids,
+            vec![3001],
+            "expected only the 120-BPM track; got {ids:?}"
+        );
     }
 
     #[test]
@@ -5706,8 +5749,13 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (4001, 'Test')", []).expect("artist");
-        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (4001, 'A', 4001, 'tidal')", []).expect("album");
+        conn.execute("INSERT INTO artists (id, name) VALUES (4001, 'Test')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (4001, 'A', 4001, 'tidal')",
+            [],
+        )
+        .expect("album");
         conn.execute(
             "INSERT INTO tracks (
                 id, title, artist_id, album_id, duration_ms, tidal_id, best_quality, best_source,
@@ -5724,7 +5772,10 @@ mod tests {
         )
         .expect("dsp");
 
-        let filters = AudioFilters { bpm_min: Some(120.0), ..Default::default() };
+        let filters = AudioFilters {
+            bpm_min: Some(120.0),
+            ..Default::default()
+        };
 
         let results = search_with_audio_filters(&conn, "", &filters, 50).expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
@@ -5736,8 +5787,13 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (5001, 'A')", []).expect("artist");
-        conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (5001, 'A', 5001, 'tidal')", []).expect("album");
+        conn.execute("INSERT INTO artists (id, name) VALUES (5001, 'A')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source) VALUES (5001, 'A', 5001, 'tidal')",
+            [],
+        )
+        .expect("album");
         for i in 0..5 {
             let id = 5001 + i;
             conn.execute(
@@ -5752,7 +5808,8 @@ mod tests {
             .expect("track");
         }
 
-        let results = search_with_audio_filters(&conn, "", &AudioFilters::default(), 3).expect("search");
+        let results =
+            search_with_audio_filters(&conn, "", &AudioFilters::default(), 3).expect("search");
         assert_eq!(results.len(), 3, "expected limit=3 to cap results");
     }
 
@@ -5761,7 +5818,11 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (6001, 'Miles Davis')", []).expect("artist");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (6001, 'Miles Davis')",
+            [],
+        )
+        .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (6001, 'Kind of Blue', 6001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5776,9 +5837,14 @@ mod tests {
 
         // Old ordering (play_count DESC, last_played_at DESC) → B leads.
         // New ordering (is_favorite DESC, ...) → A leads.
-        let results = search_with_audio_filters(&conn, "miles", &AudioFilters::default(), 50).expect("search");
+        let results = search_with_audio_filters(&conn, "miles", &AudioFilters::default(), 50)
+            .expect("search");
         let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
-        assert_eq!(ids.first(), Some(&6001), "favorited track should lead despite zero plays; got {ids:?}");
+        assert_eq!(
+            ids.first(),
+            Some(&6001),
+            "favorited track should lead despite zero plays; got {ids:?}"
+        );
     }
 
     #[test]
@@ -5786,7 +5852,8 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (7001, 'Anyone')", []).expect("artist");
+        conn.execute("INSERT INTO artists (id, name) VALUES (7001, 'Anyone')", [])
+            .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (7001, 'Anything', 7001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5797,7 +5864,10 @@ mod tests {
         )
         .expect("track");
 
-        let filters = AudioFilters { track_type: Some("album".to_string()), ..Default::default() };
+        let filters = AudioFilters {
+            track_type: Some("album".to_string()),
+            ..Default::default()
+        };
 
         let results = search_with_audio_filters(&conn, "anything", &filters, 50).expect("search");
         assert!(results.is_empty());
@@ -5811,7 +5881,8 @@ mod tests {
         // Punctuation in user queries (?, /, -) must not cause FTS to error.
         // to_fts_query strips non-alphanumerics; tokenization happens within a
         // single column, so fixtures keep all match tokens together in one column.
-        conn.execute("INSERT INTO artists (id, name) VALUES (8001, 'AC/DC')", []).expect("artist");
+        conn.execute("INSERT INTO artists (id, name) VALUES (8001, 'AC/DC')", [])
+            .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (8001, 'AC/DC Live', 8001, 'tidal')", []).expect("album");
         conn.execute(
             "INSERT INTO tracks (
@@ -5829,13 +5900,21 @@ mod tests {
         // ["ac", "dc", "live"] (unicode61 splits on /), satisfying all three.
         let r1 = search_with_audio_filters(&conn, "AC/DC live?", &AudioFilters::default(), 50)
             .expect("'AC/DC live?' must not error");
-        assert!(r1.iter().any(|r| r.id == 8001), "expected Thunderstruck (album 'AC/DC Live' has all tokens); got ids {:?}", r1.iter().map(|r| r.id).collect::<Vec<_>>());
+        assert!(
+            r1.iter().any(|r| r.id == 8001),
+            "expected Thunderstruck (album 'AC/DC Live' has all tokens); got ids {:?}",
+            r1.iter().map(|r| r.id).collect::<Vec<_>>()
+        );
 
         // Query "love - remix" → "love remix" → tokens must both appear in same
         // column. Track 8002's title "Love Remix" satisfies that.
         let r2 = search_with_audio_filters(&conn, "love - remix", &AudioFilters::default(), 50)
             .expect("'love - remix' must not error");
-        assert!(r2.iter().any(|r| r.id == 8002), "expected 'Love Remix' to match; got ids {:?}", r2.iter().map(|r| r.id).collect::<Vec<_>>());
+        assert!(
+            r2.iter().any(|r| r.id == 8002),
+            "expected 'Love Remix' to match; got ids {:?}",
+            r2.iter().map(|r| r.id).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -5845,7 +5924,8 @@ mod tests {
 
         // Setup designed to exercise the artists_fts UNION arm: track title
         // contains nothing of the query, but the artist name does.
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'The Cure')", []).expect("artist");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'The Cure')", [])
+            .expect("artist");
         conn.execute(
             "INSERT INTO albums (id, title, artist_id, source) VALUES (1, 'Disintegration', 1, 'tidal')",
             [],
@@ -5876,7 +5956,11 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (9101, 'Miles Davis')", []).expect("artist");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (9101, 'Miles Davis')",
+            [],
+        )
+        .expect("artist");
         conn.execute("INSERT INTO albums (id, title, artist_id, source) VALUES (9101, 'Kind of Blue', 9101, 'tidal')", []).expect("album");
         for i in 0..3 {
             let id = 9101 + i;
@@ -5897,10 +5981,17 @@ mod tests {
         )
         .expect("dsp");
 
-        let filters = AudioFilters { bpm_min: Some(100.0), ..Default::default() };
+        let filters = AudioFilters {
+            bpm_min: Some(100.0),
+            ..Default::default()
+        };
 
         let results = search_with_audio_filters(&conn, "miles", &filters, 2).expect("search");
-        assert_eq!(results.len(), 2, "limit=2 with both FTS bind and audio-filter binds; off-by-one would return 0 or 3");
+        assert_eq!(
+            results.len(),
+            2,
+            "limit=2 with both FTS bind and audio-filter binds; off-by-one would return 0 or 3"
+        );
     }
 
     /// End-to-end Path A read API: cascade joins through `genre_paths` and
@@ -6047,9 +6138,11 @@ mod tests {
         // 200 plays of one popular track at 124 BPM, 5 plays each of 10 tracks at
         // unrelated BPMs spanning the rest of the range.
         let mut weighted = vec![(124.0_f64, 200_i64)];
-        for (i, bpm) in [62.0, 70.0, 78.0, 86.0, 94.0, 100.0, 108.0, 142.0, 160.0, 180.0]
-            .iter()
-            .enumerate()
+        for (i, bpm) in [
+            62.0, 70.0, 78.0, 86.0, 94.0, 100.0, 108.0, 142.0, 160.0, 180.0,
+        ]
+        .iter()
+        .enumerate()
         {
             weighted.push((*bpm, 5 + i as i64 * 0)); // 5 each
         }
@@ -6491,7 +6584,11 @@ fn build_audio_filter_sql(filters: &AudioFilters, start_idx: usize) -> AudioFilt
         idx += 1;
     }
 
-    AudioFilterSql { sql, params, next_idx: idx }
+    AudioFilterSql {
+        sql,
+        params,
+        next_idx: idx,
+    }
 }
 
 pub fn search_with_audio_filters(
@@ -6515,11 +6612,7 @@ fn search_with_audio_filters_fts(
     filters: &AudioFilters,
     limit: usize,
 ) -> Result<Vec<AudioSearchResult>> {
-    if filters
-        .track_type
-        .as_deref()
-        .is_some_and(|t| t != "track")
-    {
+    if filters.track_type.as_deref().is_some_and(|t| t != "track") {
         return Ok(Vec::new());
     }
 

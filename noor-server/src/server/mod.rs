@@ -233,9 +233,7 @@ async fn require_token(
 
 async fn no_store_cache(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }

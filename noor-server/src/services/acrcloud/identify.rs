@@ -242,10 +242,11 @@ pub async fn identify_track(
             };
             if data.status.code == 0
                 && let Some(meta) = data.metadata
-                    && let Some(tracks) = meta.music
-                        && let Some(track) = tracks.into_iter().next() {
-                            return IdentifyResult::Match(track);
-                        }
+                && let Some(tracks) = meta.music
+                && let Some(track) = tracks.into_iter().next()
+            {
+                return IdentifyResult::Match(track);
+            }
             IdentifyResult::NoMatch
         }
         Err(e) => {

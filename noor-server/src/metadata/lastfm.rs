@@ -716,10 +716,11 @@ pub(crate) fn parse_chart_tracks(payload: &Value, limit: usize) -> Vec<LastFmCha
                         let url = img.get("#text").and_then(Value::as_str);
                         if s == Some(size)
                             && let Some(u) = url
-                                && !u.trim().is_empty() {
-                                    candidate = Some(u);
-                                    break;
-                                }
+                            && !u.trim().is_empty()
+                        {
+                            candidate = Some(u);
+                            break;
+                        }
                     }
                     if candidate.is_some() {
                         break;
