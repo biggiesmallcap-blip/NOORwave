@@ -37,6 +37,7 @@ Thumbs.db
 
 # Local agent / design tooling — not shared
 AGENTS.md
+CLAUDE.md
 .claude/settings.json
 .claude/settings.local.json
 .claude/skills/
