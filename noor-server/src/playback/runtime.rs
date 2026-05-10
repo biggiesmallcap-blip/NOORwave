@@ -2466,6 +2466,10 @@ fn terminal_engine_slot(
     }
 }
 
+fn handle_terminal_event(active: Option<(i64, u64)>, track_id: i64, generation: u64) -> bool {
+    active == Some((track_id, generation))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

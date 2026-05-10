@@ -8,7 +8,7 @@ pub mod onset;
 pub mod scanner;
 pub mod tempo;
 
-pub const CURRENT_ANALYSIS_VERSION: &str = "v3";
+pub const CURRENT_ANALYSIS_VERSION: &str = "v4";
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table

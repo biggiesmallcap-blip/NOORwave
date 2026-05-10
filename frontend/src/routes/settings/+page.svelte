@@ -783,29 +783,17 @@
 		}
 	}
 
-	// Live ETA for an in-progress run. Uses the latest run's progress +
-	// started_at to derive elapsed seconds, then projects remaining time.
-	// Only valid while training is running and progress > 0.
-	//
-	// SQLite stores `started_at` as UTC without a timezone marker
-	// ("YYYY-MM-DD HH:MM:SS"). `Date.parse` on a bare timestamp interprets
-	// it as local time, so on a UTC+N machine the parsed start drifts N
-	// hours into the future and "elapsed" balloons. Force UTC by converting
-	// to ISO-with-Z before parsing — same fix used elsewhere in this file
-	// (see `trained_at + 'Z'`).
-	let discoveryEtaSeconds: number | null = $derived.by(() => {
-		const r = discoveryStatus?.latest_run;
-		if (!r || r.status !== 'running' || !r.started_at) return null;
-		const iso = r.started_at.includes('T') ? r.started_at : r.started_at.replace(' ', 'T');
-		const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z';
-		const startedMs = Date.parse(withTz);
-		if (Number.isNaN(startedMs)) return null;
-		const elapsed = (nowEpochSeconds * 1000 - startedMs) / 1000;
-		if (elapsed <= 0) return null;
-		const progress = Math.max(0.01, Math.min(0.99, r.progress ?? 0));
-		const total = elapsed / progress;
-		return Math.max(0, Math.round(total - elapsed));
-	});
+	function stageLabel(stage: string | undefined): string {
+		switch (stage) {
+			case 'behavioral': return 'Learning listening patterns';
+			case 'audio':      return 'Processing audio features';
+			case 'fusion':     return 'Blending features';
+			case 'neighbors':  return 'Computing neighbors';
+			case 'in_degree':  return 'Ranking connections';
+			case 'evaluate':   return 'Evaluating';
+			default:           return 'Computing';
+		}
+	}
 
 
 	const INTENSITY_PRESETS: Record<
@@ -1113,7 +1101,7 @@
 	];
 
 	let visibleSettingsCategories = $derived(
-		settingsCategories.filter((category) => category.id !== 'data')
+		settingsCategories.filter((c) => c.id !== 'data' && c.id !== 'discovery')
 	);
 
 	let activeCategoryMeta = $derived(
@@ -1614,165 +1602,6 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'sources'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
-
-				<div class="discovery-warning glass-panel">
-					<h4>⚠ Heads up — this runs hot.</h4>
-					<p>
-						A retrain pegs every CPU core for 10–30 seconds on a typical library, longer on bigger ones. Your fans will spin up. If you're on a laptop or somewhere thermally constrained, expect heat. Hit <strong>Stop</strong> any time.
-					</p>
-				</div>
-
-				<details class="discovery-guide glass-panel">
-					<summary>How discovery works — when to retrain, what activates a model</summary>
-					<div class="guide-body">
-						<p>
-							The discovery engine learns a similarity space over your library: every track gets a vector, and each track's top neighbours are pre-computed and stored. Radio, automix, "more like this", and the discover page all read those neighbours. Until a trained model is active, those surfaces fall back to a metadata-only heuristic (same artist / genre / decade), which is flat — same handful of tracks every time.
-						</p>
-
-						<h5>When to retrain</h5>
-						<ul>
-							<li><strong>First time</strong> after syncing your library — there's no model yet.</li>
-							<li><strong>After a big sync</strong> — new tracks have no neighbours until you retrain.</li>
-							<li><strong>After a few weeks of listening</strong> — the model improves with real plays. New transitions teach it which tracks belong together.</li>
-							<li><strong>You don't need to retrain often.</strong> Once a week or so when you've added music or listened a lot. Daily is overkill.</li>
-						</ul>
-
-						<h5>Incremental refresh vs Full retrain</h5>
-						<p>
-							<strong>Incremental refresh</strong> reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
-						</p>
-						<p>
-							<strong>Full retrain</strong> wipes the audio cache and recomputes everything from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
-						</p>
-						<p>
-							On the very first run there's nothing cached, so both buttons do identical work.
-						</p>
-
-						<h5>Intensity tiers</h5>
-						<p>
-							<strong>Max</strong> (96-dim, 64 neighbours, 8-track context) — best radio quality, slowest. Recommended for libraries under ~10k or overnight runs.
-							<br /><strong>Medium</strong> (64-dim, 32 neighbours, 5-track context) — the default. Indistinguishable from Max for most listening; ~50% of the wall-clock.
-							<br /><strong>Low</strong> (48-dim, 24 neighbours, 3-track context) — skips the audio-proxy stage entirely. Cold tracks lose their metadata anchor, but the engine stays usable on modest hardware.
-						</p>
-
-						<h5>Why a model might not activate</h5>
-						<p>
-							A run can complete with full coverage but still leave Active model on <strong>Fallback only</strong>. The activation gate scales with how much you've actually listened:
-						</p>
-						<ul>
-							<li><strong>0 plays</strong> — needs ≥ 50% coverage. Cold-start mode.</li>
-							<li><strong>1–49 plays</strong> — needs ≥ 70% coverage. Recall@10 isn't reliable on a tiny held-out set, so the gate looks at coverage only.</li>
-							<li><strong>50+ plays</strong> — needs ≥ 85% coverage AND ≥ 15% recall@10. Full strict gate.</li>
-						</ul>
-						<p>
-							If you complete a run and the model doesn't activate, you'll usually see Coverage well above the relevant threshold but Active model still says Fallback. That means recall didn't clear — keep listening, retrain again in a week, and the gate will pass naturally.
-						</p>
-					</div>
-				</details>
-
-				<div class="stat-grid inner-metrics">
-					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
-					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
-				</div>
-
-				<div class="portable-card glass">
-					<div class="info-list">
-						<div class="info-row">
-							<span>Active model</span>
-							<strong>{discoveryStatus?.active_model?.model_key ?? 'Fallback only'}</strong>
-						</div>
-						<div class="info-row">
-							<span>Last trained</span>
-							<strong>{discoveryStatus?.active_model?.trained_at ? new Date(discoveryStatus.active_model.trained_at + 'Z').toLocaleString() : '—'}</strong>
-						</div>
-						<div class="info-row">
-							<span>Clip features</span>
-							<strong>{discoveryStatus?.clip_cache_tracks?.toLocaleString() ?? '0'}</strong>
-						</div>
-						<div class="info-row">
-							<span>Latest run</span>
-							<strong>
-								{#if discoveryStatus?.latest_run}
-									{discoveryStatus.latest_run.status} · {discoveryStatus.latest_run.stage} · {Math.round(discoveryStatus.latest_run.progress * 100)}%
-								{:else}
-									idle
-								{/if}
-							</strong>
-						</div>
-					</div>
-				</div>
-
-				<div class="intensity-block">
-					<div class="intensity-header">
-						<span class="intensity-eyebrow">Training intensity</span>
-						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
-					</div>
-					<div class="intensity-grid">
-						{#each (['max', 'medium', 'low'] as const) as tier (tier)}
-							<button
-								type="button"
-								class="intensity-option"
-								class:selected={discoveryIntensity === tier}
-								disabled={discoveryIsRunning || intensityBusy}
-								onclick={() => void changeIntensity(tier)}
-							>
-								<span class="intensity-title">{INTENSITY_PRESETS[tier].title}</span>
-								<span class="intensity-detail">{INTENSITY_PRESETS[tier].detail}</span>
-							</button>
-						{/each}
-					</div>
-					{#if discoverySafety}
-						{@const safety = discoverySafety}
-						<div
-							class="safety-panel"
-							class:safety-safe={safety.recommendation === 'safe'}
-							class:safety-moderate={safety.recommendation === 'moderate'}
-							class:safety-high={safety.recommendation === 'high_cost'}
-						>
-							<div class="safety-headline">
-								{#if safety.recommendation === 'safe'}
-									Safe to run — about {formatDurationSeconds(safety.estimated_seconds)} expected.
-								{:else if safety.recommendation === 'moderate'}
-									Moderate cost — about {formatDurationSeconds(safety.estimated_seconds)} expected.
-								{:else}
-									Heavy run — about {formatDurationSeconds(safety.estimated_seconds)} expected. Consider Medium or Low.
-								{/if}
-							</div>
-							<div class="safety-detail">
-								<span>{safety.track_count.toLocaleString()} tracks</span>
-								<span>·</span>
-								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
-								{#if safety.last_run_seconds !== null}
-									<span>·</span>
-									<span>last run {formatDurationSeconds(safety.last_run_seconds)}</span>
-								{/if}
-							</div>
-						</div>
-					{/if}
-					{#if discoveryIsRunning && discoveryEtaSeconds !== null}
-						<div class="eta-line">
-							Estimated time remaining: <strong>{formatDurationSeconds(discoveryEtaSeconds)}</strong>
-							{#if discoveryStatus?.latest_run?.progress !== undefined}
-								<span class="eta-progress">
-									({Math.round((discoveryStatus.latest_run.progress ?? 0) * 100)}% complete)
-								</span>
-							{/if}
-						</div>
-					{/if}
-				</div>
-
-				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning}>Incremental refresh</button>
-					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning}>Full retrain</button>
-					{#if discoveryIsRunning}
-						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
-					{/if}
-				</div>
-			</section>
-			{/if}
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
@@ -2147,6 +1976,168 @@
 			</section>
 			{/if}
 
+			{#if activeCategory === 'audio'}
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
+
+				<div class="discovery-warning glass-panel">
+					<h4>⚠ Heads up — this runs hot.</h4>
+					<p>
+						A retrain pegs every CPU core for 10–30 seconds on a typical library, longer on bigger ones. Your fans will spin up. If you're on a laptop or somewhere thermally constrained, expect heat. Hit <strong>Stop</strong> any time.
+					</p>
+				</div>
+
+				<details class="discovery-guide glass-panel">
+					<summary>How discovery works — when to retrain, what activates a model</summary>
+					<div class="guide-body">
+						<p>
+							The discovery engine learns a similarity space over your library: every track gets a vector, and each track's top neighbours are pre-computed and stored. Radio, automix, "more like this", and the discover page all read those neighbours. Until a trained model is active, those surfaces fall back to a metadata-only heuristic (same artist / genre / decade), which is flat — same handful of tracks every time.
+						</p>
+
+						<h5>When to retrain</h5>
+						<ul>
+							<li><strong>First time</strong> after syncing your library — there's no model yet.</li>
+							<li><strong>After a big sync</strong> — new tracks have no neighbours until you retrain.</li>
+							<li><strong>After a few weeks of listening</strong> — the model improves with real plays. New transitions teach it which tracks belong together.</li>
+							<li><strong>You don't need to retrain often.</strong> Once a week or so when you've added music or listened a lot. Daily is overkill.</li>
+						</ul>
+
+						<h5>Incremental refresh vs Full retrain</h5>
+						<p>
+							<strong>Incremental refresh</strong> reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
+						</p>
+						<p>
+							<strong>Full retrain</strong> wipes the audio cache and recomputes everything from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
+						</p>
+						<p>
+							On the very first run there's nothing cached, so both buttons do identical work.
+						</p>
+
+						<h5>Intensity tiers</h5>
+						<p>
+							<strong>Max</strong> (96-dim, 64 neighbours, 8-track context) — best radio quality, slowest. Recommended for libraries under ~10k or overnight runs.
+							<br /><strong>Medium</strong> (64-dim, 32 neighbours, 5-track context) — the default. Indistinguishable from Max for most listening; ~50% of the wall-clock.
+							<br /><strong>Low</strong> (48-dim, 24 neighbours, 3-track context) — skips the audio-proxy stage entirely. Cold tracks lose their metadata anchor, but the engine stays usable on modest hardware.
+						</p>
+
+						<h5>Why a model might not activate</h5>
+						<p>
+							A run can complete with full coverage but still leave Active model on <strong>Fallback only</strong>. The activation gate scales with how much you've actually listened:
+						</p>
+						<ul>
+							<li><strong>0 plays</strong> — needs ≥ 50% coverage. Cold-start mode.</li>
+							<li><strong>1–49 plays</strong> — needs ≥ 70% coverage. Recall@10 isn't reliable on a tiny held-out set, so the gate looks at coverage only.</li>
+							<li><strong>50+ plays</strong> — needs ≥ 85% coverage AND ≥ 15% recall@10. Full strict gate.</li>
+						</ul>
+						<p>
+							If you complete a run and the model doesn't activate, you'll usually see Coverage well above the relevant threshold but Active model still says Fallback. That means recall didn't clear — keep listening, retrain again in a week, and the gate will pass naturally.
+						</p>
+					</div>
+				</details>
+
+				<div class="stat-grid inner-metrics">
+					<MetricPair label="Coverage" value={discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'} copy="Playable tracks with learned neighborhoods." />
+					<MetricPair label="Embedded" value={discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'} copy="Tracks with stored embedding vectors." />
+				</div>
+
+				<div class="portable-card glass">
+					<div class="info-list">
+						<div class="info-row">
+							<span>Active model</span>
+							<strong>{discoveryStatus?.active_model?.model_key ?? 'Fallback only'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Last trained</span>
+							<strong>{discoveryStatus?.active_model?.trained_at ? new Date(discoveryStatus.active_model.trained_at + 'Z').toLocaleString() : '—'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Clip features</span>
+							<strong>{discoveryStatus?.clip_cache_tracks?.toLocaleString() ?? '0'}</strong>
+						</div>
+						<div class="info-row">
+							<span>Latest run</span>
+							<strong>
+								{#if discoveryStatus?.latest_run}
+									{discoveryStatus.latest_run.status} · {discoveryStatus.latest_run.stage} · {Math.round(discoveryStatus.latest_run.progress * 100)}%
+								{:else}
+									idle
+								{/if}
+							</strong>
+						</div>
+					</div>
+				</div>
+
+				<div class="intensity-block">
+					<div class="intensity-header">
+						<span class="intensity-eyebrow">Training intensity</span>
+						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
+					</div>
+					<div class="intensity-grid">
+						{#each (['max', 'medium', 'low'] as const) as tier (tier)}
+							<button
+								type="button"
+								class="intensity-option"
+								class:selected={discoveryIntensity === tier}
+								disabled={discoveryIsRunning || intensityBusy}
+								onclick={() => void changeIntensity(tier)}
+							>
+								<span class="intensity-title">{INTENSITY_PRESETS[tier].title}</span>
+								<span class="intensity-detail">{INTENSITY_PRESETS[tier].detail}</span>
+							</button>
+						{/each}
+					</div>
+					{#if discoverySafety}
+						{@const safety = discoverySafety}
+						<div
+							class="safety-panel"
+							class:safety-safe={safety.recommendation === 'safe'}
+							class:safety-moderate={safety.recommendation === 'moderate'}
+							class:safety-high={safety.recommendation === 'high_cost'}
+						>
+							<div class="safety-headline">
+								{#if safety.recommendation === 'safe'}
+									Safe to run — about {formatDurationSeconds(safety.estimated_seconds)} expected.
+								{:else if safety.recommendation === 'moderate'}
+									Moderate cost — about {formatDurationSeconds(safety.estimated_seconds)} expected.
+								{:else}
+									Heavy run — about {formatDurationSeconds(safety.estimated_seconds)} expected. Consider Medium or Low.
+								{/if}
+							</div>
+							<div class="safety-detail">
+								<span>{safety.track_count.toLocaleString()} tracks</span>
+								<span>·</span>
+								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
+								{#if safety.last_run_seconds !== null}
+									<span>·</span>
+									<span>last run {formatDurationSeconds(safety.last_run_seconds)}</span>
+								{/if}
+							</div>
+						</div>
+					{/if}
+					{#if discoveryIsRunning && discoveryStatus?.latest_run}
+						{@const run = discoveryStatus.latest_run}
+						{@const pct = Math.round((run.progress ?? 0) * 100)}
+						<div class="discovery-progress">
+							<div class="discovery-bar-track">
+								<div class="discovery-bar-fill" style:width="{pct}%"></div>
+							</div>
+							<div class="discovery-stage">
+								{stageLabel(run.stage)} <span class="discovery-pct">{pct}%</span>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning}>Incremental refresh</button>
+					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning}>Full retrain</button>
+					{#if discoveryIsRunning}
+						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
+					{/if}
+				</div>
+			</section>
+			{/if}
+
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Recognition" title="ACRCloud" subtitle="Sample and cover detection." />
@@ -2318,13 +2309,33 @@
 		color: var(--text-secondary);
 	}
 
-	.eta-line {
+	.discovery-progress {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.discovery-bar-track {
+		height: 4px;
+		border-radius: 2px;
+		background: var(--surface-raised, rgba(255, 255, 255, 0.08));
+		overflow: hidden;
+	}
+
+	.discovery-bar-fill {
+		height: 100%;
+		border-radius: 2px;
+		background: var(--accent, var(--color-accent));
+		transition: width 0.6s ease;
+	}
+
+	.discovery-stage {
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 	}
 
-	.eta-progress {
-		opacity: 0.7;
+	.discovery-pct {
+		opacity: 0.6;
 	}
 
 	@media (max-width: 720px) {
