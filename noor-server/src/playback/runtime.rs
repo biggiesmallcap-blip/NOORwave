@@ -18,7 +18,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
 /// How many milliseconds before track end we emit `NearEnd` and start pre-decoding
@@ -27,6 +27,8 @@ const GAPLESS_PREFILL_PAD_MS: usize = 250;
 /// 5-10 s on a cold connection. 30 s gives the next track time to produce audible
 /// samples before the crossfade window opens, even on a slow link.
 const NEAR_END_THRESHOLD_MS: i64 = 30_000;
+const DASH_INITIAL_MEDIA_SEGMENTS: usize = 8;
+const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
 
 #[derive(Debug, Clone)]
 pub struct PlaybackRuntimeConfig {
@@ -712,11 +714,19 @@ fn run_runtime_loop(
 
                 match terminal_engine_slot(active, next, fading, track_id, generation) {
                     Some(TerminalEngineSlot::FadingOut) => {
+                        debug!(
+                            "Playback terminal ignored for fading engine: track_id={}, generation={}, outcome={:?}",
+                            track_id, generation, outcome
+                        );
                         if let Some(mut engine) = state.fading_out_engine.take() {
                             engine.stop();
                         }
                     }
                     Some(TerminalEngineSlot::Next) => {
+                        debug!(
+                            "Playback terminal ignored for prepared engine: track_id={}, generation={}, outcome={:?}",
+                            track_id, generation, outcome
+                        );
                         if let PlaybackTerminalReason::Error(message) = &outcome {
                             warn!("Discarding failed pre-buffered track {track_id}: {message}");
                         }
@@ -725,6 +735,10 @@ fn run_runtime_loop(
                         }
                     }
                     Some(TerminalEngineSlot::Active) => {
+                        debug!(
+                            "Playback terminal active engine: track_id={}, generation={}, outcome={:?}",
+                            track_id, generation, outcome
+                        );
                         stop_current_engine(&mut state);
                         match outcome {
                             PlaybackTerminalReason::Finished => {
@@ -738,7 +752,12 @@ fn run_runtime_loop(
                             }
                         }
                     }
-                    None => {}
+                    None => {
+                        debug!(
+                            "Playback terminal ignored for unknown engine: track_id={}, generation={}, outcome={:?}",
+                            track_id, generation, outcome
+                        );
+                    }
                 }
             }
             PlaybackRuntimeCommand::TrackStatus {
@@ -986,6 +1005,9 @@ fn transition_to_job(
             Arc::clone(volume_ctl),
             Arc::clone(position_samples),
         )?;
+        let actual_start_rate = eng.shared.device_sample_rate;
+        output_config.sample_rate = cpal::SampleRate(actual_start_rate);
+        state.device_sample_rate = actual_start_rate;
         // Redirect the handle's reader to this engine's counter (which IS
         // position_samples for cold starts, but re-pointing is always correct).
         *position_source.lock().unwrap() = Arc::clone(position_samples);
@@ -1107,7 +1129,7 @@ impl OutputStream {
     /// this is a no-op for that backend.
     fn start(&self) -> Result<()> {
         match self {
-            Self::Cpal(s) => s.play().context("failed to start cpal stream"),
+            Self::Cpal(s) => start_cpal_stream(s),
             #[cfg(target_os = "windows")]
             Self::Wasapi(_) => Ok(()),
         }
@@ -1134,7 +1156,69 @@ impl PlaybackEngine {
         output_sample_format: SampleFormat,
         job: PreparedPlaybackJob,
         event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-        device_sample_rate: u32,
+        _device_sample_rate: u32,
+        device_channels: u16,
+        volume_ctl: Arc<AtomicU32>,
+        position_samples: Arc<AtomicU64>,
+    ) -> Result<Self> {
+        let fallback_config = device
+            .default_output_config()
+            .map(|config| config.config())
+            .unwrap_or_else(|_| output_config.clone());
+        match Self::start_with_output_config(
+            config,
+            command_tx,
+            device,
+            output_config,
+            output_sample_format,
+            job.clone(),
+            event_tx.clone(),
+            device_channels,
+            Arc::clone(&volume_ctl),
+            Arc::clone(&position_samples),
+        ) {
+            Ok(engine) => Ok(engine),
+            Err(primary_error) => {
+                let Some(fallback_config) =
+                    output_rate_fallback_config(output_config, &fallback_config)
+                else {
+                    return Err(primary_error);
+                };
+                warn!(
+                    "Playback output rejected {} Hz; cold-starting at {} Hz instead: {primary_error}",
+                    output_config.sample_rate.0, fallback_config.sample_rate.0
+                );
+                Self::start_with_output_config(
+                    config,
+                    command_tx,
+                    device,
+                    &fallback_config,
+                    output_sample_format,
+                    job,
+                    event_tx,
+                    device_channels,
+                    volume_ctl,
+                    position_samples,
+                )
+                .with_context(|| {
+                    format!(
+                        "fallback playback output at {} Hz failed after {} Hz was rejected",
+                        fallback_config.sample_rate.0, output_config.sample_rate.0
+                    )
+                })
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_output_config(
+        config: &PlaybackRuntimeConfig,
+        command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+        device: &cpal::Device,
+        output_config: &StreamConfig,
+        output_sample_format: SampleFormat,
+        job: PreparedPlaybackJob,
+        event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
         device_channels: u16,
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
@@ -1148,10 +1232,11 @@ impl PlaybackEngine {
         let track_id = job.track.id;
         let generation = job.generation;
         let source_kind = job.source_kind();
+        let output_sample_rate = output_config.sample_rate.0;
         let estimated_total_samples = job.track.duration_ms.and_then(|duration_ms| {
             estimate_total_samples_from_duration_ms(
                 duration_ms,
-                device_sample_rate,
+                output_sample_rate,
                 device_channels,
             )
         });
@@ -1160,13 +1245,24 @@ impl PlaybackEngine {
             generation,
             source_kind,
             job.gapless,
-            output_config.sample_rate.0,
+            output_sample_rate,
             device_channels,
             estimated_total_samples,
             command_tx.clone(),
             volume_ctl,
             position_samples,
         ));
+
+        let cpal_stream = build_output_stream(
+            device,
+            output_config,
+            output_sample_format,
+            Arc::clone(&shared),
+            shared.command_tx.clone(),
+            event_tx,
+        )?;
+        let stream = OutputStream::Cpal(cpal_stream);
+        stream.start()?;
 
         let decoder_shared = Arc::clone(&shared);
         let decoder_shared_for_decode = Arc::clone(&shared);
@@ -1179,7 +1275,7 @@ impl PlaybackEngine {
                     decoder_config,
                     decoder_job,
                     decoder_shared_for_decode,
-                    device_sample_rate,
+                    output_sample_rate,
                     device_channels,
                 ) {
                     let _ = decoder_shared
@@ -1188,17 +1284,6 @@ impl PlaybackEngine {
                 }
             })
             .context("failed to spawn playback decoder thread")?;
-
-        let cpal_stream = build_output_stream(
-            device,
-            output_config,
-            output_sample_format,
-            Arc::clone(&shared),
-            shared.command_tx.clone(),
-            event_tx.clone(),
-        )?;
-        let stream = OutputStream::Cpal(cpal_stream);
-        stream.start()?;
 
         Ok(Self {
             track_id,
@@ -1319,33 +1404,37 @@ impl PlaybackEngine {
                         desired_sample_rate,
                         SwapBackend::SharedFallback,
                     );
-                    (
-                        OutputStream::Cpal(build_output_stream(
-                            device,
-                            &fallback_plan.stream_config,
-                            output_sample_format,
-                            Arc::clone(&self.shared),
-                            command_tx,
-                            event_tx,
-                        )?),
-                        fallback_plan,
-                    )
+                    let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
+                        device,
+                        &fallback_plan.stream_config,
+                        output_config,
+                        output_sample_format,
+                        Arc::clone(&self.shared),
+                        command_tx,
+                        event_tx,
+                    )?;
+                    let mut active_plan = fallback_plan;
+                    active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
+                    active_plan.target_sample_rate = Some(actual_rate);
+                    (OutputStream::Cpal(stream), active_plan)
                 }
             }
         } else {
             let shared_plan =
                 swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
-            (
-                OutputStream::Cpal(build_output_stream(
-                    device,
-                    &shared_plan.stream_config,
-                    output_sample_format,
-                    Arc::clone(&self.shared),
-                    command_tx,
-                    event_tx,
-                )?),
-                shared_plan,
-            )
+            let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
+                device,
+                &shared_plan.stream_config,
+                output_config,
+                output_sample_format,
+                Arc::clone(&self.shared),
+                command_tx,
+                event_tx,
+            )?;
+            let mut active_plan = shared_plan;
+            active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
+            active_plan.target_sample_rate = Some(actual_rate);
+            (OutputStream::Cpal(stream), active_plan)
         };
         #[cfg(not(target_os = "windows"))]
         let (new_stream, active_plan) = {
@@ -1353,22 +1442,21 @@ impl PlaybackEngine {
             let _ = device_label;
             let shared_plan =
                 swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
-            (
-                OutputStream::Cpal(build_output_stream(
-                    device,
-                    &shared_plan.stream_config,
-                    output_sample_format,
-                    Arc::clone(&self.shared),
-                    command_tx,
-                    event_tx,
-                )?),
-                shared_plan,
-            )
+            let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
+                device,
+                &shared_plan.stream_config,
+                output_config,
+                output_sample_format,
+                Arc::clone(&self.shared),
+                command_tx,
+                event_tx,
+            )?;
+            let mut active_plan = shared_plan;
+            active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
+            active_plan.target_sample_rate = Some(actual_rate);
+            (OutputStream::Cpal(stream), active_plan)
         };
 
-        new_stream
-            .start()
-            .context("failed to start swapped output stream")?;
         if let Some(target_sample_rate) = active_plan.target_sample_rate {
             self.shared
                 .target_sample_rate
@@ -1462,6 +1550,13 @@ fn effective_output_config(base: &StreamConfig, desired_sample_rate: Option<u32>
     config
 }
 
+fn output_rate_fallback_config(
+    attempted: &StreamConfig,
+    base: &StreamConfig,
+) -> Option<StreamConfig> {
+    (attempted.sample_rate != base.sample_rate).then(|| base.clone())
+}
+
 fn exclusive_rebuild_rate(sample_rate_follow: bool, device_sample_rate: u32) -> Option<u32> {
     sample_rate_follow.then_some(device_sample_rate)
 }
@@ -1503,6 +1598,77 @@ fn build_output_stream(
     };
 
     Ok(stream)
+}
+
+fn start_cpal_stream(stream: &Stream) -> Result<()> {
+    stream.play().context("failed to start cpal stream")
+}
+
+fn build_started_output_stream(
+    device: &cpal::Device,
+    output_config: &StreamConfig,
+    output_sample_format: SampleFormat,
+    shared: Arc<PlaybackSharedState>,
+    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Result<Stream> {
+    let stream = build_output_stream(
+        device,
+        output_config,
+        output_sample_format,
+        shared,
+        command_tx,
+        event_tx,
+    )?;
+    start_cpal_stream(&stream)?;
+    Ok(stream)
+}
+
+fn build_started_output_stream_with_rate_fallback(
+    device: &cpal::Device,
+    attempted_config: &StreamConfig,
+    fallback_config: &StreamConfig,
+    output_sample_format: SampleFormat,
+    shared: Arc<PlaybackSharedState>,
+    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Result<(Stream, u32)> {
+    match build_started_output_stream(
+        device,
+        attempted_config,
+        output_sample_format,
+        Arc::clone(&shared),
+        command_tx.clone(),
+        event_tx.clone(),
+    ) {
+        Ok(stream) => Ok((stream, attempted_config.sample_rate.0)),
+        Err(primary_error) => {
+            let Some(fallback_config) =
+                output_rate_fallback_config(attempted_config, fallback_config)
+            else {
+                return Err(primary_error);
+            };
+            warn!(
+                "Output stream rejected or failed to start at {} Hz; falling back to {} Hz: {primary_error}",
+                attempted_config.sample_rate.0, fallback_config.sample_rate.0
+            );
+            let stream = build_started_output_stream(
+                device,
+                &fallback_config,
+                output_sample_format,
+                shared,
+                command_tx,
+                event_tx,
+            )
+            .with_context(|| {
+                format!(
+                    "fallback output stream at {} Hz also failed after {} Hz was rejected or failed to start",
+                    fallback_config.sample_rate.0, attempted_config.sample_rate.0
+                )
+            })?;
+            Ok((stream, fallback_config.sample_rate.0))
+        }
+    }
 }
 
 fn write_output_f32(
@@ -1594,8 +1760,8 @@ fn write_output_buffer<T>(
 
     let ready_to_start = guard.is_ready();
     if ready_to_start && !guard.started {
-        info!(
-            "[NOOR-DIAG] playback starting: {} samples buffered, threshold {}, callback size {}",
+        debug!(
+            "Playback buffer started: {} samples buffered, threshold {}, callback size {}",
             guard.samples.len().saturating_sub(guard.read_pos),
             guard.start_threshold_samples,
             data.len()
@@ -1658,9 +1824,20 @@ fn write_output_buffer<T>(
     };
 
     if written > 0 {
+        guard.starved_notified = false;
         shared
             .position_samples
             .fetch_add(written as u64, Ordering::Relaxed);
+    } else if guard.started && !guard.finished && !guard.starved_notified {
+        guard.starved_notified = true;
+        warn!(
+            "Playback buffer starved: track_id={}, generation={}, buffered_remaining={}, total_buffered={}, read_pos={}",
+            shared.track_id,
+            shared.generation,
+            guard.samples.len().saturating_sub(guard.read_pos),
+            guard.samples.len(),
+            guard.read_pos
+        );
     }
 
     if guard.started && !guard.started_notified {
@@ -1674,6 +1851,13 @@ fn write_output_buffer<T>(
 
     if guard.started && written == 0 && guard.finished && !guard.finished_notified {
         guard.finished_notified = true;
+        debug!(
+            "Playback runtime finished: track_id={}, generation={}, position_samples={}, total_samples={}",
+            shared.track_id,
+            shared.generation,
+            shared.position_samples.load(Ordering::Relaxed),
+            shared.total_samples.load(Ordering::Relaxed)
+        );
         let _ = command_tx.send(PlaybackRuntimeCommand::TrackTerminal {
             track_id: shared.track_id,
             generation: shared.generation,
@@ -1837,6 +2021,7 @@ struct PlaybackBuffer {
     start_threshold_samples: usize,
     started: bool,
     started_notified: bool,
+    starved_notified: bool,
     finished: bool,
     finished_notified: bool,
 }
@@ -1849,6 +2034,7 @@ impl PlaybackBuffer {
             start_threshold_samples,
             started: false,
             started_notified: false,
+            starved_notified: false,
             finished: false,
             finished_notified: false,
         }
@@ -1886,6 +2072,7 @@ impl PlaybackBuffer {
         // Always reset the finished notification so the end-of-track signal can fire again
         // if the user seeks to a position past the remaining samples.
         self.finished_notified = false;
+        self.starved_notified = false;
         // If decoding isn't done yet, also reset the start gate so the pre-buffer
         // threshold is re-evaluated from the new cursor position.
         if !self.finished {
@@ -1899,6 +2086,7 @@ impl PlaybackBuffer {
         self.read_pos = 0;
         self.started = false;
         self.started_notified = false;
+        self.starved_notified = false;
         self.finished = false;
         self.finished_notified = false;
     }
@@ -1924,16 +2112,27 @@ struct StreamPipe {
     // Returned by byte_len() so Symphonia's MSS can translate SeekFrom::End
     // into SeekFrom::Start without giving up with "stream is not seekable".
     known_length: Option<u64>,
+    dynamic_length: bool,
 }
 
 impl StreamPipe {
     fn new(rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>, known_length: Option<u64>) -> Self {
+        Self::with_initial(Vec::new(), rx, known_length, false)
+    }
+
+    fn with_initial(
+        initial: Vec<u8>,
+        rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        known_length: Option<u64>,
+        dynamic_length: bool,
+    ) -> Self {
         Self {
-            data: Vec::new(),
+            data: initial,
             read_pos: 0,
             rx: Mutex::new(rx),
             eof: false,
             known_length,
+            dynamic_length,
         }
     }
 
@@ -1998,11 +2197,15 @@ impl Seek for StreamPipe {
                 t.min(self.data.len())
             }
             SeekFrom::End(n) => {
-                // Fill until EOF so we know the total file size.
-                while !self.eof {
-                    self.recv_chunk();
+                if self.dynamic_length && self.known_length.is_none() {
+                    (self.data.len() as i64 + n).max(0) as usize
+                } else {
+                    // Fill until EOF so we know the total file size.
+                    while !self.eof {
+                        self.recv_chunk();
+                    }
+                    (self.data.len() as i64 + n).max(0) as usize
                 }
-                (self.data.len() as i64 + n).max(0) as usize
             }
         };
         self.read_pos = target.min(self.data.len());
@@ -2012,14 +2215,96 @@ impl Seek for StreamPipe {
 
 impl symphonia::core::io::MediaSource for StreamPipe {
     fn is_seekable(&self) -> bool {
-        true
+        !self.dynamic_length || self.eof || self.known_length.is_some()
     }
     fn byte_len(&self) -> Option<u64> {
         if self.eof {
             Some(self.data.len() as u64)
+        } else if self.dynamic_length {
+            None
         } else {
             self.known_length
         }
+    }
+}
+
+async fn append_stream_bytes(
+    http: &reqwest::Client,
+    url: &str,
+    segment_index: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let segment_label = dash_segment_debug_label(url);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(DASH_SEGMENT_TIMEOUT_SECS),
+        async {
+            let response = http
+                .get(url)
+                .send()
+                .await
+                .with_context(|| {
+                    format!("DASH segment {segment_index} request failed ({segment_label})")
+                })?
+                .error_for_status()
+                .with_context(|| {
+                    format!("DASH segment {segment_index} returned error status ({segment_label})")
+                })?;
+            let content_length = response.content_length().unwrap_or(0) as usize;
+            let mut stream = response.bytes_stream();
+            let mut out = Vec::with_capacity(content_length);
+            while let Some(chunk) = stream.next().await {
+                let bytes = chunk.with_context(|| {
+                    format!("DASH segment {segment_index} chunk error ({segment_label})")
+                })?;
+                out.extend_from_slice(&bytes);
+            }
+            Ok(out)
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "DASH segment {segment_index} timed out after {DASH_SEGMENT_TIMEOUT_SECS}s ({segment_label})"
+        )
+    })?
+}
+
+fn dash_initial_media_count(total_segments: usize) -> usize {
+    total_segments.min(DASH_INITIAL_MEDIA_SEGMENTS)
+}
+
+fn dash_background_fetch_window() -> usize {
+    1
+}
+
+fn build_tidal_cdn_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("TIDAL_ANDROID/1039 okhttp/3.14.9")
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build TIDAL CDN HTTP client")
+}
+
+fn dash_segment_debug_label(url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "unparseable-segment-url".to_string();
+    };
+    let host = parsed.host_str().unwrap_or("unknown-host");
+    let segment_name = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("segment");
+    let mut query_keys = parsed
+        .query_pairs()
+        .map(|(key, _)| key.into_owned())
+        .collect::<Vec<_>>();
+    query_keys.sort();
+    query_keys.dedup();
+    if query_keys.is_empty() {
+        format!("{host}/{segment_name}")
+    } else {
+        format!("{host}/{segment_name}?{}", query_keys.join(","))
     }
 }
 
@@ -2050,6 +2335,15 @@ fn decode_and_buffer_job(
             let stream_info = rt.block_on(async {
                 resolve_stream(&config.http_client, &config.access_token, &request).await
             })?;
+            debug!(
+                "TIDAL runtime stream resolved: track_id={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}",
+                shared.track_id,
+                stream_info.audio_quality,
+                stream_info.codec,
+                stream_info.sample_rate,
+                stream_info.bit_depth,
+                stream_info.segment_urls.len()
+            );
 
             if shared.stopped.load(Ordering::SeqCst) {
                 return Ok(());
@@ -2061,11 +2355,47 @@ fn decode_and_buffer_job(
             // A separate one-shot channel carries the Content-Length from the response headers
             // so StreamPipe can report byte_len() correctly, allowing Symphonia's MSS to
             // translate SeekFrom::End into an absolute position rather than failing.
+            let is_dash_stream = !stream_info.segment_urls.is_empty();
+            let mut dash_initial = Vec::new();
+            let mut remaining_segment_urls = stream_info.segment_urls.clone();
+            let initial_media_segments = dash_initial_media_count(stream_info.segment_urls.len());
+            if initial_media_segments > 0 {
+                dash_initial = rt
+                    .block_on(async {
+                        let mut bytes =
+                            append_stream_bytes(&config.http_client, &stream_info.url, 0).await?;
+                        for (idx, segment_url) in stream_info
+                            .segment_urls
+                            .iter()
+                            .take(initial_media_segments)
+                            .enumerate()
+                        {
+                            bytes.extend(
+                                append_stream_bytes(&config.http_client, segment_url, idx + 1)
+                                    .await?,
+                            );
+                        }
+                        anyhow::Ok(bytes)
+                    })
+                    .context("DASH stream prebuffer failed")?;
+                remaining_segment_urls.drain(0..initial_media_segments);
+                debug!(
+                    "TIDAL DASH prebuffer ready: track_id={}, initial_segments={}, remaining_segments={}",
+                    shared.track_id,
+                    initial_media_segments,
+                    remaining_segment_urls.len()
+                );
+            }
+
+            if shared.stopped.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
             let (len_tx, len_rx) = std::sync::mpsc::sync_channel::<Option<u64>>(1);
             let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(32);
-            let http = config.http_client.clone();
             let url = stream_info.url.clone();
-            let segment_urls = stream_info.segment_urls.clone();
+            let download_track_id = shared.track_id;
+            let segment_urls = remaining_segment_urls;
             thread::Builder::new()
                 .name("noor-stream-download".into())
                 .spawn(move || {
@@ -2075,7 +2405,8 @@ fn decode_and_buffer_job(
                         .expect("failed to build download runtime");
                     dl_rt.block_on(async move {
                         let result: anyhow::Result<()> = async {
-                            if segment_urls.is_empty() {
+                            let http = build_tidal_cdn_client();
+                            if !is_dash_stream {
                                 // Single-URL path (JSON manifest or DASH BaseURL shape)
                                 let response = http
                                     .get(&url)
@@ -2095,28 +2426,48 @@ fn decode_and_buffer_job(
                                     }
                                 }
                             } else {
-                                // DASH SegmentTemplate path: init segment then media segments.
-                                // Total length is unknown upfront; send None so StreamPipe
-                                // skips seek-from-end and falls back to linear reads.
                                 let _ = len_tx.send(None);
-                                'segments: for seg_url in
-                                    std::iter::once(&url).chain(segment_urls.iter())
-                                {
-                                    let response = http
-                                        .get(seg_url.as_str())
-                                        .send()
-                                        .await
-                                        .context("DASH segment request failed")?
-                                        .error_for_status()
-                                        .context("DASH segment returned error status")?;
-                                    let mut stream = response.bytes_stream();
-                                    while let Some(chunk) = stream.next().await {
-                                        let bytes = chunk.context("DASH segment chunk error")?;
-                                        if chunk_tx.send(Some(bytes.to_vec())).is_err() {
-                                            break 'segments; // decoder stopped early
-                                        }
+                                let total_segments = segment_urls.len();
+                                let mut sent_segments = 0usize;
+                                let mut sent_bytes = 0usize;
+                                for (idx, seg_url) in segment_urls.into_iter().enumerate() {
+                                    let bytes = append_stream_bytes(
+                                        &http,
+                                        &seg_url,
+                                        initial_media_segments + idx + 1,
+                                    )
+                                    .await?;
+                                    sent_bytes += bytes.len();
+                                    if chunk_tx.send(Some(bytes)).is_err() {
+                                        warn!(
+                                            "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                            download_track_id,
+                                            sent_segments,
+                                            total_segments
+                                        );
+                                        break;
+                                    }
+                                    sent_segments += 1;
+                                    if sent_segments <= 3
+                                        || sent_segments == total_segments
+                                        || sent_segments % 10 == 0
+                                    {
+                                        debug!(
+                                            "TIDAL DASH segment queued: track_id={}, sent_segments={}, total_remaining_segments={}, fetch_window={}",
+                                            download_track_id,
+                                            sent_segments,
+                                            total_segments,
+                                            dash_background_fetch_window()
+                                        );
                                     }
                                 }
+                                debug!(
+                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}",
+                                    download_track_id,
+                                    sent_segments,
+                                    total_segments,
+                                    sent_bytes
+                                );
                             }
                             Ok(())
                         }
@@ -2135,7 +2486,11 @@ fn decode_and_buffer_job(
             let content_length = len_rx.recv().ok().flatten();
 
             // ── Step 3: probe + decode incrementally, writing to the buffer each packet ──────
-            let pipe = StreamPipe::new(chunk_rx, content_length);
+            let pipe = if is_dash_stream {
+                StreamPipe::with_initial(dash_initial, chunk_rx, content_length, true)
+            } else {
+                StreamPipe::new(chunk_rx, content_length)
+            };
             let mss = MediaSourceStream::new(Box::new(pipe), Default::default());
 
             // Give Symphonia a format hint from the Tidal manifest MIME type so it
@@ -2202,6 +2557,8 @@ fn decode_and_buffer_job(
             // count flips. None when input rate already matches output rate
             // (passthrough).
             let mut resampler: Option<StreamResampler> = None;
+            let mut decoded_packets: u64 = 0;
+            let mut decoded_samples: u64 = 0;
 
             loop {
                 if shared.stopped.load(Ordering::SeqCst) {
@@ -2210,7 +2567,13 @@ fn decode_and_buffer_job(
 
                 let packet = match format.next_packet() {
                     Ok(p) => p,
-                    Err(SymphoniaError::IoError(_)) => break, // EOF
+                    Err(SymphoniaError::IoError(err)) => {
+                        debug!(
+                            "Playback decoder EOF: track_id={}, packets={}, samples={}, error={}",
+                            shared.track_id, decoded_packets, decoded_samples, err
+                        );
+                        break;
+                    }
                     Err(SymphoniaError::ResetRequired) => {
                         decoder.reset();
                         continue;
@@ -2302,6 +2665,8 @@ fn decode_and_buffer_job(
                     .lock()
                     .map_err(|_| anyhow!("playback buffer poisoned"))?;
                 guard.samples.extend_from_slice(&resampled);
+                decoded_packets += 1;
+                decoded_samples += resampled.len() as u64;
             }
 
             // Flush any residual samples held in the resampler at end-of-stream
@@ -2330,6 +2695,13 @@ fn decode_and_buffer_job(
                 guard.samples.len() as u64
             };
             shared.total_samples.store(total, Ordering::Relaxed);
+            let total_secs = total as f64
+                / (shared.target_sample_rate.load(Ordering::Relaxed).max(1) as f64
+                    * device_channels.max(1) as f64);
+            debug!(
+                "Playback decoder finished: track_id={}, packets={}, buffered_samples={}, duration_secs={:.3}",
+                shared.track_id, decoded_packets, total, total_secs
+            );
 
             // Notify the runtime loop that this engine's decode is complete.
             // The runtime uses this to start the crossfade stream if the window is already open.
@@ -2665,6 +3037,35 @@ mod tests {
     }
 
     #[test]
+    fn output_rate_fallback_uses_base_when_desired_rate_was_rejected() {
+        let base = StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(192_000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let attempted = StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(176_400),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let fallback = output_rate_fallback_config(&attempted, &base).expect("fallback");
+
+        assert_eq!(fallback.sample_rate.0, 192_000);
+    }
+
+    #[test]
+    fn output_rate_fallback_is_none_when_attempt_already_uses_base_rate() {
+        let base = StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(192_000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        assert!(output_rate_fallback_config(&base, &base).is_none());
+    }
+
+    #[test]
     fn swap_pause_guard_restores_previous_pause_state_on_drop() {
         let (command_tx, _command_rx) = mpsc::channel();
         let shared = Arc::new(PlaybackSharedState::new(
@@ -2686,6 +3087,93 @@ mod tests {
         }
 
         assert!(!shared.paused.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stream_pipe_reports_known_length_before_eof() {
+        let (_tx, rx) = mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let pipe = StreamPipe::new(rx, Some(641_302));
+
+        assert_eq!(
+            symphonia::core::io::MediaSource::byte_len(&pipe),
+            Some(641_302)
+        );
+    }
+
+    #[test]
+    fn stream_pipe_hides_dynamic_length_for_dash_prebuffer() {
+        let (_tx, rx) = mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+
+        assert!(!symphonia::core::io::MediaSource::is_seekable(&pipe));
+        assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), None);
+    }
+
+    #[test]
+    fn stream_pipe_dynamic_seek_end_uses_buffered_length_without_draining() {
+        let (tx, rx) = mpsc::sync_channel::<Option<Vec<u8>>>(2);
+        tx.send(Some(vec![4, 5])).unwrap();
+        tx.send(None).unwrap();
+        drop(tx);
+        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+
+        assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 3);
+        assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), None);
+    }
+
+    #[test]
+    fn stream_pipe_reports_dynamic_length_after_eof() {
+        let (tx, rx) = mpsc::sync_channel::<Option<Vec<u8>>>(2);
+        tx.send(Some(vec![4, 5])).unwrap();
+        tx.send(None).unwrap();
+        drop(tx);
+        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+        let mut out = Vec::new();
+
+        pipe.read_to_end(&mut out).unwrap();
+
+        assert_eq!(out, vec![1, 2, 3, 4, 5]);
+        assert!(symphonia::core::io::MediaSource::is_seekable(&pipe));
+        assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), Some(5));
+    }
+
+    #[test]
+    fn stream_pipe_seek_end_buffers_all_chunks() {
+        let (tx, rx) = mpsc::sync_channel::<Option<Vec<u8>>>(3);
+        tx.send(Some(vec![1, 2])).unwrap();
+        tx.send(Some(vec![3, 4])).unwrap();
+        tx.send(None).unwrap();
+        drop(tx);
+        let mut pipe = StreamPipe::new(rx, Some(4));
+
+        assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 4);
+        assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), Some(4));
+    }
+
+    #[test]
+    fn dash_initial_media_count_prefers_multiple_segments() {
+        assert_eq!(dash_initial_media_count(0), 0);
+        assert_eq!(dash_initial_media_count(1), 1);
+        assert_eq!(
+            dash_initial_media_count(DASH_INITIAL_MEDIA_SEGMENTS + 10),
+            DASH_INITIAL_MEDIA_SEGMENTS
+        );
+    }
+
+    #[test]
+    fn dash_background_fetch_window_is_sequential() {
+        assert_eq!(dash_background_fetch_window(), 1);
+    }
+
+    #[test]
+    fn dash_segment_debug_label_redacts_query_values() {
+        let label = dash_segment_debug_label(
+            "https://audio.example.test/path/seg-9.m4s?Signature=secret&Expires=123",
+        );
+
+        assert_eq!(label, "audio.example.test/seg-9.m4s?Expires,Signature");
+        assert!(!label.contains("secret"));
+        assert!(!label.contains("123"));
     }
 
     #[test]

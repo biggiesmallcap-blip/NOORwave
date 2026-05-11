@@ -87,7 +87,8 @@ pub enum StreamCodec {
 
 impl StreamInfo {
     pub fn codec_kind(&self) -> StreamCodec {
-        match self.codec.to_ascii_lowercase().as_str() {
+        let codec = self.codec.to_ascii_lowercase();
+        match codec.as_str() {
             // TIDAL's "Broadcast Transport Stream" is a manifest wrapper around
             // FLAC for LOSSLESS / HI_RES_LOSSLESS quality. Symphonia decodes the
             // inner FLAC, and the underlying audio supports gapless seeks the
@@ -96,6 +97,7 @@ impl StreamInfo {
             "audio/aac" | "aac" | "audio/mp4" | "audio/m4a" => StreamCodec::Aac,
             "audio/mpeg" | "audio/mp3" | "mp3" => StreamCodec::Mp3,
             "audio/ogg" | "ogg" => StreamCodec::Ogg,
+            _ if codec.starts_with("mp4a.") => StreamCodec::Aac,
             _ => StreamCodec::Unknown,
         }
     }
@@ -212,6 +214,15 @@ fn extract_dash_codec(xml: &str) -> String {
         .unwrap_or_else(|| "audio/mp4".to_string())
 }
 
+fn extract_bts_codec(manifest: &serde_json::Value, manifest_mime: &str) -> String {
+    manifest
+        .get("codecs")
+        .and_then(|value| value.as_str())
+        .or_else(|| manifest.get("mimeType").and_then(|value| value.as_str()))
+        .unwrap_or(manifest_mime)
+        .to_string()
+}
+
 fn parse_video_expiry(resp: &serde_json::Value) -> Option<DateTime<Utc>> {
     for key in ["expiresAt", "expires_at", "expirationDate", "expiration"] {
         if let Some(raw) = resp.get(key).and_then(serde_json::Value::as_str)
@@ -312,6 +323,60 @@ fn parse_video_stream_info(
     })
 }
 
+fn redact_tidal_stream_body(raw: &str) -> String {
+    const MAX_LEN: usize = 900;
+    let redacted = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            redact_tidal_stream_value(&mut value);
+            value.to_string()
+        }
+        Err(_) => "unparseable TIDAL stream response body".to_string(),
+    };
+    if redacted.len() > MAX_LEN {
+        let mut end = MAX_LEN;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &redacted[..end])
+    } else {
+        redacted
+    }
+}
+
+fn redact_tidal_stream_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                if is_sensitive_tidal_stream_key(key) {
+                    *value = serde_json::Value::String("<redacted>".to_string());
+                } else {
+                    redact_tidal_stream_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_tidal_stream_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_tidal_stream_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "manifest"
+            | "manifesturl"
+            | "streamurl"
+            | "url"
+            | "urls"
+            | "hlsurl"
+            | "dashurl"
+            | "licenseurl"
+    )
+}
+
 // Parses a DASH SegmentTemplate manifest and returns (init_url, vec_of_segment_urls).
 // Handles both duration= attribute (uniform segments) and <SegmentTimeline> (variable).
 fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), StreamResolveError> {
@@ -337,7 +402,11 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
     static S_ELEM_RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r#"<S\s[^>]*>"#).unwrap());
     static S_R_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r#"\br="(\d+)""#).unwrap());
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\br="(-?\d+)""#).unwrap());
+    static S_D_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\bd="(\d+)""#).unwrap());
+    static S_T_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\bt="(\d+)""#).unwrap());
 
     let duration_str = MPD_DURATION_RE
         .captures(xml)
@@ -370,40 +439,115 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse().ok())
         .unwrap_or(1);
+    let total_ts = (total_secs * timescale as f64).ceil() as u64;
 
-    let segment_count: usize = if let Some(seg_dur) = SEG_DUR_RE
+    let segment_urls: Vec<String> = if S_ELEM_RE.is_match(xml) {
+        let entries: Vec<(Option<u64>, u64, i64)> = S_ELEM_RE
+            .captures_iter(xml)
+            .filter_map(|cap| {
+                let elem = cap.get(0).map_or("", |m| m.as_str());
+                let duration = S_D_RE
+                    .captures(elem)
+                    .and_then(|c| c.get(1))
+                    .and_then(|m| m.as_str().parse::<u64>().ok())?;
+                let start_time = S_T_RE
+                    .captures(elem)
+                    .and_then(|c| c.get(1))
+                    .and_then(|m| m.as_str().parse::<u64>().ok());
+                let repeat = S_R_RE
+                    .captures(elem)
+                    .and_then(|c| c.get(1))
+                    .and_then(|m| m.as_str().parse::<i64>().ok())
+                    .unwrap_or(0);
+                Some((start_time, duration, repeat))
+            })
+            .collect();
+
+        let mut urls = Vec::new();
+        let mut current_time = entries.first().and_then(|entry| entry.0).unwrap_or(0);
+        let mut current_number = start_number;
+
+        for (idx, (start_time, duration, repeat)) in entries.iter().copied().enumerate() {
+            if let Some(start_time) = start_time {
+                current_time = start_time;
+            }
+
+            let repeat_count = if repeat >= 0 {
+                repeat as u64 + 1
+            } else {
+                let end_time = entries
+                    .get(idx + 1)
+                    .and_then(|entry| entry.0)
+                    .unwrap_or(total_ts);
+                if end_time <= current_time {
+                    1
+                } else {
+                    (end_time - current_time).div_ceil(duration)
+                }
+            };
+
+            for _ in 0..repeat_count {
+                urls.push(fill_dash_template(
+                    &media_template,
+                    current_number,
+                    current_time,
+                ));
+                current_number += 1;
+                current_time = current_time.saturating_add(duration);
+            }
+        }
+
+        urls
+    } else if let Some(seg_dur) = SEG_DUR_RE
         .captures(xml)
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse::<u64>().ok())
     {
-        let total_ts = (total_secs * timescale as f64).ceil() as u64;
-        total_ts.div_ceil(seg_dur) as usize
-    } else {
-        S_ELEM_RE
-            .captures_iter(xml)
-            .map(|cap| {
-                let elem = cap.get(0).map_or("", |m| m.as_str());
-                let repeat = S_R_RE
-                    .captures(elem)
-                    .and_then(|c| c.get(1))
-                    .and_then(|m| m.as_str().parse::<usize>().ok())
-                    .unwrap_or(0);
-                1 + repeat
+        let segment_count = total_ts.div_ceil(seg_dur);
+        (0..segment_count)
+            .map(|idx| {
+                let number = start_number + idx;
+                let time = idx * seg_dur;
+                fill_dash_template(&media_template, number, time)
             })
-            .sum()
+            .collect()
+    } else {
+        Vec::new()
     };
 
-    if segment_count == 0 {
+    if segment_urls.is_empty() {
         return Err(parse_err(
             "DASH manifest: could not determine segment count",
         ));
     }
 
-    let segment_urls: Vec<String> = (start_number..start_number + segment_count as u64)
-        .map(|n| media_template.replace("$Number$", &n.to_string()))
-        .collect();
-
     Ok((init_url, segment_urls))
+}
+
+fn fill_dash_template(template: &str, number: u64, time: u64) -> String {
+    fn format_token(value: u64, caps: &regex::Captures<'_>) -> String {
+        let Some(width) = caps
+            .get(1)
+            .and_then(|width| width.as_str().parse::<usize>().ok())
+        else {
+            return value.to_string();
+        };
+        format!("{value:0width$}")
+    }
+
+    static NUMBER_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\$Number(?:%0?(\d+)d)?\$"#).unwrap());
+    static TIME_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"\$Time(?:%0?(\d+)d)?\$"#).unwrap());
+
+    let with_number = NUMBER_TOKEN_RE.replace_all(template, |caps: &regex::Captures<'_>| {
+        format_token(number, caps)
+    });
+    TIME_TOKEN_RE
+        .replace_all(&with_number, |caps: &regex::Captures<'_>| {
+            format_token(time, caps)
+        })
+        .into_owned()
 }
 
 /// Resolve a TIDAL stream using a pre-built request description.
@@ -444,35 +588,42 @@ pub async fn resolve_stream(
         .map_err(|error| StreamResolveError::RequestFailed {
             message: format!("failed to read playback response body: {error}"),
         })?;
-    tracing::debug!("TIDAL playback response: {}", raw);
+    let safe_body = redact_tidal_stream_body(&raw);
+    tracing::debug!(
+        response_bytes = raw.len(),
+        "TIDAL playback response received"
+    );
 
     if !status.is_success() {
         crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
         if asset_not_ready_body(&raw) {
             return Err(StreamResolveError::StreamRejected {
-                message: format!("TIDAL rejected playback request with {status}: {raw}"),
+                message: format!("TIDAL rejected playback request with {status}: {safe_body}"),
             });
         }
 
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
-                message: format!("TIDAL returned {status}: {raw}"),
+                message: format!("TIDAL returned {status}: {safe_body}"),
             });
         }
 
         if status.is_client_error() {
             return Err(StreamResolveError::StreamRejected {
-                message: format!("TIDAL rejected playback request with {status}: {raw}"),
+                message: format!("TIDAL rejected playback request with {status}: {safe_body}"),
             });
         }
 
-        return Err(StreamResolveError::UpstreamHttp { status, body: raw });
+        return Err(StreamResolveError::UpstreamHttp {
+            status,
+            body: safe_body,
+        });
     }
 
     let resp: serde_json::Value =
         serde_json::from_str(&raw).map_err(|error| StreamResolveError::ResponseParseFailed {
-            message: format!("failed to parse playback response JSON: {error}; body: {raw}"),
+            message: format!("failed to parse playback response JSON: {error}; body: {safe_body}"),
         })?;
 
     // The manifest is base64-encoded JSON containing the actual URL
@@ -545,7 +696,11 @@ pub async fn resolve_stream(
             .and_then(|url| url.as_str())
             .map(|s| s.to_string())
         {
-            Some(url) => (url, vec![], None),
+            Some(url) => (
+                url,
+                vec![],
+                Some(extract_bts_codec(&manifest, manifest_mime)),
+            ),
             None => {
                 let preview: String = String::from_utf8_lossy(&manifest_bytes)
                     .chars()
@@ -591,7 +746,10 @@ pub async fn resolve_stream(
                 returned_quality = %audio_quality,
                 sample_rate = ?sample_rate,
                 bit_depth = ?bit_depth,
+                manifest_mime = %manifest_mime,
+                inner_codec = %codec,
                 codec = %codec,
+                dash_segments = segment_urls.len(),
                 "TIDAL playback quality agreed"
             );
         }
@@ -604,7 +762,10 @@ pub async fn resolve_stream(
                 returned_quality = %audio_quality,
                 sample_rate = ?sample_rate,
                 bit_depth = ?bit_depth,
+                manifest_mime = %manifest_mime,
+                inner_codec = %codec,
                 codec = %codec,
+                dash_segments = segment_urls.len(),
                 "TIDAL playback quality differed from request"
             );
         }
@@ -616,11 +777,26 @@ pub async fn resolve_stream(
                 requested_quality = %request.audio_quality,
                 sample_rate = ?sample_rate,
                 bit_depth = ?bit_depth,
+                manifest_mime = %manifest_mime,
+                inner_codec = %codec,
                 codec = %codec,
+                dash_segments = segment_urls.len(),
                 "TIDAL playback response omitted audio quality"
             );
         }
     }
+
+    tracing::info!(
+        track_id = request.track_id,
+        requested_quality = %request.audio_quality,
+        returned_quality = %audio_quality,
+        sample_rate = ?sample_rate,
+        bit_depth = ?bit_depth,
+        manifest_mime = %manifest_mime,
+        inner_codec = %codec,
+        dash_segments = segment_urls.len(),
+        "TIDAL playback stream resolved"
+    );
 
     Ok(StreamInfo {
         url: stream_url,
@@ -682,35 +858,50 @@ pub async fn resolve_video_stream(
         .map_err(|error| StreamResolveError::RequestFailed {
             message: format!("failed to read video playback response body: {error}"),
         })?;
-    tracing::debug!(target: "tidal::video", video_id, "TIDAL video playback response: {}", raw);
+    let safe_body = redact_tidal_stream_body(&raw);
+    tracing::debug!(
+        target: "tidal::video",
+        video_id,
+        response_bytes = raw.len(),
+        "TIDAL video playback response received"
+    );
 
     if !status.is_success() {
         crate::services::tidal::backoff::global().classify(status.as_u16(), &raw, retry_after);
 
         if asset_not_ready_body(&raw) {
             return Err(StreamResolveError::StreamRejected {
-                message: format!("TIDAL rejected video playback request with {status}: {raw}"),
+                message: format!(
+                    "TIDAL rejected video playback request with {status}: {safe_body}"
+                ),
             });
         }
 
         if status == reqwest::StatusCode::UNAUTHORIZED || session_expired_body(&raw) {
             return Err(StreamResolveError::SessionExpired {
-                message: format!("TIDAL returned {status}: {raw}"),
+                message: format!("TIDAL returned {status}: {safe_body}"),
             });
         }
 
         if status.is_client_error() {
             return Err(StreamResolveError::StreamRejected {
-                message: format!("TIDAL rejected video playback request with {status}: {raw}"),
+                message: format!(
+                    "TIDAL rejected video playback request with {status}: {safe_body}"
+                ),
             });
         }
 
-        return Err(StreamResolveError::UpstreamHttp { status, body: raw });
+        return Err(StreamResolveError::UpstreamHttp {
+            status,
+            body: safe_body,
+        });
     }
 
     let resp_json: serde_json::Value =
         serde_json::from_str(&raw).map_err(|error| StreamResolveError::ResponseParseFailed {
-            message: format!("failed to parse video playback response JSON: {error}; body: {raw}"),
+            message: format!(
+                "failed to parse video playback response JSON: {error}; body: {safe_body}"
+            ),
         })?;
 
     parse_video_stream_info(&resp_json, quality)
@@ -798,6 +989,132 @@ mod tests {
     }
 
     #[test]
+    fn tidal_stream_body_redaction_removes_signed_media_values() {
+        let raw = json!({
+            "streamUrl": "https://cdn.example.test/audio.flac?Signature=secret&Expires=123",
+            "manifest": "base64-manifest-with-signed-urls",
+            "urls": ["https://cdn.example.test/video.m3u8?token=secret"],
+            "audioQuality": "HI_RES_LOSSLESS"
+        })
+        .to_string();
+
+        let redacted = redact_tidal_stream_body(&raw);
+
+        assert!(redacted.contains("HI_RES_LOSSLESS"));
+        assert!(!redacted.contains("Signature=secret"));
+        assert!(!redacted.contains("base64-manifest-with-signed-urls"));
+        assert!(!redacted.contains("token=secret"));
+    }
+
+    #[test]
+    fn dash_template_expands_negative_timeline_repeat_to_full_duration() {
+        let xml = r#"
+            <MPD mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet>
+                  <Representation>
+                    <SegmentTemplate
+                      timescale="1000"
+                      initialization="https://cdn.example.test/init.mp4"
+                      media="https://cdn.example.test/seg-$Number$.m4s"
+                      startNumber="1">
+                      <SegmentTimeline>
+                        <S d="3000" r="-1"/>
+                      </SegmentTimeline>
+                    </SegmentTemplate>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+
+        let (init_url, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+
+        assert_eq!(init_url, "https://cdn.example.test/init.mp4");
+        assert_eq!(
+            segment_urls,
+            vec![
+                "https://cdn.example.test/seg-1.m4s",
+                "https://cdn.example.test/seg-2.m4s",
+                "https://cdn.example.test/seg-3.m4s",
+                "https://cdn.example.test/seg-4.m4s"
+            ]
+        );
+    }
+
+    #[test]
+    fn dash_template_expands_time_tokens_and_padding() {
+        let xml = r#"
+            <MPD mediaPresentationDuration="PT12S">
+              <Period>
+                <AdaptationSet>
+                  <Representation>
+                    <SegmentTemplate
+                      timescale="1000"
+                      initialization="https://cdn.example.test/init.mp4"
+                      media="https://cdn.example.test/time-$Time%05d$.m4s"
+                      startNumber="9">
+                      <SegmentTimeline>
+                        <S t="1000" d="3000" r="2"/>
+                        <S d="1000" r="1"/>
+                      </SegmentTimeline>
+                    </SegmentTemplate>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+
+        let (_, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+
+        assert_eq!(
+            segment_urls,
+            vec![
+                "https://cdn.example.test/time-01000.m4s",
+                "https://cdn.example.test/time-04000.m4s",
+                "https://cdn.example.test/time-07000.m4s",
+                "https://cdn.example.test/time-10000.m4s",
+                "https://cdn.example.test/time-11000.m4s"
+            ]
+        );
+    }
+
+    #[test]
+    fn dash_template_prefers_timeline_over_template_duration() {
+        let xml = r#"
+            <MPD mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet>
+                  <Representation>
+                    <SegmentTemplate
+                      timescale="1000"
+                      duration="2000"
+                      initialization="https://cdn.example.test/init.mp4"
+                      media="https://cdn.example.test/time-$Time$.m4s"
+                      startNumber="1">
+                      <SegmentTimeline>
+                        <S t="9000" d="3000" r="2"/>
+                      </SegmentTimeline>
+                    </SegmentTemplate>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+
+        let (_, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+
+        assert_eq!(
+            segment_urls,
+            vec![
+                "https://cdn.example.test/time-9000.m4s",
+                "https://cdn.example.test/time-12000.m4s",
+                "https://cdn.example.test/time-15000.m4s"
+            ]
+        );
+    }
+
+    #[test]
     fn resolved_audio_quality_marks_matching_response_as_agreed() {
         let (quality, agreement) = resolved_audio_quality(
             &json!({
@@ -829,6 +1146,36 @@ mod tests {
 
         assert_eq!(quality, "LOSSLESS");
         assert_eq!(agreement, AudioQualityAgreement::Unreported);
+    }
+
+    #[test]
+    fn codec_kind_recognizes_mp4a_codec_strings_as_aac() {
+        let info = StreamInfo {
+            url: "https://audio.example.test/track.m4a".to_string(),
+            segment_urls: vec![],
+            track_id: 1,
+            audio_quality: "HIGH".to_string(),
+            codec: "mp4a.40.2".to_string(),
+            sample_rate: None,
+            bit_depth: None,
+        };
+
+        assert_eq!(info.codec_kind(), StreamCodec::Aac);
+        assert!(!info.is_lossless());
+    }
+
+    #[test]
+    fn extracts_inner_codec_from_bts_manifest() {
+        let manifest = json!({
+            "mimeType": "audio/mp4",
+            "codecs": "mp4a.40.2",
+            "urls": ["https://audio.example.test/track.m4a"]
+        });
+
+        assert_eq!(
+            extract_bts_codec(&manifest, "application/vnd.tidal.bts"),
+            "mp4a.40.2"
+        );
     }
 
     fn resolve_manifest_url(
