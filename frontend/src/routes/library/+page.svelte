@@ -28,6 +28,7 @@
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
 	import { goto } from '$app/navigation';
 	import { showToast } from '$lib/stores/toast';
+	import { wsMessages } from '$lib/api/ws';
 
 	function buildAddToPlaylistSubmenu(
 		getTrackIds: () => Promise<number[]>,
@@ -74,6 +75,7 @@
 	}
 
 	const PAGE_SIZE = 100;
+	const RECENT_TRACK_LIMIT = 10;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
 	let playlists = $state<Playlist[]>([]);
@@ -96,6 +98,7 @@
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
 	let failedArtistImages = $state(new Set<string>());
+	let recentTracks = $state<Track[]>([]);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -148,12 +151,32 @@
 		void loadAlbums();
 		void loadTracks();
 		void loadBatchMeta();
+		void loadRecentTracks();
+		const unsubscribeWs = wsMessages.subscribe((messages) => {
+			const latest = messages.at(-1);
+			if (!latest) return;
+			if (latest.type === 'listen_history_updated') {
+				void loadRecentTracks();
+			}
+		});
 		return () => {
+			unsubscribeWs();
 			if (searchTimer) clearTimeout(searchTimer);
 			infiniteObserver?.disconnect();
 			if (undoTimer) clearTimeout(undoTimer);
 		};
 	});
+
+	async function loadRecentTracks() {
+		try {
+			const data = await api.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false);
+			recentTracks = data.tracks
+				.filter((track) => track.last_played_at)
+				.slice(0, RECENT_TRACK_LIMIT);
+		} catch (error) {
+			console.error('Failed to load recent tracks:', error);
+		}
+	}
 
 	async function loadBatchMeta() {
 		try {
@@ -882,13 +905,6 @@
 			.slice(0, 20)
 			.map(({ card }) => card);
 	});
-
-	let recentTracks = $derived.by(() =>
-		[...$tracks]
-			.filter(t => t.last_played_at)
-			.sort((a, b) => b.last_played_at!.localeCompare(a.last_played_at!))
-			.slice(0, 10)
-	);
 
 	// Per-tile lazy artwork. Keyed by domain-prefixed id so we never collide
 	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
