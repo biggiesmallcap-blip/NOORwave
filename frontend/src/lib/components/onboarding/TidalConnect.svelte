@@ -22,11 +22,22 @@
 	let redirectUrl = $state('');
 	let errorMsg = $state('');
 	let redirectError = $state('');
+	let externalOpenError = $state('');
+
+	async function openVerifyUrl() {
+		externalOpenError = '';
+		if (!verifyUrl) return;
+		const result = await openExternal(verifyUrl);
+		if (!result.ok) {
+			externalOpenError = `Browser did not open: ${result.error}. Copy this TIDAL sign-in link into your browser.`;
+		}
+	}
 
 	async function start() {
 		status = 'connecting';
 		errorMsg = '';
 		redirectError = '';
+		externalOpenError = '';
 		redirectUrl = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
@@ -35,7 +46,7 @@
 			verifyUrl = data.verify_url ?? '';
 			status = 'awaiting';
 
-			if (verifyUrl) openExternal(verifyUrl);
+			await openVerifyUrl();
 		} catch (e) {
 			status = 'error';
 			errorMsg = e instanceof Error ? e.message : String(e);
@@ -107,6 +118,10 @@
 		<div class="redirect-login">
 			<p class="muted">A TIDAL sign-in page opened.</p>
 			<p class="muted">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
+			{#if externalOpenError}
+				<p class="error" role="alert">{externalOpenError}</p>
+				<input class="redirect-input" type="url" readonly value={verifyUrl} aria-label="TIDAL sign-in URL" />
+			{/if}
 			<input
 				class="redirect-input"
 				type="url"
@@ -121,7 +136,7 @@
 				<button class="btn btn-primary" onclick={completeLogin} disabled={!redirectUrl.trim()}>Finish login</button>
 			</div>
 			<p class="hint">
-				Didn't open? <button type="button" class="hint-link" onclick={() => openExternal(verifyUrl)}>Open the page manually</button>.
+				Didn't open? <button type="button" class="hint-link" onclick={() => void openVerifyUrl()}>Open the page manually</button>.
 			</p>
 			{#if showSkip}
 				<button class="btn btn-ghost" onclick={handleSkip}>Skip for now</button>

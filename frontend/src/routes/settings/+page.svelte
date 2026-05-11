@@ -69,6 +69,7 @@
 	let verifyUrl = $state('');
 	let tidalRedirectUrl = $state('');
 	let tidalRedirectError = $state('');
+	let tidalExternalOpenError = $state('');
 	let errorMsg = $state('');
 	let playbackRuntime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
@@ -329,6 +330,7 @@
 		tidalStatus.set('connecting');
 		errorMsg = '';
 		tidalRedirectError = '';
+		tidalExternalOpenError = '';
 		tidalRedirectUrl = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
@@ -337,7 +339,7 @@
 			const data = await resp.json();
 			verifyUrl = data.verify_url ?? '';
 
-			if (verifyUrl) openExternal(verifyUrl);
+			await openTidalVerifyUrl();
 		} catch (e) {
 			tidalStatus.set('disconnected');
 			if (isFetchConnectionError(e)) {
@@ -350,9 +352,19 @@
 		}
 	}
 
+	async function openTidalVerifyUrl() {
+		tidalExternalOpenError = '';
+		if (!verifyUrl) return;
+		const result = await openExternal(verifyUrl);
+		if (!result.ok) {
+			tidalExternalOpenError = `Browser did not open: ${result.error}. Copy this TIDAL sign-in link into your browser.`;
+		}
+	}
+
 	async function completeTidalLogin() {
 		errorMsg = '';
 		tidalRedirectError = '';
+		tidalExternalOpenError = '';
 		if (!isValidTidalRedirectUrl(tidalRedirectUrl)) {
 			tidalRedirectError = 'Paste the final TIDAL redirect URL to finish login.';
 			return;
@@ -370,6 +382,7 @@
 			tidalUserId.set(data.user_id ?? '');
 			void refreshTidalStatus();
 			verifyUrl = '';
+			tidalExternalOpenError = '';
 			tidalRedirectUrl = '';
 		} catch (e) {
 			if (isFetchConnectionError(e)) {
@@ -451,6 +464,7 @@
 	}
 
 	async function disconnectTidal() {
+		tidalExternalOpenError = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/logout`, { method: 'POST' });
 			markServerOnline();
@@ -458,6 +472,7 @@
 			tidalStatus.set('disconnected');
 			tidalUserId.set('');
 			verifyUrl = '';
+			tidalExternalOpenError = '';
 			syncStatus.set('idle');
 			syncProgress.set(null);
 		} catch (error) {
@@ -1575,10 +1590,14 @@
 						<p class="page-copy">A TIDAL sign-in page opened.</p>
 						<p class="page-copy">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
 						<div class="action-row">
-							<button type="button" class="btn btn-glass" onclick={() => openExternal(verifyUrl)} disabled={!verifyUrl}>
+							<button type="button" class="btn btn-glass" onclick={() => void openTidalVerifyUrl()} disabled={!verifyUrl}>
 								Open TIDAL sign-in
 							</button>
 						</div>
+						{#if tidalExternalOpenError}
+							<p class="error" role="alert">{tidalExternalOpenError}</p>
+							<input class="text-field" type="url" readonly value={verifyUrl} aria-label="TIDAL sign-in URL" />
+						{/if}
 						<input
 							class="text-field"
 							type="url"

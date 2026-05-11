@@ -99,7 +99,7 @@
 			if (data.status === 'awaiting' && data.auth_url) {
 				pendingAuthUrl = data.auth_url;
 				scrobbleState = 'awaiting_user';
-				openExternal(data.auth_url);
+				void openExternal(data.auth_url);
 			} else {
 				scrobbleState = 'error';
 				scrobbleError = data.message ?? 'Could not start Last.fm auth.';
@@ -168,7 +168,7 @@
 			<p class="muted">
 				Optional: paste a free Last.fm API key to enrich your library with crowd-sourced tags
 				and similar-artist suggestions.
-				<button type="button" class="muted-link" onclick={() => openExternal('https://www.last.fm/api/account/create')}>Get one here</button>.
+				<button type="button" class="muted-link" onclick={() => void openExternal('https://www.last.fm/api/account/create')}>Get one here</button>.
 			</p>
 		{/if}
 
@@ -237,7 +237,7 @@
 					<div class="actions">
 						<button class="btn btn-primary" onclick={completeScrobbleAuth}>I've authorized</button>
 						{#if pendingAuthUrl}
-							<button class="btn btn-ghost" onclick={() => pendingAuthUrl && openExternal(pendingAuthUrl)}>
+							<button class="btn btn-ghost" onclick={() => { if (pendingAuthUrl) void openExternal(pendingAuthUrl); }}>
 								Reopen auth page
 							</button>
 						{/if}
