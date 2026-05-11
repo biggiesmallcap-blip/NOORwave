@@ -4070,6 +4070,23 @@ pub struct ExternalTrackCandidateRow {
     pub resolved_track_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalTidalResolutionCandidateRow {
+    pub id: i64,
+    pub title: String,
+    pub artist_name: String,
+    pub duration_ms: Option<i64>,
+    pub sighting_count: i64,
+    pub max_similarity: Option<f64>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalTidalSimilarSeedRow {
+    pub track_id: i64,
+    pub artist_tidal_id: i64,
+}
+
 #[derive(Debug, Clone)]
 struct ExternalCandidateFallbackIdentity {
     normalized_artist_name: String,
@@ -4087,6 +4104,13 @@ pub struct ExternalTrackCandidateUpsert {
     pub genre_tags_json: Option<String>,
     pub duration_ms: Option<i64>,
     pub expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalCandidateTidalResolution {
+    pub tidal_id: i64,
+    pub genre_tags_json: Option<String>,
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -5009,6 +5033,84 @@ pub fn get_external_track_candidates_for_training(
     Ok(rows)
 }
 
+pub fn get_unresolved_lastfm_external_candidates_for_tidal_resolution(
+    conn: &Connection,
+    now: &str,
+    limit: i64,
+) -> Result<Vec<ExternalTidalResolutionCandidateRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.artist_name, c.duration_ms,
+                COUNT(s.seed_track_id) AS sighting_count,
+                MAX(s.similarity) AS max_similarity,
+                c.expires_at
+         FROM external_track_candidates c
+         JOIN external_track_candidate_sightings s ON s.candidate_id = c.id
+         WHERE c.expires_at > ?1
+           AND c.resolved_track_id IS NULL
+           AND c.tidal_id IS NULL
+           AND s.source = 'lastfm_similar'
+           AND s.expires_at > ?1
+         GROUP BY c.id
+         ORDER BY sighting_count DESC,
+                  COALESCE(max_similarity, 0) DESC,
+                  c.expires_at DESC,
+                  c.updated_at DESC,
+                  c.id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![now, limit.max(1)], |row| {
+            Ok(ExternalTidalResolutionCandidateRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist_name: row.get(2)?,
+                duration_ms: row.get(3)?,
+                sighting_count: row.get(4)?,
+                max_similarity: row.get(5)?,
+                expires_at: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn count_playable_external_candidates(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM external_track_candidates
+         WHERE tidal_id IS NOT NULL
+           AND resolved_track_id IS NULL
+           AND expires_at > datetime('now')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub fn get_tidal_similar_seed_rows(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ExternalTidalSimilarSeedRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, ar.tidal_id
+         FROM tracks t
+         JOIN artists ar ON ar.id = t.artist_id
+         WHERE t.tidal_id IS NOT NULL
+           AND ar.tidal_id IS NOT NULL
+         ORDER BY t.play_count DESC, t.last_played_at DESC, t.id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit.max(1)], |row| {
+            Ok(ExternalTidalSimilarSeedRow {
+                track_id: row.get(0)?,
+                artist_tidal_id: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn upsert_external_track_candidate(
     conn: &Connection,
     input: &ExternalTrackCandidateUpsert,
@@ -5109,6 +5211,54 @@ pub fn upsert_external_track_candidate(
     };
 
     get_external_track_candidate_by_id(conn, id)
+}
+
+pub fn resolve_external_candidate_tidal_metadata(
+    conn: &Connection,
+    candidate_id: i64,
+    input: &ExternalCandidateTidalResolution,
+) -> Result<ExternalTrackCandidateRow> {
+    if input.tidal_id <= 0 {
+        bail!("external candidate tidal_id must be positive");
+    }
+
+    if let Some(existing_id) = conn
+        .query_row(
+            "SELECT id FROM external_track_candidates WHERE tidal_id = ?1 AND id <> ?2",
+            params![input.tidal_id, candidate_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        conn.execute(
+            "UPDATE external_track_candidates
+             SET genre_tags_json = COALESCE(genre_tags_json, ?2),
+                 duration_ms = COALESCE(duration_ms, ?3),
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+            params![existing_id, input.genre_tags_json, input.duration_ms],
+        )?;
+        merge_external_track_candidates(conn, existing_id, candidate_id)?;
+        return get_external_track_candidate_by_id(conn, existing_id);
+    }
+
+    conn.execute(
+        "UPDATE external_track_candidates
+         SET tidal_id = ?2,
+             dedupe_key = ?3,
+             genre_tags_json = COALESCE(genre_tags_json, ?4),
+             duration_ms = COALESCE(duration_ms, ?5),
+             updated_at = datetime('now')
+         WHERE id = ?1",
+        params![
+            candidate_id,
+            input.tidal_id,
+            format!("tidal:{}", input.tidal_id),
+            input.genre_tags_json,
+            input.duration_ms,
+        ],
+    )?;
+    get_external_track_candidate_by_id(conn, candidate_id)
 }
 
 fn external_candidate_fallback_identity(
@@ -7311,6 +7461,76 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].candidate_id, resolved.id);
         assert_eq!(rows[0].tidal_id, Some(9901));
+    }
+
+    #[test]
+    fn tidal_resolution_candidate_lookup_prioritizes_sightings_similarity_and_cap() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id)
+             VALUES (1, 'Seed A', 1, 901), (2, 'Seed B', 1, 902)",
+            [],
+        )
+        .expect("seed tracks");
+        for (key, title) in [
+            ("one-sighting", "One"),
+            ("two-sightings", "Two"),
+            ("resolved", "Resolved"),
+            ("already-tidal", "Already Tidal"),
+        ] {
+            conn.execute(
+                "INSERT INTO external_track_candidates
+                 (dedupe_key, title, artist_name, expires_at, tidal_id)
+                 VALUES (?1, ?2, 'Outside', '2099-01-01 00:00:00',
+                         CASE WHEN ?1 = 'already-tidal' THEN 9901 ELSE NULL END)",
+                params![key, title],
+            )
+            .expect("candidate");
+        }
+        conn.execute(
+            "UPDATE external_track_candidates SET resolved_track_id = 1 WHERE dedupe_key = 'resolved'",
+            [],
+        )
+        .expect("mark resolved");
+        conn.execute(
+            "INSERT INTO external_track_candidate_sightings
+             (candidate_id, seed_track_id, source, similarity, expires_at)
+             SELECT id, 1, 'lastfm_similar', 0.60, '2099-01-01 00:00:00'
+             FROM external_track_candidates WHERE dedupe_key = 'one-sighting'",
+            [],
+        )
+        .expect("one sighting");
+        conn.execute(
+            "INSERT INTO external_track_candidate_sightings
+             (candidate_id, seed_track_id, source, similarity, expires_at)
+             SELECT id, 1, 'lastfm_similar', 0.70, '2099-01-01 00:00:00'
+             FROM external_track_candidates WHERE dedupe_key = 'two-sightings'",
+            [],
+        )
+        .expect("two sighting a");
+        conn.execute(
+            "INSERT INTO external_track_candidate_sightings
+             (candidate_id, seed_track_id, source, similarity, expires_at)
+             SELECT id, 2, 'lastfm_similar', 0.90, '2099-01-01 00:00:00'
+             FROM external_track_candidates WHERE dedupe_key = 'two-sightings'",
+            [],
+        )
+        .expect("two sighting b");
+
+        let rows = get_unresolved_lastfm_external_candidates_for_tidal_resolution(
+            &conn,
+            "2026-02-01 00:00:00",
+            1,
+        )
+        .expect("resolution candidates");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Two");
+        assert_eq!(rows[0].sighting_count, 2);
+        assert_eq!(rows[0].max_similarity, Some(0.90));
     }
 
     #[test]

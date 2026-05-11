@@ -14,7 +14,7 @@ use crate::services::discovery_trainer::{
     TrainerExternalCandidate, TrainerExternalNeighbor, TrainerInput, TrainerSequenceGroup,
     TrainingProgressUpdate, run_discovery_training,
 };
-use crate::services::tidal::client::{TidalClient, TidalSearchTrack};
+use crate::services::tidal::client::{TidalClient, TidalSearchTrack, TidalTrack};
 use anyhow::{Context, Result, bail};
 use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
@@ -30,9 +30,15 @@ const EXTERNAL_TRAINING_CANDIDATE_LIMIT: i64 = 1_000;
 const EXTERNAL_REFRESH_MAX_SEED_TRACKS: usize = 100;
 const EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED: usize = 20;
 const EXTERNAL_REFRESH_TIDAL_NEW_RELEASE_ROWS: usize = 500;
+const EXTERNAL_REFRESH_TIDAL_SIMILAR_SEED_TRACKS: usize = 10;
+const EXTERNAL_REFRESH_TIDAL_SIMILAR_ARTISTS_PER_SEED: i32 = 2;
+const EXTERNAL_REFRESH_TIDAL_SIMILAR_TRACKS_PER_ARTIST: i32 = 2;
 const EXTERNAL_REFRESH_STALE_HOURS: i64 = 24;
 const EXTERNAL_REFRESH_LASTFM_DELAY_MS: u64 = 500;
 const EXTERNAL_REFRESH_LASTFM_RATE_LIMIT_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+const EXTERNAL_TIDAL_RESOLUTION_FULL_LIMIT: i64 = 500;
+const EXTERNAL_TIDAL_RESOLUTION_INCREMENTAL_LIMIT: i64 = 150;
+const EXTERNAL_TIDAL_RESOLUTION_SEARCH_LIMIT: i32 = 10;
 pub const DISCOVERY_TRAINING_SAFETY_TIMEOUT_MESSAGE: &str =
     "Laptop safety timeout stopped discovery training.";
 const DISCOVERY_TRAINING_TIMEOUT_STANDARD_SECS: u64 = 30 * 60;
@@ -74,7 +80,7 @@ impl From<LastFmSimilarTrack> for ExternalLastfmCandidate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternalTidalCandidate {
     pub tidal_id: i64,
     pub artist_name: String,
@@ -98,6 +104,82 @@ impl From<TidalSearchTrack> for ExternalTidalCandidate {
     }
 }
 
+fn external_tidal_candidate_from_track(value: TidalTrack) -> ExternalTidalCandidate {
+    let genre_tags = collect_tidal_candidate_genres(&value.extra);
+    ExternalTidalCandidate {
+        tidal_id: value.id,
+        artist_name: value.artist.name,
+        title: value.title,
+        genre_tags,
+        duration_ms: Some(value.duration.saturating_mul(1000)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TidalSearchResolutionDecision {
+    Resolved(ExternalTidalCandidate),
+    Rejected,
+    Ambiguous,
+    NoResult,
+}
+
+fn classify_tidal_search_resolution(
+    title: &str,
+    artist_name: &str,
+    duration_ms: Option<i64>,
+    results: &[TidalSearchTrack],
+) -> TidalSearchResolutionDecision {
+    if results.is_empty() {
+        return TidalSearchResolutionDecision::NoResult;
+    }
+
+    let title_norm = normalize_resolution_text(title);
+    let artist_norm = normalize_resolution_text(artist_name);
+    let strong = results
+        .iter()
+        .filter(|track| {
+            let Some(result_artist) = track.artist_name.as_deref() else {
+                return false;
+            };
+            normalize_resolution_text(&track.title) == title_norm
+                && normalize_resolution_text(result_artist) == artist_norm
+                && duration_is_close(duration_ms, Some(track.duration.saturating_mul(1000)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match strong.len() {
+        0 => TidalSearchResolutionDecision::Rejected,
+        1 => TidalSearchResolutionDecision::Resolved(ExternalTidalCandidate::from(
+            strong.into_iter().next().expect("one strong match"),
+        )),
+        _ => TidalSearchResolutionDecision::Ambiguous,
+    }
+}
+
+fn normalize_resolution_text(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn duration_is_close(left_ms: Option<i64>, right_ms: Option<i64>) -> bool {
+    match (left_ms, right_ms) {
+        (Some(left), Some(right)) if left > 0 && right > 0 => {
+            let delta = (left - right).abs();
+            let tolerance = 10_000.max((left.max(right) as f64 * 0.05).round() as i64);
+            delta <= tolerance
+        }
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExternalProviderRefreshReport {
     pub seed_tracks_scanned: usize,
@@ -111,7 +193,25 @@ pub struct ExternalProviderRefreshReport {
     pub tidal_new_release_candidates_upserted: usize,
     pub tidal_new_release_sightings_upserted: usize,
     pub tidal_new_release_skipped_rows: usize,
+    pub tidal_similar_rows_seen: usize,
+    pub tidal_similar_candidates_upserted: usize,
+    pub tidal_similar_sightings_upserted: usize,
+    pub tidal_similar_provider_errors: usize,
     pub skipped_rows: usize,
+    pub rate_limited: bool,
+    pub cooldown_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExternalTidalResolutionReport {
+    pub attempted: usize,
+    pub resolved: usize,
+    pub rejected: usize,
+    pub ambiguous: usize,
+    pub no_result: usize,
+    pub provider_errors: usize,
+    pub playable_before: i64,
+    pub playable_after: i64,
     pub rate_limited: bool,
     pub cooldown_ms: u64,
 }
@@ -216,6 +316,7 @@ pub async fn refresh_external_provider_candidates(
                                 &seed_rows,
                                 &lastfm_rows,
                                 &[],
+                                &HashMap::new(),
                                 chrono::Utc::now().naive_utc(),
                             )
                         })?;
@@ -256,16 +357,244 @@ pub async fn refresh_external_provider_candidates(
     } else {
         Vec::new()
     };
+    let mut tidal_similar_provider_errors = 0usize;
+    let mut tidal_similar_by_seed: HashMap<i64, Vec<ExternalTidalCandidate>> = HashMap::new();
+    if let Some(tidal) = clients.tidal.as_ref() {
+        let seed_limit = budget
+            .seed_tracks
+            .min(EXTERNAL_REFRESH_TIDAL_SIMILAR_SEED_TRACKS) as i64;
+        let tidal_seed_rows = db
+            .with_conn(|conn| queries::get_tidal_similar_seed_rows(conn, seed_limit))
+            .unwrap_or_default();
+        'seed_loop: for seed in tidal_seed_rows {
+            let similar_artists = match tidal
+                .get_artist_similar(
+                    seed.artist_tidal_id,
+                    EXTERNAL_REFRESH_TIDAL_SIMILAR_ARTISTS_PER_SEED,
+                    0,
+                )
+                .await
+            {
+                Ok(rows) => rows.items,
+                Err(error) => {
+                    tidal_similar_provider_errors += 1;
+                    if is_provider_rate_limit_error(&error) {
+                        tracing::warn!(
+                            target: "noor.discovery.external",
+                            seed_track_id = seed.track_id,
+                            error = %error,
+                            "TIDAL similar refresh hit rate limit"
+                        );
+                        break;
+                    }
+                    tracing::warn!(
+                        target: "noor.discovery.external",
+                        seed_track_id = seed.track_id,
+                        error = %error,
+                        "TIDAL similar artist refresh failed"
+                    );
+                    continue;
+                }
+            };
+            for artist in similar_artists
+                .into_iter()
+                .take(EXTERNAL_REFRESH_TIDAL_SIMILAR_ARTISTS_PER_SEED as usize)
+            {
+                match tidal
+                    .get_artist_top_tracks(
+                        artist.id,
+                        EXTERNAL_REFRESH_TIDAL_SIMILAR_TRACKS_PER_ARTIST,
+                        0,
+                    )
+                    .await
+                {
+                    Ok(rows) => {
+                        tidal_similar_by_seed
+                            .entry(seed.track_id)
+                            .or_default()
+                            .extend(
+                                rows.items
+                                    .into_iter()
+                                    .map(external_tidal_candidate_from_track),
+                            );
+                    }
+                    Err(error) => {
+                        tidal_similar_provider_errors += 1;
+                        if is_provider_rate_limit_error(&error) {
+                            tracing::warn!(
+                                target: "noor.discovery.external",
+                                seed_track_id = seed.track_id,
+                                artist_tidal_id = artist.id,
+                                error = %error,
+                                "TIDAL similar top-tracks refresh hit rate limit"
+                            );
+                            break 'seed_loop;
+                        }
+                        tracing::warn!(
+                            target: "noor.discovery.external",
+                            seed_track_id = seed.track_id,
+                            artist_tidal_id = artist.id,
+                            error = %error,
+                            "TIDAL similar top-tracks refresh failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
-    db.with_conn(|conn| {
+    let mut report = db.with_conn(|conn| {
         persist_external_provider_refresh(
             conn,
             &seed_rows,
             &lastfm_rows,
             &tidal_rows,
+            &tidal_similar_by_seed,
             chrono::Utc::now().naive_utc(),
         )
-    })
+    })?;
+    report.tidal_similar_provider_errors = tidal_similar_provider_errors;
+    Ok(report)
+}
+
+pub async fn resolve_external_tidal_candidates(
+    db: &Database,
+    tidal: Option<&TidalClient>,
+    full_mode: bool,
+) -> Result<ExternalTidalResolutionReport> {
+    let mut report = ExternalTidalResolutionReport {
+        playable_before: db.with_conn(queries::count_playable_external_candidates)?,
+        ..ExternalTidalResolutionReport::default()
+    };
+    let Some(tidal) = tidal else {
+        report.playable_after = report.playable_before;
+        return Ok(report);
+    };
+
+    let limit = if full_mode {
+        EXTERNAL_TIDAL_RESOLUTION_FULL_LIMIT
+    } else {
+        EXTERNAL_TIDAL_RESOLUTION_INCREMENTAL_LIMIT
+    };
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let candidates = db.with_conn(|conn| {
+        queries::get_unresolved_lastfm_external_candidates_for_tidal_resolution(conn, &now, limit)
+    })?;
+    let mut failed_keys = HashSet::new();
+
+    for candidate in candidates {
+        let failure_key = format!(
+            "{}\u{1f}{}",
+            normalize_resolution_text(&candidate.artist_name),
+            normalize_resolution_text(&candidate.title)
+        );
+        if failed_keys.contains(&failure_key) {
+            continue;
+        }
+
+        report.attempted += 1;
+        let query = format!("{} {}", candidate.artist_name, candidate.title);
+        let results = match cached_tidal_track_search(
+            db,
+            tidal,
+            &query,
+            EXTERNAL_TIDAL_RESOLUTION_SEARCH_LIMIT,
+        )
+        .await
+        {
+            Ok(results) => results,
+            Err(error) => {
+                report.provider_errors += 1;
+                failed_keys.insert(failure_key);
+                if is_provider_rate_limit_error(&error) {
+                    report.rate_limited = true;
+                    report.cooldown_ms = EXTERNAL_REFRESH_LASTFM_RATE_LIMIT_COOLDOWN_MS;
+                    tracing::warn!(
+                        target: "noor.discovery.external",
+                        candidate_id = candidate.id,
+                        error = %error,
+                        "TIDAL candidate resolution hit rate limit"
+                    );
+                    break;
+                }
+                tracing::warn!(
+                    target: "noor.discovery.external",
+                    candidate_id = candidate.id,
+                    error = %error,
+                    "TIDAL candidate resolution failed"
+                );
+                continue;
+            }
+        };
+
+        match classify_tidal_search_resolution(
+            &candidate.title,
+            &candidate.artist_name,
+            candidate.duration_ms,
+            &results,
+        ) {
+            TidalSearchResolutionDecision::Resolved(match_candidate) => {
+                let genre_tags_json = if match_candidate.genre_tags.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&match_candidate.genre_tags)?)
+                };
+                db.with_conn(|conn| {
+                    queries::resolve_external_candidate_tidal_metadata(
+                        conn,
+                        candidate.id,
+                        &queries::ExternalCandidateTidalResolution {
+                            tidal_id: match_candidate.tidal_id,
+                            genre_tags_json,
+                            duration_ms: match_candidate.duration_ms,
+                        },
+                    )
+                })?;
+                report.resolved += 1;
+            }
+            TidalSearchResolutionDecision::Rejected => {
+                report.rejected += 1;
+                failed_keys.insert(failure_key);
+            }
+            TidalSearchResolutionDecision::Ambiguous => {
+                report.ambiguous += 1;
+                failed_keys.insert(failure_key);
+            }
+            TidalSearchResolutionDecision::NoResult => {
+                report.no_result += 1;
+                failed_keys.insert(failure_key);
+            }
+        }
+    }
+
+    report.playable_after = db.with_conn(queries::count_playable_external_candidates)?;
+    Ok(report)
+}
+
+async fn cached_tidal_track_search(
+    db: &Database,
+    tidal: &TidalClient,
+    query: &str,
+    limit: i32,
+) -> Result<Vec<TidalSearchTrack>> {
+    if let Some(cached) = db.with_conn(|conn| {
+        crate::services::tidal::cache::get_search(
+            conn,
+            &crate::services::tidal::cache::TidalSearchCacheConfig::default(),
+            query,
+            limit,
+            0,
+        )
+    })? {
+        return Ok(cached.tracks);
+    }
+
+    let catalog = tidal.search_catalog(query, limit, 0).await?;
+    db.with_conn(|conn| crate::services::tidal::cache::put_search(conn, query, limit, 0, &catalog))
+        .unwrap_or_else(|error| {
+            tracing::warn!("tidal_search_cache write failed during external resolution: {error}");
+        });
+    Ok(catalog.tracks)
 }
 
 fn is_provider_rate_limit_error(error: &anyhow::Error) -> bool {
@@ -280,6 +609,7 @@ pub fn persist_external_provider_refresh(
     seeds: &[EmbeddingTrackRow],
     lastfm_by_seed: &HashMap<i64, Vec<ExternalLastfmCandidate>>,
     tidal_candidates: &[ExternalTidalCandidate],
+    tidal_similar_by_seed: &HashMap<i64, Vec<ExternalTidalCandidate>>,
     now: chrono::NaiveDateTime,
 ) -> Result<ExternalProviderRefreshReport> {
     let expires_at = now + chrono::Duration::days(30);
@@ -289,6 +619,7 @@ pub fn persist_external_provider_refresh(
         seed_tracks_scanned: seeds.len(),
         lastfm_rows_seen: lastfm_by_seed.values().map(Vec::len).sum(),
         tidal_new_release_rows_seen: tidal_candidates.len(),
+        tidal_similar_rows_seen: tidal_similar_by_seed.values().map(Vec::len).sum(),
         candidates_upserted: 0,
         sightings_upserted: 0,
         skipped_rows: 0,
@@ -408,6 +739,64 @@ pub fn persist_external_provider_refresh(
             )?;
             report.sightings_upserted += 1;
             report.tidal_new_release_sightings_upserted += 1;
+        }
+    }
+
+    for (&seed_track_id, rows) in tidal_similar_by_seed {
+        if !seed_ids.contains(&seed_track_id) {
+            report.skipped_rows += rows.len();
+            continue;
+        }
+        for row in rows {
+            if row.tidal_id <= 0 || row.title.trim().is_empty() || row.artist_name.trim().is_empty()
+            {
+                report.skipped_rows += 1;
+                continue;
+            }
+            let genre_tags_json = if row.genre_tags.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&row.genre_tags)?)
+            };
+            let candidate = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(row.tidal_id),
+                    mbid: None,
+                    dedupe_key: external_candidate_dedupe_key(
+                        Some(row.tidal_id),
+                        None,
+                        &row.artist_name,
+                        &row.title,
+                        row.duration_ms,
+                    ),
+                    title: row.title.clone(),
+                    artist_name: row.artist_name.clone(),
+                    genre_tags_json,
+                    duration_ms: row.duration_ms,
+                    expires_at: expires_at.clone(),
+                },
+            )?;
+            report.candidates_upserted += 1;
+            report.tidal_similar_candidates_upserted += 1;
+            queries::upsert_external_candidate_sighting(
+                conn,
+                &queries::ExternalCandidateSightingUpsert {
+                    candidate_id: candidate.id,
+                    seed_track_id,
+                    source: "tidal_similar".to_string(),
+                    source_payload_json: Some(
+                        serde_json::json!({
+                            "tidal_id": row.tidal_id,
+                        })
+                        .to_string(),
+                    ),
+                    similarity: None,
+                    expires_at: expires_at.clone(),
+                },
+            )?;
+            report.sightings_upserted += 1;
+            report.tidal_similar_sightings_upserted += 1;
         }
     }
 
@@ -910,6 +1299,32 @@ pub async fn start_training(
                 ExternalProviderRefreshReport::default()
             }
         };
+    let external_resolution_report = match resolve_external_tidal_candidates(
+        &db,
+        external_refresh_clients.tidal.as_ref(),
+        full_mode,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.discovery.external",
+                error = %error,
+                "external TIDAL resolution failed"
+            );
+            ExternalTidalResolutionReport {
+                playable_before: db
+                    .with_conn(queries::count_playable_external_candidates)
+                    .unwrap_or_default(),
+                playable_after: db
+                    .with_conn(queries::count_playable_external_candidates)
+                    .unwrap_or_default(),
+                provider_errors: 1,
+                ..ExternalTidalResolutionReport::default()
+            }
+        }
+    };
 
     // Build trainer input directly from DB (no JSON round-trip). The intensity
     // tier overrides dimension / top_k / window_size and decides whether to
@@ -1071,6 +1486,22 @@ pub async fn start_training(
         external_refresh_report.tidal_new_release_skipped_rows as f64,
     );
     output.metrics.insert(
+        "external_refresh.tidal_similar.rows_seen".to_string(),
+        external_refresh_report.tidal_similar_rows_seen as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_similar.candidates_upserted".to_string(),
+        external_refresh_report.tidal_similar_candidates_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_similar.sightings_upserted".to_string(),
+        external_refresh_report.tidal_similar_sightings_upserted as f64,
+    );
+    output.metrics.insert(
+        "external_refresh.tidal_similar.provider_errors".to_string(),
+        external_refresh_report.tidal_similar_provider_errors as f64,
+    );
+    output.metrics.insert(
         "external_refresh.rate_limited".to_string(),
         if external_refresh_report.rate_limited {
             1.0
@@ -1081,6 +1512,38 @@ pub async fn start_training(
     output.metrics.insert(
         "external_refresh.cooldown_ms".to_string(),
         external_refresh_report.cooldown_ms as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.attempted".to_string(),
+        external_resolution_report.attempted as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.resolved".to_string(),
+        external_resolution_report.resolved as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.rejected".to_string(),
+        external_resolution_report.rejected as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.ambiguous".to_string(),
+        external_resolution_report.ambiguous as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.no_result".to_string(),
+        external_resolution_report.no_result as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.tidal_search.provider_errors".to_string(),
+        external_resolution_report.provider_errors as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.playable_before".to_string(),
+        external_resolution_report.playable_before as f64,
+    );
+    output.metrics.insert(
+        "external_resolution.playable_after".to_string(),
+        external_resolution_report.playable_after as f64,
     );
 
     // Wait for progress logging to finish
@@ -2510,23 +2973,38 @@ mod tests {
             genre_tags: vec!["new-release".to_string()],
             duration_ms: Some(180_000),
         }];
+        let mut tidal_similar = HashMap::new();
+        tidal_similar.insert(
+            1,
+            vec![ExternalTidalCandidate {
+                tidal_id: 9002,
+                artist_name: "Similar Tidal Artist".to_string(),
+                title: "Similar Tidal Track".to_string(),
+                genre_tags: vec!["tidal-similar".to_string()],
+                duration_ms: Some(181_000),
+            }],
+        );
 
         let report = persist_external_provider_refresh(
             &conn,
             &seeds,
             &lastfm,
             &tidal,
+            &tidal_similar,
             chrono::NaiveDateTime::parse_from_str("2026-02-02 12:00:00", "%Y-%m-%d %H:%M:%S")
                 .unwrap(),
         )
         .unwrap();
 
-        assert_eq!(report.candidates_upserted, 2);
-        assert_eq!(report.sightings_upserted, 2);
+        assert_eq!(report.candidates_upserted, 3);
+        assert_eq!(report.sightings_upserted, 3);
         assert_eq!(report.lastfm_candidates_upserted, 1);
         assert_eq!(report.lastfm_sightings_upserted, 1);
         assert_eq!(report.tidal_new_release_candidates_upserted, 1);
         assert_eq!(report.tidal_new_release_sightings_upserted, 1);
+        assert_eq!(report.tidal_similar_rows_seen, 1);
+        assert_eq!(report.tidal_similar_candidates_upserted, 1);
+        assert_eq!(report.tidal_similar_sightings_upserted, 1);
         let sources = conn
             .prepare("SELECT source FROM external_track_candidate_sightings ORDER BY source")
             .unwrap()
@@ -2534,7 +3012,10 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(sources, vec!["lastfm_similar", "tidal_new_release"]);
+        assert_eq!(
+            sources,
+            vec!["lastfm_similar", "tidal_new_release", "tidal_similar"]
+        );
         let refresh_at: String = conn
             .query_row(
                 "SELECT value FROM server_config WHERE key = 'discovery_external_refresh_at'",
@@ -2543,6 +3024,137 @@ mod tests {
             )
             .unwrap();
         assert_eq!(refresh_at, "2026-02-02 12:00:00");
+    }
+
+    fn tidal_search_track(
+        id: i64,
+        title: &str,
+        artist_name: &str,
+        duration_seconds: i64,
+    ) -> TidalSearchTrack {
+        TidalSearchTrack {
+            id,
+            title: title.to_string(),
+            duration: duration_seconds,
+            artist_name: Some(artist_name.to_string()),
+            ..TidalSearchTrack::default()
+        }
+    }
+
+    #[test]
+    fn tidal_resolution_exact_artist_title_match_resolves() {
+        let decision = classify_tidal_search_resolution(
+            "Heroes",
+            "David Bowie",
+            Some(183_000),
+            &[tidal_search_track(42, "Heroes", "David Bowie", 183)],
+        );
+
+        assert!(matches!(
+            decision,
+            TidalSearchResolutionDecision::Resolved(candidate) if candidate.tidal_id == 42
+        ));
+    }
+
+    #[test]
+    fn tidal_resolution_punctuation_and_case_differences_resolve() {
+        let decision = classify_tidal_search_resolution(
+            "B.O.B.",
+            "OutKast",
+            Some(304_000),
+            &[tidal_search_track(43, "B O B", "OUTKAST", 305)],
+        );
+
+        assert!(matches!(
+            decision,
+            TidalSearchResolutionDecision::Resolved(candidate) if candidate.tidal_id == 43
+        ));
+    }
+
+    #[test]
+    fn tidal_resolution_wrong_artist_or_title_rejects() {
+        let wrong_artist = classify_tidal_search_resolution(
+            "Teardrop",
+            "Massive Attack",
+            Some(330_000),
+            &[tidal_search_track(44, "Teardrop", "Newton Faulkner", 330)],
+        );
+        let wrong_title = classify_tidal_search_resolution(
+            "Teardrop",
+            "Massive Attack",
+            Some(330_000),
+            &[tidal_search_track(45, "Angel", "Massive Attack", 330)],
+        );
+
+        assert_eq!(wrong_artist, TidalSearchResolutionDecision::Rejected);
+        assert_eq!(wrong_title, TidalSearchResolutionDecision::Rejected);
+    }
+
+    #[test]
+    fn tidal_resolution_duration_mismatch_rejects() {
+        let decision = classify_tidal_search_resolution(
+            "Windowlicker",
+            "Aphex Twin",
+            Some(367_000),
+            &[tidal_search_track(46, "Windowlicker", "Aphex Twin", 120)],
+        );
+
+        assert_eq!(decision, TidalSearchResolutionDecision::Rejected);
+    }
+
+    #[test]
+    fn tidal_resolution_multiple_strong_candidates_are_ambiguous() {
+        let decision = classify_tidal_search_resolution(
+            "Midnight City",
+            "M83",
+            Some(244_000),
+            &[
+                tidal_search_track(47, "Midnight City", "M83", 244),
+                tidal_search_track(48, "Midnight City", "M83", 245),
+            ],
+        );
+
+        assert_eq!(decision, TidalSearchResolutionDecision::Ambiguous);
+    }
+
+    #[test]
+    fn external_tidal_resolution_updates_sidecar_without_importing_track() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        let candidate = queries::upsert_external_track_candidate(
+            &conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "lastfm:burial:archangel".to_string(),
+                title: "Archangel".to_string(),
+                artist_name: "Burial".to_string(),
+                genre_tags_json: None,
+                duration_ms: None,
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+
+        let updated = queries::resolve_external_candidate_tidal_metadata(
+            &conn,
+            candidate.id,
+            &queries::ExternalCandidateTidalResolution {
+                tidal_id: 9001,
+                genre_tags_json: Some(r#"["dubstep"]"#.to_string()),
+                duration_ms: Some(244_000),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.tidal_id, Some(9001));
+        assert_eq!(updated.resolved_track_id, None);
+        assert_eq!(updated.title, "Archangel");
+        assert_eq!(updated.artist_name, "Burial");
+        let track_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(track_count, 0);
     }
 
     #[test]

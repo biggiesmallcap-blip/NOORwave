@@ -19,9 +19,14 @@ pub fn normalize_reason(tag: &str) -> &'static str {
         "album_context" | "album_seed" | "connected_album_seed" => "album",
         "genre_branch" | "genre_affinity" | "genre_drift" | "prompt_genre" => "genre",
         "energy_match" => "energy",
-        "external_match" | "last.fm similar" | "discogs_style" | "prompt_match" | "scene_match" => {
-            "external"
-        }
+        "external_match"
+        | "external_audio_proxy"
+        | "lastfm_similar"
+        | "last.fm similar"
+        | "tidal_similar"
+        | "discogs_style"
+        | "prompt_match"
+        | "scene_match" => "external",
         _ => "unknown",
     }
 }
@@ -44,6 +49,7 @@ pub fn normalize_source(source: &str) -> &'static str {
         "library" | "tidal" => "library",
         "lastfm" | "last.fm" | "Lastfm" => "lastfm",
         "engine" => "engine",
+        "external" => "external",
         "mixed" => "mixed",
         _ => "engine",
     }
@@ -370,6 +376,9 @@ mod tests {
         assert_eq!(normalize_reason("prompt_genre"), "genre");
         assert_eq!(normalize_reason("energy_match"), "energy");
         assert_eq!(normalize_reason("external_match"), "external");
+        assert_eq!(normalize_reason("external_audio_proxy"), "external");
+        assert_eq!(normalize_reason("lastfm_similar"), "external");
+        assert_eq!(normalize_reason("tidal_similar"), "external");
         assert_eq!(normalize_reason("last.fm similar"), "external");
         assert_eq!(normalize_reason("scene_match"), "external");
     }
@@ -403,6 +412,11 @@ mod tests {
     fn source_lastfm_variants() {
         assert_eq!(normalize_source("lastfm"), "lastfm");
         assert_eq!(normalize_source("last.fm"), "lastfm");
+    }
+
+    #[test]
+    fn source_external_stays_external() {
+        assert_eq!(normalize_source("external"), "external");
     }
 
     #[test]

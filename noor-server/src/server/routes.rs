@@ -36,6 +36,8 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
+mod genre_routes;
+
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     sort_by: Option<String>,
@@ -62,22 +64,6 @@ pub struct ListParams {
 pub struct SearchParams {
     q: String,
     limit: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GenreTrackParams {
-    include_descendants: Option<bool>,
-    /// Galaxy display filter — see `crate::genre::filter::GalaxyFilterRule`.
-    /// Tokens: `all` | `conf05` | `conf07` | `top2` | `top3` | `mb_only` |
-    /// `primary`. Unknown / missing → default (`conf05`).
-    filter: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GenreHeatParams {
-    days: Option<i64>,
-    /// See `GenreTrackParams::filter`.
-    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,13 +318,29 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/tracks/import",
             post(import_tidal_track_for_radio),
         )
-        .route("/api/genres", get(get_genres))
-        .route("/api/genres/heat", get(get_genre_heat))
-        .route("/api/genres/co-occurrence", get(get_genre_co_occurrence))
-        .route("/api/genres/cohorts", get(get_genre_cohorts))
-        .route("/api/genres/evolution", get(get_genre_evolution))
-        .route("/api/genres/audio-metrics", get(get_genre_audio_metrics))
-        .route("/api/genres/{id}/tracks", get(get_genre_tracks))
+        .route("/api/genres", get(genre_routes::get_genres))
+        .route(
+            "/api/genres/snapshot",
+            get(genre_routes::get_genre_snapshot),
+        )
+        .route("/api/genres/heat", get(genre_routes::get_genre_heat))
+        .route(
+            "/api/genres/co-occurrence",
+            get(genre_routes::get_genre_co_occurrence),
+        )
+        .route("/api/genres/cohorts", get(genre_routes::get_genre_cohorts))
+        .route(
+            "/api/genres/evolution",
+            get(genre_routes::get_genre_evolution),
+        )
+        .route(
+            "/api/genres/audio-metrics",
+            get(genre_routes::get_genre_audio_metrics),
+        )
+        .route(
+            "/api/genres/{id}/tracks",
+            get(genre_routes::get_genre_tracks),
+        )
         .route("/api/playlists", get(get_playlists))
         .route(
             "/api/playlists/{id}/tracks",
@@ -1570,168 +1572,6 @@ async fn import_tidal_track_for_radio(
         "tidal_id": imported.tidal_id,
         "local_id": imported.local_id,
     })))
-}
-
-#[derive(Debug, Deserialize)]
-struct GenreListParams {
-    /// See `GenreTrackParams::filter`.
-    filter: Option<String>,
-}
-
-async fn get_genres(
-    State(state): State<SharedState>,
-    Query(params): Query<GenreListParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let genres = queries::get_genre_tree_filtered(conn, filter)?;
-            Ok(Json(json!({
-                "genres": genres,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn get_genre_heat(
-    State(state): State<SharedState>,
-    Query(params): Query<GenreHeatParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let days = params.days.unwrap_or(90).max(1);
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let heat = queries::get_genre_heat_filtered(conn, days, filter)?;
-            Ok(Json(json!({
-                "heat": heat,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-#[derive(Debug, Deserialize)]
-struct GenreCoOccurrenceParams {
-    days: Option<i64>,
-    window_minutes: Option<i64>,
-    min_count: Option<i64>,
-    /// See `GenreTrackParams::filter`.
-    filter: Option<String>,
-}
-
-async fn get_genre_co_occurrence(
-    State(state): State<SharedState>,
-    Query(params): Query<GenreCoOccurrenceParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let days = params.days.unwrap_or(90).max(1);
-    let window = params.window_minutes.unwrap_or(30).max(5);
-    let min = params.min_count.unwrap_or(3).max(1);
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let pairs = queries::get_genre_co_occurrence_filtered(conn, days, window, min, filter)
-                .map_err(|e| {
-                    tracing::error!("co-occurrence query failed: {e:#}");
-                    anyhow::anyhow!("co-occurrence query failed: {e:#}")
-                })?;
-            Ok(Json(json!({
-                "pairs": pairs,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|e| {
-            tracing::error!("co-occurrence handler error: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
-}
-
-#[derive(Debug, Deserialize)]
-struct GenreCohortParams {
-    days: Option<i64>,
-    /// See `GenreTrackParams::filter`.
-    filter: Option<String>,
-}
-
-async fn get_genre_cohorts(
-    State(state): State<SharedState>,
-    Query(params): Query<GenreCohortParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let days = params.days.unwrap_or(90).max(1);
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            // HTTP endpoint preserves strict semantics — `?filter` controls
-            // exactly what's matched. Fallback rescue is internal-only.
-            let cohorts = queries::get_genre_cohorts_filtered(conn, days, filter, false)?;
-            Ok(Json(json!({
-                "cohorts": cohorts,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-#[derive(Debug, Deserialize)]
-struct GenreEvolutionParams {
-    days: Option<i64>,
-}
-
-async fn get_genre_evolution(
-    State(state): State<SharedState>,
-    Query(params): Query<GenreEvolutionParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let days = params.days.unwrap_or(90).max(7);
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let evolution = queries::get_genre_evolution(conn, days)?;
-            Ok(Json(json!({ "evolution": evolution })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn get_genre_audio_metrics(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let metrics = queries::get_genre_audio_metrics(conn)?;
-            Ok(Json(json!({ "metrics": metrics })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn get_genre_tracks(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-    Query(params): Query<GenreTrackParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let include_descendants = params.include_descendants.unwrap_or(true);
-    let filter = crate::genre::filter::GalaxyFilterRule::from_query(params.filter.as_deref());
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let tracks =
-                queries::get_tracks_by_genre_filtered(conn, id, include_descendants, filter)?;
-            Ok(Json(json!({
-                "tracks": tracks,
-                "filter": filter.label().as_ref(),
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn get_playlists(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -4940,6 +4780,89 @@ async fn get_discovery_space(
     // Only fill when browsing without a seed. In seed mode the radio candidates
     // ARE the map — padding with unrelated most-played tracks creates a cloud of
     // disconnected blue dots with no edges and falsely-cold-start labels.
+    if seed_id > 0 && prompt.is_empty() && (space_tracks.len() as i64) < limit {
+        let remaining = limit - space_tracks.len() as i64;
+        let external_rows = state_guard
+            .db
+            .with_conn(|conn| {
+                let Some(model) = queries::get_selected_discovery_embedding_model(conn)? else {
+                    return Ok(Vec::new());
+                };
+                queries::get_external_candidate_neighbors(conn, model.id, seed_id, remaining, true)
+            })
+            .unwrap_or_default();
+        let mut present_ids = space_tracks
+            .iter()
+            .map(|track| track.track_id)
+            .collect::<HashSet<_>>();
+        for row in external_rows {
+            let Some(tidal_id) = row.tidal_id.filter(|id| *id > 0) else {
+                continue;
+            };
+            if !present_ids.insert(tidal_id) {
+                continue;
+            }
+            let raw_tags = row
+                .reason_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .get("key")
+                        .and_then(|key| key.as_str())
+                        .or_else(|| value.get("label").and_then(|label| label.as_str()))
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let mut reason_tags = ds::normalize_reason_tags(&raw_tags);
+            if reason_tags.is_empty() {
+                reason_tags.push(ds::normalize_reason("external_match").to_string());
+            }
+            let primary_reason = reason_tags
+                .first()
+                .cloned()
+                .unwrap_or_else(|| ds::normalize_reason("external_match").to_string());
+
+            space_tracks.push(SpaceTrack {
+                track_id: tidal_id,
+                title: row.title,
+                artist_name: row.artist_name,
+                album_title: None,
+                artwork_url: None,
+                duration_ms: row.duration_ms,
+                similarity_score: row.score.clamp(0.0, 1.0),
+                source: "external".to_string(),
+                energy: None,
+                danceability: None,
+                bpm: None,
+                key_signature: None,
+                camelot_key: None,
+                is_instrumental: None,
+                loudness_lufs: None,
+                skip_rate: None,
+                completion_avg: None,
+                cohort_id: None,
+                cohort_label: None,
+                top_genre: None,
+                top_genre_source: None,
+                top_genre_confidence: None,
+                last_played_at: None,
+                play_count: 0,
+                is_in_library: false,
+                radio_source: Some("engine".to_string()),
+                radio_reason: Some("external_match".to_string()),
+                confidence: 0.7,
+                support_count: 1,
+                primary_reason,
+                reason_tags,
+                genres: vec![],
+                in_degree_pctile: 0.5,
+            });
+        }
+    }
+
     let seeded_ids: HashSet<i64> = space_tracks.iter().map(|t| t.track_id).collect();
     let remaining = limit - space_tracks.len() as i64;
     if remaining > 0 && seed_id == 0 {
@@ -16910,6 +16833,157 @@ mod tests {
             })
             .unwrap();
         assert_eq!(persisted_queue_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn genre_snapshot_route_returns_galaxy_payload() {
+        let app = build_test_app().await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/genres/snapshot?days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(body["genres"].is_array());
+        assert!(body["heat"].is_array());
+        assert!(body["cohorts"].is_array());
+        assert!(body["evolution"].is_array());
+        assert!(body["metrics"].is_array());
+        assert_eq!(body["filter"], "confidence_0_50");
+    }
+
+    #[tokio::test]
+    async fn discovery_space_includes_resolved_sidecar_external_neighbors() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES (1, 'Seed Track', 1, 200000, 1001)",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:space-external",
+                "discovery-fusion-v2",
+                2,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            let unresolved = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: None,
+                    mbid: None,
+                    dedupe_key: "unresolved-space".to_string(),
+                    title: "Unresolved External".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            let resolved = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(990_001),
+                    mbid: None,
+                    dedupe_key: "tidal:990001".to_string(),
+                    title: "Resolved External".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(181_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            queries::replace_external_candidate_neighbors(
+                conn,
+                model.id,
+                1,
+                &[
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: unresolved.id,
+                        rank: 1,
+                        score: 0.99,
+                        audio_score: 0.99,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: resolved.id,
+                        rank: 2,
+                        score: 0.91,
+                        audio_score: 0.91,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                ],
+            )?;
+            Ok(())
+        })
+        .expect("seed discovery space");
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discovery/space")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"seed_track_id":1,"mode":"radio","limit":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        let external = tracks
+            .iter()
+            .find(|track| track["track_id"] == 990_001)
+            .expect("resolved external sidecar node");
+        assert_eq!(external["source"], "external");
+        assert_eq!(external["is_in_library"], false);
+        assert_eq!(external["primary_reason"], "external");
+        assert!(
+            tracks
+                .iter()
+                .all(|track| track["title"] != "Unresolved External"),
+            "unresolved external candidate must stay hidden"
+        );
+        let edges = body["edges"].as_array().expect("edges array");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| { edge["from_track_id"] == 1 && edge["to_track_id"] == 990_001 })
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
