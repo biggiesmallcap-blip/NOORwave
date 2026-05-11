@@ -46,6 +46,25 @@ const AUDCLNT_E_DEVICE_IN_USE: i32 = 0x8889_000Au32 as i32;
 const AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889_000Eu32 as i32;
 const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x8889_0019u32 as i32;
 const AUDCLNT_E_INVALID_DEVICE_PERIOD: i32 = 0x8889_0020u32 as i32;
+const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
+
+struct DeviceInUseRetryBudget {
+    index: usize,
+}
+
+impl DeviceInUseRetryBudget {
+    fn new() -> Self {
+        Self { index: 0 }
+    }
+
+    fn next_delay_ms(&mut self) -> Option<u64> {
+        let delay = DEVICE_IN_USE_BACKOFF_MS.get(self.index).copied();
+        if delay.is_some() {
+            self.index += 1;
+        }
+        delay
+    }
+}
 
 /// Reason the exclusive-mode WASAPI grab failed. Plumbed up to the route
 /// layer so the UI can render a specific, actionable error rather than a
@@ -542,14 +561,10 @@ fn init_audio_client(
 
     let mut last_failure: Option<ExclusiveInitFailure> = None;
 
-    // Backoff schedule for AUDCLNT_E_DEVICE_IN_USE retries. Some drivers /
-    // Windows audio engine versions don't release the shared session within
-    // the first tens of ms; ~1.3 s total budget covers cases where a flat
-    // 150 ms didn't (observed empirically with Chrome holding shared mode).
-    // Each entry is the sleep BEFORE that attempt's retry — so 4 attempts:
-    // initial try, then sleep 50 ms, retry, sleep 150 ms, retry, sleep 350
-    // ms, retry, sleep 750 ms, give up.
-    const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
+    // Some drivers / Windows audio engine versions don't release the shared
+    // session within the first tens of ms. Keep this budget global because
+    // DEVICE_IN_USE is about device ownership, not the candidate sample format.
+    let mut device_in_use_budget = DeviceInUseRetryBudget::new();
 
     'candidate: for candidate in exclusive_candidate_formats() {
         let mut attempt: usize = 0;
@@ -575,24 +590,8 @@ fn init_audio_client(
                     return Ok(v);
                 }
                 Err(failure) => match failure {
-                    ExclusiveInitFailure::DeviceInUse
-                        if attempt < DEVICE_IN_USE_BACKOFF_MS.len() =>
-                    {
-                        let sleep_ms = DEVICE_IN_USE_BACKOFF_MS[attempt];
-                        info!(
-                            target: "playback",
-                            "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
-                             retrying after {} ms",
-                            attempt + 1,
-                            fmt_tag_label(candidate.format),
-                            sleep_ms
-                        );
-                        std::thread::sleep(Duration::from_millis(sleep_ms));
-                        attempt += 1;
-                        continue;
-                    }
                     ExclusiveInitFailure::ExclusiveDisabled => {
-                        // No format will fix this — bail immediately so the
+                        // No format will fix this. Bail immediately so the
                         // user gets a precise message.
                         warn!(
                             target: "playback",
@@ -601,16 +600,24 @@ fn init_audio_client(
                         return Err(failure);
                     }
                     ExclusiveInitFailure::DeviceInUse => {
-                        // Exhausted retry budget. Surface as DeviceInUse.
+                        if let Some(sleep_ms) = device_in_use_budget.next_delay_ms() {
+                            info!(
+                                target: "playback",
+                                "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
+                                 retrying after {} ms",
+                                attempt + 1,
+                                fmt_tag_label(candidate.format),
+                                sleep_ms
+                            );
+                            std::thread::sleep(Duration::from_millis(sleep_ms));
+                            attempt += 1;
+                            continue;
+                        }
                         warn!(
                             target: "playback",
-                            "WASAPI exclusive grab: DEVICE_IN_USE persisted across {} attempts ({:?}); \
-                             trying next format",
-                            DEVICE_IN_USE_BACKOFF_MS.len() + 1,
-                            fmt_tag_label(candidate.format)
+                            "WASAPI exclusive grab: DEVICE_IN_USE persisted after global retry budget"
                         );
-                        last_failure = Some(ExclusiveInitFailure::DeviceInUse);
-                        continue 'candidate;
+                        return Err(ExclusiveInitFailure::DeviceInUse);
                     }
                     other => {
                         info!(
@@ -933,6 +940,18 @@ mod tests {
             classify_init_hresult(AUDCLNT_E_DEVICE_IN_USE),
             InitErrorClassification::DeviceInUse
         );
+    }
+
+    #[test]
+    fn device_in_use_retry_budget_is_global() {
+        let mut budget = DeviceInUseRetryBudget::new();
+
+        assert_eq!(budget.next_delay_ms(), Some(50));
+        assert_eq!(budget.next_delay_ms(), Some(150));
+        assert_eq!(budget.next_delay_ms(), Some(350));
+        assert_eq!(budget.next_delay_ms(), Some(750));
+        assert_eq!(budget.next_delay_ms(), None);
+        assert_eq!(budget.next_delay_ms(), None);
     }
 
     #[test]
