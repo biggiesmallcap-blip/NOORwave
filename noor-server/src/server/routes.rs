@@ -12723,6 +12723,46 @@ fn spawn_playback_runtime_listener(
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
                         device: device_name,
                     });
+                    let retry = {
+                        let settings = state_guard
+                            .db
+                            .with_conn(|conn| {
+                                crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
+                            })
+                            .ok();
+                        let is_playing = state_guard
+                            .db
+                            .with_conn(|conn| player::load_state(conn).map(|s| s.is_playing))
+                            .unwrap_or(false);
+                        let runtime = state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .map(|runtime| runtime.handle.clone());
+                        settings.and_then(|settings| {
+                            if should_retry_exclusive_release(is_playing, settings.exclusive_mode) {
+                                runtime.map(|runtime| {
+                                    (
+                                        runtime,
+                                        runtime_output_settings_from_audio_settings(&settings),
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    drop(state_guard);
+                    if let Some((runtime, output)) = retry
+                        && let Err(error) = runtime.device_swap(
+                            output.device,
+                            output.exclusive_mode,
+                            output.sample_rate_follow,
+                            None,
+                            output.exclusive_release_grace_secs,
+                        )
+                    {
+                        warn!("Failed to recover released WASAPI exclusive stream: {error}");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");
@@ -13492,6 +13532,10 @@ async fn post_audio_exclusive_retry(
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn should_retry_exclusive_release(is_playing: bool, exclusive_mode: bool) -> bool {
+    is_playing && exclusive_mode
 }
 
 async fn get_audio_devices(
@@ -17153,6 +17197,14 @@ mod tests {
         assert_eq!(body["runtime"]["exclusive_transport_format"], Value::Null);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn retries_exclusive_release_only_while_playing_with_exclusive_enabled() {
+        assert!(should_retry_exclusive_release(true, true));
+        assert!(!should_retry_exclusive_release(false, true));
+        assert!(!should_retry_exclusive_release(true, false));
+        assert!(!should_retry_exclusive_release(false, false));
     }
 
     #[tokio::test]
