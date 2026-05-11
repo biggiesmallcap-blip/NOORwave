@@ -12542,8 +12542,12 @@ async fn ensure_playback_runtime_for_track(
         })?;
     drop(state_guard);
 
-    if let Some(listener_handle) = spawned_handle {
+    if let Some(listener_handle) = spawned_handle.clone() {
         spawn_playback_runtime_listener(state.clone(), listener_handle);
+    }
+
+    if let Some(runtime_handle) = spawned_handle.as_ref() {
+        apply_persisted_runtime_output_settings(state, runtime_handle).await;
     }
 
     Ok(handle)
@@ -13311,6 +13315,53 @@ async fn current_user_audio_quality(
         .map(|s| s.quality)
 }
 
+struct RuntimeOutputSettings {
+    device: playback_runtime::OutputDeviceSelection,
+    exclusive_mode: bool,
+    sample_rate_follow: bool,
+    exclusive_release_grace_secs: u32,
+}
+
+fn runtime_output_settings_from_audio_settings(
+    settings: &crate::db::audio_settings::AudioSettings,
+) -> RuntimeOutputSettings {
+    RuntimeOutputSettings {
+        device: playback_runtime::OutputDeviceSelection::from_pref(
+            settings.output_device.as_deref(),
+        ),
+        exclusive_mode: settings.exclusive_mode,
+        sample_rate_follow: settings.sample_rate_follow,
+        exclusive_release_grace_secs: settings.exclusive_release_grace_secs,
+    }
+}
+
+async fn apply_persisted_runtime_output_settings(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+) {
+    let settings = {
+        let guard = state.read().await;
+        guard
+            .db
+            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+            .ok()
+    };
+
+    let Some(settings) = settings else {
+        return;
+    };
+    let output = runtime_output_settings_from_audio_settings(&settings);
+    if let Err(e) = handle.device_swap(
+        output.device,
+        output.exclusive_mode,
+        output.sample_rate_follow,
+        None,
+        output.exclusive_release_grace_secs,
+    ) {
+        warn!("Failed to apply persisted audio settings to playback runtime: {e}");
+    }
+}
+
 // If sample-rate-follow is enabled and the freshly-resolved stream's native
 // rate differs from the device's current rate, swap the device to the new
 // rate before the track starts. Without this, the first track of a session
@@ -13351,16 +13402,13 @@ async fn align_device_to_stream_rate(
         (next_rate, settings, info.sample_rate)
     };
 
-    let device_sel = match settings.output_device.as_ref() {
-        Some(name) => playback_runtime::OutputDeviceSelection::Named(name.clone()),
-        None => playback_runtime::OutputDeviceSelection::Default,
-    };
+    let output = runtime_output_settings_from_audio_settings(&settings);
     if let Err(e) = handle.device_swap(
-        device_sel,
-        settings.exclusive_mode,
-        settings.sample_rate_follow,
+        output.device,
+        output.exclusive_mode,
+        output.sample_rate_follow,
         Some(next_rate),
-        settings.exclusive_release_grace_secs,
+        output.exclusive_release_grace_secs,
     ) {
         warn!(
             "align_device_to_stream_rate: device_swap to {next_rate} Hz (from {current_rate} Hz) failed: {e}"
@@ -13401,19 +13449,20 @@ async fn post_audio_exclusive_retry(
         ));
     }
 
-    if let Some(runtime) = guard.playback_runtime.as_ref()
-        && let Err(e) = runtime.handle.device_swap(
-            playback_runtime::OutputDeviceSelection::from_pref(settings.output_device.as_deref()),
-            settings.exclusive_mode,
-            settings.sample_rate_follow,
+    if let Some(runtime) = guard.playback_runtime.as_ref() {
+        let output = runtime_output_settings_from_audio_settings(&settings);
+        if let Err(e) = runtime.handle.device_swap(
+            output.device,
+            output.exclusive_mode,
+            output.sample_rate_follow,
             None,
-            settings.exclusive_release_grace_secs,
-        )
-    {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "message": e.to_string() })),
-        ));
+            output.exclusive_release_grace_secs,
+        ) {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            ));
+        }
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -13487,17 +13536,17 @@ async fn put_audio_settings(
             || old.sample_rate_follow != saved.sample_rate_follow
             || old.exclusive_release_grace_secs != saved.exclusive_release_grace_secs;
 
-        if needs_swap
-            && let Some(runtime) = guard.playback_runtime.as_ref()
-            && let Err(e) = runtime.handle.device_swap(
-                playback_runtime::OutputDeviceSelection::from_pref(saved.output_device.as_deref()),
-                saved.exclusive_mode,
-                saved.sample_rate_follow,
+        if needs_swap && let Some(runtime) = guard.playback_runtime.as_ref() {
+            let output = runtime_output_settings_from_audio_settings(&saved);
+            if let Err(e) = runtime.handle.device_swap(
+                output.device,
+                output.exclusive_mode,
+                output.sample_rate_follow,
                 None,
-                saved.exclusive_release_grace_secs,
-            )
-        {
-            warn!("Audio settings update: live device_swap failed: {e}");
+                output.exclusive_release_grace_secs,
+            ) {
+                warn!("Audio settings update: live device_swap failed: {e}");
+            }
         }
 
         (old, saved)
@@ -16423,6 +16472,29 @@ mod tests {
         assert_eq!(synthetic.tidal_id, Some(456));
         assert_eq!(synthetic.best_quality.as_deref(), Some("HI_RES_LOSSLESS"));
         assert_eq!(synthetic.source, "tidal_ephemeral");
+    }
+
+    #[test]
+    fn runtime_output_settings_preserve_persisted_exclusive_preferences() {
+        let mut settings = crate::db::audio_settings::AudioSettings::default();
+        settings.output_device = Some("Zen DAC V2".to_string());
+        settings.exclusive_mode = true;
+        settings.sample_rate_follow = true;
+        settings.exclusive_release_grace_secs = 12;
+
+        let output = runtime_output_settings_from_audio_settings(&settings);
+
+        match output.device {
+            playback_runtime::OutputDeviceSelection::Named(name) => {
+                assert_eq!(name, "Zen DAC V2");
+            }
+            playback_runtime::OutputDeviceSelection::Default => {
+                panic!("expected named output device")
+            }
+        }
+        assert!(output.exclusive_mode);
+        assert!(output.sample_rate_follow);
+        assert_eq!(output.exclusive_release_grace_secs, 12);
     }
 
     #[test]
