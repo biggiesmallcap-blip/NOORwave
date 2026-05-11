@@ -64,6 +64,16 @@
 		sessionStorage.removeItem(SESSION_SNAPSHOT_KEY);
 	}
 
+	function snapshotHasRestorableContext(snap: VideoPageSnapshot): boolean {
+		return Boolean(
+			snap.query?.trim() ||
+			snap.lastQuery?.trim() ||
+			snap.activeMixId ||
+			(snap.videos?.length ?? 0) > 0 ||
+			(snap.mixItems?.length ?? 0) > 0
+		);
+	}
+
 	type PrefetchedVideoStream = {
 		videoId: number;
 		hlsUrl: string;
@@ -108,6 +118,15 @@
 		const index = selectedQueueIndex(queue);
 		return index >= 0 && (nextAutoplayVideo !== null || (queue === videos && hasMore));
 	});
+	let hasVideoChoices = $derived(videos.length > 0 || mixItems.length > 0);
+	let showChooseVideoPrompt = $derived(
+		!selectedVideo &&
+		!streamUrl &&
+		!loadingStream &&
+		query.trim().length > 0 &&
+		hasVideoChoices
+	);
+	let showVideoHero = $derived(Boolean(selectedVideo || streamUrl || loadingStream || showChooseVideoPrompt));
 
 	function loadRecent(): string[] {
 		if (typeof localStorage === 'undefined') return [];
@@ -139,6 +158,28 @@
 	function clearRecent() {
 		recent = [];
 		if (typeof localStorage !== 'undefined') localStorage.removeItem(RECENT_KEY);
+	}
+
+	function clearVideoPageSession() {
+		videos = [];
+		mixItems = [];
+		selectedVideo = null;
+		streamUrl = null;
+		streamExpiresAt = null;
+		loadingStream = false;
+		query = '';
+		lastQuery = '';
+		activeMixId = null;
+		hasMore = false;
+		offset = 0;
+		error = null;
+		mixError = null;
+		prefetchedStream = null;
+		streamRequestSeq += 1;
+		prefetchRequestSeq += 1;
+		clearSessionSnapshot();
+		videoSession.reset();
+		void goto('/videos', { replaceState: true, keepFocus: true });
 	}
 
 	function normalizeError(errorValue: unknown, fallback: string): string {
@@ -411,7 +452,7 @@
 		const mixId = params.get('mixId');
 		const shouldPlayMix = params.get('play') === '1';
 		query = q;
-		if (q) void runSearch(q, false);
+		if (q) await runSearch(q, false);
 		if (mixId) {
 			await loadMix(mixId, shouldPlayMix);
 			if (!shouldPlayMix && Number.isFinite(videoId) && videoId > 0) {
@@ -423,6 +464,11 @@
 			}
 		}
 		if (Number.isFinite(videoId) && videoId > 0) {
+			const fromContext = findVideoInCurrentContext(videoId);
+			if (fromContext) {
+				void selectVideo(fromContext, false);
+				return;
+			}
 			void selectVideo({
 				tidal_id: videoId,
 				title: `TIDAL video ${videoId}`,
@@ -445,7 +491,7 @@
 
 		if (!hasExplicitParams) {
 			const snap = loadSessionSnapshot();
-			if (snap?.selectedVideo) {
+			if (snap?.selectedVideo && snapshotHasRestorableContext(snap)) {
 				selectedVideo = snap.selectedVideo;
 				videos = snap.videos ?? [];
 				mixItems = snap.mixItems ?? [];
@@ -470,6 +516,7 @@
 				window.addEventListener('popstate', onPop);
 				return () => window.removeEventListener('popstate', onPop);
 			}
+			clearSessionSnapshot();
 		}
 
 		void parseUrl();
@@ -506,7 +553,7 @@
 			loading: loadingSearch || loadingMore || loadingStream || loadingMix,
 			error: error ?? mixError,
 		});
-		if (selectedVideo) saveSessionSnapshot();
+		if (selectedVideo && videoSessionSource() !== 'direct') saveSessionSnapshot();
 		else clearSessionSnapshot();
 	});
 
@@ -530,15 +577,7 @@
 		const nonce = $videoClearRequest;
 		if (nonce === handledClearNonce) return;
 		handledClearNonce = nonce;
-		videos = [];
-		mixItems = [];
-		query = '';
-		lastQuery = '';
-		activeMixId = null;
-		hasMore = false;
-		offset = 0;
-		error = null;
-		mixError = null;
+		clearVideoPageSession();
 	});
 
 	onDestroy(() => {
@@ -554,14 +593,15 @@
 		<input
 			bind:this={inputEl}
 			class="search-input"
-			type="text"
+			type="search"
 			placeholder="Search TIDAL videos"
 			bind:value={query}
 			oninput={onInput}
 		/>
 	</header>
 
-	<section class="hero glass-panel">
+	{#if showVideoHero}
+	<section class="hero glass-panel" class:hero--prompt={showChooseVideoPrompt}>
 		<div class="player-shell">
 			{#if loadingStream && !streamUrl}
 				<Skeleton rows={4} label="Loading video" />
@@ -580,10 +620,14 @@
 					onEnded={handleVideoEnded}
 					refreshStream={refreshSelectedStream}
 				/>
-			{:else}
-				<EmptyState title="Choose a video" copy="Search TIDAL videos, then select one to play here." />
+			{:else if showChooseVideoPrompt}
+				<div class="video-choice-prompt" aria-live="polite">
+					<strong>Choose a video</strong>
+					<span>Select any result to start playback.</span>
+				</div>
 			{/if}
 		</div>
+		{#if !showChooseVideoPrompt}
 		<div class="hero-meta">
 			<p class="eyebrow">Videos</p>
 			<h1>{heroTitle}</h1>
@@ -615,14 +659,14 @@
 						<span>Stream ready</span>
 					{/if}
 				</div>
-			{:else}
-				<p class="page-copy">A focused TIDAL video surface with audio queue state preserved.</p>
 			{/if}
 			{#if error}
 				<p class="inline-error">{error}</p>
 			{/if}
 		</div>
+		{/if}
 	</section>
+	{/if}
 
 	{#if !query.trim() && videos.length === 0 && mixItems.length === 0}
 		<section class="landing-row">
@@ -706,22 +750,25 @@
 	}
 
 	.search-header {
+		width: 100%;
+		max-width: var(--content-width);
+		margin: 0 auto var(--space-5);
 		padding: 0 4px;
 	}
 
 	.search-input {
 		display: block;
 		width: 100%;
-		max-width: 640px;
+		max-width: 720px;
 		margin: 0 auto;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-strong);
+		background: var(--panel-bg);
+		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-lg);
-		padding: 12px 22px;
+		padding: 14px 22px;
 		font-size: var(--font-size-md);
 		color: var(--text-primary);
 		outline: none;
-		transition: border-color 0.15s, background 0.15s;
+		transition: border-color var(--motion-fast), background var(--motion-fast);
 	}
 
 	.search-input::placeholder {
@@ -729,7 +776,7 @@
 	}
 
 	.search-input:focus {
-		border-color: var(--accent-line);
+		border-color: var(--accent);
 		background: var(--input-focus);
 	}
 
@@ -740,8 +787,59 @@
 		padding: 16px;
 	}
 
+	.hero--prompt {
+		grid-template-columns: minmax(0, 1fr);
+		width: min(100%, 720px);
+		margin: 0 auto;
+		animation: video-choice-prompt-in var(--motion-slow) cubic-bezier(0.22, 0.7, 0.2, 1) both;
+	}
+
 	.player-shell {
 		min-width: 0;
+		min-height: clamp(160px, 24vw, 420px);
+		display: grid;
+		align-items: center;
+	}
+
+	.hero--prompt .player-shell {
+		min-height: 0;
+	}
+
+	.video-choice-prompt {
+		justify-self: stretch;
+		width: 100%;
+		padding: var(--space-4) var(--space-5);
+		border: 1px solid var(--accent-line);
+		border-radius: var(--radius-md);
+		background:
+			linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 58%, transparent), transparent 76%),
+			color-mix(in srgb, var(--panel-bg) 82%, transparent);
+		box-shadow: 0 14px 34px color-mix(in srgb, var(--accent-glow) 40%, transparent);
+		color: var(--text-primary);
+	}
+
+	.video-choice-prompt strong,
+	.video-choice-prompt span {
+		display: block;
+	}
+
+	.video-choice-prompt span {
+		margin-top: var(--space-2);
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
+	@keyframes video-choice-prompt-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px) scale(0.985);
+			filter: blur(6px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+			filter: blur(0);
+		}
 	}
 
 	.hero-meta {
@@ -777,7 +875,15 @@
 		font-size: var(--font-size-sm);
 	}
 
-	.landing-row,
+	.landing-row {
+		width: 100%;
+		max-width: 720px;
+		margin: 0 auto;
+		padding: 0 4px;
+		display: grid;
+		gap: var(--space-5);
+	}
+
 	.results-section {
 		display: grid;
 		gap: 14px;
@@ -785,13 +891,13 @@
 
 	.rail-block {
 		display: grid;
-		gap: 10px;
+		gap: var(--space-3);
 	}
 
 	.rail-header,
 	.section-heading {
 		display: flex;
-		align-items: end;
+		align-items: baseline;
 		justify-content: space-between;
 		gap: 12px;
 	}
@@ -810,6 +916,7 @@
 	.chips {
 		display: flex;
 		flex-wrap: wrap;
+		justify-content: flex-start;
 		gap: 8px;
 	}
 

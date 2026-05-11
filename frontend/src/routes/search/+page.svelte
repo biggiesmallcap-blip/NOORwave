@@ -828,7 +828,7 @@
     <input
       bind:this={inputEl}
       class="search-input"
-      type="text"
+      type="search"
       placeholder="Search Tidal's full catalogue"
       bind:value={query}
       oninput={onInput}
@@ -1510,32 +1510,33 @@
   .search-page {
     width: min(100%, var(--content-width));
     margin: 0 auto;
-    padding: 16px 4px 80px;
+    padding: 0 4px 80px;
   }
   .search-header {
+    width: 100%;
     max-width: var(--content-width);
-    margin: 0 auto 40px;
+    margin: 0 auto var(--space-5);
     padding: 0 4px;
   }
   .search-input {
     display: block;
     width: 100%;
-    max-width: 640px;
+    max-width: 720px;
     margin: 0 auto;
-    background: var(--bg-raised);
-    border: 1px solid var(--border-strong);
+    background: var(--panel-bg);
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    padding: 12px 22px;
+    padding: 14px 22px;
     font-size: var(--font-size-md);
     color: var(--text-primary);
     outline: none;
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color var(--motion-fast), background var(--motion-fast);
   }
   .search-input::placeholder { color: var(--text-tertiary); }
 
   .hint-chips {
     margin: 10px auto 0;
-    max-width: 640px;
+    max-width: 720px;
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -1558,7 +1559,7 @@
   }
   .inline-hint {
     margin: 8px auto 0;
-    max-width: 640px;
+    max-width: 720px;
     font-size: var(--font-size-xs);
     color: var(--text-tertiary);
     display: flex;
@@ -1581,7 +1582,7 @@
 
   .kbd-hint {
     margin: 10px auto 0;
-    max-width: 640px;
+    max-width: 720px;
     font-size: var(--font-size-xs);
     color: var(--text-tertiary);
     display: flex;
@@ -1627,10 +1628,12 @@
     margin: 0;
   }
   .filter-pills {
-    margin: 14px 0 0;
+    margin: 14px auto 0;
+    max-width: 720px;
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+    justify-content: center;
   }
   .filter-pill {
     background: transparent;
@@ -1667,7 +1670,7 @@
   }
   .search-input:focus {
     border-color: var(--accent);
-    background: var(--bg-elevated);
+    background: var(--input-focus);
     box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .search-hint {

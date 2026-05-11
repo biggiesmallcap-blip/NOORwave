@@ -7,7 +7,7 @@
 		off: 'Shuffle off',
 		genre: 'Genre mix',
 		weighted: 'Smart shuffle',
-		true: 'True shuffle'
+		true: 'True random'
 	};
 
 	const SHUFFLE_ICONS: Record<string, string> = {

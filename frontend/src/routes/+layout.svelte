@@ -239,7 +239,13 @@
 		off: 'Shuffle off',
 		genre: 'Genre mix',
 		weighted: 'Smart shuffle',
-		true: 'True shuffle'
+		true: 'True random'
+	};
+
+	const shuffleStatusLabels: Record<string, string> = {
+		genre: 'Genre mix',
+		weighted: 'Smart shuffle',
+		true: 'True random'
 	};
 
 	const shuffleIcons: Record<string, string> = {
@@ -1137,13 +1143,13 @@
 			<div class="live-status">
 				<span class:offline={!$wsConnected} class="live-dot"></span>
 				<div class="live-copy">
-					<strong>{$wsConnected ? 'Observatory live' : 'Signal offline'}</strong>
-					<span>{$wsConnected ? 'Realtime stream is locked in' : 'Waiting for websocket relay'}</span>
+					<strong>{$wsConnected ? 'Server connected' : 'Server offline'}</strong>
+					<span>{$wsConnected ? 'Realtime updates active' : 'Waiting for realtime updates'}</span>
 				</div>
 			</div>
 
 			{#if $shuffleMode !== 'off'}
-				<p class="status-line">{shuffleLabels[$shuffleMode]}</p>
+				<p class="status-line">Shuffle mode: {shuffleStatusLabels[$shuffleMode]}</p>
 			{/if}
 
 			{#if $automixEnabled}

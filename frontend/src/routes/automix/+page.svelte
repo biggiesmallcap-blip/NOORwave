@@ -124,7 +124,7 @@
 		{ mode: 'off' as const, label: 'Off', copy: 'Queue order stays untouched.', meter: 0.15 },
 		{ mode: 'genre' as const, label: 'Genre mix', copy: 'Clustered flow with related detours.', meter: 0.62 },
 		{ mode: 'weighted' as const, label: 'Smart shuffle', copy: 'Freshness, favorites, and skips all count.', meter: 0.8 },
-		{ mode: 'true' as const, label: 'True shuffle', copy: 'Flat random coverage for the full queue.', meter: 0.38 }
+		{ mode: 'true' as const, label: 'True random', copy: 'Flat random coverage for the full queue.', meter: 0.38 }
 	];
 
 	const queueUpcoming = $derived(

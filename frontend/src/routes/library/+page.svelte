@@ -76,6 +76,9 @@
 
 	const PAGE_SIZE = 100;
 	const RECENT_TRACK_LIMIT = 10;
+	const ALL_SEARCH_ARTIST_PREVIEW_LIMIT = 12;
+	const ALL_SEARCH_ALBUM_PREVIEW_LIMIT = 12;
+	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
 
 	let activeTab = $state<'all' | 'tracks' | 'liked' | 'albums' | 'artists'>('all');
 	let playlists = $state<Playlist[]>([]);
@@ -346,6 +349,14 @@
 			const label = path.join(' > ');
 			return [{ ...node, name: label }, ...flattenGenres(node.children ?? [], path)];
 		});
+	}
+
+	function formatSearchSummary(artistCount: number, albumCount: number, trackCount: number) {
+		const parts: string[] = [];
+		if (artistCount > 0) parts.push(`${artistCount} artist match${artistCount === 1 ? '' : 'es'}`);
+		if (albumCount > 0) parts.push(`${albumCount} album match${albumCount === 1 ? '' : 'es'}`);
+		if (trackCount > 0) parts.push(`${trackCount} track match${trackCount === 1 ? '' : 'es'}`);
+		return parts.length ? parts.join(', ') : 'No library matches';
 	}
 
 	function selectionRange<T extends { id: number }>(
@@ -739,6 +750,14 @@
 		if (!activeDecade) return base;
 		return base.filter(a => a.year != null && Math.floor(a.year / 10) * 10 === activeDecade);
 	});
+	let visibleArtists = $derived.by(() => {
+		return $searchQuery.trim() ? searchResults.artists : artists;
+	});
+	let allSearchArtists = $derived(searchResults.artists);
+	let allSearchArtistPreview = $derived(allSearchArtists.slice(0, ALL_SEARCH_ARTIST_PREVIEW_LIMIT));
+	let allSearchAlbumPreview = $derived(visibleAlbums.slice(0, ALL_SEARCH_ALBUM_PREVIEW_LIMIT));
+	let allSearchTrackPreview = $derived(visibleTracks.slice(0, ALL_SEARCH_TRACK_PREVIEW_LIMIT));
+	let allSearchTotal = $derived(allSearchArtists.length + visibleAlbums.length + visibleTracks.length);
 	let canLoadMore = $derived(
 		!$searchQuery.trim() &&
 		((activeTab === 'tracks' || activeTab === 'liked')
@@ -748,7 +767,9 @@
 			: false)
 	);
 	let searchSummary = $derived(
-		(activeTab === 'tracks' || activeTab === 'liked')
+		activeTab === 'all'
+			? formatSearchSummary(allSearchArtists.length, visibleAlbums.length, visibleTracks.length)
+			: (activeTab === 'tracks' || activeTab === 'liked')
 			? `${visibleTracks.length} track match${visibleTracks.length === 1 ? '' : 'es'}`
 			: `${visibleAlbums.length} album match${visibleAlbums.length === 1 ? '' : 'es'}`
 	);
@@ -1062,7 +1083,7 @@
 	}
 }} />
 
-<div class="page-shell library animate-in">
+<div class="page-shell library">
 	<div class="library-search-shell">
 		<input
 			class="library-search-input"
@@ -1185,6 +1206,198 @@
 	{#if $isLoading}
 		<div class="loading"><div class="spinner"></div><span>Loading library…</span></div>
 
+	{:else if activeTab === 'all' && isSearchMode}
+		<div class="library-search-results">
+			{#if allSearchArtists.length > 0}
+				<section class="library-search-section">
+					<div class="section-header-row">
+						<h3 class="section-label">Artists ({allSearchArtists.length})</h3>
+						{#if allSearchArtists.length > ALL_SEARCH_ARTIST_PREVIEW_LIMIT}
+							<button class="view-all-link" onclick={() => switchTab('artists')}>View all →</button>
+						{/if}
+					</div>
+					<div class="artist-grid search-preview-grid">
+						{#each allSearchArtistPreview as artist (artist.id)}
+							{@const photoSrc = artist.photo_url && !failedArtistImages.has(artist.photo_url) ? artist.photo_url : null}
+							{@const lazyArtistImg = artistLazyArt[artist.id] && !failedArtistImages.has(artistLazyArt[artist.id]) ? artistLazyArt[artist.id] : null}
+							{@const fallbackSrc = artistArtworkById.get(artist.id)}
+							{@const fallbackArtistImg = fallbackSrc && !failedArtistImages.has(fallbackSrc) ? fallbackSrc : null}
+							{@const artistImg = photoSrc ?? lazyArtistImg ?? fallbackArtistImg}
+							<button
+								class="artist-card"
+								onclick={() => void goto(`/artists/${artist.id}`)}
+								oncontextmenu={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									openContextMenu(e, buildArtistMenu(artist, { isLocal: true, hideOpen: true }), artist.name);
+								}}
+								title="Open {artist.name}"
+								use:lazyTidalArt={{
+									enabled: !photoSrc && !artistLazyArt[artist.id],
+									query: { artist: artist.name },
+									onResolve: (url) => (artistLazyArt[artist.id] = url),
+								}}
+							>
+								<div class="artist-photo">
+									{#if artistImg}
+										<img src={artistImg} alt={artist.name} loading="lazy" onerror={() => { failedArtistImages = new Set([...failedArtistImages, artistImg]); }} />
+									{:else}
+										<span class="artist-initial">{artist.name.charAt(0).toUpperCase()}</span>
+									{/if}
+								</div>
+								<span class="artist-name">{artist.name}</span>
+							</button>
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			{#if visibleAlbums.length > 0}
+				<section class="library-search-section">
+					<div class="section-header-row">
+						<h3 class="section-label">Albums ({visibleAlbums.length})</h3>
+						{#if visibleAlbums.length > ALL_SEARCH_ALBUM_PREVIEW_LIMIT}
+							<button class="view-all-link" onclick={() => switchTab('albums')}>View all →</button>
+						{/if}
+					</div>
+					<div class="album-grid search-preview-grid">
+						{#each allSearchAlbumPreview as album (album.id)}
+							{@const albumKey = `album-${album.id}`}
+							{@const albumArt = album.artwork_url ?? lazyArt[albumKey] ?? null}
+							<div
+								class="album-card"
+								role="button"
+								tabindex="0"
+								onclick={() => void openAlbumDetail(album)}
+								oncontextmenu={(event) => {
+									event.preventDefault();
+									event.stopPropagation();
+									openContextMenu(event, buildAlbumMenu(album, {
+										isLocal: true,
+										addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
+											const { tracks: t } = await api.getAlbumTracks(album.id);
+											return t.map(tr => tr.id);
+										}),
+									}), album.title);
+								}}
+								onkeydown={(event) => runOnActivation(event, () => void openAlbumDetail(album))}
+								use:lazyTidalArt={{
+									enabled: !album.artwork_url && !lazyArt[albumKey],
+									query: { artist: album.artist_name, title: album.title },
+									onResolve: (url) => (lazyArt[albumKey] = url),
+								}}
+							>
+								<div class="album-art">
+									{#if albumArt}
+										<img src={albumArt} alt={album.title} loading="lazy" />
+									{:else}
+										<div class="art-placeholder" aria-hidden="true"></div>
+									{/if}
+									<div class="album-art-overlay">
+										<button
+											class="art-play-btn"
+											aria-label="Play {album.title}"
+											onclick={(event) => void playAlbum(album.id, event)}
+										>
+											<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+												<polygon points="5,3 13,8 5,13" fill="currentColor" />
+											</svg>
+										</button>
+										<button
+											class="art-info-btn"
+											aria-label="View {album.title} details"
+											onclick={(event) => { event.stopPropagation(); void openAlbumDetail(album); }}
+										>
+											i
+										</button>
+									</div>
+								</div>
+								<div class="album-meta">
+									<span class="album-title">{album.title}</span>
+									<span class="album-artist">{album.artist_name ?? 'Unknown'}</span>
+									<div class="album-chips">
+										{#if album.year}<span class="album-chip">{album.year}</span>{/if}
+										{#if album.release_type}<span class="album-chip">{album.release_type}</span>{/if}
+									</div>
+								</div>
+							</div>
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			{#if visibleTracks.length > 0}
+				<section class="library-search-section">
+					<div class="section-header-row">
+						<h3 class="section-label">Tracks ({visibleTracks.length})</h3>
+						{#if visibleTracks.length > ALL_SEARCH_TRACK_PREVIEW_LIMIT}
+							<button class="view-all-link" onclick={() => switchTab('tracks')}>View all →</button>
+						{/if}
+					</div>
+					<div class="home-track-list">
+						{#each allSearchTrackPreview as track (track.id)}
+							{@const trackKey = `track-${track.id}`}
+							{@const trackArt = track.artwork_url ?? lazyArt[trackKey] ?? null}
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<div
+								class="home-track-row"
+								class:playing={$currentTrack?.id === track.id && $isPlaying}
+								role="button"
+								onclick={() => void playTrack(track)}
+								oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); openContextMenu(e, buildTrackMenu(track)); }}
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && void playTrack(track)}
+								use:lazyTidalArt={{
+									enabled: !track.artwork_url && !lazyArt[trackKey],
+									query: { artist: track.artist_name, title: track.title },
+									onResolve: (url) => (lazyArt[trackKey] = url),
+								}}
+							>
+								<div class="ht-art" class:ht-art--fallback={!trackArt}>
+									{#if trackArt}
+										<img class="ht-art-img" src={trackArt} alt="" loading="lazy" />
+									{/if}
+								</div>
+								<div class="ht-meta">
+									<span class="ht-title">{track.title}</span>
+									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` - ${track.album_title}` : ''}</span>
+								</div>
+								<span class="ht-duration">{formatTrackDuration(track.duration_ms)}</span>
+								<div class="ht-actions">
+									<button
+										class="btn-icon"
+										title="View details"
+										onclick={(e) => { e.stopPropagation(); void openTrackDetail(track); }}
+										aria-label="View details"
+									>
+										i
+									</button>
+									<button
+										class="btn-icon"
+										title="Add to queue"
+										onclick={(e) => { e.stopPropagation(); void addTrackToQueue(track.id); }}
+										aria-label="Add to queue"
+									>
+										<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+											<line x1="2" y1="4" x2="14" y2="4"/>
+											<line x1="2" y1="8" x2="14" y2="8"/>
+											<line x1="2" y1="12" x2="10" y2="12"/>
+											<line x1="13" y1="10" x2="13" y2="16"/>
+											<line x1="10" y1="13" x2="16" y2="13"/>
+										</svg>
+									</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			{#if allSearchTotal === 0}
+				<EmptyState title="No library matches" copy="Try a different artist, album, or track name." />
+			{/if}
+		</div>
+
 	{:else if activeTab === 'all'}
 		<div class="library-home">
 			{#if heroArtists.length > 0}
@@ -1248,11 +1461,11 @@
 									onResolve: (url) => (lazyArt[trackKey] = url),
 								}}
 							>
-								{#if trackArt}
-									<div class="ht-art" style="background-image: url('{trackArt}')"></div>
-								{:else}
-									<div class="ht-art ht-art--fallback"></div>
-								{/if}
+								<div class="ht-art" class:ht-art--fallback={!trackArt}>
+									{#if trackArt}
+										<img class="ht-art-img" src={trackArt} alt="" loading="lazy" />
+									{/if}
+								</div>
 								<div class="ht-meta">
 									<span class="ht-title">{track.title}</span>
 									<span class="ht-sub">{track.artist_name ?? ''}{track.album_title ? ` — ${track.album_title}` : ''}</span>
@@ -1399,30 +1612,16 @@
 
 	{:else if activeTab === 'artists'}
 		<!-- Artist Grid -->
-		{#if artistsLoading}
+		{#if artistsLoading && !isSearchMode}
 			<div class="loading">Loading artists…</div>
-		{:else if artists.length === 0}
-			<EmptyState title="No artists yet" copy="Sync your TIDAL library in Settings to populate artists." />
+		{:else if visibleArtists.length === 0}
+			<EmptyState
+				title={isSearchMode ? 'No artists match' : 'No artists yet'}
+				copy={isSearchMode ? `Nothing in your library matches "${$searchQuery.trim()}". Try a different search.` : 'Sync your TIDAL library in Settings to populate artists.'}
+			/>
 		{:else}
-			{@const q = $searchQuery.trim().toLowerCase()}
-			{@const ftsArtists = q ? searchResults.artists : []}
-			{@const filteredArtists = q
-				? ftsArtists
-					.map(a => {
-						const n = a.name.toLowerCase();
-						let score = 0;
-						if (n === q) score = 100;
-						else if (n.startsWith(q)) score = 80;
-						else if (n.split(/\s+/).some(w => w.startsWith(q))) score = 60;
-						else if (n.includes(q)) score = 40;
-						return { artist: a, score };
-					})
-					.filter(x => x.score > 0)
-					.sort((a, b) => b.score - a.score || a.artist.name.localeCompare(b.artist.name))
-					.map(x => x.artist)
-				: artists}
 			<div class="artist-grid">
-				{#each filteredArtists as artist (artist.id)}
+				{#each visibleArtists as artist (artist.id)}
 					{@const photoSrc = artist.photo_url && !failedArtistImages.has(artist.photo_url) ? artist.photo_url : null}
 					{@const lazyArtistImg = artistLazyArt[artist.id] && !failedArtistImages.has(artistLazyArt[artist.id]) ? artistLazyArt[artist.id] : null}
 					{@const fallbackSrc = artistArtworkById.get(artist.id)}
@@ -1455,9 +1654,6 @@
 				{/each}
 			</div>
 
-			{#if filteredArtists.length === 0}
-				<EmptyState title="No artists match" copy={`Nothing in your library matches "${q}". Try a different search.`} />
-			{/if}
 		{/if}
 
 	{:else if activeTab === 'tracks' || activeTab === 'liked'}
@@ -1858,6 +2054,23 @@
 		padding: 8px 0 40px;
 	}
 
+	.library-search-results {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-6);
+		padding: var(--space-2) 0 var(--space-6);
+	}
+
+	.library-search-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+
+	.search-preview-grid {
+		margin: 0;
+	}
+
 	.home-section {
 		display: flex;
 		flex-direction: column;
@@ -1920,6 +2133,14 @@
 		border-radius: 4px;
 		background-size: cover;
 		background-position: center;
+		overflow: hidden;
+	}
+
+	.ht-art-img {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
 	}
 
 	.ht-art--fallback {
@@ -2257,27 +2478,29 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
+		width: 100%;
 		max-width: var(--content-width);
-		margin: 0 auto 24px;
+		margin: 0 auto var(--space-5);
 		padding: 0 4px;
 	}
 
 	.library-search-input {
 		width: 100%;
-		max-width: 640px;
+		max-width: 720px;
 		margin: 0 auto;
 		padding: 14px 22px;
 		border-radius: var(--radius-lg);
 		border: 1px solid var(--border-subtle);
 		background: var(--panel-bg);
-		color: var(--text-primary, #fff);
+		color: var(--text-primary);
 		font-size: var(--font-size-md);
 		outline: none;
-		transition: border-color 0.15s;
+		transition: border-color var(--motion-fast), background var(--motion-fast);
 	}
 
 	.library-search-input:focus {
 		border-color: var(--accent);
+		background: var(--input-focus);
 	}
 
 	.library-status {
