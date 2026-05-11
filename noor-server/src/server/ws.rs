@@ -9,7 +9,6 @@ use axum::{
     routing::get,
 };
 use serde_json::json;
-use tokio::time::{Duration, interval};
 use tracing::info;
 
 pub fn ws_routes(state: SharedState) -> Router {
@@ -43,11 +42,6 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     {
         return;
     }
-
-    // Keepalive ping every 30 seconds to prevent idle TCP connections from
-    // being reaped by NAT/proxies/OS when there are no playback events.
-    let mut ping_ticker = interval(Duration::from_secs(30));
-    ping_ticker.tick().await; // consume the immediate first tick
 
     // Forward events to the client
     loop {
@@ -130,12 +124,6 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                     }),
                 };
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                    break;
-                }
-            }
-            // Keepalive ping
-            _ = ping_ticker.tick() => {
-                if socket.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
             }
