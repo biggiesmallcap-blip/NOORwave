@@ -1,0 +1,26 @@
+{
+	"navigationZones": [
+		{
+			"label": "Atlas",
+			"routeIds": ["home", "library", "search", "videos", "genres", "playlists", "discover"]
+		},
+		{
+			"label": "Signals",
+			"routeIds": ["automix", "analytics", "duplicates"]
+		},
+		{
+			"label": "System",
+			"routeIds": ["settings"]
+		}
+	],
+	"mobileTabRouteIds": ["home", "library", "genres", "discover"],
+	"mobileMoreRouteIds": ["playlists", "automix", "analytics", "duplicates", "settings"],
+	"smokePhaseRouteIds": {
+		"shell": ["home", "library", "search", "settings"],
+		"links": ["home", "library", "search", "playlists", "videos", "settings"],
+		"menus": ["home", "library", "search", "automix", "duplicates"],
+		"artist-album": ["library", "search"],
+		"styling": ["home", "library", "search", "settings", "automix", "genres"],
+		"performance": ["home", "library", "search", "analytics", "discover", "videos"]
+	}
+}

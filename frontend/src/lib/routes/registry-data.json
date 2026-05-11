@@ -1,0 +1,13 @@
+{
+	"home": { "path": "/", "label": "Home", "zone": "Atlas", "icon": "⌂" },
+	"library": { "path": "/library", "label": "Library", "zone": "Atlas", "icon": "♫" },
+	"search": { "path": "/search", "label": "Search", "zone": "Atlas", "icon": "⌕" },
+	"videos": { "path": "/videos", "label": "Videos", "zone": "Atlas", "icon": "▷" },
+	"genres": { "path": "/genres", "label": "Genre Galaxy", "zone": "Atlas", "icon": "✦" },
+	"playlists": { "path": "/playlists", "label": "Playlists", "zone": "Atlas", "icon": "☰" },
+	"discover": { "path": "/discoverspace", "label": "Discover", "zone": "Atlas", "icon": "◈" },
+	"automix": { "path": "/automix", "label": "Automix", "zone": "Signals", "icon": "⟁" },
+	"analytics": { "path": "/analytics", "label": "Analytics", "zone": "Signals", "icon": "◉" },
+	"duplicates": { "path": "/duplicates", "label": "Duplicates", "zone": "Signals", "icon": "⊘" },
+	"settings": { "path": "/settings", "label": "Settings", "zone": "System", "icon": "⚙" }
+}
