@@ -6,5 +6,5 @@
   "remote": {
     "urls": ["http://127.0.0.1:3334/**"]
   },
-  "permissions": ["core:webview:allow-set-webview-zoom"]
+  "permissions": ["core:webview:allow-set-webview-zoom", "opener:default"]
 }

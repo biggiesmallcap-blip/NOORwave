@@ -1,11 +1,5 @@
-// Opens a URL in the system browser. In Tauri the WebView2 doesn't honor
-// `<a target="_blank">` or `window.open()` for external URLs by default —
-// we route through the `open_external` Tauri command (which calls the Rust
-// `open` crate). Falls back to `window.open` for plain-browser usage so
-// `npm run dev` still works.
-//
-// Tauri 2 injects `window.__TAURI_INTERNALS__.invoke`. Detect via that
-// rather than adding an npm dep — keeps the bundle the same size.
+import { openUrl } from '@tauri-apps/plugin-opener';
+
 type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 interface TauriWindow extends Window {
@@ -19,11 +13,10 @@ export function isTauri(): boolean {
 
 export function openExternal(url: string): void {
 	if (!url) return;
-	const w = typeof window === 'undefined' ? null : (window as TauriWindow);
-	const invoke = w?.__TAURI_INTERNALS__?.invoke;
-	if (invoke) {
-		void invoke('open_external', { url }).catch((err) => {
-			console.warn('open_external failed', err);
+	const w = typeof window === 'undefined' ? null : window;
+	if (isTauri()) {
+		void openUrl(url).catch((err) => {
+			console.warn('opener.openUrl failed', err);
 		});
 		return;
 	}

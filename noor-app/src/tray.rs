@@ -106,7 +106,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap()
                         .clone();
                     if let Some(url) = url {
-                        let _ = open::that(url);
+                        let _ = tauri_plugin_opener::open_url(url, None::<&str>);
                     }
                 }
                 "network" => {
