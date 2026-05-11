@@ -953,7 +953,12 @@ fn transition_to_job(
     // a perfectly good audio stream and cold-start a duplicate.
     // position_source was already redirected to the promoted engine at promotion
     // time, so the handle reads the correct counter without any extra work here.
-    if !force_restart && state.engine.as_ref().map(|e| e.track_id) == Some(job.track.id) {
+    if switch_is_noop_for_active_job(
+        force_restart,
+        state.engine.as_ref().map(|e| (e.track_id, e.generation)),
+        job.track.id,
+        job.generation,
+    ) {
         return Ok(());
     }
 
@@ -1044,6 +1049,15 @@ fn transition_to_job(
 
     state.engine = Some(engine);
     Ok(())
+}
+
+fn switch_is_noop_for_active_job(
+    force_restart: bool,
+    active: Option<(i64, u64)>,
+    track_id: i64,
+    generation: u64,
+) -> bool {
+    !force_restart && active == Some((track_id, generation))
 }
 
 fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
@@ -3297,6 +3311,13 @@ mod tests {
             terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 4, 1),
             None
         );
+    }
+
+    #[test]
+    fn switch_noop_requires_same_track_and_generation() {
+        assert!(switch_is_noop_for_active_job(false, Some((42, 7)), 42, 7));
+        assert!(!switch_is_noop_for_active_job(false, Some((42, 7)), 42, 8));
+        assert!(!switch_is_noop_for_active_job(true, Some((42, 7)), 42, 7));
     }
 
     #[test]

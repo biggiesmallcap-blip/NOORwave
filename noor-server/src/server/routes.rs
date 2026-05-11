@@ -12495,11 +12495,6 @@ fn current_playback_generation(state: &crate::AppState) -> u64 {
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-async fn current_playback_generation_async(state: &SharedState) -> u64 {
-    let state_guard = state.read().await;
-    current_playback_generation(&state_guard)
-}
-
 async fn bump_playback_generation(state: &SharedState) -> u64 {
     let state_guard = state.read().await;
     state_guard
@@ -13680,7 +13675,7 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
     };
 
     let crossfade_ms = current_crossfade_ms(state).await;
-    let generation = current_playback_generation_async(state).await;
+    let generation = bump_playback_generation(state).await;
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(generation);
