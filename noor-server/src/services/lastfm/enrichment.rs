@@ -12,11 +12,119 @@ use crate::genre::scorer::{MIN_SCORE_FLOOR, TagInput, TagLevel, TagSource, score
 use crate::metadata::lastfm::LastFmClient;
 use crate::services::lastfm::tag_filter::is_artist_name_tag;
 use crate::tags::context::{TagContext, classify_tag_context};
+use rusqlite::Connection;
 
 const CALL_DELAY_MS: u64 = 200;
 const MAX_RETRIES: u32 = 3;
 
 type CountedTag = (String, Option<u32>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnrichmentMode {
+    Pending,
+    RefreshAll,
+}
+
+pub struct EnrichmentStats {
+    pub total_tracks: i64,
+    pub checked_tracks: i64,
+    pub enriched_tracks: i64,
+    pub remaining_tracks: i64,
+}
+
+pub fn count_tracks_to_enrich(conn: &Connection, mode: EnrichmentMode) -> Result<usize> {
+    let sql = match mode {
+        EnrichmentMode::Pending => {
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)"
+        }
+        EnrichmentMode::RefreshAll => {
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))"
+        }
+    };
+    let count: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+pub fn load_tracks_to_enrich(
+    conn: &Connection,
+    mode: EnrichmentMode,
+) -> Result<Vec<(i64, String, String)>> {
+    let sql = match mode {
+        EnrichmentMode::Pending => {
+            "SELECT t.id, t.title, a.name
+             FROM tracks t
+             JOIN artists a ON t.artist_id = a.id
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND NOT EXISTS (
+                   SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id
+               )
+             ORDER BY t.id"
+        }
+        EnrichmentMode::RefreshAll => {
+            "SELECT t.id, t.title, a.name
+             FROM tracks t
+             JOIN artists a ON t.artist_id = a.id
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+             ORDER BY t.id"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    Ok(stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn enrichment_stats(conn: &Connection) -> Result<EnrichmentStats> {
+    let total_tracks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tracks t
+         WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))",
+        [],
+        |row| row.get(0),
+    )?;
+    let checked_tracks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tracks t
+         WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+           AND EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
+        [],
+        |row| row.get(0),
+    )?;
+    let enriched_tracks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tracks t
+         WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+           AND (
+               EXISTS (
+                   SELECT 1 FROM track_genres tg
+                   WHERE tg.track_id = t.id AND tg.source = 'lastfm'
+               )
+               OR EXISTS (
+                   SELECT 1 FROM track_context_tags tct
+                   WHERE tct.track_id = t.id AND tct.source = 'lastfm'
+               )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok(EnrichmentStats {
+        total_tracks,
+        checked_tracks,
+        enriched_tracks,
+        remaining_tracks: (total_tracks - checked_tracks).max(0),
+    })
+}
+
+fn mark_checked(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO lastfm_checked (track_id, checked_at)
+         VALUES (?1, datetime('now'))
+         ON CONFLICT(track_id) DO UPDATE SET checked_at = excluded.checked_at",
+        rusqlite::params![track_id],
+    )?;
+    Ok(())
+}
 
 fn context_confidence(count: Option<u32>) -> f64 {
     match count {
@@ -66,6 +174,7 @@ pub async fn run_enrichment<F, G>(
     state: SharedState,
     http: Client,
     api_key: String,
+    mode: EnrichmentMode,
     cancel: Arc<AtomicBool>,
     mut artist_progress: G,
     mut progress: F,
@@ -78,22 +187,11 @@ where
 
     let client = LastFmClient::new(http, api_key);
 
-    let tracks_to_enrich: Vec<(i64, String, String)> = state.read().await.db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT t.id, t.title, a.name
-             FROM tracks t
-             JOIN artists a ON t.artist_id = a.id
-             WHERE (t.is_favorite = 1
-                    OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-               AND NOT EXISTS (
-                   SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id
-               )",
-        )?;
-        Ok(stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .filter_map(|row| row.ok())
-            .collect::<Vec<_>>())
-    })?;
+    let tracks_to_enrich: Vec<(i64, String, String)> = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| load_tracks_to_enrich(conn, mode))?;
 
     let total = tracks_to_enrich.len();
     if total == 0 {
@@ -204,6 +302,17 @@ where
             || matches!(artist_cache.get(&artist), Some(Some(tags)) if !tags.is_empty());
 
         let _ = state.read().await.db.with_conn(|conn| {
+            if mode == EnrichmentMode::RefreshAll && !transient_failure {
+                conn.execute(
+                    "DELETE FROM track_genres WHERE track_id = ?1 AND source = 'lastfm'",
+                    rusqlite::params![track_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM track_context_tags WHERE track_id = ?1 AND source = 'lastfm'",
+                    rusqlite::params![track_id],
+                )?;
+            }
+
             let catalog = crate::genre::builder::embedded_builder().catalog();
             let mut routed_input: Vec<(String, Option<u32>, TagSource, TagLevel)> = Vec::new();
             let mut seen: HashSet<(String, TagSource, TagLevel)> = HashSet::new();
@@ -284,10 +393,7 @@ where
             }
 
             if !transient_failure {
-                conn.execute(
-                    "INSERT OR IGNORE INTO lastfm_checked (track_id) VALUES (?1)",
-                    rusqlite::params![track_id],
-                )?;
+                mark_checked(conn, track_id)?;
             }
             Ok(())
         });
@@ -356,6 +462,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+
+    fn lastfm_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE albums (id INTEGER PRIMARY KEY, is_favorite INTEGER DEFAULT 0);
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                artist_id INTEGER NOT NULL,
+                album_id INTEGER,
+                is_favorite INTEGER DEFAULT 0
+            );
+            CREATE TABLE lastfm_checked (
+                track_id INTEGER PRIMARY KEY,
+                checked_at TEXT DEFAULT (datetime('now'))
+            );
+            ",
+        )
+        .unwrap();
+        conn
+    }
 
     #[test]
     fn mood_tags_are_routed_to_context_not_genres() {
@@ -412,5 +542,43 @@ mod tests {
         let old_json = serde_json::to_string(&vec!["rock".to_string()]).unwrap();
         let parsed: Option<Vec<CountedTag>> = serde_json::from_str(&old_json).ok();
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn refresh_mode_selects_already_checked_eligible_tracks() {
+        let conn = lastfm_test_conn();
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Autechre')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO albums (id, is_favorite) VALUES (10, 1), (11, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, is_favorite) VALUES
+                (1, 'Flutter', 1, 11, 1),
+                (2, 'Bike', 1, 10, 0),
+                (3, 'Basscadet', 1, 11, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO lastfm_checked (track_id) VALUES (1), (2)", [])
+            .unwrap();
+
+        assert_eq!(
+            count_tracks_to_enrich(&conn, EnrichmentMode::Pending).unwrap(),
+            0
+        );
+        assert_eq!(
+            count_tracks_to_enrich(&conn, EnrichmentMode::RefreshAll).unwrap(),
+            2
+        );
+
+        let refresh_tracks = load_tracks_to_enrich(&conn, EnrichmentMode::RefreshAll).unwrap();
+        let ids = refresh_tracks
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 2]);
     }
 }

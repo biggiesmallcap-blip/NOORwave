@@ -30,6 +30,7 @@ pub async fn run_if_idle(state: SharedState) {
 
 async fn spawn_lastfm_if_idle(state: SharedState) {
     use crate::services::lastfm;
+    use crate::services::lastfm::enrichment::EnrichmentMode;
 
     let (
         http,
@@ -76,13 +77,7 @@ async fn spawn_lastfm_if_idle(state: SharedState) {
     let total: usize = {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT COUNT(*) FROM tracks t
-                 WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-                   AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
-                [],
-                |r| r.get(0),
-            )?)
+            lastfm::enrichment::count_tracks_to_enrich(conn, EnrichmentMode::Pending)
         })
         .unwrap_or(0)
     };
@@ -119,6 +114,7 @@ async fn spawn_lastfm_if_idle(state: SharedState) {
             state,
             http,
             api_key,
+            EnrichmentMode::Pending,
             cancel,
             move |done, artist_total| {
                 prefetch_total_cb.store(artist_total, Ordering::SeqCst);

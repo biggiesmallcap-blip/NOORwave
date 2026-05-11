@@ -101,6 +101,8 @@
 	let lastfmApiKey = $state('');
 	let lastfmSaving = $state(false);
 	let lastfmError = $state('');
+	let lastfmTotal = $state(0);
+	let lastfmChecked = $state(0);
 	let lastfmEnrichedCount = $state(0);
 	let lastfmRemaining = $state(0);
 	let lastfmIsRunning = $state(false);
@@ -197,19 +199,19 @@
 	// Mirrors PER_TRACK_DELAY_MS in services/lastfm/enrichment.rs.
 	const LASTFM_FALLBACK_SECONDS_PER_TRACK = 0.5;
 	const DISCOVERY_SAFETY_TIMEOUT_MESSAGE = 'Laptop safety timeout stopped discovery training.';
+	let lastfmRunRemaining = $derived(Math.max(0, lastfmRunTotal - lastfmRunProcessed));
 
 	let lastfmEtaSeconds = $derived.by(() => {
-		const remainingInRun = Math.max(0, lastfmRunTotal - lastfmRunProcessed);
-		if (remainingInRun === 0) return 0;
+		if (lastfmRunRemaining === 0) return 0;
 		// While running, compute observed rate from elapsed wall time.
 		if (lastfmIsRunning && lastfmRunStartedAt > 0 && lastfmRunProcessed > 0) {
 			const elapsed = Math.max(1, nowEpochSeconds - lastfmRunStartedAt);
 			const secondsPerTrack = elapsed / lastfmRunProcessed;
-			return remainingInRun * secondsPerTrack;
+			return lastfmRunRemaining * secondsPerTrack;
 		}
 		// Pre-run estimate (or post-stop, before fresh status load): use the
 		// total queue (`lastfmRemaining`) and the constant rate.
-		const queue = lastfmIsRunning ? remainingInRun : lastfmRemaining;
+		const queue = lastfmIsRunning ? lastfmRunRemaining : lastfmRemaining;
 		return queue * LASTFM_FALLBACK_SECONDS_PER_TRACK;
 	});
 	let lastfmEtaLabel = $derived(formatDurationSeconds(lastfmEtaSeconds));
@@ -608,6 +610,8 @@
 
 		if (enrichResp.status === 'fulfilled') {
 			const data2 = await enrichResp.value.json();
+			lastfmTotal = data2.total_tracks ?? 0;
+			lastfmChecked = data2.checked_tracks ?? 0;
 			lastfmEnrichedCount = data2.enriched_tracks ?? 0;
 			lastfmRemaining = data2.remaining_tracks ?? 0;
 			lastfmIsRunning = data2.is_running === true;
@@ -656,11 +660,15 @@
 	async function startLastfmEnrichment() {
 		lastfmError = '';
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/library/enrich/lastfm`, { method: 'POST' });
+			const refresh = lastfmRemaining === 0 && lastfmTotal > 0;
+			const path = `/api/library/enrich/lastfm${refresh ? '?mode=refresh' : ''}`;
+			const resp = await authFetch(`${getApiBase()}${path}`, { method: 'POST' });
 			markServerOnline();
 			const data = await resp.json();
 			if (data.status === 'error') {
 				lastfmError = data.message ?? 'Last.fm enrichment failed.';
+			} else if (data.status === 'no_eligible_tracks') {
+				lastfmError = 'Favorite tracks or albums before running Last.fm tags.';
 			}
 			await loadLastfmStatus();
 		} catch (e) {
@@ -1737,11 +1745,12 @@
 					</div>
 				{:else}
 					<div class="stat-grid inner-metrics">
-						<MetricPair label="Tagged" value={lastfmEnrichedCount.toLocaleString()} copy="Tracks with Last.fm tag coverage." />
+						<MetricPair label="Tagged" value={lastfmEnrichedCount.toLocaleString()} copy="Tracks with Last.fm genre or context tags." />
+						<MetricPair label="Checked" value={`${lastfmChecked.toLocaleString()} / ${lastfmTotal.toLocaleString()}`} copy="Eligible tracks already queried." />
 						<MetricPair
 							label="Remaining"
 							value={lastfmRemaining.toLocaleString()}
-							copy="Favorited tracks still pending Last.fm lookup. Last.fm allows ~5 req/sec — full pass takes ~30 min per 10k tracks."
+							copy="Favorited tracks still pending Last.fm lookup. Last.fm allows ~5 req/sec, so a full pass takes ~30 min per 10k tracks."
 						/>
 					</div>
 
@@ -1751,13 +1760,13 @@
 								{#if lastfmIsRunning && lastfmPrefetchTotal > 0 && lastfmPrefetchDone < lastfmPrefetchTotal}
 									Pre-fetching artist tags… {lastfmPrefetchDone.toLocaleString()} / {lastfmPrefetchTotal.toLocaleString()} artists. Track pass starts after.
 								{:else if lastfmIsRunning && lastfmRunTotal > 0}
-									Querying Last.fm… {lastfmRemaining.toLocaleString()} tracks remaining (~{lastfmEtaLabel} left).
-								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmEnrichedCount > 0}
-									Enrichment finished. {lastfmEnrichedCount.toLocaleString()} tracks tagged.
+									Querying Last.fm… {lastfmRunRemaining.toLocaleString()} tracks left in this run (~{lastfmEtaLabel} left).
+								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmTotal > 0}
+									All {lastfmTotal.toLocaleString()} eligible tracks checked. Recheck tags to refresh Last.fm coverage.
 								{:else if !lastfmIsRunning && lastfmRemaining > 0}
-									{lastfmRemaining.toLocaleString()} favorited tracks pending — full pass ~{lastfmEtaLabel}. Click Enrich to start; runs in the background even if you close this tab.
+									{lastfmRemaining.toLocaleString()} favorited tracks pending. Full pass ~{lastfmEtaLabel}. Click Enrich to start; runs in the background even if you close this tab.
 								{:else}
-									No tracks pending Last.fm enrichment.
+									No favorited tracks or albums ready for Last.fm enrichment.
 								{/if}
 							</p>
 							<span>
@@ -1786,9 +1795,15 @@
 						<button
 							class="btn btn-primary"
 							onclick={startLastfmEnrichment}
-							disabled={lastfmIsRunning || lastfmRemaining === 0}
+							disabled={lastfmIsRunning || lastfmTotal === 0}
 						>
-							{lastfmIsRunning ? 'Running…' : lastfmRemaining === 0 ? 'All enriched' : 'Enrich genres'}
+							{lastfmIsRunning
+								? 'Running…'
+								: lastfmRemaining === 0
+									? 'Recheck tags'
+									: lastfmChecked > 0
+										? 'Resume enrichment'
+										: 'Enrich genres'}
 						</button>
 						{#if lastfmIsRunning}
 							<button class="btn btn-glass" onclick={stopLastfmEnrichment}>Stop</button>

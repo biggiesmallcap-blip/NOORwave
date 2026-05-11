@@ -15210,10 +15210,32 @@ async fn lastfm_clear_config(State(state): State<SharedState>) -> Result<Json<Va
     Ok(Json(json!({"status": "cleared"})))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct LastfmEnrichmentStartParams {
+    mode: Option<String>,
+    refresh: Option<bool>,
+}
+
+impl LastfmEnrichmentStartParams {
+    fn mode(&self) -> crate::services::lastfm::enrichment::EnrichmentMode {
+        if self.refresh == Some(true)
+            || self.mode.as_deref().is_some_and(|mode| {
+                mode.eq_ignore_ascii_case("refresh") || mode.eq_ignore_ascii_case("refresh_all")
+            })
+        {
+            crate::services::lastfm::enrichment::EnrichmentMode::RefreshAll
+        } else {
+            crate::services::lastfm::enrichment::EnrichmentMode::Pending
+        }
+    }
+}
+
 async fn start_lastfm_enrichment(
     State(state): State<SharedState>,
+    Query(params): Query<LastfmEnrichmentStartParams>,
 ) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
+    use crate::services::lastfm::enrichment::EnrichmentMode;
     use std::sync::atomic::Ordering;
 
     let (
@@ -15264,17 +15286,22 @@ async fn start_lastfm_enrichment(
         })));
     };
 
-    let total: usize = state.read().await.db.with_conn(|conn| {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks t
-             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-               AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
-            [], |r| r.get(0)
-        )?)
-    }).unwrap_or(0);
+    let mode = params.mode();
+    let total: usize = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| lastfm::enrichment::count_tracks_to_enrich(conn, mode))
+        .unwrap_or(0);
 
     if total == 0 {
-        return Ok(Json(json!({"status": "already_complete"})));
+        return Ok(Json(json!({
+            "status": if mode == EnrichmentMode::RefreshAll {
+                "no_eligible_tracks"
+            } else {
+                "already_complete"
+            }
+        })));
     }
 
     cancel.store(false, Ordering::SeqCst);
@@ -15302,6 +15329,7 @@ async fn start_lastfm_enrichment(
             state,
             http,
             api_key,
+            mode,
             cancel,
             move |done, artist_total| {
                 prefetch_total_cb.store(artist_total, Ordering::SeqCst);
@@ -15338,27 +15366,9 @@ async fn get_lastfm_enrichment_status(
 ) -> Result<Json<Value>, StatusCode> {
     use std::sync::atomic::Ordering;
     let s = state.read().await;
-    let enriched: i64 =
-        s.db.with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'lastfm'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap_or(0);
-    let remaining: i64 = s
-        .db
-        .with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT COUNT(*) FROM tracks t
-             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-               AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap_or(0);
+    let stats =
+        s.db.with_conn(crate::services::lastfm::enrichment::enrichment_stats)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let is_running = s.lastfm_enrich_running.load(Ordering::SeqCst);
     let run_total = s.lastfm_enrich_total.load(Ordering::SeqCst);
     let run_processed = s.lastfm_enrich_processed.load(Ordering::SeqCst);
@@ -15366,8 +15376,10 @@ async fn get_lastfm_enrichment_status(
     let prefetch_done = s.lastfm_prefetch_done.load(Ordering::SeqCst);
     let run_started_at = s.lastfm_enrich_started_at.load(Ordering::SeqCst);
     Ok(Json(json!({
-        "enriched_tracks": enriched,
-        "remaining_tracks": remaining,
+        "total_tracks": stats.total_tracks,
+        "checked_tracks": stats.checked_tracks,
+        "enriched_tracks": stats.enriched_tracks,
+        "remaining_tracks": stats.remaining_tracks,
         "is_running": is_running,
         "run_total": run_total,
         "run_processed": run_processed,
