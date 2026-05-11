@@ -19,9 +19,9 @@
 //! continuous paused state. The runtime detects the release via
 //! [`ExclusiveStream::is_released`] and re-grabs on the next Resume / Play.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -125,6 +125,48 @@ pub struct ExclusiveStream {
     #[allow(dead_code)]
     pub effective_channels: u16,
     pub transport_format: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ExclusiveRenderRole {
+    Active,
+    Prepared,
+    Fading,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExclusiveRenderSource {
+    pub role: ExclusiveRenderRole,
+    pub shared: Arc<PlaybackSharedState>,
+}
+
+#[derive(Default)]
+pub(crate) struct ExclusiveRenderSourceBank {
+    sources: RwLock<Vec<ExclusiveRenderSource>>,
+}
+
+impl ExclusiveRenderSourceBank {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_sources(&self, sources: Vec<ExclusiveRenderSource>) {
+        if let Ok(mut guard) = self.sources.write() {
+            *guard = sources;
+        }
+    }
+
+    pub fn clear(&self) {
+        self.set_sources(Vec::new());
+    }
+
+    pub fn snapshot(&self) -> Vec<ExclusiveRenderSource> {
+        self.sources
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl ExclusiveStream {
@@ -255,7 +297,7 @@ pub fn build_exclusive_stream(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
-    shared: Arc<PlaybackSharedState>,
+    source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> std::result::Result<ExclusiveStream, ExclusiveInitFailure> {
@@ -277,7 +319,7 @@ pub fn build_exclusive_stream(
                 desired_sample_rate,
                 channels,
                 grace_secs,
-                shared,
+                source_bank,
                 command_tx,
                 event_tx,
                 shutdown_clone,
@@ -314,7 +356,7 @@ fn run_render_thread(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
-    shared: Arc<PlaybackSharedState>,
+    source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     shutdown: Arc<AtomicBool>,
@@ -333,6 +375,7 @@ fn run_render_thread(
     };
 
     let mut f32_scratch: Vec<f32> = Vec::new();
+    let mut mix_scratch: Vec<f32> = Vec::new();
     let mut byte_buf: Vec<u8> = Vec::new();
     match write_available_wasapi_frames(
         &audio_client,
@@ -340,10 +383,11 @@ fn run_render_thread(
         channels,
         blockalign,
         fmt_tag,
-        &shared,
+        &source_bank,
         &command_tx,
         &event_tx,
         &mut f32_scratch,
+        &mut mix_scratch,
         &mut byte_buf,
     ) {
         Ok(Some(report)) => {
@@ -393,7 +437,7 @@ fn run_render_thread(
         // Drop chains release the IAudioClient so other apps can use the
         // device. The runtime detects the release via `is_released()` and
         // rebuilds the stream on the next Resume/Play.
-        if shared.paused.load(Ordering::Relaxed) {
+        if source_bank_all_paused(&source_bank) {
             let now = Instant::now();
             match paused_since {
                 None => paused_since = Some(now),
@@ -428,10 +472,11 @@ fn run_render_thread(
             channels,
             blockalign,
             fmt_tag,
-            &shared,
+            &source_bank,
             &command_tx,
             &event_tx,
             &mut f32_scratch,
+            &mut mix_scratch,
             &mut byte_buf,
         ) {
             Ok(Some(report)) => {
@@ -488,10 +533,11 @@ fn write_available_wasapi_frames(
     channels: u16,
     blockalign: usize,
     fmt_tag: Format,
-    shared: &Arc<PlaybackSharedState>,
+    source_bank: &Arc<ExclusiveRenderSourceBank>,
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     f32_scratch: &mut Vec<f32>,
+    mix_scratch: &mut Vec<f32>,
     byte_buf: &mut Vec<u8>,
 ) -> std::result::Result<Option<RenderWriteReport>, String> {
     let frames = audio_client
@@ -506,7 +552,12 @@ fn write_available_wasapi_frames(
     f32_scratch.resize(interleaved, 0.0);
     f32_scratch.fill(0.0);
 
-    fill_f32_from_shared(f32_scratch, shared, command_tx, event_tx);
+    mix_scratch.resize(interleaved, 0.0);
+    for source in source_bank.snapshot() {
+        mix_scratch.fill(0.0);
+        fill_f32_from_shared(mix_scratch, &source.shared, command_tx, event_tx);
+        mix_f32_into(f32_scratch, mix_scratch);
+    }
     let nonzero_audio = f32_scratch.iter().any(|sample| sample.abs() > f32::EPSILON);
 
     let bytes_needed = frames * blockalign;
@@ -527,6 +578,19 @@ fn write_available_wasapi_frames(
         frames,
         nonzero_audio,
     }))
+}
+
+fn mix_f32_into(dst: &mut [f32], src: &[f32]) {
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d = (*d + *s).clamp(-1.0, 1.0);
+    }
+}
+
+fn source_bank_all_paused(source_bank: &ExclusiveRenderSourceBank) -> bool {
+    let sources = source_bank.snapshot();
+    sources
+        .iter()
+        .all(|source| source.shared.paused.load(Ordering::Relaxed))
 }
 
 /// Try every candidate format in turn, attempting `initialize_client` directly
@@ -952,6 +1016,59 @@ mod tests {
         assert_eq!(budget.next_delay_ms(), Some(750));
         assert_eq!(budget.next_delay_ms(), None);
         assert_eq!(budget.next_delay_ms(), None);
+    }
+
+    #[test]
+    fn exclusive_source_bank_replaces_sources_atomically() {
+        let bank = ExclusiveRenderSourceBank::new();
+        assert!(bank.snapshot().is_empty());
+
+        bank.set_sources(vec![
+            ExclusiveRenderSource {
+                role: ExclusiveRenderRole::Active,
+                shared: test_shared_state(1, 1),
+            },
+            ExclusiveRenderSource {
+                role: ExclusiveRenderRole::Prepared,
+                shared: test_shared_state(2, 1),
+            },
+        ]);
+
+        let snapshot = bank.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].role, ExclusiveRenderRole::Active);
+        assert_eq!(snapshot[1].role, ExclusiveRenderRole::Prepared);
+
+        bank.clear();
+        assert!(bank.snapshot().is_empty());
+    }
+
+    #[test]
+    fn mix_f32_sources_sums_and_clamps_samples() {
+        let mut out = vec![0.0_f32; 4];
+        let a = vec![0.75, -0.75, 0.25, -0.25];
+        let b = vec![0.75, -0.75, -0.5, 0.5];
+
+        mix_f32_into(&mut out, &a);
+        mix_f32_into(&mut out, &b);
+
+        assert_eq!(out, vec![1.0, -1.0, -0.25, 0.25]);
+    }
+
+    fn test_shared_state(track_id: i64, generation: u64) -> Arc<PlaybackSharedState> {
+        let (command_tx, _) = std::sync::mpsc::channel();
+        Arc::new(PlaybackSharedState::new(
+            track_id,
+            generation,
+            crate::playback::player::PlaybackSourceKind::TidalStream,
+            crate::playback::gapless::GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ))
     }
 
     #[test]

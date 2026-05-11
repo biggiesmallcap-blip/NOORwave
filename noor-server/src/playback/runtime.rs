@@ -1391,13 +1391,21 @@ impl PlaybackEngine {
             let exclusive_plan =
                 swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
             let device_name = device.name().ok();
+            let source_bank =
+                Arc::new(crate::playback::wasapi_exclusive::ExclusiveRenderSourceBank::new());
+            source_bank.set_sources(vec![
+                crate::playback::wasapi_exclusive::ExclusiveRenderSource {
+                    role: crate::playback::wasapi_exclusive::ExclusiveRenderRole::Active,
+                    shared: Arc::clone(&self.shared),
+                },
+            ]);
             match crate::playback::wasapi_exclusive::build_exclusive_stream(
                 device_name.as_deref(),
                 device_label.clone(),
                 exclusive_plan.stream_config.sample_rate.0,
                 exclusive_plan.stream_config.channels,
                 exclusive_release_grace_secs,
-                Arc::clone(&self.shared),
+                source_bank,
                 command_tx.clone(),
                 event_tx.clone(),
             ) {
@@ -1967,7 +1975,7 @@ pub(crate) struct PlaybackSharedState {
 
 impl PlaybackSharedState {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         track_id: i64,
         generation: u64,
         source_kind: PlaybackSourceKind,
