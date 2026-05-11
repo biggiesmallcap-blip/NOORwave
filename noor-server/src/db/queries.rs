@@ -4206,6 +4206,16 @@ pub fn update_embedding_model_metrics(
     Ok(())
 }
 
+pub fn fail_embedding_model(conn: &Connection, model_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE embedding_models
+         SET status = 'failed'
+         WHERE id = ?1",
+        params![model_id],
+    )?;
+    Ok(())
+}
+
 fn read_embedding_model(row: &Row<'_>) -> rusqlite::Result<EmbeddingModel> {
     Ok(EmbeddingModel {
         id: row.get(0)?,
