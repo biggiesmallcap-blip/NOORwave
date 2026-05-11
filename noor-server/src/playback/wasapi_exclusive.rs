@@ -78,8 +78,8 @@ impl ExclusiveInitFailure {
                     .to_string()
             }
             Self::NoFormatAccepted => {
-                "This device rejected every exclusive-mode format we tried (f32, 24-in-32, \
-                 16-bit). Pick a different output device."
+                "This device rejected every exclusive-mode format we tried (32-bit, packed \
+                 24-bit, 24-in-32, 16-bit, f32). Pick a different output device."
                     .to_string()
             }
             Self::Other(s) => format!("Exclusive mode failed: {s}"),
@@ -129,7 +129,51 @@ impl Drop for ExclusiveStream {
 enum Format {
     F32,
     I32,
+    I24In32,
+    I24Packed,
     I16,
+}
+
+struct CandidateFormat {
+    storebits: usize,
+    validbits: usize,
+    sample_type: SampleType,
+    format: Format,
+}
+
+fn exclusive_candidate_formats() -> &'static [CandidateFormat] {
+    &[
+        CandidateFormat {
+            storebits: 32,
+            validbits: 32,
+            sample_type: SampleType::Int,
+            format: Format::I32,
+        },
+        CandidateFormat {
+            storebits: 24,
+            validbits: 24,
+            sample_type: SampleType::Int,
+            format: Format::I24Packed,
+        },
+        CandidateFormat {
+            storebits: 32,
+            validbits: 24,
+            sample_type: SampleType::Int,
+            format: Format::I24In32,
+        },
+        CandidateFormat {
+            storebits: 16,
+            validbits: 16,
+            sample_type: SampleType::Int,
+            format: Format::I16,
+        },
+        CandidateFormat {
+            storebits: 32,
+            validbits: 32,
+            sample_type: SampleType::Float,
+            format: Format::F32,
+        },
+    ]
 }
 
 struct MmcssGuard {
@@ -490,15 +534,6 @@ fn init_audio_client(
         }
     }
 
-    // We re-resolve the device fresh inside try_initialize_one so each
-    // candidate format gets a clean IAudioClient (the COM object is in a bad
-    // state after a failed Initialize).
-    let candidates: &[(usize, usize, SampleType, Format)] = &[
-        (32, 32, SampleType::Float, Format::F32),
-        (32, 24, SampleType::Int, Format::I32),
-        (16, 16, SampleType::Int, Format::I16),
-    ];
-
     let mut last_failure: Option<ExclusiveInitFailure> = None;
 
     // Backoff schedule for AUDCLNT_E_DEVICE_IN_USE retries. Some drivers /
@@ -510,17 +545,17 @@ fn init_audio_client(
     // ms, retry, sleep 750 ms, give up.
     const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
 
-    'candidate: for (storebits, validbits, sample_type, fmt_tag) in candidates {
+    'candidate: for candidate in exclusive_candidate_formats() {
         let mut attempt: usize = 0;
         loop {
             match try_initialize_one(
                 device_pref,
-                *storebits,
-                *validbits,
-                sample_type,
+                candidate.storebits,
+                candidate.validbits,
+                &candidate.sample_type,
                 desired_sample_rate,
                 channels,
-                *fmt_tag,
+                candidate.format,
             ) {
                 Ok(v) => {
                     if attempt > 0 {
@@ -528,7 +563,7 @@ fn init_audio_client(
                             target: "playback",
                             "WASAPI exclusive grab succeeded on attempt {} ({:?})",
                             attempt + 1,
-                            fmt_tag_label(*fmt_tag)
+                            fmt_tag_label(candidate.format)
                         );
                     }
                     return Ok(v);
@@ -543,7 +578,7 @@ fn init_audio_client(
                             "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
                              retrying after {} ms",
                             attempt + 1,
-                            fmt_tag_label(*fmt_tag),
+                            fmt_tag_label(candidate.format),
                             sleep_ms
                         );
                         std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -566,7 +601,7 @@ fn init_audio_client(
                             "WASAPI exclusive grab: DEVICE_IN_USE persisted across {} attempts ({:?}); \
                              trying next format",
                             DEVICE_IN_USE_BACKOFF_MS.len() + 1,
-                            fmt_tag_label(*fmt_tag)
+                            fmt_tag_label(candidate.format)
                         );
                         last_failure = Some(ExclusiveInitFailure::DeviceInUse);
                         continue 'candidate;
@@ -576,7 +611,7 @@ fn init_audio_client(
                             target: "playback",
                             "WASAPI exclusive grab attempt {} ({:?}) rejected: {}",
                             attempt + 1,
-                            fmt_tag_label(*fmt_tag),
+                            fmt_tag_label(candidate.format),
                             other
                         );
                         last_failure = Some(other);
@@ -739,7 +774,9 @@ fn try_initialize_one(
 fn fmt_tag_label(fmt: Format) -> &'static str {
     match fmt {
         Format::F32 => "f32",
-        Format::I32 => "i24-in-32",
+        Format::I32 => "i32",
+        Format::I24In32 => "i24-in-32",
+        Format::I24Packed => "i24-packed",
         Format::I16 => "i16",
     }
 }
@@ -817,6 +854,13 @@ fn convert_f32_to_bytes(
             }
         }
         Format::I32 => {
+            debug_assert_eq!(blockalign, channels * 4);
+            for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
+                let v = f32_to_i32_pcm(s);
+                chunk.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        Format::I24In32 => {
             // 24-in-32: WAVEFORMATEXTENSIBLE with 32 storebits + 24 validbits
             // means the device looks at the high 24 bits. Filling the full
             // i32 range is acceptable; the bottom 8 bits are ignored.
@@ -824,6 +868,13 @@ fn convert_f32_to_bytes(
             for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
                 let v = f32_to_i32_pcm(s);
                 chunk.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        Format::I24Packed => {
+            debug_assert_eq!(blockalign, channels * 3);
+            for (chunk, &s) in dst.chunks_exact_mut(3).zip(src.iter()) {
+                let v = f32_to_i24_pcm(s);
+                chunk.copy_from_slice(&v.to_le_bytes()[0..3]);
             }
         }
         Format::I16 => {
@@ -843,6 +894,16 @@ fn f32_to_i16_pcm(sample: f32) -> i16 {
         i16::MAX
     } else {
         (sample * i16::MAX as f32) as i16
+    }
+}
+
+fn f32_to_i24_pcm(sample: f32) -> i32 {
+    if sample <= -1.0 {
+        -8_388_608
+    } else if sample >= 1.0 {
+        8_388_607
+    } else {
+        (sample * 8_388_607.0) as i32
     }
 }
 
@@ -918,9 +979,33 @@ mod tests {
     }
 
     #[test]
+    fn convert_f32_to_bytes_writes_packed_i24_little_endian() {
+        let mut dst = vec![0_u8; 9];
+
+        convert_f32_to_bytes(&[1.0, -1.0, 0.0], &mut dst, Format::I24Packed, 3, 1);
+
+        assert_eq!(
+            dst,
+            vec![0xff, 0xff, 0x7f, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn candidate_formats_prefer_integer_formats_before_float() {
+        let labels: Vec<_> = exclusive_candidate_formats()
+            .iter()
+            .map(|candidate| fmt_tag_label(candidate.format))
+            .collect();
+
+        assert_eq!(labels, vec!["i32", "i24-packed", "i24-in-32", "i16", "f32"]);
+    }
+
+    #[test]
     fn format_labels_match_candidate_formats() {
         assert_eq!(fmt_tag_label(Format::F32), "f32");
-        assert_eq!(fmt_tag_label(Format::I32), "i24-in-32");
+        assert_eq!(fmt_tag_label(Format::I32), "i32");
+        assert_eq!(fmt_tag_label(Format::I24In32), "i24-in-32");
+        assert_eq!(fmt_tag_label(Format::I24Packed), "i24-packed");
         assert_eq!(fmt_tag_label(Format::I16), "i16");
     }
 }
