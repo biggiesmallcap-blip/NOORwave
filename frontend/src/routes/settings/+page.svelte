@@ -215,6 +215,9 @@
 		const tick = setInterval(() => {
 			nowEpochSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
+		const discoveryTrainingPoll = setInterval(() => {
+			if (discoveryIsRunning) void loadDiscoveryStatus();
+		}, 3000);
 		wsUnsubscribe = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
@@ -296,6 +299,7 @@
 		return () => {
 			if (pollTimer) clearInterval(pollTimer);
 			if (mbPollTimer) clearInterval(mbPollTimer);
+			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
 			wsUnsubscribe?.();
 		};
@@ -732,9 +736,9 @@
 		}
 	}
 
-	async function startDiscoveryTraining(mode: 'full' | 'incremental') {
+	async function startDiscoveryTraining(mode: 'full' | 'incremental', rebuildAudio = false) {
 		try {
-			const response = await api.startDiscoveryTraining(mode);
+			const response = await api.startDiscoveryTraining(mode, rebuildAudio);
 			if (response.status === 'legacy_trainer_unavailable') {
 				errorMsg = response.message ?? 'Switch to V2 to train discovery.';
 			} else {
@@ -2033,7 +2037,7 @@
 							<strong>Incremental refresh</strong> reuses the cached audio-proxy features from the last run and only rebuilds the behavioural + similarity stages. Faster — typically 30–50% of a Full Retrain wall-clock. Use this for routine refreshes.
 						</p>
 						<p>
-							<strong>Full retrain</strong> wipes the audio cache and recomputes everything from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
+							<strong>Full retrain</strong> bypasses cached audio-proxy features and recomputes current library tracks from scratch. Use this if you've changed intensity tier, suspect the cache is stale, or it's been a long time since the last clean rebuild.
 						</p>
 						<p>
 							On the very first run there's nothing cached, so both buttons do identical work.
@@ -2206,7 +2210,7 @@
 
 				<div class="action-row">
 					<button class="btn btn-primary" onclick={() => void startDiscoveryTraining('incremental')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Incremental refresh</button>
-					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full')} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Full retrain</button>
+					<button class="btn btn-glass" onclick={() => void startDiscoveryTraining('full', true)} disabled={discoveryIsRunning || !discoveryEngineTrainable}>Full retrain</button>
 					{#if discoveryIsRunning}
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
 					{/if}

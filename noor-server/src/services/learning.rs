@@ -827,6 +827,19 @@ pub async fn start_training(
         Ok((model, run))
     })?;
 
+    macro_rules! fail_training_on_err {
+        ($expr:expr) => {
+            match $expr {
+                Ok(value) => value,
+                Err(error) => {
+                    let error: anyhow::Error = error.into();
+                    mark_training_failure(&db, run.id, model.id, &error);
+                    return Err(error);
+                }
+            }
+        };
+    }
+
     // If cancel is requested at any stage boundary, mark the run as cancelled
     // and skip remaining persistence + model activation. Callers MUST `return Ok(())`
     // when this returns `Ok(true)` — otherwise a later stage may double-finish the run.
@@ -863,15 +876,17 @@ pub async fn start_training(
         Ok(false)
     };
 
-    db.with_conn(|conn| {
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "corpus", "running", 0.05, None, 0)
-    })?;
+    }));
 
     // Backfill listen_history columns added in MIGRATION_023, exactly once per
     // database lifetime. The trainer is the natural trigger — sequence-aware
     // features depend on session_id and transition_from_track_id, so we do
     // this before the corpus build runs.
-    if let Some(report) = db.with_conn(crate::services::listen_history_backfill::run_if_needed)? {
+    if let Some(report) =
+        fail_training_on_err!(db.with_conn(crate::services::listen_history_backfill::run_if_needed))
+    {
         tracing::info!(
             target: "noor.discovery.training",
             rows_updated = report.rows_updated,
@@ -881,7 +896,7 @@ pub async fn start_training(
         );
     }
 
-    let external_last_refresh_at = load_external_provider_last_refresh(&db)?;
+    let external_last_refresh_at = fail_training_on_err!(load_external_provider_last_refresh(&db));
     let external_refresh_report =
         match refresh_external_provider_candidates(&db, &external_refresh_clients, full_mode).await
         {
@@ -899,14 +914,19 @@ pub async fn start_training(
     // Build trainer input directly from DB (no JSON round-trip). The intensity
     // tier overrides dimension / top_k / window_size and decides whether to
     // include the audio-proxy stage (Low skips it).
-    let input = db.with_conn(|conn| build_trainer_input(conn, intensity_params, full_mode))?;
+    let input = fail_training_on_err!(db.with_conn(|conn| build_trainer_input(
+        conn,
+        intensity_params,
+        full_mode,
+        rebuild_audio
+    )));
     let provider_budget =
         plan_external_provider_refresh(full_mode, external_last_refresh_at, input.tracks.len());
     let heldout_examples = input.heldout_examples.clone();
 
-    db.with_conn(|conn| {
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
-    })?;
+    }));
 
     // Progress channel — broadcasts to WebSocket + logs to tracing
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TrainingProgressUpdate>();
@@ -953,7 +973,7 @@ pub async fn start_training(
         watchdog_flag.store(true, Ordering::Relaxed);
         watchdog_cancel.store(true, Ordering::Relaxed);
     });
-    let output_result = tokio::task::spawn_blocking(move || -> Result<_> {
+    let output_join = tokio::task::spawn_blocking(move || -> Result<_> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(worker_threads)
             .thread_name(|idx| format!("discovery-v2-{idx}"))
@@ -965,8 +985,16 @@ pub async fn start_training(
     })
     .await
     .context("discovery trainer panicked");
+    let output_result = match output_join {
+        Ok(output_result) => output_result,
+        Err(error) => {
+            watchdog_task.abort();
+            mark_training_failure(&db, run.id, model.id, &error);
+            return Err(error);
+        }
+    };
     watchdog_task.abort();
-    let mut output = output_result??;
+    let mut output = fail_training_on_err!(output_result);
     output.metrics.insert(
         "safety.timeout_seconds".to_string(),
         safety_timeout.as_secs() as f64,
@@ -1059,12 +1087,12 @@ pub async fn start_training(
     drop(progress_tx);
     let _ = log_task.await;
 
-    if bail_if_cancelled("audio")? {
+    if fail_training_on_err!(bail_if_cancelled("audio")) {
         return Ok(());
     }
-    db.with_conn(|conn| {
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "audio", "running", 0.55, None, 0)
-    })?;
+    }));
 
     let audio_features = output
         .audio_features
@@ -1080,13 +1108,15 @@ pub async fn start_training(
         })
         .collect::<Vec<_>>();
 
-    if bail_if_cancelled("audio_features")? {
+    if fail_training_on_err!(bail_if_cancelled("audio_features")) {
         return Ok(());
     }
-    db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))?;
-    db.with_conn(|conn| {
+    fail_training_on_err!(
+        db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))
+    );
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "fusion", "running", 0.72, None, 0)
-    })?;
+    }));
 
     let embeddings = output
         .fusion_embeddings
@@ -1096,10 +1126,14 @@ pub async fn start_training(
             (track_id, pack_vector_f64(vector), norm)
         })
         .collect::<Vec<_>>();
-    if bail_if_cancelled("fusion")? {
+    if fail_training_on_err!(bail_if_cancelled("fusion")) {
         return Ok(());
     }
-    db.with_conn(|conn| queries::replace_track_embeddings(conn, model.id, &embeddings))?;
+    fail_training_on_err!(db.with_conn(|conn| queries::replace_track_embeddings(
+        conn,
+        model.id,
+        &embeddings
+    )));
 
     let neighbors = output
         .neighbors
@@ -1138,14 +1172,14 @@ pub async fn start_training(
             }
         })
         .collect::<Vec<_>>();
-    if bail_if_cancelled("neighbors")? {
+    if fail_training_on_err!(bail_if_cancelled("neighbors")) {
         return Ok(());
     }
-    db.with_conn(|conn| {
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
         queries::replace_track_neighbors(conn, model.id, &neighbors)?;
         persist_external_neighbors(conn, model.id, &output.external_neighbors)
-    })?;
+    }));
 
     // Persist per-reason hit-rate diagnostics. The trainer's primary_reason
     // tags drive these rows; the next iteration of metadata-bonus tuning reads
@@ -1164,11 +1198,19 @@ pub async fn start_training(
             insufficient_data: r.insufficient_data,
         })
         .collect();
-    db.with_conn(|conn| queries::replace_discovery_diagnostics(conn, model.id, &reason_rows))?;
+    fail_training_on_err!(db.with_conn(|conn| queries::replace_discovery_diagnostics(
+        conn,
+        model.id,
+        &reason_rows
+    )));
 
-    append_active_baseline_metrics(&db, &mut output.metrics, &heldout_examples)?;
+    fail_training_on_err!(append_active_baseline_metrics(
+        &db,
+        &mut output.metrics,
+        &heldout_examples
+    ));
 
-    let metrics_json = serde_json::to_string(&output.metrics)?;
+    let metrics_json = fail_training_on_err!(serde_json::to_string(&output.metrics));
     let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
     let recall = output
         .metrics
@@ -1227,19 +1269,36 @@ pub async fn start_training(
         } else {
             coverage >= 0.5
         };
-    if bail_if_cancelled("evaluate")? {
+    if fail_training_on_err!(bail_if_cancelled("evaluate")) {
         return Ok(());
     }
-    db.with_conn(|conn| {
+    fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
         queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
         if should_activate {
             queries::activate_embedding_model(conn, model.id)?;
         }
         queries::finish_training_run(conn, run.id, "completed")
-    })?;
+    }));
 
     Ok(())
+}
+
+fn mark_training_failure(db: &Database, run_id: i64, model_id: i64, error: &anyhow::Error) {
+    let error_text = error.to_string();
+    if let Err(mark_error) = db.with_conn(|conn| {
+        queries::fail_training_run(conn, run_id, &error_text)?;
+        queries::fail_embedding_model(conn, model_id)
+    }) {
+        tracing::error!(
+            target: "noor.discovery.training",
+            run_id,
+            model_id,
+            original_error = %error,
+            mark_error = %mark_error,
+            "failed to persist discovery training failure"
+        );
+    }
 }
 
 pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearningModel>> {
@@ -1597,6 +1656,7 @@ fn build_trainer_input(
     conn: &rusqlite::Connection,
     intensity: IntensityParams,
     full_mode: bool,
+    rebuild_audio: bool,
 ) -> Result<TrainerInput> {
     let tracks = queries::get_embedding_track_rows(conn)?;
     let external_candidates =
@@ -1681,13 +1741,23 @@ fn build_trainer_input(
     // run. We only reuse rows whose stored vector dim matches the current
     // intensity tier — flipping Max→Medium changes the vector size, in which
     // case the cache is invalid and we recompute. None when full_mode is true,
-    // when intensity skips audio entirely (Low), or when no cache rows match.
-    let cached_audio_features = if !full_mode && intensity.include_audio_proxy {
-        let expected_dim = intensity.dimension as usize;
-        hydrate_cached_audio_features(queries::get_cached_audio_features(conn)?, expected_dim)
-    } else {
-        None
-    };
+    // the caller requested an audio refit, intensity skips audio entirely
+    // (Low), or no cache rows match.
+    let cached_audio_features =
+        if should_reuse_cached_audio_features(intensity, full_mode, rebuild_audio) {
+            let expected_dim = intensity.dimension as usize;
+            let expected_track_ids = tracks
+                .iter()
+                .map(|track| track.track_id)
+                .collect::<HashSet<_>>();
+            hydrate_cached_audio_features(
+                queries::get_cached_audio_features(conn)?,
+                expected_dim,
+                &expected_track_ids,
+            )
+        } else {
+            None
+        };
 
     Ok(TrainerInput {
         seed: 13,
@@ -1748,13 +1818,25 @@ fn build_trainer_input(
     })
 }
 
+fn should_reuse_cached_audio_features(
+    intensity: IntensityParams,
+    full_mode: bool,
+    rebuild_audio: bool,
+) -> bool {
+    !full_mode && !rebuild_audio && intensity.include_audio_proxy
+}
+
 fn hydrate_cached_audio_features(
     rows: Vec<queries::CachedAudioFeatureRow>,
     expected_dim: usize,
+    expected_track_ids: &HashSet<i64>,
 ) -> Option<HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature>> {
     let map: HashMap<i64, crate::services::discovery_trainer::TrainerAudioFeature> = rows
         .into_iter()
         .filter_map(|row| {
+            if !expected_track_ids.contains(&row.track_id) {
+                return None;
+            }
             if row.feature_version != AUDIO_PROXY_FEATURE_VERSION {
                 return None;
             }
@@ -1773,7 +1855,16 @@ fn hydrate_cached_audio_features(
             ))
         })
         .collect();
-    if map.is_empty() { None } else { Some(map) }
+    if !expected_track_ids.is_empty()
+        && map.len() == expected_track_ids.len()
+        && expected_track_ids
+            .iter()
+            .all(|track_id| map.contains_key(track_id))
+    {
+        Some(map)
+    } else {
+        None
+    }
 }
 
 fn centroid_for_ids(active: &ActiveLearningModel, anchor_ids: &[i64]) -> Vec<f64> {
@@ -2066,12 +2157,68 @@ mod tests {
             clip_duration_ms: 20_000,
         }];
 
-        let hydrated = hydrate_cached_audio_features(rows, 2);
+        let hydrated = hydrate_cached_audio_features(rows, 2, &HashSet::from([1]));
 
         assert!(
             hydrated.is_none(),
             "v1 proxy vectors must not be reused after v2 DSP token expansion"
         );
+    }
+
+    #[test]
+    fn cached_audio_features_reject_partial_track_coverage() {
+        let rows = vec![queries::CachedAudioFeatureRow {
+            track_id: 1,
+            feature_version: AUDIO_PROXY_FEATURE_VERSION.to_string(),
+            vector_blob: pack_vector_f64(&[0.5, 0.5]),
+            clip_start_ms: 0,
+            clip_duration_ms: 20_000,
+        }];
+
+        let hydrated = hydrate_cached_audio_features(rows, 2, &HashSet::from([1, 2]));
+
+        assert!(
+            hydrated.is_none(),
+            "partial audio cache must recompute instead of silently dropping uncached tracks to behavioral-only fusion"
+        );
+    }
+
+    #[test]
+    fn cached_audio_features_ignore_stale_rows_outside_training_corpus() {
+        let rows = vec![
+            queries::CachedAudioFeatureRow {
+                track_id: 1,
+                feature_version: AUDIO_PROXY_FEATURE_VERSION.to_string(),
+                vector_blob: pack_vector_f64(&[0.5, 0.5]),
+                clip_start_ms: 0,
+                clip_duration_ms: 20_000,
+            },
+            queries::CachedAudioFeatureRow {
+                track_id: 99,
+                feature_version: AUDIO_PROXY_FEATURE_VERSION.to_string(),
+                vector_blob: pack_vector_f64(&[0.25, 0.75]),
+                clip_start_ms: 0,
+                clip_duration_ms: 20_000,
+            },
+        ];
+
+        let hydrated = hydrate_cached_audio_features(rows, 2, &HashSet::from([1]))
+            .expect("stale cache row should not force recompute");
+
+        assert_eq!(hydrated.len(), 1);
+        assert!(hydrated.contains_key(&1));
+        assert!(!hydrated.contains_key(&99));
+    }
+
+    #[test]
+    fn cached_audio_features_are_skipped_when_audio_rebuild_requested() {
+        let medium = DiscoveryIntensity::Medium.params();
+        let low = DiscoveryIntensity::Low.params();
+
+        assert!(should_reuse_cached_audio_features(medium, false, false));
+        assert!(!should_reuse_cached_audio_features(medium, false, true));
+        assert!(!should_reuse_cached_audio_features(medium, true, false));
+        assert!(!should_reuse_cached_audio_features(low, false, false));
     }
 
     #[test]
@@ -2243,6 +2390,57 @@ mod tests {
             })
             .expect("count models");
         assert_eq!(model_count, 0);
+    }
+
+    #[tokio::test]
+    async fn start_training_marks_run_and_model_failed_when_setup_errors_after_creation() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            conn.execute("DROP TABLE tracks", [])?;
+            Ok(())
+        })
+        .expect("break trainer input setup");
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AppEvent>(1);
+
+        let err = start_training(
+            db.clone(),
+            event_tx,
+            false,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            ExternalProviderRefreshClients::default(),
+        )
+        .await
+        .expect_err("broken setup should fail training");
+
+        assert!(
+            err.to_string().contains("no such table: tracks"),
+            "unexpected error: {err}"
+        );
+        let (run_status, run_progress, run_error, model_status) = db
+            .with_conn(|conn| {
+                let run =
+                    queries::get_latest_training_run(conn)?.expect("training run should exist");
+                let model_id = run.model_id.expect("training run should have model");
+                let model_status: String = conn.query_row(
+                    "SELECT status FROM embedding_models WHERE id = ?1",
+                    [model_id],
+                    |row| row.get(0),
+                )?;
+                Ok((run.status, run.progress, run.error_text, model_status))
+            })
+            .expect("read failed run");
+
+        assert_eq!(run_status, "failed");
+        assert_eq!(run_progress, 0.05);
+        assert!(
+            run_error
+                .as_deref()
+                .is_some_and(|text| text.contains("no such table: tracks")),
+            "run should store failure text, got {run_error:?}"
+        );
+        assert_eq!(model_status, "failed");
     }
 
     #[test]
