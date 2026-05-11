@@ -1,5 +1,4 @@
 use crate::db::queries;
-use crate::library::duplicates as dup;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
 use crate::playback::{player, queue, runtime as playback_runtime};
@@ -8,7 +7,6 @@ use crate::services::discovery::{
 };
 use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
-use crate::services::spotify;
 use crate::services::tidal::{
     auth as tidal_auth,
     client::{TidalClient, TidalSearchTrack, TidalSearchVideo, TidalTrack},
@@ -31,15 +29,19 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 mod analytics_routes;
 mod chart_routes;
+mod duplicates_routes;
+mod enrichment_routes;
 mod genre_routes;
+mod search_routes;
 mod sportify_routes;
+mod tidal_home_routes;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -61,12 +63,6 @@ pub struct ListParams {
     energy_max: Option<f64>,
     key_signature: Option<String>,
     instrumental_only: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SearchParams {
-    q: String,
-    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,11 +251,6 @@ pub struct DiscoveryFeedbackRequest {
     context: Option<Value>,
     #[serde(default)]
     session_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ResolveGroupRequest {
-    preferred_track_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,35 +457,41 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/library/batch/set-genre", post(batch_set_genre))
         .route(
             "/api/library/enrich/musicbrainz",
-            post(start_musicbrainz_enrichment),
+            post(enrichment_routes::start_musicbrainz_enrichment),
         )
         .route(
             "/api/library/enrich/musicbrainz/status",
-            get(get_musicbrainz_status),
+            get(enrichment_routes::get_musicbrainz_status),
         )
         .route(
             "/api/library/enrich/musicbrainz/portable",
-            get(get_musicbrainz_portable_snapshot),
+            get(enrichment_routes::get_musicbrainz_portable_snapshot),
         )
         .route(
             "/api/library/enrich/musicbrainz/portable/export",
-            post(export_musicbrainz_portable_snapshot),
+            post(enrichment_routes::export_musicbrainz_portable_snapshot),
         )
         .route(
             "/api/library/enrich/musicbrainz/portable/import",
-            post(import_musicbrainz_portable_snapshot),
+            post(enrichment_routes::import_musicbrainz_portable_snapshot),
         )
         .route("/api/library/tracks/favorite", post(set_track_favorite))
         // Duplicates
-        .route("/api/library/duplicates/scan", post(scan_duplicates))
-        .route("/api/library/duplicates", get(get_duplicates))
+        .route(
+            "/api/library/duplicates/scan",
+            post(duplicates_routes::scan_duplicates),
+        )
+        .route(
+            "/api/library/duplicates",
+            get(duplicates_routes::get_duplicates),
+        )
         .route(
             "/api/library/duplicates/{group_id}/resolve",
-            post(resolve_duplicate_group),
+            post(duplicates_routes::resolve_duplicate_group),
         )
         .route(
             "/api/library/duplicates/{group_id}/dismiss",
-            post(dismiss_duplicate_group),
+            post(duplicates_routes::dismiss_duplicate_group),
         )
         // Playback
         .route("/api/playback/state", get(get_playback_state))
@@ -536,10 +533,13 @@ pub fn api_routes(state: SharedState) -> Router {
             post(post_audio_exclusive_retry),
         )
         // Search
-        .route("/api/search", get(search))
-        .route("/api/search/audio", post(search_audio))
-        .route("/api/search/vibe", get(search_vibe))
-        .route("/api/search/underrated", get(search_underrated))
+        .route("/api/search", get(search_routes::search))
+        .route("/api/search/audio", post(search_routes::search_audio))
+        .route("/api/search/vibe", get(search_routes::search_vibe))
+        .route(
+            "/api/search/underrated",
+            get(search_routes::search_underrated),
+        )
         // TIDAL
         .route("/api/tidal/login", post(tidal_login))
         .route("/api/tidal/login/complete", post(tidal_login_complete))
@@ -567,51 +567,72 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/artists/{tidal_id}", get(tidal_artist_profile))
         .route("/api/tidal/logout", post(tidal_logout))
         // Spotify
-        .route("/api/spotify/config", post(spotify_save_config))
         .route(
             "/api/spotify/config",
-            axum::routing::delete(spotify_clear_config),
+            post(enrichment_routes::spotify_save_config),
         )
-        .route("/api/spotify/status", get(spotify_status))
+        .route(
+            "/api/spotify/config",
+            axum::routing::delete(enrichment_routes::spotify_clear_config),
+        )
+        .route(
+            "/api/spotify/status",
+            get(enrichment_routes::spotify_status),
+        )
         .route(
             "/api/library/enrich/spotify",
-            post(start_spotify_enrichment),
+            post(enrichment_routes::start_spotify_enrichment),
         )
         .route(
             "/api/library/enrich/spotify/status",
-            get(get_spotify_enrichment_status),
+            get(enrichment_routes::get_spotify_enrichment_status),
         )
         .route(
             "/api/library/enrich/spotify/reset",
-            post(reset_spotify_enrichment),
+            post(enrichment_routes::reset_spotify_enrichment),
         )
         .route(
             "/api/library/tidal-stream/purge",
-            post(purge_orphan_tidal_stream_tracks),
+            post(enrichment_routes::purge_orphan_tidal_stream_tracks),
         )
         // Last.fm
-        .route("/api/lastfm/config", post(lastfm_save_config))
         .route(
             "/api/lastfm/config",
-            axum::routing::delete(lastfm_clear_config),
+            post(enrichment_routes::lastfm_save_config),
         )
-        .route("/api/lastfm/status", get(lastfm_status))
+        .route(
+            "/api/lastfm/config",
+            axum::routing::delete(enrichment_routes::lastfm_clear_config),
+        )
+        .route("/api/lastfm/status", get(enrichment_routes::lastfm_status))
         // Last.fm scrobble auth (server-side flow — `LASTFM_API_SECRET` env required)
-        .route("/api/lastfm/auth/start", post(lastfm_auth_start))
-        .route("/api/lastfm/auth/complete", post(lastfm_auth_complete))
-        .route("/api/lastfm/auth/disconnect", post(lastfm_auth_disconnect))
-        .route("/api/library/enrich/lastfm", post(start_lastfm_enrichment))
+        .route(
+            "/api/lastfm/auth/start",
+            post(enrichment_routes::lastfm_auth_start),
+        )
+        .route(
+            "/api/lastfm/auth/complete",
+            post(enrichment_routes::lastfm_auth_complete),
+        )
+        .route(
+            "/api/lastfm/auth/disconnect",
+            post(enrichment_routes::lastfm_auth_disconnect),
+        )
+        .route(
+            "/api/library/enrich/lastfm",
+            post(enrichment_routes::start_lastfm_enrichment),
+        )
         .route(
             "/api/library/enrich/lastfm/stop",
-            post(stop_lastfm_enrichment),
+            post(enrichment_routes::stop_lastfm_enrichment),
         )
         .route(
             "/api/library/enrich/lastfm/status",
-            get(get_lastfm_enrichment_status),
+            get(enrichment_routes::get_lastfm_enrichment_status),
         )
         .route(
             "/api/library/enrich/lastfm/reset",
-            post(reset_lastfm_enrichment),
+            post(enrichment_routes::reset_lastfm_enrichment),
         )
         // Audio analysis
         .route(
@@ -655,18 +676,27 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
         // TIDAL "Your Mixes" — drives the home Your Mixes shelf above Trending.
-        .route("/api/tidal/mixes", get(get_tidal_mixes))
-        .route("/api/tidal/mixes/{id}/tracks", get(get_tidal_mix_tracks))
+        .route("/api/tidal/mixes", get(tidal_home_routes::get_tidal_mixes))
+        .route(
+            "/api/tidal/mixes/{id}/tracks",
+            get(tidal_home_routes::get_tidal_mix_tracks),
+        )
         .route("/api/tidal/play-mix", post(play_tidal_mix))
         // TIDAL "Personal Radio" — drives the home Personal Radio shelf.
-        .route("/api/tidal/radio-stations", get(get_tidal_radio_stations))
+        .route(
+            "/api/tidal/radio-stations",
+            get(tidal_home_routes::get_tidal_radio_stations),
+        )
         // TIDAL editorial home modules — drives the search-page discover surface.
-        .route("/api/tidal/home-modules", get(get_tidal_home_modules))
+        .route(
+            "/api/tidal/home-modules",
+            get(tidal_home_routes::get_tidal_home_modules),
+        )
         // Per-module detail items (View all). Resolves the module's
         // dataApiPath server-side and returns the full item set.
         .route(
             "/api/tidal/discover-modules/{id}/items",
-            get(get_tidal_discover_module_items),
+            get(tidal_home_routes::get_tidal_discover_module_items),
         )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
@@ -6607,517 +6637,6 @@ async fn batch_set_genre(
 
 // ── MusicBrainz enrichment ─────────────────────────────────────────────────
 
-async fn start_musicbrainz_enrichment(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-
-    let (http_client, event_tx, running) = {
-        let g = state.read().await;
-        (
-            g.http_client.clone(),
-            g.event_tx.clone(),
-            g.musicbrainz_enrich_running.clone(),
-        )
-    };
-
-    if running.load(Ordering::SeqCst) {
-        return Ok(Json(json!({ "status": "already_running" })));
-    }
-
-    let total: usize = {
-        let g = state.read().await;
-        g.db.with_conn(crate::services::musicbrainz::count_unenriched_tracks)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    if total == 0 {
-        return Ok(Json(
-            json!({ "status": "already_complete", "remaining": 0 }),
-        ));
-    }
-
-    running.store(true, Ordering::SeqCst);
-
-    tokio::spawn(async move {
-        let progress_tx = event_tx.clone();
-        let result = crate::services::musicbrainz::run_enrichment(
-            state,
-            http_client,
-            move |progress| {
-                let _ = progress_tx.send(AppEvent::SyncProgress {
-                    service: "musicbrainz".to_string(),
-                    progress: progress.processed as f32 / progress.total.max(1) as f32,
-                });
-            },
-            1,
-        )
-        .await;
-        running.store(false, Ordering::SeqCst);
-        match result {
-            Ok(_) => {
-                let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
-                let _ = event_tx.send(AppEvent::LibrarySynced);
-            }
-            Err(err) => {
-                warn!("MusicBrainz enrichment error: {err:?}");
-            }
-        }
-    });
-
-    Ok(Json(json!({ "status": "started", "remaining": total })))
-}
-
-async fn get_musicbrainz_status(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    let (total, checked, enriched) = state
-        .db
-        .with_conn(|conn| {
-            let total: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
-            let checked: i64 =
-                conn.query_row("SELECT COUNT(*) FROM musicbrainz_checked", [], |r| r.get(0))?;
-            let enriched: i64 = conn.query_row(
-                "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'musicbrainz'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok((total, checked, enriched))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({
-        "total_tracks": total,
-        "checked_tracks": checked,
-        "enriched_tracks": enriched,
-        "remaining": (total - checked).max(0),
-        "complete": checked >= total
-    })))
-}
-
-async fn get_musicbrainz_portable_snapshot(
-    State(_state): State<SharedState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let snapshot =
-        crate::services::musicbrainz::read_portable_snapshot_status().map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "message": "NOOR couldn't read the portable MusicBrainz snapshot status.",
-                    "details": error.to_string(),
-                })),
-            )
-        })?;
-
-    Ok(Json(json!({
-        "exists": snapshot.exists,
-        "path": snapshot.path,
-        "generated_at": snapshot.generated_at,
-        "checked_rows": snapshot.checked_rows,
-        "genre_rows": snapshot.genre_rows,
-    })))
-}
-
-async fn export_musicbrainz_portable_snapshot(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let snapshot = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(crate::services::musicbrainz::export_portable_snapshot)
-            .map_err(|error| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "message": "NOOR couldn't write the portable MusicBrainz snapshot.",
-                        "details": error.to_string(),
-                    })),
-                )
-            })?
-            .status
-    };
-
-    Ok(Json(json!({
-        "status": "exported",
-        "snapshot": {
-            "exists": snapshot.exists,
-            "path": snapshot.path,
-            "generated_at": snapshot.generated_at,
-            "checked_rows": snapshot.checked_rows,
-            "genre_rows": snapshot.genre_rows,
-        }
-    })))
-}
-
-async fn import_musicbrainz_portable_snapshot(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let imported = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(crate::services::musicbrainz::import_portable_snapshot)
-            .map_err(|error| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "message": "NOOR couldn't import the portable MusicBrainz snapshot.",
-                        "details": error.to_string(),
-                    })),
-                )
-            })?
-    };
-
-    {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::MusicBrainzEnriched);
-        let _ = state.event_tx.send(AppEvent::LibrarySynced);
-    }
-
-    Ok(Json(json!({
-        "status": "imported",
-        "checked_inserted": imported.checked_inserted,
-        "checked_skipped": imported.checked_skipped,
-        "genre_inserted": imported.genre_inserted,
-        "track_skipped": imported.track_skipped,
-        "genre_skipped": imported.genre_skipped,
-        "snapshot": {
-            "exists": imported.status.exists,
-            "path": imported.status.path,
-            "generated_at": imported.status.generated_at,
-            "checked_rows": imported.status.checked_rows,
-            "genre_rows": imported.status.genre_rows,
-        }
-    })))
-}
-
-// ── Duplicate detection ───────────────────────────────────────────────────────
-
-/// Scan the library for duplicates. Runs synchronously (usually <5s for 32k tracks).
-async fn scan_duplicates(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let stats = {
-        let s = state.read().await;
-        s.db.with_conn(dup::scan)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-    Ok(Json(json!({
-        "groups_found": stats.groups_found,
-        "tracks_affected": stats.tracks_affected,
-        "isrc_matches": stats.isrc_matches,
-        "title_matches": stats.title_matches,
-    })))
-}
-
-/// List pending duplicate groups with full track data (paginated).
-async fn get_duplicates(
-    State(state): State<SharedState>,
-    Query(params): Query<ListParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
-
-    let s = state.read().await;
-    s.db.with_conn(|conn| {
-        let total = dup::count_pending_groups(conn)?;
-        let groups = dup::load_groups(conn, limit, offset)?;
-        Ok(Json(json!({ "groups": groups, "total": total })))
-    })
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Keep `preferred_track_id`, delete the rest from DB, return TIDAL IDs to unfavorite.
-async fn resolve_duplicate_group(
-    State(state): State<SharedState>,
-    Path(group_id): Path<i64>,
-    Json(payload): Json<ResolveGroupRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    // Get TIDAL tokens for unfavorite calls.
-    let (tokens, http) = {
-        let s = state.read().await;
-        let tokens = s.tidal_tokens.clone();
-        (tokens, s.http_client.clone())
-    };
-
-    let result = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| dup::resolve_group(conn, group_id, payload.preferred_track_id))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    // Broadcast queue / playback / library events based on the reconcile outcome.
-    {
-        let s = state.read().await;
-        if result.reconcile.queue_changed {
-            let _ = s.event_tx.send(AppEvent::QueueUpdated);
-        }
-        if result.reconcile.current_changed {
-            let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
-        }
-        let _ = s.event_tx.send(AppEvent::LibrarySynced);
-    }
-
-    // Best-effort unfavorite on TIDAL with session refresh retry.
-    if let Some(t) = tokens.clone() {
-        for tidal_id in &result.tidal_ids_to_unfavorite {
-            if let Err(e) = tidal_mutations::remove_favorite_track(
-                &http,
-                &t.access_token,
-                &t.user_id,
-                *tidal_id,
-                &t.country_code,
-            )
-            .await
-            {
-                // If it looks like a session expiry, try to refresh and retry once.
-                if (e.to_string().contains("401")
-                    || e.to_string().to_lowercase().contains("unauthorized"))
-                    && let Ok(refreshed) = recover_tidal_session(&state, &http, &t).await
-                {
-                    if let Err(e2) = tidal_mutations::remove_favorite_track(
-                        &http,
-                        &refreshed.access_token,
-                        &refreshed.user_id,
-                        *tidal_id,
-                        &refreshed.country_code,
-                    )
-                    .await
-                    {
-                        error!(
-                            "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
-                        );
-                    }
-                    continue;
-                }
-                warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");
-            }
-        }
-    }
-
-    Ok(Json(json!({
-        "removed": result.removed_track_ids,
-        "unfavorited_tidal": result.tidal_ids_to_unfavorite,
-    })))
-}
-
-/// Dismiss a duplicate group without deleting anything.
-async fn dismiss_duplicate_group(
-    State(state): State<SharedState>,
-    Path(group_id): Path<i64>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    s.db.with_conn(|conn| dup::dismiss_group(conn, group_id))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "dismissed" })))
-}
-
-async fn search(
-    State(state): State<SharedState>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(20);
-
-    // Snapshot what each side needs without holding the read lock across the
-    // Sportify HTTP call.
-    let (db, sportify_client, cache_cfg) = {
-        let s = state.read().await;
-        (
-            s.db.clone(),
-            s.sportify_client.clone(),
-            s.sportify_cache_config,
-        )
-    };
-
-    // Local DB search and Sportify playlist search are independent — run them
-    // concurrently. Local search must succeed (existing contract); Sportify is
-    // best-effort (upstream may break).
-    let q = params.q.clone();
-    let db_for_local = db.clone();
-    let local_fut = async move { db_for_local.with_conn(|conn| queries::search(conn, &q, limit)) };
-
-    let spotify_fut = async {
-        match sportify_client {
-            Some(client) => fetch_spotify_playlist_search_compact(
-                &client,
-                &db,
-                &cache_cfg,
-                &params.q,
-                limit.min(20).max(1) as u32,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("sportify playlist search failed: {}", e);
-                Vec::new()
-            }),
-            None => Vec::new(),
-        }
-    };
-
-    let (local_res, spotify_playlists) = tokio::join!(local_fut, spotify_fut);
-    let local = local_res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({
-        "tracks": local.tracks,
-        "albums": local.albums,
-        "artists": local.artists,
-        "spotify_playlists": spotify_playlists,
-    })))
-}
-
-/// Compact playlist-search result tailored for inline rendering in /search
-/// and Ctrl+K. Drops the heavyweight track-list payload — the ephemeral
-/// view fetches that on click.
-#[derive(Debug, Serialize)]
-struct SpotifyPlaylistSearchItem {
-    spotify_id: String,
-    name: String,
-    description: Option<String>,
-    image_url: Option<String>,
-    owner: Option<String>,
-    follower_count: Option<i64>,
-    total_tracks: Option<i32>,
-}
-
-async fn fetch_spotify_playlist_search_compact(
-    client: &crate::services::sportify::SportifyClient,
-    db: &crate::db::Database,
-    cfg: &crate::services::sportify::cache::SportifyCacheConfig,
-    query: &str,
-    limit: u32,
-) -> anyhow::Result<Vec<SpotifyPlaylistSearchItem>> {
-    use crate::services::sportify::client::SportifySearchKind;
-    use crate::services::sportify::recommend::cached_search;
-
-    if query.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let results = cached_search(
-        client,
-        db,
-        cfg,
-        query,
-        SportifySearchKind::Playlist,
-        limit,
-        0,
-    )
-    .await?;
-
-    Ok(results
-        .playlists
-        .into_iter()
-        .filter_map(|p| {
-            let id = p.spotify_id()?;
-            Some(SpotifyPlaylistSearchItem {
-                spotify_id: id,
-                name: p.title().unwrap_or_default(),
-                description: p.description.clone(),
-                image_url: p.best_thumbnail(),
-                owner: p
-                    .owner
-                    .as_ref()
-                    .and_then(|o| o.display_name().map(str::to_string)),
-                follower_count: p.follower_count(),
-                total_tracks: p.total_track_count(),
-            })
-        })
-        .collect())
-}
-
-#[derive(Debug, Deserialize)]
-struct AudioSearchRequest {
-    free_text: Option<String>,
-    bpm_min: Option<f64>,
-    bpm_max: Option<f64>,
-    energy_min: Option<f64>,
-    energy_max: Option<f64>,
-    danceability_min: Option<f64>,
-    danceability_max: Option<f64>,
-    key_signature: Option<String>,
-    camelot_key: Option<String>,
-    year_min: Option<i64>,
-    year_max: Option<i64>,
-    genre_ids: Option<Vec<i64>>,
-    track_type: Option<String>,
-    is_instrumental: Option<bool>,
-    limit: Option<usize>,
-}
-
-async fn search_audio(
-    State(state): State<SharedState>,
-    Json(body): Json<AudioSearchRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let filters = queries::AudioFilters {
-        bpm_min: body.bpm_min,
-        bpm_max: body.bpm_max,
-        energy_min: body.energy_min,
-        energy_max: body.energy_max,
-        danceability_min: body.danceability_min,
-        danceability_max: body.danceability_max,
-        key_signature: body.key_signature,
-        camelot_key: body.camelot_key,
-        year_min: body.year_min,
-        year_max: body.year_max,
-        genre_ids: body.genre_ids.unwrap_or_default(),
-        track_type: body.track_type,
-        is_instrumental: body.is_instrumental,
-    };
-    let free_text = body.free_text.unwrap_or_default();
-    let limit = body.limit.unwrap_or(50);
-
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let tracks = queries::search_with_audio_filters(conn, &free_text, &filters, limit)?;
-            Ok(Json(json!({ "tracks": tracks })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-#[derive(Deserialize)]
-struct VibeParams {
-    track_id: i64,
-    limit: Option<usize>,
-}
-
-async fn search_vibe(
-    State(state): State<SharedState>,
-    Query(params): Query<VibeParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(6);
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let results = queries::get_same_vibe_tracks(conn, params.track_id, limit as i64)?;
-            Ok(Json(json!({ "tracks": results })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-#[derive(Deserialize)]
-struct UnderratedParams {
-    artist_id: i64,
-    limit: Option<usize>,
-}
-
-async fn search_underrated(
-    State(state): State<SharedState>,
-    Query(params): Query<UnderratedParams>,
-) -> Result<Json<Value>, StatusCode> {
-    let limit = params.limit.unwrap_or(5);
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let results = queries::get_underrated_tracks(conn, params.artist_id, limit as i64)?;
-            Ok(Json(json!({ "tracks": results })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let (live_position_ms, ephemeral_playing, audio_active) = {
         let state_guard = state.read().await;
@@ -7146,7 +6665,7 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
     // Correct a stale is_playing flag before sending to the frontend:
     // - no runtime at all (server restarted, runtime crashed), OR
     // - runtime exists but CPAL buffer hasn't started draining yet (buffering phase).
-    // Ephemeral TIDAL tracks bypass this check — they set is_playing themselves.
+    // Ephemeral TIDAL tracks bypass this check: they set is_playing themselves.
     if (!audio_active || live_position_ms.is_none()) && !ephemeral_playing {
         snapshot.state.is_playing = false;
     }
@@ -7301,7 +6820,7 @@ async fn play_track(
                 let state_guard = state.read().await;
                 state_guard.db.with_conn(player::pause).ok()
             };
-            // Flush the prior TIDAL session before bailing — otherwise the
+            // Flush the prior TIDAL session before bailing, otherwise the
             // active session keeps accumulating against the still-playing
             // previous track, and the next successful play_track records a
             // bogus multi-hour listen.
@@ -7360,7 +6879,7 @@ async fn play_track(
             })),
         )
     })?;
-    // Fire-and-forget play event — session health + artist attribution
+    // Fire-and-forget play event: session health + artist attribution
     if let Some(tidal_id) = track.tidal_id {
         let http = {
             let g = state.read().await;
@@ -7480,7 +6999,7 @@ async fn resolve_tidal_playback_stream(
             let refreshed = match recover_tidal_session(state, &http, &tokens).await {
                 Ok(tokens) => tokens,
                 Err(recover_err) => {
-                    // Do NOT clear the session here — a transient network error during
+                    // Do NOT clear the session here. A transient network error during
                     // token refresh should not log the user out permanently.
                     tracing::error!(
                         target: "noor.playback.tidal",
@@ -7506,7 +7025,7 @@ async fn resolve_tidal_playback_stream(
             match tidal_stream::resolve_stream(&http, &refreshed.access_token, request).await {
                 Ok(info) => Ok(info),
                 Err(retry_err) if retry_err.is_session_expired() => {
-                    // Still expired after a successful refresh — TIDAL revoked the account.
+                    // Still expired after a successful refresh: TIDAL revoked the account.
                     // Only clear now since we know the refresh token itself is dead.
                     let _ = clear_tidal_session(state).await;
                     tracing::error!(
@@ -7663,7 +7182,7 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
     // Flush the in-progress session to listen_history on pause so analytics
     // shows partial listens without waiting for the next track-change. The
     // snapshot has is_playing=false, so sync_session_after_snapshot won't
-    // start a new session — resume_session_after_snapshot will reopen one
+    // start a new session. resume_session_after_snapshot will reopen one
     // (reusing the same session_id if the gap is < 30 min).
     sync_session_after_snapshot(
         &state,
@@ -7715,7 +7234,7 @@ const MATCH_QUALITY_THRESHOLD: f64 = 0.85;
 const RESOLVER_POOL_SIZE: usize = 4;
 
 // Scoring weights (two-field, no album metadata available from Last.fm).
-// Three-field variant (0.55/0.35/0.10) applies when pending_album is stored —
+// Three-field variant (0.55/0.35/0.10) applies when pending_album is stored:
 // not yet in schema; constants named here to make the future wiring obvious.
 const SCORE_W_ARTIST: f64 = 0.60;
 const SCORE_W_TITLE: f64 = 0.40;
@@ -7871,7 +7390,7 @@ fn promote_pending_row_emit(
 ///
 /// Spawned by `radio_start` after inserting pending rows. Bounded by
 /// `Arc<Semaphore>` (RESOLVER_POOL_SIZE permits). Unlike the lazy path, this
-/// does **not** update `playback_state.current_track_id` — the playing row
+/// does **not** update `playback_state.current_track_id`. The playing row
 /// may not be the one being resolved.
 async fn resolve_pending_row(
     db: crate::db::Database,
@@ -7983,7 +7502,7 @@ async fn resolve_pending_row(
 }
 
 /// Attempts to resolve the current pending queue item to a Tidal track.
-/// Called when the current queue item is a pending (unresolved) row — track_id IS NULL.
+/// Called when the current queue item is a pending row: track_id IS NULL.
 /// Claims ownership via resolving_at, searches Tidal with combined Jaro-Winkler scoring
 /// (0.60×artist + 0.40×title, threshold 0.85), imports the match via
 /// import_track_from_metadata, and atomically promotes the queue row.
@@ -9328,7 +8847,7 @@ async fn tidal_poll(State(state): State<SharedState>) -> Json<Value> {
     }
 }
 
-async fn load_persisted_tidal_tokens(
+pub(super) async fn load_persisted_tidal_tokens(
     state: &SharedState,
 ) -> anyhow::Result<Option<tidal_auth::TidalTokens>> {
     let (db, master_key) = {
@@ -9794,7 +9313,7 @@ fn tidal_track_artwork_url(t: &TidalTrack, size: i32) -> Option<String> {
         .and_then(|c| TidalClient::get_artwork_url(&Some(c.clone()), size))
 }
 
-fn tidal_track_playable_json(
+pub(super) fn tidal_track_playable_json(
     t: TidalTrack,
     library_state: Option<queries::TidalTrackLibraryState>,
     artwork_size: i32,
@@ -10237,7 +9756,7 @@ async fn play_tidal_ephemeral(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // If the picked track is sitting in the pending mix queue, jump to it —
+    // If the picked track is sitting in the pending mix queue, jump to it.
     // drop entries before it (and the entry itself, which we're about to
     // start) and leave the rest queued. Only fully clear when the user
     // chose something outside the current mix.
@@ -10601,7 +10120,7 @@ async fn tidal_artist_profile(
 
     // Fetch the artist's own profile separately so a transient failure
     // (rate-limit, 404 on the artist endpoint) doesn't kill the whole
-    // route — top-tracks/albums already loaded successfully above.
+    // route: top-tracks/albums already loaded successfully above.
     let artist_profile = {
         let probe = TidalClient::with_http(
             tidal_http_client.clone(),
@@ -10820,7 +10339,7 @@ async fn tidal_sync_library(
         )
     };
 
-    // Reentrancy guard — refuse to start a second concurrent sync.
+    // Reentrancy guard: refuse to start a second concurrent sync.
     if running_flag
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -10829,7 +10348,7 @@ async fn tidal_sync_library(
     }
     cancel_flag.store(false, Ordering::SeqCst);
 
-    // From here on, any early return MUST release the running flag — wrap the
+    // From here on, any early return MUST release the running flag. Wrap the
     // setup phase in a RAII guard. The spawned task will take ownership of the
     // guard via mem::replace once the work actually starts.
     let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
@@ -10844,7 +10363,7 @@ async fn tidal_sync_library(
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
         .map_err(|error| {
-            // setup_guard drops here on early-return path → releases running.
+            // setup_guard drops here on early-return path and releases running.
             drop(setup_guard.take());
             error.into_response()
         })?;
@@ -10925,7 +10444,7 @@ async fn tidal_sync_library(
 }
 
 /// Cancel the in-flight TIDAL sync. Sets the cancel flag; the running task
-/// observes it between pages and returns early. Always returns 200 — the
+/// observes it between pages and returns early. Always returns 200: the
 /// frontend uses this idempotently and doesn't care whether a sync was actually
 /// running.
 async fn tidal_sync_cancel(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -11006,7 +10525,7 @@ async fn do_tidal_sync(
             })?;
         }
         offset += resp.items.len() as i32;
-        // Artists phase shows up as 0.0 → 0.05 — small but non-zero so users see
+        // Artists phase shows up as 0.0 to 0.05: small but non-zero so users see
         // movement during what used to be a silent phase.
         let artist_progress = ((offset as f32 / artist_total) * 0.05).clamp(0.0, 0.05);
         send_tidal_sync_progress(state, artist_progress).await;
@@ -11124,7 +10643,7 @@ async fn do_tidal_sync(
 
                 albums_hydrated_in_page += 1;
                 let processed_albums = offset as usize + albums_hydrated_in_page;
-                // Albums phase: 0.05 → 0.5. Artists phase ate 0.0–0.05.
+                // Albums phase: 0.05 to 0.5. Artists phase ate 0.0 to 0.05.
                 let progress_fraction =
                     (0.05 + (processed_albums as f32 / album_total) * 0.45).clamp(0.05, 0.5);
                 send_tidal_sync_progress(state, progress_fraction).await;
@@ -11373,7 +10892,7 @@ async fn run_tidal_sync_with_reauth(
             let refreshed = match recover_tidal_session(state, &http, &tokens).await {
                 Ok(tokens) => tokens,
                 Err(recover_err) => {
-                    // Do NOT clear the session — a transient network error during refresh
+                    // Do NOT clear the session. A transient network error during refresh
                     // should not permanently log the user out.
                     tracing::error!(
                         target: "noor.sync.tidal",
@@ -11504,7 +11023,7 @@ async fn ensure_tidal_session(
             match recover_tidal_session(state, &http, tokens).await {
                 Ok(tokens) => Ok((tokens, TidalSyncSessionState::Recovered)),
                 Err(recover_err) => {
-                    // Do NOT clear — a transient refresh failure should not log the user out.
+                    // Do NOT clear. A transient refresh failure should not log the user out.
                     tracing::error!(
                         target: "noor.sync.tidal",
                         event = "preflight_refresh_failed",
@@ -11535,7 +11054,7 @@ async fn ensure_tidal_session(
     }
 }
 
-async fn recover_tidal_session(
+pub(super) async fn recover_tidal_session(
     state: &SharedState,
     http: &reqwest::Client,
     tokens: &tidal_auth::TidalTokens,
@@ -11580,7 +11099,7 @@ async fn recover_tidal_session(
     Ok(refreshed)
 }
 
-fn error_looks_like_auth(err: &anyhow::Error) -> bool {
+pub(super) fn error_looks_like_auth(err: &anyhow::Error) -> bool {
     let message = err.to_string().to_ascii_lowercase();
     message.contains("401")
         || message.contains("substatus\":6001")
@@ -11725,7 +11244,7 @@ fn spawn_playback_runtime_listener(
                     track_id,
                     generation,
                 }) => {
-                    // Track is no longer producing audio — clear the flag before advancing.
+                    // Track is no longer producing audio. Clear the flag before advancing.
                     state
                         .write()
                         .await
@@ -11779,7 +11298,7 @@ fn spawn_playback_runtime_listener(
                     if current_playback_generation(&state_guard) != generation {
                         continue;
                     }
-                    // CPAL buffer threshold crossed — samples are actually flowing now.
+                    // CPAL buffer threshold crossed. Samples are actually flowing now.
                     state_guard
                         .audio_active
                         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -11888,7 +11407,7 @@ async fn handle_near_end(
             return Ok(());
         }
 
-        // Skip pre-decode in exclusive mode — only one stream can grab the
+        // Skip pre-decode in exclusive mode. Only one stream can grab the
         // device exclusively, and a paused pre-buffer engine would force-share
         // the device which the OS rejects with AUDCLNT_E_DEVICE_IN_USE.
         // The next track will cold-start when the current one finishes.
@@ -11929,7 +11448,7 @@ async fn handle_near_end(
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
         Some(req) => req,
-        None => return Ok(()), // local library — skip pre-buffer for now
+        None => return Ok(()), // local library: skip pre-buffer for now
     };
 
     let stream_info = match resolve_tidal_playback_stream(&state, &next, &stream_request).await {
@@ -12128,7 +11647,7 @@ async fn handle_runtime_finished(
                     && status.as_u16() == 429
                 {
                     tracing::warn!(
-                        "TIDAL 429 advancing mix to '{}' — backing off 3s and retrying once",
+                        "TIDAL 429 advancing mix to '{}': backing off 3s and retrying once",
                         current.title
                     );
                     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -12142,7 +11661,7 @@ async fn handle_runtime_finished(
                     Err((status, body)) => {
                         consecutive_failures += 1;
                         tracing::warn!(
-                            "Failed to advance to '{}' ({status}, fail {consecutive_failures}/{MAX_CONSEC_FAILURES}): {} — skipping",
+                            "Failed to advance to '{}' ({status}, fail {consecutive_failures}/{MAX_CONSEC_FAILURES}): {}. Skipping",
                             current.title,
                             body.0
                         );
@@ -12230,7 +11749,7 @@ async fn handle_runtime_finished(
         // Track-id mismatch (e.g. user already advanced to another track via
         // play_track, or playback was paused). The runtime-finished session
         // is for `finished_track_id` and may still be sitting in
-        // active_listen_session — flush it before bailing so the partial
+        // active_listen_session. Flush it before bailing so the partial
         // listen isn't lost. Direct flush, not sync_session_after_snapshot:
         // we don't want to start a new session for whatever DB state has now.
         let mut state_guard = state.write().await;
@@ -12450,7 +11969,7 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
         })
         .unwrap_or(0);
 
-    // Exclusive mode owns the device with a single stream — crossfade
+    // Exclusive mode owns the device with a single stream. Crossfade
     // requires two simultaneous streams, which the OS rejects with
     // AUDCLNT_E_DEVICE_IN_USE. Force 0 here so the fade-out ramp on the
     // outgoing track also goes away (otherwise we'd attenuate the last
@@ -12525,7 +12044,7 @@ async fn apply_persisted_runtime_output_settings(
 // rate differs from the device's current rate, swap the device to the new
 // rate before the track starts. Without this, the first track of a session
 // (and any track played from a cold start) plays at the device's existing
-// rate with a software resampler in the path — not bit-perfect. The
+// rate with a software resampler in the path: not bit-perfect. The
 // next-track pre-buffer path already does this; this helper makes every
 // play/switch site behave the same way.
 async fn align_device_to_stream_rate(
@@ -12577,10 +12096,10 @@ async fn align_device_to_stream_rate(
 
 // ───── Audio output settings ────────────────────────────────────────────────
 //
-// `GET /api/audio/devices`     — enumerate cpal output devices
-// `GET /api/audio/settings`    — current persisted AudioSettings
-// `PUT /api/audio/settings`    — persist + (if device/exclusive/SR-follow changed) live-swap
-// `POST /api/audio/exclusive/retry` — force a fresh DeviceSwap to retry exclusive grab
+// `GET /api/audio/devices`: enumerate cpal output devices
+// `GET /api/audio/settings`: current persisted AudioSettings
+// `PUT /api/audio/settings`: persist and live-swap when output settings change
+// `POST /api/audio/exclusive/retry`: force a fresh DeviceSwap to retry exclusive grab
 
 /// Re-issue the active output device's `DeviceSwap` so the runtime tries to
 /// grab WASAPI exclusive again. Used by the "Retry" button on the red-pill
@@ -12711,7 +12230,7 @@ async fn put_audio_settings(
         (old, saved)
     };
 
-    // Quality changed → re-issue the current track at the new quality so the
+    // Quality changed: re-issue the current track at the new quality so the
     // user immediately hears (and sees) the new tier. The track restarts from
     // 0; preserving position would require partial-stream offset support that
     // TIDAL's playbackinfo API doesn't expose.
@@ -12741,7 +12260,7 @@ async fn put_audio_settings(
 
 /// Re-resolve the currently-playing track at the user's current quality and
 /// switch the runtime to it. Called after `put_audio_settings` when the user
-/// flips the quality dropdown — without this, quality changes don't take effect
+/// flips the quality dropdown. Without this, quality changes don't take effect
 /// until the next track and the user can't tell the setting did anything.
 async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Result<()> {
     let Some(track_id) = current_playback_track_id(state).await else {
@@ -13064,8 +12583,8 @@ pub(crate) fn flush_active_listen_session_locked(
     // On DB error: restore the session so the next flush attempt retries
     // (helpful for shutdown_handler and clear_tidal_session, which don't
     // immediately start a replacement session). Track-transition flushes
-    // are still racy — the next sync_session_after_snapshot will overwrite
-    // active_listen_session with a new track's session — but those weren't
+    // are still racy. The next sync_session_after_snapshot will overwrite
+    // active_listen_session with a new track's session, but those weren't
     // recoverable before either.
     let (completed, scrobble_payload) = match write_result {
         Ok(v) => v,
@@ -13207,7 +12726,7 @@ fn apply_tidal_favorite_flags(
     prev_count: i64,
 ) -> anyhow::Result<()> {
     // Refuse to wipe favorites if this run somehow returned zero items but the
-    // previous run had a real population — almost always a transient TIDAL API
+    // previous run had a real population, almost always a transient TIDAL API
     // hiccup, not a legitimate "user unfavorited everything".
     if favorite_ids.is_empty() && prev_count > 0 {
         anyhow::bail!(
@@ -13218,7 +12737,7 @@ fn apply_tidal_favorite_flags(
     }
 
     // Scope the reset to TIDAL-sourced rows so manually-imported albums/tracks
-    // (e.g. from `import_tidal_album`) keep whatever favorite state they had —
+    // (e.g. from `import_tidal_album`) keep whatever favorite state they had:
     // they aren't "TIDAL favorites" in the strict sync sense.
     let reset_sql = format!(
         "UPDATE {table} SET is_favorite = 0 WHERE source = 'tidal' AND tidal_id IS NOT NULL"
@@ -13341,505 +12860,6 @@ async fn get_home_releases(State(state): State<SharedState>) -> Result<Json<Valu
 
 // ─── TIDAL: Your Mixes ───────────────────────────────────────────────────────
 
-/// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
-/// Master Mix, etc) for the home page Your Mixes shelf.
-///
-/// 503 when TIDAL is disconnected so the frontend can render its connect prompt.
-async fn get_tidal_mixes(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    // Persisted-tokens fallback covers the cold-boot race: the home page
-    // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
-    // disk, so a direct in-memory check returns 503 even though the user is
-    // connected. Other TIDAL endpoints follow this same pattern.
-    let (tokens, http_client, tidal_http_client, mixes_cache) = {
-        let in_memory = {
-            let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.http_client.clone(),
-                s.tidal_http_client.clone(),
-                s.tidal_mixes_cache.clone(),
-            )
-        };
-        match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
-            None => {
-                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, in_memory.1, in_memory.2, in_memory.3)
-            }
-        }
-    };
-    let Some(tokens) = tokens else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    // 6h TTL cache. TIDAL refreshes mixes daily; revisiting Home shouldn't
-    // round-trip TIDAL each time. Cache is cleared on app restart.
-    {
-        let guard = mixes_cache.lock().unwrap();
-        if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
-        {
-            return Ok(Json(
-                json!({ "mixes": cached, "source": "tidal", "cached": true }),
-            ));
-        }
-    }
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-    let mixes = match client.get_my_mixes().await {
-        Ok(mixes) => mixes,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry.get_my_mixes().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_mixes failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
-        Err(e) => {
-            tracing::warn!("TIDAL get_my_mixes failed: {e}");
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
-    {
-        let mut guard = mixes_cache.lock().unwrap();
-        *guard = Some((Instant::now(), mixes.clone()));
-    }
-    Ok(Json(json!({ "mixes": mixes, "source": "tidal" })))
-}
-
-// ─── TIDAL: Personal Radio Stations ──────────────────────────────────────────
-
-/// Returns the user's personal TIDAL radio stations for the home shelf.
-/// Same pattern as `get_tidal_mixes` — 503 when disconnected, 6h TTL cache.
-async fn get_tidal_radio_stations(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let (tokens, http_client, tidal_http_client, radio_cache) = {
-        let in_memory = {
-            let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.http_client.clone(),
-                s.tidal_http_client.clone(),
-                s.tidal_radio_stations_cache.clone(),
-            )
-        };
-        match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
-            None => {
-                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, in_memory.1, in_memory.2, in_memory.3)
-            }
-        }
-    };
-    let Some(tokens) = tokens else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    {
-        let guard = radio_cache.lock().unwrap();
-        if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
-        {
-            return Ok(Json(
-                json!({ "stations": cached, "source": "tidal", "cached": true }),
-            ));
-        }
-    }
-
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-    let stations = match client.get_my_radio_stations().await {
-        Ok(s) => s,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry.get_my_radio_stations().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_radio_stations failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
-        Err(e) => {
-            tracing::warn!("TIDAL get_my_radio_stations failed: {e}");
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
-    {
-        let mut guard = radio_cache.lock().unwrap();
-        *guard = Some((Instant::now(), stations.clone()));
-    }
-    Ok(Json(json!({ "stations": stations, "source": "tidal" })))
-}
-
-// ─── TIDAL: Home discover modules ────────────────────────────────────────────
-
-/// Returns the editorial modules from `pages/home` (what the TIDAL web client
-/// renders as the "discover" surface — The Hits, New Tracks, New Albums,
-/// Spotlighted Uploads, From our editors). 503 when TIDAL is disconnected so
-/// the frontend can render its connect prompt instead of an error toast.
-async fn get_tidal_home_modules(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let (tokens, http_client, tidal_http_client) = {
-        let in_memory = {
-            let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.http_client.clone(),
-                s.tidal_http_client.clone(),
-            )
-        };
-        match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
-            None => {
-                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, in_memory.1, in_memory.2)
-            }
-        }
-    };
-    let Some(tokens) = tokens else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-    let modules = match client.get_home_modules().await {
-        Ok(m) => m,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry.get_home_modules().await.map_err(|e| {
-                tracing::warn!("TIDAL get_home_modules failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
-        Err(e) => {
-            tracing::warn!("TIDAL get_home_modules failed: {e}");
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
-    Ok(Json(json!({ "modules": modules, "source": "tidal" })))
-}
-
-/// Returns the full item set for one home discover module, used by the
-/// per-module "View all" detail route. The home preview only ships 5 items
-/// for TRACK_LIST modules; this handler resolves the module id back to the
-/// upstream `dataApiPath` and follows it to load the complete list.
-async fn get_tidal_discover_module_items(
-    State(state): State<SharedState>,
-    Path(module_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, StatusCode> {
-    let limit: u32 = params
-        .get("limit")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50)
-        .min(200);
-
-    let (tokens, http_client, tidal_http_client) = {
-        let in_memory = {
-            let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.http_client.clone(),
-                s.tidal_http_client.clone(),
-            )
-        };
-        match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
-            None => {
-                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, in_memory.1, in_memory.2)
-            }
-        }
-    };
-    let Some(tokens) = tokens else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
-    let modules = match client.get_home_modules().await {
-        Ok(m) => m,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::with_http(
-                tidal_http_client.clone(),
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry.get_home_modules().await.map_err(|e| {
-                tracing::warn!("get_home_modules failed after refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
-        Err(e) => {
-            tracing::warn!("get_home_modules failed: {e}");
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
-
-    let Some(module) = modules.into_iter().find(|m| m.id == module_id) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let module_kind = module.kind.clone();
-    let module_title = module.title.clone();
-    // Modules without a `dataApiPath` (e.g. ALBUM_LIST already returning all
-    // items inline) just echo back the preview items — that's the whole set.
-    let items = if let Some(path) = module.more_path.as_deref() {
-        let access_token = tokens.access_token.clone();
-        let country_code = tokens.country_code.clone();
-        let live = TidalClient::with_http(tidal_http_client, access_token, country_code);
-        match live
-            .get_module_items_via_path(path, &module_kind, limit)
-            .await
-        {
-            Ok(items) if !items.is_empty() => items,
-            _ => module.items, // fall back to the preview if the show-more call fails or returns 0
-        }
-    } else {
-        module.items
-    };
-
-    Ok(Json(json!({
-        "module": {
-            "id": module_id,
-            "title": module_title,
-            "kind": module_kind,
-            "items": items,
-        },
-        "source": "tidal",
-    })))
-}
-
-/// Returns the playable tracks inside a TIDAL mix. Frontend calls this when
-/// the user clicks a mix card on the home Your Mixes shelf, then queues +
-/// plays the first track via the existing TIDAL playback path.
-async fn get_tidal_mix_tracks(
-    State(state): State<SharedState>,
-    Path(mix_id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tokens, tidal_http_client) = {
-        let s = state.read().await;
-        let tidal_http = s.tidal_http_client.clone();
-        let in_memory = s.tidal_tokens.clone();
-        drop(s);
-        match in_memory {
-            Some(t) => (Some(t), tidal_http),
-            None => {
-                let persisted = load_persisted_tidal_tokens(&state).await.ok().flatten();
-                (persisted, tidal_http)
-            }
-        }
-    };
-    let Some(tokens) = tokens else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "TIDAL not connected" })),
-        ));
-    };
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-    let items = client.get_mix_tracks(&mix_id).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
-    let library_states = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
-            .unwrap_or_default()
-    };
-    let tracks: Vec<Value> = items
-        .into_iter()
-        .map(|t| {
-            let library_state = library_states.get(&t.id).copied();
-            tidal_track_playable_json(t, library_state, 640)
-        })
-        .collect();
-
-    Ok(Json(json!({ "tracks": tracks })))
-}
-
-// ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────
-
-/// Reasoning lives in `services/lastfm/scrobble.rs` and the plan file. Short
-/// version: the user goes Settings → "Connect Last.fm account" → we open
-/// `https://www.last.fm/api/auth/?api_key=...&token=...` in a new tab → user
-/// clicks "Yes, allow access" → returns to NOORwave → "I've authorized" button
-/// fires /complete → we redeem the token for a session_key (encrypted on disk).
-
-async fn lastfm_auth_start(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-
-    let (http, api_secret, api_key) = {
-        let s = state.read().await;
-        let api_key =
-            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-                .ok()
-                .flatten()
-                .map(|c| c.api_key);
-        (s.http_client.clone(), s.lastfm_api_secret.clone(), api_key)
-    };
-    let Some(api_secret) = api_secret else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Save a Last.fm API key first."
-        })));
-    };
-
-    let token = match lastfm::scrobble::get_token(&http, &api_key, &api_secret).await {
-        Ok(t) => t,
-        Err(e) => {
-            return Ok(Json(json!({
-                "status": "error",
-                "message": format!("auth.getToken failed: {e}")
-            })));
-        }
-    };
-
-    // Stash the pending token server-side so /complete doesn't have to trust
-    // the client to round-trip it.
-    let stash_result = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::set_pending_token(conn, &token)?;
-        Ok(())
-    });
-    if let Err(e) = stash_result {
-        tracing::warn!("Failed to stash Last.fm pending_token: {e}");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    let auth_url = format!(
-        "https://www.last.fm/api/auth/?api_key={}&token={}",
-        urlencoding::encode(&api_key),
-        urlencoding::encode(&token)
-    );
-    Ok(Json(json!({
-        "status": "awaiting",
-        "auth_url": auth_url,
-    })))
-}
-
-async fn lastfm_auth_complete(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-
-    let (http, api_secret, api_key, pending_token, master_key) = {
-        let s = state.read().await;
-        let creds =
-            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-                .ok()
-                .flatten();
-        (
-            s.http_client.clone(),
-            s.lastfm_api_secret.clone(),
-            creds.as_ref().map(|c| c.api_key.clone()),
-            creds.and_then(|c| c.pending_token),
-            s.master_key.clone(),
-        )
-    };
-    let Some(api_secret) = api_secret else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    let Some(api_key) = api_key.filter(|k| !k.is_empty()) else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Last.fm API key not configured."
-        })));
-    };
-    let Some(token) = pending_token else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "No pending auth — call /api/lastfm/auth/start first."
-        })));
-    };
-
-    let session = match lastfm::scrobble::get_session(&http, &api_key, &api_secret, &token).await {
-        Ok(s) => s,
-        Err(e) => {
-            // Don't drop the pending_token on a "not yet authorized" error —
-            // the user might just need a few more seconds in the browser.
-            // The user can retry by clicking the button again.
-            return Ok(Json(json!({
-                "status": "not_yet_authorized",
-                "message": format!("auth.getSession failed: {e}")
-            })));
-        }
-    };
-
-    let persist_result = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::save_session_key(
-            conn,
-            &master_key,
-            &session.session_key,
-            &session.user_name,
-        )?;
-        Ok(())
-    });
-    if let Err(e) = persist_result {
-        tracing::warn!("Failed to persist Last.fm session: {e}");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    Ok(Json(json!({
-        "status": "connected",
-        "user": session.user_name,
-    })))
-}
-
-async fn lastfm_auth_disconnect(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-    let _ = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::clear_session(conn)?;
-        Ok(())
-    });
-    Ok(Json(json!({"status": "disconnected"})))
-}
-
 /// Get daily picks curated from user's library using learning model
 async fn get_home_picks(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let state_guard = state.read().await;
@@ -13924,599 +12944,6 @@ async fn get_home_news(State(state): State<SharedState>) -> Result<Json<Value>, 
 }
 
 // ── Spotify Config & Enrichment ──────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct SpotifyConfigRequest {
-    client_id: String,
-    client_secret: String,
-}
-
-async fn spotify_save_config(
-    State(state): State<SharedState>,
-    Json(payload): Json<SpotifyConfigRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let http = state.read().await.http_client.clone();
-    let creds = spotify::auth::SpotifyCredentials {
-        client_id: payload.client_id.trim().to_string(),
-        client_secret: payload.client_secret.trim().to_string(),
-    };
-
-    if creds.client_id.is_empty() || creds.client_secret.is_empty() {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Client ID and Client Secret are both required."
-        })));
-    }
-
-    // Verify the credentials work by fetching a token before saving.
-    match spotify::auth::fetch_app_token(&http, &creds).await {
-        Ok(tokens) => {
-            let _ = state.read().await.db.with_conn(|conn| {
-                spotify::auth::save_credentials(conn, &creds)?;
-                Ok(())
-            });
-            {
-                let mut s = state.write().await;
-                s.spotify_tokens = Some(tokens);
-            }
-            Ok(Json(json!({"status": "ok"})))
-        }
-        Err(e) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Spotify rejected the credentials: {}", e)
-        }))),
-    }
-}
-
-async fn spotify_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let configured = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| {
-            Ok(spotify::auth::load_credentials(conn)
-                .ok()
-                .flatten()
-                .is_some())
-        })
-        .unwrap_or(false);
-    Ok(Json(json!({"configured": configured})))
-}
-
-async fn spotify_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let _ = state.read().await.db.with_conn(|conn| {
-        spotify::auth::clear_credentials(conn)?;
-        Ok(())
-    });
-    {
-        let mut s = state.write().await;
-        s.spotify_tokens = None;
-    }
-    Ok(Json(json!({"status": "cleared"})))
-}
-
-async fn start_spotify_enrichment(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-
-    let (http, event_tx, running, total_atom, processed_atom) = {
-        let s = state.read().await;
-        (
-            s.http_client.clone(),
-            s.event_tx.clone(),
-            s.spotify_enrich_running.clone(),
-            s.spotify_enrich_total.clone(),
-            s.spotify_enrich_processed.clone(),
-        )
-    };
-
-    if running.load(Ordering::SeqCst) {
-        let total = total_atom.load(Ordering::SeqCst);
-        let processed = processed_atom.load(Ordering::SeqCst);
-        return Ok(Json(json!({
-            "status": "already_running",
-            "total": total,
-            "processed": processed
-        })));
-    }
-
-    // Require credentials and prime a fresh token before enqueueing work.
-    let creds = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| Ok(spotify::auth::load_credentials(conn).ok().flatten()))
-        .unwrap_or(None);
-    let Some(creds) = creds else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Spotify credentials not configured."
-        })));
-    };
-
-    match spotify::auth::fetch_app_token(&http, &creds).await {
-        Ok(tokens) => {
-            let mut s = state.write().await;
-            s.spotify_tokens = Some(tokens);
-        }
-        Err(e) => {
-            return Ok(Json(json!({
-                "status": "error",
-                "message": format!("Failed to fetch Spotify token: {}", e)
-            })));
-        }
-    }
-
-    let total: usize = state.read().await.db.with_conn(|conn| {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks t
-             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-               AND NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
-            [], |r| r.get(0)
-        )?)
-    }).unwrap_or(0);
-
-    if total == 0 {
-        return Ok(Json(json!({"status": "already_complete"})));
-    }
-
-    running.store(true, Ordering::SeqCst);
-    total_atom.store(total, Ordering::SeqCst);
-    processed_atom.store(0, Ordering::SeqCst);
-
-    tokio::spawn(async move {
-        let progress_tx = event_tx.clone();
-        let total_atom_cb = total_atom.clone();
-        let processed_atom_cb = processed_atom.clone();
-        let result = crate::services::spotify::enrichment::run_enrichment(
-            state,
-            http,
-            move |current, total| {
-                processed_atom_cb.store(current, Ordering::SeqCst);
-                if total > 0 {
-                    total_atom_cb.store(total, Ordering::SeqCst);
-                }
-                let _ = progress_tx.send(AppEvent::SyncProgress {
-                    service: "spotify".to_string(),
-                    progress: current as f32 / total.max(1) as f32,
-                });
-            },
-        )
-        .await;
-
-        running.store(false, Ordering::SeqCst);
-        if result.is_ok() {
-            let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
-        }
-    });
-
-    Ok(Json(json!({"status": "started", "total": total})))
-}
-
-async fn get_spotify_enrichment_status(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    let enriched: i64 =
-        s.db.with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT COUNT(DISTINCT track_id) FROM track_genres WHERE source = 'spotify'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap_or(0);
-    let remaining: i64 = s.db.with_conn(|conn| {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tracks t
-             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
-               AND NOT EXISTS (SELECT 1 FROM spotify_checked sc WHERE sc.track_id = t.id)",
-            [],
-            |r| r.get(0),
-        )?)
-    }).unwrap_or(0);
-    let is_running = s.spotify_enrich_running.load(Ordering::SeqCst);
-    let run_total = s.spotify_enrich_total.load(Ordering::SeqCst);
-    let run_processed = s.spotify_enrich_processed.load(Ordering::SeqCst);
-
-    Ok(Json(json!({
-        "enriched_tracks": enriched,
-        "remaining_tracks": remaining,
-        "is_running": is_running,
-        "run_total": run_total,
-        "run_processed": run_processed,
-    })))
-}
-
-// Wipes the spotify_checked table and any track_genres rows from source
-// 'spotify'. Use after fixing rate-limiting bugs that may have wrongly
-// stamped tracks as "checked" with no tags. Refuses while a run is active.
-async fn reset_spotify_enrichment(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    if s.spotify_enrich_running.load(Ordering::SeqCst) {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Cannot reset while enrichment is running."
-        })));
-    }
-    let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
-        let checks = conn.execute("DELETE FROM spotify_checked", [])?;
-        let tags = conn.execute("DELETE FROM track_genres WHERE source = 'spotify'", [])?;
-        Ok((checks, tags))
-    });
-    match result {
-        Ok((checks, tags)) => Ok(Json(json!({
-            "status": "ok",
-            "checks_cleared": checks,
-            "tags_cleared": tags,
-        }))),
-        Err(e) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Reset failed: {}", e),
-        }))),
-    }
-}
-
-// Manual cleanup: delete `tidal_stream` track rows that have no remaining
-// references (no listen history, not favorited, not in any queue/playlist/etc).
-// Safe to run any time. CASCADE FKs (track_neighbors, embeddings, transitions,
-// audio_dsp_features, etc.) take care of trained-data cleanup automatically.
-async fn purge_orphan_tidal_stream_tracks(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let result: anyhow::Result<usize> = s.db.with_conn(|conn| {
-        // Filter against every non-CASCADE FK referencing tracks(id) so the
-        // DELETE doesn't fail with a constraint violation.
-        let deleted = conn.execute(
-            "DELETE FROM tracks
-             WHERE source = 'tidal_stream'
-               AND is_favorite = 0
-               AND id NOT IN (SELECT track_id FROM listen_history WHERE track_id IS NOT NULL)
-               AND id NOT IN (SELECT track_id FROM queue WHERE track_id IS NOT NULL)
-               AND id NOT IN (SELECT track_id FROM playlist_tracks)
-               AND id NOT IN (SELECT current_track_id FROM playback_state WHERE current_track_id IS NOT NULL)
-               AND id NOT IN (SELECT track_id FROM shuffle_state)
-               AND id NOT IN (SELECT track_id FROM duplicate_group_members)
-               AND id NOT IN (SELECT track_id FROM acrcloud_results)",
-            [],
-        )?;
-        Ok(deleted)
-    });
-    match result {
-        Ok(deleted) => {
-            tracing::info!(deleted, "purge_orphan_tidal_stream_tracks");
-            Ok(Json(json!({ "status": "ok", "deleted": deleted })))
-        }
-        Err(e) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Purge failed: {}", e),
-        }))),
-    }
-}
-
-// ── Last.fm Endpoints ────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct LastFmConfigRequest {
-    api_key: String,
-}
-
-async fn lastfm_save_config(
-    State(state): State<SharedState>,
-    Json(payload): Json<LastFmConfigRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-    let api_key = payload.api_key.trim().to_string();
-    if api_key.is_empty() {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "API key is required."
-        })));
-    }
-
-    // Verify the key works by hitting a free, parameterless endpoint.
-    let http = state.read().await.http_client.clone();
-    let probe = http
-        .get("https://ws.audioscrobbler.com/2.0/")
-        .query(&[
-            ("method", "tag.getTopTags"),
-            ("api_key", &api_key),
-            ("format", "json"),
-        ])
-        .send()
-        .await;
-    match probe {
-        Ok(resp) if resp.status().is_success() => {
-            let body_text = resp.text().await.unwrap_or_default();
-            if body_text.contains("\"error\"") {
-                return Ok(Json(json!({
-                    "status": "error",
-                    "message": format!("Last.fm rejected the key: {}",
-                        body_text.chars().take(200).collect::<String>())
-                })));
-            }
-            let creds = lastfm::auth::LastFmCredentials {
-                api_key,
-                ..Default::default()
-            };
-            let _ = state.read().await.db.with_conn(|conn| {
-                lastfm::auth::save_credentials(conn, &creds)?;
-                Ok(())
-            });
-            Ok(Json(json!({"status": "ok"})))
-        }
-        Ok(resp) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Last.fm rejected the key: HTTP {}", resp.status())
-        }))),
-        Err(e) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Could not reach Last.fm: {}", e)
-        }))),
-    }
-}
-
-async fn lastfm_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-    let (creds, has_secret) = {
-        let s = state.read().await;
-        let creds =
-            s.db.with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-                .ok()
-                .flatten();
-        (creds, s.lastfm_api_secret.is_some())
-    };
-    let enrichment = creds
-        .as_ref()
-        .map(|c| !c.api_key.is_empty())
-        .unwrap_or(false);
-    let user = creds.as_ref().and_then(|c| c.session_user.clone());
-    let scrobbling = enrichment && has_secret && user.is_some();
-    Ok(Json(json!({
-        // Legacy field kept for backward compat with any existing caller of
-        // /api/lastfm/status — equivalent to `enrichment`.
-        "configured": enrichment,
-        "enrichment": enrichment,
-        "scrobbling": scrobbling,
-        "scrobble_available": has_secret,
-        "user": user,
-    })))
-}
-
-async fn lastfm_clear_config(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-    let _ = state.read().await.db.with_conn(|conn| {
-        lastfm::auth::clear_credentials(conn)?;
-        Ok(())
-    });
-    Ok(Json(json!({"status": "cleared"})))
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct LastfmEnrichmentStartParams {
-    mode: Option<String>,
-    refresh: Option<bool>,
-}
-
-impl LastfmEnrichmentStartParams {
-    fn mode(&self) -> crate::services::lastfm::enrichment::EnrichmentMode {
-        if self.refresh == Some(true)
-            || self.mode.as_deref().is_some_and(|mode| {
-                mode.eq_ignore_ascii_case("refresh") || mode.eq_ignore_ascii_case("refresh_all")
-            })
-        {
-            crate::services::lastfm::enrichment::EnrichmentMode::RefreshAll
-        } else {
-            crate::services::lastfm::enrichment::EnrichmentMode::Pending
-        }
-    }
-}
-
-async fn start_lastfm_enrichment(
-    State(state): State<SharedState>,
-    Query(params): Query<LastfmEnrichmentStartParams>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::lastfm;
-    use crate::services::lastfm::enrichment::EnrichmentMode;
-    use std::sync::atomic::Ordering;
-
-    let (
-        http,
-        event_tx,
-        running,
-        cancel,
-        total_atom,
-        processed_atom,
-        prefetch_total_atom,
-        prefetch_done_atom,
-        started_at_atom,
-    ) = {
-        let s = state.read().await;
-        (
-            s.http_client.clone(),
-            s.event_tx.clone(),
-            s.lastfm_enrich_running.clone(),
-            s.lastfm_enrich_cancel.clone(),
-            s.lastfm_enrich_total.clone(),
-            s.lastfm_enrich_processed.clone(),
-            s.lastfm_prefetch_total.clone(),
-            s.lastfm_prefetch_done.clone(),
-            s.lastfm_enrich_started_at.clone(),
-        )
-    };
-
-    if running.load(Ordering::SeqCst) {
-        let total = total_atom.load(Ordering::SeqCst);
-        let processed = processed_atom.load(Ordering::SeqCst);
-        return Ok(Json(json!({
-            "status": "already_running",
-            "total": total,
-            "processed": processed
-        })));
-    }
-
-    let creds = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| Ok(lastfm::auth::load_credentials(conn).ok().flatten()))
-        .unwrap_or(None);
-    let Some(creds) = creds else {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Last.fm API key not configured."
-        })));
-    };
-
-    let mode = params.mode();
-    let total: usize = state
-        .read()
-        .await
-        .db
-        .with_conn(|conn| lastfm::enrichment::count_tracks_to_enrich(conn, mode))
-        .unwrap_or(0);
-
-    if total == 0 {
-        return Ok(Json(json!({
-            "status": if mode == EnrichmentMode::RefreshAll {
-                "no_eligible_tracks"
-            } else {
-                "already_complete"
-            }
-        })));
-    }
-
-    cancel.store(false, Ordering::SeqCst);
-    running.store(true, Ordering::SeqCst);
-    total_atom.store(total, Ordering::SeqCst);
-    processed_atom.store(0, Ordering::SeqCst);
-    prefetch_total_atom.store(0, Ordering::SeqCst);
-    prefetch_done_atom.store(0, Ordering::SeqCst);
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    started_at_atom.store(now_secs, Ordering::SeqCst);
-
-    let api_key = creds.api_key.clone();
-    let started_at_atom_cleanup = started_at_atom.clone();
-    tokio::spawn(async move {
-        let progress_tx = event_tx.clone();
-        let artist_tx = event_tx.clone();
-        let total_atom_cb = total_atom.clone();
-        let processed_atom_cb = processed_atom.clone();
-        let prefetch_total_cb = prefetch_total_atom.clone();
-        let prefetch_done_cb = prefetch_done_atom.clone();
-        let result = lastfm::enrichment::run_enrichment(
-            state,
-            http,
-            api_key,
-            mode,
-            cancel,
-            move |done, artist_total| {
-                prefetch_total_cb.store(artist_total, Ordering::SeqCst);
-                prefetch_done_cb.store(done, Ordering::SeqCst);
-                let _ = artist_tx.send(AppEvent::SyncProgress {
-                    service: "lastfm".to_string(),
-                    progress: done as f32 / artist_total.max(1) as f32,
-                });
-            },
-            move |current, total| {
-                processed_atom_cb.store(current, Ordering::SeqCst);
-                if total > 0 {
-                    total_atom_cb.store(total, Ordering::SeqCst);
-                }
-                let _ = progress_tx.send(AppEvent::SyncProgress {
-                    service: "lastfm".to_string(),
-                    progress: current as f32 / total.max(1) as f32,
-                });
-            },
-        )
-        .await;
-        running.store(false, Ordering::SeqCst);
-        started_at_atom_cleanup.store(0, Ordering::SeqCst);
-        if result.is_ok() {
-            let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
-        }
-    });
-
-    Ok(Json(json!({"status": "started", "total": total})))
-}
-
-async fn get_lastfm_enrichment_status(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    let stats =
-        s.db.with_conn(crate::services::lastfm::enrichment::enrichment_stats)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let is_running = s.lastfm_enrich_running.load(Ordering::SeqCst);
-    let run_total = s.lastfm_enrich_total.load(Ordering::SeqCst);
-    let run_processed = s.lastfm_enrich_processed.load(Ordering::SeqCst);
-    let prefetch_total = s.lastfm_prefetch_total.load(Ordering::SeqCst);
-    let prefetch_done = s.lastfm_prefetch_done.load(Ordering::SeqCst);
-    let run_started_at = s.lastfm_enrich_started_at.load(Ordering::SeqCst);
-    Ok(Json(json!({
-        "total_tracks": stats.total_tracks,
-        "checked_tracks": stats.checked_tracks,
-        "enriched_tracks": stats.enriched_tracks,
-        "remaining_tracks": stats.remaining_tracks,
-        "is_running": is_running,
-        "run_total": run_total,
-        "run_processed": run_processed,
-        "prefetch_total": prefetch_total,
-        "prefetch_done": prefetch_done,
-        "run_started_at": run_started_at,
-    })))
-}
-
-async fn reset_lastfm_enrichment(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    if s.lastfm_enrich_running.load(Ordering::SeqCst) {
-        return Ok(Json(json!({
-            "status": "error",
-            "message": "Cannot reset while enrichment is running."
-        })));
-    }
-    let result: anyhow::Result<(usize, usize)> = s.db.with_conn(|conn| {
-        let checks = conn.execute("DELETE FROM lastfm_checked", [])?;
-        let tags = conn.execute("DELETE FROM track_genres WHERE source = 'lastfm'", [])?;
-        conn.execute("DELETE FROM lastfm_artist_cache", [])?;
-        Ok((checks, tags))
-    });
-    match result {
-        Ok((checks, tags)) => Ok(Json(json!({
-            "status": "ok",
-            "checks_cleared": checks,
-            "tags_cleared": tags,
-        }))),
-        Err(e) => Ok(Json(json!({
-            "status": "error",
-            "message": format!("Reset failed: {}", e),
-        }))),
-    }
-}
-
-async fn stop_lastfm_enrichment(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    s.lastfm_enrich_cancel.store(true, Ordering::Relaxed);
-    Ok(Json(json!({ "status": "stopping" })))
-}
-
-// ── Audio Analysis Endpoints ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct AudioAnalysisRequest {

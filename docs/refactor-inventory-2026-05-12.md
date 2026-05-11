@@ -154,6 +154,114 @@ Behavior:
 - JSON response shape is unchanged.
 - Analytics DB query calls are unchanged.
 
+### Search Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/search_routes.rs`
+
+Change:
+
+- Added `mod search_routes;`.
+- Moved the search route island out of `routes.rs`:
+  - `search`
+  - `search_audio`
+  - `search_vibe`
+  - `search_underrated`
+  - Spotify playlist compact search helper
+  - search query/body DTOs
+
+Reasoning:
+
+- Search routes are independent from playback, auth, and migrations.
+- Keeping the Sportify playlist helper with `/api/search` keeps the cross-service search behavior local to that route family.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Query/body parsing is unchanged.
+- JSON response shape is unchanged.
+
+### Duplicate Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/duplicates_routes.rs`
+
+Change:
+
+- Added `mod duplicates_routes;`.
+- Moved duplicate scan/list/resolve/dismiss handlers out of `routes.rs`.
+- Kept the TIDAL unfavorite retry path by calling the shared parent session refresh helper.
+
+Reasoning:
+
+- Duplicate detection is a self-contained library maintenance surface.
+- The route module keeps duplicate DB calls and TIDAL cleanup adjacency together without changing duplicate internals.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Pagination behavior is unchanged.
+- Queue/playback/library event emission is unchanged.
+- TIDAL unfavorite behavior is unchanged.
+
+### Enrichment Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/enrichment_routes.rs`
+
+Change:
+
+- Added `mod enrichment_routes;`.
+- Moved MusicBrainz, Spotify, and Last.fm config/enrichment handlers out of `routes.rs`.
+- Moved Last.fm server-side auth handlers with the Last.fm enrichment surface.
+- Left audio-analysis routes in `routes.rs` for a separate pass.
+
+Reasoning:
+
+- MusicBrainz, Spotify, and Last.fm enrichment share the same settings/maintenance route class.
+- Keeping audio analysis out of this module avoids mixing metadata enrichment with DSP analysis.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Background task spawning, progress events, cancellation flags, and reset behavior are unchanged.
+
+### Tidal Home Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/tidal_home_routes.rs`
+
+Change:
+
+- Added `mod tidal_home_routes;`.
+- Moved TIDAL home shelf handlers out of `routes.rs`:
+  - `get_tidal_mixes`
+  - `get_tidal_mix_tracks`
+  - `get_tidal_radio_stations`
+  - `get_tidal_home_modules`
+  - `get_tidal_discover_module_items`
+- Reused the parent token persistence, session refresh, auth-error detection, and playable JSON helpers.
+- Kept `play_tidal_mix` in the parent because it is part of the playback path, not just home data loading.
+
+Reasoning:
+
+- The TIDAL home shelf handlers are a compact read/proxy surface.
+- Reusing parent helpers avoids duplicating session recovery logic.
+- Leaving playback-start logic in the parent keeps this extraction lower risk.
+
+Behavior:
+
+- Route URLs are unchanged.
+- TIDAL token fallback, six-hour cache behavior, session refresh retry, and JSON response shape are unchanged.
+
 ### Artist Spread Shuffle
 
 File: `noor-server/src/playback/shuffle.rs`
@@ -193,6 +301,7 @@ Completed:
 - `git diff --check`
 - Attribution scan across changed files
 - Banned punctuation scan across changed files
+- `cargo test -p noor-server` after extracting search, duplicate, enrichment, and TIDAL home route modules
 
 Observed:
 
@@ -207,6 +316,8 @@ Observed:
 - Formatter and diff whitespace checks passed.
 - No AI attribution strings were found in changed files.
 - No em dash, right arrow, or less-equal glyphs were found in changed files.
+- After the second route extraction batch, the full `noor-server` package passed: 567 passed, 0 failed, 1 ignored.
+- Added-line and new-module scans found no AI attribution strings, em dash, right arrow, or less-equal glyphs.
 
 ## Deferred Refactors
 
