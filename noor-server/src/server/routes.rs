@@ -12795,19 +12795,6 @@ async fn handle_near_end(
             return Ok(());
         }
 
-        // Skip pre-decode in exclusive mode — only one stream can grab the
-        // device exclusively, and a paused pre-buffer engine would force-share
-        // the device which the OS rejects with AUDCLNT_E_DEVICE_IN_USE.
-        // The next track will cold-start when the current one finishes.
-        let exclusive = state_guard
-            .db
-            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
-            .map(|s| s.exclusive_mode)
-            .unwrap_or(false);
-        if exclusive {
-            return Ok(());
-        }
-
         let cleared = recently_cleared(&state_guard);
         let next = state_guard
             .db
@@ -13340,7 +13327,7 @@ async fn effective_crossfade_ms(state: &SharedState, configured: i32) -> i32 {
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
         .map(|s| s.exclusive_mode)
         .unwrap_or(false);
-    if exclusive { 0 } else { configured }
+    effective_crossfade_for_exclusive(exclusive, configured)
 }
 
 async fn current_crossfade_ms(state: &SharedState) -> i32 {
@@ -13367,7 +13354,11 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
         .map(|s| s.exclusive_mode)
         .unwrap_or(false);
-    if exclusive { 0 } else { configured }
+    effective_crossfade_for_exclusive(exclusive, configured)
+}
+
+fn effective_crossfade_for_exclusive(_exclusive: bool, configured: i32) -> i32 {
+    configured.max(0)
 }
 
 async fn current_user_audio_quality(
@@ -17205,6 +17196,13 @@ mod tests {
         assert!(!should_retry_exclusive_release(false, true));
         assert!(!should_retry_exclusive_release(true, false));
         assert!(!should_retry_exclusive_release(false, false));
+    }
+
+    #[test]
+    fn exclusive_crossfade_policy_keeps_configured_value() {
+        assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 1_500);
+        assert_eq!(effective_crossfade_for_exclusive(false, 1_500), 1_500);
+        assert_eq!(effective_crossfade_for_exclusive(true, -10), 0);
     }
 
     #[tokio::test]
