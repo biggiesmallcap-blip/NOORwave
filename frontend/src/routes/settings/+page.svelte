@@ -1566,7 +1566,11 @@
 					<div class="auth-card glass">
 						<p class="page-copy">A TIDAL sign-in page opened.</p>
 						<p class="page-copy">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
-						<a class="verify-link" href={verifyUrl} target="_blank">{verifyUrl}</a>
+						<div class="action-row">
+							<a class="btn btn-glass" href={verifyUrl} target="_blank" rel="noreferrer">
+								Open TIDAL sign-in
+							</a>
+						</div>
 						<input
 							class="text-field"
 							type="url"
@@ -3242,11 +3246,6 @@
 		padding: 16px;
 		display: grid;
 		gap: 12px;
-	}
-
-	.verify-link {
-		color: var(--accent-strong);
-		word-break: break-all;
 	}
 
 	.text-field {

@@ -106,7 +106,7 @@ jobs:
 
       - name: Build portable
         shell: pwsh
-        run: .\scripts\build-portable.ps1
+        run: .\scripts\build-portable.ps1 -UsePrebuiltFrontend
 
       - name: Rename artifact
         shell: pwsh
