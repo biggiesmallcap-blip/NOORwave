@@ -1567,9 +1567,9 @@
 						<p class="page-copy">A TIDAL sign-in page opened.</p>
 						<p class="page-copy">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
 						<div class="action-row">
-							<a class="btn btn-glass" href={verifyUrl} target="_blank" rel="noreferrer">
+							<button type="button" class="btn btn-glass" onclick={() => openExternal(verifyUrl)} disabled={!verifyUrl}>
 								Open TIDAL sign-in
-							</a>
+							</button>
 						</div>
 						<input
 							class="text-field"
