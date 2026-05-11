@@ -1101,58 +1101,60 @@
 		</div>
 
 		<div class="filter-pills">
-			<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
-			<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
-			<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
-			<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
-			<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+			<div class="filter-pill-group filter-pill-group--primary">
+				<button class="filter-pill" class:active={activeTab === 'all'}     onclick={() => switchTab('all')}>All</button>
+				<button class="filter-pill" class:active={activeTab === 'tracks'}  onclick={() => switchTab('tracks')}>Tracks</button>
+				<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
+				<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
+				<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+			</div>
 
-			<div class="filter-pills-spacer"></div>
+			<div class="filter-pill-actions">
+				{#if activeTab === 'albums'}
+					<div class="view-toggle" role="group" aria-label="Album view layout">
+						<button
+							class="view-toggle-btn"
+							class:active={$viewMode === 'grid'}
+							onclick={() => viewMode.set('grid')}
+							aria-pressed={$viewMode === 'grid'}
+							aria-label="Grid view"
+							title="Grid view"
+						>
+							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<rect x="2" y="2" width="5" height="5" rx="1"/>
+								<rect x="9" y="2" width="5" height="5" rx="1"/>
+								<rect x="2" y="9" width="5" height="5" rx="1"/>
+								<rect x="9" y="9" width="5" height="5" rx="1"/>
+							</svg>
+						</button>
+						<button
+							class="view-toggle-btn"
+							class:active={$viewMode === 'list'}
+							onclick={() => viewMode.set('list')}
+							aria-pressed={$viewMode === 'list'}
+							aria-label="List view"
+							title="List view"
+						>
+							<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<line x1="3" y1="4" x2="13" y2="4"/>
+								<line x1="3" y1="8" x2="13" y2="8"/>
+								<line x1="3" y1="12" x2="13" y2="12"/>
+							</svg>
+						</button>
+					</div>
+				{/if}
 
-			{#if activeTab === 'albums'}
-				<div class="view-toggle" role="group" aria-label="Album view layout">
-					<button
-						class="view-toggle-btn"
-						class:active={$viewMode === 'grid'}
-						onclick={() => viewMode.set('grid')}
-						aria-pressed={$viewMode === 'grid'}
-						aria-label="Grid view"
-						title="Grid view"
-					>
-						<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-							<rect x="2" y="2" width="5" height="5" rx="1"/>
-							<rect x="9" y="2" width="5" height="5" rx="1"/>
-							<rect x="2" y="9" width="5" height="5" rx="1"/>
-							<rect x="9" y="9" width="5" height="5" rx="1"/>
-						</svg>
-					</button>
-					<button
-						class="view-toggle-btn"
-						class:active={$viewMode === 'list'}
-						onclick={() => viewMode.set('list')}
-						aria-pressed={$viewMode === 'list'}
-						aria-label="List view"
-						title="List view"
-					>
-						<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-							<line x1="3" y1="4" x2="13" y2="4"/>
-							<line x1="3" y1="8" x2="13" y2="8"/>
-							<line x1="3" y1="12" x2="13" y2="12"/>
-						</svg>
-					</button>
-				</div>
-			{/if}
+				<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
+					⤮ Random
+				</button>
 
-			<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
-				⤮ Random
-			</button>
-
-			{#if searchBusy}
-				<span class="library-status">Searching…</span>
-			{:else if isSearchMode}
-				<span class="library-status">{searchSummary}</span>
-				<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
-			{/if}
+				{#if searchBusy}
+					<span class="library-status">Searching…</span>
+				{:else if isSearchMode}
+					<span class="library-status">{searchSummary}</span>
+					<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
+				{/if}
+			</div>
 		</div>
 	</div>
 
@@ -2510,14 +2512,31 @@
 	}
 
 	.filter-pills {
-		display: flex;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 		gap: 6px;
 		align-items: center;
+		width: 100%;
+		max-width: 720px;
+		margin: 0 auto;
+	}
+
+	.filter-pill-group,
+	.filter-pill-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 		flex-wrap: wrap;
 	}
 
-	.filter-pills-spacer {
-		flex: 1;
+	.filter-pill-group--primary {
+		grid-column: 2;
+		justify-content: center;
+	}
+
+	.filter-pill-actions {
+		grid-column: 3;
+		justify-self: start;
 	}
 
 	.filter-pill--ghost {
@@ -2920,6 +2939,17 @@
 		.filter-pills,
 		.view-toggle {
 			width: 100%;
+		}
+
+		.filter-pills {
+			grid-template-columns: 1fr;
+		}
+
+		.filter-pill-group--primary,
+		.filter-pill-actions {
+			grid-column: 1;
+			width: 100%;
+			justify-content: center;
 		}
 
 		.filter-pill {

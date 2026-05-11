@@ -254,16 +254,21 @@
 	}
 
 	.quiet-panel {
+		--quiet-panel-pad: clamp(var(--space-3), 3vh, var(--space-6));
+		--quiet-panel-gap: clamp(var(--space-2), 1.8vh, var(--space-4));
+		--quiet-art-size: clamp(180px, 40vh, 520px);
+		--quiet-panel-w: min(var(--quiet-art-size), calc(100vw - (2 * var(--quiet-panel-pad))));
+
 		position: fixed;
 		inset: 0;
 		z-index: calc(var(--z-modal) + 1);
 		display: grid;
-		grid-template-columns: minmax(0, 520px);
+		grid-template-columns: minmax(0, var(--quiet-panel-w));
 		grid-auto-rows: min-content;
 		justify-content: center;
 		align-content: center;
-		gap: 22px;
-		padding: 32px 24px;
+		gap: var(--quiet-panel-gap);
+		padding: var(--quiet-panel-pad);
 		box-sizing: border-box;
 		outline: none;
 	}
@@ -293,11 +298,10 @@
 	}
 
 	.quiet-art-wrap {
-		width: 100%;
-		max-width: min(60vh, 520px);
+		width: var(--quiet-panel-w);
 		aspect-ratio: 1;
 		justify-self: center;
-		border-radius: 22px;
+		border-radius: var(--radius-lg);
 		overflow: hidden;
 		box-shadow:
 			0 30px 80px -20px rgba(0, 0, 0, 0.7),
