@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { api, type AudioSettings } from '$lib/api/client';
+import { refreshPlaybackRuntime } from '$lib/stores/player';
 
 export interface AudioSettingsState {
 	settings: AudioSettings | null;
@@ -41,7 +42,9 @@ function createStore() {
 			const before = get({ subscribe }).settings;
 			if (!before) return;
 			const next: AudioSettings = { ...before, ...patch };
+			const qualityChanged = next.quality !== before.quality;
 			const isLiveApplyChange =
+				qualityChanged ||
 				next.output_device !== before.output_device ||
 				next.exclusive_mode !== before.exclusive_mode ||
 				next.sample_rate_follow !== before.sample_rate_follow;
@@ -49,6 +52,9 @@ function createStore() {
 			try {
 				const saved = await api.updateAudioSettings(next);
 				update((s) => ({ ...s, settings: saved, pendingApply: false }));
+				if (qualityChanged) {
+					void refreshPlaybackRuntime();
+				}
 			} catch (err) {
 				update((s) => ({
 					...s,

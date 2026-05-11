@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { formatPlayerStreamDetail } from './stream_display';
+import { formatPlayerStreamDetail, formatResolutionShort } from './stream_display';
 
 describe('formatPlayerStreamDetail', () => {
 	test('shows confirmed lossless quality without using the output device rate', () => {
@@ -32,5 +32,28 @@ describe('formatPlayerStreamDetail', () => {
 		});
 
 		expect(label).toBe('Hi-Res Lossless \u00b7 192 kHz \u00b7 24-bit \u00b7 Excl');
+	});
+
+	test('shows the lossy high bitrate when no resolution is reported', () => {
+		const label = formatPlayerStreamDetail({
+			stream: {
+				audio_quality: 'HIGH',
+				sample_rate: null,
+				bit_depth: null,
+			},
+			exclusiveEngaged: true,
+		});
+
+		expect(label).toBe('High \u00b7 320 kbps AAC \u00b7 Excl');
+	});
+
+	test('uses bitrate for the short high quality badge', () => {
+		const label = formatResolutionShort({
+			audio_quality: 'HIGH',
+			sample_rate: null,
+			bit_depth: null,
+		});
+
+		expect(label).toBe('320 kbps');
 	});
 });

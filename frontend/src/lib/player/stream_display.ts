@@ -26,6 +26,12 @@ function formatStreamQuality(quality: string | null | undefined): string | null 
 	return normalized.replaceAll('_', ' ');
 }
 
+function formatQualityDetail(quality: string | null | undefined): string | null {
+	const normalized = quality?.trim().toUpperCase();
+	if (normalized === 'HIGH') return '320 kbps AAC';
+	return null;
+}
+
 function inferStreamBitDepth(quality: string | null | undefined, sampleRate: number | null): number | null {
 	if (sampleRate && sampleRate > 48000) return 24;
 	if (quality === 'HI_RES_LOSSLESS' || quality === 'HI_RES') return 24;
@@ -37,6 +43,9 @@ export function formatResolutionShort(stream: PlayerStreamDisplay): string {
 	if (!stream) return '';
 	const bitDepth = stream.bit_depth;
 	const sampleRate = stream.sample_rate;
+	if (!bitDepth && !sampleRate && stream.audio_quality?.trim().toUpperCase() === 'HIGH') {
+		return '320 kbps';
+	}
 	if (!bitDepth && !sampleRate) return '';
 	const khz = sampleRate ? sampleRate / 1000 : null;
 	const khzLabel = khz === null ? '' : Number.isInteger(khz) ? `${khz}` : khz.toFixed(1);
@@ -57,8 +66,10 @@ export function formatPlayerStreamDetail({
 	const sampleRate = stream?.sample_rate ?? null;
 	const bitDepth = stream?.bit_depth ?? inferStreamBitDepth(stream?.audio_quality, sampleRate);
 	const quality = formatStreamQuality(stream?.audio_quality);
+	const qualityDetail = formatQualityDetail(stream?.audio_quality);
 
 	if (quality) parts.push(quality);
+	if (qualityDetail) parts.push(qualityDetail);
 	if (sampleRate) parts.push(formatSampleRate(sampleRate));
 	if (bitDepth) parts.push(`${bitDepth}-bit`);
 	if (exclusiveEngaged) parts.push('Excl');
