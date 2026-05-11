@@ -1,4 +1,4 @@
-use crate::db::queries;
+﻿use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
 use crate::playback::{player, queue, runtime as playback_runtime};
@@ -35,13 +35,17 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 mod analytics_routes;
+mod audio_analysis_routes;
 mod chart_routes;
+mod discovery_routes;
 mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
 mod search_routes;
 mod sportify_routes;
 mod tidal_home_routes;
+mod tidal_sync_routes;
+pub use tidal_sync_routes::trigger_auto_sync;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -66,30 +70,6 @@ pub struct ListParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DiscoveryPreviewRequest {
-    prompt: String,
-    mode: Option<String>,
-    services: Option<Vec<String>>,
-    limit: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DiscoveryPresetRequest {
-    name: String,
-    prompt: String,
-    mode: Option<String>,
-    services: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DiscoveryExternalRequest {
-    prompt: String,
-    mode: Option<String>,
-    services: Option<Vec<String>>,
-    limit: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct DiscoveryExternalResultRequest {
     provider: String,
     provider_track_id: String,
@@ -100,15 +80,6 @@ pub struct DiscoveryExternalResultRequest {
     duration_ms: Option<i64>,
     audio_quality: Option<String>,
     normalized_genres: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DiscoveryConnectionsRequest {
-    prompt: String,
-    mode: Option<String>,
-    services: Option<Vec<String>>,
-    limit: Option<i64>,
-    seed: DiscoveryExternalResultRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,23 +208,6 @@ pub struct AutomixRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DiscoveryTrainRequest {
-    mode: Option<String>,
-    rebuild_audio: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DiscoveryFeedbackRequest {
-    seed_track_id: i64,
-    candidate_track_id: i64,
-    action: String,
-    surface: String,
-    context: Option<Value>,
-    #[serde(default)]
-    session_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AddTracksToPlaylistRequest {
     track_ids: Vec<i64>,
 }
@@ -262,7 +216,7 @@ struct AddTracksToPlaylistRequest {
 pub struct CreateSmartPlaylistRequest {
     name: String,
     description: Option<String>,
-    /// The root `RuleClause` as a raw JSON value — validated by deserializing into
+    /// The root `RuleClause` as a raw JSON value - validated by deserializing into
     /// `SmartPlaylistDefinition` before writing to DB.
     rules: Value,
 }
@@ -352,35 +306,66 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/analytics/listens/recent",
             get(analytics_routes::get_recent_listens),
         )
-        .route("/api/discovery/preview", post(preview_discovery))
-        .route("/api/discovery/new", post(discover_new_music))
-        .route("/api/discovery/save", post(save_discovery_track))
+        .route(
+            "/api/discovery/preview",
+            post(discovery_routes::preview_discovery),
+        )
+        .route(
+            "/api/discovery/new",
+            post(discovery_routes::discover_new_music),
+        )
+        .route(
+            "/api/discovery/save",
+            post(discovery_routes::save_discovery_track),
+        )
         .route("/api/discovery/play", post(play_discovery_track))
-        .route("/api/discovery/connections", post(discover_connected_music))
-        .route("/api/discovery/status", get(get_discovery_status))
-        .route("/api/discovery/train", post(start_discovery_training))
+        .route(
+            "/api/discovery/connections",
+            post(discovery_routes::discover_connected_music),
+        )
+        .route(
+            "/api/discovery/status",
+            get(discovery_routes::get_discovery_status),
+        )
+        .route(
+            "/api/discovery/train",
+            post(discovery_routes::start_discovery_training),
+        )
         .route(
             "/api/discovery/train/status",
-            get(get_discovery_training_status),
+            get(discovery_routes::get_discovery_training_status),
         )
-        .route("/api/discovery/train/stop", post(stop_discovery_training))
+        .route(
+            "/api/discovery/train/stop",
+            post(discovery_routes::stop_discovery_training),
+        )
         .route(
             "/api/discovery/train/intensity",
-            get(get_discovery_intensity).post(set_discovery_intensity),
+            get(discovery_routes::get_discovery_intensity)
+                .post(discovery_routes::set_discovery_intensity),
         )
         .route(
             "/api/discovery/train/engine",
-            get(get_discovery_engine).post(set_discovery_engine),
+            get(discovery_routes::get_discovery_engine)
+                .post(discovery_routes::set_discovery_engine),
         )
-        .route("/api/discovery/train/safety", get(get_discovery_safety))
+        .route(
+            "/api/discovery/train/safety",
+            get(discovery_routes::get_discovery_safety),
+        )
         .route(
             "/api/discovery/train/safety-profile",
-            get(get_discovery_safety_profile).post(set_discovery_safety_profile),
+            get(discovery_routes::get_discovery_safety_profile)
+                .post(discovery_routes::set_discovery_safety_profile),
         )
-        .route("/api/discovery/feedback", post(record_discovery_feedback))
+        .route(
+            "/api/discovery/feedback",
+            post(discovery_routes::record_discovery_feedback),
+        )
         .route(
             "/api/discovery/presets",
-            get(get_discovery_presets).post(create_discovery_preset),
+            get(discovery_routes::get_discovery_presets)
+                .post(discovery_routes::create_discovery_preset),
         )
         // Similar Radio
         .route("/api/discovery/radio", post(get_radio_tracks))
@@ -390,12 +375,12 @@ pub fn api_routes(state: SharedState) -> Router {
         )
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
-        // Sportify-based discovery resolver — single, bulk, and cache-only status poll.
+        // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
         .route("/api/resolve/tidal/track", get(resolve_tidal_track))
         .route("/api/resolve/tidal/bulk", post(resolve_tidal_bulk))
         .route("/api/resolve/tidal/status", get(resolve_tidal_status))
         // Sportify (anonymous Spotify metadata proxy) discovery surface.
-        // Sportify is upstream and subject to breakage — every handler is
+        // Sportify is upstream and subject to breakage - every handler is
         // cache-first, every failure surfaces as JSON error or empty list,
         // and nothing here writes to library tables. Worst case for an
         // outage is a degraded /discover; existing library data is never
@@ -544,8 +529,14 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tidal/login", post(tidal_login))
         .route("/api/tidal/login/complete", post(tidal_login_complete))
         .route("/api/tidal/login/poll", post(tidal_poll))
-        .route("/api/tidal/sync", post(tidal_sync_library))
-        .route("/api/tidal/sync/cancel", post(tidal_sync_cancel))
+        .route(
+            "/api/tidal/sync",
+            post(tidal_sync_routes::tidal_sync_library),
+        )
+        .route(
+            "/api/tidal/sync/cancel",
+            post(tidal_sync_routes::tidal_sync_cancel),
+        )
         .route("/api/tidal/status", get(tidal_status))
         .route(
             "/api/tidal/backoff",
@@ -605,7 +596,7 @@ pub fn api_routes(state: SharedState) -> Router {
             axum::routing::delete(enrichment_routes::lastfm_clear_config),
         )
         .route("/api/lastfm/status", get(enrichment_routes::lastfm_status))
-        // Last.fm scrobble auth (server-side flow — `LASTFM_API_SECRET` env required)
+        // Last.fm scrobble auth (server-side flow - `LASTFM_API_SECRET` env required)
         .route(
             "/api/lastfm/auth/start",
             post(enrichment_routes::lastfm_auth_start),
@@ -637,37 +628,46 @@ pub fn api_routes(state: SharedState) -> Router {
         // Audio analysis
         .route(
             "/api/library/analyze/audio-features",
-            post(start_audio_analysis),
+            post(audio_analysis_routes::start_audio_analysis),
         )
-        .route("/api/library/analyze/stop", post(stop_audio_analysis))
+        .route(
+            "/api/library/analyze/stop",
+            post(audio_analysis_routes::stop_audio_analysis),
+        )
         .route(
             "/api/library/analyze/status",
-            get(get_audio_analysis_status),
+            get(audio_analysis_routes::get_audio_analysis_status),
         )
         .route(
             "/api/library/analyze/passive",
-            get(get_passive_dsp).put(set_passive_dsp),
+            get(audio_analysis_routes::get_passive_dsp).put(audio_analysis_routes::set_passive_dsp),
         )
         .route(
             "/api/tracks/{id}/audio-features",
-            get(get_track_audio_features),
+            get(audio_analysis_routes::get_track_audio_features),
         )
         .route(
             "/api/library/audio-features/stats",
-            get(get_audio_features_stats),
+            get(audio_analysis_routes::get_audio_features_stats),
         )
         .route(
             "/api/library/audio-features/quality",
-            get(get_audio_features_quality),
+            get(audio_analysis_routes::get_audio_features_quality),
         )
-        .route("/api/library/analytics", get(get_library_analytics))
+        .route(
+            "/api/library/analytics",
+            get(audio_analysis_routes::get_library_analytics),
+        )
         .route(
             "/api/library/analyze/reanalyze-stale",
-            get(reanalyze_stale_tracks),
+            get(audio_analysis_routes::reanalyze_stale_tracks),
         )
-        .route("/api/library/analyze/reset", post(reset_audio_analysis))
-        .route("/api/sync/info", get(get_sync_info))
-        .route("/api/sync/auto", post(set_auto_sync))
+        .route(
+            "/api/library/analyze/reset",
+            post(audio_analysis_routes::reset_audio_analysis),
+        )
+        .route("/api/sync/info", get(tidal_sync_routes::get_sync_info))
+        .route("/api/sync/auto", post(tidal_sync_routes::set_auto_sync))
         // Status
         .route("/api/status", get(status))
         // Home page discovery endpoints
@@ -675,19 +675,19 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/home/picks", get(get_home_picks))
         .route("/api/home/articles", get(get_home_articles))
         .route("/api/home/news", get(get_home_news))
-        // TIDAL "Your Mixes" — drives the home Your Mixes shelf above Trending.
+        // TIDAL "Your Mixes" - drives the home Your Mixes shelf above Trending.
         .route("/api/tidal/mixes", get(tidal_home_routes::get_tidal_mixes))
         .route(
             "/api/tidal/mixes/{id}/tracks",
             get(tidal_home_routes::get_tidal_mix_tracks),
         )
         .route("/api/tidal/play-mix", post(play_tidal_mix))
-        // TIDAL "Personal Radio" — drives the home Personal Radio shelf.
+        // TIDAL "Personal Radio" - drives the home Personal Radio shelf.
         .route(
             "/api/tidal/radio-stations",
             get(tidal_home_routes::get_tidal_radio_stations),
         )
-        // TIDAL editorial home modules — drives the search-page discover surface.
+        // TIDAL editorial home modules - drives the search-page discover surface.
         .route(
             "/api/tidal/home-modules",
             get(tidal_home_routes::get_tidal_home_modules),
@@ -965,7 +965,7 @@ async fn get_album_tracks(
         }
     };
 
-    // No TIDAL id → can't enrich; return library tracks alone.
+    // No TIDAL id -> can't enrich; return library tracks alone.
     let Some(tidal_album_id) = album_tidal_id else {
         return Ok(Json(json!({
             "tracks": tracks,
@@ -974,7 +974,7 @@ async fn get_album_tracks(
         })));
     };
 
-    // TIDAL session needed for the catalog fetch — best-effort only.
+    // TIDAL session needed for the catalog fetch - best-effort only.
     let (tokens, tidal_http_client) = {
         let persisted = match load_persisted_tidal_tokens(&state).await {
             Ok(p) => p,
@@ -1146,14 +1146,14 @@ async fn get_artist_discography(
     let eps_fut = fetch_all_artist_albums(&client, tidal_artist_id, "EPSANDSINGLES");
     let compilations_fut = fetch_all_artist_albums(&client, tidal_artist_id, "COMPILATIONS");
     let live_fut = fetch_all_artist_albums(&client, tidal_artist_id, "LIVE");
-    // Top tracks raised from 10 → 50 so the merged Top Tracks list on the
+    // Top tracks raised from 10 -> 50 so the merged Top Tracks list on the
     // artist page surfaces a meaningful catalog even when the user has zero
     // library matches; 50 is TIDAL's per-page max.
     let top_fut = client.get_artist_top_tracks(tidal_artist_id, 50, 0);
     let videos_fut = client.get_artist_videos(tidal_artist_id, 50, 0);
     let similar_fut = client.get_artist_similar(tidal_artist_id, 20, 0);
     let bio_fut = client.get_artist_bio(tidal_artist_id);
-    // Profile fetch in the same parallel batch — gives us the artist's
+    // Profile fetch in the same parallel batch - gives us the artist's
     // canonical `picture` URL so the page hero can fall back to TIDAL
     // when the local row has no `photo_url`.
     let profile_fut = client.get_artist(tidal_artist_id);
@@ -1183,7 +1183,7 @@ async fn get_artist_discography(
     // Picture URL fallback chain. TIDAL's `/artists/{id}` record is the
     // canonical source, but it ships `picture: null` for many artists.
     // We then try the artist's own `picture` as embedded in their top
-    // tracks, then finally fall back to an album cover — same trick the
+    // tracks, then finally fall back to an album cover - same trick the
     // library Recently Played Artists rail uses to keep tiles populated
     // when no artist photo exists. Extracted *before* the result-bearing
     // _res values are consumed by the payload builders below.
@@ -1204,7 +1204,7 @@ async fn get_artist_discography(
     let top_track_some = top_track_picture_id.is_some();
     let album_cover_some = album_cover_picture_id.is_some();
     // TIDAL's CDN ships `640x640.jpg` reliably for album covers but not
-    // for artist pictures — many artist images are stored at 320 max.
+    // for artist pictures - many artist images are stored at 320 max.
     // Pick the size that matches whichever tier resolved.
     let (resolved_picture_id, picture_size) = if let Some(id) = direct_picture_id {
         (Some(id), 320)
@@ -1327,7 +1327,7 @@ async fn get_artist_discography(
         .unwrap_or_default();
 
     // Resolve `local_id` per similar artist via the same lookup pattern used
-    // for albums above — lets the frontend route /artists/[local_id] when
+    // for albums above - lets the frontend route /artists/[local_id] when
     // present (preserving library-affordances) and /tidal/artists/[id] otherwise.
     let similar_items: Vec<crate::services::tidal::client::TidalArtist> =
         similar_res.map(|r| r.items).unwrap_or_default();
@@ -1438,7 +1438,7 @@ async fn get_artist_spotify_stats(
                 .unwrap_or_default();
         let artist_name = pairs.first().map(|_| String::new()).unwrap_or_default();
         // Re-look up the artist's display name (any track's artist_name works
-        // — they all share artist_id=id by construction).
+        // - they all share artist_id=id by construction).
         let name =
             s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
                 .ok()
@@ -1618,7 +1618,7 @@ async fn get_playlists(State(state): State<SharedState>) -> Result<Json<Value>, 
         .with_conn(|conn| {
             let mut playlists = queries::get_playlists(conn)?;
 
-            // Count smart playlists — if none, skip expensive loading.
+            // Count smart playlists - if none, skip expensive loading.
             let smart_count = playlists.iter().filter(|p| p.is_smart).count();
             if smart_count > 0 {
                 // Load all data once, build a shared context.
@@ -1847,186 +1847,6 @@ async fn delete_smart_playlist_route(
         })
 }
 
-async fn preview_discovery(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryPreviewRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let prompt = payload.prompt.trim();
-    if prompt.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let services = payload
-        .services
-        .clone()
-        .unwrap_or_else(|| vec!["tidal".to_string()]);
-    let mode = normalize_discovery_mode(payload.mode.as_deref());
-    let candidate_limit = payload.limit.unwrap_or(18).clamp(1, 40);
-    let result_limit = payload.limit.unwrap_or(8).clamp(1, 20) as usize;
-
-    let state = state.read().await;
-    let recent_similar = state
-        .db
-        .with_conn(|conn| queries::get_similar_tracks(conn, 1, 5, &[]))
-        .unwrap_or_default();
-    if let Ok(Some(preview)) = discovery_learning::build_prompt_preview(
-        &state.db,
-        prompt,
-        &mode,
-        &services,
-        result_limit,
-        &recent_similar,
-    ) {
-        return Ok(Json(json!({ "preview": preview })));
-    }
-
-    let preview = state
-        .db
-        .with_conn(|conn| {
-            let request = discovery_engine::DiscoveryPreviewRequest {
-                prompt: prompt.to_string(),
-                mode,
-                services,
-                limit: result_limit,
-            };
-            let context = discovery_engine::DiscoveryContext {
-                overview: queries::get_analytics_overview(conn)?,
-                behavior: queries::get_behavior_metrics(conn)?,
-                recent_listens: queries::get_recent_listens(conn, 12)?,
-                top_artists: queries::get_top_artists_by_history(conn, 6)?,
-                top_genres: queries::get_top_genres_by_history(conn, 6)?,
-                track_genres: queries::get_track_genre_paths_with_fallback(conn)?
-                    .into_iter()
-                    .map(|(id, rows)| (id, queries::ResolvedGenre::paths_only(&rows)))
-                    .collect(),
-            };
-            let candidates = queries::get_discovery_candidate_tracks(conn, candidate_limit)?;
-            let preview = discovery_engine::build_preview(&request, &context, &candidates);
-            queries::cache_discovery_results(conn, None, &preview.results)?;
-            Ok(preview)
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({ "preview": preview })))
-}
-
-async fn discover_new_music(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryExternalRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let prompt = payload.prompt.trim();
-    if prompt.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "prompt_required",
-                "message": "Add a few words first so NOOR can search outward.",
-            })),
-        ));
-    }
-
-    let mode = normalize_discovery_mode(payload.mode.as_deref());
-    let services = normalize_discovery_services(payload.services);
-    if !services.iter().any(|service| service == "tidal") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "tidal_required",
-                "message": "TIDAL must stay selected for real new-music discovery right now.",
-            })),
-        ));
-    }
-
-    let request = external_discovery_engine::ExternalDiscoveryRequest {
-        prompt: prompt.to_string(),
-        mode,
-        services,
-        limit: payload.limit.unwrap_or(10).clamp(1, 20) as usize,
-    };
-    let context = load_external_discovery_context(&state)
-        .await
-        .map_err(internal_discovery_error)?;
-    let queries = external_discovery_engine::build_search_queries(&request, &context);
-    let queries = augment_search_queries_with_lastfm(&state, &request, &context, queries).await;
-    let provider = tidal_discovery_provider(&state).await?;
-    let candidates = provider
-        .search_tracks(&queries, 10)
-        .await
-        .map_err(discovery_upstream_error)?;
-    let candidates = enrich_candidates_with_metadata(&state, candidates).await;
-    let embedding_scores = discovery_learning::compute_external_embedding_scores(
-        &{
-            let guard = state.read().await;
-            guard.db.clone()
-        },
-        prompt,
-        &candidates,
-    )
-    .unwrap_or_default();
-    let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
-        .await
-        .map_err(internal_discovery_error)?;
-    let mut feed = external_discovery_engine::build_external_feed(
-        &request,
-        &context,
-        &candidates,
-        &library_tidal_ids,
-        discovery_provider_capabilities(),
-        None,
-    );
-    for result in &mut feed.results {
-        result.embedding_score = embedding_scores.get(&result.provider_track_id).copied();
-        if let Some(score) = result.embedding_score {
-            result.score = (((result.score as f64) * 0.8) + (score.max(0.0) * 20.0)).round() as i32;
-            if score > 0.2 {
-                result.tags.push("embedding boost".to_string());
-            }
-        }
-    }
-    feed.results
-        .sort_by(|left, right| right.score.cmp(&left.score));
-
-    Ok(Json(json!({ "feed": feed })))
-}
-
-async fn save_discovery_track(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryExternalResultRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let provider = normalize_external_provider(&payload.provider).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "unsupported_provider",
-                "message": "That discovery provider is not supported yet.",
-            })),
-        )
-    })?;
-
-    if provider != "tidal" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "unsupported_provider",
-                "message": "Only TIDAL discovery saves are wired up right now.",
-            })),
-        ));
-    }
-
-    let provider = tidal_discovery_provider(&state).await?;
-    provider
-        .save_track(&payload.provider_track_id)
-        .await
-        .map_err(discovery_upstream_error)?;
-
-    Ok(Json(json!({
-        "saved": true,
-        "provider": "tidal",
-        "provider_track_id": payload.provider_track_id,
-        "message": format!("Saved “{}” to TIDAL favorites. Run sync to pull it fully into NOOR.", payload.title),
-    })))
-}
-
 async fn play_discovery_track(
     State(state): State<SharedState>,
     Json(payload): Json<DiscoveryExternalResultRequest>,
@@ -2154,554 +1974,6 @@ async fn play_discovery_track(
     })))
 }
 
-async fn discover_connected_music(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryConnectionsRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let prompt = payload.prompt.trim();
-    if prompt.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "prompt_required",
-                "message": "Keep a prompt in play so NOOR can connect the next songs.",
-            })),
-        ));
-    }
-
-    let provider_name = normalize_external_provider(&payload.seed.provider).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "unsupported_provider",
-                "message": "That discovery provider is not supported yet.",
-            })),
-        )
-    })?;
-    if provider_name != "tidal" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "unsupported_provider",
-                "message": "Only TIDAL connection trails are wired up right now.",
-            })),
-        ));
-    }
-
-    let request = external_discovery_engine::ExternalDiscoveryRequest {
-        prompt: prompt.to_string(),
-        mode: normalize_discovery_mode(payload.mode.as_deref()),
-        services: normalize_discovery_services(payload.services),
-        limit: payload.limit.unwrap_or(10).clamp(1, 20) as usize,
-    };
-    let context = load_external_discovery_context(&state)
-        .await
-        .map_err(internal_discovery_error)?;
-    let seed = DiscoveryCandidateSeed {
-        provider_track_id: payload.seed.provider_track_id.clone(),
-        title: payload.seed.title.clone(),
-        artist_name: payload.seed.artist_name.clone(),
-        album_title: payload.seed.album_title.clone(),
-        normalized_genres: payload.seed.normalized_genres.clone().unwrap_or_default(),
-    };
-    let queries = external_discovery_engine::build_connection_queries(&request, &context, &seed);
-    let queries = augment_connection_queries_with_lastfm(&state, &seed, queries).await;
-    let provider = tidal_discovery_provider(&state).await?;
-    let candidates = provider
-        .connected_tracks(&seed, &queries, 8)
-        .await
-        .map_err(discovery_upstream_error)?
-        .into_iter()
-        .filter(|candidate| candidate.provider_track_id != seed.provider_track_id)
-        .collect::<Vec<_>>();
-    let candidates = enrich_candidates_with_metadata(&state, candidates).await;
-    let embedding_scores = discovery_learning::compute_external_embedding_scores(
-        &{
-            let guard = state.read().await;
-            guard.db.clone()
-        },
-        prompt,
-        &candidates,
-    )
-    .unwrap_or_default();
-    let library_tidal_ids = existing_candidate_tidal_ids(&state, &candidates)
-        .await
-        .map_err(internal_discovery_error)?;
-    let trail_item = Some(discovery_request_to_trail_item(&payload.seed));
-    let mut feed = external_discovery_engine::build_external_feed(
-        &request,
-        &context,
-        &candidates,
-        &library_tidal_ids,
-        discovery_provider_capabilities(),
-        trail_item,
-    );
-    for result in &mut feed.results {
-        result.embedding_score = embedding_scores.get(&result.provider_track_id).copied();
-        if let Some(score) = result.embedding_score {
-            result.score = (((result.score as f64) * 0.8) + (score.max(0.0) * 20.0)).round() as i32;
-            if score > 0.2 {
-                result.tags.push("embedding boost".to_string());
-            }
-        }
-    }
-    feed.results
-        .sort_by(|left, right| right.score.cmp(&left.score));
-
-    Ok(Json(json!({ "feed": feed })))
-}
-
-async fn get_discovery_presets(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    let presets = state
-        .db
-        .with_conn(queries::list_discovery_presets)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({ "presets": presets })))
-}
-
-async fn create_discovery_preset(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryPresetRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let name = payload.name.trim();
-    let prompt = payload.prompt.trim();
-    if name.is_empty() || prompt.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mode = normalize_discovery_mode(payload.mode.as_deref());
-
-    let services_json = serde_json::to_string(
-        &payload
-            .services
-            .unwrap_or_else(|| vec!["tidal".to_string()]),
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let state = state.read().await;
-    let preset = state
-        .db
-        .with_conn(|conn| {
-            queries::create_discovery_preset(conn, name, prompt, &mode, &services_json)
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({ "preset": preset })))
-}
-
-async fn get_discovery_status(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    let status = state
-        .db
-        .with_conn(queries::get_discovery_status)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": status })))
-}
-
-async fn get_discovery_training_status(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    let run = state
-        .db
-        .with_conn(queries::get_latest_training_run)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Build a synthetic per-stage breakdown so the frontend can render a
-    // pipeline view without needing multi-row stage history in the schema.
-    const STAGE_ORDER: &[&str] = &[
-        "corpus",
-        "behavioral",
-        "audio",
-        "fusion",
-        "neighbors",
-        "evaluate",
-    ];
-    const STAGE_THRESHOLDS: &[f64] = &[0.05, 0.2, 0.55, 0.72, 0.88, 0.96];
-
-    let stages: Vec<Value> = if let Some(ref r) = run {
-        let current_stage_idx = STAGE_ORDER.iter().position(|&s| s == r.stage).unwrap_or(0);
-        STAGE_ORDER
-            .iter()
-            .enumerate()
-            .map(|(i, &name)| {
-                let stage_status = if r.status == "failed" && i == current_stage_idx {
-                    "failed"
-                } else if i < current_stage_idx {
-                    "done"
-                } else if i == current_stage_idx {
-                    r.status.as_str()
-                } else {
-                    "pending"
-                };
-                let progress = if i < current_stage_idx {
-                    1.0_f64
-                } else if i == current_stage_idx {
-                    let lo = if i == 0 { 0.0 } else { STAGE_THRESHOLDS[i - 1] };
-                    let hi = STAGE_THRESHOLDS[i];
-                    ((r.progress - lo) / (hi - lo)).clamp(0.0, 1.0)
-                } else {
-                    0.0_f64
-                };
-                json!({ "stage": name, "status": stage_status, "progress": progress })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok(Json(json!({ "run": run, "stages": stages })))
-}
-
-async fn start_discovery_training(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryTrainRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-
-    let mode = payload.mode.as_deref().unwrap_or("incremental");
-    let full_mode = mode == "full";
-    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
-    let (db, cancel) = {
-        let guard = state.read().await;
-        (guard.db.clone(), guard.discovery_train_cancel.clone())
-    };
-
-    // Guard: reject if a run is already in progress
-    let already_running = db
-        .with_conn(queries::get_latest_training_run)
-        .ok()
-        .flatten()
-        .map(|run| run.status == "running")
-        .unwrap_or(false);
-
-    if already_running {
-        return Ok(Json(json!({
-            "status": "already_running",
-            "mode": mode
-        })));
-    }
-
-    let engine = discovery_learning::load_discovery_engine(&db);
-    if !engine.supports_training() {
-        return Ok(Json(json!({
-            "status": "legacy_trainer_unavailable",
-            "mode": mode,
-            "engine": engine.as_str(),
-            "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
-        })));
-    }
-
-    // Reset cancel flag synchronously before spawning so that a Stop request
-    // arriving immediately after this call reaches the spawned task.
-    cancel.store(false, Ordering::SeqCst);
-
-    tokio::spawn(async move {
-        let (event_tx, http_client, tidal_http_client, tidal_tokens) = {
-            let guard = state.read().await;
-            (
-                guard.event_tx.clone(),
-                guard.http_client.clone(),
-                guard.tidal_http_client.clone(),
-                guard.tidal_tokens.clone(),
-            )
-        };
-        let lastfm = LastFmClient::load(http_client, &db);
-        let tokens = match tidal_tokens {
-            Some(tokens) => Some(tokens),
-            None => load_persisted_tidal_tokens(&state).await.ok().flatten(),
-        };
-        let tidal = tokens.map(|tokens| {
-            TidalClient::with_http(tidal_http_client, tokens.access_token, tokens.country_code)
-        });
-        let external_refresh_clients =
-            discovery_learning::ExternalProviderRefreshClients { lastfm, tidal };
-        if let Err(error) = discovery_learning::start_training(
-            db,
-            event_tx,
-            full_mode,
-            rebuild_audio,
-            cancel,
-            external_refresh_clients,
-        )
-        .await
-        {
-            tracing::error!(
-                target: "noor.discovery.training",
-                error = %error,
-                "discovery learning pipeline failed"
-            );
-        }
-    });
-    Ok(Json(json!({
-        "status": "training_started",
-        "mode": if full_mode { "full" } else { "incremental" }
-    })))
-}
-
-async fn stop_discovery_training(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    s.discovery_train_cancel.store(true, Ordering::Relaxed);
-    Ok(Json(json!({ "status": "stopping" })))
-}
-
-async fn get_discovery_intensity(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{DiscoveryIntensity, load_discovery_intensity};
-    let s = state.read().await;
-    let intensity = load_discovery_intensity(&s.db);
-    let params = intensity.params();
-    Ok(Json(json!({
-        "intensity": intensity.as_str(),
-        "dimension": params.dimension,
-        "top_k": params.top_k,
-        "window_size": params.window_size,
-        "include_audio_proxy": params.include_audio_proxy,
-        "available": [
-            DiscoveryIntensity::Max.as_str(),
-            DiscoveryIntensity::Medium.as_str(),
-            DiscoveryIntensity::Low.as_str(),
-        ],
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct IntensityRequest {
-    intensity: String,
-}
-
-async fn set_discovery_intensity(
-    State(state): State<SharedState>,
-    Json(payload): Json<IntensityRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{
-        DiscoveryIntensity, set_discovery_intensity as save_intensity,
-    };
-    let s = state.read().await;
-    let parsed = DiscoveryIntensity::parse(&payload.intensity);
-    save_intensity(&s.db, parsed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "intensity": parsed.as_str() })))
-}
-
-async fn get_discovery_engine(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::DiscoveryEngine;
-    let s = state.read().await;
-    let engine = discovery_learning::load_discovery_engine(&s.db);
-    Ok(Json(json!({
-        "engine": engine.as_str(),
-        "label": engine.label(),
-        "family": engine.family(),
-        "trainable": engine.supports_training(),
-        "available": [
-            DiscoveryEngine::V2.as_str(),
-            DiscoveryEngine::V1.as_str(),
-        ],
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct EngineRequest {
-    engine: String,
-}
-
-async fn set_discovery_engine(
-    State(state): State<SharedState>,
-    Json(payload): Json<EngineRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let parsed = discovery_learning::DiscoveryEngine::parse(&payload.engine);
-    discovery_learning::set_discovery_engine(&s.db, parsed)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({
-        "engine": parsed.as_str(),
-        "label": parsed.label(),
-        "family": parsed.family(),
-        "trainable": parsed.supports_training(),
-    })))
-}
-
-async fn get_discovery_safety_profile(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{
-        DiscoveryTrainingSafetyProfile, discovery_training_worker_threads,
-        load_discovery_training_safety_profile,
-    };
-    let s = state.read().await;
-    let profile = load_discovery_training_safety_profile(&s.db);
-    Ok(Json(json!({
-        "profile": profile.as_str(),
-        "label": profile.label(),
-        "worker_threads": discovery_training_worker_threads(profile),
-        "available": [
-            DiscoveryTrainingSafetyProfile::LaptopSafe.as_str(),
-            DiscoveryTrainingSafetyProfile::Balanced.as_str(),
-            DiscoveryTrainingSafetyProfile::Performance.as_str(),
-        ],
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct SafetyProfileRequest {
-    profile: String,
-}
-
-async fn set_discovery_safety_profile(
-    State(state): State<SharedState>,
-    Json(payload): Json<SafetyProfileRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{
-        DiscoveryTrainingSafetyProfile, discovery_training_worker_threads,
-        set_discovery_training_safety_profile,
-    };
-    let s = state.read().await;
-    let parsed = DiscoveryTrainingSafetyProfile::parse(&payload.profile);
-    set_discovery_training_safety_profile(&s.db, parsed)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({
-        "profile": parsed.as_str(),
-        "label": parsed.label(),
-        "worker_threads": discovery_training_worker_threads(parsed),
-    })))
-}
-
-// Safety estimate: tells the UI how long training is expected to take and
-// how much memory it'll claim, derived from the current track count, the
-// active intensity tier, and the duration of the most recent successful run
-// (if any). Frontend uses this to gate the user with a "this'll take ~X min"
-// preview before they hit Start.
-async fn get_discovery_safety(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use crate::services::learning::{
-        discovery_training_safety_timeout, discovery_training_worker_threads,
-        load_discovery_intensity, load_discovery_training_safety_profile,
-    };
-    let s = state.read().await;
-
-    let (track_count, last_run_seconds): (i64, Option<f64>) =
-        s.db.with_conn(|conn| {
-            let tracks: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM tracks WHERE source IS NOT NULL",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            // Most recent finished run, in seconds. SQLite's strftime epoch
-            // gives integer seconds; subtraction is the wall-clock duration.
-            let last: Option<f64> = conn
-                .query_row(
-                    "SELECT (julianday(finished_at) - julianday(started_at)) * 86400.0
-                     FROM training_runs
-                     WHERE finished_at IS NOT NULL AND status = 'completed'
-                     ORDER BY id DESC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
-            Ok((tracks, last))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let intensity = load_discovery_intensity(&s.db);
-    let params = intensity.params();
-    let safety_profile = load_discovery_training_safety_profile(&s.db);
-    let safety_timeout_seconds = discovery_training_safety_timeout(intensity).as_secs();
-    let worker_threads = discovery_training_worker_threads(safety_profile);
-
-    // Cost model: similarity_neighbors is O(n²) on track count. Constant
-    // factor scales roughly with `dim × top_k`. Calibrated against the
-    // observed Max-tier baseline of ~12 minutes for 30,000 tracks (~0.8μs
-    // per pair on a typical laptop). Final fudge factor includes I/O,
-    // co-occurrence build, and audio-proxy overhead.
-    let n = track_count as f64;
-    let pair_cost_ns = 800.0 * (params.dimension as f64 / 96.0) * (params.top_k as f64 / 64.0);
-    let neighbors_seconds = (n * n * pair_cost_ns) / 1.0e9;
-    let audio_seconds = if params.include_audio_proxy {
-        n * 0.0008
-    } else {
-        0.0
-    };
-    let behavioral_seconds = n * 0.001;
-    let estimated_seconds_model = neighbors_seconds + audio_seconds + behavioral_seconds;
-
-    // Prefer the actual last-run duration if we have one — it captures the
-    // user's real machine and library. Blend 70/30 with the model so we
-    // don't anchor too hard on a single noisy datapoint.
-    let estimated_seconds = match last_run_seconds {
-        Some(observed) if observed > 5.0 => 0.3 * estimated_seconds_model + 0.7 * observed,
-        _ => estimated_seconds_model,
-    };
-
-    // Peak RAM rough estimate: dim × N × 8 bytes for behavioral vectors,
-    // doubled for audio + fusion, plus the neighbor graph (top_k × N × 32).
-    let ram_mb = ((params.dimension as f64 * n * 8.0 * 3.0) + (params.top_k as f64 * n * 32.0))
-        / (1024.0 * 1024.0);
-
-    // Safety classification: Green when the run is short or matches a known
-    // baseline. Yellow when we expect 5-20 min on a non-trivial library.
-    // Red when we predict over 20 min or RAM crosses 1.5 GB — these are the
-    // cases where the user should consider dropping intensity.
-    let recommendation = if estimated_seconds > 1200.0 || ram_mb > 1500.0 {
-        "high_cost"
-    } else if estimated_seconds > 300.0 {
-        "moderate"
-    } else {
-        "safe"
-    };
-
-    Ok(Json(json!({
-        "track_count": track_count,
-        "intensity": intensity.as_str(),
-        "estimated_seconds": estimated_seconds.round() as i64,
-        "estimated_minutes": (estimated_seconds / 60.0 * 10.0).round() / 10.0,
-        "estimated_ram_mb": ram_mb.round() as i64,
-        "last_run_seconds": last_run_seconds.map(|s| s.round() as i64),
-        "recommendation": recommendation,
-        "safety_profile": safety_profile.as_str(),
-        "safety_timeout_seconds": safety_timeout_seconds,
-        "worker_threads": worker_threads,
-        "params": {
-            "dimension": params.dimension,
-            "top_k": params.top_k,
-            "window_size": params.window_size,
-            "include_audio_proxy": params.include_audio_proxy,
-        },
-    })))
-}
-
-async fn record_discovery_feedback(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryFeedbackRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let context_json = payload.context.as_ref().map(Value::to_string);
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            queries::record_discovery_feedback(
-                conn,
-                payload.seed_track_id,
-                payload.candidate_track_id,
-                &payload.action,
-                &payload.surface,
-                context_json.as_deref(),
-                payload.session_id.as_deref(),
-            )
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({ "recorded": true })))
-}
-
-// ─── Similar Radio ──────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 struct RadioRequest {
     seed_track_id: Option<i64>,
@@ -2773,7 +2045,7 @@ async fn get_radio_tracks(
             Json(json!({"error": "Failed to query learned neighbors"})),
         )
     })? {
-        // DSP harmonic post-scoring — apply the shared harmonic multiplier to
+        // DSP harmonic post-scoring - apply the shared harmonic multiplier to
         // every row that has audio features on both sides. Rows without
         // features are left untouched (never penalised for being unanalyzed).
         let seed_features = state
@@ -2944,7 +2216,7 @@ async fn compute_radio_similarity(
     })))
 }
 
-// ─── Discovery Sound Space ───────────────────────────────────────────────
+// --- Discovery Sound Space -----------------------------------------------
 
 /// Stable synthetic id for an external (Last.fm) candidate that has no resolved
 /// Tidal id. Negative i64 keyed off `artist|title` so multiple unresolved hits
@@ -2952,8 +2224,8 @@ async fn compute_radio_similarity(
 /// are negligible at the ~60-candidate scale of a single radio request.
 ///
 /// TODO(option 2): Replace this with real Tidal-search resolution in `radio.rs`
-/// before the candidate leaves the orchestrator — that would also let
-/// `DiscoverSidePanel.resolveExternalPlayable` go away. Needs an artist+title →
+/// before the candidate leaves the orchestrator - that would also let
+/// `DiscoverSidePanel.resolveExternalPlayable` go away. Needs an artist+title ->
 /// tidal_id cache (in-memory or a small SQLite table) to avoid hammering the
 /// Tidal API on every discovery request.
 fn synthetic_external_track_id(artist: &str, title: &str) -> i64 {
@@ -2985,7 +2257,7 @@ struct ResolveTidalTrackQuery {
 }
 
 /// Resolve one Spotify (Sportify) track to TIDAL for playback. Reads the
-/// Spotify→TIDAL map cache first; on miss, fetches Sportify metadata and
+/// Spotify->TIDAL map cache first; on miss, fetches Sportify metadata and
 /// runs the title/artist/duration matcher against TIDAL search.
 ///
 /// Response shape mirrors the `tidal: {...}` block on the normalized
@@ -3151,7 +2423,7 @@ async fn resolve_tidal_track(
     })))
 }
 
-// ─── Sportify bulk + status resolution endpoints ────────────
+// --- Sportify bulk + status resolution endpoints ------------
 
 #[derive(Debug, Deserialize)]
 struct ResolveTidalBulkBody {
@@ -3253,7 +2525,7 @@ async fn resolve_tidal_bulk(
     }
 
     // Fetch Sportify metadata for everything we need to resolve. Cache miss
-    // → upstream call; failures fall through as `unresolved` rather than
+    // -> upstream call; failures fall through as `unresolved` rather than
     // failing the whole batch.
     let mut to_resolve: Vec<(String, crate::services::sportify::models::SportifyTrack)> =
         Vec::with_capacity(needs_fetch.len());
@@ -3437,7 +2709,7 @@ async fn resolve_tidal_status(
     Ok(Json(json!({ "entries": entries })))
 }
 
-// ─── Sportify discovery read endpoints ──────────────────────
+// --- Sportify discovery read endpoints ----------------------
 
 /// Resolve the first `eager_n` Spotify tracks against TIDAL inline (so the
 /// top of the response is instantly playable) and spawn a background task
@@ -3445,7 +2717,7 @@ async fn resolve_tidal_status(
 /// `sportify_unresolved`, so a follow-up `enrich_tracks_with_tidal_cache`
 /// call reflects the inline resolutions in the response.
 ///
-/// Returns the list of spotify_ids spawned for lazy resolution — surfaced in
+/// Returns the list of spotify_ids spawned for lazy resolution - surfaced in
 /// the response so the frontend's status poller knows what to watch.
 async fn eager_and_lazy_resolve_for_list(
     state: &SharedState,
@@ -3501,7 +2773,7 @@ async fn eager_and_lazy_resolve_for_list(
     }
 
     // Without TIDAL credentials we can't resolve anything. Leave rows pending
-    // so the UI shows them as such — better than persisting bogus failures.
+    // so the UI shows them as such - better than persisting bogus failures.
     let tokens = match tidal_tokens_in_state {
         Some(t) => Some(t),
         None => match load_persisted_tidal_tokens(state).await {
@@ -3722,11 +2994,11 @@ async fn get_discovery_space(
         in_degree_pctile: f64,
     }
 
-    // ── 1. Decide track set based on inputs ──────────────────────────────────
+    // -- 1. Decide track set based on inputs ----------------------------------
     //
-    //   prompt set   → rank_candidates (text/genre/affinity scoring)
-    //   seed_id set  → radio_from_neighbors (embedding graph)
-    //   neither      → most-played fallback
+    //   prompt set   -> rank_candidates (text/genre/affinity scoring)
+    //   seed_id set  -> radio_from_neighbors (embedding graph)
+    //   neither      -> most-played fallback
 
     let mut space_tracks: Vec<SpaceTrack> = if !prompt.is_empty() {
         // Prompt path: run the full discovery scoring engine against the library
@@ -3883,7 +3155,7 @@ async fn get_discovery_space(
         vec![]
     };
 
-    // ── 1b. Prepend the seed track itself when in seed mode (so canvas has center) ──
+    // -- 1b. Prepend the seed track itself when in seed mode (so canvas has center) --
     if seed_id > 0 && prompt.is_empty() {
         // Avoid duplicating if it somehow ended up in the candidate list.
         let already_present = space_tracks.iter().any(|t| t.track_id == seed_id);
@@ -3954,9 +3226,9 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 2. Fill remainder from most-played library tracks ────────────────────
+    // -- 2. Fill remainder from most-played library tracks --------------------
     // Only fill when browsing without a seed. In seed mode the radio candidates
-    // ARE the map — padding with unrelated most-played tracks creates a cloud of
+    // ARE the map - padding with unrelated most-played tracks creates a cloud of
     // disconnected blue dots with no edges and falsely-cold-start labels.
     if seed_id > 0 && prompt.is_empty() && (space_tracks.len() as i64) < limit {
         let remaining = limit - space_tracks.len() as i64;
@@ -4116,7 +3388,7 @@ async fn get_discovery_space(
         space_tracks.truncate(limit as usize);
     }
 
-    // ── 3. Fetch DSP features for all collected track IDs ────────────────────
+    // -- 3. Fetch DSP features for all collected track IDs --------------------
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
@@ -4126,7 +3398,7 @@ async fn get_discovery_space(
             .join(",");
 
         if ids_csv.is_empty() {
-            // No library tracks present (pure external response) — nothing to enrich.
+            // No library tracks present (pure external response) - nothing to enrich.
         } else {
             type DspRow = (
                 Option<f64>,    // energy
@@ -4183,7 +3455,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 3b. Aggregate skip-rate + completion-avg from listen_history ─────────
+    // -- 3b. Aggregate skip-rate + completion-avg from listen_history ---------
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
@@ -4193,7 +3465,7 @@ async fn get_discovery_space(
             .join(",");
 
         if ids_csv.is_empty() {
-            // No library tracks present (pure external response) — nothing to enrich.
+            // No library tracks present (pure external response) - nothing to enrich.
         } else {
             let listen_map: std::collections::HashMap<i64, (Option<f64>, Option<f64>)> = state_guard.db.with_conn(|conn| {
                 let sql = format!(
@@ -4228,7 +3500,7 @@ async fn get_discovery_space(
 
             for t in &mut space_tracks {
                 if let Some((skip, comp)) = listen_map.get(&t.track_id) {
-                    // Preserve Option semantics — None means "no listen data" (distinct from 0.0).
+                    // Preserve Option semantics - None means "no listen data" (distinct from 0.0).
                     t.skip_rate = *skip;
                     t.completion_avg = *comp;
                 }
@@ -4236,7 +3508,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 3c. Backfill last_played_at + play_count from tracks table ───────────
+    // -- 3c. Backfill last_played_at + play_count from tracks table -----------
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
@@ -4246,7 +3518,7 @@ async fn get_discovery_space(
             .join(",");
 
         if ids_csv.is_empty() {
-            // No library tracks present (pure external response) — nothing to enrich.
+            // No library tracks present (pure external response) - nothing to enrich.
         } else {
             let track_meta: std::collections::HashMap<i64, (Option<String>, i64)> = state_guard
                 .db
@@ -4280,7 +3552,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 3d. Top-genre with source + confidence (highest confidence per track) ─
+    // -- 3d. Top-genre with source + confidence (highest confidence per track) -
     if !space_tracks.is_empty() {
         let ids_csv: String = space_tracks
             .iter()
@@ -4290,9 +3562,9 @@ async fn get_discovery_space(
             .join(",");
 
         if ids_csv.is_empty() {
-            // No library tracks present (pure external response) — nothing to enrich.
+            // No library tracks present (pure external response) - nothing to enrich.
         } else {
-            // genre_map: track_id → (top_name, top_source, top_conf, all_names)
+            // genre_map: track_id -> (top_name, top_source, top_conf, all_names)
             type GenreEntry = (String, Option<String>, Option<f64>, Vec<String>);
             let genre_map: std::collections::HashMap<i64, GenreEntry> = state_guard
                 .db
@@ -4337,7 +3609,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 3e. Cohort assignment per track (90-day window) ──────────────────────
+    // -- 3e. Cohort assignment per track (90-day window) ----------------------
     if !space_tracks.is_empty() {
         let track_ids: Vec<i64> = space_tracks
             .iter()
@@ -4346,7 +3618,7 @@ async fn get_discovery_space(
             .collect();
 
         if track_ids.is_empty() {
-            // No library tracks — skip cohort assignment.
+            // No library tracks - skip cohort assignment.
         } else {
             let cohort_map: std::collections::HashMap<i64, (String, String)> = state_guard
                 .db
@@ -4362,7 +3634,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 4. Build typed edges (v1.5) ──────────────────────────────────────────
+    // -- 4. Build typed edges (v1.5) ------------------------------------------
     // Typed to feed the pruner and serialized after pruning. Old callers receive
     // extra fields they can ignore; all existing fields are preserved.
     struct FullEdge {
@@ -4379,7 +3651,7 @@ async fn get_discovery_space(
         metadata_score: f64,
     }
 
-    // Library↔library edges come from `track_neighbors`. We always run this
+    // Library<->library edges come from `track_neighbors`. We always run this
     // query when there's more than one library track in the result set so the
     // map shows the full neighbor graph, regardless of whether external tracks
     // are present.
@@ -4481,7 +3753,7 @@ async fn get_discovery_space(
     };
 
     // External (non-library) tracks aren't in `track_neighbors`, so synthesize
-    // a seed→external edge per external track. This runs alongside the library
+    // a seed->external edge per external track. This runs alongside the library
     // edges above so users see both their library graph and the external links.
     if seed_id > 0 && prompt.is_empty() {
         for t in space_tracks.iter().filter(|t| !t.is_in_library) {
@@ -4502,7 +3774,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 5. Score normalization (per source group) ─────────────────────────────
+    // -- 5. Score normalization (per source group) -----------------------------
     let score_candidates: Vec<ds::ScoreCandidate> = space_tracks
         .iter()
         .map(|t| ds::ScoreCandidate {
@@ -4513,7 +3785,7 @@ async fn get_discovery_space(
         .collect();
     let norm_scores = ds::normalize_scores_by_source(&score_candidates);
 
-    // ── 6. Within-set in-degree stats ────────────────────────────────────────
+    // -- 6. Within-set in-degree stats ----------------------------------------
     let prune_edges: Vec<ds::PruneEdge> = typed_edges
         .iter()
         .map(|e| ds::PruneEdge {
@@ -4531,7 +3803,7 @@ async fn get_discovery_space(
         }
     }
 
-    // ── 7. Graph pruning ──────────────────────────────────────────────────────
+    // -- 7. Graph pruning ------------------------------------------------------
     let prune_nodes: Vec<ds::PruneNode> = space_tracks
         .iter()
         .map(|t| ds::PruneNode {
@@ -4556,7 +3828,7 @@ async fn get_discovery_space(
     // Filter space_tracks to survivors; preserve original order.
     space_tracks.retain(|t| surviving_ids.contains(&t.track_id));
 
-    // ── 8. Serialize nodes with v1.5 fields ──────────────────────────────────
+    // -- 8. Serialize nodes with v1.5 fields ----------------------------------
     let total = space_tracks.len().max(1);
     let track_nodes: Vec<Value> = space_tracks
         .iter()
@@ -4566,7 +3838,7 @@ async fn get_discovery_space(
                 .get(&t.track_id)
                 .copied()
                 .unwrap_or_else(|| t.similarity_score.clamp(0.0, 1.0));
-            // Library tracks are only truly cold-start if confidence is very low —
+            // Library tracks are only truly cold-start if confidence is very low -
             // support_count may be 0 simply because the neighbor table hasn't been
             // calculated yet, which doesn't mean there's no behavioral data.
             let is_cold_start = !t.is_in_library && (t.support_count == 0 || t.confidence < 0.3);
@@ -4676,7 +3948,7 @@ async fn get_discovery_space(
         })
         .collect();
 
-    // ── 9. Serialize edges with v1.5 fields ──────────────────────────────────
+    // -- 9. Serialize edges with v1.5 fields ----------------------------------
     let edge_nodes: Vec<Value> = typed_edges
         .iter()
         .filter(|e| {
@@ -4685,7 +3957,7 @@ async fn get_discovery_space(
         .map(|e| {
             let edge_id = format!("{}-{}-{}", e.from_track_id, e.to_track_id, e.primary_reason);
             json!({
-                // ── Existing fields ──
+                // -- Existing fields --
                 "from_id": e.from_track_id,
                 "to_id": e.to_track_id,
                 "type": &e.primary_reason,
@@ -4694,7 +3966,7 @@ async fn get_discovery_space(
                 "behavioral_score": e.behavioral_score,
                 "audio_score": e.audio_score,
                 "metadata_score": e.metadata_score,
-                // ── v1.5 fields ──
+                // -- v1.5 fields --
                 "id": edge_id,
                 "from_track_id": e.from_track_id,
                 "to_track_id": e.to_track_id,
@@ -4707,7 +3979,7 @@ async fn get_discovery_space(
         })
         .collect();
 
-    // ── 10. Diagnostics ───────────────────────────────────────────────────────
+    // -- 10. Diagnostics -------------------------------------------------------
     let mut source_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut reason_counts: std::collections::HashMap<String, usize> =
@@ -4743,10 +4015,10 @@ async fn get_discovery_space(
         "low_confidence_edge_dropped_count": prune_result.low_confidence_edge_dropped_count,
     });
 
-    // ── 11. Background seed-neighbor refresh (DiscoverSpace only) ────────────
+    // -- 11. Background seed-neighbor refresh (DiscoverSpace only) ------------
     // Fire-and-forget: computes embedding similarity for this seed, writes to
     // track_neighbors, then sends DiscoverySpaceRefreshed so the map auto-reloads.
-    // `refreshed_seeds` is a TTL'd map keyed by (seed_id → model_id, instant) so
+    // `refreshed_seeds` is a TTL'd map keyed by (seed_id -> model_id, instant) so
     // entries expire and re-training invalidates them automatically.
     if seed_id > 0 && prompt.is_empty() {
         let guard = state.read().await;
@@ -4764,7 +4036,7 @@ async fn get_discovery_space(
                 seed_id,
                 mid,
             ),
-            None => true, // no model → nothing to do anyway
+            None => true, // no model -> nothing to do anyway
         };
         if !already_fresh {
             let db2 = guard.db.clone();
@@ -4865,7 +4137,7 @@ async fn radio_song(
     Ok(Json(body))
 }
 
-// ─── POST /api/radio/start ───────────────────────────────────────────────────
+// --- POST /api/radio/start ---------------------------------------------------
 //
 // Atomically builds a radio queue from a seed track, inserting library tracks
 // directly and non-library Last.fm results as pending rows, then spawns
@@ -5239,7 +4511,7 @@ async fn radio_start(
             }
         } else {
             tracing::warn!(
-                "radio_start: Tidal tokens unavailable — pending rows will rely on lazy resolution"
+                "radio_start: Tidal tokens unavailable - pending rows will rely on lazy resolution"
             );
         }
     }
@@ -5538,7 +4810,7 @@ async fn get_discovery_artists(
     })))
 }
 
-fn normalize_discovery_mode(mode: Option<&str>) -> String {
+pub(super) fn normalize_discovery_mode(mode: Option<&str>) -> String {
     match mode.unwrap_or("mood").trim() {
         "reference" => "reference".to_string(),
         "dj" => "dj".to_string(),
@@ -5547,7 +4819,7 @@ fn normalize_discovery_mode(mode: Option<&str>) -> String {
     }
 }
 
-fn normalize_discovery_services(services: Option<Vec<String>>) -> Vec<String> {
+pub(super) fn normalize_discovery_services(services: Option<Vec<String>>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     services
         .unwrap_or_else(|| vec!["tidal".to_string()])
@@ -5564,7 +4836,7 @@ fn normalize_discovery_services(services: Option<Vec<String>>) -> Vec<String> {
         .collect()
 }
 
-fn normalize_external_provider(provider: &str) -> Option<&'static str> {
+pub(super) fn normalize_external_provider(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "tidal" => Some("tidal"),
         "soundcloud" => Some("soundcloud"),
@@ -5574,7 +4846,7 @@ fn normalize_external_provider(provider: &str) -> Option<&'static str> {
     }
 }
 
-fn internal_discovery_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+pub(super) fn internal_discovery_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     error!(
         target: "noor.discovery.external",
         event = "internal_discovery_error",
@@ -5590,7 +4862,7 @@ fn internal_discovery_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     )
 }
 
-fn discovery_upstream_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+pub(super) fn discovery_upstream_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     error!(
         target: "noor.discovery.external",
         event = "upstream_discovery_error",
@@ -5607,7 +4879,7 @@ fn discovery_upstream_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     )
 }
 
-async fn tidal_discovery_provider(
+pub(super) async fn tidal_discovery_provider(
     state: &SharedState,
 ) -> Result<TidalDiscoveryProvider, (StatusCode, Json<Value>)> {
     let state_guard = state.read().await;
@@ -5834,7 +5106,7 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
     }
 }
 
-async fn load_external_discovery_context(
+pub(super) async fn load_external_discovery_context(
     state: &SharedState,
 ) -> anyhow::Result<external_discovery_engine::ExternalDiscoveryContext> {
     let state_guard = state.read().await;
@@ -5849,7 +5121,7 @@ async fn load_external_discovery_context(
     })
 }
 
-async fn existing_candidate_tidal_ids(
+pub(super) async fn existing_candidate_tidal_ids(
     state: &SharedState,
     candidates: &[crate::services::discovery::DiscoveryCandidateTrack],
 ) -> anyhow::Result<std::collections::HashSet<i64>> {
@@ -5863,7 +5135,8 @@ async fn existing_candidate_tidal_ids(
         .with_conn(|conn| queries::get_existing_tidal_track_ids(conn, &tidal_ids))
 }
 
-fn discovery_provider_capabilities() -> Vec<crate::db::models::DiscoveryProviderCapability> {
+pub(super) fn discovery_provider_capabilities()
+-> Vec<crate::db::models::DiscoveryProviderCapability> {
     vec![
         crate::db::models::DiscoveryProviderCapability {
             provider: "tidal".to_string(),
@@ -5896,7 +5169,7 @@ fn discovery_provider_capabilities() -> Vec<crate::db::models::DiscoveryProvider
     ]
 }
 
-async fn augment_connection_queries_with_lastfm(
+pub(super) async fn augment_connection_queries_with_lastfm(
     state: &SharedState,
     seed: &DiscoveryCandidateSeed,
     base_queries: Vec<String>,
@@ -5924,7 +5197,7 @@ async fn augment_connection_queries_with_lastfm(
     }
 }
 
-async fn augment_search_queries_with_lastfm(
+pub(super) async fn augment_search_queries_with_lastfm(
     state: &SharedState,
     request: &external_discovery_engine::ExternalDiscoveryRequest,
     context: &external_discovery_engine::ExternalDiscoveryContext,
@@ -5964,7 +5237,7 @@ async fn augment_search_queries_with_lastfm(
     }
 }
 
-async fn enrich_candidates_with_metadata(
+pub(super) async fn enrich_candidates_with_metadata(
     state: &SharedState,
     mut candidates: Vec<crate::services::discovery::DiscoveryCandidateTrack>,
 ) -> Vec<crate::services::discovery::DiscoveryCandidateTrack> {
@@ -6086,7 +5359,7 @@ fn discovery_result_to_track(
     })
 }
 
-fn discovery_request_to_trail_item(
+pub(super) fn discovery_request_to_trail_item(
     payload: &DiscoveryExternalResultRequest,
 ) -> crate::db::models::DiscoveryConnectionTrailItem {
     crate::db::models::DiscoveryConnectionTrailItem {
@@ -6484,7 +5757,7 @@ async fn set_track_favorite(
         tidal_tokens
     };
 
-    // Update local DB immediately — Tidal sync happens in the background.
+    // Update local DB immediately - Tidal sync happens in the background.
     // When liking for the first time, bump date_added so the track sorts to top of the library.
     {
         let state = state.read().await;
@@ -6543,7 +5816,7 @@ async fn set_track_favorite(
                 };
                 if let Err(error) = result {
                     if error_looks_like_auth(&error) {
-                        // Token expired — refresh and retry once, matching the pattern
+                        // Token expired - refresh and retry once, matching the pattern
                         // used by search/stream/playlist paths in this file.
                         match recover_tidal_session(&state_for_sync, &http_client, &tokens).await {
                             Ok(refreshed) => {
@@ -6635,7 +5908,7 @@ async fn batch_set_genre(
     })))
 }
 
-// ── MusicBrainz enrichment ─────────────────────────────────────────────────
+// -- MusicBrainz enrichment -------------------------------------------------
 
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let (live_position_ms, ephemeral_playing, audio_active) = {
@@ -7224,7 +6497,7 @@ async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
-// ─── Pending-row resolution ──────────────────────────────────────────────────
+// --- Pending-row resolution --------------------------------------------------
 //
 // Both the lazy (next_track caller) and background-eager (radio_start) paths
 // share the same scoring constants. The lazy path also closes the
@@ -7504,7 +6777,7 @@ async fn resolve_pending_row(
 /// Attempts to resolve the current pending queue item to a Tidal track.
 /// Called when the current queue item is a pending row: track_id IS NULL.
 /// Claims ownership via resolving_at, searches Tidal with combined Jaro-Winkler scoring
-/// (0.60×artist + 0.40×title, threshold 0.85), imports the match via
+/// (0.60xartist + 0.40xtitle, threshold 0.85), imports the match via
 /// import_track_from_metadata, and atomically promotes the queue row.
 ///
 /// Returns the resolved Track on success, or None if no acceptable match or on error.
@@ -8109,7 +7382,7 @@ async fn set_playback_shuffle(
     // `apply_shuffle` above never sees it. Reorder it here so flipping shuffle
     // on during a TIDAL mix actually changes what plays next. Pending entries
     // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
-    // plain Fisher-Yates — same shape as `true` shuffle.
+    // plain Fisher-Yates - same shape as `true` shuffle.
     if mode != queue::ShuffleMode::Off {
         let mut q = state_guard.pending_tidal_mix_queue.lock().unwrap();
         if q.len() > 1 {
@@ -8556,11 +7829,11 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                 )?;
             match (current_track_id, current_queue_item_id) {
                 (Some(track_id), _) => {
-                    // Library track playing — preserve by track_id.
+                    // Library track playing - preserve by track_id.
                     conn.execute("DELETE FROM queue WHERE track_id != ?1", params![track_id])?;
                 }
                 (None, Some(qid)) => {
-                    // Pending row playing — preserve by queue item id.
+                    // Pending row playing - preserve by queue item id.
                     conn.execute("DELETE FROM queue WHERE id != ?1", params![qid])?;
                 }
                 (None, None) => {
@@ -8569,7 +7842,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
             }
             state.pending_tidal_mix_queue.lock().unwrap().clear();
             // Return the full PlaybackSnapshot ({state, queue}) so the UI can
-            // refresh both at once — additive over the prior `{queue}` shape:
+            // refresh both at once - additive over the prior `{queue}` shape:
             // existing consumers keep reading `queue`, new ones read
             // `playback_state`.
             let snapshot = player::load_snapshot(conn)?;
@@ -8694,7 +7967,7 @@ fn resolve_smart_playlist_tracks_with_context(
 fn build_smart_playlist_context(
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<PlaylistEvaluationContext> {
-    // Smart-playlist genre rules are inclusion-only — the RuleClause enum has
+    // Smart-playlist genre rules are inclusion-only - the RuleClause enum has
     // no genre-negation variant (only NotInPlaylist). So fallback genres can
     // safely apply to every rule. If a Genre-negation primitive is added
     // later, this is the place to split into literal vs. fallback contexts.
@@ -8744,7 +8017,7 @@ fn resolve_smart_playlist_tracks(
     resolve_smart_playlist_tracks_with_context(playlist, &tracks, &context)
 }
 
-// ─── TIDAL Endpoints ──────────────────────────────────────
+// --- TIDAL Endpoints --------------------------------------
 
 /// Start PKCE login flow. Returns a browser URL. The user must paste the
 /// redirected TIDAL URL into the completion endpoint after signing in.
@@ -8972,7 +8245,7 @@ async fn tidal_logout(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({ "status": "logged_out" }))
 }
 
-// ─── TIDAL Search ─────────────────────────────────────────────────────────────
+// --- TIDAL Search -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct TidalSearchParams {
@@ -9066,7 +8339,7 @@ async fn tidal_search(
 
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
 
-    // Cache check — best-effort. A read failure must NOT block the upstream call.
+    // Cache check - best-effort. A read failure must NOT block the upstream call.
     let cached = db
         .with_conn(|conn| {
             crate::services::tidal::cache::get_search(conn, &cache_cfg, &params.q, limit, offset)
@@ -9118,7 +8391,7 @@ async fn tidal_search(
                 ));
             }
         };
-        // Best-effort cache write — log and continue on failure.
+        // Best-effort cache write - log and continue on failure.
         let to_cache = fetched.clone();
         let q_owned = params.q.clone();
         let lim_for_write = limit;
@@ -9215,7 +8488,7 @@ async fn tidal_search(
     ))
 }
 
-// ─── TIDAL Playlist Search + Tracks ───────────────────────────────────────────
+// --- TIDAL Playlist Search + Tracks -------------------------------------------
 
 fn tidal_video_to_resp(video: TidalSearchVideo) -> TidalSearchVideoResp {
     TidalSearchVideoResp {
@@ -9917,7 +9190,7 @@ async fn start_ephemeral_tidal_playback(
     // Backstop for callers that don't ship artwork (Spotify-resolved playlist
     // tracks below the fold never trigger the lazy IntersectionObserver, so
     // they arrive with `artwork_url: null`). Look up the TIDAL track once and
-    // reuse its album cover at the standard 640×640 size.
+    // reuse its album cover at the standard 640x640 size.
     let mut track = track;
     if track.artwork_url.is_none() {
         let lookup_client = TidalClient::with_http(
@@ -10192,866 +9465,6 @@ async fn tidal_artist_profile(
         "top_tracks": top_tracks,
         "albums": albums,
     })))
-}
-
-/// Get sync info (last sync time, auto-sync settings).
-async fn get_sync_info(
-    State(state): State<SharedState>,
-    Query(params): Query<serde_json::Map<String, serde_json::Value>>,
-) -> Result<Json<Value>, StatusCode> {
-    let service = params
-        .get("service")
-        .and_then(|v| v.as_str())
-        .unwrap_or("tidal");
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let info = queries::get_sync_info(conn, service)
-                .map_err(|e| anyhow::anyhow!("sync info failed: {e}"))?;
-            Ok(Json(json!({ "sync": info })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Set auto-sync daily toggle.
-#[derive(Debug, Deserialize)]
-struct AutoSyncRequest {
-    service: Option<String>,
-    enabled: bool,
-}
-
-async fn set_auto_sync(
-    State(state): State<SharedState>,
-    Json(payload): Json<AutoSyncRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let service = payload.service.as_deref().unwrap_or("tidal");
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            queries::set_auto_sync_daily(conn, service, payload.enabled)
-                .map_err(|e| anyhow::anyhow!("set auto sync failed: {e}"))?;
-            Ok(Json(
-                json!({ "service": service, "auto_sync_daily": payload.enabled }),
-            ))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Public function to trigger auto-sync from server startup.
-pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Result<SyncStats> {
-    use std::sync::atomic::Ordering;
-
-    if service != "tidal" {
-        return Err(anyhow::anyhow!(
-            "Unsupported auto-sync service: {}",
-            service
-        ));
-    }
-
-    // Get tokens + reentrancy/cancel flags
-    let persisted_tokens = load_persisted_tidal_tokens(state).await?;
-    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
-        let s = state.read().await;
-        let tokens = s
-            .tidal_tokens
-            .clone()
-            .or(persisted_tokens)
-            .ok_or_else(|| anyhow::anyhow!("No TIDAL tokens available for auto-sync"))?;
-        (
-            tokens,
-            s.tidal_sync_running.clone(),
-            s.tidal_sync_cancel.clone(),
-            s.tidal_http_client.clone(),
-        )
-    };
-
-    if running_flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(anyhow::anyhow!(
-            "TIDAL sync is already running; auto-sync skipped"
-        ));
-    }
-    cancel_flag.store(false, Ordering::SeqCst);
-    let _running = TidalSyncRunningGuard(running_flag);
-
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
-    // Run sync
-    let result = run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag).await;
-    match result {
-        Ok(stats) => {
-            // Record sync timestamp
-            state.read().await.db.with_conn(|conn| {
-                queries::update_sync_timestamp(
-                    conn,
-                    "tidal",
-                    stats.tracks as i64,
-                    stats.albums as i64,
-                )
-            })?;
-
-            // Broadcast completion
-            let s = state.read().await;
-            let _ = s.event_tx.send(AppEvent::LibrarySynced);
-            Ok(stats)
-        }
-        Err(e) => {
-            let s = state.read().await;
-            let _ = s.event_tx.send(AppEvent::SyncFailed {
-                service: "tidal".to_string(),
-                message: e.to_string(),
-            });
-            Err(e)
-        }
-    }
-}
-
-/// Sync TIDAL library into local database.
-async fn tidal_sync_library(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use std::sync::atomic::Ordering;
-
-    // Get tokens and reentrancy/cancel flags
-    let persisted_tokens = load_persisted_tidal_tokens(&state).await.map_err(|error| {
-        TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response()
-    })?;
-    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
-        let s = state.read().await;
-        let tokens = s
-            .tidal_tokens
-            .clone()
-            .or(persisted_tokens)
-            .ok_or(TidalSyncStartError::NotConnected)?;
-        (
-            tokens,
-            s.tidal_sync_running.clone(),
-            s.tidal_sync_cancel.clone(),
-            s.tidal_http_client.clone(),
-        )
-    };
-
-    // Reentrancy guard: refuse to start a second concurrent sync.
-    if running_flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(TidalSyncStartError::AlreadyRunning.into_response());
-    }
-    cancel_flag.store(false, Ordering::SeqCst);
-
-    // From here on, any early return MUST release the running flag. Wrap the
-    // setup phase in a RAII guard. The spawned task will take ownership of the
-    // guard via mem::replace once the work actually starts.
-    let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
-
-    // Create TIDAL client
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
-    let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
-        .await
-        .map_err(|error| {
-            // setup_guard drops here on early-return path and releases running.
-            drop(setup_guard.take());
-            error.into_response()
-        })?;
-
-    // Hand the guard off to the background task so the flag stays set for the
-    // entire sync duration (and is released on completion or panic).
-    let task_guard = setup_guard.take().expect("guard still held");
-
-    // Run sync in background
-    let state_clone = state.clone();
-    let sync_tokens = session.clone();
-    let cancel_for_task = cancel_flag.clone();
-    let http_for_task = tidal_http_client;
-    tokio::spawn(async move {
-        let _running = task_guard; // released on scope exit
-        tracing::info!(
-            target: "noor.sync.tidal",
-            event = "background_start",
-            session_state = session_state.as_str(),
-            user_id = %sync_tokens.user_id,
-            "TIDAL sync background task started"
-        );
-        let client = TidalClient::with_http(
-            http_for_task,
-            sync_tokens.access_token.clone(),
-            sync_tokens.country_code.clone(),
-        );
-        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens, &cancel_for_task).await
-        {
-            Ok(stats) => {
-                tracing::info!(
-                    target: "noor.sync.tidal",
-                    event = "sync_complete",
-                    artists = stats.artists,
-                    albums = stats.albums,
-                    tracks = stats.tracks,
-                    playlists = stats.playlists,
-                    "TIDAL sync complete"
-                );
-                if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
-                    queries::update_sync_timestamp(
-                        conn,
-                        "tidal",
-                        stats.tracks as i64,
-                        stats.albums as i64,
-                    )
-                }) {
-                    tracing::warn!("Failed to record sync timestamp: {}", e);
-                }
-                let s = state_clone.read().await;
-                let _ = s.event_tx.send(AppEvent::LibrarySynced);
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "noor.sync.tidal",
-                    event = "sync_failure",
-                    user_id = %session.user_id,
-                    error = %e,
-                    "TIDAL sync failed"
-                );
-                let s = state_clone.read().await;
-                let _ = s.event_tx.send(AppEvent::SyncFailed {
-                    service: "tidal".to_string(),
-                    message: e.to_string(),
-                });
-            }
-        }
-    });
-
-    let mut response = json!({
-        "status": "sync_started",
-    });
-    if matches!(session_state, TidalSyncSessionState::Recovered) {
-        response["session_state"] = json!("recovered");
-    }
-
-    Ok(Json(response))
-}
-
-/// Cancel the in-flight TIDAL sync. Sets the cancel flag; the running task
-/// observes it between pages and returns early. Always returns 200: the
-/// frontend uses this idempotently and doesn't care whether a sync was actually
-/// running.
-async fn tidal_sync_cancel(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    use std::sync::atomic::Ordering;
-    let s = state.read().await;
-    let was_running = s.tidal_sync_running.load(Ordering::SeqCst);
-    s.tidal_sync_cancel.store(true, Ordering::SeqCst);
-    Ok(Json(
-        json!({ "status": if was_running { "cancelling" } else { "idle" } }),
-    ))
-}
-
-/// Perform the actual TIDAL sync (runs in background task).
-async fn do_tidal_sync(
-    client: &TidalClient,
-    state: &SharedState,
-    user_id: &str,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> anyhow::Result<SyncStats> {
-    use crate::services::tidal::client::TidalClient as TC;
-    use futures::stream::{self, StreamExt};
-    use std::sync::atomic::Ordering;
-
-    let check_cancel = || -> anyhow::Result<()> {
-        if cancel.load(Ordering::SeqCst) {
-            anyhow::bail!("TIDAL sync cancelled");
-        }
-        Ok(())
-    };
-
-    let mut stats = SyncStats::default();
-    let mut favorite_album_ids = HashSet::new();
-    let mut favorite_track_ids = HashSet::new();
-
-    // Read previous run's counts so `apply_tidal_favorite_flags` can refuse to
-    // wipe favorites if this run somehow returns zero items.
-    let (prev_track_count, prev_album_count) = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| {
-            Ok(queries::get_sync_info(conn, "tidal")?
-                .map(|i| (i.last_sync_track_count, i.last_sync_album_count))
-                .unwrap_or((0, 0)))
-        })?
-    };
-
-    // ── Sync favorite artists ────────────────────────
-    tracing::info!("Syncing TIDAL artists...");
-    let mut offset = 0;
-    loop {
-        check_cancel()?;
-        let resp = client.get_favorite_artists(user_id, 100, offset).await?;
-        if resp.items.is_empty() {
-            break;
-        }
-        let artist_total = resp
-            .total_number_of_items
-            .unwrap_or((offset + resp.items.len() as i32) as i64)
-            .max(1) as f32;
-        {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
-                    let a = &fav.item;
-                    let photo = a.picture.as_ref().map(|p| {
-                        let path = p.replace('-', "/");
-                        format!("https://resources.tidal.com/images/{}/480x480.jpg", path)
-                    });
-                    tx.execute(
-                        "INSERT INTO artists (tidal_id, name, photo_url) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name, photo_url=COALESCE(excluded.photo_url, artists.photo_url)",
-                        rusqlite::params![a.id, a.name, photo],
-                    )?;
-                    stats.artists += 1;
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
-        }
-        offset += resp.items.len() as i32;
-        // Artists phase shows up as 0.0 to 0.05: small but non-zero so users see
-        // movement during what used to be a silent phase.
-        let artist_progress = ((offset as f32 / artist_total) * 0.05).clamp(0.0, 0.05);
-        send_tidal_sync_progress(state, artist_progress).await;
-        if resp
-            .total_number_of_items
-            .is_none_or(|t| offset as i64 >= t)
-        {
-            break;
-        }
-    }
-    tracing::info!("Synced {} artists", stats.artists);
-
-    // ── Sync favorite albums ─────────────────────────
-    tracing::info!("Syncing TIDAL albums...");
-    offset = 0;
-    loop {
-        check_cancel()?;
-        let resp = client.get_favorite_albums(user_id, 100, offset).await?;
-        if resp.items.is_empty() {
-            break;
-        }
-        // Batch the page's album upserts in one transaction.
-        {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
-                    let album = &fav.item;
-                    let artwork = TC::get_artwork_url(&album.cover, 640);
-                    let year: Option<i32> = album
-                        .release_date
-                        .as_ref()
-                        .and_then(|d| d.split('-').next())
-                        .and_then(|y| y.parse().ok());
-                    let photo = album.artist.picture.as_ref().map(|p| {
-                        let path = p.replace('-', "/");
-                        format!("https://resources.tidal.com/images/{}/480x480.jpg", path)
-                    });
-                    tx.execute(
-                        "INSERT INTO artists (tidal_id, name, photo_url) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name, photo_url=COALESCE(excluded.photo_url, artists.photo_url)",
-                        rusqlite::params![album.artist.id, album.artist.name, photo],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO albums (tidal_id, title, artist_id, year, artwork_url, release_type, track_count, is_favorite, source)
-                         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, ?5, ?6, ?7, 1, 'tidal')
-                         ON CONFLICT(tidal_id) DO UPDATE SET title=excluded.title, year=COALESCE(excluded.year, albums.year),
-                         artwork_url=COALESCE(excluded.artwork_url, albums.artwork_url), track_count=COALESCE(excluded.track_count, albums.track_count),
-                         is_favorite=1",
-                        rusqlite::params![album.id, album.title, album.artist.id, year, artwork, album.release_type, album.number_of_tracks],
-                    )?;
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
-        }
-        for fav in &resp.items {
-            stats.albums += 1;
-            favorite_album_ids.insert(fav.item.id);
-        }
-
-        // Hydrate album tracks with bounded concurrency so the UI keeps moving
-        // instead of stalling on one giant page-wide batch.
-        let album_ids: Vec<i64> = resp.items.iter().map(|f| f.item.id).collect();
-        let album_total = resp
-            .total_number_of_items
-            .unwrap_or((offset + resp.items.len() as i32) as i64)
-            .max(1) as f32;
-        let mut albums_hydrated_in_page = 0usize;
-
-        for album_chunk in album_ids.chunks(10) {
-            check_cancel()?;
-            // Bound each per-album fetch so a single hung Tidal request can't
-            // stall the chunk for ~30s (reqwest default). One retry on error
-            // or timeout handles transient network blips; a second timeout
-            // surfaces as an Err that the loop below quietly skips.
-            let album_fetch_timeout = std::time::Duration::from_secs(15);
-            let mut fetches = stream::iter(album_chunk.iter().copied())
-                .map(|album_id| async move {
-                    let first = tokio::time::timeout(
-                        album_fetch_timeout,
-                        client.get_album_tracks(album_id),
-                    )
-                    .await;
-                    match first {
-                        Ok(Ok(resp)) => Ok(resp),
-                        _ => match tokio::time::timeout(
-                            album_fetch_timeout,
-                            client.get_album_tracks(album_id),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(anyhow::anyhow!(
-                                "get_album_tracks timed out twice for album {album_id}"
-                            )),
-                        },
-                    }
-                })
-                .buffer_unordered(10);
-
-            while let Some(result) = fetches.next().await {
-                if let Ok(tracks_resp) = result {
-                    let s = state.read().await;
-                    s.db.with_conn(|conn| {
-                        let tx = conn.unchecked_transaction()?;
-                        for track in &tracks_resp.items {
-                            insert_tidal_track(&tx, track, false)?;
-                            stats.tracks += 1;
-                        }
-                        tx.commit()?;
-                        Ok(())
-                    })?;
-                }
-
-                albums_hydrated_in_page += 1;
-                let processed_albums = offset as usize + albums_hydrated_in_page;
-                // Albums phase: 0.05 to 0.5. Artists phase ate 0.0 to 0.05.
-                let progress_fraction =
-                    (0.05 + (processed_albums as f32 / album_total) * 0.45).clamp(0.05, 0.5);
-                send_tidal_sync_progress(state, progress_fraction).await;
-            }
-        }
-
-        offset += resp.items.len() as i32;
-        if resp
-            .total_number_of_items
-            .is_none_or(|t| offset as i64 >= t)
-        {
-            break;
-        }
-    }
-    tracing::info!(
-        "Synced {} albums, {} tracks so far",
-        stats.albums,
-        stats.tracks
-    );
-
-    // ── Sync favorite tracks ─────────────────────────
-    tracing::info!("Syncing TIDAL favorite tracks...");
-    offset = 0;
-    loop {
-        check_cancel()?;
-        let resp = client.get_favorite_tracks(user_id, 100, offset).await?;
-        if resp.items.is_empty() {
-            break;
-        }
-        {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
-                    let track = &fav.item;
-                    favorite_track_ids.insert(track.id);
-                    // Ensure artist
-                    tx.execute(
-                        "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
-                        rusqlite::params![track.artist.id, track.artist.name],
-                    )?;
-                    // Ensure album ref
-                    if let Some(ref album_ref) = track.album {
-                        let artwork = TC::get_artwork_url(&album_ref.cover, 640);
-                        tx.execute(
-                            "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
-                             VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
-                            rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
-                        )?;
-                    }
-                    insert_tidal_track(&tx, track, true)?;
-                    stats.tracks += 1;
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
-        }
-        offset += resp.items.len() as i32;
-        let processed_tracks = offset as f32;
-        let track_progress = resp
-            .total_number_of_items
-            .map(|t| 0.5 + (processed_tracks / t.max(1) as f32) * 0.4)
-            .unwrap_or(0.85)
-            .clamp(0.5, 0.9);
-        send_tidal_sync_progress(state, track_progress).await;
-        if resp
-            .total_number_of_items
-            .is_none_or(|t| offset as i64 >= t)
-        {
-            break;
-        }
-    }
-    tracing::info!("Synced {} tracks total", stats.tracks);
-
-    // ── Sync playlists ───────────────────────────────
-    tracing::info!("Syncing TIDAL playlists...");
-    let mut playlist_offset = 0;
-    let mut all_playlists: Vec<_> = vec![];
-    loop {
-        let resp = client.get_playlists(user_id, 100, playlist_offset).await?;
-        if resp.items.is_empty() {
-            break;
-        }
-        let fetched = resp.items.len() as i32;
-        all_playlists.extend(resp.items);
-        playlist_offset += fetched;
-        if resp
-            .total_number_of_items
-            .is_none_or(|t| playlist_offset as i64 >= t)
-        {
-            break;
-        }
-    }
-    let total_playlists = all_playlists.len().max(1);
-    for (playlist_index, playlist) in all_playlists.iter().enumerate() {
-        check_cancel()?;
-        // Upsert the playlist row up front so metadata sticks even if the
-        // track-fetch errors out partway. The DELETE+INSERT below for
-        // `playlist_tracks` is wrapped in a single transaction so the playlist
-        // never appears empty mid-sync.
-        {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                conn.execute(
-                    "INSERT OR REPLACE INTO playlists (tidal_uuid, name, description, track_count)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        playlist.uuid,
-                        playlist.title,
-                        playlist.description,
-                        playlist.number_of_tracks.unwrap_or(0)
-                    ],
-                )?;
-                Ok(())
-            })?;
-        }
-
-        let playlist_id: Option<i64> = {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id FROM playlists WHERE tidal_uuid=?1",
-                        rusqlite::params![playlist.uuid],
-                        |row| row.get(0),
-                    )
-                    .ok())
-            })?
-        };
-
-        if let Some(pid) = playlist_id {
-            // Fetch all pages first, then DELETE+INSERT atomically. If the API
-            // errors mid-fetch, the existing playlist contents stay intact.
-            let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
-            let mut track_offset = 0;
-            loop {
-                check_cancel()?;
-                let tracks_resp = client
-                    .get_playlist_tracks(&playlist.uuid, 100, track_offset)
-                    .await?;
-                if tracks_resp.items.is_empty() {
-                    break;
-                }
-                let fetched = tracks_resp.items.len() as i32;
-                all_tracks.extend(tracks_resp.items);
-                track_offset += fetched;
-                if tracks_resp
-                    .total_number_of_items
-                    .is_none_or(|t| track_offset as i64 >= t)
-                {
-                    break;
-                }
-            }
-
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                tx.execute(
-                    "DELETE FROM playlist_tracks WHERE playlist_id=?1",
-                    rusqlite::params![pid],
-                )?;
-                let mut position = 0;
-                for track in &all_tracks {
-                    tx.execute(
-                        "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2) ON CONFLICT(tidal_id) DO UPDATE SET name=excluded.name",
-                        rusqlite::params![track.artist.id, track.artist.name],
-                    )?;
-                    if let Some(ref album_ref) = track.album {
-                        let artwork = TC::get_artwork_url(&album_ref.cover, 640);
-                        tx.execute(
-                            "INSERT OR IGNORE INTO albums (tidal_id, title, artist_id, artwork_url, is_favorite, source)
-                             VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), ?4, 0, 'tidal')",
-                            rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
-                        )?;
-                    }
-                    insert_tidal_track(&tx, track, false)?;
-
-                    let track_id: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM tracks WHERE tidal_id=?1",
-                            rusqlite::params![track.id],
-                            |row| row.get(0),
-                        )
-                        .ok();
-                    if let Some(tid) = track_id {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![pid, tid, position],
-                        )?;
-                        position += 1;
-                    }
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
-        }
-        stats.playlists += 1;
-        let playlist_progress =
-            0.9 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.1);
-        send_tidal_sync_progress(state, playlist_progress.clamp(0.9, 0.99)).await;
-    }
-    tracing::info!("Synced {} playlists", stats.playlists);
-
-    {
-        let s = state.read().await;
-        s.db.with_conn(|conn| {
-            apply_tidal_favorite_flags(conn, "albums", &favorite_album_ids, prev_album_count)?;
-            apply_tidal_favorite_flags(conn, "tracks", &favorite_track_ids, prev_track_count)?;
-            Ok(())
-        })?;
-    }
-
-    Ok(stats)
-}
-
-async fn send_tidal_sync_progress(state: &SharedState, progress: f32) {
-    let s = state.read().await;
-    let _ = s.event_tx.send(AppEvent::SyncProgress {
-        service: "tidal".to_string(),
-        progress,
-    });
-}
-
-async fn run_tidal_sync_with_reauth(
-    client: &TidalClient,
-    state: &SharedState,
-    tokens: tidal_auth::TidalTokens,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> anyhow::Result<SyncStats> {
-    match do_tidal_sync(client, state, &tokens.user_id, cancel).await {
-        Ok(stats) => Ok(stats),
-        Err(err) if error_looks_like_auth(&err) => {
-            tracing::warn!(
-                target: "noor.sync.tidal",
-                event = "sync_auth_failure",
-                user_id = %tokens.user_id,
-                error = %err,
-                "TIDAL sync hit an auth error; trying refresh-token recovery"
-            );
-
-            let (http, tidal_http_client) = {
-                let s = state.read().await;
-                (s.http_client.clone(), s.tidal_http_client.clone())
-            };
-
-            let refreshed = match recover_tidal_session(state, &http, &tokens).await {
-                Ok(tokens) => tokens,
-                Err(recover_err) => {
-                    // Do NOT clear the session. A transient network error during refresh
-                    // should not permanently log the user out.
-                    tracing::error!(
-                        target: "noor.sync.tidal",
-                        event = "sync_recovery_failed",
-                        user_id = %tokens.user_id,
-                        error = %recover_err,
-                        original_error = %err,
-                        "TIDAL sync recovery failed; keeping stored tokens"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "TIDAL session recovery failed after auth error: {}; original sync error: {}",
-                        recover_err,
-                        err
-                    ));
-                }
-            };
-            let retry_client = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            tracing::info!(
-                target: "noor.sync.tidal",
-                event = "sync_recovered",
-                user_id = %refreshed.user_id,
-                "TIDAL sync session recovered; retrying sync"
-            );
-            do_tidal_sync(&retry_client, state, &refreshed.user_id, cancel).await
-        }
-        Err(err) => Err(err),
-    }
-}
-
-#[derive(Clone, Copy)]
-enum TidalSyncSessionState {
-    Valid,
-    Recovered,
-}
-
-impl TidalSyncSessionState {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Valid => "valid",
-            Self::Recovered => "recovered",
-        }
-    }
-}
-
-enum TidalSyncStartError {
-    NotConnected,
-    AlreadyRunning,
-    SessionCheckFailed(String),
-    PreflightRefreshFailed(String),
-}
-
-impl TidalSyncStartError {
-    fn into_response(self) -> (StatusCode, Json<Value>) {
-        match self {
-            Self::NotConnected => (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "not_connected",
-                    "message": "Connect TIDAL in Settings before syncing."
-                })),
-            ),
-            Self::AlreadyRunning => (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "status": "already_running",
-                    "message": "A TIDAL sync is already in progress."
-                })),
-            ),
-            Self::SessionCheckFailed(message) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "status": "session_check_failed",
-                    "message": message,
-                })),
-            ),
-            Self::PreflightRefreshFailed(message) => (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "preflight_refresh_failed",
-                    "message": "TIDAL session expired or rejected. Reconnect in Settings before syncing again.",
-                    "details": message,
-                })),
-            ),
-        }
-    }
-}
-
-/// RAII guard that flips `tidal_sync_running` back to `false` on drop, so a
-/// panic or early return inside the spawned sync task can never leave the flag
-/// stuck and lock out future syncs.
-struct TidalSyncRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for TidalSyncRunningGuard {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-impl From<TidalSyncStartError> for (StatusCode, Json<Value>) {
-    fn from(value: TidalSyncStartError) -> Self {
-        value.into_response()
-    }
-}
-
-async fn ensure_tidal_session(
-    state: &SharedState,
-    tokens: &tidal_auth::TidalTokens,
-    client: &TidalClient,
-) -> std::result::Result<(tidal_auth::TidalTokens, TidalSyncSessionState), TidalSyncStartError> {
-    match client.validate_session(&tokens.user_id).await {
-        Ok(()) => Ok((tokens.clone(), TidalSyncSessionState::Valid)),
-        Err(err) if error_looks_like_auth(&err) => {
-            tracing::warn!(
-                target: "noor.sync.tidal",
-                event = "preflight_stale_session",
-                user_id = %tokens.user_id,
-                error = %err,
-                "TIDAL session looks stale before sync"
-            );
-            let http = {
-                let s = state.read().await;
-                s.http_client.clone()
-            };
-            match recover_tidal_session(state, &http, tokens).await {
-                Ok(tokens) => Ok((tokens, TidalSyncSessionState::Recovered)),
-                Err(recover_err) => {
-                    // Do NOT clear. A transient refresh failure should not log the user out.
-                    tracing::error!(
-                        target: "noor.sync.tidal",
-                        event = "preflight_refresh_failed",
-                        user_id = %tokens.user_id,
-                        error = %recover_err,
-                        original_error = %err,
-                        "TIDAL preflight refresh failed; keeping stored tokens"
-                    );
-                    Err(TidalSyncStartError::PreflightRefreshFailed(
-                        recover_err.to_string(),
-                    ))
-                }
-            }
-        }
-        Err(err) => {
-            tracing::error!(
-                target: "noor.sync.tidal",
-                event = "preflight_check_failed",
-                user_id = %tokens.user_id,
-                error = %err,
-                "TIDAL session check failed before sync"
-            );
-            Err(TidalSyncStartError::SessionCheckFailed(format!(
-                "TIDAL session check failed before sync: {}",
-                err
-            )))
-        }
-    }
 }
 
 pub(super) async fn recover_tidal_session(
@@ -12094,7 +10507,7 @@ async fn align_device_to_stream_rate(
     }
 }
 
-// ───── Audio output settings ────────────────────────────────────────────────
+// ----- Audio output settings ------------------------------------------------
 //
 // `GET /api/audio/devices`: enumerate cpal output devices
 // `GET /api/audio/settings`: current persisted AudioSettings
@@ -12660,7 +11073,7 @@ async fn persist_tidal_tokens(
     Ok(())
 }
 
-fn insert_tidal_track(
+pub(super) fn insert_tidal_track(
     conn: &rusqlite::Connection,
     track: &crate::services::tidal::client::TidalTrack,
     is_favorite: bool,
@@ -12719,7 +11132,7 @@ fn insert_tidal_track(
     Ok(())
 }
 
-fn apply_tidal_favorite_flags(
+pub(super) fn apply_tidal_favorite_flags(
     conn: &rusqlite::Connection,
     table: &str,
     favorite_ids: &HashSet<i64>,
@@ -12816,16 +11229,6 @@ fn collect_genre_values(value: &Value, output: &mut Vec<String>) {
     }
 }
 
-#[derive(Default)]
-pub struct SyncStats {
-    pub artists: usize,
-    pub albums: usize,
-    pub tracks: usize,
-    pub playlists: usize,
-}
-
-// ─── Home Page Discovery Endpoints ───────────────────────────────────────────────
-
 /// Get new album releases from AllMusic RSS
 async fn get_home_releases(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     use crate::services::lastfm;
@@ -12858,7 +11261,7 @@ async fn get_home_releases(State(state): State<SharedState>) -> Result<Json<Valu
     }
 }
 
-// ─── TIDAL: Your Mixes ───────────────────────────────────────────────────────
+// --- TIDAL: Your Mixes -------------------------------------------------------
 
 /// Get daily picks curated from user's library using learning model
 async fn get_home_picks(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
@@ -12943,248 +11346,7 @@ async fn get_home_news(State(state): State<SharedState>) -> Result<Json<Value>, 
     })))
 }
 
-// ── Spotify Config & Enrichment ──────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct AudioAnalysisRequest {
-    mode: String, // "preview" or "local"
-    local_path: Option<String>,
-}
-
-async fn start_audio_analysis(
-    State(state): State<SharedState>,
-    Json(payload): Json<AudioAnalysisRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    use crate::services::audio_analysis::scanner;
-
-    let mode = payload.mode.clone();
-    let local_path = payload.local_path.clone();
-    let (analysis_tx, cancel, running) = {
-        let s = state.read().await;
-        (
-            s.analysis_tx.clone(),
-            s.audio_analysis_cancel.clone(),
-            s.audio_analysis_running.clone(),
-        )
-    };
-
-    let Some(tx) = analysis_tx else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    // Reset cancel flag and mark as running before spawning
-    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-    running.store(true, std::sync::atomic::Ordering::Relaxed);
-
-    let mode_for_spawn = mode.clone();
-    tokio::spawn(async move {
-        match mode_for_spawn.as_str() {
-            "preview" => {
-                scanner::run_preview_scan(state, tx, cancel).await;
-            }
-            "local" => {
-                if let Some(raw) = local_path {
-                    // Reject traversal sequences and resolve to a real absolute path
-                    let candidate = std::path::PathBuf::from(&raw);
-                    let resolved = match std::fs::canonicalize(&candidate) {
-                        Ok(p) if p.is_dir() => p,
-                        _ => {
-                            tracing::warn!("local scan rejected invalid path: {:?}", raw);
-                            return;
-                        }
-                    };
-                    scanner::run_local_scan(state, tx, cancel, resolved, Default::default()).await;
-                }
-            }
-            _ => {}
-        }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
-    });
-
-    Ok(Json(json!({ "status": "started", "mode": mode })))
-}
-
-async fn stop_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    s.audio_analysis_cancel
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    s.audio_analysis_running
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    Ok(Json(json!({ "status": "stopped" })))
-}
-
-async fn get_audio_analysis_status(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let analyzed =
-        s.db.with_conn(queries::count_audio_dsp_features)
-            .unwrap_or(0);
-    Ok(Json(json!({
-        "running": s.audio_analysis_running.load(std::sync::atomic::Ordering::Relaxed),
-        "analyzed": analyzed,
-    })))
-}
-
-async fn get_passive_dsp(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let enabled =
-        s.db.with_conn(|conn| Ok(crate::services::audio_analysis::is_passive_enabled(conn)))
-            .unwrap_or(true);
-    Ok(Json(json!({ "enabled": enabled })))
-}
-
-#[derive(Deserialize)]
-struct PassiveDspBody {
-    enabled: bool,
-}
-
-async fn set_passive_dsp(
-    State(state): State<SharedState>,
-    Json(payload): Json<PassiveDspBody>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    s.db.with_conn(|conn| {
-        crate::services::audio_analysis::set_passive_enabled(conn, payload.enabled)
-            .map_err(anyhow::Error::from)
-    })
-    .map_err(|e| {
-        tracing::error!("failed to persist passive_dsp_enabled: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(json!({ "enabled": payload.enabled })))
-}
-
-async fn get_track_audio_features(
-    State(state): State<SharedState>,
-    Path(track_id): Path<i64>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let features =
-        s.db.with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "features": features })))
-}
-
-async fn get_audio_features_stats(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let stats =
-        s.db.with_conn(queries::get_audio_features_stats)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "stats": stats })))
-}
-
-async fn get_library_analytics(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let summary =
-        s.db.with_conn(|conn| {
-            let tracks = queries::get_all_tracks(conn)?;
-            let playlists = queries::get_playlists(conn)?;
-            let genre_paths = queries::get_track_genre_paths_with_fallback(conn)?;
-            let mut context = crate::smart::analytics::AnalyticsContext::new();
-            for (track_id, rows) in genre_paths {
-                context =
-                    context.with_track_genres(track_id, queries::ResolvedGenre::paths_only(&rows));
-            }
-            Ok(crate::smart::analytics::summarize_library(
-                &tracks, &playlists, &context,
-            ))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "analytics": summary })))
-}
-
-async fn reset_audio_analysis(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    s.db.with_conn(queries::delete_all_audio_dsp_features)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "reset" })))
-}
-
-/// GET /api/library/audio-features/quality — coverage / confidence breakdown.
-async fn get_audio_features_quality(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let s = state.read().await;
-    let q =
-        s.db.with_conn(queries::get_audio_features_quality)
-            .map_err(|e| {
-                tracing::error!("audio-features/quality query failed: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    Ok(Json(json!({
-        "total_tracks": q.total_tracks,
-        "analyzed": q.analyzed,
-        "analysis_current": q.analysis_current,
-        "analysis_stale": q.analysis_stale,
-        "low_confidence_bpm": q.low_confidence_bpm,
-        "low_confidence_key": q.low_confidence_key,
-        "no_preview_url": q.no_preview_url,
-        "fingerprinted": q.fingerprinted,
-    })))
-}
-
-/// GET /api/library/analyze/reanalyze-stale — re-queue every track whose
-/// stored `analysis_version` is not the current `CURRENT_ANALYSIS_VERSION`
-/// (see `crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION`). If the
-/// analysis actor isn't wired we still return the count of stale tracks so the
-/// caller can decide what to do next.
-async fn reanalyze_stale_tracks(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, StatusCode> {
-    let (db, analysis_tx) = {
-        let s = state.read().await;
-        (s.db.clone(), s.analysis_tx.clone())
-    };
-
-    let stale_ids = db
-        .with_conn(queries::get_stale_analysis_track_ids)
-        .map_err(|e| {
-            tracing::error!("reanalyze-stale query failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let total = stale_ids.len();
-
-    // Drop the DSP rows so the next scan picks them up, and optionally
-    // nudge the analysis actor (it only accepts jobs with decoded samples,
-    // so here we simply log the queue size — a fresh scan will actually
-    // re-decode & re-analyse).
-    if total > 0 {
-        db.with_conn(|conn| -> anyhow::Result<()> {
-            // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
-            conn.execute(
-                &format!(
-                    "DELETE FROM audio_dsp_features WHERE analysis_version != '{}'",
-                    crate::services::audio_analysis::CURRENT_ANALYSIS_VERSION,
-                ),
-                [],
-            )?;
-            Ok(())
-        })
-        .map_err(|e| {
-            tracing::error!("reanalyze-stale delete failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    }
-
-    let actor_configured = analysis_tx.is_some();
-
-    Ok(Json(json!({
-        "status": "queued",
-        "stale_count": total,
-        "actor_configured": actor_configured,
-        "note": if actor_configured {
-            "Stale analyses cleared. Run /api/library/analyze/audio-features to re-scan."
-        } else {
-            "Analysis actor not configured. Stale rows cleared but no scan queued."
-        }
-    })))
-}
+// -- Spotify Config & Enrichment ----------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -13528,7 +11690,7 @@ mod tests {
     }
 
     /// Build a fresh `AppState` backed by `db`. Single source of truth for test
-    /// initializers — when `crate::AppState` gains a field, add it here once.
+    /// initializers - when `crate::AppState` gains a field, add it here once.
     fn fresh_test_state(db: Database) -> crate::AppState {
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         crate::AppState {
@@ -14544,7 +12706,7 @@ mod tests {
 
     /// Boundary: `seed_track_id == 0` is also rejected. Zero is
     /// neither a valid library id (rowids start at 1) nor an
-    /// ephemeral negative — it usually indicates a serialisation
+    /// ephemeral negative - it usually indicates a serialisation
     /// default leaking through, which still shouldn't reach the
     /// orchestrator.
     #[tokio::test]

@@ -262,6 +262,102 @@ Behavior:
 - Route URLs are unchanged.
 - TIDAL token fallback, six-hour cache behavior, session refresh retry, and JSON response shape are unchanged.
 
+### Audio Analysis Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/audio_analysis_routes.rs`
+
+Change:
+
+- Added `mod audio_analysis_routes;`.
+- Moved the DSP analysis route handlers out of `routes.rs`:
+  - `start_audio_analysis`
+  - `stop_audio_analysis`
+  - `get_audio_analysis_status`
+  - `get_passive_dsp`
+  - `set_passive_dsp`
+  - `get_track_audio_features`
+  - `get_audio_features_stats`
+  - `get_library_analytics`
+  - `reset_audio_analysis`
+  - `get_audio_features_quality`
+  - `reanalyze_stale_tracks`
+- Moved the audio analysis request DTOs with the handlers.
+
+Reasoning:
+
+- Audio analysis is a self-contained library maintenance surface.
+- The module only depends on shared state, DB queries, and the existing audio analysis scanner.
+- Keeping this separate from metadata enrichment avoids mixing DSP maintenance with source enrichment.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Cancel flag, running flag, and scanner spawn behavior are unchanged.
+- DSP query and reset behavior is unchanged.
+
+### TIDAL Sync Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/tidal_sync_routes.rs`
+
+Change:
+
+- Added `mod tidal_sync_routes;`.
+- Moved TIDAL sync handlers and sync worker helpers out of `routes.rs`:
+  - `get_sync_info`
+  - `set_auto_sync`
+  - `trigger_auto_sync`
+  - `tidal_sync_library`
+  - `tidal_sync_cancel`
+  - TIDAL sync guard, progress, import, and favorite-flag helpers
+- Re-exported `trigger_auto_sync` from the parent route module for startup auto-sync.
+- Kept shared token persistence, session recovery, auth-error detection, and TIDAL import row helpers in the parent.
+
+Reasoning:
+
+- TIDAL sync has enough state and guard logic to deserve its own route module.
+- Startup auto-sync already depends on the route-level trigger, so the public parent re-export keeps that contract stable.
+- Reusing the parent auth/session helpers avoids duplicating fragile TIDAL recovery behavior.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Auto-sync startup entry point is unchanged.
+- Sync cancellation, progress events, favorite preservation, and session refresh behavior are unchanged.
+
+### Discovery Route Extraction
+
+Files:
+
+- `noor-server/src/server/routes.rs`
+- `noor-server/src/server/routes/discovery_routes.rs`
+
+Change:
+
+- Added `mod discovery_routes;`.
+- Moved discovery search, connections, presets, training controls, training safety, and feedback handlers out of `routes.rs`.
+- Moved their request DTOs with the handlers.
+- Left `/api/discovery/play` in `routes.rs`.
+- Promoted the shared discovery helper functions to `pub(super)` so the child module can reuse the existing implementation.
+
+Reasoning:
+
+- Discovery search and training are a coherent route family with shared prompt, provider, and training dependencies.
+- `/api/discovery/play` touches playback runtime and stream startup, which is a higher-risk surface and should stay parent-side until a dedicated playback pass.
+- Keeping shared provider/context helpers in the parent avoids moving helpers still used by radio, sound-space, and playback-adjacent discovery code.
+
+Behavior:
+
+- Route URLs are unchanged.
+- Prompt validation, provider selection, Last.fm augmentation, metadata enrichment, and embedding-score blending are unchanged.
+- Training start/stop, safety estimate, engine selection, and feedback persistence behavior are unchanged.
+- Discovery inline playback behavior is unchanged because it was not moved.
+
 ### Artist Spread Shuffle
 
 File: `noor-server/src/playback/shuffle.rs`
@@ -318,6 +414,7 @@ Observed:
 - No em dash, right arrow, or less-equal glyphs were found in changed files.
 - After the second route extraction batch, the full `noor-server` package passed: 567 passed, 0 failed, 1 ignored.
 - Added-line and new-module scans found no AI attribution strings, em dash, right arrow, or less-equal glyphs.
+- After extracting audio analysis, TIDAL sync, and discovery route modules, the full `noor-server` package passed again: 567 passed, 0 failed, 1 ignored.
 
 ## Deferred Refactors
 
