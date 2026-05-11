@@ -17,20 +17,22 @@ export interface ExclusiveStatusState {
 	engaged: boolean;
 	failureReason: string | null;
 	device: string | null;
+	transportFormat: string | null;
 }
 
 export const exclusiveStatus = writable<ExclusiveStatusState>({
 	engaged: false,
 	failureReason: null,
 	device: null,
+	transportFormat: null,
 });
 
-export function setExclusiveEngaged(device: string) {
-	exclusiveStatus.set({ engaged: true, failureReason: null, device });
+export function setExclusiveEngaged(device: string, transportFormat: string | null) {
+	exclusiveStatus.set({ engaged: true, failureReason: null, device, transportFormat });
 }
 
 export function setExclusiveFailed(device: string, reason: string) {
-	exclusiveStatus.set({ engaged: false, failureReason: reason, device });
+	exclusiveStatus.set({ engaged: false, failureReason: reason, device, transportFormat: null });
 }
 
 export function setExclusiveReleased(device: string) {
@@ -41,5 +43,6 @@ export function setExclusiveReleased(device: string) {
 		engaged: false,
 		failureReason: null,
 		device: s.device ?? device,
+		transportFormat: null,
 	}));
 }

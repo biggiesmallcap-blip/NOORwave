@@ -8019,6 +8019,7 @@ async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<V
             "active_track_id": info.active_track_id,
             "last_error": info.last_error,
             "exclusive_engaged": info.exclusive_engaged,
+            "exclusive_transport_format": info.exclusive_transport_format,
         })
     });
     let stream = state.current_stream_display.as_ref().map(|d| {
@@ -12613,6 +12614,14 @@ fn spawn_playback_runtime_listener(
                         .as_ref()
                         .map(|i| i.exclusive_engaged)
                         .unwrap_or(false);
+                    let prev_exclusive_transport = if prev_exclusive {
+                        state_guard
+                            .playback_runtime_info
+                            .as_ref()
+                            .and_then(|i| i.exclusive_transport_format.clone())
+                    } else {
+                        None
+                    };
                     state_guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
                         device_name,
                         sample_rate,
@@ -12620,6 +12629,7 @@ fn spawn_playback_runtime_listener(
                         active_track_id: None,
                         last_error,
                         exclusive_engaged: prev_exclusive,
+                        exclusive_transport_format: prev_exclusive_transport,
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Started {
@@ -12676,13 +12686,16 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
                     device_name,
+                    transport_format,
                 }) => {
                     let mut state_guard = state.write().await;
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = true;
+                        info.exclusive_transport_format = Some(transport_format.clone());
                     }
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveEngaged {
                         device: device_name,
+                        transport_format,
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
@@ -12692,6 +12705,7 @@ fn spawn_playback_runtime_listener(
                     let mut state_guard = state.write().await;
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
+                        info.exclusive_transport_format = None;
                     }
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveFailed {
                         device: device_name,
@@ -12704,6 +12718,7 @@ fn spawn_playback_runtime_listener(
                     let mut state_guard = state.write().await;
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
+                        info.exclusive_transport_format = None;
                     }
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
                         device: device_name,
@@ -13579,6 +13594,7 @@ async fn put_audio_settings(
         let mut guard = state.write().await;
         let released_device = guard.playback_runtime_info.as_mut().map(|info| {
             info.exclusive_engaged = false;
+            info.exclusive_transport_format = None;
             info.device_name.clone()
         });
         if let Some(device) = released_device {
@@ -17076,9 +17092,29 @@ mod tests {
                 active_track_id: Some(1),
                 last_error: None,
                 exclusive_engaged: true,
+                exclusive_transport_format: Some("i24-in-32".to_string()),
             });
         }
         let app = api_routes(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/playback/runtime")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["runtime"]["exclusive_transport_format"], "i24-in-32");
 
         let mut next_settings = crate::db::audio_settings::AudioSettings::default();
         next_settings.exclusive_mode = false;
@@ -17114,6 +17150,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(body["runtime"]["exclusive_engaged"], false);
+        assert_eq!(body["runtime"]["exclusive_transport_format"], Value::Null);
 
         let _ = std::fs::remove_file(db_path);
     }

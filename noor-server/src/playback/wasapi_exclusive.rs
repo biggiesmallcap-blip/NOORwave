@@ -105,6 +105,7 @@ pub struct ExclusiveStream {
     pub effective_sample_rate: u32,
     #[allow(dead_code)]
     pub effective_channels: u16,
+    pub transport_format: String,
 }
 
 impl ExclusiveStream {
@@ -246,7 +247,7 @@ pub fn build_exclusive_stream(
     let device_pref_owned = device_pref.map(|s| s.to_string());
 
     let (init_tx, init_rx) =
-        mpsc::sync_channel::<std::result::Result<(u32, u16), ExclusiveInitFailure>>(1);
+        mpsc::sync_channel::<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>(1);
 
     let thread = thread::Builder::new()
         .name("noor-wasapi-exclusive".into())
@@ -272,12 +273,13 @@ pub fn build_exclusive_stream(
     })?;
 
     match outcome {
-        Ok((effective_rate, effective_channels)) => Ok(ExclusiveStream {
+        Ok((effective_rate, effective_channels, transport_format)) => Ok(ExclusiveStream {
             shutdown,
             released,
             thread: Some(thread),
             effective_sample_rate: effective_rate,
             effective_channels,
+            transport_format,
         }),
         Err(failure) => {
             let _ = thread.join();
@@ -298,7 +300,7 @@ fn run_render_thread(
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     shutdown: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
-    init_tx: mpsc::SyncSender<std::result::Result<(u32, u16), ExclusiveInitFailure>>,
+    init_tx: mpsc::SyncSender<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>,
 ) {
     let _mmcss = enter_mmcss();
     let init_result = init_audio_client(device_pref.as_deref(), desired_sample_rate, channels);
@@ -356,7 +358,11 @@ fn run_render_thread(
         });
         return;
     }
-    let _ = init_tx.send(Ok((desired_sample_rate, channels)));
+    let _ = init_tx.send(Ok((
+        desired_sample_rate,
+        channels,
+        fmt_tag_label(fmt_tag).to_string(),
+    )));
 
     let grace = Duration::from_secs(grace_secs.max(1) as u64);
     let mut paused_since: Option<Instant> = None;
@@ -862,11 +868,11 @@ fn convert_f32_to_bytes(
         }
         Format::I24In32 => {
             // 24-in-32: WAVEFORMATEXTENSIBLE with 32 storebits + 24 validbits
-            // means the device looks at the high 24 bits. Filling the full
-            // i32 range is acceptable; the bottom 8 bits are ignored.
+            // means the valid PCM payload is left-aligned, leaving the low
+            // byte clear.
             debug_assert_eq!(blockalign, channels * 4);
             for (chunk, &s) in dst.chunks_exact_mut(4).zip(src.iter()) {
-                let v = f32_to_i32_pcm(s);
+                let v = f32_to_i24_pcm(s) << 8;
                 chunk.copy_from_slice(&v.to_le_bytes());
             }
         }
@@ -987,6 +993,20 @@ mod tests {
         assert_eq!(
             dst,
             vec![0xff, 0xff, 0x7f, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn convert_f32_to_bytes_writes_i24_in_32_left_aligned() {
+        let mut dst = vec![0_u8; 12];
+
+        convert_f32_to_bytes(&[1.0, -1.0, 0.5], &mut dst, Format::I24In32, 4, 1);
+
+        assert_eq!(
+            dst,
+            vec![
+                0x00, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x80, 0x00, 0xff, 0xff, 0x3f
+            ]
         );
     }
 

@@ -1946,6 +1946,12 @@
 									</div>
 								</div>
 							{/if}
+							{#if s.exclusive_mode && $exclusiveStatus.engaged && $exclusiveStatus.transportFormat}
+								<div class="info-row">
+									<span>Exclusive transport</span>
+									<strong>{$exclusiveStatus.transportFormat}</strong>
+								</div>
+							{/if}
 							<div class="info-row">
 								<span>Idle release</span>
 								<strong>

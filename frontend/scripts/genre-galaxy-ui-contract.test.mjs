@@ -6,6 +6,7 @@ describe('genre galaxy UI contract', () => {
 		const route = readFileSync('src/routes/genres/+page.svelte', 'utf8');
 		const galaxy = readFileSync('src/lib/components/Genre/GenreGalaxy.svelte', 'utf8');
 
+		expect(route).toContain('api.getGenreGalaxySnapshot(90)');
 		expect(route).toContain('aria-label="Galaxy summary"');
 		expect(route).toContain('class="hud-card-title"');
 		expect(route).toContain('class="hud-meta-line"');

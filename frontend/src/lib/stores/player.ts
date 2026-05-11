@@ -174,7 +174,10 @@ export async function refreshPlaybackRuntime() {
 		// without waiting for the next WS exclusive event.
 		if (result.runtime) {
 			if (result.runtime.exclusive_engaged) {
-				setExclusiveEngaged(result.runtime.device_name);
+				setExclusiveEngaged(
+					result.runtime.device_name,
+					result.runtime.exclusive_transport_format
+				);
 			} else {
 				setExclusiveReleased(result.runtime.device_name ?? '');
 			}

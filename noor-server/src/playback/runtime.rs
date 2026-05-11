@@ -184,6 +184,7 @@ pub enum PlaybackRuntimeEvent {
     /// banner and shows engaged state.
     ExclusiveModeEngaged {
         device_name: String,
+        transport_format: String,
     },
     /// WASAPI exclusive grab failed; runtime fell back to cpal shared so the
     /// user still hears audio. `reason` is a human-readable explanation.
@@ -1401,8 +1402,10 @@ impl PlaybackEngine {
                 event_tx.clone(),
             ) {
                 Ok(exclusive_stream) => {
+                    let transport_format = exclusive_stream.transport_format.clone();
                     let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
                         device_name: device_label.clone(),
+                        transport_format,
                     });
                     (OutputStream::Wasapi(exclusive_stream), exclusive_plan)
                 }

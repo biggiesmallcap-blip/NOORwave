@@ -164,31 +164,7 @@
 	};
 
 	async function fetchGalaxySnapshot(): Promise<GalaxySnapshot> {
-		const [genreResp, heatResp, cohortsResp, evolutionResp, metricsResp] = await Promise.allSettled([
-			api.getGenres(),
-			api.getGenreHeat(90),
-			api.getGenreCohorts(90),
-			api.getGenreEvolution(90),
-			api.getGenreAudioMetrics()
-		]);
-		if (genreResp.status !== 'fulfilled') throw genreResp.reason;
-		const genres = genreResp.value.genres;
-		const heatResult = heatResp.status === 'fulfilled'
-			? heatResp.value.heat
-			: isNotFoundError(heatResp.reason)
-				? buildZeroHeat(genres)
-				: (() => { throw heatResp.reason; })();
-		if (heatResp.status === 'rejected' && isNotFoundError(heatResp.reason)) {
-			console.warn('Genre heat endpoint unavailable; rendering galaxy with zero heat.');
-		}
-
-		return {
-			genres,
-			heat: heatResult,
-			cohorts: cohortsResp.status === 'fulfilled' ? cohortsResp.value.cohorts : [],
-			evolution: evolutionResp.status === 'fulfilled' ? evolutionResp.value.evolution : [],
-			metrics: metricsResp.status === 'fulfilled' ? metricsResp.value.metrics : []
-		};
+		return api.getGenreGalaxySnapshot(90);
 	}
 
 	function clearGalaxyCaches() {

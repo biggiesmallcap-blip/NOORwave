@@ -1,13 +1,16 @@
-export const DEFAULT_PHASES = ['shell', 'links', 'menus', 'artist-album', 'styling', 'performance'];
+import routeRegistryData from '../src/lib/routes/registry-data.json' with { type: 'json' };
+import navigationData from '../src/lib/routes/navigation-data.json' with { type: 'json' };
 
-export const PHASE_ROUTES = {
-	shell: ['/', '/library', '/search', '/settings'],
-	links: ['/', '/library', '/search', '/playlists', '/videos', '/settings'],
-	menus: ['/', '/library', '/search', '/automix', '/duplicates'],
-	'artist-album': ['/library', '/search'],
-	styling: ['/', '/library', '/search', '/settings', '/automix', '/genres'],
-	performance: ['/', '/library', '/search', '/analytics', '/discoverspace', '/videos'],
-};
+export const DEFAULT_PHASES = Object.keys(navigationData.smokePhaseRouteIds);
+
+export const PHASE_ROUTE_IDS = navigationData.smokePhaseRouteIds;
+
+export const PHASE_ROUTES = Object.fromEntries(
+	Object.entries(PHASE_ROUTE_IDS).map(([phase, ids]) => [
+		phase,
+		ids.map((id) => routePathForId(id)),
+	])
+);
 
 const VALID_PHASES = new Set(['full', ...DEFAULT_PHASES]);
 
@@ -20,6 +23,14 @@ function readArg(args, flag, fallback = undefined) {
 
 function hasFlag(args, flag) {
 	return args.includes(flag);
+}
+
+function routePathForId(id) {
+	const route = routeRegistryData[id];
+	if (!route) {
+		throw new Error(`unknown app route id "${id}"`);
+	}
+	return route.path;
 }
 
 function parseNumberArg(args, flag) {

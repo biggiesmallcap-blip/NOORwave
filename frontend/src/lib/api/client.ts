@@ -606,6 +606,7 @@ export interface PlaybackRuntimeInfo {
 	active_track_id: number | null;
 	last_error: string | null;
 	exclusive_engaged: boolean;
+	exclusive_transport_format: string | null;
 }
 
 export interface StreamDisplayInfo {
@@ -1541,6 +1542,18 @@ export const api = {
 
 	getGenres() {
 		return fetchApi<{ genres: Genre[] }>('/api/genres');
+	},
+
+	getGenreGalaxySnapshot(days = 90) {
+		return fetchApi<{
+			genres: Genre[];
+			heat: GenreHeat[];
+			cohorts: GenreCohort[];
+			evolution: GenreEvolutionPoint[];
+			metrics: GenreAudioMetrics[];
+		}>('/api/genres/snapshot', {
+			days: String(days)
+		});
 	},
 
 	getGenreHeat(days = 90) {
