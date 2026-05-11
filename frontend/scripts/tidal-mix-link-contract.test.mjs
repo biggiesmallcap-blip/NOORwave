@@ -21,8 +21,25 @@ describe('TIDAL mix link contracts', () => {
 			routes.indexOf('// ─── Last.fm scrobble auth', routes.indexOf('async fn get_tidal_mix_tracks'))
 		);
 
-		expect(mixRoute).toContain('"artist_tidal_id": t.artist.id');
-		expect(mixRoute).toContain('"album_tidal_id": t.album.as_ref().map(|al| al.id)');
+		expect(routes).toContain('"artist_tidal_id": t.artist.id');
+		expect(routes).toContain('"album_tidal_id": t.album.as_ref().map(|al| al.id)');
+		expect(mixRoute).toContain('tidal_track_playable_json(t, library_state, 640)');
+	});
+
+	test('TIDAL mix playback preserves local liked state when available', () => {
+		const client = readFileSync('src/lib/api/client.ts', 'utf8');
+		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
+		const routes = readFileSync('../noor-server/src/server/routes.rs', 'utf8');
+		const mixRoute = routes.slice(
+			routes.indexOf('async fn get_tidal_mix_tracks'),
+			routes.indexOf('async fn lastfm_auth_start', routes.indexOf('async fn get_tidal_mix_tracks'))
+		);
+
+		expect(client).toContain('is_favorite?: boolean');
+		expect(player).toContain('track.is_favorite ?? false');
+		expect(player).toContain('localTidalTrackId(first) ?? -first.tidal_id');
+		expect(routes).toContain('"is_favorite": library_state.map(|s| s.is_favorite).unwrap_or(false)');
+		expect(mixRoute).toContain('queries::get_tidal_track_library_states');
 	});
 
 	test('quiet mode exposes title, album art, and album text as links', () => {

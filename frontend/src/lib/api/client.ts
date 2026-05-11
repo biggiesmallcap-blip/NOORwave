@@ -99,6 +99,9 @@ export interface TidalDiscographyTrack {
 	disc_number?: number | null;
 	artist_name?: string | null;
 	artist_tidal_id?: number | null;
+	track_id?: number;
+	is_in_library?: boolean;
+	is_favorite?: boolean;
 }
 
 export interface TidalArtistVideo {
@@ -425,7 +428,9 @@ export interface TidalPlayable {
 	artist_tidal_id?: number | null;
 	album_tidal_id?: number | null;
 	track_id?: number;
+	local_id?: number | null;
 	is_in_library?: boolean;
+	is_favorite?: boolean;
 }
 
 /** Phase 5 — entry returned by `GET /api/charts`.

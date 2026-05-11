@@ -3184,26 +3184,49 @@ pub fn get_existing_tidal_track_ids(conn: &Connection, tidal_ids: &[i64]) -> Res
     Ok(ids)
 }
 
-pub fn get_tidal_track_local_ids(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TidalTrackLibraryState {
+    pub local_id: i64,
+    pub is_favorite: bool,
+}
+
+pub fn get_tidal_track_library_states(
     conn: &Connection,
     tidal_ids: &[i64],
-) -> Result<HashMap<i64, i64>> {
+) -> Result<HashMap<i64, TidalTrackLibraryState>> {
     if tidal_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let placeholders = placeholders(tidal_ids.len());
-    let sql = format!("SELECT tidal_id, id FROM tracks WHERE tidal_id IN ({placeholders})");
+    let sql =
+        format!("SELECT tidal_id, id, is_favorite FROM tracks WHERE tidal_id IN ({placeholders})");
     let params = params_from_iter(tidal_ids.iter().copied());
     let mut stmt = conn.prepare(&sql)?;
     let mut map = HashMap::new();
     let rows = stmt.query_map(params, |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            TidalTrackLibraryState {
+                local_id: row.get::<_, i64>(1)?,
+                is_favorite: row.get::<_, i64>(2)? != 0,
+            },
+        ))
     })?;
     for row in rows {
-        let (tid, lid) = row?;
-        map.insert(tid, lid);
+        let (tidal_id, state) = row?;
+        map.insert(tidal_id, state);
     }
     Ok(map)
+}
+
+pub fn get_tidal_track_local_ids(
+    conn: &Connection,
+    tidal_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    Ok(get_tidal_track_library_states(conn, tidal_ids)?
+        .into_iter()
+        .map(|(tidal_id, state)| (tidal_id, state.local_id))
+        .collect())
 }
 
 pub fn get_artist_photos_by_tidal_ids(
@@ -7584,6 +7607,22 @@ mod tests {
 
         let count = get_track_count(&conn, true, true).expect("strict count");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tidal_track_library_states_include_liked_flags() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_album_with_one_liked_track(&conn);
+
+        let states = get_tidal_track_library_states(&conn, &[101, 102, 999]).expect("tidal states");
+
+        assert_eq!(states.len(), 2);
+        assert_eq!(states.get(&101).map(|s| s.local_id), Some(1));
+        assert_eq!(states.get(&101).map(|s| s.is_favorite), Some(true));
+        assert_eq!(states.get(&102).map(|s| s.local_id), Some(2));
+        assert_eq!(states.get(&102).map(|s| s.is_favorite), Some(false));
+        assert!(!states.contains_key(&999));
     }
 
     #[test]

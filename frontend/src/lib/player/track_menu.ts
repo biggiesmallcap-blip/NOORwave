@@ -50,6 +50,11 @@ export interface BuildTidalTrackMenuOptions {
 	inQueue?: boolean;
 }
 
+function tidalLocalTrackId(track: TidalPlayable): number | null {
+	const id = track.track_id ?? track.local_id ?? null;
+	return typeof id === 'number' && id > 0 ? id : null;
+}
+
 const SEPARATOR: MenuItem = { separator: true, label: '' };
 
 /**
@@ -215,6 +220,16 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		});
 	}
 	if (track.artist_tidal_id != null || track.album_tidal_id != null) {
+		items.push(SEPARATOR);
+	}
+
+	const localId = tidalLocalTrackId(track);
+	if (localId != null) {
+		items.push({
+			label: track.is_favorite ? 'Remove from favourites' : 'Add to favourites',
+			icon: track.is_favorite ? 'â™¥' : 'â™¡',
+			onSelect: () => void toggleTrackFavorite(localId, track.is_favorite ?? false),
+		});
 		items.push(SEPARATOR);
 	}
 

@@ -35,6 +35,11 @@ const tidalMetadataById = new Map<number, Partial<TidalPlayable>>();
 
 type TidalMetadataInput = Pick<TidalPlayable, 'tidal_id' | 'title'> & Partial<Omit<TidalPlayable, 'tidal_id' | 'title'>>;
 
+function localTidalTrackId(track: Pick<TidalPlayable, 'tidal_id'> & Partial<TidalPlayable>): number | null {
+	const id = track.track_id ?? track.local_id ?? null;
+	return typeof id === 'number' && id > 0 ? id : null;
+}
+
 function rememberTidalPlayable(track: TidalMetadataInput) {
 	if (!track.tidal_id || track.tidal_id <= 0) return;
 	const previous = tidalMetadataById.get(track.tidal_id) ?? {};
@@ -46,6 +51,10 @@ function rememberTidalPlayable(track: TidalMetadataInput) {
 		album_tidal_id: track.album_tidal_id ?? previous.album_tidal_id ?? null,
 		artwork_url: track.artwork_url ?? previous.artwork_url ?? null,
 		duration_ms: track.duration_ms ?? previous.duration_ms ?? null,
+		track_id: track.track_id ?? previous.track_id,
+		local_id: track.local_id ?? previous.local_id ?? null,
+		is_in_library: track.is_in_library ?? previous.is_in_library,
+		is_favorite: track.is_favorite ?? previous.is_favorite,
 	});
 }
 
@@ -57,14 +66,17 @@ function enrichTidalTrack(track: Track | null): Track | null {
 	if (!track?.tidal_id) return track;
 	const cached = tidalMetadataById.get(track.tidal_id);
 	if (!cached) return track;
+	const localId = localTidalTrackId({ tidal_id: track.tidal_id, ...cached });
 	return {
 		...track,
+		id: track.id < 0 ? (localId ?? track.id) : track.id,
 		artist_name: track.artist_name ?? cached.artist_name ?? null,
 		artist_tidal_id: track.artist_tidal_id ?? cached.artist_tidal_id ?? null,
 		album_title: track.album_title ?? cached.album_title ?? null,
 		album_tidal_id: track.album_tidal_id ?? cached.album_tidal_id ?? null,
 		artwork_url: track.artwork_url ?? cached.artwork_url ?? null,
 		duration_ms: track.duration_ms ?? cached.duration_ms ?? null,
+		is_favorite: cached.is_favorite ?? track.is_favorite,
 	};
 }
 
@@ -942,7 +954,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 		rememberTidalPlayable(track);
 		await api.playTidalTrack(track);
 		setCurrentTrack({
-			id: -track.tidal_id,
+			id: localTidalTrackId(track) ?? -track.tidal_id,
 			title: track.title,
 			artist_id: -1, // no library artist for ephemeral tracks
 			artist_name: track.artist_name,
@@ -958,7 +970,7 @@ export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 			best_quality: 'LOSSLESS', // placeholder — ephemeral tracks don't report fidelity
 			best_source: 'tidal',
 			fidelity_score: 0,
-			is_favorite: false,
+			is_favorite: track.is_favorite ?? false,
 			play_count: 0,
 			last_played_at: null,
 			date_added: null,
@@ -991,7 +1003,7 @@ function tidalQueueRequest(track: TidalPlayable) {
 function setOptimisticTidalTrack(track: TidalPlayable) {
 	rememberTidalPlayable(track);
 	setCurrentTrack({
-		id: -track.tidal_id,
+		id: localTidalTrackId(track) ?? -track.tidal_id,
 		title: track.title,
 		artist_id: -1,
 		artist_name: track.artist_name,
@@ -1007,7 +1019,7 @@ function setOptimisticTidalTrack(track: TidalPlayable) {
 		best_quality: 'LOSSLESS',
 		best_source: 'tidal',
 		fidelity_score: 0,
-		is_favorite: false,
+		is_favorite: track.is_favorite ?? false,
 		play_count: 0,
 		last_played_at: null,
 		date_added: null,
@@ -1131,12 +1143,16 @@ async function startTidalEphemeralQueue(
 		duration_ms?: number | null;
 		artist_tidal_id?: number | null;
 		album_tidal_id?: number | null;
+		track_id?: number;
+		local_id?: number | null;
+		is_in_library?: boolean;
+		is_favorite?: boolean;
 	}>,
 ): Promise<void> {
 	const first = tracks[0];
 	rememberTidalPlayables(tracks);
 	setCurrentTrack({
-		id: -first.tidal_id,
+		id: localTidalTrackId(first) ?? -first.tidal_id,
 		title: first.title,
 		artist_id: -1,
 		artist_name: first.artist_name ?? null,
@@ -1152,7 +1168,7 @@ async function startTidalEphemeralQueue(
 		best_quality: 'LOSSLESS',
 		best_source: 'tidal',
 		fidelity_score: 0,
-		is_favorite: false,
+		is_favorite: first.is_favorite ?? false,
 		play_count: 0,
 		last_played_at: null,
 		date_added: null,

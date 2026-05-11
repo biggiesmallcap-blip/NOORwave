@@ -1455,32 +1455,18 @@ async fn get_tidal_album_tracks(
         )
     })?;
 
-    let tracks: Vec<Value> = result
-        .items
+    let items = result.items;
+    let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
+    let library_states = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
+            .unwrap_or_default()
+    };
+    let tracks: Vec<Value> = items
         .into_iter()
         .map(|t| {
-            let artwork = t
-                .album
-                .as_ref()
-                .and_then(|al| al.cover.as_ref())
-                .and_then(|c| {
-                    crate::services::tidal::client::TidalClient::get_artwork_url(
-                        &Some(c.clone()),
-                        160,
-                    )
-                });
-            json!({
-                "tidal_id": t.id,
-                "title": t.title,
-                "duration_ms": t.duration * 1000,
-                "track_number": t.track_number,
-                "disc_number": t.volume_number,
-                "artist_name": t.artist.name,
-                "artist_tidal_id": t.artist.id,
-                "album_title": t.album.as_ref().map(|al| al.title.clone()),
-                "album_tidal_id": t.album.as_ref().map(|al| al.id),
-                "artwork_url": artwork,
-            })
+            let library_state = library_states.get(&t.id).copied();
+            tidal_track_playable_json(t, library_state, 160)
         })
         .collect();
 
@@ -7074,6 +7060,7 @@ async fn overlay_snapshot_with_external_track_and_position(
     // Surface the pending TIDAL mix queue (auto-advance items behind the
     // currently-playing ephemeral track) into the visible queue so UP NEXT
     // shows the rest of the mix instead of "empty".
+    let db = state_guard.db.clone();
     let pending = state_guard
         .pending_tidal_mix_queue
         .lock()
@@ -7083,6 +7070,10 @@ async fn overlay_snapshot_with_external_track_and_position(
         .collect::<Vec<_>>();
     drop(state_guard);
     if !pending.is_empty() {
+        let tidal_ids: Vec<i64> = pending.iter().map(|p| p.tidal_track_id).collect();
+        let library_states = db
+            .with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
+            .unwrap_or_default();
         let start_position = snapshot
             .queue
             .iter()
@@ -7091,8 +7082,11 @@ async fn overlay_snapshot_with_external_track_and_position(
             .unwrap_or(-1)
             + 1;
         for (offset, p) in pending.into_iter().enumerate() {
+            let library_state = library_states.get(&p.tidal_track_id).copied();
             let track = crate::db::models::Track {
-                id: -p.tidal_track_id,
+                id: library_state
+                    .map(|state| state.local_id)
+                    .unwrap_or(-p.tidal_track_id),
                 title: p.title,
                 artist_id: 0,
                 artist_name: p.artist_name,
@@ -7108,16 +7102,17 @@ async fn overlay_snapshot_with_external_track_and_position(
                 best_quality: Some("LOSSLESS".to_string()),
                 best_source: Some("tidal".to_string()),
                 fidelity_score: 0,
-                is_favorite: false,
+                is_favorite: library_state
+                    .map(|state| state.is_favorite)
+                    .unwrap_or(false),
                 play_count: 0,
                 last_played_at: None,
                 date_added: None,
                 source: "tidal_ephemeral".to_string(),
                 artwork_url: p.artwork_url,
             };
-            // Negative ids for both queue id + track id so the frontend can
-            // tell these are in-memory placeholders and skip remove/reorder
-            // until proper ephemeral-queue management ships.
+            // Queue ids stay negative for in-memory mix rows. Track ids are
+            // local ids when the TIDAL id is already in the library.
             snapshot.queue.push(crate::db::models::QueueItem {
                 id: -(offset as i64 + 1),
                 track,
@@ -10721,6 +10716,45 @@ async fn tidal_video_search(
     })))
 }
 
+fn tidal_track_artwork_url(t: &TidalTrack, size: i32) -> Option<String> {
+    t.album
+        .as_ref()
+        .and_then(|al| al.cover.as_ref())
+        .and_then(|c| TidalClient::get_artwork_url(&Some(c.clone()), size))
+}
+
+fn tidal_track_playable_json(
+    t: TidalTrack,
+    library_state: Option<queries::TidalTrackLibraryState>,
+    artwork_size: i32,
+) -> Value {
+    let artwork = tidal_track_artwork_url(&t, artwork_size);
+    json!({
+        "tidal_id": t.id,
+        "title": t.title,
+        "duration_ms": t.duration * 1000,
+        "track_number": t.track_number,
+        "disc_number": t.volume_number,
+        "artist_name": t.artist.name,
+        "artist_tidal_id": t.artist.id,
+        "album_title": t.album.as_ref().map(|al| al.title.clone()),
+        "album_tidal_id": t.album.as_ref().map(|al| al.id),
+        "artwork_url": artwork,
+        "track_id": library_state.map(|s| s.local_id).unwrap_or(0),
+        "is_in_library": library_state.is_some(),
+        "is_favorite": library_state.map(|s| s.is_favorite).unwrap_or(false),
+    })
+}
+
+fn lookup_tidal_track_library_state(
+    db: &crate::db::Database,
+    tidal_id: i64,
+) -> Option<queries::TidalTrackLibraryState> {
+    db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &[tidal_id]))
+        .ok()
+        .and_then(|states| states.get(&tidal_id).copied())
+}
+
 #[derive(Debug, Deserialize)]
 struct TidalVideoPlaybackParams {
     quality: Option<String>,
@@ -11100,24 +11134,18 @@ async fn tidal_playlist_tracks(
         }
     };
 
-    // TidalTrack: id (i64), title (String), duration (i64), artist (TidalArtist, not Option),
-    // album: Option<TidalAlbumRef> with cover: Option<String>
+    let tidal_ids: Vec<i64> = resp.items.iter().map(|t| t.id).collect();
+    let library_states = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
+            .unwrap_or_default()
+    };
     let playable: Vec<serde_json::Value> = resp
         .items
-        .iter()
+        .into_iter()
         .map(|t| {
-            json!({
-                "tidal_id": t.id,
-                "title": t.title,
-                "artist_name": t.artist.name,
-                "album_title": t.album.as_ref().map(|a| &a.title),
-                "artwork_url": t.album.as_ref().and_then(|a| a.cover.as_ref()).and_then(|c| {
-                    TidalClient::get_artwork_url(&Some(c.clone()), 640)
-                }),
-                "duration_ms": t.duration * 1000,
-                "track_id": 0,
-                "is_in_library": false,
-            })
+            let library_state = library_states.get(&t.id).copied();
+            tidal_track_playable_json(t, library_state, 640)
         })
         .collect();
 
@@ -11232,9 +11260,13 @@ fn build_ephemeral_tidal_stream_request(
 fn build_ephemeral_synthetic_track(
     track: &crate::PendingEphemeralTidalTrack,
     stream_info: &tidal_stream::StreamInfo,
+    library_state: Option<queries::TidalTrackLibraryState>,
 ) -> crate::db::models::Track {
+    let local_id = library_state
+        .map(|state| state.local_id)
+        .unwrap_or(-track.tidal_track_id);
     crate::db::models::Track {
-        id: -track.tidal_track_id,
+        id: local_id,
         title: track.title.clone(),
         artist_id: 0,
         artist_name: track.artist_name.clone(),
@@ -11250,7 +11282,9 @@ fn build_ephemeral_synthetic_track(
         best_quality: Some(stream_info.audio_quality.clone()),
         best_source: Some("tidal".to_string()),
         fidelity_score: 0,
-        is_favorite: false,
+        is_favorite: library_state
+            .map(|state| state.is_favorite)
+            .unwrap_or(false),
         play_count: 0,
         last_played_at: None,
         date_added: None,
@@ -11344,7 +11378,11 @@ async fn start_ephemeral_tidal_playback(
             }
         };
 
-    let synthetic = build_ephemeral_synthetic_track(&track, &stream_info);
+    let library_state = {
+        let s = state.read().await;
+        lookup_tidal_track_library_state(&s.db, track.tidal_track_id)
+    };
+    let synthetic = build_ephemeral_synthetic_track(&track, &stream_info, library_state);
 
     let playback_generation = bump_playback_generation(state).await;
     let snapshot = {
@@ -14575,33 +14613,17 @@ async fn get_tidal_mix_tracks(
         )
     })?;
 
-    // Reuse the same shape `getTidalAlbumTracks` returns so the frontend's
-    // `playTidalTrackNow` consumer can reuse its existing track-mapping.
+    let tidal_ids: Vec<i64> = items.iter().map(|t| t.id).collect();
+    let library_states = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
+            .unwrap_or_default()
+    };
     let tracks: Vec<Value> = items
         .into_iter()
         .map(|t| {
-            let artwork = t
-                .album
-                .as_ref()
-                .and_then(|al| al.cover.as_ref())
-                .and_then(|c| {
-                    crate::services::tidal::client::TidalClient::get_artwork_url(
-                        &Some(c.clone()),
-                        640,
-                    )
-                });
-            json!({
-                "tidal_id": t.id,
-                "title": t.title,
-                "duration_ms": t.duration * 1000,
-                "track_number": t.track_number,
-                "disc_number": t.volume_number,
-                "artist_name": t.artist.name,
-                "artist_tidal_id": t.artist.id,
-                "album_title": t.album.as_ref().map(|al| al.title.clone()),
-                "album_tidal_id": t.album.as_ref().map(|al| al.id),
-                "artwork_url": artwork,
-            })
+            let library_state = library_states.get(&t.id).copied();
+            tidal_track_playable_json(t, library_state, 640)
         })
         .collect();
 
@@ -16574,7 +16596,7 @@ mod tests {
             bit_depth: Some(24),
         };
 
-        let synthetic = build_ephemeral_synthetic_track(&track, &stream);
+        let synthetic = build_ephemeral_synthetic_track(&track, &stream, None);
 
         assert_eq!(synthetic.id, -456);
         assert_eq!(synthetic.tidal_id, Some(456));
