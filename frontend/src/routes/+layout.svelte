@@ -69,6 +69,11 @@
 	import { palette } from '$lib/stores/palette';
 	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
 	import { isTauri } from '$lib/util/external';
+	import { tidalAuthFlow, tidalStatus, loadTidalStatus } from '$lib/stores/tidal';
+	import {
+		TIDAL_PKCE_RELOGIN_DISMISSED_KEY,
+		shouldShowLegacyReloginNotice,
+	} from '$lib/tidal/login';
 	import { paletteById } from '$lib/components/wallpaper/palettes';
 	import {
 		requestVideoClear,
@@ -97,6 +102,21 @@
 	let connectError = $state('');
 	let connectBusy = $state(false);
 	let pinInputEl = $state<HTMLInputElement | null>(null);
+	let pkceReloginDismissedThisSession = $state(false);
+	let pkceReloginDismissedForever = $state(false);
+	// Remove this migration notice after 2026-05-25. Keep PKCE auth and encrypted token migration.
+	let showPkceReloginNotice = $derived(
+		authReady &&
+			onboardingChecked &&
+			!isOnboardingRoute &&
+			shouldShowLegacyReloginNotice(
+				{ connected: $tidalStatus === 'connected', auth_flow: $tidalAuthFlow },
+				{
+					dismissedForever: pkceReloginDismissedForever,
+					dismissedThisSession: pkceReloginDismissedThisSession,
+				}
+			)
+	);
 
 	function handlePinInput(event: Event) {
 		const el = event.target as HTMLInputElement;
@@ -296,6 +316,8 @@
 		if (storedTheme === 'light' || storedTheme === 'dark') {
 			theme = storedTheme;
 		}
+		pkceReloginDismissedForever =
+			localStorage.getItem(TIDAL_PKCE_RELOGIN_DISMISSED_KEY) === '1';
 
 		applyTheme(theme);
 
@@ -490,7 +512,23 @@
 		authReady = true;
 		connectWebSocket();
 		void refreshPlaybackState();
+		void loadTidalStatus();
 		void checkOnboarding();
+	}
+
+	function dismissPkceReloginForSession() {
+		pkceReloginDismissedThisSession = true;
+	}
+
+	function dismissPkceReloginForever() {
+		pkceReloginDismissedForever = true;
+		pkceReloginDismissedThisSession = true;
+		localStorage.setItem(TIDAL_PKCE_RELOGIN_DISMISSED_KEY, '1');
+	}
+
+	async function reconnectTidalWithPkce() {
+		pkceReloginDismissedThisSession = true;
+		await goto('/settings?tidalLogin=1');
 	}
 
 	// Redirects to /onboarding when the server reports first-run state. Fails
@@ -1032,6 +1070,22 @@
 <QuietMode />
 <ShortcutHelp open={shortcutHelpOpen} onClose={closeShortcutHelp} />
 <QueueReasonCard reason={hoveredReason} mouseX={reasonMouseX} mouseY={reasonMouseY} />
+
+{#if showPkceReloginNotice}
+	<div class="pkce-relogin-backdrop" role="presentation">
+		<div class="pkce-relogin-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="pkce-relogin-title">
+			<h2 id="pkce-relogin-title">TIDAL login changed</h2>
+			<p>
+				NOORwave now uses TIDAL's PKCE sign-in for Lossless and Hi-Res playback. Sign in again to keep full-quality streaming.
+			</p>
+			<div class="pkce-relogin-actions">
+				<button class="btn btn-primary" onclick={() => void reconnectTidalWithPkce()}>Reconnect TIDAL</button>
+				<button class="btn btn-glass" onclick={dismissPkceReloginForSession}>Not now</button>
+				<button class="btn btn-ghost" onclick={dismissPkceReloginForever}>Don't show again</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 {#if isOnboardingRoute}
 	{@render children()}
@@ -4046,6 +4100,44 @@
 	}
 
 	/* ─── Connect screen ───────────────────── */
+
+	.pkce-relogin-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: var(--z-modal, 80);
+		display: grid;
+		place-items: center;
+		padding: 24px;
+		background: rgba(0, 0, 0, 0.56);
+		backdrop-filter: blur(10px);
+	}
+
+	.pkce-relogin-modal {
+		width: min(100%, 460px);
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		padding: 28px;
+		border-radius: var(--radius-md, 12px);
+	}
+
+	.pkce-relogin-modal h2 {
+		margin: 0;
+		font-size: var(--font-size-xl);
+		letter-spacing: 0;
+	}
+
+	.pkce-relogin-modal p {
+		margin: 0;
+		color: var(--text-secondary);
+		line-height: var(--line-height-normal);
+	}
+
+	.pkce-relogin-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+	}
 
 	.connect-backdrop {
 		position: fixed;

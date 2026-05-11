@@ -3,6 +3,9 @@ import { getApiBase, authFetch } from '$lib/api/client';
 
 export const tidalStatus = writable<'disconnected' | 'connecting' | 'connected'>('disconnected');
 export const tidalUserId = writable('');
+export const tidalAuthFlow = writable<string | null>(null);
+export const tidalPkceClientCredentialSource = writable<string | null>(null);
+export const tidalLegacyClientCredentialSource = writable<string | null>(null);
 export const syncStatus = writable<'idle' | 'syncing' | 'done' | 'error' | 'cancelled'>('idle');
 export const syncProgress = writable<number | null>(null);
 export const syncError = writable<string | null>(null);
@@ -23,11 +26,17 @@ export async function loadTidalStatus() {
 		if (!resp.ok) return;
 		const data = await resp.json();
 		if (data.connected) {
-			tidalStatus.set('connected');
 			tidalUserId.set(data.user_id);
+			tidalAuthFlow.set(data.auth_flow ?? null);
+			tidalPkceClientCredentialSource.set(data.pkce_client_credential_source ?? null);
+			tidalLegacyClientCredentialSource.set(data.legacy_client_credential_source ?? null);
+			tidalStatus.set('connected');
 		} else {
-			tidalStatus.set('disconnected');
 			tidalUserId.set('');
+			tidalAuthFlow.set(null);
+			tidalPkceClientCredentialSource.set(null);
+			tidalLegacyClientCredentialSource.set(null);
+			tidalStatus.set('disconnected');
 		}
 	} catch {}
 }

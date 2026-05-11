@@ -774,7 +774,7 @@ impl TidalClient {
                 if items.is_empty() {
                     continue;
                 }
-                tracing::warn!(
+                tracing::debug!(
                     "TIDAL home module '{}' (kind={}): parsed {}/{} items, more_path={:?}",
                     title,
                     kind,
@@ -1528,6 +1528,47 @@ fn direct_url_or_image_id(v: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use tracing::{
+        Event, Id, Level, Metadata, Subscriber,
+        span::{Attributes, Record},
+        subscriber::Interest,
+    };
+
+    #[derive(Clone, Default)]
+    struct RecordingSubscriber {
+        levels: Arc<Mutex<Vec<Level>>>,
+    }
+
+    impl Subscriber for RecordingSubscriber {
+        fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+            Interest::always()
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
+
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            self.levels.lock().unwrap().push(*event.metadata().level());
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
 
     /// Round-trip the documented `pages/my_collection_my_mixes` shape through
     /// the parser. Asserts: every mix has non-empty id/title/image_url, the
@@ -1641,6 +1682,53 @@ mod tests {
         assert!(TidalClient::parse_my_mixes(&json!({})).is_empty());
         assert!(TidalClient::parse_my_mixes(&json!({"rows": []})).is_empty());
         assert!(TidalClient::parse_my_mixes(&json!({"rows": [{"modules": []}]})).is_empty());
+    }
+
+    #[test]
+    fn parse_home_modules_logs_success_at_debug_level() {
+        let payload = json!({
+            "rows": [
+                {
+                    "modules": [
+                        {
+                            "id": "new-tracks",
+                            "title": "New Tracks",
+                            "type": "TRACK_LIST",
+                            "pagedList": {
+                                "dataApiPath": "pages/data/new-tracks",
+                                "items": [
+                                    {
+                                        "id": 10,
+                                        "title": "Signal",
+                                        "duration": 180,
+                                        "artist": { "id": 20, "name": "NOOR" },
+                                        "album": { "id": 30, "title": "Wave", "cover": "aaa-bbb-ccc" }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        let subscriber = RecordingSubscriber::default();
+        let levels = subscriber.levels.clone();
+
+        let modules =
+            tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+                TidalClient::parse_home_modules(&payload)
+            });
+
+        assert_eq!(modules.len(), 1);
+        let levels = levels.lock().unwrap().clone();
+        assert!(
+            !levels.contains(&Level::WARN),
+            "successful home module parse must not emit warn"
+        );
+        assert!(
+            levels.contains(&Level::DEBUG),
+            "successful home module parse should remain visible at debug"
+        );
     }
 
     #[test]

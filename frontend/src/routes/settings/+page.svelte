@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import type { Unsubscriber } from 'svelte/store';
 	import {
 		api,
@@ -57,18 +58,20 @@
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
+	import { openExternal } from '$lib/util/external';
+	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
-	let userCode = $state('');
 	let verifyUrl = $state('');
+	let tidalRedirectUrl = $state('');
+	let tidalRedirectError = $state('');
 	let errorMsg = $state('');
 	let playbackRuntime = $state<PlaybackRuntimeInfo | null>(null);
 	let runtimeAvailable = $state(false);
-	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let mbPollTimer: ReturnType<typeof setInterval> | null = null;
 	let wsUnsubscribe: Unsubscriber | null = null;
 
@@ -295,9 +298,7 @@
 		void loadSpotifyStatus();
 		void loadLastfmStatus();
 		serverToken = getStoredToken() ?? '';
-
 		return () => {
-			if (pollTimer) clearInterval(pollTimer);
 			if (mbPollTimer) clearInterval(mbPollTimer);
 			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
@@ -325,33 +326,16 @@
 	async function connectTidal() {
 		tidalStatus.set('connecting');
 		errorMsg = '';
+		tidalRedirectError = '';
+		tidalRedirectUrl = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
 			markServerOnline();
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			const data = await resp.json();
-			userCode = data.user_code;
-			verifyUrl = data.verify_url;
+			verifyUrl = data.verify_url ?? '';
 
-			window.open(verifyUrl, '_blank');
-
-			pollTimer = setInterval(async () => {
-				try {
-					const pollResp = await authFetch(`${getApiBase()}/api/tidal/login/poll`, { method: 'POST' });
-					markServerOnline();
-					const pollData = await pollResp.json();
-					if (pollData.status === 'authenticated') {
-						tidalStatus.set('connected');
-						tidalUserId.set(pollData.user_id);
-						userCode = '';
-						verifyUrl = '';
-						if (pollTimer) clearInterval(pollTimer);
-						pollTimer = null;
-					}
-				} catch (error) {
-					if (isFetchConnectionError(error)) markServerOffline();
-				}
-			}, 3000);
+			if (verifyUrl) openExternal(verifyUrl);
 		} catch (e) {
 			tidalStatus.set('disconnected');
 			if (isFetchConnectionError(e)) {
@@ -362,6 +346,48 @@
 				errorMsg = `Failed to connect: ${e}`;
 			}
 		}
+	}
+
+	async function completeTidalLogin() {
+		errorMsg = '';
+		tidalRedirectError = '';
+		if (!isValidTidalRedirectUrl(tidalRedirectUrl)) {
+			tidalRedirectError = 'Paste the final TIDAL redirect URL to finish login.';
+			return;
+		}
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/tidal/login/complete`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ redirect_url: tidalRedirectUrl.trim() }),
+			});
+			markServerOnline();
+			const data = await resp.json().catch(() => ({}));
+			if (!resp.ok) throw new Error(data.error ?? `Server returned ${resp.status}`);
+			tidalStatus.set('connected');
+			tidalUserId.set(data.user_id ?? '');
+			void refreshTidalStatus();
+			verifyUrl = '';
+			tidalRedirectUrl = '';
+		} catch (e) {
+			if (isFetchConnectionError(e)) {
+				markServerOffline();
+				errorMsg = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				markServerOnline();
+				errorMsg = `Failed to finish TIDAL login: ${e}`;
+			}
+		}
+	}
+
+	async function pasteTidalRedirectUrl() {
+		tidalRedirectError = '';
+		const result = await readTidalRedirectFromClipboard();
+		if (result.ok && result.redirectUrl) {
+			tidalRedirectUrl = result.redirectUrl;
+			return;
+		}
+		tidalRedirectError = result.error ?? 'Clipboard access failed. Paste the URL manually.';
 	}
 
 	function formatSyncDate(isoString: string): string {
@@ -429,7 +455,6 @@
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			tidalStatus.set('disconnected');
 			tidalUserId.set('');
-			userCode = '';
 			verifyUrl = '';
 			syncStatus.set('idle');
 			syncProgress.set(null);
@@ -1099,6 +1124,17 @@
 	// belongs to exactly one category; empty columns are hidden by CSS.
 	type SettingsCategory = 'appearance' | 'sources' | 'discovery' | 'audio' | 'data' | 'account';
 	let activeCategory = $state<SettingsCategory>('appearance');
+	let handledTidalLoginRequest = $state('');
+	$effect(() => {
+		const requested = page.url.searchParams.get('tidalLogin');
+		if (requested !== '1') return;
+		const key = page.url.href;
+		if (handledTidalLoginRequest === key) return;
+		handledTidalLoginRequest = key;
+		activeCategory = 'sources';
+		window.history.replaceState({}, '', '/settings');
+		void connectTidal();
+	});
 	// Single shared preview — shader prop changes reuse the same GL context,
 	// avoiding WebGL context churn from per-tile mount/unmount cycles.
 	let previewShader = $state<string | null>(null);
@@ -1528,10 +1564,26 @@
 					</div>
 				{:else if $tidalStatus === 'connecting'}
 					<div class="auth-card glass">
-						<p class="page-copy">Finish authorization in the browser, then return here.</p>
+						<p class="page-copy">A TIDAL sign-in page opened.</p>
+						<p class="page-copy">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
 						<a class="verify-link" href={verifyUrl} target="_blank">{verifyUrl}</a>
-						<div class="user-code">{userCode}</div>
-						<p class="page-copy">Waiting for the device-code flow to complete.</p>
+						<input
+							class="text-field"
+							type="url"
+							bind:value={tidalRedirectUrl}
+							placeholder="https://tidal.com/android/login/auth?code=..."
+						/>
+						{#if tidalRedirectError}
+							<p class="error" role="alert">{tidalRedirectError}</p>
+						{/if}
+						<div class="action-row">
+							<button class="btn btn-glass" onclick={pasteTidalRedirectUrl}>
+								Paste from clipboard
+							</button>
+							<button class="btn btn-primary" onclick={completeTidalLogin} disabled={!tidalRedirectUrl.trim()}>
+								Finish login
+							</button>
+						</div>
 					</div>
 				{:else}
 					<div class="info-list">
@@ -3197,19 +3249,18 @@
 		word-break: break-all;
 	}
 
-	.path-value {
-		word-break: break-all;
+	.text-field {
+		width: 100%;
+		padding: 10px 12px;
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--text-primary);
+		font: inherit;
 	}
 
-	.user-code {
-		padding: 16px;
-		border-radius: var(--radius-sm);
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid var(--panel-border);
-		font-family: var(--font-mono);
-		font-size: var(--font-size-2xl);
-		letter-spacing: 0.18em;
-		text-align: center;
+	.path-value {
+		word-break: break-all;
 	}
 
 	.roadmap-list {

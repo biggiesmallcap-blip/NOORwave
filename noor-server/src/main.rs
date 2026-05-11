@@ -489,12 +489,31 @@ async fn main() -> Result<()> {
                 |row| row.get::<_, Vec<u8>>(0),
             );
             Ok(match result {
-                Ok(bytes) => String::from_utf8(bytes)
-                    .ok()
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .inspect(|t: &services::tidal::auth::TidalTokens| {
-                        info!("Loaded persisted TIDAL tokens for user {}", t.user_id);
-                    }),
+                Ok(bytes) => {
+                    services::tidal::auth::decode_persisted_tidal_tokens(&master_key, &bytes)
+                        .ok()
+                        .flatten()
+                        .and_then(|persisted| {
+                            let needs_rewrite = persisted.needs_encrypted_rewrite();
+                            let tokens = persisted.into_tokens();
+                            if needs_rewrite
+                                && let Ok(blob) =
+                                    services::tidal::auth::encode_persisted_tidal_tokens(
+                                        &master_key,
+                                        &tokens,
+                                    )
+                            {
+                                let _ = conn.execute(
+                            "UPDATE service_auth SET access_token_enc = ?1 WHERE service='tidal'",
+                            rusqlite::params![blob],
+                        );
+                            }
+                            Some(tokens)
+                        })
+                        .inspect(|t: &services::tidal::auth::TidalTokens| {
+                            info!("Loaded persisted TIDAL tokens for user {}", t.user_id);
+                        })
+                }
                 Err(_) => None,
             })
         })

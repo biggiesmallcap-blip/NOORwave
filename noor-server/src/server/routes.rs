@@ -539,6 +539,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/search/underrated", get(search_underrated))
         // TIDAL
         .route("/api/tidal/login", post(tidal_login))
+        .route("/api/tidal/login/complete", post(tidal_login_complete))
         .route("/api/tidal/login/poll", post(tidal_poll))
         .route("/api/tidal/sync", post(tidal_sync_library))
         .route("/api/tidal/sync/cancel", post(tidal_sync_cancel))
@@ -1183,7 +1184,7 @@ async fn get_artist_discography(
             e
         );
     }
-    tracing::warn!(
+    tracing::debug!(
         "TIDAL artist {} picture resolution: direct={}, top_track={}, album_cover={}, resolved={}",
         tidal_artist_id,
         direct_some,
@@ -10160,18 +10161,13 @@ fn resolve_smart_playlist_tracks(
 
 // ─── TIDAL Endpoints ──────────────────────────────────────
 
-/// Start device code login flow. Returns user_code and verify_url.
+/// Start PKCE login flow. Returns a browser URL. The user must paste the
+/// redirected TIDAL URL into the completion endpoint after signing in.
 async fn tidal_login(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let http = {
-        let s = state.read().await;
-        s.http_client.clone()
-    };
-
-    let (device_code, user_code, verify_url, interval) =
-        tidal_auth::start_device_login(&http).await.map_err(|e| {
-            tracing::error!("TIDAL login error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let login = tidal_auth::start_pkce_login().map_err(|e| {
+        tracing::error!("TIDAL PKCE login error: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Cancel any previous in-flight login polling
     {
@@ -10181,50 +10177,55 @@ async fn tidal_login(State(state): State<SharedState>) -> Result<Json<Value>, St
         s.tidal_login_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     }
 
-    // Poll for token in background, then persist to DB
-    let state_clone = state.clone();
-    let http_clone = http.clone();
-    let cancel = {
+    Ok(Json(json!({
+        "mode": "pkce",
+        "verify_url": login.verify_url,
+        "requires_redirect_url": true,
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TidalLoginCompletePayload {
+    redirect_url: String,
+}
+
+async fn tidal_login_complete(
+    State(state): State<SharedState>,
+    Json(payload): Json<TidalLoginCompletePayload>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let http = {
         let s = state.read().await;
-        s.tidal_login_cancel.clone()
+        s.http_client.clone()
     };
-    tokio::spawn(async move {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!("TIDAL login polling cancelled (new login started)");
-            return;
-        }
-        match tidal_auth::poll_for_token(&http_clone, &device_code, interval).await {
-            Ok(tokens) => {
-                tracing::info!("TIDAL auth successful! User: {}", tokens.user_id);
-                // Persist tokens to DB so they survive restarts
-                {
-                    let s = state_clone.read().await;
-                    let _ = s.db.with_conn(|conn| {
-                        let token_json = serde_json::to_string(&tokens)?;
-                        conn.execute(
-                            "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
-                             VALUES ('tidal', ?1, ?2, datetime('now'))
-                             ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                             user_id=excluded.user_id, connected_at=excluded.connected_at",
-                            rusqlite::params![token_json.as_bytes(), tokens.user_id],
-                        )?;
-                        Ok(())
-                    });
-                }
-                let mut s = state_clone.write().await;
-                s.tidal_tokens = Some(tokens);
-                let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
-            }
-            Err(e) => {
-                tracing::error!("TIDAL polling failed: {}", e);
-            }
-        }
-    });
+
+    let tokens = tidal_auth::complete_pkce_login(&http, &payload.redirect_url)
+        .await
+        .map_err(|e| {
+            tracing::error!("TIDAL PKCE completion error: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("TIDAL login failed: {e}") })),
+            )
+        })?;
+
+    persist_tidal_tokens(&state, &tokens).await.map_err(|e| {
+        tracing::error!("TIDAL token persist error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Failed to persist TIDAL login" })),
+        )
+    })?;
+    {
+        let mut s = state.write().await;
+        s.tidal_tokens = Some(tokens.clone());
+        let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
 
     Ok(Json(json!({
-        "user_code": user_code,
-        "verify_url": verify_url,
-        "interval": interval,
+        "status": "authenticated",
+        "user_id": tokens.user_id,
+        "country_code": tokens.country_code,
+        "auth_flow": tokens.auth_flow,
     })))
 }
 
@@ -10264,12 +10265,12 @@ async fn tidal_poll(State(state): State<SharedState>) -> Json<Value> {
 async fn load_persisted_tidal_tokens(
     state: &SharedState,
 ) -> anyhow::Result<Option<tidal_auth::TidalTokens>> {
-    let db = {
+    let (db, master_key) = {
         let s = state.read().await;
-        s.db.clone()
+        (s.db.clone(), s.master_key.clone())
     };
 
-    let tokens = db.with_conn(|conn| {
+    let loaded = db.with_conn(|conn| {
         let result = conn.query_row(
             "SELECT access_token_enc FROM service_auth WHERE service='tidal'",
             [],
@@ -10277,20 +10278,34 @@ async fn load_persisted_tidal_tokens(
         );
 
         Ok(match result {
-            Ok(bytes) => String::from_utf8(bytes)
-                .ok()
-                .and_then(|json| serde_json::from_str::<tidal_auth::TidalTokens>(&json).ok()),
+            Ok(bytes) => tidal_auth::decode_persisted_tidal_tokens(&master_key, &bytes)?,
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(error) => return Err(error.into()),
         })
     })?;
 
-    if let Some(ref tokens) = tokens {
+    let Some(loaded) = loaded else {
+        return Ok(None);
+    };
+    let needs_rewrite = loaded.needs_encrypted_rewrite();
+    let tokens = loaded.into_tokens();
+    if needs_rewrite {
+        let blob = tidal_auth::encode_persisted_tidal_tokens(&master_key, &tokens)?;
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE service_auth SET access_token_enc = ?1 WHERE service = 'tidal'",
+                params![blob],
+            )?;
+            Ok(())
+        })?;
+    }
+
+    {
         let mut s = state.write().await;
         s.tidal_tokens = Some(tokens.clone());
     }
 
-    Ok(tokens)
+    Ok(Some(tokens))
 }
 
 /// Get TIDAL backoff gate status.
@@ -10317,16 +10332,52 @@ async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
     };
 
     if let Some(tokens) = tokens {
-        Json(json!({
-            "connected": true,
-            "user_id": tokens.user_id,
-            "country_code": tokens.country_code,
-        }))
+        if !tokens.is_pkce() {
+            tidal_auth::warn_if_fallback_client_credentials();
+        }
+        Json(tidal_status_payload(
+            Some(&tokens),
+            tidal_auth::tidal_pkce_client_credential_source(),
+            tidal_auth::tidal_client_credential_source(),
+        ))
     } else {
-        Json(json!({
-            "connected": false,
-        }))
+        Json(tidal_status_payload(
+            None,
+            tidal_auth::tidal_pkce_client_credential_source(),
+            tidal_auth::tidal_client_credential_source(),
+        ))
     }
+}
+
+fn tidal_status_payload(
+    tokens: Option<&tidal_auth::TidalTokens>,
+    pkce_source: tidal_auth::TidalCredentialSource,
+    legacy_source: tidal_auth::TidalCredentialSource,
+) -> Value {
+    let Some(tokens) = tokens else {
+        return json!({ "connected": false });
+    };
+    let auth_flow = tokens.auth_flow.as_deref().unwrap_or("legacy");
+    let mut body = json!({
+        "connected": true,
+        "user_id": tokens.user_id,
+        "country_code": tokens.country_code,
+        "auth_flow": auth_flow,
+    });
+    if let Some(map) = body.as_object_mut() {
+        if auth_flow == "pkce" {
+            map.insert(
+                "pkce_client_credential_source".to_string(),
+                json!(pkce_source.as_str()),
+            );
+        } else {
+            map.insert(
+                "legacy_client_credential_source".to_string(),
+                json!(legacy_source.as_str()),
+            );
+        }
+    }
+    body
 }
 
 /// Clear TIDAL session (logout).
@@ -12386,12 +12437,16 @@ async fn recover_tidal_session(
         user_id = %tokens.user_id,
         "Refreshing TIDAL session"
     );
-    let mut refreshed = tidal_auth::refresh_token(http, &tokens.refresh_token).await?;
+    let mut refreshed =
+        tidal_auth::refresh_token(http, &tokens.refresh_token, tokens.auth_flow.as_deref()).await?;
     if refreshed.user_id.is_empty() {
         refreshed.user_id = tokens.user_id.clone();
     }
     if refreshed.country_code.is_empty() {
         refreshed.country_code = tokens.country_code.clone();
+    }
+    if refreshed.auth_flow.is_none() {
+        refreshed.auth_flow = tokens.auth_flow.clone();
     }
 
     persist_tidal_tokens(state, &refreshed).await?;
@@ -13965,13 +14020,13 @@ async fn persist_tidal_tokens(
     {
         let s = state.read().await;
         s.db.with_conn(|conn| {
-            let token_json = serde_json::to_string(tokens)?;
+            let token_blob = tidal_auth::encode_persisted_tidal_tokens(&s.master_key, tokens)?;
             conn.execute(
                 "INSERT INTO service_auth (service, access_token_enc, user_id, connected_at)
                  VALUES ('tidal', ?1, ?2, datetime('now'))
                  ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
                  user_id=excluded.user_id, connected_at=excluded.connected_at",
-                rusqlite::params![token_json.as_bytes(), tokens.user_id],
+                rusqlite::params![token_blob, tokens.user_id],
             )?;
             Ok(())
         })?;
@@ -16410,6 +16465,52 @@ mod tests {
     }
 
     #[test]
+    fn tidal_status_payload_reports_pkce_source_only_for_pkce_tokens() {
+        let tokens = test_tidal_tokens(Some("pkce"));
+
+        let body = tidal_status_payload(
+            Some(&tokens),
+            tidal_auth::TidalCredentialSource::Env,
+            tidal_auth::TidalCredentialSource::Fallback,
+        );
+
+        assert_eq!(body["connected"], true);
+        assert_eq!(body["auth_flow"], "pkce");
+        assert_eq!(body["pkce_client_credential_source"], "env");
+        assert!(body.get("legacy_client_credential_source").is_none());
+    }
+
+    #[test]
+    fn tidal_status_payload_reports_legacy_source_only_for_legacy_tokens() {
+        let tokens = test_tidal_tokens(None);
+
+        let body = tidal_status_payload(
+            Some(&tokens),
+            tidal_auth::TidalCredentialSource::Env,
+            tidal_auth::TidalCredentialSource::Fallback,
+        );
+
+        assert_eq!(body["connected"], true);
+        assert_eq!(body["auth_flow"], "legacy");
+        assert_eq!(body["legacy_client_credential_source"], "fallback");
+        assert!(body.get("pkce_client_credential_source").is_none());
+    }
+
+    #[test]
+    fn tidal_status_payload_disconnected_omits_credential_sources() {
+        let body = tidal_status_payload(
+            None,
+            tidal_auth::TidalCredentialSource::Env,
+            tidal_auth::TidalCredentialSource::Fallback,
+        );
+
+        assert_eq!(body["connected"], false);
+        assert!(body.get("auth_flow").is_none());
+        assert!(body.get("pkce_client_credential_source").is_none());
+        assert!(body.get("legacy_client_credential_source").is_none());
+    }
+
+    #[test]
     fn ephemeral_stream_request_uses_user_audio_quality() {
         let request = build_ephemeral_tidal_stream_request(
             123,
@@ -16472,6 +16573,18 @@ mod tests {
         assert_eq!(synthetic.tidal_id, Some(456));
         assert_eq!(synthetic.best_quality.as_deref(), Some("HI_RES_LOSSLESS"));
         assert_eq!(synthetic.source, "tidal_ephemeral");
+    }
+
+    fn test_tidal_tokens(auth_flow: Option<&str>) -> tidal_auth::TidalTokens {
+        tidal_auth::TidalTokens {
+            access_token: "access-secret".to_string(),
+            refresh_token: "refresh-secret".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 86_400,
+            user_id: "u-1".to_string(),
+            country_code: "AU".to_string(),
+            auth_flow: auth_flow.map(str::to_string),
+        }
     }
 
     #[test]

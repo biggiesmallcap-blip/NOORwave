@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
 	import { authFetch, getApiBase } from '$lib/api/client';
 	import { openExternal } from '$lib/util/external';
+	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
 
 	let {
 		variant = 'onboarding',
@@ -18,63 +18,68 @@
 	type Status = 'idle' | 'connecting' | 'awaiting' | 'connected' | 'error';
 
 	let status = $state<Status>('idle');
-	let userCode = $state('');
 	let verifyUrl = $state('');
+	let redirectUrl = $state('');
 	let errorMsg = $state('');
-	let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-	function clearPolling() {
-		if (pollTimer !== null) {
-			clearInterval(pollTimer);
-			pollTimer = null;
-		}
-	}
+	let redirectError = $state('');
 
 	async function start() {
 		status = 'connecting';
 		errorMsg = '';
+		redirectError = '';
+		redirectUrl = '';
 		try {
 			const resp = await authFetch(`${getApiBase()}/api/tidal/login`, { method: 'POST' });
 			if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 			const data = await resp.json();
-			userCode = data.user_code ?? '';
 			verifyUrl = data.verify_url ?? '';
 			status = 'awaiting';
 
 			if (verifyUrl) openExternal(verifyUrl);
-
-			pollTimer = setInterval(async () => {
-				try {
-					const pollResp = await authFetch(`${getApiBase()}/api/tidal/login/poll`, { method: 'POST' });
-					const pollData = await pollResp.json();
-					if (pollData.status === 'authenticated') {
-						clearPolling();
-						status = 'connected';
-						onconnected?.({ user_id: pollData.user_id });
-					}
-				} catch {
-					// Transient — keep polling.
-				}
-			}, 3000);
 		} catch (e) {
 			status = 'error';
 			errorMsg = e instanceof Error ? e.message : String(e);
 		}
 	}
 
-	function copyCode() {
-		if (!userCode) return;
-		navigator.clipboard?.writeText(userCode).catch(() => {});
+	async function completeLogin() {
+		errorMsg = '';
+		redirectError = '';
+		if (!isValidTidalRedirectUrl(redirectUrl)) {
+			redirectError = 'Paste the final TIDAL redirect URL to finish login.';
+			return;
+		}
+		try {
+			const resp = await authFetch(`${getApiBase()}/api/tidal/login/complete`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ redirect_url: redirectUrl.trim() }),
+			});
+			const data = await resp.json().catch(() => ({}));
+			if (!resp.ok) throw new Error(data.error ?? `Server returned ${resp.status}`);
+			status = 'connected';
+			verifyUrl = '';
+			redirectUrl = '';
+			onconnected?.({ user_id: data.user_id });
+		} catch (e) {
+			status = 'error';
+			errorMsg = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function pasteRedirectUrl() {
+		redirectError = '';
+		const result = await readTidalRedirectFromClipboard();
+		if (result.ok && result.redirectUrl) {
+			redirectUrl = result.redirectUrl;
+			return;
+		}
+		redirectError = result.error ?? 'Clipboard access failed. Paste the URL manually.';
 	}
 
 	function handleSkip() {
-		clearPolling();
 		onskip?.();
 	}
-
-	onDestroy(() => {
-		clearPolling();
-	});
 </script>
 
 <div class="tidal-connect" class:variant-onboarding={variant === 'onboarding'} class:variant-settings={variant === 'settings'}>
@@ -97,12 +102,23 @@
 			</div>
 		</div>
 	{:else if status === 'connecting'}
-		<p class="muted">Asking TIDAL for a sign-in code…</p>
+		<p class="muted">Opening TIDAL sign-in...</p>
 	{:else if status === 'awaiting'}
-		<div class="device-code">
-			<p class="muted">A browser tab opened to TIDAL. Enter this code there:</p>
-			<div class="code" onclick={copyCode} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && copyCode()}>
-				{userCode || '—'}
+		<div class="redirect-login">
+			<p class="muted">A TIDAL sign-in page opened.</p>
+			<p class="muted">After sign-in, copy the address from the final TIDAL page. Paste it here to finish.</p>
+			<input
+				class="redirect-input"
+				type="url"
+				bind:value={redirectUrl}
+				placeholder="https://tidal.com/android/login/auth?code=..."
+			/>
+			{#if redirectError}
+				<p class="error" role="alert">{redirectError}</p>
+			{/if}
+			<div class="actions">
+				<button class="btn btn-ghost" onclick={pasteRedirectUrl}>Paste from clipboard</button>
+				<button class="btn btn-primary" onclick={completeLogin} disabled={!redirectUrl.trim()}>Finish login</button>
 			</div>
 			<p class="hint">
 				Didn't open? <button type="button" class="hint-link" onclick={() => openExternal(verifyUrl)}>Open the page manually</button>.
@@ -131,7 +147,7 @@
 		font-family: var(--font-display);
 		font-size: var(--font-size-3xl);
 		font-weight: var(--font-weight-medium);
-		letter-spacing: -0.02em;
+		letter-spacing: 0;
 		line-height: var(--line-height-tight);
 	}
 	.variant-onboarding p {
@@ -168,23 +184,21 @@
 		border-color: rgba(255, 255, 255, 0.08);
 	}
 	.btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: #e7eaf2; }
-	.code {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0.18em;
-		padding: 18px 28px;
-		background: var(--panel-bg);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		user-select: all;
-	}
-	.device-code {
+	.redirect-login {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		gap: 12px;
+		width: min(100%, 520px);
+	}
+	.redirect-input {
+		width: 100%;
+		padding: 10px 12px;
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--text-primary);
+		font: inherit;
 	}
 	.hint, .muted { color: var(--text-tertiary); margin: 0; font-size: var(--font-size-xs); }
 	.hint-link {
