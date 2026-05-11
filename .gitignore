@@ -50,6 +50,13 @@ docs/superpowers/
 
 # Local test artifacts
 scripts/click-test-screenshots/
+target_codex_verify_fresh/
+_tmp_20460_c4ba653036c6634ab224f799cde4c457
+body.md
+rust.instructions.md
+svelte.instructions.md
+.continue/
+docs/assets/gif/
 
 # Asset-pack swap backups — pre-swap copies kept on disk for reference
 frontend/static/svg_old/
