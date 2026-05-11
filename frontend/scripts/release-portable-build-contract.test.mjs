@@ -21,7 +21,7 @@ describe('Windows release portable build', () => {
 		const script = read('scripts/build-portable.ps1');
 
 		expect(script).toContain('[switch]$UsePrebuiltFrontend');
-		expect(script).toContain('Invoke-Native pnpm run build');
+		expect(script).toContain('Invoke-Native -FilePath pnpm -Arguments @("run", "build")');
 		expect(script).toContain('frontend\\build');
 		expect(script).toContain('index.html');
 	});
