@@ -27,6 +27,7 @@ use super::models::{
 const DEFAULT_TTL_SECS: i64 = 30 * 24 * 60 * 60; // 30 days
 const DEFAULT_RESOLVE_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 const DEFAULT_RETRY_AFTER_SECS: i64 = 7 * 24 * 60 * 60;
+const UNRESOLVED_REASON_VERSION: &str = "resolver:v2:";
 pub const DEFAULT_EAGER_N: usize = 10;
 pub const DEFAULT_BULK_CONCURRENCY: usize = 6;
 
@@ -444,6 +445,13 @@ pub fn get_unresolved(
 
 /// True if we should skip a fresh attempt (the row was tried recently).
 pub fn unresolved_is_cold(record: &UnresolvedRecord, cfg: &SportifyCacheConfig) -> bool {
+    let current_reason = record
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with(UNRESOLVED_REASON_VERSION));
+    if !current_reason {
+        return false;
+    }
     now_secs().saturating_sub(record.last_attempt_at) < cfg.unresolved_retry_after_secs
 }
 
@@ -452,6 +460,7 @@ pub fn put_unresolved(
     spotify_track_id: &str,
     reason: Option<&str>,
 ) -> Result<()> {
+    let reason = reason.map(versioned_unresolved_reason);
     conn.execute(
         "INSERT INTO sportify_unresolved
             (spotify_track_id, last_attempt_at, attempts, reason)
@@ -460,10 +469,18 @@ pub fn put_unresolved(
             last_attempt_at = excluded.last_attempt_at,
             attempts = sportify_unresolved.attempts + 1,
             reason = excluded.reason",
-        params![spotify_track_id, now_secs(), reason],
+        params![spotify_track_id, now_secs(), reason.as_deref()],
     )
     .context("write sportify_unresolved")?;
     Ok(())
+}
+
+fn versioned_unresolved_reason(reason: &str) -> String {
+    if reason.starts_with(UNRESOLVED_REASON_VERSION) {
+        reason.to_string()
+    } else {
+        format!("{UNRESOLVED_REASON_VERSION}{reason}")
+    }
 }
 
 #[cfg(test)]
@@ -528,7 +545,19 @@ mod tests {
         put_unresolved(&conn, "abc", Some("b")).unwrap();
         let rec = get_unresolved(&conn, "abc").unwrap().unwrap();
         assert_eq!(rec.attempts, 2);
-        assert_eq!(rec.reason.as_deref(), Some("b"));
+        assert_eq!(rec.reason.as_deref(), Some("resolver:v2:b"));
+    }
+
+    #[test]
+    fn old_unresolved_reason_is_not_cold_after_resolver_change() {
+        let cfg = SportifyCacheConfig::default();
+        let old = UnresolvedRecord {
+            spotify_track_id: "abc".to_string(),
+            last_attempt_at: now_secs(),
+            attempts: 1,
+            reason: Some("title=1.00 artist=0.33 dur=0.00".to_string()),
+        };
+        assert!(!unresolved_is_cold(&old, &cfg));
     }
 
     #[test]
