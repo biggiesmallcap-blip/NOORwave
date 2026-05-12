@@ -248,6 +248,9 @@ describe('formatDateShort', () => {
 	test('Today / Yesterday', () => {
 		const now = new Date();
 		expect(formatDateShort(now.toISOString())).toBe('Today');
+		const sameDayFuture = new Date(now);
+		sameDayFuture.setHours(sameDayFuture.getHours() + 4);
+		expect(formatDateShort(sameDayFuture.toISOString())).toBe('Today');
 		const yesterday = new Date(now);
 		yesterday.setDate(yesterday.getDate() - 1);
 		expect(formatDateShort(yesterday.toISOString())).toBe('Yesterday');

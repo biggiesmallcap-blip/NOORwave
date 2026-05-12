@@ -129,7 +129,7 @@ pub fn artist_spread_shuffle_with_rng<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<Track> {
     let mut buckets = bucket_tracks_by_artist(tracks);
-    distribute_buckets(&mut buckets, rng)
+    distribute_buckets_by_largest_gap(&mut buckets, rng)
 }
 
 pub fn genre_shuffle(tracks: &[Track], track_genres: &HashMap<i64, Vec<String>>) -> Vec<Track> {
@@ -178,6 +178,53 @@ fn distribute_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut R) -> V
 
     while sequence.len() < total {
         let Some(index) = pick_bucket_index(buckets, last_key.as_deref(), rng) else {
+            break;
+        };
+
+        if let Some(track) = buckets[index].tracks.pop_front() {
+            last_key = Some(buckets[index].key.clone());
+            sequence.push(track);
+        }
+    }
+
+    sequence
+}
+
+fn distribute_buckets_by_largest_gap<R: Rng + ?Sized>(
+    buckets: &mut [Bucket],
+    rng: &mut R,
+) -> Vec<Track> {
+    for bucket in buckets.iter_mut() {
+        let slice = bucket.tracks.make_contiguous();
+        slice.shuffle(rng);
+    }
+
+    buckets.shuffle(rng);
+
+    let total = buckets
+        .iter()
+        .map(|bucket| bucket.tracks.len())
+        .sum::<usize>();
+    let mut sequence = Vec::with_capacity(total);
+    let mut last_key: Option<String> = None;
+
+    while sequence.len() < total {
+        let mut best_index = None;
+        let mut best_len = 0;
+        for (index, bucket) in buckets.iter().enumerate() {
+            let len = bucket.tracks.len();
+            if len == 0 || last_key.as_deref() == Some(bucket.key.as_str()) {
+                continue;
+            }
+            if len > best_len {
+                best_index = Some(index);
+                best_len = len;
+            }
+        }
+
+        let index =
+            best_index.or_else(|| buckets.iter().position(|bucket| !bucket.tracks.is_empty()));
+        let Some(index) = index else {
             break;
         };
 
@@ -424,6 +471,36 @@ mod tests {
 
         for pair in shuffled.windows(2) {
             assert_ne!(pair[0].artist_id, pair[1].artist_id);
+        }
+    }
+
+    #[test]
+    fn artist_spread_repairs_same_artist_tail_when_possible() {
+        let tracks = vec![
+            track(1, 1, "A", false, 1, None, 10),
+            track(2, 1, "A", false, 1, None, 10),
+            track(3, 1, "A", false, 1, None, 10),
+            track(4, 2, "B", false, 1, None, 10),
+            track(5, 2, "B", false, 1, None, 10),
+            track(6, 3, "C", false, 1, None, 10),
+            track(7, 3, "C", false, 1, None, 10),
+        ];
+
+        for seed in 0u64..200 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let shuffled = artist_spread_shuffle_with_rng(&tracks, &mut rng);
+
+            for pair in shuffled.windows(2) {
+                assert_ne!(
+                    pair[0].artist_id,
+                    pair[1].artist_id,
+                    "seed {seed} produced {:?}",
+                    shuffled
+                        .iter()
+                        .map(|track| track.artist_id)
+                        .collect::<Vec<_>>()
+                );
+            }
         }
     }
 

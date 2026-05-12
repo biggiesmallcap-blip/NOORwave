@@ -360,6 +360,8 @@ struct PlaybackRuntimeLoopState {
     device_name: String,
     device_sample_rate: u32,
     device_channels: u16,
+    #[cfg(target_os = "windows")]
+    exclusive_sink: ExclusiveRuntimeSink,
     /// Currently-audible "primary" engine. After a crossfade swap this is the
     /// incoming track; before any swap it's whatever was last started.
     engine: Option<PlaybackEngine>,
@@ -386,6 +388,36 @@ struct PlaybackRuntimeLoopState {
     /// thread. Used when re-grabbing exclusive on Resume/Play after the render
     /// thread released the device, and when cold-starting new engines.
     current_exclusive_release_grace_secs: u32,
+}
+
+#[cfg(target_os = "windows")]
+struct ExclusiveRuntimeSink {
+    source_bank: Arc<crate::playback::wasapi_exclusive::ExclusiveRenderSourceBank>,
+    stream: Option<crate::playback::wasapi_exclusive::ExclusiveStream>,
+}
+
+#[cfg(target_os = "windows")]
+impl ExclusiveRuntimeSink {
+    fn new() -> Self {
+        Self {
+            source_bank: Arc::new(
+                crate::playback::wasapi_exclusive::ExclusiveRenderSourceBank::new(),
+            ),
+            stream: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.source_bank.clear();
+        self.stream = None;
+    }
+
+    fn needs_rebuild(&self) -> bool {
+        self.stream
+            .as_ref()
+            .map(|stream| stream.is_released())
+            .unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -459,6 +491,8 @@ fn run_runtime_loop(
         device_name,
         device_sample_rate: output_config.sample_rate.0,
         device_channels: output_config.channels,
+        #[cfg(target_os = "windows")]
+        exclusive_sink: ExclusiveRuntimeSink::new(),
         engine: None,
         next_engine: None,
         fading_out_engine: None,
@@ -557,25 +591,42 @@ fn run_runtime_loop(
                     if let Some(mut stale) = state.next_engine.take() {
                         stale.stop();
                     }
-                    match PlaybackEngine::start(
-                        &config,
-                        &command_tx,
-                        &device,
-                        &output_config,
-                        output_sample_format,
-                        job,
-                        event_tx.clone(),
-                        state.device_sample_rate,
-                        state.device_channels,
-                        Arc::clone(&volume_ctl),
-                        // Give the pending engine its own position counter so it starts at 0.
-                        Arc::new(AtomicU64::new(0)),
-                    ) {
+                    let pending_position = Arc::new(AtomicU64::new(0));
+                    let engine_result = if state.current_exclusive {
+                        PlaybackEngine::start_decoder_only(
+                            &config,
+                            &command_tx,
+                            job,
+                            state.device_sample_rate,
+                            state.device_channels,
+                            Arc::clone(&volume_ctl),
+                            pending_position,
+                        )
+                    } else {
+                        PlaybackEngine::start(
+                            &config,
+                            &command_tx,
+                            &device,
+                            &output_config,
+                            output_sample_format,
+                            job,
+                            event_tx.clone(),
+                            state.device_sample_rate,
+                            state.device_channels,
+                            Arc::clone(&volume_ctl),
+                            pending_position,
+                        )
+                    };
+                    match engine_result {
                         Ok(engine) => {
                             // Keep the stream alive but software-paused so host pause does not
                             // block control commands on some Linux/PipeWire setups.
                             engine.shared.paused.store(true, Ordering::SeqCst);
                             state.next_engine = Some(engine);
+                            #[cfg(target_os = "windows")]
+                            if state.current_exclusive {
+                                refresh_exclusive_sources(&state);
+                            }
                         }
                         Err(err) => {
                             warn!("Failed to pre-buffer next track: {err:?}");
@@ -647,33 +698,51 @@ fn run_runtime_loop(
                 // missing stream. swap_stream handles its own cpal-shared
                 // fallback if the re-grab now fails (e.g. another app grabbed
                 // exclusive while we were paused).
-                if state.current_exclusive
-                    && let Some(engine) = state.engine.as_mut()
-                    && engine.needs_stream_rebuild()
-                {
-                    info!(
-                        "Resume: rebuilding exclusive stream after idle release on {}",
-                        state.device_name
-                    );
-                    match engine.swap_stream(
-                        &device,
-                        &output_config,
-                        output_sample_format,
-                        command_tx.clone(),
-                        event_tx.clone(),
-                        true,
-                        exclusive_rebuild_rate(
+                if state.current_exclusive {
+                    #[cfg(target_os = "windows")]
+                    if state.exclusive_sink.needs_rebuild() {
+                        info!(
+                            "Resume: rebuilding exclusive stream after idle release on {}",
+                            state.device_name
+                        );
+                        refresh_exclusive_sources(&state);
+                        let rebuild_rate = exclusive_rebuild_rate(
                             state.current_sample_rate_follow,
                             state.device_sample_rate,
-                        ),
-                        state.current_exclusive_release_grace_secs,
-                    ) {
-                        Ok(actual_rate) => {
-                            output_config.sample_rate = cpal::SampleRate(actual_rate);
-                            state.device_sample_rate = actual_rate;
-                        }
-                        Err(err) => {
-                            warn!("Resume: failed to rebuild exclusive stream: {err:?}");
+                        );
+                        let release_grace_secs = state.current_exclusive_release_grace_secs;
+                        match ensure_exclusive_sink_started(
+                            &mut state,
+                            &device,
+                            &output_config,
+                            rebuild_rate,
+                            release_grace_secs,
+                            command_tx.clone(),
+                            event_tx.clone(),
+                        ) {
+                            Ok(actual_rate) => {
+                                output_config.sample_rate = cpal::SampleRate(actual_rate);
+                                state.device_sample_rate = actual_rate;
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "Resume: failed to rebuild exclusive sink; falling back to shared: {err:?}"
+                                );
+                                if let Some(engine) = state.engine.as_mut() {
+                                    let actual_rate = engine.swap_stream(
+                                        &device,
+                                        &output_config,
+                                        output_sample_format,
+                                        command_tx.clone(),
+                                        event_tx.clone(),
+                                        false,
+                                        rebuild_rate,
+                                        release_grace_secs,
+                                    )?;
+                                    output_config.sample_rate = cpal::SampleRate(actual_rate);
+                                    state.device_sample_rate = actual_rate;
+                                }
+                            }
                         }
                     }
                 }
@@ -690,6 +759,8 @@ fn run_runtime_loop(
             }
             PlaybackRuntimeCommand::Stop => {
                 stop_all_engines(&mut state);
+                #[cfg(target_os = "windows")]
+                state.exclusive_sink.clear();
                 let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
             }
             PlaybackRuntimeCommand::TrackTerminal {
@@ -759,6 +830,10 @@ fn run_runtime_loop(
                             track_id, generation, outcome
                         );
                     }
+                }
+                #[cfg(target_os = "windows")]
+                if state.current_exclusive {
+                    refresh_exclusive_sources(&state);
                 }
             }
             PlaybackRuntimeCommand::TrackStatus {
@@ -850,48 +925,115 @@ fn run_runtime_loop(
                 // active one. Any in-flight crossfade is sacrificed at this
                 // point; the user is intentionally trading multi-stream mixing
                 // for bit-perfect output.
-                if exclusive {
-                    if let Some(mut stale) = state.next_engine.take() {
-                        stale.stop();
-                    }
-                    if let Some(mut stale) = state.fading_out_engine.take() {
-                        stale.stop();
-                    }
-                }
-
                 // Rebuild the stream on every live engine so they all play on
                 // the new device. swap_stream now transparently falls back to
                 // cpal shared on exclusive failure (and emits an
                 // ExclusiveModeFailed event), so a hard error here is rare —
                 // typically only a cpal shared build failure.
                 let mut swap_failed = false;
-                for engine_slot in [
-                    state.engine.as_mut(),
-                    state.next_engine.as_mut(),
-                    state.fading_out_engine.as_mut(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    match engine_slot.swap_stream(
-                        &new_device,
-                        &new_config,
-                        new_format,
-                        command_tx.clone(),
-                        event_tx.clone(),
-                        exclusive,
-                        desired_rate,
-                        exclusive_release_grace_secs,
-                    ) {
-                        Ok(actual_rate) => {
-                            actual_config.sample_rate = cpal::SampleRate(actual_rate);
+                if exclusive {
+                    #[cfg(target_os = "windows")]
+                    {
+                        for engine_slot in [
+                            state.engine.as_mut(),
+                            state.next_engine.as_mut(),
+                            state.fading_out_engine.as_mut(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            drop(engine_slot.stream.take());
+                            if let Some(target_rate) = requested_plan.target_sample_rate {
+                                engine_slot
+                                    .shared
+                                    .target_sample_rate
+                                    .store(target_rate, Ordering::Relaxed);
+                            }
                         }
-                        Err(err) => {
-                            warn!(
-                                "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
-                                engine_slot.track_id
-                            );
-                            swap_failed = true;
+                        refresh_exclusive_sources(&state);
+                        state.exclusive_sink.stream = None;
+                        match ensure_exclusive_sink_started(
+                            &mut state,
+                            &new_device,
+                            &new_config,
+                            desired_rate,
+                            exclusive_release_grace_secs,
+                            command_tx.clone(),
+                            event_tx.clone(),
+                        ) {
+                            Ok(actual_rate) => {
+                                actual_config.sample_rate = cpal::SampleRate(actual_rate);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "DeviceSwap: exclusive sink failed; falling back to shared: {err:?}"
+                                );
+                                swap_failed = true;
+                                for engine_slot in [
+                                    state.engine.as_mut(),
+                                    state.next_engine.as_mut(),
+                                    state.fading_out_engine.as_mut(),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                {
+                                    match engine_slot.swap_stream(
+                                        &new_device,
+                                        &new_config,
+                                        new_format,
+                                        command_tx.clone(),
+                                        event_tx.clone(),
+                                        false,
+                                        desired_rate,
+                                        exclusive_release_grace_secs,
+                                    ) {
+                                        Ok(actual_rate) => {
+                                            actual_config.sample_rate =
+                                                cpal::SampleRate(actual_rate);
+                                        }
+                                        Err(err) => {
+                                            warn!(
+                                                "DeviceSwap: failed to rebuild shared fallback for track {}: {err:?}",
+                                                engine_slot.track_id
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    #[cfg(target_os = "windows")]
+                    state.exclusive_sink.clear();
+
+                    for engine_slot in [
+                        state.engine.as_mut(),
+                        state.next_engine.as_mut(),
+                        state.fading_out_engine.as_mut(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        match engine_slot.swap_stream(
+                            &new_device,
+                            &new_config,
+                            new_format,
+                            command_tx.clone(),
+                            event_tx.clone(),
+                            false,
+                            desired_rate,
+                            exclusive_release_grace_secs,
+                        ) {
+                            Ok(actual_rate) => {
+                                actual_config.sample_rate = cpal::SampleRate(actual_rate);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
+                                    engine_slot.track_id
+                                );
+                                swap_failed = true;
+                            }
                         }
                     }
                 }
@@ -925,6 +1067,8 @@ fn run_runtime_loop(
             }
             PlaybackRuntimeCommand::Shutdown => {
                 stop_all_engines(&mut state);
+                #[cfg(target_os = "windows")]
+                state.exclusive_sink.clear();
                 break;
             }
         }
@@ -986,69 +1130,99 @@ fn transition_to_job(
         .map(|e| e.track_id == job.track.id && e.generation == job.generation)
         .unwrap_or(false);
 
-    let engine = if pre_decoded_match {
+    if pre_decoded_match {
         let pre = state.next_engine.take().unwrap();
         // position_source was already redirected to this engine's counter at
         // promote_next_to_active time, so the handle reads the right value.
         // Restart the stream (it was paused during pre-decode).
         pre.shared.paused.store(false, Ordering::SeqCst);
-        pre
+        state.engine = Some(pre);
+        #[cfg(target_os = "windows")]
+        if state.current_exclusive {
+            refresh_exclusive_sources(state);
+        }
     } else {
         // Cold start — stop any stale next_engine.
         if let Some(mut stale) = state.next_engine.take() {
             stale.stop();
         }
-        let mut eng = PlaybackEngine::start(
-            config,
-            command_tx,
-            device,
-            output_config,
-            output_sample_format,
-            job,
-            event_tx.clone(),
-            state.device_sample_rate,
-            state.device_channels,
-            Arc::clone(volume_ctl),
-            Arc::clone(position_samples),
-        )?;
-        let actual_start_rate = eng.shared.device_sample_rate;
-        output_config.sample_rate = cpal::SampleRate(actual_start_rate);
-        state.device_sample_rate = actual_start_rate;
-        // Redirect the handle's reader to this engine's counter (which IS
-        // position_samples for cold starts, but re-pointing is always correct).
-        *position_source.lock().unwrap() = Arc::clone(position_samples);
-
-        // If exclusive mode is currently engaged, swap the just-built cpal
-        // shared stream over to the WASAPI exclusive backend so the user
-        // doesn't silently get shared-mode output for every new track.
-        // swap_stream itself handles the fallback-to-cpal + event emission
-        // when the WASAPI grab fails, so a hard error here is rare.
         if state.current_exclusive {
-            match eng.swap_stream(
+            let eng = PlaybackEngine::start_decoder_only(
+                config,
+                command_tx,
+                job,
+                state.device_sample_rate,
+                state.device_channels,
+                Arc::clone(volume_ctl),
+                Arc::clone(position_samples),
+            )?;
+            state.engine = Some(eng);
+            *position_source.lock().unwrap() = Arc::clone(position_samples);
+
+            #[cfg(target_os = "windows")]
+            {
+                refresh_exclusive_sources(state);
+                match ensure_exclusive_sink_started(
+                    state,
+                    device,
+                    output_config,
+                    exclusive_rebuild_rate(
+                        state.current_sample_rate_follow,
+                        state.device_sample_rate,
+                    ),
+                    state.current_exclusive_release_grace_secs,
+                    command_tx.clone(),
+                    event_tx.clone(),
+                ) {
+                    Ok(actual_rate) => {
+                        output_config.sample_rate = cpal::SampleRate(actual_rate);
+                        state.device_sample_rate = actual_rate;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "transition_to_job: exclusive sink failed; falling back to shared: {err:?}"
+                        );
+                        if let Some(engine) = state.engine.as_mut() {
+                            let actual_rate = engine.swap_stream(
+                                device,
+                                output_config,
+                                output_sample_format,
+                                command_tx.clone(),
+                                event_tx.clone(),
+                                false,
+                                exclusive_rebuild_rate(
+                                    state.current_sample_rate_follow,
+                                    state.device_sample_rate,
+                                ),
+                                state.current_exclusive_release_grace_secs,
+                            )?;
+                            output_config.sample_rate = cpal::SampleRate(actual_rate);
+                            state.device_sample_rate = actual_rate;
+                        }
+                    }
+                }
+            }
+        } else {
+            let eng = PlaybackEngine::start(
+                config,
+                command_tx,
                 device,
                 output_config,
                 output_sample_format,
-                command_tx.clone(),
+                job,
                 event_tx.clone(),
-                true,
-                exclusive_rebuild_rate(state.current_sample_rate_follow, state.device_sample_rate),
-                state.current_exclusive_release_grace_secs,
-            ) {
-                Ok(actual_rate) => {
-                    output_config.sample_rate = cpal::SampleRate(actual_rate);
-                    state.device_sample_rate = actual_rate;
-                }
-                Err(err) => {
-                    warn!(
-                        "transition_to_job: swap_stream errored cold-starting new engine: {err:?}"
-                    );
-                }
-            }
+                state.device_sample_rate,
+                state.device_channels,
+                Arc::clone(volume_ctl),
+                Arc::clone(position_samples),
+            )?;
+            let actual_start_rate = eng.shared.device_sample_rate;
+            output_config.sample_rate = cpal::SampleRate(actual_start_rate);
+            state.device_sample_rate = actual_start_rate;
+            *position_source.lock().unwrap() = Arc::clone(position_samples);
+            state.engine = Some(eng);
         }
-        eng
-    };
-
-    state.engine = Some(engine);
+    }
     Ok(())
 }
 
@@ -1074,6 +1248,99 @@ fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
     }
     if let Some(mut engine) = state.fading_out_engine.take() {
         engine.stop();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn exclusive_render_sources(
+    active: Option<&PlaybackEngine>,
+    prepared: Option<&PlaybackEngine>,
+    fading: Option<&PlaybackEngine>,
+) -> Vec<crate::playback::wasapi_exclusive::ExclusiveRenderSource> {
+    let mut sources = Vec::new();
+    if let Some(engine) = active {
+        sources.push(crate::playback::wasapi_exclusive::ExclusiveRenderSource {
+            role: crate::playback::wasapi_exclusive::ExclusiveRenderRole::Active,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    if let Some(engine) = prepared {
+        sources.push(crate::playback::wasapi_exclusive::ExclusiveRenderSource {
+            role: crate::playback::wasapi_exclusive::ExclusiveRenderRole::Prepared,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    if let Some(engine) = fading {
+        sources.push(crate::playback::wasapi_exclusive::ExclusiveRenderSource {
+            role: crate::playback::wasapi_exclusive::ExclusiveRenderRole::Fading,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    sources
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_exclusive_sources(state: &PlaybackRuntimeLoopState) {
+    state
+        .exclusive_sink
+        .source_bank
+        .set_sources(exclusive_render_sources(
+            state.engine.as_ref(),
+            state.next_engine.as_ref(),
+            state.fading_out_engine.as_ref(),
+        ));
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn ensure_exclusive_sink_started(
+    state: &mut PlaybackRuntimeLoopState,
+    device: &cpal::Device,
+    output_config: &StreamConfig,
+    desired_sample_rate: Option<u32>,
+    exclusive_release_grace_secs: u32,
+    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Result<u32> {
+    let exclusive_plan =
+        swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
+    if !state.exclusive_sink.needs_rebuild() {
+        return Ok(exclusive_plan.stream_config.sample_rate.0);
+    }
+    state.exclusive_sink.stream = None;
+
+    let device_label = device
+        .name()
+        .unwrap_or_else(|_| "default output device".to_string());
+    let device_name = device.name().ok();
+    match crate::playback::wasapi_exclusive::build_exclusive_stream(
+        device_name.as_deref(),
+        device_label.clone(),
+        exclusive_plan.stream_config.sample_rate.0,
+        exclusive_plan.stream_config.channels,
+        exclusive_release_grace_secs,
+        Arc::clone(&state.exclusive_sink.source_bank),
+        command_tx,
+        event_tx.clone(),
+    ) {
+        Ok(stream) => {
+            let transport_format = stream.transport_format.clone();
+            state.exclusive_sink.stream = Some(stream);
+            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                device_name: device_label,
+                transport_format,
+            });
+            Ok(exclusive_plan.stream_config.sample_rate.0)
+        }
+        Err(failure) => {
+            let reason = failure.user_message();
+            warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
+            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
+                reason: reason.clone(),
+                device_name: device_label,
+            });
+            Err(anyhow!(reason))
+        }
     }
 }
 
@@ -1125,6 +1392,10 @@ fn promote_next_to_active(
             generation: outgoing_generation,
         });
     }
+    #[cfg(target_os = "windows")]
+    if state.current_exclusive {
+        refresh_exclusive_sources(state);
+    }
 }
 
 /// Output stream backend. Shared mode goes through cpal (which uses WASAPI
@@ -1133,9 +1404,6 @@ fn promote_next_to_active(
 /// audio engine entirely. Both feed from the same `PlaybackSharedState`.
 enum OutputStream {
     Cpal(Stream),
-    #[cfg(target_os = "windows")]
-    #[allow(dead_code)]
-    Wasapi(crate::playback::wasapi_exclusive::ExclusiveStream),
 }
 
 impl OutputStream {
@@ -1145,8 +1413,6 @@ impl OutputStream {
     fn start(&self) -> Result<()> {
         match self {
             Self::Cpal(s) => start_cpal_stream(s),
-            #[cfg(target_os = "windows")]
-            Self::Wasapi(_) => Ok(()),
         }
     }
 }
@@ -1238,6 +1504,50 @@ impl PlaybackEngine {
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
     ) -> Result<Self> {
+        let mut engine = Self::start_decoder_only(
+            config,
+            command_tx,
+            job,
+            output_config.sample_rate.0,
+            device_channels,
+            volume_ctl,
+            position_samples,
+        )?;
+
+        let cpal_stream = match build_output_stream(
+            device,
+            output_config,
+            output_sample_format,
+            Arc::clone(&engine.shared),
+            engine.shared.command_tx.clone(),
+            event_tx,
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                engine.stop();
+                return Err(error);
+            }
+        };
+        let stream = OutputStream::Cpal(cpal_stream);
+        if let Err(error) = stream.start() {
+            engine.stop();
+            return Err(error);
+        }
+        engine.stream = Some(stream);
+
+        Ok(engine)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_decoder_only(
+        config: &PlaybackRuntimeConfig,
+        command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+        job: PreparedPlaybackJob,
+        output_sample_rate: u32,
+        device_channels: u16,
+        volume_ctl: Arc<AtomicU32>,
+        position_samples: Arc<AtomicU64>,
+    ) -> Result<Self> {
         if matches!(job.source, PlaybackSourceRequest::LocalLibrary) {
             return Err(anyhow!(
                 "local library playback is not wired into the host-audio runtime yet"
@@ -1247,7 +1557,6 @@ impl PlaybackEngine {
         let track_id = job.track.id;
         let generation = job.generation;
         let source_kind = job.source_kind();
-        let output_sample_rate = output_config.sample_rate.0;
         let estimated_total_samples = job.track.duration_ms.and_then(|duration_ms| {
             estimate_total_samples_from_duration_ms(
                 duration_ms,
@@ -1267,17 +1576,6 @@ impl PlaybackEngine {
             volume_ctl,
             position_samples,
         ));
-
-        let cpal_stream = build_output_stream(
-            device,
-            output_config,
-            output_sample_format,
-            Arc::clone(&shared),
-            shared.command_tx.clone(),
-            event_tx,
-        )?;
-        let stream = OutputStream::Cpal(cpal_stream);
-        stream.start()?;
 
         let decoder_shared = Arc::clone(&shared);
         let decoder_shared_for_decode = Arc::clone(&shared);
@@ -1303,7 +1601,7 @@ impl PlaybackEngine {
         Ok(Self {
             track_id,
             generation,
-            stream: Some(stream),
+            stream: None,
             decoder_thread: Some(decoder_thread),
             shared,
         })
@@ -1317,18 +1615,6 @@ impl PlaybackEngine {
     fn resume(&self) -> Result<()> {
         self.shared.paused.store(false, Ordering::SeqCst);
         Ok(())
-    }
-
-    /// True iff the engine's output stream is gone OR an exclusive WASAPI
-    /// stream has self-released after idle. Used by the runtime to know it
-    /// needs to call `swap_stream` to rebuild the stream before unpausing.
-    fn needs_stream_rebuild(&self) -> bool {
-        match self.stream.as_ref() {
-            None => true,
-            #[cfg(target_os = "windows")]
-            Some(OutputStream::Wasapi(s)) => s.is_released(),
-            Some(_) => false,
-        }
     }
 
     fn stop(&mut self) {
@@ -1372,8 +1658,7 @@ impl PlaybackEngine {
         event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
         exclusive: bool,
         desired_sample_rate: Option<u32>,
-        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-        exclusive_release_grace_secs: u32,
+        _exclusive_release_grace_secs: u32,
     ) -> Result<u32> {
         // Pause first so the decoder side doesn't keep filling while the
         // callback is gone, then drop the old stream before building the new
@@ -1382,97 +1667,26 @@ impl PlaybackEngine {
         let pause_guard = SwapPauseGuard::new(Arc::clone(&self.shared));
         drop(self.stream.take());
 
-        let device_label = device
-            .name()
-            .unwrap_or_else(|_| "default output device".to_string());
+        if exclusive {
+            return Err(anyhow!(
+                "exclusive output is owned by the runtime WASAPI sink"
+            ));
+        }
 
-        #[cfg(target_os = "windows")]
-        let (new_stream, active_plan) = if exclusive {
-            let exclusive_plan =
-                swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
-            let device_name = device.name().ok();
-            match crate::playback::wasapi_exclusive::build_exclusive_stream(
-                device_name.as_deref(),
-                device_label.clone(),
-                exclusive_plan.stream_config.sample_rate.0,
-                exclusive_plan.stream_config.channels,
-                exclusive_release_grace_secs,
-                Arc::clone(&self.shared),
-                command_tx.clone(),
-                event_tx.clone(),
-            ) {
-                Ok(exclusive_stream) => {
-                    let transport_format = exclusive_stream.transport_format.clone();
-                    let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
-                        device_name: device_label.clone(),
-                        transport_format,
-                    });
-                    (OutputStream::Wasapi(exclusive_stream), exclusive_plan)
-                }
-                Err(failure) => {
-                    let reason = failure.user_message();
-                    warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
-                    let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
-                        reason,
-                        device_name: device_label.clone(),
-                    });
-                    let fallback_plan = swap_stream_plan(
-                        output_config,
-                        desired_sample_rate,
-                        SwapBackend::SharedFallback,
-                    );
-                    let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
-                        device,
-                        &fallback_plan.stream_config,
-                        output_config,
-                        output_sample_format,
-                        Arc::clone(&self.shared),
-                        command_tx,
-                        event_tx,
-                    )?;
-                    let mut active_plan = fallback_plan;
-                    active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
-                    active_plan.target_sample_rate = Some(actual_rate);
-                    (OutputStream::Cpal(stream), active_plan)
-                }
-            }
-        } else {
-            let shared_plan =
-                swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
-            let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
-                device,
-                &shared_plan.stream_config,
-                output_config,
-                output_sample_format,
-                Arc::clone(&self.shared),
-                command_tx,
-                event_tx,
-            )?;
-            let mut active_plan = shared_plan;
-            active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
-            active_plan.target_sample_rate = Some(actual_rate);
-            (OutputStream::Cpal(stream), active_plan)
-        };
-        #[cfg(not(target_os = "windows"))]
-        let (new_stream, active_plan) = {
-            let _ = exclusive;
-            let _ = device_label;
-            let shared_plan =
-                swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
-            let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
-                device,
-                &shared_plan.stream_config,
-                output_config,
-                output_sample_format,
-                Arc::clone(&self.shared),
-                command_tx,
-                event_tx,
-            )?;
-            let mut active_plan = shared_plan;
-            active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
-            active_plan.target_sample_rate = Some(actual_rate);
-            (OutputStream::Cpal(stream), active_plan)
-        };
+        let shared_plan = swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
+        let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
+            device,
+            &shared_plan.stream_config,
+            output_config,
+            output_sample_format,
+            Arc::clone(&self.shared),
+            command_tx,
+            event_tx,
+        )?;
+        let mut active_plan = shared_plan;
+        active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
+        active_plan.target_sample_rate = Some(actual_rate);
+        let new_stream = OutputStream::Cpal(stream);
 
         if let Some(target_sample_rate) = active_plan.target_sample_rate {
             self.shared
@@ -1967,7 +2181,7 @@ pub(crate) struct PlaybackSharedState {
 
 impl PlaybackSharedState {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         track_id: i64,
         generation: u64,
         source_kind: PlaybackSourceKind,
@@ -3406,6 +3620,52 @@ mod tests {
                 }
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn exclusive_render_sources_include_active_prepared_and_fading() {
+        let active = test_engine_with_shared(10, 1);
+        let prepared = test_engine_with_shared(11, 1);
+        let fading = test_engine_with_shared(9, 1);
+
+        let sources = exclusive_render_sources(Some(&active), Some(&prepared), Some(&fading));
+
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            sources[0].role,
+            crate::playback::wasapi_exclusive::ExclusiveRenderRole::Active
+        );
+        assert_eq!(
+            sources[1].role,
+            crate::playback::wasapi_exclusive::ExclusiveRenderRole::Prepared
+        );
+        assert_eq!(
+            sources[2].role,
+            crate::playback::wasapi_exclusive::ExclusiveRenderRole::Fading
+        );
+    }
+
+    fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
+        let (command_tx, _) = mpsc::channel();
+        PlaybackEngine {
+            track_id,
+            generation,
+            stream: None,
+            decoder_thread: None,
+            shared: Arc::new(PlaybackSharedState::new(
+                track_id,
+                generation,
+                PlaybackSourceKind::TidalStream,
+                GaplessPlan::disabled(),
+                48_000,
+                2,
+                None,
+                command_tx,
+                Arc::new(AtomicU32::new(1.0f32.to_bits())),
+                Arc::new(AtomicU64::new(0)),
+            )),
         }
     }
 }

@@ -11967,7 +11967,7 @@ async fn do_tidal_sync(
                     s.db.with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
                         for track in &tracks_resp.items {
-                            insert_tidal_track(&tx, track, false)?;
+                            insert_tidal_track(&tx, track, false, None)?;
                             stats.tracks += 1;
                         }
                         tx.commit()?;
@@ -12028,7 +12028,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    insert_tidal_track(&tx, track, true)?;
+                    insert_tidal_track(&tx, track, true, fav.created.as_deref())?;
                     stats.tracks += 1;
                 }
                 tx.commit()?;
@@ -12153,7 +12153,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    insert_tidal_track(&tx, track, false)?;
+                    insert_tidal_track(&tx, track, false, None)?;
 
                     let track_id: Option<i64> = tx
                         .query_row(
@@ -12723,6 +12723,46 @@ fn spawn_playback_runtime_listener(
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
                         device: device_name,
                     });
+                    let retry = {
+                        let settings = state_guard
+                            .db
+                            .with_conn(|conn| {
+                                crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
+                            })
+                            .ok();
+                        let is_playing = state_guard
+                            .db
+                            .with_conn(|conn| player::load_state(conn).map(|s| s.is_playing))
+                            .unwrap_or(false);
+                        let runtime = state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .map(|runtime| runtime.handle.clone());
+                        settings.and_then(|settings| {
+                            if should_retry_exclusive_release(is_playing, settings.exclusive_mode) {
+                                runtime.map(|runtime| {
+                                    (
+                                        runtime,
+                                        runtime_output_settings_from_audio_settings(&settings),
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    drop(state_guard);
+                    if let Some((runtime, output)) = retry
+                        && let Err(error) = runtime.device_swap(
+                            output.device,
+                            output.exclusive_mode,
+                            output.sample_rate_follow,
+                            None,
+                            output.exclusive_release_grace_secs,
+                        )
+                    {
+                        warn!("Failed to recover released WASAPI exclusive stream: {error}");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");
@@ -12752,19 +12792,6 @@ async fn handle_near_end(
             return Ok(());
         }
         if current_playback_generation(&state_guard) != generation {
-            return Ok(());
-        }
-
-        // Skip pre-decode in exclusive mode — only one stream can grab the
-        // device exclusively, and a paused pre-buffer engine would force-share
-        // the device which the OS rejects with AUDCLNT_E_DEVICE_IN_USE.
-        // The next track will cold-start when the current one finishes.
-        let exclusive = state_guard
-            .db
-            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
-            .map(|s| s.exclusive_mode)
-            .unwrap_or(false);
-        if exclusive {
             return Ok(());
         }
 
@@ -12874,6 +12901,18 @@ async fn handle_near_end(
                 && let Some(next_rate) = stream.sample_rate
             {
                 let current_rate = info.sample_rate;
+                if should_skip_prebuffer_for_exclusive_rate_change(
+                    settings.exclusive_mode,
+                    settings.sample_rate_follow,
+                    current_rate,
+                    Some(next_rate),
+                ) {
+                    info!(
+                        "Skipping pre-buffer for next track {}: exclusive sample-rate-follow will switch from {} Hz to {} Hz at track start",
+                        next.id, current_rate, next_rate
+                    );
+                    return Ok(());
+                }
                 if next_rate as u32 != current_rate {
                     let device_sel = match settings.output_device {
                         Some(device_id) => {
@@ -13300,7 +13339,7 @@ async fn effective_crossfade_ms(state: &SharedState, configured: i32) -> i32 {
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
         .map(|s| s.exclusive_mode)
         .unwrap_or(false);
-    if exclusive { 0 } else { configured }
+    effective_crossfade_for_exclusive(exclusive, configured)
 }
 
 async fn current_crossfade_ms(state: &SharedState) -> i32 {
@@ -13327,7 +13366,26 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
         .map(|s| s.exclusive_mode)
         .unwrap_or(false);
-    if exclusive { 0 } else { configured }
+    effective_crossfade_for_exclusive(exclusive, configured)
+}
+
+fn effective_crossfade_for_exclusive(_exclusive: bool, configured: i32) -> i32 {
+    configured.max(0)
+}
+
+fn should_skip_prebuffer_for_exclusive_rate_change(
+    exclusive_mode: bool,
+    sample_rate_follow: bool,
+    current_rate: u32,
+    next_rate: Option<i32>,
+) -> bool {
+    if !exclusive_mode || !sample_rate_follow {
+        return false;
+    }
+    let Some(next_rate) = next_rate else {
+        return false;
+    };
+    next_rate > 0 && next_rate as u32 != current_rate
 }
 
 async fn current_user_audio_quality(
@@ -13492,6 +13550,10 @@ async fn post_audio_exclusive_retry(
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn should_retry_exclusive_release(is_playing: bool, exclusive_mode: bool) -> bool {
+    is_playing && exclusive_mode
 }
 
 async fn get_audio_devices(
@@ -14013,6 +14075,7 @@ fn insert_tidal_track(
     conn: &rusqlite::Connection,
     track: &crate::services::tidal::client::TidalTrack,
     is_favorite: bool,
+    favorite_created: Option<&str>,
 ) -> anyhow::Result<()> {
     // Ensure artist exists first (tracks.artist_id is NOT NULL)
     conn.execute(
@@ -14033,17 +14096,21 @@ fn insert_tidal_track(
     let album_tidal_id = track.album.as_ref().map(|a| a.id);
 
     conn.execute(
-        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source)
-         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal')
+        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source, date_added)
+         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')))
          ON CONFLICT(tidal_id) DO UPDATE SET
             title=excluded.title, best_quality=excluded.best_quality,
             fidelity_score=MAX(tracks.fidelity_score, excluded.fidelity_score),
-            is_favorite=MAX(tracks.is_favorite, excluded.is_favorite)",
+            is_favorite=MAX(tracks.is_favorite, excluded.is_favorite),
+            date_added=CASE
+                WHEN ?11 = 1 AND ?12 IS NOT NULL THEN excluded.date_added
+                ELSE tracks.date_added
+            END",
         rusqlite::params![
             track.id, track.title, track.artist.id, album_tidal_id,
             track.volume_number.unwrap_or(1), track.track_number,
             track.duration * 1000, track.isrc,
-            quality, fidelity, is_favorite as i32,
+            quality, fidelity, is_favorite as i32, favorite_created,
         ],
     )?;
 
@@ -16555,6 +16622,48 @@ mod tests {
         }
     }
 
+    fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::TidalTrack {
+        crate::services::tidal::client::TidalTrack {
+            id,
+            title: title.to_string(),
+            duration: 180,
+            track_number: Some(1),
+            volume_number: Some(1),
+            isrc: None,
+            artist: crate::services::tidal::client::TidalArtist {
+                id: 10,
+                name: "Artist".to_string(),
+                picture: None,
+                extra: HashMap::new(),
+            },
+            artists: None,
+            album: None,
+            audio_quality: Some("LOSSLESS".to_string()),
+            stream_ready: Some(true),
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn insert_tidal_track_uses_favorite_created_as_date_added() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let track = test_tidal_track(2001, "Newest favorite");
+
+            insert_tidal_track(conn, &track, true, Some("2026-05-01T12:34:56.000Z"))?;
+
+            let date_added: String = conn.query_row(
+                "SELECT date_added FROM tracks WHERE tidal_id = 2001",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(date_added, "2026-05-01T12:34:56.000Z");
+            Ok(())
+        })
+        .expect("inserted favorite track");
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn runtime_output_settings_preserve_persisted_exclusive_preferences() {
         let mut settings = crate::db::audio_settings::AudioSettings::default();
@@ -17153,6 +17262,52 @@ mod tests {
         assert_eq!(body["runtime"]["exclusive_transport_format"], Value::Null);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn retries_exclusive_release_only_while_playing_with_exclusive_enabled() {
+        assert!(should_retry_exclusive_release(true, true));
+        assert!(!should_retry_exclusive_release(false, true));
+        assert!(!should_retry_exclusive_release(true, false));
+        assert!(!should_retry_exclusive_release(false, false));
+    }
+
+    #[test]
+    fn exclusive_crossfade_policy_keeps_configured_value() {
+        assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 1_500);
+        assert_eq!(effective_crossfade_for_exclusive(false, 1_500), 1_500);
+        assert_eq!(effective_crossfade_for_exclusive(true, -10), 0);
+    }
+
+    #[test]
+    fn exclusive_sample_rate_follow_skips_prebuffer_on_rate_change() {
+        assert!(should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            true,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            true,
+            96_000,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            false,
+            true,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            false,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true, true, 44_100, None,
+        ));
     }
 
     #[tokio::test]

@@ -133,6 +133,25 @@ fn favorite_predicate(favorite_only: bool, liked_only: bool) -> Option<&'static 
     }
 }
 
+fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
+    let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
+    match sort_by {
+        "title" => format!("t.title {dir}"),
+        "artist" => format!("a_artists.name {dir}"),
+        "album" => format!("al.title {dir}"),
+        "year" => format!("al.year {dir}"),
+        "date_added" => format!("t.date_added {dir}, t.id {dir}"),
+        "duration" => format!("t.duration_ms {dir}"),
+        "play_count" => format!("t.play_count {dir}"),
+        "fidelity" => format!("t.fidelity_score {dir}"),
+        "bpm" => format!("COALESCE(a.bpm, 0) {dir}"),
+        "energy" => format!("COALESCE(a.energy, 0) {dir}"),
+        "danceability" => format!("COALESCE(a.danceability, 0) {dir}"),
+        "last_played_at" => format!("COALESCE(t.last_played_at, '') {dir}"),
+        _ => format!("t.date_added {dir}, t.id {dir}"),
+    }
+}
+
 pub fn get_tracks(
     conn: &Connection,
     sort_by: &str,
@@ -171,22 +190,7 @@ pub fn get_tracks_with_dsp(
         || dsp.key_signature.is_some()
         || dsp.instrumental_only;
 
-    let order_col = match sort_by {
-        "title" => "t.title",
-        "artist" => "a_artists.name",
-        "album" => "al.title",
-        "year" => "al.year",
-        "date_added" => "t.date_added",
-        "duration" => "t.duration_ms",
-        "play_count" => "t.play_count",
-        "fidelity" => "t.fidelity_score",
-        "bpm" => "COALESCE(a.bpm, 0)",
-        "energy" => "COALESCE(a.energy, 0)",
-        "danceability" => "COALESCE(a.danceability, 0)",
-        "last_played_at" => "COALESCE(t.last_played_at, '')",
-        _ => "t.date_added",
-    };
-    let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
+    let order_clause = track_order_clause(sort_by, sort_dir);
 
     let mut conditions = Vec::new();
     if let Some(pred) = favorite_predicate(favorite_only, liked_only) {
@@ -237,7 +241,7 @@ pub fn get_tracks_with_dsp(
          LEFT JOIN albums al ON t.album_id = al.id
          {join_clause}
          {where_clause}
-         ORDER BY {order_col} {dir}
+         ORDER BY {order_clause}
          LIMIT ?1 OFFSET ?2"
     );
 
@@ -7781,6 +7785,43 @@ mod tests {
 
         let count = get_track_count(&conn, true, false).expect("library count");
         assert_eq!(count, 3, "count must match favorite_only data query");
+    }
+
+    #[test]
+    fn date_added_desc_uses_newest_row_as_tiebreaker() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id,
+                                  best_quality, best_source, fidelity_score, is_favorite, source, date_added)
+             VALUES (1, 'First', 1, 200000, 201, 'LOSSLESS', 'tidal', 10, 1, 'tidal', '2026-05-01T00:00:00Z'),
+                    (2, 'Second', 1, 200000, 202, 'LOSSLESS', 'tidal', 10, 1, 'tidal', '2026-05-01T00:00:00Z'),
+                    (3, 'Third', 1, 200000, 203, 'LOSSLESS', 'tidal', 10, 1, 'tidal', '2026-05-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed tracks");
+
+        let tracks = get_tracks(&conn, "date_added", "desc", 100, 0, true, false)
+            .expect("date sorted tracks");
+
+        assert_eq!(
+            tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn date_added_order_clause_has_explicit_id_tiebreaker() {
+        assert_eq!(
+            track_order_clause("date_added", "desc"),
+            "t.date_added DESC, t.id DESC"
+        );
+        assert_eq!(
+            track_order_clause("date_added", "asc"),
+            "t.date_added ASC, t.id ASC"
+        );
     }
 
     #[test]

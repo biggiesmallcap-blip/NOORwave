@@ -19,9 +19,9 @@
 //! continuous paused state. The runtime detects the release via
 //! [`ExclusiveStream::is_released`] and re-grabs on the next Resume / Play.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,25 @@ const AUDCLNT_E_DEVICE_IN_USE: i32 = 0x8889_000Au32 as i32;
 const AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889_000Eu32 as i32;
 const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x8889_0019u32 as i32;
 const AUDCLNT_E_INVALID_DEVICE_PERIOD: i32 = 0x8889_0020u32 as i32;
+const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
+
+struct DeviceInUseRetryBudget {
+    index: usize,
+}
+
+impl DeviceInUseRetryBudget {
+    fn new() -> Self {
+        Self { index: 0 }
+    }
+
+    fn next_delay_ms(&mut self) -> Option<u64> {
+        let delay = DEVICE_IN_USE_BACKOFF_MS.get(self.index).copied();
+        if delay.is_some() {
+            self.index += 1;
+        }
+        delay
+    }
+}
 
 /// Reason the exclusive-mode WASAPI grab failed. Plumbed up to the route
 /// layer so the UI can render a specific, actionable error rather than a
@@ -106,6 +125,48 @@ pub struct ExclusiveStream {
     #[allow(dead_code)]
     pub effective_channels: u16,
     pub transport_format: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ExclusiveRenderRole {
+    Active,
+    Prepared,
+    Fading,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExclusiveRenderSource {
+    pub role: ExclusiveRenderRole,
+    pub shared: Arc<PlaybackSharedState>,
+}
+
+#[derive(Default)]
+pub(crate) struct ExclusiveRenderSourceBank {
+    sources: RwLock<Vec<ExclusiveRenderSource>>,
+}
+
+impl ExclusiveRenderSourceBank {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_sources(&self, sources: Vec<ExclusiveRenderSource>) {
+        if let Ok(mut guard) = self.sources.write() {
+            *guard = sources;
+        }
+    }
+
+    pub fn clear(&self) {
+        self.set_sources(Vec::new());
+    }
+
+    pub fn snapshot(&self) -> Vec<ExclusiveRenderSource> {
+        self.sources
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl ExclusiveStream {
@@ -236,7 +297,7 @@ pub fn build_exclusive_stream(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
-    shared: Arc<PlaybackSharedState>,
+    source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> std::result::Result<ExclusiveStream, ExclusiveInitFailure> {
@@ -258,7 +319,7 @@ pub fn build_exclusive_stream(
                 desired_sample_rate,
                 channels,
                 grace_secs,
-                shared,
+                source_bank,
                 command_tx,
                 event_tx,
                 shutdown_clone,
@@ -295,7 +356,7 @@ fn run_render_thread(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
-    shared: Arc<PlaybackSharedState>,
+    source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     shutdown: Arc<AtomicBool>,
@@ -314,6 +375,7 @@ fn run_render_thread(
     };
 
     let mut f32_scratch: Vec<f32> = Vec::new();
+    let mut mix_scratch: Vec<f32> = Vec::new();
     let mut byte_buf: Vec<u8> = Vec::new();
     match write_available_wasapi_frames(
         &audio_client,
@@ -321,10 +383,11 @@ fn run_render_thread(
         channels,
         blockalign,
         fmt_tag,
-        &shared,
+        &source_bank,
         &command_tx,
         &event_tx,
         &mut f32_scratch,
+        &mut mix_scratch,
         &mut byte_buf,
     ) {
         Ok(Some(report)) => {
@@ -374,7 +437,7 @@ fn run_render_thread(
         // Drop chains release the IAudioClient so other apps can use the
         // device. The runtime detects the release via `is_released()` and
         // rebuilds the stream on the next Resume/Play.
-        if shared.paused.load(Ordering::Relaxed) {
+        if source_bank_all_paused(&source_bank) {
             let now = Instant::now();
             match paused_since {
                 None => paused_since = Some(now),
@@ -409,10 +472,11 @@ fn run_render_thread(
             channels,
             blockalign,
             fmt_tag,
-            &shared,
+            &source_bank,
             &command_tx,
             &event_tx,
             &mut f32_scratch,
+            &mut mix_scratch,
             &mut byte_buf,
         ) {
             Ok(Some(report)) => {
@@ -469,10 +533,11 @@ fn write_available_wasapi_frames(
     channels: u16,
     blockalign: usize,
     fmt_tag: Format,
-    shared: &Arc<PlaybackSharedState>,
+    source_bank: &Arc<ExclusiveRenderSourceBank>,
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     f32_scratch: &mut Vec<f32>,
+    mix_scratch: &mut Vec<f32>,
     byte_buf: &mut Vec<u8>,
 ) -> std::result::Result<Option<RenderWriteReport>, String> {
     let frames = audio_client
@@ -487,7 +552,12 @@ fn write_available_wasapi_frames(
     f32_scratch.resize(interleaved, 0.0);
     f32_scratch.fill(0.0);
 
-    fill_f32_from_shared(f32_scratch, shared, command_tx, event_tx);
+    mix_scratch.resize(interleaved, 0.0);
+    for source in source_bank.snapshot() {
+        mix_scratch.fill(0.0);
+        fill_f32_from_shared(mix_scratch, &source.shared, command_tx, event_tx);
+        mix_f32_into(f32_scratch, mix_scratch);
+    }
     let nonzero_audio = f32_scratch.iter().any(|sample| sample.abs() > f32::EPSILON);
 
     let bytes_needed = frames * blockalign;
@@ -508,6 +578,19 @@ fn write_available_wasapi_frames(
         frames,
         nonzero_audio,
     }))
+}
+
+fn mix_f32_into(dst: &mut [f32], src: &[f32]) {
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d = (*d + *s).clamp(-1.0, 1.0);
+    }
+}
+
+fn source_bank_all_paused(source_bank: &ExclusiveRenderSourceBank) -> bool {
+    let sources = source_bank.snapshot();
+    sources
+        .iter()
+        .all(|source| source.shared.paused.load(Ordering::Relaxed))
 }
 
 /// Try every candidate format in turn, attempting `initialize_client` directly
@@ -542,14 +625,10 @@ fn init_audio_client(
 
     let mut last_failure: Option<ExclusiveInitFailure> = None;
 
-    // Backoff schedule for AUDCLNT_E_DEVICE_IN_USE retries. Some drivers /
-    // Windows audio engine versions don't release the shared session within
-    // the first tens of ms; ~1.3 s total budget covers cases where a flat
-    // 150 ms didn't (observed empirically with Chrome holding shared mode).
-    // Each entry is the sleep BEFORE that attempt's retry — so 4 attempts:
-    // initial try, then sleep 50 ms, retry, sleep 150 ms, retry, sleep 350
-    // ms, retry, sleep 750 ms, give up.
-    const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
+    // Some drivers / Windows audio engine versions don't release the shared
+    // session within the first tens of ms. Keep this budget global because
+    // DEVICE_IN_USE is about device ownership, not the candidate sample format.
+    let mut device_in_use_budget = DeviceInUseRetryBudget::new();
 
     'candidate: for candidate in exclusive_candidate_formats() {
         let mut attempt: usize = 0;
@@ -575,24 +654,8 @@ fn init_audio_client(
                     return Ok(v);
                 }
                 Err(failure) => match failure {
-                    ExclusiveInitFailure::DeviceInUse
-                        if attempt < DEVICE_IN_USE_BACKOFF_MS.len() =>
-                    {
-                        let sleep_ms = DEVICE_IN_USE_BACKOFF_MS[attempt];
-                        info!(
-                            target: "playback",
-                            "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
-                             retrying after {} ms",
-                            attempt + 1,
-                            fmt_tag_label(candidate.format),
-                            sleep_ms
-                        );
-                        std::thread::sleep(Duration::from_millis(sleep_ms));
-                        attempt += 1;
-                        continue;
-                    }
                     ExclusiveInitFailure::ExclusiveDisabled => {
-                        // No format will fix this — bail immediately so the
+                        // No format will fix this. Bail immediately so the
                         // user gets a precise message.
                         warn!(
                             target: "playback",
@@ -601,16 +664,24 @@ fn init_audio_client(
                         return Err(failure);
                     }
                     ExclusiveInitFailure::DeviceInUse => {
-                        // Exhausted retry budget. Surface as DeviceInUse.
+                        if let Some(sleep_ms) = device_in_use_budget.next_delay_ms() {
+                            info!(
+                                target: "playback",
+                                "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
+                                 retrying after {} ms",
+                                attempt + 1,
+                                fmt_tag_label(candidate.format),
+                                sleep_ms
+                            );
+                            std::thread::sleep(Duration::from_millis(sleep_ms));
+                            attempt += 1;
+                            continue;
+                        }
                         warn!(
                             target: "playback",
-                            "WASAPI exclusive grab: DEVICE_IN_USE persisted across {} attempts ({:?}); \
-                             trying next format",
-                            DEVICE_IN_USE_BACKOFF_MS.len() + 1,
-                            fmt_tag_label(candidate.format)
+                            "WASAPI exclusive grab: DEVICE_IN_USE persisted after global retry budget"
                         );
-                        last_failure = Some(ExclusiveInitFailure::DeviceInUse);
-                        continue 'candidate;
+                        return Err(ExclusiveInitFailure::DeviceInUse);
                     }
                     other => {
                         info!(
@@ -933,6 +1004,71 @@ mod tests {
             classify_init_hresult(AUDCLNT_E_DEVICE_IN_USE),
             InitErrorClassification::DeviceInUse
         );
+    }
+
+    #[test]
+    fn device_in_use_retry_budget_is_global() {
+        let mut budget = DeviceInUseRetryBudget::new();
+
+        assert_eq!(budget.next_delay_ms(), Some(50));
+        assert_eq!(budget.next_delay_ms(), Some(150));
+        assert_eq!(budget.next_delay_ms(), Some(350));
+        assert_eq!(budget.next_delay_ms(), Some(750));
+        assert_eq!(budget.next_delay_ms(), None);
+        assert_eq!(budget.next_delay_ms(), None);
+    }
+
+    #[test]
+    fn exclusive_source_bank_replaces_sources_atomically() {
+        let bank = ExclusiveRenderSourceBank::new();
+        assert!(bank.snapshot().is_empty());
+
+        bank.set_sources(vec![
+            ExclusiveRenderSource {
+                role: ExclusiveRenderRole::Active,
+                shared: test_shared_state(1, 1),
+            },
+            ExclusiveRenderSource {
+                role: ExclusiveRenderRole::Prepared,
+                shared: test_shared_state(2, 1),
+            },
+        ]);
+
+        let snapshot = bank.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].role, ExclusiveRenderRole::Active);
+        assert_eq!(snapshot[1].role, ExclusiveRenderRole::Prepared);
+
+        bank.clear();
+        assert!(bank.snapshot().is_empty());
+    }
+
+    #[test]
+    fn mix_f32_sources_sums_and_clamps_samples() {
+        let mut out = vec![0.0_f32; 4];
+        let a = vec![0.75, -0.75, 0.25, -0.25];
+        let b = vec![0.75, -0.75, -0.5, 0.5];
+
+        mix_f32_into(&mut out, &a);
+        mix_f32_into(&mut out, &b);
+
+        assert_eq!(out, vec![1.0, -1.0, -0.25, 0.25]);
+    }
+
+    fn test_shared_state(track_id: i64, generation: u64) -> Arc<PlaybackSharedState> {
+        let (command_tx, _) = std::sync::mpsc::channel();
+        Arc::new(PlaybackSharedState::new(
+            track_id,
+            generation,
+            crate::playback::player::PlaybackSourceKind::TidalStream,
+            crate::playback::gapless::GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ))
     }
 
     #[test]
