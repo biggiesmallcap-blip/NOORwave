@@ -81,7 +81,7 @@ pub fn spawn_actor(
     tokio::spawn(async move {
         let mut analyzed_count: u32 = 0;
 
-        while let Some((track_id, mut samples, mut sample_rate)) = rx.recv().await {
+        while let Some((track_id, samples, sample_rate)) = rx.recv().await {
             // Bail early if the user has disabled passive DSP analysis. We
             // still consume the message so the channel drains; we just skip
             // the work.
@@ -92,12 +92,6 @@ pub fn spawn_actor(
                 continue;
             }
 
-            let max_samples = (sample_rate * config.max_seconds) as usize;
-            if samples.len() > max_samples {
-                samples.truncate(max_samples);
-            }
-            (samples, sample_rate) = prepare_passive_analysis_samples(samples, sample_rate);
-
             // Skip tracks already on the current analysis version.
             let already_analyzed = db
                 .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
@@ -106,9 +100,14 @@ pub fn spawn_actor(
                 .map(|f| f.analysis_version == CURRENT_ANALYSIS_VERSION)
                 .unwrap_or(false);
 
-            if already_analyzed {
+            let Some((samples, sample_rate)) = prepare_passive_analysis_job(
+                samples,
+                sample_rate,
+                config.max_seconds,
+                already_analyzed,
+            ) else {
                 continue;
-            }
+            };
 
             // CPU-heavy DSP must run off the tokio worker (Issue A).
             let db_clone = db.clone();
@@ -136,6 +135,25 @@ pub fn spawn_actor(
     });
 
     tx
+}
+
+fn prepare_passive_analysis_job(
+    mut samples: Vec<f32>,
+    mut sample_rate: u32,
+    max_seconds: u32,
+    already_analyzed: bool,
+) -> Option<(Vec<f32>, u32)> {
+    if already_analyzed {
+        return None;
+    }
+
+    let max_samples = (sample_rate * max_seconds) as usize;
+    if samples.len() > max_samples {
+        samples.truncate(max_samples);
+    }
+    (samples, sample_rate) = prepare_passive_analysis_samples(samples, sample_rate);
+
+    Some((samples, sample_rate))
 }
 
 fn prepare_passive_analysis_samples(samples: Vec<f32>, sample_rate: u32) -> (Vec<f32>, u32) {
@@ -207,6 +225,15 @@ mod tests {
 
         assert_eq!(sample_rate, 44_100);
         assert_eq!(samples, input);
+    }
+
+    #[test]
+    fn passive_analysis_plan_skips_current_version_before_preparing_samples() {
+        let input: Vec<f32> = (0..16).map(|i| i as f32).collect();
+
+        let planned = prepare_passive_analysis_job(input, u32::MAX, 30, true);
+
+        assert!(planned.is_none());
     }
 
     #[test]
