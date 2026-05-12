@@ -87,6 +87,27 @@ describe('canonical media link helpers', () => {
 		expect(buildMediaMenu(artistRefFromTrack(track)!).map((item) => item.label)).toContain('Open artist');
 		expect(buildMediaMenu(albumRefFromTrack(track)!).map((item) => item.label)).toContain('Open album');
 	});
+
+	test('ephemeral tracks never expose non-positive local artist routes', () => {
+		const track = localTrack({
+			id: 78,
+			artist_id: -1,
+			artist_tidal_id: 333,
+			album_id: null,
+			album_tidal_id: 444,
+			source: 'tidal_ephemeral',
+		});
+
+		expect(mediaHref(artistRefFromTrack(track))).toBe('/tidal/artists/333');
+
+		const trackMenuLabels = buildTrackMenu(track).map((item) => item.label);
+		expect(trackMenuLabels).not.toContain('Artist radio');
+		expect(trackMenuLabels).not.toContain('Go to Local Artist');
+
+		const artistMenuLabels = buildMediaMenu(artistRefFromTrack(track)!).map((item) => item.label);
+		expect(artistMenuLabels).toContain('Open on Tidal');
+		expect(artistMenuLabels).not.toContain('Open artist');
+	});
 });
 
 describe('queue menu contracts', () => {

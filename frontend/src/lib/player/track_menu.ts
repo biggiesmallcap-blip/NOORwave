@@ -82,7 +82,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	const items: MenuItem[] = [];
 	const hasAlbum = !options.hideAlbumActions && track.album_id != null;
-	const hasArtist = !options.hideArtistActions && track.artist_id != null;
+	const hasArtist = !options.hideArtistActions && track.artist_id != null && track.artist_id > 0;
 	const isQueueItem = options.queueItemId != null;
 
 	items.push({

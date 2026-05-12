@@ -1525,7 +1525,7 @@ export const api = {
 	},
 
 	importTidalTrackForRadio(track: TidalPlayable) {
-		return fetchApi<{ tidal_id: number; local_id: number }>('/api/tidal/tracks/import', undefined, {
+		return fetchApi<{ tidal_id: number; local_id: number; artist_id: number; album_id: number | null }>('/api/tidal/tracks/import', undefined, {
 			method: 'POST',
 			body: JSON.stringify({
 				tidal_id: track.tidal_id,

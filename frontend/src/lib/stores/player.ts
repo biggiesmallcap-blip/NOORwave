@@ -684,18 +684,20 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 		const ephemeral = get(currentTrack);
 		if (!ephemeral || !ephemeral.tidal_id) return;
 		try {
-			const { local_id } = await api.importTidalTrackForRadio({
+			const { local_id, artist_id, album_id } = await api.importTidalTrackForRadio({
 				tidal_id: ephemeral.tidal_id,
 				title: ephemeral.title ?? 'Unknown',
 				artist_name: ephemeral.artist_name,
+				artist_tidal_id: ephemeral.artist_tidal_id ?? null,
 				album_title: ephemeral.album_title,
+				album_tidal_id: ephemeral.album_tidal_id ?? null,
 				artwork_url: ephemeral.artwork_url,
 				duration_ms: ephemeral.duration_ms,
 			});
-			currentTrack.update((t) => (t && t.id === trackId ? { ...t, id: local_id } : t));
+			currentTrack.update((t) => (t && t.id === trackId ? { ...t, id: local_id, artist_id, album_id } : t));
 			playbackQueue.update((q) =>
 				q.map((item) =>
-					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id } } : item
+					item.track.id === trackId ? { ...item, track: { ...item.track, id: local_id, artist_id, album_id } } : item
 				)
 			);
 			return toggleTrackFavorite(local_id, false);

@@ -26,8 +26,8 @@ export interface BuildArtistMenuOptions {
 const SEPARATOR: MenuItem = { separator: true, label: '' };
 
 function resolveLocalId(artist: ArtistLike): number | null {
-	if (typeof artist.id === 'number') return artist.id;
-	if (typeof artist.local_id === 'number') return artist.local_id;
+	if (typeof artist.id === 'number' && artist.id > 0) return artist.id;
+	if (typeof artist.local_id === 'number' && artist.local_id > 0) return artist.local_id;
 	return null;
 }
 

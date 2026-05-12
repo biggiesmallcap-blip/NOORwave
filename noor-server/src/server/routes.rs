@@ -1555,7 +1555,14 @@ async fn import_tidal_album(
     let tracks: Vec<Value> = imported
         .tracks
         .iter()
-        .map(|t| json!({ "tidal_id": t.tidal_id, "local_id": t.local_id }))
+        .map(|t| {
+            json!({
+                "tidal_id": t.tidal_id,
+                "local_id": t.local_id,
+                "artist_id": t.artist_id,
+                "album_id": t.album_id,
+            })
+        })
         .collect();
 
     Ok(Json(json!({
@@ -1608,6 +1615,8 @@ async fn import_tidal_track_for_radio(
     Ok(Json(json!({
         "tidal_id": imported.tidal_id,
         "local_id": imported.local_id,
+        "artist_id": imported.artist_id,
+        "album_id": imported.album_id,
     })))
 }
 

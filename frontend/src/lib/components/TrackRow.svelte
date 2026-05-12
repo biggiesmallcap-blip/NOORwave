@@ -85,7 +85,7 @@
 	}
 
 	function openArtistContextMenu(e: MouseEvent) {
-		if (track.artist_id == null || !track.artist_name) return;
+		if (track.artist_id == null || track.artist_id <= 0 || !track.artist_name) return;
 		openContextMenu(
 			e,
 			buildArtistMenu({ id: track.artist_id, name: track.artist_name }, { isLocal: true }),
@@ -242,7 +242,7 @@
 		<div class="cell-meta">
 			<p class="title">{track.title}</p>
 			{#if showArtist && track.artist_name}
-				{#if track.artist_id != null}
+				{#if track.artist_id != null && track.artist_id > 0}
 					<a
 						class="sub link"
 						href="/artists/{track.artist_id}"

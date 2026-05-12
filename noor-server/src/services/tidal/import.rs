@@ -23,6 +23,8 @@ pub struct ImportedAlbum {
 pub struct ImportedTrack {
     pub tidal_id: i64,
     pub local_id: i64,
+    pub artist_id: i64,
+    pub album_id: Option<i64>,
 }
 
 /// Inputs for [`import_track_from_metadata`]. Most fields are optional so
@@ -107,6 +109,8 @@ pub async fn import_album(
             imported.push(ImportedTrack {
                 tidal_id: t.id,
                 local_id,
+                artist_id: track_artist_id,
+                album_id: Some(album_id),
             });
         }
 
@@ -277,6 +281,8 @@ pub async fn import_track_from_metadata(
         Ok(ImportedTrack {
             tidal_id: meta.tidal_id,
             local_id,
+            artist_id,
+            album_id,
         })
     })
 }
