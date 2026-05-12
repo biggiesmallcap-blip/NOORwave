@@ -7,9 +7,14 @@ const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'top
                                'zen', 'galaxy',
                                'joy-division', 'oscilloscope', 'spectrum', 'vinyl', 'tape',
                                'phasing', 'spectrogram', 'lissajous', 'drone', 'reel',
-                               'standing-wave'];
+                               'standing-wave',
+                               'pattern-grid', 'pattern-dots', 'pattern-hatch',
+                               'pattern-truchet', 'pattern-waves', 'pattern-noise',
+                               'pattern-plasma', 'pattern-kaleido', 'pattern-tunnel',
+                               'pattern-melt', 'pattern-speed', 'pattern-vortex',
+                               'pattern-shards', 'pattern-vector'];
 
-const DEFAULT: WallpaperId = 'standing-wave';
+const DEFAULT: WallpaperId = 'pattern-speed';
 
 function readInitial(): WallpaperId {
 	if (typeof localStorage === 'undefined') return DEFAULT;

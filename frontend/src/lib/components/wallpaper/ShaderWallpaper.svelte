@@ -46,7 +46,15 @@ uniform vec3 u_color4;
 	}
 
 	onMount(() => {
-		const gl = canvas.getContext('webgl', { premultipliedAlpha: false, antialias: true });
+		const gl = canvas.getContext('webgl', {
+			alpha: false,
+			antialias: false,
+			depth: false,
+			stencil: false,
+			premultipliedAlpha: false,
+			preserveDrawingBuffer: false,
+			powerPreference: 'low-power'
+		});
 		if (!gl) return;
 		gl.getExtension('OES_standard_derivatives');
 
@@ -100,11 +108,7 @@ uniform vec3 u_color4;
 			if (!buf) {
 				buf = gl!.createBuffer();
 				gl!.bindBuffer(gl!.ARRAY_BUFFER, buf);
-				gl!.bufferData(
-					gl!.ARRAY_BUFFER,
-					new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
-					gl!.STATIC_DRAW
-				);
+				gl!.bufferData(gl!.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl!.STATIC_DRAW);
 			} else {
 				gl!.bindBuffer(gl!.ARRAY_BUFFER, buf);
 			}
@@ -230,7 +234,7 @@ uniform vec3 u_color4;
 			gl!.uniform3f(uColor3!, pal.c3[0], pal.c3[1], pal.c3[2]);
 			gl!.uniform3f(uColor4!, pal.c4[0], pal.c4[1], pal.c4[2]);
 
-			gl!.drawArrays(gl!.TRIANGLES, 0, 6);
+			gl!.drawArrays(gl!.TRIANGLES, 0, 3);
 		};
 		loop();
 

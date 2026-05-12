@@ -1306,6 +1306,7 @@
 		activePalette.shader.c3,
 		activePalette.shader.c4
 	]);
+	let extendedWallpaperCount = $derived(WALLPAPERS.filter((option) => option.extended).length);
 </script>
 
 <svelte:head>
@@ -1511,7 +1512,11 @@
 					aria-expanded={showExtendedShaders}
 				>
 					<span class="wallpaper-more-icon" class:open={showExtendedShaders}>▸</span>
-					{showExtendedShaders ? 'Fewer shaders' : 'More shaders (11)'}
+					{#if showExtendedShaders}
+						Fewer shaders
+					{:else}
+						More shaders ({extendedWallpaperCount})
+					{/if}
 				</button>
 
 				{#if showExtendedShaders}

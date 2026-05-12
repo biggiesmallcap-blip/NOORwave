@@ -1236,12 +1236,252 @@ void main(){
 }
 `;
 
+const PATTERN_HELPERS = /* glsl */ `
+#define PI 3.14159265
+
+float h21(vec2 p){
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  float a = h21(i);
+  float b = h21(i + vec2(1.0, 0.0));
+  float c = h21(i + vec2(0.0, 1.0));
+  float d = h21(i + vec2(1.0, 1.0));
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+
+float aaLine(float v, float w){
+  float aa = fwidth(v);
+  return 1.0 - smoothstep(w - aa, w + aa, abs(v));
+}
+
+void finishPattern(vec2 frag, vec2 uv, vec3 col, float k, float a){
+  float vg = 1.0 - smoothstep(0.6, 1.2, length(uv));
+  col = mix(col, u_color2, clamp(k, 0.0, 1.0) * 0.85);
+  col = mix(col, u_color3, clamp(a, 0.0, 1.0));
+  col *= mix(0.78, 1.0, vg);
+  col += (h21(frag) - 0.5) / 255.0;
+  gl_FragColor = vec4(col, 1.0);
+}
+
+void finishColor(vec2 frag, vec2 uv, vec3 col){
+  float vg = 1.0 - smoothstep(0.7, 1.3, length(uv));
+  col *= mix(0.7, 1.05, vg);
+  col += (h21(frag) - 0.5) / 255.0;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function patternShader(body: string): string {
+	return `${PATTERN_HELPERS}
+void main(){
+  vec2 frag = gl_FragCoord.xy;
+  vec2 uv = (frag - 0.5 * u_resolution) / min(u_resolution.x, u_resolution.y);
+  vec3 col = u_color1;
+  float k = 0.0;
+  float a = 0.0;
+${body}
+  finishPattern(frag, uv, col, k, a);
+}
+`;
+}
+
+export const SHADER_PATTERN_GRID = patternShader(/* glsl */ `
+  float scale = 22.0;
+  vec2 g = uv * scale + vec2(u_time * 0.06, -u_time * 0.04);
+  vec2 q = fract(g) - 0.5;
+  k = max(aaLine(q.x, 0.02), aaLine(q.y, 0.02));
+  vec2 cell = floor(g);
+  float bigX = aaLine(fract(cell.x / 5.0 + 0.5) - 0.5, 0.5/5.0) * aaLine(q.x, 0.04);
+  float bigY = aaLine(fract(cell.y / 5.0 + 0.5) - 0.5, 0.5/5.0) * aaLine(q.y, 0.04);
+  a = max(bigX, bigY);
+`);
+
+export const SHADER_PATTERN_DOTS = patternShader(/* glsl */ `
+  vec2 p = uv * 18.0;
+  vec2 r = vec2(1.0, 1.7320508);
+  vec2 hp = mod(p, r) - 0.5 * r;
+  vec2 hp2 = mod(p - 0.5 * r, r) - 0.5 * r;
+  float d = min(length(hp), length(hp2));
+  float aa = fwidth(d);
+  k = 1.0 - smoothstep(0.16 - aa, 0.16 + aa, d);
+  float t = fract(u_time * 0.08);
+  a = (1.0 - smoothstep(0.0, 0.02, abs(length(uv) - t * 0.9))) * (1.0 - k);
+`);
+
+export const SHADER_PATTERN_HATCH = patternShader(/* glsl */ `
+  float s = 16.0;
+  float ang = 0.6;
+  vec2 r = vec2(cos(ang), sin(ang));
+  float v = dot(uv, r) * s + u_time * 0.4;
+  vec2 r2 = vec2(cos(-ang), sin(-ang));
+  float v2 = dot(uv, r2) * s - u_time * 0.25;
+  k = max(aaLine(fract(v) - 0.5, 0.06), aaLine(fract(v2) - 0.5, 0.02) * 0.5);
+  a = aaLine(fract(v * 0.2) - 0.5, 0.02);
+`);
+
+export const SHADER_PATTERN_TRUCHET = patternShader(/* glsl */ `
+  vec2 p = uv * 9.0 + vec2(u_time * 0.05, 0.0);
+  vec2 ip = floor(p);
+  vec2 fp = fract(p) - 0.5;
+  if (step(0.5, h21(ip)) > 0.5) fp.x = -fp.x;
+  float d1 = abs(length(fp - vec2(-0.5, -0.5)) - 0.5);
+  float d2 = abs(length(fp - vec2(0.5, 0.5)) - 0.5);
+  float d = min(d1, d2);
+  float aa = fwidth(d);
+  k = 1.0 - smoothstep(0.06, 0.06 + aa*2.0, d);
+  a = (1.0 - smoothstep(0.18, 0.18 + aa*2.0, d)) * (1.0 - k) * 0.35;
+`);
+
+export const SHADER_PATTERN_WAVES = patternShader(/* glsl */ `
+  float r = length(uv);
+  float bands = sin(r * 36.0 - u_time * 1.2);
+  float k1 = smoothstep(0.0, 0.04, bands);
+  float k2 = smoothstep(0.0, 0.04, sin(r * 36.0 - u_time * 1.2 - 0.4));
+  k = k1 * 0.55;
+  a = (k2 - k1) * 0.6;
+`);
+
+export const SHADER_PATTERN_NOISE = patternShader(/* glsl */ `
+  vec2 p = uv * 3.0;
+  float n = vnoise(p + vec2(u_time * 0.08, 0.0));
+  float n2 = vnoise(p * 2.1 - vec2(0.0, u_time * 0.05));
+  float v = n * 0.65 + n2 * 0.35;
+  float band = fract(v * 6.0);
+  k = smoothstep(0.45, 0.5, band) * (1.0 - smoothstep(0.5, 0.55, band));
+  a = smoothstep(0.85, 0.9, v) * 0.6;
+`);
+
+export const SHADER_PATTERN_PLASMA = patternShader(/* glsl */ `
+  vec2 p = uv * 3.2;
+  float t = u_time * 0.6;
+  float v = sin(p.x + t)
+          + sin(p.y * 1.3 + t * 1.1)
+          + sin((p.x + p.y) * 0.9 + t * 0.7)
+          + sin(length(p) * 2.0 - t * 1.3);
+  v *= 0.25;
+  col = 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + v) + u_time * 0.2);
+  col = mix(u_color1, col, 0.92);
+  finishColor(frag, uv, col);
+  return;
+`);
+
+export const SHADER_PATTERN_KALEIDO = patternShader(/* glsl */ `
+  float ang = atan(uv.y, uv.x);
+  float r = length(uv);
+  float seg = PI / 4.0;
+  ang = mod(ang, seg);
+  ang = abs(ang - seg * 0.5);
+  vec2 q = vec2(cos(ang), sin(ang)) * r * 3.0 + vec2(u_time * 0.15, -u_time * 0.1);
+  float n = vnoise(q) * 0.6 + vnoise(q * 2.3 + 5.0) * 0.4;
+  float band = fract(n * 5.0 + u_time * 0.2);
+  vec3 rb = 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + r * 1.5 + n * 1.2 + u_time * 0.1));
+  col = mix(u_color1, rb, 0.95);
+  col *= mix(0.6, 1.1, band);
+  finishColor(frag, uv, col);
+  return;
+`);
+
+export const SHADER_PATTERN_TUNNEL = patternShader(/* glsl */ `
+  float r = length(uv);
+  float ang = atan(uv.y, uv.x);
+  float u1 = 1.0 / max(r, 0.001) + u_time * 0.8;
+  float v1 = ang * 6.0 / PI;
+  float c = mod(step(0.5, fract(u1 * 0.5)) + step(0.5, fract(v1 * 0.5)), 2.0);
+  vec3 rb = 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + u1 * 0.1 + u_time * 0.15));
+  col = mix(u_color1, rb, 0.9);
+  col *= mix(0.55, 1.05, c);
+  col *= smoothstep(0.0, 0.6, r);
+  finishColor(frag, uv, col);
+  return;
+`);
+
+export const SHADER_PATTERN_MELT = patternShader(/* glsl */ `
+  vec2 p = uv * 2.0;
+  float t = u_time * 0.25;
+  vec2 w = vec2(vnoise(p + vec2(t, 0.0)), vnoise(p + vec2(0.0, t) + 7.3));
+  p += (w - 0.5) * 2.5;
+  float n = vnoise(p * 1.6 + t);
+  float band = fract(n * 4.0 + u_time * 0.15);
+  vec3 rb = 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + n * 1.8 + u_time * 0.1));
+  col = mix(u_color1, rb, 0.92);
+  col = mix(col, vec3(1.0), smoothstep(0.92, 0.98, band) * 0.5);
+  finishColor(frag, uv, col);
+  return;
+`);
+
+export const SHADER_PATTERN_SPEED = patternShader(/* glsl */ `
+  float ang = atan(uv.y, uv.x);
+  float r = length(uv);
+  float seg = 36.0;
+  float idx = floor(ang / 6.2831 * seg + 0.5);
+  float jitter = h21(vec2(idx, 0.0)) - 0.5;
+  float a0 = (idx + jitter * 0.6) / seg * 6.2831;
+  float dAng = ang - a0;
+  float thick = 0.003 + r * 0.018 + jitter * 0.004;
+  float ln = 1.0 - smoothstep(thick, thick + 0.004, abs(sin(dAng)) * r);
+  k = ln * mix(0.6, 1.0, step(0.0, sin(u_time * 0.5 + idx * 0.7)));
+  float wedge = step(0.94, abs(cos(ang * 6.0 - u_time * 0.6)));
+  a = wedge * smoothstep(0.0, 0.4, r) * (1.0 - smoothstep(0.7, 1.0, r));
+`);
+
+export const SHADER_PATTERN_VORTEX = patternShader(/* glsl */ `
+  float r = length(uv);
+  float ang = atan(uv.y, uv.x);
+  float v = sin(8.0 * ang + log(max(r, 0.001)) * 6.0 - u_time * 1.2);
+  k = smoothstep(0.0, 0.05, v) * 0.9;
+  a = smoothstep(0.85, 0.95, v) * 0.7;
+  a += (1.0 - smoothstep(0.0, 0.08, r)) * 0.8;
+`);
+
+export const SHADER_PATTERN_SHARDS = patternShader(/* glsl */ `
+  vec2 p = uv * 5.0 + vec2(u_time * 0.05, 0.0);
+  vec2 ip = floor(p);
+  vec2 fp = fract(p);
+  float md = 1e9;
+  float md2 = 1e9;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 g = vec2(float(i), float(j));
+      vec2 o = vec2(h21(ip + g), h21(ip + g + 17.3));
+      o = 0.5 + 0.5 * sin(u_time * 0.4 + 6.2831 * o);
+      vec2 d = g + o - fp;
+      float dist = dot(d, d);
+      if (dist < md) { md2 = md; md = dist; }
+      else if (dist < md2) { md2 = dist; }
+    }
+  }
+  float edge = sqrt(md2) - sqrt(md);
+  float aa = fwidth(edge);
+  k = 1.0 - smoothstep(0.04, 0.04 + aa * 2.0, edge);
+  a = (1.0 - smoothstep(0.0, 0.12, sqrt(md))) * 0.6;
+`);
+
+export const SHADER_PATTERN_VECTOR = patternShader(/* glsl */ `
+  float ang = atan(uv.y, uv.x);
+  float radials = aaLine(fract(ang / 6.2831 * 16.0) - 0.5, 0.04);
+  float r = length(uv);
+  float rings = aaLine(fract(log(max(r, 0.001)) * 2.5 + u_time * 0.6) - 0.5, 0.05);
+  k = max(radials, rings);
+  a = (1.0 - smoothstep(0.0, 0.025, r)) * 0.9;
+`);
+
 export type WallpaperId = 'none' | 'aurora' | 'chrome' | 'grid' | 'nebula' | 'topo'
                         | 'topo-noir' | 'aurora-deep' | 'chrome-brushed'
                         | 'zen' | 'galaxy'
                         | 'joy-division' | 'oscilloscope' | 'spectrum' | 'vinyl' | 'tape'
                         | 'phasing' | 'spectrogram' | 'lissajous' | 'drone' | 'reel'
-                        | 'standing-wave';
+                        | 'standing-wave'
+                        | 'pattern-grid' | 'pattern-dots' | 'pattern-hatch'
+                        | 'pattern-truchet' | 'pattern-waves' | 'pattern-noise'
+                        | 'pattern-plasma' | 'pattern-kaleido' | 'pattern-tunnel'
+                        | 'pattern-melt' | 'pattern-speed' | 'pattern-vortex'
+                        | 'pattern-shards' | 'pattern-vector';
 
 export interface WallpaperOption {
 	id: WallpaperId;
@@ -1264,6 +1504,20 @@ export const WALLPAPERS: WallpaperOption[] = [
 	{ id: 'chrome-brushed', label: 'Chrome Brushed', sublabel: 'Brushed metal · chromatic aberration', shader: SHADER_CHROME_BRUSHED },
 	{ id: 'zen',    label: 'Zen Water',     sublabel: 'Calm caustic ripples · cursor stirs the surface',             shader: SHADER_ZEN },
 	{ id: 'galaxy', label: 'Spiral Galaxy', sublabel: 'Logarithmic arms · differential rotation · cursor bends gravity', shader: SHADER_GALAXY },
+	{ id: 'pattern-speed',   label: 'Speed',   sublabel: 'Futurist radial force lines',        shader: SHADER_PATTERN_SPEED },
+	{ id: 'pattern-vortex',  label: 'Vortex',  sublabel: 'Rotating logarithmic arms',          shader: SHADER_PATTERN_VORTEX },
+	{ id: 'pattern-shards',  label: 'Shards',  sublabel: 'Cellular fractured shards',          shader: SHADER_PATTERN_SHARDS },
+	{ id: 'pattern-vector',  label: 'Vector',  sublabel: 'Converging perspective grid',        shader: SHADER_PATTERN_VECTOR },
+	{ id: 'pattern-plasma',  label: 'Plasma',  sublabel: 'Four-sine psychedelic plasma',       shader: SHADER_PATTERN_PLASMA },
+	{ id: 'pattern-kaleido', label: 'Kaleido', sublabel: 'Eight-fold mirrored noise swirl',    shader: SHADER_PATTERN_KALEIDO },
+	{ id: 'pattern-tunnel',  label: 'Tunnel',  sublabel: 'Polar checker zoom tunnel',          shader: SHADER_PATTERN_TUNNEL },
+	{ id: 'pattern-melt',    label: 'Melt',    sublabel: 'Domain-warped color flow',           shader: SHADER_PATTERN_MELT },
+	{ id: 'pattern-grid',    label: 'Grid',    sublabel: 'Soft anti-aliased pattern grid',     shader: SHADER_PATTERN_GRID,    extended: true },
+	{ id: 'pattern-dots',    label: 'Dots',    sublabel: 'Hex dot lattice with a pulse ring',  shader: SHADER_PATTERN_DOTS,    extended: true },
+	{ id: 'pattern-hatch',   label: 'Hatch',   sublabel: 'Animated diagonal crosshatch',       shader: SHADER_PATTERN_HATCH,   extended: true },
+	{ id: 'pattern-truchet', label: 'Truchet', sublabel: 'Quarter-arc tiled weave',            shader: SHADER_PATTERN_TRUCHET, extended: true },
+	{ id: 'pattern-waves',   label: 'Waves',   sublabel: 'Concentric sine bands',              shader: SHADER_PATTERN_WAVES,   extended: true },
+	{ id: 'pattern-noise',   label: 'Noise',   sublabel: 'Value-noise contour bands',          shader: SHADER_PATTERN_NOISE,   extended: true },
 	// Extended: music-themed monochrome shaders
 	{ id: 'joy-division',   label: 'Unknown Pleasures', sublabel: 'Stacked pulsar ridgelines · Saville 1979',          shader: SHADER_JOY_DIVISION,   extended: true },
 	{ id: 'oscilloscope',   label: 'Oscilloscope',      sublabel: 'Three phosphor traces · soft bloom',                shader: SHADER_OSCILLOSCOPE,   extended: true },
