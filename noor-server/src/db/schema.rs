@@ -39,6 +39,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_035,
     MIGRATION_036,
     MIGRATION_037,
+    MIGRATION_038,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1081,6 +1082,14 @@ CREATE TABLE IF NOT EXISTS external_track_candidate_neighbors (
 
 CREATE INDEX IF NOT EXISTS idx_external_neighbors_library_model_rank
     ON external_track_candidate_neighbors(library_track_id, model_id, rank);
+"#;
+
+const MIGRATION_038: &str = r#"
+ALTER TABLE sync_metadata ADD COLUMN last_full_sync_at TEXT;
+ALTER TABLE sync_metadata ADD COLUMN last_sync_kind TEXT;
+ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_artist_cursor TEXT;
+ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_album_cursor TEXT;
+ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_track_cursor TEXT;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

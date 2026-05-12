@@ -29,7 +29,8 @@
 		loadTidalStatus as refreshTidalStatus,
 		loadSyncInfo,
 		setAutoSyncDaily,
-		cancelTidalSync
+		cancelTidalSync,
+		startTidalSync
 	} from '$lib/stores/tidal';
 	import {
 		audioAnalysis,
@@ -427,14 +428,14 @@
 		await setAutoSyncDaily(!current);
 	}
 
-	async function syncLibrary() {
+	async function syncLibrary(mode: 'auto' | 'full' = 'auto') {
 		// Don't flip syncStatus to 'syncing' until the server actually accepts
 		// the request — otherwise an immediate network error or 409 leaves the
 		// UI showing "Syncing…" for the duration of the failed POST.
 		errorMsg = '';
 		syncError.set(null);
 		try {
-			const resp = await authFetch(`${getApiBase()}/api/tidal/sync`, { method: 'POST' });
+			const resp = await startTidalSync(mode);
 			markServerOnline();
 			const data = await resp.json().catch(() => ({}));
 			if (!resp.ok) throw new Error(data.message ?? `Server returned ${resp.status}`);
@@ -1633,6 +1634,11 @@
 									Cancelled
 								{:else if $syncInfo?.last_sync_at}
 									{formatSyncDate($syncInfo.last_sync_at)}
+									{#if $syncInfo.last_sync_kind}
+										<span class="sync-count">
+											{$syncInfo.last_sync_kind === 'incremental' ? 'fast' : 'full'}
+										</span>
+									{/if}
 									{#if $syncInfo.last_sync_track_count > 0}
 										<span class="sync-count">
 											({$syncInfo.last_sync_track_count.toLocaleString()} tracks{#if $syncInfo.last_sync_album_count > 0}, {$syncInfo.last_sync_album_count.toLocaleString()} albums{/if})
@@ -1666,7 +1672,7 @@
 						</div>
 					</div>
 					<div class="action-row">
-						<button class="btn btn-primary" onclick={syncLibrary} disabled={$syncStatus === 'syncing'}>
+						<button class="btn btn-primary" onclick={() => void syncLibrary()} disabled={$syncStatus === 'syncing'}>
 							{#if $syncStatus === 'syncing'}
 								Syncing…
 							{:else if $syncStatus === 'done'}
@@ -1676,6 +1682,9 @@
 							{:else}
 								Sync library
 							{/if}
+						</button>
+						<button class="btn btn-glass" onclick={() => void syncLibrary('full')} disabled={$syncStatus === 'syncing'}>
+							Full resync
 						</button>
 						{#if $syncStatus === 'syncing'}
 							<button class="btn btn-glass" onclick={handleCancelSync}>Cancel</button>

@@ -15,6 +15,53 @@ pub struct SyncStats {
     pub albums: usize,
     pub tracks: usize,
     pub playlists: usize,
+    pub sync_kind: String,
+    pub favorite_artist_cursor: Option<String>,
+    pub favorite_album_cursor: Option<String>,
+    pub favorite_track_cursor: Option<String>,
+}
+
+const FULL_SYNC_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SyncModeRequest {
+    Auto,
+    Full,
+    Incremental,
+}
+
+impl Default for SyncModeRequest {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncMode {
+    Full,
+    Incremental,
+}
+
+impl SyncMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TidalSyncQuery {
+    mode: Option<SyncModeRequest>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IncrementalPagePlan {
+    process_count: usize,
+    hit_cursor: bool,
+    newest_created: Option<String>,
 }
 
 /// Get sync info (last sync time, auto-sync settings).
@@ -108,16 +155,22 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     );
 
     // Run sync
-    let result = run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag).await;
+    let result =
+        run_tidal_sync_with_reauth(&client, state, tokens, &cancel_flag, SyncModeRequest::Auto)
+            .await;
     match result {
         Ok(stats) => {
             // Record sync timestamp
             state.read().await.db.with_conn(|conn| {
-                crate::db::queries::update_sync_timestamp(
+                crate::db::queries::update_sync_timestamp_with_metadata(
                     conn,
                     "tidal",
                     stats.tracks as i64,
                     stats.albums as i64,
+                    &stats.sync_kind,
+                    stats.favorite_artist_cursor.as_deref(),
+                    stats.favorite_album_cursor.as_deref(),
+                    stats.favorite_track_cursor.as_deref(),
                 )
             })?;
 
@@ -140,6 +193,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
 /// Sync TIDAL library into local database.
 pub(super) async fn tidal_sync_library(
     State(state): State<SharedState>,
+    Query(params): Query<TidalSyncQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use std::sync::atomic::Ordering;
 
@@ -200,6 +254,7 @@ pub(super) async fn tidal_sync_library(
     // Run sync in background
     let state_clone = state.clone();
     let sync_tokens = session.clone();
+    let requested_mode = params.mode.unwrap_or_default();
     let cancel_for_task = cancel_flag.clone();
     let http_for_task = tidal_http_client;
     tokio::spawn(async move {
@@ -216,7 +271,14 @@ pub(super) async fn tidal_sync_library(
             sync_tokens.access_token.clone(),
             sync_tokens.country_code.clone(),
         );
-        match run_tidal_sync_with_reauth(&client, &state_clone, sync_tokens, &cancel_for_task).await
+        match run_tidal_sync_with_reauth(
+            &client,
+            &state_clone,
+            sync_tokens,
+            &cancel_for_task,
+            requested_mode,
+        )
+        .await
         {
             Ok(stats) => {
                 tracing::info!(
@@ -229,11 +291,15 @@ pub(super) async fn tidal_sync_library(
                     "TIDAL sync complete"
                 );
                 if let Err(e) = state_clone.read().await.db.with_conn(|conn| {
-                    crate::db::queries::update_sync_timestamp(
+                    crate::db::queries::update_sync_timestamp_with_metadata(
                         conn,
                         "tidal",
                         stats.tracks as i64,
                         stats.albums as i64,
+                        &stats.sync_kind,
+                        stats.favorite_artist_cursor.as_deref(),
+                        stats.favorite_album_cursor.as_deref(),
+                        stats.favorite_track_cursor.as_deref(),
                     )
                 }) {
                     tracing::warn!("Failed to record sync timestamp: {}", e);
@@ -290,6 +356,7 @@ async fn do_tidal_sync(
     state: &SharedState,
     user_id: &str,
     cancel: &std::sync::atomic::AtomicBool,
+    requested_mode: SyncModeRequest,
 ) -> anyhow::Result<SyncStats> {
     use crate::services::tidal::client::TidalClient as TC;
     use futures::stream::{self, StreamExt};
@@ -302,7 +369,26 @@ async fn do_tidal_sync(
         Ok(())
     };
 
-    let mut stats = SyncStats::default();
+    let sync_info = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| Ok(crate::db::queries::get_sync_info(conn, "tidal")?))?
+    };
+    let sync_mode =
+        choose_effective_sync_mode(requested_mode, sync_info.as_ref(), current_unix_epoch());
+
+    let mut stats = SyncStats {
+        sync_kind: sync_mode.as_str().to_string(),
+        favorite_artist_cursor: sync_info
+            .as_ref()
+            .and_then(|info| info.tidal_favorite_artist_cursor.clone()),
+        favorite_album_cursor: sync_info
+            .as_ref()
+            .and_then(|info| info.tidal_favorite_album_cursor.clone()),
+        favorite_track_cursor: sync_info
+            .as_ref()
+            .and_then(|info| info.tidal_favorite_track_cursor.clone()),
+        ..Default::default()
+    };
     let mut favorite_album_ids = HashSet::new();
     let mut favorite_track_ids = HashSet::new();
 
@@ -320,12 +406,25 @@ async fn do_tidal_sync(
     // ── Sync favorite artists ────────────────────────
     tracing::info!("Syncing TIDAL artists...");
     let mut offset = 0;
+    let artist_cursor = if matches!(sync_mode, SyncMode::Incremental) {
+        stats.favorite_artist_cursor.clone()
+    } else {
+        None
+    };
     loop {
         check_cancel()?;
         let resp = client.get_favorite_artists(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
         }
+        let page_plan = plan_incremental_page(&resp.items, artist_cursor.as_deref());
+        if page_plan.process_count > 0 {
+            advance_cursor(
+                &mut stats.favorite_artist_cursor,
+                page_plan.newest_created.as_deref(),
+            );
+        }
+        let page_items = &resp.items[..page_plan.process_count];
         let artist_total = resp
             .total_number_of_items
             .unwrap_or((offset + resp.items.len() as i32) as i64)
@@ -334,7 +433,7 @@ async fn do_tidal_sync(
             let s = state.read().await;
             s.db.with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
+                for fav in page_items {
                     let a = &fav.item;
                     let photo = a.picture.as_ref().map(|p| {
                         let path = p.replace('-', "/");
@@ -356,6 +455,9 @@ async fn do_tidal_sync(
         // movement during what used to be a silent phase.
         let artist_progress = ((offset as f32 / artist_total) * 0.05).clamp(0.0, 0.05);
         send_tidal_sync_progress(state, artist_progress).await;
+        if matches!(sync_mode, SyncMode::Incremental) && page_plan.hit_cursor {
+            break;
+        }
         if resp
             .total_number_of_items
             .is_none_or(|t| offset as i64 >= t)
@@ -368,18 +470,31 @@ async fn do_tidal_sync(
     // ── Sync favorite albums ─────────────────────────
     tracing::info!("Syncing TIDAL albums...");
     offset = 0;
+    let album_cursor = if matches!(sync_mode, SyncMode::Incremental) {
+        stats.favorite_album_cursor.clone()
+    } else {
+        None
+    };
     loop {
         check_cancel()?;
         let resp = client.get_favorite_albums(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
         }
+        let page_plan = plan_incremental_page(&resp.items, album_cursor.as_deref());
+        if page_plan.process_count > 0 {
+            advance_cursor(
+                &mut stats.favorite_album_cursor,
+                page_plan.newest_created.as_deref(),
+            );
+        }
+        let page_items = &resp.items[..page_plan.process_count];
         // Batch the page's album upserts in one transaction.
         {
             let s = state.read().await;
             s.db.with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
+                for fav in page_items {
                     let album = &fav.item;
                     let artwork = TC::get_artwork_url(&album.cover, 640);
                     let year: Option<i32> = album
@@ -409,14 +524,14 @@ async fn do_tidal_sync(
                 Ok(())
             })?;
         }
-        for fav in &resp.items {
+        for fav in page_items {
             stats.albums += 1;
             favorite_album_ids.insert(fav.item.id);
         }
 
         // Hydrate album tracks with bounded concurrency so the UI keeps moving
         // instead of stalling on one giant page-wide batch.
-        let album_ids: Vec<i64> = resp.items.iter().map(|f| f.item.id).collect();
+        let album_ids: Vec<i64> = page_items.iter().map(|f| f.item.id).collect();
         let album_total = resp
             .total_number_of_items
             .unwrap_or((offset + resp.items.len() as i32) as i64)
@@ -478,6 +593,9 @@ async fn do_tidal_sync(
         }
 
         offset += resp.items.len() as i32;
+        if matches!(sync_mode, SyncMode::Incremental) && page_plan.hit_cursor {
+            break;
+        }
         if resp
             .total_number_of_items
             .is_none_or(|t| offset as i64 >= t)
@@ -494,17 +612,30 @@ async fn do_tidal_sync(
     // ── Sync favorite tracks ─────────────────────────
     tracing::info!("Syncing TIDAL favorite tracks...");
     offset = 0;
+    let track_cursor = if matches!(sync_mode, SyncMode::Incremental) {
+        stats.favorite_track_cursor.clone()
+    } else {
+        None
+    };
     loop {
         check_cancel()?;
         let resp = client.get_favorite_tracks(user_id, 100, offset).await?;
         if resp.items.is_empty() {
             break;
         }
+        let page_plan = plan_incremental_page(&resp.items, track_cursor.as_deref());
+        if page_plan.process_count > 0 {
+            advance_cursor(
+                &mut stats.favorite_track_cursor,
+                page_plan.newest_created.as_deref(),
+            );
+        }
+        let page_items = &resp.items[..page_plan.process_count];
         {
             let s = state.read().await;
             s.db.with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                for fav in &resp.items {
+                for fav in page_items {
                     let track = &fav.item;
                     favorite_track_ids.insert(track.id);
                     // Ensure artist
@@ -536,6 +667,9 @@ async fn do_tidal_sync(
             .unwrap_or(0.85)
             .clamp(0.5, 0.9);
         send_tidal_sync_progress(state, track_progress).await;
+        if matches!(sync_mode, SyncMode::Incremental) && page_plan.hit_cursor {
+            break;
+        }
         if resp
             .total_number_of_items
             .is_none_or(|t| offset as i64 >= t)
@@ -546,35 +680,36 @@ async fn do_tidal_sync(
     tracing::info!("Synced {} tracks total", stats.tracks);
 
     // ── Sync playlists ───────────────────────────────
-    tracing::info!("Syncing TIDAL playlists...");
-    let mut playlist_offset = 0;
-    let mut all_playlists: Vec<_> = vec![];
-    loop {
-        let resp = client.get_playlists(user_id, 100, playlist_offset).await?;
-        if resp.items.is_empty() {
-            break;
+    if matches!(sync_mode, SyncMode::Full) {
+        tracing::info!("Syncing TIDAL playlists...");
+        let mut playlist_offset = 0;
+        let mut all_playlists: Vec<_> = vec![];
+        loop {
+            let resp = client.get_playlists(user_id, 100, playlist_offset).await?;
+            if resp.items.is_empty() {
+                break;
+            }
+            let fetched = resp.items.len() as i32;
+            all_playlists.extend(resp.items);
+            playlist_offset += fetched;
+            if resp
+                .total_number_of_items
+                .is_none_or(|t| playlist_offset as i64 >= t)
+            {
+                break;
+            }
         }
-        let fetched = resp.items.len() as i32;
-        all_playlists.extend(resp.items);
-        playlist_offset += fetched;
-        if resp
-            .total_number_of_items
-            .is_none_or(|t| playlist_offset as i64 >= t)
-        {
-            break;
-        }
-    }
-    let total_playlists = all_playlists.len().max(1);
-    for (playlist_index, playlist) in all_playlists.iter().enumerate() {
-        check_cancel()?;
-        // Upsert the playlist row up front so metadata sticks even if the
-        // track-fetch errors out partway. The DELETE+INSERT below for
-        // `playlist_tracks` is wrapped in a single transaction so the playlist
-        // never appears empty mid-sync.
-        {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                conn.execute(
+        let total_playlists = all_playlists.len().max(1);
+        for (playlist_index, playlist) in all_playlists.iter().enumerate() {
+            check_cancel()?;
+            // Upsert the playlist row up front so metadata sticks even if the
+            // track-fetch errors out partway. The DELETE+INSERT below for
+            // `playlist_tracks` is wrapped in a single transaction so the playlist
+            // never appears empty mid-sync.
+            {
+                let s = state.read().await;
+                s.db.with_conn(|conn| {
+                    conn.execute(
                     "INSERT OR REPLACE INTO playlists (tidal_uuid, name, description, track_count)
                      VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![
@@ -584,49 +719,49 @@ async fn do_tidal_sync(
                         playlist.number_of_tracks.unwrap_or(0)
                     ],
                 )?;
-                Ok(())
-            })?;
-        }
-
-        let playlist_id: Option<i64> = {
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id FROM playlists WHERE tidal_uuid=?1",
-                        rusqlite::params![playlist.uuid],
-                        |row| row.get(0),
-                    )
-                    .ok())
-            })?
-        };
-
-        if let Some(pid) = playlist_id {
-            // Fetch all pages first, then DELETE+INSERT atomically. If the API
-            // errors mid-fetch, the existing playlist contents stay intact.
-            let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
-            let mut track_offset = 0;
-            loop {
-                check_cancel()?;
-                let tracks_resp = client
-                    .get_playlist_tracks(&playlist.uuid, 100, track_offset)
-                    .await?;
-                if tracks_resp.items.is_empty() {
-                    break;
-                }
-                let fetched = tracks_resp.items.len() as i32;
-                all_tracks.extend(tracks_resp.items);
-                track_offset += fetched;
-                if tracks_resp
-                    .total_number_of_items
-                    .is_none_or(|t| track_offset as i64 >= t)
-                {
-                    break;
-                }
+                    Ok(())
+                })?;
             }
 
-            let s = state.read().await;
-            s.db.with_conn(|conn| {
+            let playlist_id: Option<i64> = {
+                let s = state.read().await;
+                s.db.with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT id FROM playlists WHERE tidal_uuid=?1",
+                            rusqlite::params![playlist.uuid],
+                            |row| row.get(0),
+                        )
+                        .ok())
+                })?
+            };
+
+            if let Some(pid) = playlist_id {
+                // Fetch all pages first, then DELETE+INSERT atomically. If the API
+                // errors mid-fetch, the existing playlist contents stay intact.
+                let mut all_tracks: Vec<crate::services::tidal::client::TidalTrack> = Vec::new();
+                let mut track_offset = 0;
+                loop {
+                    check_cancel()?;
+                    let tracks_resp = client
+                        .get_playlist_tracks(&playlist.uuid, 100, track_offset)
+                        .await?;
+                    if tracks_resp.items.is_empty() {
+                        break;
+                    }
+                    let fetched = tracks_resp.items.len() as i32;
+                    all_tracks.extend(tracks_resp.items);
+                    track_offset += fetched;
+                    if tracks_resp
+                        .total_number_of_items
+                        .is_none_or(|t| track_offset as i64 >= t)
+                    {
+                        break;
+                    }
+                }
+
+                let s = state.read().await;
+                s.db.with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
                 tx.execute(
                     "DELETE FROM playlist_tracks WHERE playlist_id=?1",
@@ -666,15 +801,16 @@ async fn do_tidal_sync(
                 tx.commit()?;
                 Ok(())
             })?;
+            }
+            stats.playlists += 1;
+            let playlist_progress =
+                0.9 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.1);
+            send_tidal_sync_progress(state, playlist_progress.clamp(0.9, 0.99)).await;
         }
-        stats.playlists += 1;
-        let playlist_progress =
-            0.9 + (((playlist_index + 1) as f32 / total_playlists as f32) * 0.1);
-        send_tidal_sync_progress(state, playlist_progress.clamp(0.9, 0.99)).await;
     }
     tracing::info!("Synced {} playlists", stats.playlists);
 
-    {
+    if sync_mode_reconciles_favorites(sync_mode) {
         let s = state.read().await;
         s.db.with_conn(|conn| {
             super::apply_tidal_favorite_flags(
@@ -709,8 +845,9 @@ async fn run_tidal_sync_with_reauth(
     state: &SharedState,
     tokens: tidal_auth::TidalTokens,
     cancel: &std::sync::atomic::AtomicBool,
+    requested_mode: SyncModeRequest,
 ) -> anyhow::Result<SyncStats> {
-    match do_tidal_sync(client, state, &tokens.user_id, cancel).await {
+    match do_tidal_sync(client, state, &tokens.user_id, cancel, requested_mode).await {
         Ok(stats) => Ok(stats),
         Err(err) if super::error_looks_like_auth(&err) => {
             tracing::warn!(
@@ -757,7 +894,14 @@ async fn run_tidal_sync_with_reauth(
                 user_id = %refreshed.user_id,
                 "TIDAL sync session recovered; retrying sync"
             );
-            do_tidal_sync(&retry_client, state, &refreshed.user_id, cancel).await
+            do_tidal_sync(
+                &retry_client,
+                state,
+                &refreshed.user_id,
+                cancel,
+                requested_mode,
+            )
+            .await
         }
         Err(err) => Err(err),
     }
@@ -887,6 +1031,250 @@ async fn ensure_tidal_session(
                 "TIDAL session check failed before sync: {}",
                 err
             )))
+        }
+    }
+}
+
+fn choose_effective_sync_mode(
+    requested_mode: SyncModeRequest,
+    sync_info: Option<&crate::db::queries::SyncInfo>,
+    now_epoch: i64,
+) -> SyncMode {
+    match requested_mode {
+        SyncModeRequest::Full => SyncMode::Full,
+        SyncModeRequest::Incremental => {
+            if sync_info.is_some_and(|info| sync_info_ready_for_incremental(info, now_epoch)) {
+                SyncMode::Incremental
+            } else {
+                SyncMode::Full
+            }
+        }
+        SyncModeRequest::Auto => {
+            if sync_info.is_some_and(|info| sync_info_ready_for_incremental(info, now_epoch)) {
+                SyncMode::Incremental
+            } else {
+                SyncMode::Full
+            }
+        }
+    }
+}
+
+fn sync_info_ready_for_incremental(info: &crate::db::queries::SyncInfo, now_epoch: i64) -> bool {
+    let Some(last_full_sync_at) = info.last_full_sync_at.as_deref() else {
+        return false;
+    };
+    if info.tidal_favorite_artist_cursor.is_none()
+        || info.tidal_favorite_album_cursor.is_none()
+        || info.tidal_favorite_track_cursor.is_none()
+    {
+        return false;
+    }
+    let Some(last_full_epoch) = parse_sync_epoch(last_full_sync_at) else {
+        return false;
+    };
+    now_epoch.saturating_sub(last_full_epoch) <= FULL_SYNC_INTERVAL_SECS
+}
+
+fn parse_sync_epoch(value: &str) -> Option<i64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(dt.timestamp());
+    }
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|dt| dt.and_utc().timestamp())
+}
+
+fn current_unix_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn plan_incremental_page<T>(
+    items: &[crate::services::tidal::client::FavoriteItem<T>],
+    cursor: Option<&str>,
+) -> IncrementalPagePlan {
+    let mut process_count = 0;
+    let mut hit_cursor = false;
+    let mut newest_created = None;
+
+    for item in items {
+        let Some(created) = item.created.as_deref() else {
+            process_count += 1;
+            continue;
+        };
+        if cursor.is_some_and(|cursor| created <= cursor) {
+            hit_cursor = true;
+            break;
+        }
+        if newest_created.is_none() {
+            newest_created = Some(created.to_string());
+        }
+        process_count += 1;
+    }
+
+    IncrementalPagePlan {
+        process_count,
+        hit_cursor,
+        newest_created,
+    }
+}
+
+fn advance_cursor(cursor: &mut Option<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if cursor
+        .as_deref()
+        .is_none_or(|existing| candidate > existing)
+    {
+        *cursor = Some(candidate.to_string());
+    }
+}
+
+fn sync_mode_reconciles_favorites(sync_mode: SyncMode) -> bool {
+    matches!(sync_mode, SyncMode::Full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::queries::SyncInfo;
+    use crate::services::tidal::client::TidalArtist;
+    use std::collections::HashMap;
+
+    fn sync_info(
+        last_full_sync_at: Option<&str>,
+        artist_cursor: Option<&str>,
+        album_cursor: Option<&str>,
+        track_cursor: Option<&str>,
+    ) -> SyncInfo {
+        SyncInfo {
+            service: "tidal".to_string(),
+            last_sync_at: "2026-05-10 00:00:00".to_string(),
+            auto_sync_daily: false,
+            last_sync_track_count: 0,
+            last_sync_album_count: 0,
+            last_full_sync_at: last_full_sync_at.map(str::to_string),
+            last_sync_kind: None,
+            tidal_favorite_artist_cursor: artist_cursor.map(str::to_string),
+            tidal_favorite_album_cursor: album_cursor.map(str::to_string),
+            tidal_favorite_track_cursor: track_cursor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn auto_mode_uses_incremental_after_recent_full_sync_with_cursors() {
+        let now = parse_sync_epoch("2026-05-12 00:00:00").unwrap();
+        let info = sync_info(
+            Some("2026-05-10 00:00:00"),
+            Some("2026-05-10T01:00:00Z"),
+            Some("2026-05-10T02:00:00Z"),
+            Some("2026-05-10T03:00:00Z"),
+        );
+
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Auto, Some(&info), now),
+            SyncMode::Incremental
+        );
+    }
+
+    #[test]
+    fn auto_mode_uses_incremental_when_full_sync_is_exactly_seven_days_old() {
+        let now = parse_sync_epoch("2026-05-12 00:00:00").unwrap();
+        let info = sync_info(
+            Some("2026-05-05 00:00:00"),
+            Some("2026-05-10T01:00:00Z"),
+            Some("2026-05-10T02:00:00Z"),
+            Some("2026-05-10T03:00:00Z"),
+        );
+
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Auto, Some(&info), now),
+            SyncMode::Incremental
+        );
+    }
+
+    #[test]
+    fn auto_mode_uses_full_without_recent_full_sync_or_cursors() {
+        let now = parse_sync_epoch("2026-05-12 00:00:00").unwrap();
+        let stale = sync_info(
+            Some("2026-05-01 00:00:00"),
+            Some("2026-05-10T01:00:00Z"),
+            Some("2026-05-10T02:00:00Z"),
+            Some("2026-05-10T03:00:00Z"),
+        );
+        let missing_cursor = sync_info(
+            Some("2026-05-10 00:00:00"),
+            Some("2026-05-10T01:00:00Z"),
+            None,
+            Some("2026-05-10T03:00:00Z"),
+        );
+
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Auto, None, now),
+            SyncMode::Full
+        );
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Auto, Some(&stale), now),
+            SyncMode::Full
+        );
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Auto, Some(&missing_cursor), now),
+            SyncMode::Full
+        );
+    }
+
+    #[test]
+    fn explicit_incremental_falls_back_to_full_without_cursors() {
+        let now = parse_sync_epoch("2026-05-12 00:00:00").unwrap();
+        let missing_cursor = sync_info(
+            Some("2026-05-10 00:00:00"),
+            Some("2026-05-10T01:00:00Z"),
+            None,
+            Some("2026-05-10T03:00:00Z"),
+        );
+
+        assert_eq!(
+            choose_effective_sync_mode(SyncModeRequest::Incremental, Some(&missing_cursor), now),
+            SyncMode::Full
+        );
+    }
+
+    #[test]
+    fn incremental_page_processing_stops_at_cursor() {
+        let page = vec![
+            favorite_artist(1, "2026-05-12T10:00:00Z"),
+            favorite_artist(2, "2026-05-11T10:00:00Z"),
+            favorite_artist(3, "2026-05-10T10:00:00Z"),
+        ];
+
+        let plan = plan_incremental_page(&page, Some("2026-05-11T10:00:00Z"));
+
+        assert_eq!(plan.process_count, 1);
+        assert!(plan.hit_cursor);
+        assert_eq!(plan.newest_created.as_deref(), Some("2026-05-12T10:00:00Z"));
+    }
+
+    #[test]
+    fn full_mode_reconciles_favorites_but_incremental_mode_does_not() {
+        assert!(sync_mode_reconciles_favorites(SyncMode::Full));
+        assert!(!sync_mode_reconciles_favorites(SyncMode::Incremental));
+    }
+
+    fn favorite_artist(
+        id: i64,
+        created: &str,
+    ) -> crate::services::tidal::client::FavoriteItem<TidalArtist> {
+        crate::services::tidal::client::FavoriteItem {
+            item: TidalArtist {
+                id,
+                name: format!("Artist {id}"),
+                picture: None,
+                extra: HashMap::new(),
+            },
+            created: Some(created.to_string()),
         }
     }
 }

@@ -17,8 +17,15 @@ export interface SyncInfo {
 	auto_sync_daily: boolean;
 	last_sync_track_count: number;
 	last_sync_album_count: number;
+	last_full_sync_at?: string | null;
+	last_sync_kind?: string | null;
+	tidal_favorite_artist_cursor?: string | null;
+	tidal_favorite_album_cursor?: string | null;
+	tidal_favorite_track_cursor?: string | null;
 }
 export const syncInfo = writable<SyncInfo | null>(null);
+
+export type TidalSyncMode = 'auto' | 'full';
 
 export async function loadTidalStatus() {
 	try {
@@ -67,6 +74,11 @@ export async function cancelTidalSync() {
 	try {
 		await authFetch(`${getApiBase()}/api/tidal/sync/cancel`, { method: 'POST' });
 	} catch {}
+}
+
+export async function startTidalSync(mode: TidalSyncMode = 'auto') {
+	const suffix = mode === 'full' ? '?mode=full' : '';
+	return authFetch(`${getApiBase()}/api/tidal/sync${suffix}`, { method: 'POST' });
 }
 
 export function handleSyncProgress(progress: number) {

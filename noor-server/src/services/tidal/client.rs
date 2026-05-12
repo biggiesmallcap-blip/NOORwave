@@ -296,16 +296,32 @@ impl TidalClient {
 
     // ─── Favorites ─────────────────────────────────────────
 
+    fn favorite_url(&self, user_id: &str, kind: &str, limit: i32, offset: i32) -> String {
+        format!(
+            "{}/users/{}/favorites/{}?countryCode={}&limit={}&offset={}&order=DATE&orderDirection=DESC",
+            TIDAL_API_URL, user_id, kind, self.country_code, limit, offset
+        )
+    }
+
+    pub(crate) fn favorite_tracks_url(&self, user_id: &str, limit: i32, offset: i32) -> String {
+        self.favorite_url(user_id, "tracks", limit, offset)
+    }
+
+    pub(crate) fn favorite_albums_url(&self, user_id: &str, limit: i32, offset: i32) -> String {
+        self.favorite_url(user_id, "albums", limit, offset)
+    }
+
+    pub(crate) fn favorite_artists_url(&self, user_id: &str, limit: i32, offset: i32) -> String {
+        self.favorite_url(user_id, "artists", limit, offset)
+    }
+
     pub async fn get_favorite_tracks(
         &self,
         user_id: &str,
         limit: i32,
         offset: i32,
     ) -> Result<TidalPaginatedResponse<FavoriteItem<TidalTrack>>> {
-        let url = format!(
-            "{}/users/{}/favorites/tracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, user_id, self.country_code, limit, offset
-        );
+        let url = self.favorite_tracks_url(user_id, limit, offset);
         self.get_json(&url).await
     }
 
@@ -315,10 +331,7 @@ impl TidalClient {
         limit: i32,
         offset: i32,
     ) -> Result<TidalPaginatedResponse<FavoriteItem<TidalAlbum>>> {
-        let url = format!(
-            "{}/users/{}/favorites/albums?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, user_id, self.country_code, limit, offset
-        );
+        let url = self.favorite_albums_url(user_id, limit, offset);
         self.get_json(&url).await
     }
 
@@ -328,10 +341,7 @@ impl TidalClient {
         limit: i32,
         offset: i32,
     ) -> Result<TidalPaginatedResponse<FavoriteItem<TidalArtist>>> {
-        let url = format!(
-            "{}/users/{}/favorites/artists?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, user_id, self.country_code, limit, offset
-        );
+        let url = self.favorite_artists_url(user_id, limit, offset);
         self.get_json(&url).await
     }
 
@@ -1573,6 +1583,26 @@ mod tests {
     /// Round-trip the documented `pages/my_collection_my_mixes` shape through
     /// the parser. Asserts: every mix has non-empty id/title/image_url, the
     /// mix_type passes through, and rows/modules nesting is walked.
+    #[test]
+    fn favorite_urls_request_newest_first_ordering() {
+        let client = TidalClient::new("token".into(), "US".into());
+
+        let tracks = client.favorite_tracks_url("user-1", 100, 0);
+        let albums = client.favorite_albums_url("user-1", 100, 20);
+        let artists = client.favorite_artists_url("user-1", 50, 10);
+
+        for url in [tracks, albums, artists] {
+            assert!(
+                url.contains("order=DATE"),
+                "favorite URL must request date ordering: {url}"
+            );
+            assert!(
+                url.contains("orderDirection=DESC"),
+                "favorite URL must request newest-first ordering: {url}"
+            );
+        }
+    }
+
     #[test]
     fn parse_my_mixes_extracts_full_set() {
         let payload = json!({
