@@ -107,6 +107,7 @@
 	let lastfmChecked = $state(0);
 	let lastfmEnrichedCount = $state(0);
 	let lastfmRemaining = $state(0);
+	let lastfmCheckedUntagged = $derived(Math.max(0, lastfmChecked - lastfmEnrichedCount));
 	let lastfmIsRunning = $state(false);
 	let lastfmRunTotal = $state(0);
 	let lastfmRunProcessed = $state(0);
@@ -673,11 +674,10 @@
 		lastfmError = '';
 	}
 
-	async function startLastfmEnrichment() {
+	async function startLastfmEnrichment(mode: '' | 'retry_untagged' | 'refresh' = '') {
 		lastfmError = '';
 		try {
-			const refresh = lastfmRemaining === 0 && lastfmTotal > 0;
-			const path = `/api/library/enrich/lastfm${refresh ? '?mode=refresh' : ''}`;
+			const path = `/api/library/enrich/lastfm${mode ? `?mode=${mode}` : ''}`;
 			const resp = await authFetch(`${getApiBase()}${path}`, { method: 'POST' });
 			markServerOnline();
 			const data = await resp.json();
@@ -691,6 +691,22 @@
 			lastfmError = e instanceof Error ? e.message : String(e);
 			if (isFetchConnectionError(e)) markServerOffline();
 		}
+	}
+
+	function startLastfmPrimaryEnrichment() {
+		if (lastfmRemaining === 0 && lastfmCheckedUntagged > 0) {
+			startLastfmRetryUntagged();
+			return;
+		}
+		void startLastfmEnrichment('');
+	}
+
+	function startLastfmRetryUntagged() {
+		void startLastfmEnrichment('retry_untagged');
+	}
+
+	function startLastfmRefreshAll() {
+		void startLastfmEnrichment('refresh');
 	}
 
 	async function stopLastfmEnrichment() {
@@ -1791,6 +1807,8 @@
 									Pre-fetching artist tags… {lastfmPrefetchDone.toLocaleString()} / {lastfmPrefetchTotal.toLocaleString()} artists. Track pass starts after.
 								{:else if lastfmIsRunning && lastfmRunTotal > 0}
 									Querying Last.fm… {lastfmRunRemaining.toLocaleString()} tracks left in this run (~{lastfmEtaLabel} left).
+								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmCheckedUntagged > 0}
+									All {lastfmTotal.toLocaleString()} eligible tracks checked. {lastfmCheckedUntagged.toLocaleString()} returned no saved Last.fm tags.
 								{:else if !lastfmIsRunning && lastfmRemaining === 0 && lastfmTotal > 0}
 									All {lastfmTotal.toLocaleString()} eligible tracks checked. Recheck tags to refresh Last.fm coverage.
 								{:else if !lastfmIsRunning && lastfmRemaining > 0}
@@ -1824,16 +1842,25 @@
 					<div class="action-row">
 						<button
 							class="btn btn-primary"
-							onclick={startLastfmEnrichment}
-							disabled={lastfmIsRunning || lastfmTotal === 0}
+							onclick={startLastfmPrimaryEnrichment}
+							disabled={lastfmIsRunning || lastfmTotal === 0 || (lastfmRemaining === 0 && lastfmCheckedUntagged === 0)}
 						>
 							{lastfmIsRunning
 								? 'Running…'
-								: lastfmRemaining === 0
-									? 'Recheck tags'
+								: lastfmRemaining === 0 && lastfmCheckedUntagged > 0
+									? 'Retry untagged'
+									: lastfmRemaining === 0
+									? 'All checked'
 									: lastfmChecked > 0
 										? 'Resume enrichment'
 										: 'Enrich genres'}
+						</button>
+						<button
+							class="btn btn-glass"
+							onclick={startLastfmRefreshAll}
+							disabled={lastfmIsRunning || lastfmTotal === 0}
+						>
+							Recheck all tags
 						</button>
 						{#if lastfmIsRunning}
 							<button class="btn btn-glass" onclick={stopLastfmEnrichment}>Stop</button>

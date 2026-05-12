@@ -22,6 +22,7 @@ type CountedTag = (String, Option<u32>);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnrichmentMode {
     Pending,
+    RetryUntagged,
     RefreshAll,
 }
 
@@ -38,6 +39,19 @@ pub fn count_tracks_to_enrich(conn: &Connection, mode: EnrichmentMode) -> Result
             "SELECT COUNT(*) FROM tracks t
              WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
                AND NOT EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)"
+        }
+        EnrichmentMode::RetryUntagged => {
+            "SELECT COUNT(*) FROM tracks t
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND EXISTS (SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id)
+               AND NOT EXISTS (
+                   SELECT 1 FROM track_genres tg
+                   WHERE tg.track_id = t.id AND tg.source = 'lastfm'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM track_context_tags tct
+                   WHERE tct.track_id = t.id AND tct.source = 'lastfm'
+               )"
         }
         EnrichmentMode::RefreshAll => {
             "SELECT COUNT(*) FROM tracks t
@@ -60,6 +74,24 @@ pub fn load_tracks_to_enrich(
              WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
                AND NOT EXISTS (
                    SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id
+               )
+             ORDER BY t.id"
+        }
+        EnrichmentMode::RetryUntagged => {
+            "SELECT t.id, t.title, a.name
+             FROM tracks t
+             JOIN artists a ON t.artist_id = a.id
+             WHERE (t.is_favorite = 1 OR t.album_id IN (SELECT id FROM albums WHERE is_favorite = 1))
+               AND EXISTS (
+                   SELECT 1 FROM lastfm_checked lc WHERE lc.track_id = t.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM track_genres tg
+                   WHERE tg.track_id = t.id AND tg.source = 'lastfm'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM track_context_tags tct
+                   WHERE tct.track_id = t.id AND tct.source = 'lastfm'
                )
              ORDER BY t.id"
         }
@@ -124,6 +156,18 @@ fn mark_checked(conn: &Connection, track_id: i64) -> Result<()> {
         rusqlite::params![track_id],
     )?;
     Ok(())
+}
+
+fn should_replace_existing(
+    mode: EnrichmentMode,
+    transient_failure: bool,
+    _has_replacement_rows: bool,
+) -> bool {
+    mode == EnrichmentMode::RefreshAll && !transient_failure
+}
+
+fn should_mark_track_checked(track_lookup_failed: bool, artist_lookup_failed: bool) -> bool {
+    !track_lookup_failed && !artist_lookup_failed
 }
 
 fn context_confidence(count: Option<u32>) -> f64 {
@@ -246,6 +290,7 @@ where
     artist_progress(already_cached, artist_total);
 
     let mut fetched_so_far = already_cached;
+    let mut artist_transient_failures = HashSet::new();
     for artist in to_fetch {
         if cancel.load(Ordering::Relaxed) {
             info!("Last.fm enrichment cancelled during artist pre-fetch.");
@@ -254,7 +299,16 @@ where
 
         let tags = match fetch_with_retry(|| client.artist_top_tags(artist)).await {
             Ok(tags) => tags,
-            Err(()) => Vec::new(),
+            Err(()) => {
+                artist_transient_failures.insert(artist.clone());
+                fetched_so_far += 1;
+                artist_progress(fetched_so_far, artist_total);
+                if fetched_so_far.is_multiple_of(500) {
+                    info!("Artist pre-fetch: {}/{}", fetched_so_far, artist_total);
+                }
+                sleep(Duration::from_millis(CALL_DELAY_MS)).await;
+                continue;
+            }
         };
         let tags_opt = if tags.is_empty() {
             None
@@ -289,30 +343,21 @@ where
     let mut transient_skips = 0usize;
 
     for (track_id, title, artist) in tracks_to_enrich {
-        let mut transient_failure = false;
+        let artist_lookup_failed = artist_transient_failures.contains(&artist);
+        let mut track_lookup_failed = false;
         let track_tags = match fetch_with_retry(|| client.track_top_tags(&artist, &title)).await {
             Ok(tags) => tags,
             Err(()) => {
-                transient_failure = true;
+                track_lookup_failed = true;
                 Vec::new()
             }
         };
+        let transient_failure = track_lookup_failed || artist_lookup_failed;
 
         let track_tagged = !track_tags.is_empty()
             || matches!(artist_cache.get(&artist), Some(Some(tags)) if !tags.is_empty());
 
         let _ = state.read().await.db.with_conn(|conn| {
-            if mode == EnrichmentMode::RefreshAll && !transient_failure {
-                conn.execute(
-                    "DELETE FROM track_genres WHERE track_id = ?1 AND source = 'lastfm'",
-                    rusqlite::params![track_id],
-                )?;
-                conn.execute(
-                    "DELETE FROM track_context_tags WHERE track_id = ?1 AND source = 'lastfm'",
-                    rusqlite::params![track_id],
-                )?;
-            }
-
             let catalog = crate::genre::builder::embedded_builder().catalog();
             let mut routed_input: Vec<(String, Option<u32>, TagSource, TagLevel)> = Vec::new();
             let mut seen: HashSet<(String, TagSource, TagLevel)> = HashSet::new();
@@ -359,6 +404,18 @@ where
 
             let (genre_inputs, context_rows) = route_tags(&routed_input, catalog);
             let result = score_genre_tags(&genre_inputs, MIN_SCORE_FLOOR);
+            let has_replacement_rows = !result.genres.is_empty() || !context_rows.is_empty();
+
+            if should_replace_existing(mode, transient_failure, has_replacement_rows) {
+                conn.execute(
+                    "DELETE FROM track_genres WHERE track_id = ?1 AND source = 'lastfm'",
+                    rusqlite::params![track_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM track_context_tags WHERE track_id = ?1 AND source = 'lastfm'",
+                    rusqlite::params![track_id],
+                )?;
+            }
 
             for scored in &result.genres {
                 let Some(genre_id): Option<i64> = conn
@@ -392,7 +449,7 @@ where
                 )?;
             }
 
-            if !transient_failure {
+            if should_mark_track_checked(track_lookup_failed, artist_lookup_failed) {
                 mark_checked(conn, track_id)?;
             }
             Ok(())
@@ -580,5 +637,105 @@ mod tests {
             .map(|(id, _, _)| *id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn retry_untagged_mode_selects_checked_tracks_without_lastfm_outputs() {
+        let conn = lastfm_test_conn();
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Autechre')", [])
+            .unwrap();
+        conn.execute("INSERT INTO albums (id, is_favorite) VALUES (10, 1)", [])
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE genres (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE track_genres (
+                track_id INTEGER NOT NULL,
+                genre_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                PRIMARY KEY (track_id, genre_id)
+             );
+             CREATE TABLE track_context_tags (
+                track_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                normalized_tag TEXT NOT NULL,
+                context TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                PRIMARY KEY (track_id, normalized_tag, context, source)
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, is_favorite) VALUES
+                (1, 'Flutter', 1, 10, 0),
+                (2, 'Bike', 1, 10, 0),
+                (3, 'Basscadet', 1, 10, 0),
+                (4, 'Pir', 1, 10, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lastfm_checked (track_id) VALUES (1), (2), (3)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO genres (id, name) VALUES (1, 'Techno')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id, source) VALUES (2, 1, 'lastfm')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_context_tags
+                (track_id, tag, normalized_tag, context, source, confidence)
+             VALUES (3, 'happy', 'happy', 'mood', 'lastfm', 0.7)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            count_tracks_to_enrich(&conn, EnrichmentMode::RetryUntagged).unwrap(),
+            1
+        );
+
+        let retry_tracks = load_tracks_to_enrich(&conn, EnrichmentMode::RetryUntagged).unwrap();
+        let ids = retry_tracks
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1]);
+    }
+
+    #[test]
+    fn refresh_replaces_existing_rows_on_successful_empty_results() {
+        assert!(should_replace_existing(
+            EnrichmentMode::RefreshAll,
+            false,
+            false
+        ));
+        assert!(should_replace_existing(
+            EnrichmentMode::RefreshAll,
+            false,
+            true
+        ));
+        assert!(!should_replace_existing(
+            EnrichmentMode::RefreshAll,
+            true,
+            true
+        ));
+        assert!(!should_replace_existing(
+            EnrichmentMode::Pending,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn track_is_not_checked_when_artist_lookup_had_transient_failure() {
+        assert!(should_mark_track_checked(false, false));
+        assert!(!should_mark_track_checked(true, false));
+        assert!(!should_mark_track_checked(false, true));
     }
 }

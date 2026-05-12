@@ -1902,7 +1902,6 @@ async fn play_discovery_track(
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(playback_generation);
-    align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -4359,7 +4358,6 @@ async fn start_first_radio_queue_item(
             user_quality,
         )
         .with_generation(playback_generation);
-        align_device_to_stream_rate(state, &runtime_handle, &stream_info).await;
         runtime_handle.play(job).map_err(|error| {
             let message = format!("Failed to start host audio playback: {error}");
             report_playback_failure(state, &message);
@@ -6149,7 +6147,6 @@ async fn play_track(
     let job =
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(playback_generation);
-    align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|error| {
         let message = format!("Failed to start host audio playback: {error}");
         report_playback_failure(&state, &message);
@@ -7154,7 +7151,6 @@ async fn next_track(
             user_quality,
         )
         .with_generation(playback_generation);
-        align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -7296,7 +7292,6 @@ async fn previous_track(
             user_quality,
         )
         .with_generation(playback_generation);
-        align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
         runtime_handle.switch_to(job).map_err(|error| {
             let message = format!("Failed to switch host audio playback: {error}");
             report_playback_failure(&state, &message);
@@ -9309,7 +9304,6 @@ async fn start_ephemeral_tidal_playback(
             return Err(error);
         }
     };
-    align_device_to_stream_rate(state, &runtime_handle, &stream_info).await;
     runtime_handle.play(job).map_err(|e| {
         let message = format!("Failed to start host audio playback: {e}");
         report_playback_failure(state, &message);
@@ -9994,7 +9988,7 @@ async fn handle_near_end(
                     .current_stream_display
                     .as_ref()
                     .and_then(|display| display.bit_depth);
-                if should_skip_prebuffer_for_exclusive_rate_change(
+                if should_skip_prebuffer_for_sample_rate_follow_format_change(
                     settings.exclusive_mode,
                     settings.sample_rate_follow,
                     current_rate,
@@ -10010,7 +10004,7 @@ async fn handle_near_end(
                         .map(|depth| depth.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
                     info!(
-                        "Skipping pre-buffer for next track {}: exclusive sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
+                        "Skipping pre-buffer for next track {}: sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
                         next.id, current_rate, current_depth_label, next_rate, next_depth_label
                     );
                     return Ok(());
@@ -10333,7 +10327,6 @@ async fn handle_runtime_finished(
                 user_quality,
             )
             .with_generation(generation);
-            align_device_to_stream_rate(&state, &runtime_handle, &stream_info).await;
             runtime_handle.switch_to(job)?;
             {
                 let mut state_guard = state.write().await;
@@ -10478,7 +10471,7 @@ fn effective_crossfade_for_exclusive(exclusive: bool, configured: i32) -> i32 {
     if exclusive { 0 } else { configured.max(0) }
 }
 
-fn should_skip_prebuffer_for_exclusive_rate_change(
+fn should_skip_prebuffer_for_sample_rate_follow_format_change(
     exclusive_mode: bool,
     sample_rate_follow: bool,
     current_rate: u32,
@@ -10486,7 +10479,7 @@ fn should_skip_prebuffer_for_exclusive_rate_change(
     current_bit_depth: Option<i32>,
     next_bit_depth: Option<i32>,
 ) -> bool {
-    if !exclusive_mode || !sample_rate_follow {
+    if !sample_rate_follow {
         return false;
     }
     let rate_changes =
@@ -10495,7 +10488,7 @@ fn should_skip_prebuffer_for_exclusive_rate_change(
         (current_bit_depth, next_bit_depth),
         (Some(current), Some(next)) if current > 0 && next > 0 && current != next
     );
-    rate_changes || bit_depth_changes
+    rate_changes || (exclusive_mode && bit_depth_changes)
 }
 
 async fn current_user_audio_quality(
@@ -10553,60 +10546,6 @@ async fn apply_persisted_runtime_output_settings(
         output.exclusive_release_grace_secs,
     ) {
         warn!("Failed to apply persisted audio settings to playback runtime: {e}");
-    }
-}
-
-// If sample-rate-follow is enabled and the freshly-resolved stream's native
-// rate differs from the device's current rate, swap the device to the new
-// rate before the track starts. Without this, the first track of a session
-// (and any track played from a cold start) plays at the device's existing
-// rate with a software resampler in the path: not bit-perfect. The
-// next-track pre-buffer path already does this; this helper makes every
-// play/switch site behave the same way.
-async fn align_device_to_stream_rate(
-    state: &SharedState,
-    handle: &playback_runtime::PlaybackRuntimeHandle,
-    stream_info: &tidal_stream::StreamInfo,
-) {
-    let (next_rate, settings, current_rate) = {
-        let guard = state.read().await;
-        let Some(info) = guard.playback_runtime_info.as_ref() else {
-            return;
-        };
-        let Some(rate_i32) = stream_info.sample_rate else {
-            return;
-        };
-        if rate_i32 <= 0 {
-            return;
-        }
-        let next_rate = rate_i32 as u32;
-        if next_rate == info.sample_rate {
-            return;
-        }
-        let settings = match guard
-            .db
-            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
-        {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        if !settings.sample_rate_follow {
-            return;
-        }
-        (next_rate, settings, info.sample_rate)
-    };
-
-    let output = runtime_output_settings_from_audio_settings(&settings);
-    if let Err(e) = handle.device_swap(
-        output.device,
-        output.exclusive_mode,
-        output.sample_rate_follow,
-        Some(next_rate),
-        output.exclusive_release_grace_secs,
-    ) {
-        warn!(
-            "align_device_to_stream_rate: device_swap to {next_rate} Hz (from {current_rate} Hz) failed: {e}"
-        );
     }
 }
 
@@ -10829,7 +10768,6 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
         player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(generation);
 
-    align_device_to_stream_rate(state, &handle, &stream_info).await;
     handle.switch_to(job)?;
 
     {
@@ -12342,7 +12280,7 @@ mod tests {
 
     #[test]
     fn exclusive_sample_rate_follow_skips_prebuffer_on_rate_change() {
-        assert!(should_skip_prebuffer_for_exclusive_rate_change(
+        assert!(should_skip_prebuffer_for_sample_rate_follow_format_change(
             true,
             true,
             44_100,
@@ -12350,7 +12288,7 @@ mod tests {
             Some(16),
             Some(24),
         ));
-        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+        assert!(!should_skip_prebuffer_for_sample_rate_follow_format_change(
             true,
             true,
             96_000,
@@ -12358,15 +12296,7 @@ mod tests {
             Some(24),
             Some(24),
         ));
-        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
-            false,
-            true,
-            44_100,
-            Some(96_000),
-            Some(16),
-            Some(24),
-        ));
-        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+        assert!(!should_skip_prebuffer_for_sample_rate_follow_format_change(
             true,
             false,
             44_100,
@@ -12374,7 +12304,7 @@ mod tests {
             Some(16),
             Some(24),
         ));
-        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+        assert!(!should_skip_prebuffer_for_sample_rate_follow_format_change(
             true,
             true,
             44_100,
@@ -12382,11 +12312,23 @@ mod tests {
             Some(16),
             Some(16),
         ));
-        assert!(should_skip_prebuffer_for_exclusive_rate_change(
+        assert!(should_skip_prebuffer_for_sample_rate_follow_format_change(
             true,
             true,
             44_100,
             Some(44_100),
+            Some(16),
+            Some(24),
+        ));
+    }
+
+    #[test]
+    fn shared_sample_rate_follow_skips_prebuffer_on_rate_change() {
+        assert!(should_skip_prebuffer_for_sample_rate_follow_format_change(
+            false,
+            true,
+            44_100,
+            Some(96_000),
             Some(16),
             Some(24),
         ));

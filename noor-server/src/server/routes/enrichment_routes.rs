@@ -592,6 +592,12 @@ impl LastfmEnrichmentStartParams {
             })
         {
             crate::services::lastfm::enrichment::EnrichmentMode::RefreshAll
+        } else if self.mode.as_deref().is_some_and(|mode| {
+            mode.eq_ignore_ascii_case("retry_untagged")
+                || mode.eq_ignore_ascii_case("untagged")
+                || mode.eq_ignore_ascii_case("missing")
+        }) {
+            crate::services::lastfm::enrichment::EnrichmentMode::RetryUntagged
         } else {
             crate::services::lastfm::enrichment::EnrichmentMode::Pending
         }

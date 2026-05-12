@@ -907,17 +907,16 @@ fn run_runtime_loop(
                     .name()
                     .unwrap_or_else(|_| "default output device".to_string());
 
-                // When sample-rate-follow is on, re-target both the cpal stream
-                // and the decoder. Use the explicitly-provided rate if given (e.g.
-                // per-track transition), otherwise use the new device's default.
-                // When off, pass `None` so the existing rate carries over (the cpal
-                // stream may resample internally, which is fine for the toggle
-                // being off).
-                let desired_rate = match desired_sample_rate {
-                    Some(rate) => Some(rate),
-                    None if sample_rate_follow => Some(new_config.sample_rate.0),
-                    _ => None,
-                };
+                let has_live_engines = state.engine.is_some()
+                    || state.next_engine.is_some()
+                    || state.fading_out_engine.is_some();
+                let desired_rate = device_swap_target_sample_rate(
+                    desired_sample_rate,
+                    sample_rate_follow,
+                    has_live_engines,
+                    state.device_sample_rate,
+                    new_config.sample_rate.0,
+                );
                 let requested_backend = if exclusive {
                     SwapBackend::Exclusive
                 } else {
@@ -1124,6 +1123,20 @@ fn transition_to_job(
     // Reset position counter for the new track (safe: old engine is fully stopped above).
     position_samples.store(0, Ordering::SeqCst);
 
+    let output_state_update = transition_output_state_update(
+        job.output_sample_rate,
+        state.current_sample_rate_follow,
+        state.device_sample_rate,
+    );
+    if let Some(update) = output_state_update {
+        output_config.sample_rate = cpal::SampleRate(update.sample_rate);
+        state.device_sample_rate = update.sample_rate;
+        #[cfg(target_os = "windows")]
+        if update.force_exclusive_rebuild && state.current_exclusive {
+            state.exclusive_sink.stream = None;
+        }
+    }
+
     let _ = event_tx.send(PlaybackRuntimeEvent::Preparing {
         track_id: job.track.id,
         source: job.source_kind(),
@@ -1133,7 +1146,15 @@ fn transition_to_job(
     let pre_decoded_match = state
         .next_engine
         .as_ref()
-        .map(|e| e.track_id == job.track.id && e.generation == job.generation)
+        .map(|e| {
+            e.track_id == job.track.id
+                && e.generation == job.generation
+                && prepared_engine_matches_output_rate(
+                    e.shared.device_sample_rate,
+                    job.output_sample_rate,
+                    state.current_sample_rate_follow,
+                )
+        })
         .unwrap_or(false);
 
     if pre_decoded_match {
@@ -1228,6 +1249,13 @@ fn transition_to_job(
             *position_source.lock().unwrap() = Arc::clone(position_samples);
             state.engine = Some(eng);
         }
+    }
+    if output_state_update.is_some_and(|update| update.notify_ready) {
+        let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
+            device_name: state.device_name.clone(),
+            sample_rate: state.device_sample_rate,
+            channels: state.device_channels,
+        });
     }
     Ok(())
 }
@@ -1831,6 +1859,65 @@ fn output_rate_fallback_config(
 
 fn exclusive_rebuild_rate(sample_rate_follow: bool, device_sample_rate: u32) -> Option<u32> {
     sample_rate_follow.then_some(device_sample_rate)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputStateUpdate {
+    sample_rate: u32,
+    force_exclusive_rebuild: bool,
+    notify_ready: bool,
+}
+
+fn device_swap_target_sample_rate(
+    requested_sample_rate: Option<u32>,
+    sample_rate_follow: bool,
+    has_live_engines: bool,
+    current_sample_rate: u32,
+    device_default_sample_rate: u32,
+) -> Option<u32> {
+    if let Some(rate) = requested_sample_rate {
+        return Some(rate);
+    }
+    if has_live_engines {
+        return Some(current_sample_rate);
+    }
+    sample_rate_follow.then_some(device_default_sample_rate)
+}
+
+fn transition_output_state_update(
+    job_sample_rate: Option<u32>,
+    sample_rate_follow: bool,
+    current_sample_rate: u32,
+) -> Option<OutputStateUpdate> {
+    transition_output_sample_rate(job_sample_rate, sample_rate_follow, current_sample_rate).map(
+        |sample_rate| OutputStateUpdate {
+            sample_rate,
+            force_exclusive_rebuild: true,
+            notify_ready: true,
+        },
+    )
+}
+
+fn transition_output_sample_rate(
+    job_sample_rate: Option<u32>,
+    sample_rate_follow: bool,
+    current_sample_rate: u32,
+) -> Option<u32> {
+    if !sample_rate_follow {
+        return None;
+    }
+    job_sample_rate.filter(|rate| *rate > 0 && *rate != current_sample_rate)
+}
+
+fn prepared_engine_matches_output_rate(
+    engine_sample_rate: u32,
+    job_sample_rate: Option<u32>,
+    sample_rate_follow: bool,
+) -> bool {
+    !sample_rate_follow
+        || job_sample_rate
+            .map(|rate| rate == engine_sample_rate)
+            .unwrap_or(true)
 }
 
 fn build_output_stream(
@@ -3290,6 +3377,91 @@ mod tests {
     fn exclusive_rebuild_rate_follows_current_output_rate_only_when_enabled() {
         assert_eq!(exclusive_rebuild_rate(true, 96_000), Some(96_000));
         assert_eq!(exclusive_rebuild_rate(false, 96_000), None);
+    }
+
+    #[test]
+    fn device_swap_preserves_active_rate_without_explicit_target() {
+        assert_eq!(
+            device_swap_target_sample_rate(None, true, true, 44_100, 48_000),
+            Some(44_100)
+        );
+        assert_eq!(
+            device_swap_target_sample_rate(None, false, true, 96_000, 48_000),
+            Some(96_000)
+        );
+    }
+
+    #[test]
+    fn device_swap_uses_default_follow_rate_when_idle() {
+        assert_eq!(
+            device_swap_target_sample_rate(None, true, false, 44_100, 48_000),
+            Some(48_000)
+        );
+        assert_eq!(
+            device_swap_target_sample_rate(None, false, false, 44_100, 48_000),
+            None
+        );
+    }
+
+    #[test]
+    fn device_swap_explicit_target_overrides_active_rate() {
+        assert_eq!(
+            device_swap_target_sample_rate(Some(192_000), true, true, 44_100, 48_000),
+            Some(192_000)
+        );
+    }
+
+    #[test]
+    fn transition_output_sample_rate_uses_job_rate_only_when_following() {
+        assert_eq!(
+            transition_output_sample_rate(Some(96_000), true, 44_100),
+            Some(96_000)
+        );
+        assert_eq!(
+            transition_output_sample_rate(Some(96_000), false, 44_100),
+            None
+        );
+        assert_eq!(
+            transition_output_sample_rate(Some(44_100), true, 44_100),
+            None
+        );
+        assert_eq!(transition_output_sample_rate(None, true, 44_100), None);
+    }
+
+    #[test]
+    fn sample_rate_follow_transition_rebuilds_output_state() {
+        assert_eq!(
+            transition_output_state_update(Some(96_000), true, 44_100),
+            Some(OutputStateUpdate {
+                sample_rate: 96_000,
+                force_exclusive_rebuild: true,
+                notify_ready: true,
+            })
+        );
+        assert_eq!(
+            transition_output_state_update(Some(44_100), true, 44_100),
+            None
+        );
+    }
+
+    #[test]
+    fn prepared_engine_rate_must_match_when_sample_rate_following() {
+        assert!(prepared_engine_matches_output_rate(
+            96_000,
+            Some(96_000),
+            true
+        ));
+        assert!(!prepared_engine_matches_output_rate(
+            44_100,
+            Some(96_000),
+            true
+        ));
+        assert!(prepared_engine_matches_output_rate(
+            44_100,
+            Some(96_000),
+            false
+        ));
+        assert!(prepared_engine_matches_output_rate(44_100, None, true));
     }
 
     #[test]
