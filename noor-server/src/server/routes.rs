@@ -12901,6 +12901,18 @@ async fn handle_near_end(
                 && let Some(next_rate) = stream.sample_rate
             {
                 let current_rate = info.sample_rate;
+                if should_skip_prebuffer_for_exclusive_rate_change(
+                    settings.exclusive_mode,
+                    settings.sample_rate_follow,
+                    current_rate,
+                    Some(next_rate),
+                ) {
+                    info!(
+                        "Skipping pre-buffer for next track {}: exclusive sample-rate-follow will switch from {} Hz to {} Hz at track start",
+                        next.id, current_rate, next_rate
+                    );
+                    return Ok(());
+                }
                 if next_rate as u32 != current_rate {
                     let device_sel = match settings.output_device {
                         Some(device_id) => {
@@ -13359,6 +13371,21 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
 
 fn effective_crossfade_for_exclusive(_exclusive: bool, configured: i32) -> i32 {
     configured.max(0)
+}
+
+fn should_skip_prebuffer_for_exclusive_rate_change(
+    exclusive_mode: bool,
+    sample_rate_follow: bool,
+    current_rate: u32,
+    next_rate: Option<i32>,
+) -> bool {
+    if !exclusive_mode || !sample_rate_follow {
+        return false;
+    }
+    let Some(next_rate) = next_rate else {
+        return false;
+    };
+    next_rate > 0 && next_rate as u32 != current_rate
 }
 
 async fn current_user_audio_quality(
@@ -17203,6 +17230,37 @@ mod tests {
         assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 1_500);
         assert_eq!(effective_crossfade_for_exclusive(false, 1_500), 1_500);
         assert_eq!(effective_crossfade_for_exclusive(true, -10), 0);
+    }
+
+    #[test]
+    fn exclusive_sample_rate_follow_skips_prebuffer_on_rate_change() {
+        assert!(should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            true,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            true,
+            96_000,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            false,
+            true,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            false,
+            44_100,
+            Some(96_000),
+        ));
+        assert!(!should_skip_prebuffer_for_exclusive_rate_change(
+            true, true, 44_100, None,
+        ));
     }
 
     #[tokio::test]
