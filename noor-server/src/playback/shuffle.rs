@@ -48,7 +48,7 @@ impl WeightedShuffleProfile {
         // when the user skips tracks before the 90% completion threshold.
         if let Some(last_played) = track.last_played_at.as_deref() {
             // Time-decay: penalty fades from full (0.8×) at <1 day to none at 30+ days.
-            // Tracks played months ago get no penalty. Only truly recent plays are suppressed.
+            // Tracks played months ago get no penalty — only truly recent plays are suppressed.
             let days_since = parse_days_since(last_played);
             let decay = (days_since / 30.0).min(1.0); // 0.0 = just played, 1.0 = 30+ days ago
             let penalty = self.recent_play_penalty + (1.0 - self.recent_play_penalty) * decay;
@@ -129,8 +129,7 @@ pub fn artist_spread_shuffle_with_rng<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<Track> {
     let mut buckets = bucket_tracks_by_artist(tracks);
-    let spread = distribute_artist_buckets(&mut buckets, rng);
-    stabilize_adjacent_keys(spread, artist_bucket_key)
+    distribute_buckets_by_largest_gap(&mut buckets, rng)
 }
 
 pub fn genre_shuffle(tracks: &[Track], track_genres: &HashMap<i64, Vec<String>>) -> Vec<Track> {
@@ -191,7 +190,10 @@ fn distribute_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut R) -> V
     sequence
 }
 
-fn distribute_artist_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut R) -> Vec<Track> {
+fn distribute_buckets_by_largest_gap<R: Rng + ?Sized>(
+    buckets: &mut [Bucket],
+    rng: &mut R,
+) -> Vec<Track> {
     for bucket in buckets.iter_mut() {
         let slice = bucket.tracks.make_contiguous();
         slice.shuffle(rng);
@@ -207,8 +209,22 @@ fn distribute_artist_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut 
     let mut last_key: Option<String> = None;
 
     while sequence.len() < total {
-        let Some(index) = pick_largest_eligible_bucket_index(buckets, last_key.as_deref(), rng)
-        else {
+        let mut best_index = None;
+        let mut best_len = 0;
+        for (index, bucket) in buckets.iter().enumerate() {
+            let len = bucket.tracks.len();
+            if len == 0 || last_key.as_deref() == Some(bucket.key.as_str()) {
+                continue;
+            }
+            if len > best_len {
+                best_index = Some(index);
+                best_len = len;
+            }
+        }
+
+        let index =
+            best_index.or_else(|| buckets.iter().position(|bucket| !bucket.tracks.is_empty()));
+        let Some(index) = index else {
             break;
         };
 
@@ -222,7 +238,7 @@ fn distribute_artist_buckets<R: Rng + ?Sized>(buckets: &mut [Bucket], rng: &mut 
 }
 
 /// Pick the next bucket to drain. Eligible buckets (non-empty, key != last_key)
-/// are sampled in proportion to their remaining track count. Large buckets get
+/// are sampled in proportion to their remaining track count — large buckets get
 /// picked more often without being deterministic, so the queue isn't always led
 /// by the dominant key. Falls back to any non-empty bucket when no other key
 /// has tracks left.
@@ -263,51 +279,22 @@ fn pick_bucket_index<R: Rng + ?Sized>(
     eligible.first().map(|(i, _)| *i).or(fallback)
 }
 
-fn pick_largest_eligible_bucket_index<R: Rng + ?Sized>(
-    buckets: &[Bucket],
-    last_key: Option<&str>,
-    rng: &mut R,
-) -> Option<usize> {
-    let mut fallback: Option<(usize, usize)> = None;
-    let mut max_weight = 0usize;
-    let mut eligible = Vec::new();
-
-    for (index, bucket) in buckets.iter().enumerate() {
-        let weight = bucket.tracks.len();
-        if weight == 0 {
-            continue;
-        }
-        if fallback.is_none_or(|(_, fallback_weight)| weight > fallback_weight) {
-            fallback = Some((index, weight));
-        }
-        if last_key == Some(bucket.key.as_str()) {
-            continue;
-        }
-        match weight.cmp(&max_weight) {
-            Ordering::Greater => {
-                max_weight = weight;
-                eligible.clear();
-                eligible.push(index);
-            }
-            Ordering::Equal => eligible.push(index),
-            Ordering::Less => {}
-        }
-    }
-
-    eligible
-        .choose(rng)
-        .copied()
-        .or_else(|| fallback.map(|(index, _)| index))
-}
-
 fn bucket_tracks_by_artist(tracks: &[Track]) -> Vec<Bucket> {
     let mut groups: HashMap<String, Vec<Track>> = HashMap::new();
 
     for track in tracks.iter().cloned() {
-        groups
-            .entry(artist_bucket_key(&track))
-            .or_default()
-            .push(track);
+        let artist_key = if track.artist_id != 0 {
+            format!("artist:{}", track.artist_id)
+        } else {
+            track
+                .artist_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| format!("artist-name:{name}"))
+                .unwrap_or_else(|| UNKNOWN_ARTIST_KEY.to_string())
+        };
+
+        groups.entry(artist_key).or_default().push(track);
     }
 
     groups
@@ -317,19 +304,6 @@ fn bucket_tracks_by_artist(tracks: &[Track]) -> Vec<Bucket> {
             tracks: VecDeque::from(tracks),
         })
         .collect()
-}
-
-fn artist_bucket_key(track: &Track) -> String {
-    if track.artist_id != 0 {
-        format!("artist:{}", track.artist_id)
-    } else {
-        track
-            .artist_name
-            .clone()
-            .filter(|name| !name.trim().is_empty())
-            .map(|name| format!("artist-name:{name}"))
-            .unwrap_or_else(|| UNKNOWN_ARTIST_KEY.to_string())
-    }
 }
 
 fn bucket_tracks_by_genre(
@@ -501,6 +475,36 @@ mod tests {
     }
 
     #[test]
+    fn artist_spread_repairs_same_artist_tail_when_possible() {
+        let tracks = vec![
+            track(1, 1, "A", false, 1, None, 10),
+            track(2, 1, "A", false, 1, None, 10),
+            track(3, 1, "A", false, 1, None, 10),
+            track(4, 2, "B", false, 1, None, 10),
+            track(5, 2, "B", false, 1, None, 10),
+            track(6, 3, "C", false, 1, None, 10),
+            track(7, 3, "C", false, 1, None, 10),
+        ];
+
+        for seed in 0u64..200 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let shuffled = artist_spread_shuffle_with_rng(&tracks, &mut rng);
+
+            for pair in shuffled.windows(2) {
+                assert_ne!(
+                    pair[0].artist_id,
+                    pair[1].artist_id,
+                    "seed {seed} produced {:?}",
+                    shuffled
+                        .iter()
+                        .map(|track| track.artist_id)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pick_bucket_does_not_always_lead_with_dominant_key() {
         // Library skewed heavily to one genre. The greedy "pick largest" rule
         // would always lead with that genre's track; weighted random picking
@@ -530,7 +534,7 @@ mod tests {
         let ambient_leads = leading_genre_counts.get("Ambient").copied().unwrap_or(0);
         assert!(
             ambient_leads >= 5,
-            "Ambient should occasionally lead even when smaller: got {ambient_leads}/200"
+            "Ambient should occasionally lead even when smaller — got {ambient_leads}/200"
         );
     }
 

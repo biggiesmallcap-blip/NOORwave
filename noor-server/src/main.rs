@@ -31,6 +31,7 @@ pub struct PlaybackRuntimeInfo {
     pub active_track_id: Option<i64>,
     pub last_error: Option<String>,
     pub exclusive_engaged: bool,
+    pub exclusive_transport_format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +245,7 @@ pub enum AppEvent {
     /// WASAPI exclusive grab succeeded on the audio engine.
     AudioExclusiveEngaged {
         device: String,
+        transport_format: String,
     },
     /// WASAPI exclusive grab failed; runtime fell back to cpal shared. The
     /// `reason` is human-readable and surfaced in the settings red-pill banner.

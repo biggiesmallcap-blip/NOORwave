@@ -109,9 +109,10 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "discovery_space_refreshed",
                         "seed_track_id": seed_track_id,
                     }),
-                    AppEvent::AudioExclusiveEngaged { device } => json!({
+                    AppEvent::AudioExclusiveEngaged { device, transport_format } => json!({
                         "type": "audio_exclusive_engaged",
                         "device": device,
+                        "transport_format": transport_format,
                     }),
                     AppEvent::AudioExclusiveFailed { device, reason } => json!({
                         "type": "audio_exclusive_failed",

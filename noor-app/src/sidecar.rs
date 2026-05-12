@@ -43,6 +43,9 @@ fn log_path() -> PathBuf {
 }
 
 const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024;
+const SERVER_PING_URL: &str = "http://127.0.0.1:3334/api/ping";
+const SERVER_SETUP_TOKEN_URL: &str = "http://127.0.0.1:3334/api/setup/token";
+const SERVER_SHUTDOWN_URL: &str = "http://127.0.0.1:3334/api/shutdown";
 
 fn rotate_log_if_oversized(path: &PathBuf) {
     let size = match std::fs::metadata(path) {
@@ -57,7 +60,48 @@ fn rotate_log_if_oversized(path: &PathBuf) {
     let _ = std::fs::rename(path, &rotated);
 }
 
+fn should_shutdown_stale_server_before_spawn(has_owned_child: bool, server_ready: bool) -> bool {
+    !has_owned_child && server_ready
+}
+
+fn localhost_server_is_ready(client: &reqwest::blocking::Client) -> bool {
+    client
+        .get(SERVER_PING_URL)
+        .send()
+        .is_ok_and(|resp| resp.status().is_success())
+}
+
+fn wait_until_localhost_server_stops(client: &reqwest::blocking::Client, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !localhost_server_is_ready(client) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn shutdown_stale_server_before_spawn(state: &Arc<SidecarState>) {
+    let has_owned_child = state.child.lock().unwrap().is_some();
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return;
+    };
+    if !should_shutdown_stale_server_before_spawn(
+        has_owned_child,
+        localhost_server_is_ready(&client),
+    ) {
+        return;
+    }
+    let _ = client.post(SERVER_SHUTDOWN_URL).send();
+    wait_until_localhost_server_stops(&client, Duration::from_millis(1500));
+}
+
 pub fn spawn_server(state: &Arc<SidecarState>) {
+    shutdown_stale_server_before_spawn(state);
+
     let host_mode = *state.host_mode.lock().unwrap();
     let path = log_path();
     rotate_log_if_oversized(&path);
@@ -107,7 +151,7 @@ pub fn kill_server(state: &Arc<SidecarState>) {
             .timeout(Duration::from_millis(1000))
             .build()
         {
-            let _ = client.post("http://127.0.0.1:3334/api/shutdown").send();
+            let _ = client.post(SERVER_SHUTDOWN_URL).send();
         }
         // Give the server up to 2s to exit cleanly after the shutdown
         // signal. Poll try_wait in 50ms ticks — std::process has no
@@ -144,9 +188,9 @@ pub fn restart_server(state: &Arc<SidecarState>) {
 pub fn wait_for_ready(state: &Arc<SidecarState>) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Ok(resp) = reqwest::blocking::get("http://127.0.0.1:3334/api/ping") {
+        if let Ok(resp) = reqwest::blocking::get(SERVER_PING_URL) {
             if resp.status().is_success() {
-                if let Ok(r) = reqwest::blocking::get("http://127.0.0.1:3334/api/setup/token") {
+                if let Ok(r) = reqwest::blocking::get(SERVER_SETUP_TOKEN_URL) {
                     if let Ok(body) = r.json::<serde_json::Value>() {
                         let token = body["token"].as_str().map(|s| s.to_owned());
                         *state.server_token.lock().unwrap() = token.clone();
@@ -159,4 +203,16 @@ pub fn wait_for_ready(state: &Arc<SidecarState>) -> Option<String> {
         std::thread::sleep(Duration::from_millis(300));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_shutdown_only_runs_when_no_owned_child_is_tracked() {
+        assert!(should_shutdown_stale_server_before_spawn(false, true));
+        assert!(!should_shutdown_stale_server_before_spawn(true, true));
+        assert!(!should_shutdown_stale_server_before_spawn(false, false));
+    }
 }

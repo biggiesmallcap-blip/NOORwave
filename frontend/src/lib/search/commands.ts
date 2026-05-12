@@ -2,6 +2,7 @@ import { goto } from '$app/navigation';
 import { get } from 'svelte/store';
 import { currentTrack } from '$lib/stores/player';
 import { api } from '$lib/api/client';
+import { APP_ROUTES, type AppRouteId } from '$lib/routes/registry';
 
 export interface SlashCommand {
 	prefix: string;         // e.g. 'play', 'queue', 'radio', 'jump'
@@ -10,6 +11,23 @@ export interface SlashCommand {
 	// execute receives the rest of the input after the command word (trimmed)
 	execute: (arg: string) => Promise<void> | void;
 }
+
+const JUMP_ROUTE_IDS = [
+	'library',
+	'genres',
+	'playlists',
+	'discover',
+	'settings',
+	'search',
+] as const satisfies readonly AppRouteId[];
+
+const JUMP_ROUTES = new Map(
+	JUMP_ROUTE_IDS.map((id) => {
+		const route = APP_ROUTES[id];
+		return [route.path.replace(/^\//, ''), route.path] as const;
+	})
+);
+const JUMP_ARGS = [...JUMP_ROUTES.keys()].join('|');
 
 export const SLASH_COMMANDS: SlashCommand[] = [
 	{
@@ -80,13 +98,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 	{
 		prefix: 'ds',
 		description: 'Open Discover Space',
-		execute: () => goto('/discoverspace'),
+		execute: () => goto(APP_ROUTES.discover.path),
 	},
 	{
 		prefix: 'jump',
 		description: 'Navigate to a page',
-		args: 'library|genres|playlists|discoverspace|settings|search',
-		execute: (arg) => { if (arg) goto(`/${arg}`); },
+		args: JUMP_ARGS,
+		execute: (arg) => {
+			if (arg) goto(JUMP_ROUTES.get(arg) ?? `/${arg}`);
+		},
 	},
 	{
 		prefix: 'automix',

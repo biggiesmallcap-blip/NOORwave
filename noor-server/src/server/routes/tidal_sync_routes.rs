@@ -460,7 +460,7 @@ async fn do_tidal_sync(
                     s.db.with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
                         for track in &tracks_resp.items {
-                            super::insert_tidal_track(&tx, track, false)?;
+                            super::insert_tidal_track(&tx, track, false, None)?;
                             stats.tracks += 1;
                         }
                         tx.commit()?;
@@ -521,7 +521,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    super::insert_tidal_track(&tx, track, true)?;
+                    super::insert_tidal_track(&tx, track, true, fav.created.as_deref())?;
                     stats.tracks += 1;
                 }
                 tx.commit()?;
@@ -646,7 +646,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    super::insert_tidal_track(&tx, track, false)?;
+                    super::insert_tidal_track(&tx, track, false, None)?;
 
                     let track_id: Option<i64> = tx
                         .query_row(

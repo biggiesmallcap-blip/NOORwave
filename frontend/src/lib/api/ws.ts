@@ -29,7 +29,7 @@ export type WsMessage =
 	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number }
 	| { type: 'discovery_space_refresh_progress'; seed_track_id: number; stage: string; progress: number }
 	| { type: 'discovery_space_refreshed'; seed_track_id: number }
-	| { type: 'audio_exclusive_engaged'; device: string }
+	| { type: 'audio_exclusive_engaged'; device: string; transport_format: string }
 	| { type: 'audio_exclusive_failed'; device: string; reason: string }
 	| { type: 'audio_exclusive_released'; device: string };
 
@@ -127,7 +127,7 @@ export function connectWebSocket() {
 				handleDiscoverySpaceRefreshed(data.seed_track_id);
 			}
 			if (data?.type === 'audio_exclusive_engaged') {
-				setExclusiveEngaged(data.device ?? '');
+				setExclusiveEngaged(data.device ?? '', data.transport_format ?? null);
 			}
 			if (data?.type === 'audio_exclusive_failed') {
 				setExclusiveFailed(data.device ?? '', data.reason ?? 'Exclusive mode unavailable');
