@@ -233,7 +233,7 @@ fn score(
     let title_jaccard = token_jaccard(&sp_title_norm, &cand_title_norm);
 
     let cand_artist = cand.artist_name.as_deref().unwrap_or("");
-    let artist_jaccard = token_jaccard(
+    let artist_jaccard = fuzzy_token_jaccard(
         &normalize_artist(sp_primary_artist),
         &normalize_artist(cand_artist),
     );
@@ -377,6 +377,66 @@ fn token_jaccard(a: &str, b: &str) -> f64 {
     } else {
         intersection / union
     }
+}
+
+fn fuzzy_token_jaccard(a: &str, b: &str) -> f64 {
+    let ta: Vec<String> = tokens(a).into_iter().collect();
+    let tb: Vec<String> = tokens(b).into_iter().collect();
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
+
+    let mut matched_b = vec![false; tb.len()];
+    let mut intersection = 0usize;
+    for left in &ta {
+        if let Some(idx) = tb.iter().enumerate().position(|(idx, right)| {
+            !matched_b[idx] && (left == right || one_edit_apart(left, right))
+        }) {
+            matched_b[idx] = true;
+            intersection += 1;
+        }
+    }
+
+    let union = ta.len() + tb.len() - intersection;
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    if a == b || a.len() < 4 || b.len() < 4 || a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut edits = 0usize;
+
+    while i < a_chars.len() && j < b_chars.len() {
+        if a_chars[i] == b_chars[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+        match a_chars.len().cmp(&b_chars.len()) {
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Greater => i += 1,
+            std::cmp::Ordering::Less => j += 1,
+        }
+    }
+
+    edits + (a_chars.len() - i) + (b_chars.len() - j) == 1
 }
 
 /// Detect version markers in a track title. Two tracks are eligible for
@@ -561,6 +621,20 @@ mod tests {
         let breakdown = score(&s, "Music Sounds Better With You", "Stardust", &c);
         assert!(breakdown.score < RESOLVED_THRESHOLD);
         assert!(breakdown.score >= LOW_CONFIDENCE_THRESHOLD - 0.05);
+    }
+
+    #[test]
+    fn score_tolerates_near_artist_spelling_when_title_matches() {
+        let s = sp("El Bandido", "Nicolaas Jaar", None);
+        let c = cand(123, "El Bandido", "Nicolas Jaar", 302);
+        let breakdown = score(&s, "El Bandido", "Nicolaas Jaar", &c);
+        assert!(
+            breakdown.score >= LOW_CONFIDENCE_THRESHOLD,
+            "expected >= {} but got {} ({})",
+            LOW_CONFIDENCE_THRESHOLD,
+            breakdown.score,
+            breakdown.reason
+        );
     }
 
     #[test]
