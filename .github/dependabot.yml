@@ -9,3 +9,32 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    groups:
+      cargo:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: cpal
+      - dependency-name: wasapi
+      - dependency-name: windows-sys
+      - dependency-name: tauri
+      - dependency-name: tauri-build
+      - dependency-name: wry
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    groups:
+      frontend:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "@tauri-apps/*"

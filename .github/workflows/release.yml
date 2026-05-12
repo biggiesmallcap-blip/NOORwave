@@ -15,6 +15,10 @@ on:
     tags:
       - "v*.*.*"
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
@@ -372,6 +376,25 @@ jobs:
         with:
           pattern: sha256-*
           merge-multiple: true
+
+      - name: Validate checksum artifacts
+        shell: pwsh
+        run: |
+          $expected = @(
+            "windows.sha256",
+            "linux-x64.sha256",
+            "macos-arm64.sha256",
+            "macos-x64.sha256"
+          )
+          foreach ($file in $expected) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Missing checksum file: $file"
+            }
+          }
+          $actual = @(Get-ChildItem -Filter "*.sha256")
+          if ($actual.Count -ne 4) {
+            throw "Expected 4 checksum files, found $($actual.Count)"
+          }
 
       - name: Merge into sha256sums.txt
         run: cat *.sha256 | sort > sha256sums.txt
