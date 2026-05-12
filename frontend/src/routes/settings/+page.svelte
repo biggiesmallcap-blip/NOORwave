@@ -1283,13 +1283,13 @@
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'discovery', label: 'Discovery', icon: '✦', hint: 'Learned radio engine' },
-		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Runtime + DSP analysis' },
+		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
 		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
 	];
 
 	let visibleSettingsCategories = $derived(
-		settingsCategories.filter((c) => c.id !== 'data' && c.id !== 'discovery')
+		settingsCategories.filter((c) => c.id !== 'data')
 	);
 
 	let activeCategoryMeta = $derived(
@@ -1846,188 +1846,196 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Output" title="Audio output" subtitle="Audio routing and video playback defaults." />
+				<SectionHeader eyebrow="Output" title="Playback output" subtitle="Quality, device, and bit-perfect routing." />
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
-					<div class="info-list">
-						{#if isWindows}
-							<div class="info-row">
-								<span>
-									Bit-perfect mode
-									{#if bitPerfectActive}<em class="setting-em-reset">&nbsp;active</em>{/if}
-								</span>
-								<strong>
-									<label class="toggle-switch">
-										<input
-											type="checkbox"
-											checked={bitPerfectActive}
-											onchange={onBitPerfectToggle}
-										/>
-										<span class="toggle-slider"></span>
-									</label>
-								</strong>
-							</div>
-							<p class="page-copy setting-caption">
-								Sets quality to Hi-Res Lossless, takes exclusive control of the output device, and matches the device rate to each track's native rate. Equivalent to enabling the three audiophile toggles below at once. Some DACs misbehave under exclusive mode — turn off if you hear dropouts.
+					<div class="audio-mode-summary">
+						<div>
+							<span class="audio-mode-label">Current mode</span>
+							<strong>
+								{bitPerfectActive ? 'Bit-perfect exclusive' : s.exclusive_mode ? 'Exclusive output' : 'Shared output'}
+							</strong>
+							<p>
+								{#if bitPerfectActive}
+									Hi-Res Lossless, exclusive WASAPI, native sample rates. Crossfade is bypassed; same-rate gapless prebuffer stays on.
+								{:else if s.exclusive_mode}
+									Exclusive device control is on. Crossfade is bypassed for bit-perfect output.
+								{:else}
+									Windows shared output. Crossfade and normal system audio mixing are available.
+								{/if}
 							</p>
-						{/if}
-						<div class="info-row">
-							<span>Quality</span>
-							<strong>
-								<select
-									class="audio-select"
-									value={s.quality}
-									onchange={onAudioQualityChange}
-								>
-									{#each AUDIO_QUALITY_OPTIONS as opt (opt.value)}
-										<option value={opt.value}>{opt.label}</option>
-									{/each}
-								</select>
-							</strong>
-						</div>
-						<div class="info-row">
-							<span>Output device</span>
-							<strong>
-								<select
-									class="audio-select"
-									value={s.output_device ?? '__default__'}
-									onchange={onAudioDeviceChange}
-								>
-									<option value="__default__">System default</option>
-									{#each audioDevices as d (d.id)}
-										<option value={d.id}>
-											{d.name}{d.is_default ? ' (default)' : ''}
-										</option>
-									{/each}
-								</select>
-							</strong>
 						</div>
 						{#if isWindows}
-							<div class="info-row">
-								<span>Exclusive output (WASAPI)</span>
-								<strong>
-									<label class="toggle-switch">
-										<input
-											type="checkbox"
-											checked={s.exclusive_mode}
-											onchange={onAudioExclusiveToggle}
-										/>
-										<span class="toggle-slider"></span>
-									</label>
-								</strong>
-							</div>
-							<p class="page-copy setting-caption">
-								Engaged only while audio plays. Releases the device after the
-								idle window below so other apps can use it; re-grabs on next play.
-								Crossfade and gapless pre-decode are disabled in exclusive mode.
-							</p>
-							{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
-								<div
-									class="exclusive-failed-banner"
-									role="alert"
-									style="margin: 0.6rem 0; padding: 0.85rem 1rem; border: 2px solid #ef4444; border-left-width: 6px; background: rgba(239, 68, 68, 0.12); color: #fecaca; border-radius: 6px;"
-								>
-									<strong style="display: block; margin-bottom: 0.25rem; color: #fff; letter-spacing: 0.02em;">
-										Exclusive mode unavailable
-									</strong>
-									<span class="setting-status-line">
-										{$exclusiveStatus.failureReason} Audio is currently routed
-										through Windows shared mixing.
-									</span>
-									<div style="margin-top: 0.6rem; display: flex; gap: 0.5rem;">
-										<button
-											type="button"
-											class="btn btn-primary"
-											style="padding: 0.35rem 0.9rem;"
-											disabled={retryingExclusive}
-											onclick={retryExclusive}
-										>
-											{retryingExclusive ? 'Retrying…' : 'Retry'}
-										</button>
-										<button
-											type="button"
-											class="btn"
-											style="padding: 0.35rem 0.9rem;"
-											onclick={disableExclusive}
-										>
-											Disable exclusive
-										</button>
-									</div>
-								</div>
-							{/if}
-							{#if s.exclusive_mode && $exclusiveStatus.engaged && $exclusiveStatus.transportFormat}
-								<div class="info-row">
-									<span>Exclusive transport</span>
-									<strong>{$exclusiveStatus.transportFormat}</strong>
-								</div>
-							{/if}
-							<div class="info-row">
-								<span>Idle release</span>
-								<strong>
-									<input
-										type="range"
-										min="5"
-										max="120"
-										step="5"
-										value={s.exclusive_release_grace_secs}
-										oninput={onExclusiveGraceChange}
-										style="vertical-align: middle; width: 140px;"
-									/>
-									<span class="setting-numeric">
-										{s.exclusive_release_grace_secs}s
-									</span>
-								</strong>
-							</div>
-							<p class="page-copy setting-caption">
-								Seconds of pause / silence before NOORwave releases the device
-								for other apps. Lower = friendlier; higher = sticks around.
-							</p>
+							<label class="toggle-switch audio-mode-toggle" aria-label="Toggle bit-perfect mode">
+								<input
+									type="checkbox"
+									checked={bitPerfectActive}
+									onchange={onBitPerfectToggle}
+								/>
+								<span class="toggle-slider"></span>
+							</label>
 						{/if}
-						<div class="info-row">
-							<span>Sample rate follows source</span>
-							<strong>
-								<label class="toggle-switch">
-									<input
-										type="checkbox"
-										checked={s.sample_rate_follow}
-										onchange={onAudioSrFollowToggle}
-									/>
-									<span class="toggle-slider"></span>
-								</label>
-							</strong>
-						</div>
-						<p class="page-copy setting-caption">
-							Reconfigures the output device to each track's native rate (44.1 / 48 / 96 / 192 kHz). Recommended with exclusive mode.
-						</p>
-						<div class="info-row">
-							<span>Video quality</span>
-							<strong>
-								<select
-									class="audio-select"
-									value={s.video_quality_mode}
-									onchange={onVideoQualityModeChange}
-								>
-									{#each VIDEO_QUALITY_OPTIONS as opt (opt.value)}
-										<option value={opt.value}>{opt.label}</option>
-									{/each}
-								</select>
-							</strong>
-						</div>
-						<p class="page-copy setting-caption">
-							Max chooses the highest HLS rendition exposed by each video. Auto lets the player adapt to bandwidth.
-						</p>
 					</div>
 
+					<div class="audio-field-grid">
+						<label class="audio-field">
+							<span>Stream quality</span>
+							<select
+								class="audio-select"
+								value={s.quality}
+								onchange={onAudioQualityChange}
+							>
+								{#each AUDIO_QUALITY_OPTIONS as opt (opt.value)}
+									<option value={opt.value}>{opt.label}</option>
+								{/each}
+							</select>
+						</label>
+						<label class="audio-field">
+							<span>Output device</span>
+							<select
+								class="audio-select"
+								value={s.output_device ?? '__default__'}
+								onchange={onAudioDeviceChange}
+							>
+								<option value="__default__">System default</option>
+								{#each audioDevices as d (d.id)}
+									<option value={d.id}>
+										{d.name}{d.is_default ? ' (default)' : ''}
+									</option>
+								{/each}
+							</select>
+						</label>
+					</div>
+
+					{#if isWindows}
+						<details class="audio-advanced">
+							<summary>
+								<span>Advanced output</span>
+								<small>Exclusive mode, rate matching, idle release</small>
+							</summary>
+							<div class="info-list">
+								<div class="info-row">
+									<span>Exclusive output (WASAPI)</span>
+									<strong>
+										<label class="toggle-switch">
+											<input
+												type="checkbox"
+												checked={s.exclusive_mode}
+												onchange={onAudioExclusiveToggle}
+											/>
+											<span class="toggle-slider"></span>
+										</label>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Takes over the device while playing. Crossfade is bypassed; prepared same-rate tracks still hand off gaplessly.
+								</p>
+								{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
+									<div class="exclusive-failed-banner" role="alert">
+										<strong>Exclusive mode unavailable</strong>
+										<span class="setting-status-line">
+											{$exclusiveStatus.failureReason} Audio is currently routed
+											through Windows shared mixing.
+										</span>
+										<div class="exclusive-actions">
+											<button
+												type="button"
+												class="btn btn-primary btn-compact"
+												disabled={retryingExclusive}
+												onclick={retryExclusive}
+											>
+												{retryingExclusive ? 'Retrying...' : 'Retry'}
+											</button>
+											<button
+												type="button"
+												class="btn btn-compact"
+												onclick={disableExclusive}
+											>
+												Disable exclusive
+											</button>
+										</div>
+									</div>
+								{/if}
+								{#if s.exclusive_mode && $exclusiveStatus.engaged && $exclusiveStatus.transportFormat}
+									<div class="info-row">
+										<span>Exclusive transport</span>
+										<strong>{$exclusiveStatus.transportFormat}</strong>
+									</div>
+								{/if}
+								<div class="info-row">
+									<span>Idle release</span>
+									<strong class="range-with-value">
+										<input
+											type="range"
+											class="exclusive-grace-slider"
+											min="5"
+											max="120"
+											step="5"
+											value={s.exclusive_release_grace_secs}
+											oninput={onExclusiveGraceChange}
+										/>
+										<span class="setting-numeric">
+											{s.exclusive_release_grace_secs}s
+										</span>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Lower values release the device faster after pause. Higher values avoid repeated device grabs.
+								</p>
+								<div class="info-row">
+									<span>Sample rate follows source</span>
+									<strong>
+										<label class="toggle-switch">
+											<input
+												type="checkbox"
+												checked={s.sample_rate_follow}
+												onchange={onAudioSrFollowToggle}
+											/>
+											<span class="toggle-slider"></span>
+										</label>
+									</strong>
+								</div>
+								<p class="page-copy setting-caption">
+									Matches 44.1, 48, 96, or 192 kHz tracks when the device accepts the rate.
+								</p>
+							</div>
+						</details>
+					{:else}
+						<p class="page-copy setting-caption">Exclusive output is available on Windows.</p>
+					{/if}
+
+					<details class="audio-advanced">
+						<summary>
+							<span>Video playback</span>
+							<small>Quality for music videos</small>
+						</summary>
+						<label class="audio-field audio-field-single">
+							<span>Video quality</span>
+							<select
+								class="audio-select"
+								value={s.video_quality_mode}
+								onchange={onVideoQualityModeChange}
+							>
+								{#each VIDEO_QUALITY_OPTIONS as opt (opt.value)}
+									<option value={opt.value}>{opt.label}</option>
+								{/each}
+							</select>
+						</label>
+						<p class="page-copy setting-caption">
+							Max uses the highest stream the video exposes. Auto adapts to bandwidth.
+						</p>
+					</details>
+
 					{#if $audioSettings.pendingApply}
-						<p class="page-copy setting-caption" style="color: var(--text-secondary)">Output reconfiguring…</p>
+						<p class="page-copy setting-caption audio-muted">Output reconfiguring...</p>
 					{/if}
 					{#if $audioSettings.error}
-						<p class="page-copy" style="color: var(--state-error, #f87171)">{$audioSettings.error}</p>
+						<p class="page-copy audio-error">{$audioSettings.error}</p>
 					{/if}
 				{:else if $audioSettings.loading}
-					<p class="page-copy">Loading audio settings…</p>
+					<p class="page-copy">Loading audio settings...</p>
 				{:else if $audioSettings.error}
-					<p class="page-copy" style="color: var(--state-error, #f87171)">{$audioSettings.error}</p>
+					<p class="page-copy audio-error">{$audioSettings.error}</p>
 				{/if}
 			</section>
 			{/if}
@@ -2111,7 +2119,7 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'audio'}
+			{#if activeCategory === 'discovery'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
@@ -2327,7 +2335,7 @@
 		<div class="settings-side">
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Playback" title="Audio runtime" subtitle="Current device and format." />
+				<SectionHeader eyebrow="Runtime" title="Now playing path" subtitle="Current device and format." />
 				<div class="info-list">
 					<div class="info-row">
 						<span>Device</span>
@@ -2344,7 +2352,7 @@
 						</strong>
 					</div>
 					<div class="info-row">
-						<span>Active track</span>
+						<span>Track ID</span>
 						<strong>{playbackRuntime?.active_track_id ?? 'None'}</strong>
 					</div>
 				</div>
@@ -2373,7 +2381,7 @@
 
 			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="DSP" title="Audio analysis" subtitle="BPM, key, energy, danceability." />
+				<SectionHeader eyebrow="Analysis" title="Library audio data" subtitle="Passive BPM, key, and energy capture." />
 
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Analyzed" value={$audioAnalysis.analyzed.toLocaleString()} copy="Tracks with DSP features." />
@@ -2383,17 +2391,7 @@
 				</div>
 
 				<p class="analysis-note">
-					Tracks analyse automatically as you play them. The first 30 seconds of audio
-					from the live playback stream is captured into memory, run through the
-					BPM / key / energy detector, and saved alongside the track — no extra
-					network requests, no separate download.
-				</p>
-				<p class="analysis-note">
-					This means the data fills in over time as you listen rather than all at
-					once. There's no bulk-scan button: scanning the entire library would
-					require thousands of TIDAL preview requests in quick succession, which
-					trips TIDAL's rate limiter and breaks playback for the whole account
-					until the backoff clears.
+					New data is captured from playback. There is no bulk scan because large TIDAL preview bursts trigger rate limits.
 				</p>
 
 				<div class="info-row">
@@ -2422,7 +2420,7 @@
 				</div>
 
 				<details class="advanced-details">
-					<summary>Advanced Settings</summary>
+					<summary>Advanced analysis limits</summary>
 					<div class="setting-row">
 						<label for="dsp-max-duration">Max duration per track (seconds)</label>
 						<input id="dsp-max-duration" type="number" value="30" min="10" max="120" />
@@ -2481,11 +2479,6 @@
 	.setting-caption {
 		font-size: var(--font-size-sm);
 	}
-	.setting-em-reset {
-		font-style: normal;
-		opacity: 0.6;
-		font-size: var(--font-size-xs);
-	}
 	.setting-status-line {
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
@@ -2493,6 +2486,153 @@
 	.setting-numeric {
 		margin-left: 0.5rem;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.audio-mode-summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: var(--space-4);
+		border-left: 3px solid var(--accent);
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.audio-mode-summary > div {
+		display: grid;
+		gap: var(--space-1);
+		min-width: 0;
+	}
+
+	.audio-mode-label,
+	.audio-field > span,
+	.audio-advanced summary small {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	.audio-mode-summary strong {
+		font-size: var(--font-size-lg);
+		line-height: var(--line-height-tight);
+	}
+
+	.audio-mode-summary p {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		color: var(--text-secondary);
+	}
+
+	.audio-mode-toggle {
+		flex: 0 0 auto;
+	}
+
+	.audio-field-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-3);
+	}
+
+	.audio-field {
+		display: grid;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
+	.audio-field-single {
+		margin-top: var(--space-3);
+	}
+
+	.audio-select {
+		width: 100%;
+		min-width: 0;
+		padding: 9px 10px;
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
+		background: rgba(255, 255, 255, 0.05);
+		color: var(--text-primary);
+		font: inherit;
+	}
+
+	.audio-advanced {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		padding: var(--space-3) var(--space-4);
+	}
+
+	.audio-advanced summary {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--space-3);
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.audio-advanced summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.audio-advanced summary > span {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.audio-advanced[open] {
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	.audio-advanced[open] summary {
+		margin-bottom: var(--space-3);
+	}
+
+	.exclusive-failed-banner {
+		display: grid;
+		gap: var(--space-2);
+		margin: var(--space-2) 0;
+		padding: var(--space-3) var(--space-4);
+		border: 1px solid var(--state-error);
+		border-left-width: 4px;
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--state-error) 12%, transparent);
+		color: var(--text-primary);
+	}
+
+	.exclusive-failed-banner strong {
+		color: var(--text-primary);
+	}
+
+	.exclusive-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+	}
+
+	.btn-compact {
+		padding: var(--space-1) var(--space-3);
+	}
+
+	.range-with-value {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+	}
+
+	.exclusive-grace-slider {
+		width: clamp(8rem, 18vw, 10rem);
+		accent-color: var(--accent);
+	}
+
+	.audio-muted {
+		color: var(--text-secondary);
+	}
+
+	.audio-error {
+		color: var(--state-error);
 	}
 
 	.engine-block {
@@ -3371,6 +3511,16 @@
 		}
 
 		.inner-metrics {
+			grid-template-columns: 1fr;
+		}
+
+		.audio-mode-summary,
+		.audio-advanced summary {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+
+		.audio-field-grid {
 			grid-template-columns: 1fr;
 		}
 

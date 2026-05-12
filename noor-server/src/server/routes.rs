@@ -10027,13 +10027,18 @@ async fn handle_near_end(
         }
     }
 
+    let effective_crossfade = effective_crossfade_ms(&state, crossfade_ms).await;
     let _gapless = crate::playback::gapless::plan_from_stream(
         stream_info.as_ref(),
-        crate::playback::gapless::GaplessSettings::new(true, crossfade_ms),
+        crate::playback::gapless::GaplessSettings::new(true, effective_crossfade),
     );
-    let job =
-        player::build_playback_preparation(&next, stream_info.as_ref(), crossfade_ms, user_quality)
-            .with_generation(generation);
+    let job = player::build_playback_preparation(
+        &next,
+        stream_info.as_ref(),
+        effective_crossfade,
+        user_quality,
+    )
+    .with_generation(generation);
 
     {
         let state_guard = state.read().await;
@@ -10413,10 +10418,10 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
 ///
 /// Every code path that calls `player::build_playback_preparation` to start a
 /// track on the host audio runtime must source `crossfade_ms` through this
-/// helper (or `effective_crossfade_ms` to apply the exclusive-mode override).
-/// Passing a hardcoded 0 disables the per-engine fade-out ramp AND prevents
-/// `CrossfadeStart` from firing, which silently breaks both gapless and
-/// crossfade transitions.
+/// helper (or `effective_crossfade_ms` to apply the exclusive-mode policy).
+/// Passing a hardcoded 0 outside that policy disables the per-engine fade-out
+/// ramp and prevents `CrossfadeStart` from firing, which breaks crossfade
+/// transitions.
 /// Returns `configured` unless exclusive mode is on, in which case it returns 0.
 /// Used by callsites that already have a snapshot's `crossfade_ms` and want the
 /// same exclusive-mode override that `current_crossfade_ms` applies, without
@@ -10445,11 +10450,9 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
         })
         .unwrap_or(0);
 
-    // Exclusive mode owns the device with a single stream. Crossfade
-    // requires two simultaneous streams, which the OS rejects with
-    // AUDCLNT_E_DEVICE_IN_USE. Force 0 here so the fade-out ramp on the
-    // outgoing track also goes away (otherwise we'd attenuate the last
-    // few seconds of every track for no reason).
+    // Bit-perfect exclusive playback must not rewrite samples. Crossfade
+    // requires mixing and gain ramps, so exclusive mode keeps prebuffering but
+    // suppresses the overlap.
     let exclusive = guard
         .db
         .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
@@ -10458,8 +10461,8 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
     effective_crossfade_for_exclusive(exclusive, configured)
 }
 
-fn effective_crossfade_for_exclusive(_exclusive: bool, configured: i32) -> i32 {
-    configured.max(0)
+fn effective_crossfade_for_exclusive(exclusive: bool, configured: i32) -> i32 {
+    if exclusive { 0 } else { configured.max(0) }
 }
 
 fn should_skip_prebuffer_for_exclusive_rate_change(
@@ -12313,8 +12316,8 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_crossfade_policy_keeps_configured_value() {
-        assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 1_500);
+    fn exclusive_crossfade_policy_suppresses_crossfade() {
+        assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 0);
         assert_eq!(effective_crossfade_for_exclusive(false, 1_500), 1_500);
         assert_eq!(effective_crossfade_for_exclusive(true, -10), 0);
     }

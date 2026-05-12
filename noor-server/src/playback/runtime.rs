@@ -811,16 +811,22 @@ fn run_runtime_loop(
                             "Playback terminal active engine: track_id={}, generation={}, outcome={:?}",
                             track_id, generation, outcome
                         );
-                        stop_current_engine(&mut state);
-                        match outcome {
-                            PlaybackTerminalReason::Finished => {
-                                let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
-                                    track_id,
-                                    generation,
-                                });
-                            }
-                            PlaybackTerminalReason::Error(message) => {
-                                let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+                        if should_promote_prepared_at_boundary(
+                            active, next, track_id, generation, &outcome,
+                        ) {
+                            promote_prepared_at_boundary(&mut state, &event_tx, &position_source);
+                        } else {
+                            stop_current_engine(&mut state);
+                            match outcome {
+                                PlaybackTerminalReason::Finished => {
+                                    let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
+                                        track_id,
+                                        generation,
+                                    });
+                                }
+                                PlaybackTerminalReason::Error(message) => {
+                                    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+                                }
                             }
                         }
                     }
@@ -1387,6 +1393,41 @@ fn promote_next_to_active(
         state.fading_out_engine = Some(outgoing);
         // Tell the routes layer that the audible "current" track has flipped.
         // Reusing Finished keeps the existing queue-advance path.
+        let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
+            track_id: outgoing_id,
+            generation: outgoing_generation,
+        });
+    }
+    #[cfg(target_os = "windows")]
+    if state.current_exclusive {
+        refresh_exclusive_sources(state);
+    }
+}
+
+fn promote_prepared_at_boundary(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+) {
+    let Some(next) = state.next_engine.take() else {
+        return;
+    };
+    next.shared
+        .fadein_start_samples
+        .store(u64::MAX, Ordering::Relaxed);
+    next.shared.paused.store(false, Ordering::SeqCst);
+    *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
+
+    let outgoing = state.engine.take();
+    state.engine = Some(next);
+
+    if let Some(mut prior) = state.fading_out_engine.take() {
+        prior.stop();
+    }
+    if let Some(mut outgoing) = outgoing {
+        let outgoing_id = outgoing.track_id;
+        let outgoing_generation = outgoing.generation;
+        outgoing.stop();
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
             track_id: outgoing_id,
             generation: outgoing_generation,
@@ -3182,6 +3223,18 @@ fn terminal_engine_slot(
     }
 }
 
+fn should_promote_prepared_at_boundary(
+    active: Option<(i64, u64)>,
+    next: Option<(i64, u64)>,
+    track_id: i64,
+    generation: u64,
+    outcome: &PlaybackTerminalReason,
+) -> bool {
+    matches!(outcome, PlaybackTerminalReason::Finished)
+        && active == Some((track_id, generation))
+        && next.is_some_and(|(_, next_generation)| next_generation == generation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3528,6 +3581,31 @@ mod tests {
             terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 4, 1),
             None
         );
+    }
+
+    #[test]
+    fn active_finish_promotes_prepared_track_at_boundary() {
+        assert!(should_promote_prepared_at_boundary(
+            Some((1, 7)),
+            Some((2, 7)),
+            1,
+            7,
+            &PlaybackTerminalReason::Finished
+        ));
+        assert!(!should_promote_prepared_at_boundary(
+            Some((1, 7)),
+            None,
+            1,
+            7,
+            &PlaybackTerminalReason::Finished
+        ));
+        assert!(!should_promote_prepared_at_boundary(
+            Some((1, 7)),
+            Some((2, 7)),
+            1,
+            7,
+            &PlaybackTerminalReason::Error("decode failed".to_string())
+        ));
     }
 
     #[test]
