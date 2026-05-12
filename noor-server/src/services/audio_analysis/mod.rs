@@ -15,6 +15,7 @@ pub const CURRENT_ANALYSIS_VERSION: &str = "v4";
 /// as "1" (enabled) or "0" (disabled). When disabled, the actor still runs
 /// (consuming samples to drain the channel) but does not call analyse_and_save.
 pub const PASSIVE_DSP_ENABLED_KEY: &str = "passive_dsp_enabled";
+const PASSIVE_ANALYSIS_MAX_SAMPLE_RATE: u32 = 48_000;
 
 use crate::AppEvent;
 use rusqlite::Connection;
@@ -80,7 +81,7 @@ pub fn spawn_actor(
     tokio::spawn(async move {
         let mut analyzed_count: u32 = 0;
 
-        while let Some((track_id, mut samples, sample_rate)) = rx.recv().await {
+        while let Some((track_id, mut samples, mut sample_rate)) = rx.recv().await {
             // Bail early if the user has disabled passive DSP analysis. We
             // still consume the message so the channel drains; we just skip
             // the work.
@@ -95,6 +96,7 @@ pub fn spawn_actor(
             if samples.len() > max_samples {
                 samples.truncate(max_samples);
             }
+            (samples, sample_rate) = prepare_passive_analysis_samples(samples, sample_rate);
 
             // Skip tracks already on the current analysis version.
             let already_analyzed = db
@@ -136,6 +138,25 @@ pub fn spawn_actor(
     tx
 }
 
+fn prepare_passive_analysis_samples(samples: Vec<f32>, sample_rate: u32) -> (Vec<f32>, u32) {
+    if sample_rate <= PASSIVE_ANALYSIS_MAX_SAMPLE_RATE || sample_rate == 0 || samples.is_empty() {
+        return (samples, sample_rate);
+    }
+
+    let factor = sample_rate.div_ceil(PASSIVE_ANALYSIS_MAX_SAMPLE_RATE) as usize;
+    if factor <= 1 {
+        return (samples, sample_rate);
+    }
+
+    let downsampled = samples
+        .chunks(factor)
+        .map(|chunk| chunk.iter().copied().sum::<f32>() / chunk.len() as f32)
+        .collect::<Vec<_>>();
+    let downsampled_rate = (sample_rate / factor as u32).max(1);
+
+    (downsampled, downsampled_rate)
+}
+
 /// Camelot compatibility helpers (reused by automix scoring + radio).
 
 /// Check if two Camelot keys are compatible (same number, or differ by 1 mod 12).
@@ -167,6 +188,26 @@ fn camelot_number_diff(a: &str, b: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_analysis_downsamples_192khz_to_48khz() {
+        let input: Vec<f32> = (0..16).map(|i| i as f32).collect();
+
+        let (samples, sample_rate) = prepare_passive_analysis_samples(input, 192_000);
+
+        assert_eq!(sample_rate, 48_000);
+        assert_eq!(samples, vec![1.5, 5.5, 9.5, 13.5]);
+    }
+
+    #[test]
+    fn passive_analysis_keeps_44khz_samples_native() {
+        let input = vec![0.25, -0.25, 0.5, -0.5];
+
+        let (samples, sample_rate) = prepare_passive_analysis_samples(input.clone(), 44_100);
+
+        assert_eq!(sample_rate, 44_100);
+        assert_eq!(samples, input);
+    }
 
     #[test]
     fn camelot_compatible_accepts_same_relative_and_adjacent_keys() {
