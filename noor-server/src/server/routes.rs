@@ -9990,15 +9990,28 @@ async fn handle_near_end(
                 && let Some(next_rate) = stream.sample_rate
             {
                 let current_rate = info.sample_rate;
+                let current_bit_depth = state_guard
+                    .current_stream_display
+                    .as_ref()
+                    .and_then(|display| display.bit_depth);
                 if should_skip_prebuffer_for_exclusive_rate_change(
                     settings.exclusive_mode,
                     settings.sample_rate_follow,
                     current_rate,
                     Some(next_rate),
+                    current_bit_depth,
+                    stream.bit_depth,
                 ) {
+                    let current_depth_label = current_bit_depth
+                        .map(|depth| depth.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let next_depth_label = stream
+                        .bit_depth
+                        .map(|depth| depth.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     info!(
-                        "Skipping pre-buffer for next track {}: exclusive sample-rate-follow will switch from {} Hz to {} Hz at track start",
-                        next.id, current_rate, next_rate
+                        "Skipping pre-buffer for next track {}: exclusive sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
+                        next.id, current_rate, current_depth_label, next_rate, next_depth_label
                     );
                     return Ok(());
                 }
@@ -10470,14 +10483,19 @@ fn should_skip_prebuffer_for_exclusive_rate_change(
     sample_rate_follow: bool,
     current_rate: u32,
     next_rate: Option<i32>,
+    current_bit_depth: Option<i32>,
+    next_bit_depth: Option<i32>,
 ) -> bool {
     if !exclusive_mode || !sample_rate_follow {
         return false;
     }
-    let Some(next_rate) = next_rate else {
-        return false;
-    };
-    next_rate > 0 && next_rate as u32 != current_rate
+    let rate_changes =
+        next_rate.is_some_and(|next_rate| next_rate > 0 && next_rate as u32 != current_rate);
+    let bit_depth_changes = matches!(
+        (current_bit_depth, next_bit_depth),
+        (Some(current), Some(next)) if current > 0 && next > 0 && current != next
+    );
+    rate_changes || bit_depth_changes
 }
 
 async fn current_user_audio_quality(
@@ -12329,27 +12347,48 @@ mod tests {
             true,
             44_100,
             Some(96_000),
+            Some(16),
+            Some(24),
         ));
         assert!(!should_skip_prebuffer_for_exclusive_rate_change(
             true,
             true,
             96_000,
             Some(96_000),
+            Some(24),
+            Some(24),
         ));
         assert!(!should_skip_prebuffer_for_exclusive_rate_change(
             false,
             true,
             44_100,
             Some(96_000),
+            Some(16),
+            Some(24),
         ));
         assert!(!should_skip_prebuffer_for_exclusive_rate_change(
             true,
             false,
             44_100,
             Some(96_000),
+            Some(16),
+            Some(24),
         ));
         assert!(!should_skip_prebuffer_for_exclusive_rate_change(
-            true, true, 44_100, None,
+            true,
+            true,
+            44_100,
+            None,
+            Some(16),
+            Some(16),
+        ));
+        assert!(should_skip_prebuffer_for_exclusive_rate_change(
+            true,
+            true,
+            44_100,
+            Some(44_100),
+            Some(16),
+            Some(24),
         ));
     }
 
