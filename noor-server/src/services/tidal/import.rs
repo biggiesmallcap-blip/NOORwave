@@ -229,6 +229,24 @@ pub async fn import_track_from_metadata(
     conn_pool.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
 
+        let existing: Option<(i64, i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT id, artist_id, album_id FROM tracks WHERE tidal_id = ?1",
+                params![meta.tidal_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        if let Some((local_id, artist_id, album_id)) = existing {
+            tx.commit()?;
+            return Ok(ImportedTrack {
+                tidal_id: meta.tidal_id,
+                local_id,
+                artist_id,
+                album_id,
+            });
+        }
+
         let artist_id = upsert_artist_tx(
             &tx,
             meta.artist_tidal_id.unwrap_or(0),
@@ -248,34 +266,22 @@ pub async fn import_track_from_metadata(
             None
         };
 
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM tracks WHERE tidal_id = ?1",
-                params![meta.tidal_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        let local_id = if let Some(id) = existing {
-            id
-        } else {
-            tx.execute(
-                "INSERT INTO tracks (
-                    tidal_id, title, artist_id, album_id,
-                    duration_ms, best_quality, best_source, fidelity_score,
-                    is_favorite, source
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'LOSSLESS', 'tidal', 700, 0, ?6)",
-                params![
-                    meta.tidal_id,
-                    meta.title,
-                    artist_id,
-                    album_id,
-                    meta.duration_ms.unwrap_or(0),
-                    TIDAL_STREAM_SOURCE,
-                ],
-            )?;
-            tx.last_insert_rowid()
-        };
+        tx.execute(
+            "INSERT INTO tracks (
+                tidal_id, title, artist_id, album_id,
+                duration_ms, best_quality, best_source, fidelity_score,
+                is_favorite, source
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'LOSSLESS', 'tidal', 700, 0, ?6)",
+            params![
+                meta.tidal_id,
+                meta.title,
+                artist_id,
+                album_id,
+                meta.duration_ms.unwrap_or(0),
+                TIDAL_STREAM_SOURCE,
+            ],
+        )?;
+        let local_id = tx.last_insert_rowid();
 
         tx.commit()?;
         Ok(ImportedTrack {
@@ -539,6 +545,53 @@ mod tests {
         assert_eq!(album_artwork.as_deref(), Some("cover.jpg"));
         assert_eq!(album_tidal, Some(3333));
         assert_eq!(artist_photo.as_deref(), Some("artist.jpg"));
+    }
+
+    #[tokio::test]
+    async fn import_track_from_metadata_returns_existing_track_artist_and_album_ids() {
+        let db = setup_db();
+
+        let (existing_artist_id, existing_album_id, existing_track_id) = db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO artists (name) VALUES (?1)",
+                    params!["Local Artist"],
+                )?;
+                let artist_id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO albums (title, artist_id, source) VALUES (?1, ?2, 'local')",
+                    params!["Local Album", artist_id],
+                )?;
+                let album_id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO tracks (
+                        tidal_id, title, artist_id, album_id, duration_ms, source
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'local')",
+                    params![88001, "Known Track", artist_id, album_id, 180_000],
+                )?;
+                Ok((artist_id, album_id, conn.last_insert_rowid()))
+            })
+            .unwrap();
+
+        let imported = import_track_from_metadata(
+            &db,
+            ImportTrackMetadata {
+                tidal_id: 88001,
+                title: "Known Track".to_string(),
+                artist_name: "TIDAL Artist".to_string(),
+                artist_tidal_id: Some(44001),
+                album_title: Some("TIDAL Album".to_string()),
+                album_tidal_id: Some(55001),
+                duration_ms: Some(180_000),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("existing track import should succeed");
+
+        assert_eq!(imported.local_id, existing_track_id);
+        assert_eq!(imported.artist_id, existing_artist_id);
+        assert_eq!(imported.album_id, Some(existing_album_id));
     }
 }
 
