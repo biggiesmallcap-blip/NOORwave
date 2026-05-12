@@ -331,7 +331,12 @@ pub fn replace_queue_with_tracks(
             tracks.push(track);
         }
     }
-    queue::replace_queue(conn, &tracks, source)
+    let queue = queue::replace_queue(conn, &tracks, source)?;
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+        [],
+    )?;
+    Ok(queue)
 }
 
 /// Replace the queue with tracks plus optional per-row reasons.
@@ -352,7 +357,12 @@ pub fn replace_queue_with_reasons(
             paired.push((track, reason));
         }
     }
-    queue::replace_queue_with_reasons(conn, &paired, source)
+    let queue = queue::replace_queue_with_reasons(conn, &paired, source)?;
+    conn.execute(
+        "UPDATE playback_state SET current_queue_item_id = NULL WHERE id = 1",
+        [],
+    )?;
+    Ok(queue)
 }
 
 pub fn play_track_now(conn: &Connection, track_id: i64) -> Result<PlaybackSnapshot> {
@@ -648,17 +658,8 @@ pub fn next_track(conn: &Connection, recently_cleared: bool) -> Result<PlaybackS
         return load_snapshot(conn);
     }
 
-    // Prefer track_id lookup (library rows); fall back to queue item ID (pending rows
-    // where current_track_id is NULL because the track isn't in the library yet).
-    let current_index = current_track_id
-        .and_then(|track_id| {
-            queue_items
-                .iter()
-                .position(|item| item.track.id == track_id)
-        })
-        .or_else(|| {
-            current_queue_item_id.and_then(|qid| queue_items.iter().position(|item| item.id == qid))
-        });
+    let current_index =
+        playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
 
     let next_track = match repeat_mode.as_str() {
         "one" => current_index
@@ -821,15 +822,8 @@ pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Opti
         return Ok(None);
     }
 
-    let current_index = current_track_id
-        .and_then(|track_id| {
-            queue_items
-                .iter()
-                .position(|item| item.track.id == track_id)
-        })
-        .or_else(|| {
-            current_queue_item_id.and_then(|qid| queue_items.iter().position(|item| item.id == qid))
-        });
+    let current_index =
+        playback_anchor_index(&queue_items, current_track_id, current_queue_item_id);
 
     let next = match repeat_mode.as_str() {
         "one" => current_index
@@ -902,6 +896,29 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
         .unwrap_or(listened_ms >= 240_000)
 }
 
+fn playback_anchor_index(
+    queue_items: &[QueueItem],
+    current_track_id: Option<i64>,
+    current_queue_item_id: Option<i64>,
+) -> Option<usize> {
+    if let Some(qid) = current_queue_item_id
+        && let Some(idx) = queue_items.iter().position(|item| item.id == qid)
+    {
+        if current_track_id
+            .map(|track_id| queue_items[idx].track.id == track_id)
+            .unwrap_or(true)
+        {
+            return Some(idx);
+        }
+    }
+
+    current_track_id.and_then(|track_id| {
+        queue_items
+            .iter()
+            .position(|item| item.track.id == track_id)
+    })
+}
+
 pub fn ensure_automix_queue_depth(
     conn: &Connection,
     target_upcoming: usize,
@@ -926,9 +943,11 @@ pub fn ensure_automix_queue_depth(
         return Ok(queue_items);
     };
 
-    let current_index = queue_items
-        .iter()
-        .position(|item| item.track.id == current_track.id);
+    let current_index = playback_anchor_index(
+        &queue_items,
+        Some(current_track.id),
+        state.current_queue_item_id,
+    );
 
     // If the current track isn't found in the queue (e.g. queue was replaced or cleared),
     // treat upcoming count as 0 so automix still extends rather than bailing.
@@ -2045,6 +2064,46 @@ mod tests {
     }
 
     #[test]
+    fn peek_next_track_uses_current_queue_item_id_for_duplicate_tracks() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 1, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let second_track_one = queue_items
+            .iter()
+            .find(|item| item.position == 2 && item.track.id == 1)
+            .expect("second copy of track 1");
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![second_track_one.id],
+        )
+        .unwrap();
+
+        let next = peek_next_track(&conn, false).unwrap().expect("next track");
+
+        assert_eq!(next.id, 3);
+    }
+
+    #[test]
+    fn peek_next_track_ignores_mismatched_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let next = peek_next_track(&conn, false).unwrap().expect("next track");
+
+        assert_eq!(next.id, 3);
+    }
+
+    #[test]
     fn ensure_automix_queue_depth_suppresses_refill_when_recently_cleared() {
         // Same setup as `next_track_extends_queue_when_automix_is_enabled`:
         // two tracks queued, automix on, current = 2. The non-suppressed
@@ -2259,6 +2318,33 @@ mod tests {
     }
 
     #[test]
+    fn ensure_automix_queue_depth_anchors_to_duplicate_current_queue_item() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 1]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let second_track_one = queue_items
+            .iter()
+            .find(|item| item.position == 2 && item.track.id == 1)
+            .expect("second copy of track 1");
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1,
+                 automix_enabled = 1, shuffle_mode = 'off'
+             WHERE id = 1",
+            params![second_track_one.id],
+        )
+        .unwrap();
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+        assert!(
+            queue.len() > queue_items.len(),
+            "automix should refill from the active duplicate row"
+        );
+        assert!(queue.iter().any(|item| item.source == "automix"));
+    }
+
+    #[test]
     fn play_track_now_sets_current_queue_item_id() {
         let conn = conn();
         // Seed two queue rows pointing at the same track so the "lowest
@@ -2324,6 +2410,60 @@ mod tests {
             snapshot.queue.first().map(|item| item.id)
         );
         assert!(snapshot.state.is_playing);
+    }
+
+    #[test]
+    fn next_track_uses_current_queue_item_id_for_duplicate_tracks() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 1, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        let second_track_one = queue_items
+            .iter()
+            .find(|item| item.position == 2 && item.track.id == 1)
+            .expect("second copy of track 1");
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![second_track_one.id],
+        )
+        .unwrap();
+
+        let snapshot = next_track(&conn, false).unwrap();
+
+        assert_eq!(snapshot.state.current_track.as_ref().map(|t| t.id), Some(3));
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            queue_items
+                .iter()
+                .find(|item| item.track.id == 3)
+                .map(|item| item.id)
+        );
+    }
+
+    #[test]
+    fn next_track_ignores_mismatched_current_queue_item_id() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2, 3]);
+        let queue_items = queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, current_queue_item_id = ?1, is_playing = 1
+             WHERE id = 1",
+            params![queue_items[0].id],
+        )
+        .unwrap();
+
+        let snapshot = next_track(&conn, false).unwrap();
+
+        assert_eq!(snapshot.state.current_track.as_ref().map(|t| t.id), Some(3));
+        assert_eq!(
+            snapshot.state.current_queue_item_id,
+            queue_items
+                .iter()
+                .find(|item| item.track.id == 3)
+                .map(|item| item.id)
+        );
     }
 
     #[test]
