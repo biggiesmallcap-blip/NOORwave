@@ -11967,7 +11967,7 @@ async fn do_tidal_sync(
                     s.db.with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
                         for track in &tracks_resp.items {
-                            insert_tidal_track(&tx, track, false)?;
+                            insert_tidal_track(&tx, track, false, None)?;
                             stats.tracks += 1;
                         }
                         tx.commit()?;
@@ -12028,7 +12028,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    insert_tidal_track(&tx, track, true)?;
+                    insert_tidal_track(&tx, track, true, fav.created.as_deref())?;
                     stats.tracks += 1;
                 }
                 tx.commit()?;
@@ -12153,7 +12153,7 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    insert_tidal_track(&tx, track, false)?;
+                    insert_tidal_track(&tx, track, false, None)?;
 
                     let track_id: Option<i64> = tx
                         .query_row(
@@ -14075,6 +14075,7 @@ fn insert_tidal_track(
     conn: &rusqlite::Connection,
     track: &crate::services::tidal::client::TidalTrack,
     is_favorite: bool,
+    favorite_created: Option<&str>,
 ) -> anyhow::Result<()> {
     // Ensure artist exists first (tracks.artist_id is NOT NULL)
     conn.execute(
@@ -14095,17 +14096,21 @@ fn insert_tidal_track(
     let album_tidal_id = track.album.as_ref().map(|a| a.id);
 
     conn.execute(
-        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source)
-         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal')
+        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, disc_number, track_number, duration_ms, isrc, best_quality, best_source, fidelity_score, is_favorite, source, date_added)
+         VALUES (?1, ?2, (SELECT id FROM artists WHERE tidal_id=?3), (SELECT id FROM albums WHERE tidal_id=?4), ?5, ?6, ?7, ?8, ?9, 'tidal', ?10, ?11, 'tidal', COALESCE(?12, datetime('now')))
          ON CONFLICT(tidal_id) DO UPDATE SET
             title=excluded.title, best_quality=excluded.best_quality,
             fidelity_score=MAX(tracks.fidelity_score, excluded.fidelity_score),
-            is_favorite=MAX(tracks.is_favorite, excluded.is_favorite)",
+            is_favorite=MAX(tracks.is_favorite, excluded.is_favorite),
+            date_added=CASE
+                WHEN ?11 = 1 AND ?12 IS NOT NULL THEN excluded.date_added
+                ELSE tracks.date_added
+            END",
         rusqlite::params![
             track.id, track.title, track.artist.id, album_tidal_id,
             track.volume_number.unwrap_or(1), track.track_number,
             track.duration * 1000, track.isrc,
-            quality, fidelity, is_favorite as i32,
+            quality, fidelity, is_favorite as i32, favorite_created,
         ],
     )?;
 
@@ -16615,6 +16620,48 @@ mod tests {
             country_code: "AU".to_string(),
             auth_flow: auth_flow.map(str::to_string),
         }
+    }
+
+    fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::TidalTrack {
+        crate::services::tidal::client::TidalTrack {
+            id,
+            title: title.to_string(),
+            duration: 180,
+            track_number: Some(1),
+            volume_number: Some(1),
+            isrc: None,
+            artist: crate::services::tidal::client::TidalArtist {
+                id: 10,
+                name: "Artist".to_string(),
+                picture: None,
+                extra: HashMap::new(),
+            },
+            artists: None,
+            album: None,
+            audio_quality: Some("LOSSLESS".to_string()),
+            stream_ready: Some(true),
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn insert_tidal_track_uses_favorite_created_as_date_added() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let track = test_tidal_track(2001, "Newest favorite");
+
+            insert_tidal_track(conn, &track, true, Some("2026-05-01T12:34:56.000Z"))?;
+
+            let date_added: String = conn.query_row(
+                "SELECT date_added FROM tracks WHERE tidal_id = 2001",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(date_added, "2026-05-01T12:34:56.000Z");
+            Ok(())
+        })
+        .expect("inserted favorite track");
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

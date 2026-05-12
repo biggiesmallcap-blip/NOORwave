@@ -59,12 +59,15 @@ export function formatTrackDuration(ms: number | null | undefined): string {
  */
 export function formatDateShort(iso: string | null): string {
 	if (!iso) return '—';
-	const d = new Date(iso);
+	const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(iso)
+		? `${iso.replace(' ', 'T')}Z`
+		: iso;
+	const d = new Date(normalized);
 	const now = new Date();
 	const diffMs = now.getTime() - d.getTime();
 	const diffDays = Math.floor(diffMs / 86400000);
 
-	if (diffDays === 0) return 'Today';
+	if (diffDays <= 0) return 'Today';
 	if (diffDays === 1) return 'Yesterday';
 	if (diffDays < 7) return `${diffDays}d ago`;
 	if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
