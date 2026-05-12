@@ -1146,7 +1146,7 @@
 	// ─── Category rail ───────────────────────────────────────────────────
 	// Splits the previously stacked panels into focused pages. Each panel
 	// belongs to exactly one category; empty columns are hidden by CSS.
-	type SettingsCategory = 'appearance' | 'sources' | 'discovery' | 'audio' | 'data' | 'account';
+	type SettingsCategory = 'appearance' | 'sources' | 'audio' | 'data' | 'account';
 	let activeCategory = $state<SettingsCategory>('appearance');
 	let handledTidalLoginRequest = $state('');
 	$effect(() => {
@@ -1282,7 +1282,6 @@
 	const settingsCategories: { id: SettingsCategory; label: string; icon: string; hint: string }[] = [
 		{ id: 'appearance', label: 'Appearance', icon: '◐', hint: 'Theme + wallpaper' },
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
-		{ id: 'discovery', label: 'Discovery', icon: '✦', hint: 'Learned radio engine' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
 		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
 		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
@@ -1378,8 +1377,6 @@
 						<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v16M4 12h16" /></svg>
 					{:else if cat.id === 'sources'}
 						<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>
-					{:else if cat.id === 'discovery'}
-						<svg viewBox="0 0 24 24"><path d="M12 3l2.3 6.2L21 12l-6.7 2.8L12 21l-2.3-6.2L3 12l6.7-2.8z" /></svg>
 					{:else if cat.id === 'audio'}
 						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
 					{:else if cat.id === 'data'}
@@ -2119,7 +2116,7 @@
 			</section>
 			{/if}
 
-			{#if activeCategory === 'discovery'}
+			{#if activeCategory === 'audio'}
 			<section class="glass-panel section-panel">
 				<SectionHeader eyebrow="Learning" title="Discovery engine" subtitle="Learned radio coverage and training." />
 
