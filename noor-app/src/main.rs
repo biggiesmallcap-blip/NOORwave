@@ -66,6 +66,11 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running NOORwave");
+        .build(tauri::generate_context!())
+        .expect("error while building NOORwave")
+        .run(move |_app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                sidecar::kill_server(&state);
+            }
+        });
 }
