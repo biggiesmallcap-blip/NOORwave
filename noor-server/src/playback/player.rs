@@ -50,6 +50,7 @@ pub struct PreparedPlaybackJob {
     pub source: PlaybackSourceRequest,
     pub gapless: GaplessPlan,
     pub generation: u64,
+    pub output_sample_rate: Option<u32>,
 }
 
 pub type PlaybackPreparation = PreparedPlaybackJob;
@@ -137,6 +138,7 @@ impl PreparedPlaybackJob {
             source,
             gapless,
             generation: 0,
+            output_sample_rate: None,
         }
     }
 
@@ -873,7 +875,12 @@ pub fn build_playback_preparation(
         .unwrap_or(PlaybackSourceRequest::LocalLibrary);
     let gapless = gapless::plan_from_stream(stream_info, GaplessSettings::new(true, crossfade_ms));
 
-    PreparedPlaybackJob::new(track.clone(), source, gapless)
+    let output_sample_rate = stream_info.and_then(StreamInfo::sample_rate_hz);
+
+    PreparedPlaybackJob {
+        output_sample_rate,
+        ..PreparedPlaybackJob::new(track.clone(), source, gapless)
+    }
 }
 
 pub fn playback_source_kind(track: &Track) -> &'static str {
@@ -2005,6 +2012,7 @@ mod tests {
         assert_eq!(request.audio_quality, "LOSSLESS");
         assert!(prep.gapless.enabled);
         assert_eq!(prep.gapless.overlap_ms, 1500);
+        assert_eq!(prep.output_sample_rate, Some(44_100));
     }
 
     #[test]

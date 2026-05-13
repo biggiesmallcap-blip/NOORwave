@@ -1,5 +1,7 @@
 pub mod automix;
+pub mod decode;
 pub mod gapless;
+pub mod output;
 pub mod player;
 pub mod queue;
 pub mod runtime;
