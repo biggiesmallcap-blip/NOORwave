@@ -50,6 +50,7 @@ strsim = "0.11"
 
 # Audio analysis
 rustfft = "6"
+aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "static"] }
 num-complex = "0.4"
 hmac = "0.12"
 sha1 = "0.10"
