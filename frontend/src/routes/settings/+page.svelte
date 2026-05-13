@@ -54,7 +54,18 @@
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
-	import { wallpaper, setWallpaper } from '$lib/stores/wallpaper';
+	import {
+		wallpaper,
+		wallpaperBlur,
+		wallpaperFps,
+		setWallpaper,
+		setWallpaperBlur,
+		setWallpaperFps,
+		WALLPAPER_BLUR_MAX,
+		WALLPAPER_BLUR_MIN,
+		WALLPAPER_FPS_MAX,
+		WALLPAPER_FPS_MIN
+	} from '$lib/stores/wallpaper';
 	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
@@ -1494,7 +1505,7 @@
 
 				<div class="wallpaper-big-preview">
 					{#if previewShader}
-						<ShaderWallpaper shader={previewShader} maxDpr={1} interactive={true} />
+						<ShaderWallpaper shader={previewShader} maxDpr={1} targetFps={$wallpaperFps} interactive={true} />
 					{:else if !previewShader && $wallpaper !== 'none'}
 						<div class="wallpaper-big-preview-hint">
 							<span>Hover a tile to preview</span>
@@ -1504,6 +1515,46 @@
 							<span>Hover a tile to preview</span>
 						</div>
 					{/if}
+				</div>
+
+				<div class="wallpaper-control-grid">
+					<label class="wallpaper-control">
+						<span>
+							<strong>Wallpaper FPS</strong>
+							<small>Higher looks smoother. Lower saves GPU.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<input
+								type="range"
+								min={WALLPAPER_FPS_MIN}
+								max={WALLPAPER_FPS_MAX}
+								step="1"
+								value={$wallpaperFps}
+								oninput={(e) => setWallpaperFps(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+								aria-label="Wallpaper FPS"
+							/>
+							<output>{$wallpaperFps} FPS</output>
+						</div>
+					</label>
+
+					<label class="wallpaper-control">
+						<span>
+							<strong>Wallpaper blur</strong>
+							<small>Soften or sharpen the background layer.</small>
+						</span>
+						<div class="wallpaper-slider-row">
+							<input
+								type="range"
+								min={WALLPAPER_BLUR_MIN}
+								max={WALLPAPER_BLUR_MAX}
+								step="1"
+								value={$wallpaperBlur}
+								oninput={(e) => setWallpaperBlur(parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+								aria-label="Wallpaper blur"
+							/>
+							<output>{$wallpaperBlur}px</output>
+						</div>
+					</label>
 				</div>
 
 				<div class="wallpaper-grid">
@@ -3213,6 +3264,58 @@
 		color: rgba(255, 255, 255, 0.20);
 	}
 
+	.wallpaper-control-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 10px;
+	}
+
+	.wallpaper-control {
+		display: grid;
+		gap: 8px;
+		padding: 10px 12px;
+		border-radius: 8px;
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.025);
+	}
+
+	.wallpaper-control > span {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.wallpaper-control strong {
+		font-size: var(--font-size-sm);
+		color: var(--text-primary);
+	}
+
+	.wallpaper-control small {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary, var(--text-secondary));
+		line-height: var(--line-height-snug);
+	}
+
+	.wallpaper-slider-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.wallpaper-slider-row input {
+		flex: 1;
+		min-width: 120px;
+		accent-color: var(--accent);
+	}
+
+	.wallpaper-slider-row output {
+		min-width: 6ch;
+		text-align: right;
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+	}
+
 	/* ── Tile grid ── */
 	.wallpaper-grid {
 		display: grid;
@@ -3579,6 +3682,10 @@
 		}
 
 		.audio-field-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.wallpaper-control-grid {
 			grid-template-columns: 1fr;
 		}
 

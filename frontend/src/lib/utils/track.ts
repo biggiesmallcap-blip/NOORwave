@@ -1,4 +1,4 @@
-import type { Track, TidalPlayable, TidalSearchTrack } from '$lib/api/client';
+import type { QueueItem, Track, TidalPlayable, TidalSearchTrack } from '$lib/api/client';
 
 /**
  * Convert an ephemeral `Track` (a now-playing or queue row) into a
@@ -11,10 +11,15 @@ import type { Track, TidalPlayable, TidalSearchTrack } from '$lib/api/client';
  *
  * Detection: `play_tidal_ephemeral` on the backend constructs a
  * synthetic `Track { id: -tidal_track_id, ... }`. That negative id
- * is the signal — library tracks always have positive ids.
+ * is the signal. Library tracks always have positive ids.
  */
 export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 	if (track.id >= 0 || track.tidal_id == null) return null;
+	return trackWithTidalIdToPlayable(track);
+}
+
+function trackWithTidalIdToPlayable(track: Track): TidalPlayable | null {
+	if (track.tidal_id == null || track.tidal_id <= 0) return null;
 	return {
 		tidal_id: track.tidal_id,
 		title: track.title,
@@ -25,6 +30,13 @@ export function trackToTidalPlayable(track: Track): TidalPlayable | null {
 		artist_tidal_id: track.artist_tidal_id ?? null,
 		album_tidal_id: track.album_tidal_id ?? null,
 	};
+}
+
+export function queueItemToTidalPlayable(item: QueueItem): TidalPlayable | null {
+	const direct = trackToTidalPlayable(item.track);
+	if (direct) return direct;
+	if (item.id >= 0 || item.source !== 'tidal_mix') return null;
+	return trackWithTidalIdToPlayable(item.track);
 }
 
 /**

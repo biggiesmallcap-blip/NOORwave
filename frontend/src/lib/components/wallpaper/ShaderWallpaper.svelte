@@ -7,14 +7,21 @@
 		shader: string;
 		/** Cap device pixel ratio. Lower = cheaper. */
 		maxDpr?: number;
+		/** Cap draw rate. Lower = cheaper for always-on background wallpapers. */
+		targetFps?: number;
 		/** When true, the canvas receives its own pointer events. False: mouse is inferred from window. */
 		interactive?: boolean;
 	};
 
-	let { shader, maxDpr = 2, interactive = true }: Props = $props();
+	let { shader, maxDpr = 2, targetFps = 45, interactive = true }: Props = $props();
 
 	let host: HTMLDivElement;
 	let canvas: HTMLCanvasElement;
+	let frameIntervalMs = 1000 / 45;
+
+	$effect(() => {
+		frameIntervalMs = Math.max(1000 / targetFps, 1000 / 60);
+	});
 
 	const VERT = `attribute vec2 a_pos; void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 	const FRAG_PREAMBLE = `#extension GL_OES_standard_derivatives : enable
@@ -200,8 +207,7 @@ uniform vec3 u_color4;
 				lastFrame = now;
 				return;
 			}
-			// Skip frames if tab is throttled
-			if (now - lastFrame < 12) return;
+			if (now - lastFrame < frameIntervalMs) return;
 			lastFrame = now;
 
 			state.mouse[0] += (state.targetMouse[0] - state.mouse[0]) * 0.12;

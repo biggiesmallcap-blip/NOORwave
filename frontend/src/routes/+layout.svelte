@@ -61,10 +61,10 @@
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
-	import { trackToTidalPlayable } from '$lib/utils/track';
+	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
-	import { wallpaper } from '$lib/stores/wallpaper';
+	import { wallpaper, wallpaperFps } from '$lib/stores/wallpaper';
 	import { palette } from '$lib/stores/palette';
 	import { uiZoom, zoomIn, zoomOut, resetZoom, nudgeZoom, applyZoom } from '$lib/stores/uiZoom';
 	import { isTauri } from '$lib/util/external';
@@ -651,7 +651,7 @@
 	}
 
 	function queueItemTidalPlayable(item: QueueItemType): TidalPlayable | null {
-		return trackToTidalPlayable(item.track);
+		return queueItemToTidalPlayable(item);
 	}
 
 	function isEphemeralQueueItem(item: QueueItemType): boolean {
@@ -1042,7 +1042,7 @@
 
 <div class="wallpaper-layer" aria-hidden="true">
 	{#if activeWallpaper.shader}
-		<ShaderWallpaper shader={activeWallpaper.shader} interactive={false} maxDpr={1.5} />
+		<ShaderWallpaper shader={activeWallpaper.shader} interactive={false} maxDpr={1} targetFps={$wallpaperFps} />
 	{/if}
 </div>
 
@@ -1809,6 +1809,9 @@
 		inset: 0;
 		z-index: 0;
 		pointer-events: none;
+		filter: blur(var(--wallpaper-blur, 10px)) saturate(1.08);
+		transform: scale(var(--wallpaper-scale, 1.025));
+		transform-origin: center;
 	}
 
 	.app-shell {
@@ -1838,16 +1841,14 @@
 
 	.app-shell.has-wallpaper .sidebar,
 	.app-shell.has-wallpaper .now-playing-panel {
-		backdrop-filter: var(--blur-modal);
-		-webkit-backdrop-filter: var(--blur-modal);
+		backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.12);
+		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.12);
 	}
 
-	/* Content pane frost: subtle dark tint + mild blur so all page content
-	   remains readable over any wallpaper, without fully hiding the animation. */
 	.app-shell.has-wallpaper .workspace {
 		background: rgba(9, 9, 14, 0.44);
-		backdrop-filter: var(--blur-overlay);
-		-webkit-backdrop-filter: var(--blur-overlay);
+		backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
+		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 	}
 
 	.sidebar {

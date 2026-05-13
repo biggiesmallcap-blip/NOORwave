@@ -1107,6 +1107,9 @@
 				<button class="filter-pill" class:active={activeTab === 'liked'}   onclick={() => switchTab('liked')}>Liked</button>
 				<button class="filter-pill" class:active={activeTab === 'albums'}  onclick={() => switchTab('albums')}>Albums</button>
 				<button class="filter-pill" class:active={activeTab === 'artists'} onclick={() => switchTab('artists')}>Artists</button>
+				<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
+					⤮ Random
+				</button>
 			</div>
 
 			<div class="filter-pill-actions">
@@ -1143,10 +1146,6 @@
 						</button>
 					</div>
 				{/if}
-
-				<button class="filter-pill filter-pill--ghost" onclick={() => void playRandomLibrary()} title="Random play">
-					⤮ Random
-				</button>
 
 				{#if searchBusy}
 					<span class="library-status">Searching…</span>

@@ -19,6 +19,13 @@ describe('library layout contracts', () => {
 	test('primary category pills stay centered under the search input', () => {
 		expect(source).toContain('class="filter-pill-group filter-pill-group--primary"');
 		expect(source).toContain('class="filter-pill-actions"');
+		const primaryStart = source.indexOf('class="filter-pill-group filter-pill-group--primary"');
+		const actionsStart = source.indexOf('class="filter-pill-actions"');
+		const randomStart = source.indexOf('title="Random play"');
+		expect(primaryStart).toBeGreaterThan(-1);
+		expect(actionsStart).toBeGreaterThan(primaryStart);
+		expect(randomStart).toBeGreaterThan(primaryStart);
+		expect(randomStart).toBeLessThan(actionsStart);
 
 		const row = cssBlock('.filter-pills');
 		expect(row).toContain('max-width: 720px');
