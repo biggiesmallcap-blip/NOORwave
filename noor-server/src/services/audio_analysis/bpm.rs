@@ -195,6 +195,52 @@ mod tests {
     }
 
     #[test]
+    fn folk_fingerpicking_resolves_to_quarter() {
+        // Regression for "Fire and Rain" (James Taylor, ~77 BPM) being reported
+        // as ~154 BPM. Gentle Travis-style fingerpicking has bass on quarter
+        // notes and treble on eighth-note off-beats with amplitudes much closer
+        // together than the "Handy Man" 1.0/0.6 split — closer to 1.0/0.85.
+        //
+        // At 77 BPM the prior (centred at 120, σ=0.6 octaves) gives 154 a 1.47×
+        // boost over 77. The biased autocorrelation further penalises the long
+        // 77 BPM lag. Combined, raw(154) ends up ≥ raw(77) and step (b)'s
+        // strict `>` check refuses to promote the slower tempo.
+        //
+        // Fixed in `tempo::estimate_tempo` step (b): when the winner sits in
+        // [145, 200] BPM and the half lands in [62, 100] BPM, the half threshold
+        // relaxes to 0.85 × winner_raw (mirroring step (a)'s ratio).
+        let sr = 44_100u32;
+        let total = (sr as f64 * 10.0) as usize;
+        let mut samples = vec![0.0f32; total];
+
+        let quarter_bpm = 77.0_f64;
+        let eighth_period = (sr as f64 * 30.0 / quarter_bpm) as usize;
+
+        let mut t = 0usize;
+        let mut idx = 0usize;
+        while t < total {
+            // Even indices = quarter-note bass (full), odd = eighth-note treble
+            // (gentler — but much closer to bass than the 1.0/0.6 Handy Man test).
+            let amp = if idx % 2 == 0 { 1.0f32 } else { 0.85 };
+            for j in 0..32 {
+                if t + j < samples.len() {
+                    samples[t + j] = amp;
+                }
+            }
+            t += eighth_period;
+            idx += 1;
+        }
+
+        let (bpm, _) = detect_bpm(&samples, sr).expect("should detect tempo");
+        assert!(
+            (bpm - quarter_bpm).abs() < 4.0,
+            "folk fingerpicking regression (Fire and Rain bug): expected ~{}, got {}",
+            quarter_bpm,
+            bpm,
+        );
+    }
+
+    #[test]
     fn confidence_separates_metronome_from_noise() {
         // Behavioural contract from the old detector: confidence for a clean
         // metronome must be meaningfully higher than for noise. The old test

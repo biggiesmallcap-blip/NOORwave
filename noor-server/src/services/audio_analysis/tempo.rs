@@ -33,6 +33,18 @@ pub const PRIOR_SIGMA_OCTAVES: f64 = 0.6;
 /// 85% of the winner's (biased-normalised) correlation to be considered.
 pub const OCTAVE_RATIO_THRESHOLD: f64 = 0.85;
 const OCTAVE_WEIGHTED_RATIO_MAX: f64 = 0.85;
+/// Step-(b) relaxed threshold for the slow-tempo / doubled-detection case.
+const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.85;
+/// Winner-tempo band in which the relaxed half-tempo threshold applies.
+/// Lower bound (145) sits comfortably above the prior peak (120) so 120 BPM
+/// metronomes with strong half-tempo subharmonics aren't demoted to 60. Upper
+/// bound (200) matches the practical ceiling for doubled folk/ballad detection
+/// (real folk maxes ~100 BPM → doubled ≤ 200).
+const RELAX_WINNER_MIN: i32 = 145;
+const RELAX_WINNER_MAX: i32 = 200;
+/// Half-tempo band where the relaxed threshold applies. The folk/ballad band.
+const RELAX_HALF_MIN: i32 = 62;
+const RELAX_HALF_MAX: i32 = 100;
 /// Calibrates the strength scale: peak-to-mean ratios up to ~5× saturate to 1.0.
 /// Empirical — clean metronomes hit ~5×-mean on the prior-weighted spectrum.
 const STRENGTH_PEAK_TO_MEAN_DENOM: f64 = 4.0;
@@ -154,7 +166,26 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
             });
         if let Some(h) = half_bpm {
             let r_half = *raw.get(&h).unwrap_or(&0.0);
-            if r_half > winner_raw {
+            // The default threshold is strict `>` — see the asymmetry note at
+            // the top of the file. That asymmetry was tuned assuming the prior's
+            // pull toward the winner is modest. For doubled folk/ballad detections
+            // (winner ≈ 150-180, half ≈ 75-90) the prior gives the doubled winner
+            // a much bigger boost than for the reggae case (77 → 154 ratio ≈ 1.47
+            // vs reggae's ≈ 1.27), so raw(half) can stay slightly below
+            // raw(winner) even when the true tempo is the half. In that band only,
+            // relax to 0.85 × winner — symmetric with step (a)'s threshold.
+            // The winner band starts at 145 (above the prior peak) to avoid
+            // demoting genuine 120 BPM detections to 60 BPM half-time.
+            // Regression: `folk_fingerpicking_resolves_to_quarter` (Fire and
+            // Rain, James Taylor, 77 BPM reported as 154).
+            let relax = (RELAX_WINNER_MIN..=RELAX_WINNER_MAX).contains(&best_bpm)
+                && (RELAX_HALF_MIN..=RELAX_HALF_MAX).contains(&h);
+            let threshold = if relax {
+                HALF_RATIO_THRESHOLD_RELAXED * winner_raw
+            } else {
+                winner_raw
+            };
+            if r_half > threshold {
                 chosen = h;
             }
         }
