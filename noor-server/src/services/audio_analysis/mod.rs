@@ -9,7 +9,7 @@ pub mod queue_prescanner;
 pub mod scanner;
 pub mod tempo;
 
-pub const CURRENT_ANALYSIS_VERSION: &str = "v5";
+pub const CURRENT_ANALYSIS_VERSION: &str = "v6";
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table

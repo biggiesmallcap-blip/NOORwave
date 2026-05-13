@@ -73,6 +73,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     let (tokens, http_client, db) = {
         let s = state.read().await;
         let Some(tokens) = s.tidal_tokens.clone() else {
+            tracing::info!(track_id, "prescanner skip: no TIDAL tokens");
             return Ok(false);
         };
         (tokens, s.http_client.clone(), s.db.clone())
@@ -86,6 +87,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         .flatten();
     if let Some(f) = &existing {
         if f.analysis_version == super::CURRENT_ANALYSIS_VERSION {
+            tracing::info!(track_id, "prescanner skip: already at current version");
             return Ok(false);
         }
     }
@@ -95,8 +97,11 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         .ok()
         .and_then(|pairs| pairs.into_iter().next().map(|(_, tid)| tid));
     let Some(tidal_id) = tidal_id else {
+        tracing::info!(track_id, "prescanner skip: no tidal_id");
         return Ok(false);
     };
+
+    tracing::info!(track_id, tidal_id, "prescanner: starting analysis");
 
     let stream_info = crate::services::tidal::stream::get_stream_url(
         &http_client,
@@ -134,6 +139,11 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         }
     }
     if buf.len() < 32 * 1024 {
+        tracing::info!(
+            track_id,
+            bytes = buf.len(),
+            "prescanner skip: downloaded clip too small"
+        );
         return Ok(false);
     }
 
@@ -179,7 +189,14 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     .ok()
     .flatten();
 
-    if saved.is_some() {
+    if let Some(f) = &saved {
+        tracing::info!(
+            track_id,
+            bpm = ?f.bpm,
+            key = f.key_signature.as_deref().unwrap_or("?"),
+            energy = ?f.energy,
+            "prescanner: analyzed"
+        );
         let _ = state
             .read()
             .await
@@ -187,6 +204,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
             .send(AppEvent::TrackAnalyzed { track_id });
         Ok(true)
     } else {
+        tracing::warn!(track_id, "prescanner: analyze_and_save returned None");
         Ok(false)
     }
 }

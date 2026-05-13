@@ -34,7 +34,13 @@ pub const PRIOR_SIGMA_OCTAVES: f64 = 0.6;
 pub const OCTAVE_RATIO_THRESHOLD: f64 = 0.85;
 const OCTAVE_WEIGHTED_RATIO_MAX: f64 = 0.85;
 /// Step-(b) relaxed threshold for the slow-tempo / doubled-detection case.
-const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.85;
+/// Loosened from 0.85 to 0.55 after "Rapper's Delight" (Taggy Matcher reggae
+/// cover, 91 BPM real → 184 detected): skank-on-off-beat patterns push
+/// raw(eighth-note lag) well above raw(quarter-note lag), so the half-tempo
+/// candidate sits much further below the winner than gentle folk fingerpicking
+/// does. The DnB test (pure 174 BPM click train) doesn't enter step (b)
+/// because step (a) promotes the double directly.
+const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.55;
 /// Winner-tempo band in which the relaxed half-tempo threshold applies.
 /// Lower bound (145) sits comfortably above the prior peak (120) so 120 BPM
 /// metronomes with strong half-tempo subharmonics aren't demoted to 60. Upper
