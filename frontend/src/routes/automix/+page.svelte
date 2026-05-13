@@ -157,7 +157,6 @@
 			: null
 	);
 	const currentFeatureSummary = $derived(formatFeatureSummary($currentTrackFeatures));
-	const selectedShuffle = $derived(shuffleModes.find((m) => m.mode === $shuffleMode) ?? shuffleModes[0]);
 	const discoveryCoverageLabel = $derived(
 		discoveryStatus
 			? `${Math.round(discoveryStatus.coverage_ratio * 100)}% embedded`
@@ -223,8 +222,6 @@
 			discoveryStatus
 		})
 	);
-	const goodMixCount = $derived(forecastCounts.good);
-	const clashMixCount = $derived(forecastCounts.clash);
 
 	function percentLabel(value: number | null | undefined): string {
 		if (value == null || !Number.isFinite(value)) return '--';
@@ -272,11 +269,14 @@
 <div class="page-shell automix-page animate-in">
 	<PageHeader
 		eyebrow="Automix"
-		title="Automix controls"
-		subtitle="Crossfade, queue policy, and upcoming blend checks."
+		title="Automix diagnostics"
+		subtitle="Seed health, queue blend forecast, and controls for fixing weak transitions."
 	>
 		{#snippet actions()}
 			<button class="btn btn-glass" onclick={loadControlData} disabled={saving}>Refresh data</button>
+			<button class="btn btn-glass" onclick={startCurrentSongRadio} disabled={saving || !$currentTrack}>
+				Start radio
+			</button>
 			<button
 				class="btn {$automixEnabled ? 'btn-primary' : 'btn-glass'}"
 				onclick={() => applyAutomix(!$automixEnabled)}
@@ -291,25 +291,25 @@
 		<div class="error-banner glass-panel">{errorMsg}</div>
 	{/if}
 
-	<section class="automix-hero glass-panel">
+	<section class="diagnostic-top">
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
-			class="now-card"
+			class="seed-panel glass-panel"
 			oncontextmenu={(e) => {
 				if ($currentTrack) openTrackContextMenu(e, $currentTrack);
 			}}
 		>
-			<div class="now-art-shell">
+			<div class="seed-art-shell">
 				{#if $currentTrack?.artwork_url}
 					<img src={$currentTrack.artwork_url} alt="" />
 				{:else}
-					<div class="now-art-empty">NOOR</div>
+					<div class="seed-art-empty">NOOR</div>
 				{/if}
 			</div>
-			<div class="now-copy">
-				<p class="eyebrow">Now playing</p>
+			<div class="seed-copy">
+				<p class="eyebrow">Current seed</p>
 				<h2>{$currentTrack?.title ?? 'No active track'}</h2>
-				<p>{$currentTrack?.artist_name ?? 'Start playback to seed automix.'}</p>
+				<p>{$currentTrack?.artist_name ?? 'Start playback to seed Automix.'}</p>
 				<div class="signal-strip">
 					<span>{currentFeatureSummary}</span>
 					<span>{$currentStreamDisplay?.audio_quality ?? 'Stream idle'}</span>
@@ -318,25 +318,35 @@
 			</div>
 		</div>
 
-		<div class="mix-radar">
-			<div class="radar-ring" style={`--mix:${selectedShuffle.meter}; --fade:${Math.min(1, draftCrossfade / 12000)}`}>
-				<div class="radar-core">
-					<strong>{crossfadeLabel(draftCrossfade)}</strong>
-					<span>{selectedShuffle.label}</span>
+		<div class="health-panel glass-panel">
+			<div class="card-heading">
+				<div>
+					<p class="eyebrow">Health</p>
+					<h3>{health.label}</h3>
 				</div>
+				<StateBadge
+					label={health.label}
+					tone={health.status === 'ready' ? 'active' : health.status === 'blocked' ? 'error' : 'warning'}
+					compact={true}
+				/>
+			</div>
+			<div class="health-reasons">
+				{#each health.reasons.slice(0, 4) as reason}
+					<span>{reason}</span>
+				{/each}
 			</div>
 			<div class="radar-stats">
 				<div>
-					<span>Good blends</span>
-					<strong>{goodMixCount}</strong>
-				</div>
-				<div>
-					<span>Clashes</span>
-					<strong>{clashMixCount}</strong>
+					<span>Good</span>
+					<strong>{forecastCounts.good}</strong>
 				</div>
 				<div>
 					<span>Pending</span>
-					<strong>{pendingQueueCount}</strong>
+					<strong>{forecastCounts.pending}</strong>
+				</div>
+				<div>
+					<span>Clashes</span>
+					<strong>{forecastCounts.clash}</strong>
 				</div>
 			</div>
 		</div>
@@ -347,6 +357,75 @@
 		<MetricPair label="Automix" value={automixQueueCount} copy="Generated rows." />
 		<MetricPair label="Model" value={discoveryCoverageLabel} copy={`${discoveryStatus?.playable_tracks?.toLocaleString() ?? 0} playable indexed.`} />
 		<MetricPair label="DSP" value={audioStats?.total_analyzed?.toLocaleString() ?? '0'} copy={`BPM ${audioStats?.avg_bpm?.toFixed(1) ?? '--'} / key ${audioStats?.top_key ?? '--'}.`} />
+	</section>
+
+	<section class="queue-lab glass-panel">
+		<div class="card-heading">
+			<div>
+				<p class="eyebrow">Forecast</p>
+				<h3>Upcoming blends</h3>
+			</div>
+			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
+		</div>
+
+		{#if queueUpcoming.length === 0}
+			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
+		{:else}
+			<div class="queue-list">
+				{#each forecastRows as row, i (`${row.item.id}-${i}`)}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div
+						class="forecast-row verdict-{row.verdict}"
+						oncontextmenu={(e) => openTrackContextMenu(e, row.item.track, row.item.id)}
+					>
+						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
+						{#if row.item.track.artwork_url}
+							<img class="queue-art" src={row.item.track.artwork_url} alt="" />
+						{:else}
+							<div class="queue-art placeholder">♪</div>
+						{/if}
+						<div class="queue-meta">
+							<strong>{row.item.track.title}</strong>
+							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
+						</div>
+						<div class="forecast-diagnostics">
+							<span>{formatFeatureSummary(row.nextFeatures)}</span>
+							{#if row.verdict !== 'unknown'}
+								<b class="compat-pill compat-{row.verdict}">
+									{row.keyLabel ?? row.verdict}
+									{#if row.bpmDeltaLabel}
+										<small>{row.bpmDeltaLabel}</small>
+									{/if}
+								</b>
+							{:else}
+								<b class="compat-pill">Analyzing</b>
+							{/if}
+							{#if row.energyDeltaLabel}
+								<span>{row.energyDeltaLabel}</span>
+							{/if}
+							{#if row.missing.length > 0}
+								<span>{row.missing.join(', ')}</span>
+							{/if}
+						</div>
+						<StateBadge label={row.sourceLabel} tone={row.isExternalPending ? 'default' : 'active'} compact={true} />
+						<div class="forecast-actions">
+							<button class="forecast-action" onclick={(event) => void moveForecastRowNext(row, event)} disabled={saving || row.item.is_pending}>
+								Next
+							</button>
+							<button class="forecast-action" onclick={(event) => void refreshForecastRow(row, event)} disabled={saving}>
+								Refresh
+							</button>
+							<button class="forecast-action danger" onclick={(event) => void removeForecastRow(row, event)} disabled={saving}>
+								Remove
+							</button>
+						</div>
+					</div>
+				{/each}
+				{#if queueUpcoming.length > INDICATOR_WINDOW}
+					<p class="queue-overflow">+ {queueUpcoming.length - INDICATOR_WINDOW} more tracks</p>
+				{/if}
+			</div>
+		{/if}
 	</section>
 
 	<section class="control-layout">
@@ -428,60 +507,6 @@
 		</section>
 	</section>
 
-	<section class="queue-lab glass-panel">
-		<div class="card-heading">
-			<div>
-				<p class="eyebrow">Forecast</p>
-				<h3>Upcoming blends</h3>
-			</div>
-			<StateBadge label={`${queueUpcoming.slice(0, INDICATOR_WINDOW).length} visible`} tone="default" compact={true} />
-		</div>
-
-		{#if queueUpcoming.length === 0}
-			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
-		{:else}
-			<div class="queue-list">
-				{#each forecastRows as row, i (`${row.item.id}-${i}`)}
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div
-						class="queue-row"
-						oncontextmenu={(e) => openTrackContextMenu(e, row.item.track, row.item.id)}
-					>
-						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
-						{#if row.item.track.artwork_url}
-							<img class="queue-art" src={row.item.track.artwork_url} alt="" />
-						{:else}
-							<div class="queue-art placeholder">♪</div>
-						{/if}
-						<div class="queue-meta">
-							<strong>{row.item.track.title}</strong>
-							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
-						</div>
-						<div class="queue-dsp">
-							<span>{formatFeatureSummary(row.nextFeatures)}</span>
-							{#if row.verdict !== 'unknown'}
-								<b class="compat-pill compat-{row.verdict}">
-									{row.keyLabel ?? row.verdict}
-									{#if row.bpmDeltaLabel}
-										<small>{row.bpmDeltaLabel}</small>
-									{/if}
-								</b>
-							{:else}
-								<b class="compat-pill">Analyzing</b>
-							{/if}
-						</div>
-						{#if row.item.source.startsWith('automix')}
-							<StateBadge label={row.sourceLabel} tone="active" compact={true} />
-						{/if}
-					</div>
-				{/each}
-				{#if queueUpcoming.length > INDICATOR_WINDOW}
-					<p class="queue-overflow">+ {queueUpcoming.length - INDICATOR_WINDOW} more tracks</p>
-				{/if}
-			</div>
-		{/if}
-	</section>
-
 	<section class="data-calls">
 		<div class="glass-panel data-card">
 			<span>Embedding coverage</span>
@@ -513,7 +538,7 @@
 
 	.automix-page :global(.page-header .intro) {
 		max-width: 68ch;
-		gap: 7px;
+		gap: var(--space-2);
 	}
 
 	.automix-page :global(.page-header .subtitle) {
@@ -523,71 +548,76 @@
 	}
 
 	.error-banner {
-		padding: 12px 16px;
+		padding: var(--space-3) var(--space-4);
 		color: var(--state-error);
 		font-size: var(--font-size-sm);
 	}
 
-	.automix-hero {
+	.diagnostic-top {
 		display: grid;
-		grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
-		gap: 22px;
-		padding: 22px;
+		grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 0.75fr);
+		gap: var(--space-4);
 		align-items: stretch;
 	}
 
-	.now-card {
+	.seed-panel,
+	.health-panel {
+		padding: var(--space-4);
+	}
+
+	.seed-panel {
 		display: grid;
-		grid-template-columns: 150px minmax(0, 1fr);
-		gap: 18px;
+		grid-template-columns: clamp(8rem, 12vw, 10rem) minmax(0, 1fr);
+		gap: var(--space-4);
 		align-items: center;
 		min-width: 0;
 	}
 
-	.now-art-shell,
-	.now-art-empty {
+	.seed-art-shell,
+	.seed-art-empty {
 		aspect-ratio: 1;
-		border-radius: 12px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: linear-gradient(135deg, rgba(124, 128, 255, 0.18), rgba(109, 184, 155, 0.08));
+		background: var(--bg-raised);
 		border: 1px solid var(--border-subtle);
 	}
 
-	.now-art-shell img {
+	.seed-art-shell img {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
 	}
 
-	.now-art-empty {
+	.seed-art-empty {
 		display: grid;
 		place-items: center;
 		font-family: var(--font-mono);
 		color: var(--text-tertiary);
 	}
 
-	.now-copy {
+	.seed-copy {
 		min-width: 0;
 		display: grid;
-		gap: 10px;
+		gap: var(--space-2);
 	}
 
-	.now-copy h2 {
+	.seed-copy h2 {
 		font-family: var(--font-body);
 		font-size: var(--font-size-3xl);
 		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		letter-spacing: 0;
 		overflow-wrap: anywhere;
 	}
 
-	.now-copy p:not(.eyebrow) {
+	.seed-copy p:not(.eyebrow) {
 		color: var(--text-secondary);
 	}
 
 	.signal-strip {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 8px;
+		gap: var(--space-2);
 	}
 
 	.signal-strip span,
@@ -600,51 +630,12 @@
 	}
 
 	.signal-strip span {
-		padding: 6px 9px;
+		padding: var(--space-1) var(--space-2);
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
 
-	.mix-radar {
-		display: grid;
-		grid-template-columns: 180px 1fr;
-		gap: 18px;
-		align-items: center;
-	}
-
-	.radar-ring {
-		--mix: 0.5;
-		--fade: 0.4;
-		aspect-ratio: 1;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background:
-			conic-gradient(from 210deg, var(--accent) calc(var(--mix) * 280deg), rgba(255, 255, 255, 0.08) 0),
-			radial-gradient(circle, rgba(109, 184, 155, calc(var(--fade) * 0.22)) 0 45%, transparent 46%);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.radar-core {
-		width: 68%;
-		aspect-ratio: 1;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		align-content: center;
-		gap: 4px;
-		background: color-mix(in srgb, var(--bg-base) 78%, transparent);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.radar-core strong {
-		font-family: var(--font-body);
-		font-size: var(--font-size-2xl);
-		letter-spacing: 0;
-	}
-
-	.radar-core span,
 	.radar-stats span,
 	.data-card span {
 		color: var(--text-secondary);
@@ -653,33 +644,58 @@
 
 	.radar-stats {
 		display: grid;
-		gap: 10px;
+		gap: var(--space-2);
 	}
 
 	.radar-stats div {
 		display: flex;
 		justify-content: space-between;
-		gap: 12px;
-		padding-bottom: 10px;
+		gap: var(--space-3);
+		padding-bottom: var(--space-2);
 		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.health-panel {
+		display: grid;
+		gap: var(--space-3);
+	}
+
+	.health-reasons {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+	}
+
+	.health-reasons span,
+	.forecast-action {
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.035);
+	}
+
+	.health-reasons span {
+		padding: var(--space-1) var(--space-2);
+		border-radius: 999px;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		line-height: 1;
 	}
 
 	.control-layout {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(280px, 1fr));
+		grid-template-columns: repeat(2, minmax(18rem, 1fr));
 		gap: var(--space-4);
 	}
 
 	.control-card,
 	.queue-lab,
 	.data-card {
-		padding: 20px;
+		padding: var(--space-4);
 	}
 
 	.control-card {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
+		gap: var(--space-3);
 	}
 
 	.control-card.wide {
@@ -690,7 +706,7 @@
 		display: flex;
 		align-items: flex-start;
 		justify-content: space-between;
-		gap: 14px;
+		gap: var(--space-3);
 	}
 
 	.card-heading h3 {
@@ -702,18 +718,21 @@
 	.shuffle-options,
 	.data-calls {
 		display: grid;
-		gap: 8px;
+		gap: var(--space-2);
 	}
 
 	.crossfade-steps {
-		grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
 	}
 
 	.step-btn {
-		padding: 8px 12px;
+		padding: var(--space-2) var(--space-3);
 		border-radius: 999px;
 		color: var(--text-secondary);
-		transition: all var(--motion-fast);
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
 	}
 
 	.step-btn.active,
@@ -726,7 +745,7 @@
 	.slider-row {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: var(--space-3);
 	}
 
 	.crossfade-slider {
@@ -734,7 +753,7 @@
 	}
 
 	.slider-value {
-		min-width: 42px;
+		min-width: 3rem;
 		text-align: right;
 		font-variant-numeric: tabular-nums;
 		color: var(--text-secondary);
@@ -750,11 +769,14 @@
 
 	.policy-toggle {
 		display: grid;
-		gap: 6px;
-		padding: 14px;
-		border-radius: 12px;
+		gap: var(--space-1);
+		padding: var(--space-3);
+		border-radius: var(--radius-md);
 		text-align: left;
-		transition: all var(--motion-fast);
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
 	}
 
 	.policy-toggle span,
@@ -777,15 +799,15 @@
 		position: relative;
 		overflow: hidden;
 		display: grid;
-		gap: 7px;
-		padding: 14px;
-		border-radius: 12px;
+		gap: var(--space-2);
+		padding: var(--space-3);
+		border-radius: var(--radius-md);
 		text-align: left;
 	}
 
 	.shuffle-meter {
 		width: 100%;
-		height: 5px;
+		height: 0.3125rem;
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.08);
 		overflow: hidden;
@@ -807,28 +829,32 @@
 
 	.queue-lab {
 		display: grid;
-		gap: 16px;
+		gap: var(--space-3);
 	}
 
 	.queue-list {
 		display: grid;
-		gap: 6px;
+		gap: var(--space-2);
 	}
 
-	.queue-row {
+	.forecast-row {
 		display: grid;
-		grid-template-columns: 34px 44px minmax(0, 1fr) minmax(180px, 0.7fr) auto;
+		grid-template-columns: 2.125rem clamp(2.25rem, 3vw, 2.75rem) minmax(0, 1fr) minmax(14rem, 0.85fr) auto auto;
 		align-items: center;
-		gap: 12px;
-		padding: 10px;
-		border-radius: 10px;
+		gap: var(--space-3);
+		padding: var(--space-2);
+		border-radius: var(--radius-sm);
 		background: rgba(255, 255, 255, 0.026);
 		border: 1px solid transparent;
 	}
 
-	.queue-row:hover {
+	.forecast-row:hover {
 		border-color: var(--border-subtle);
 		background: rgba(255, 255, 255, 0.045);
+	}
+
+	.forecast-row.verdict-clash {
+		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
 	}
 
 	.queue-index {
@@ -838,9 +864,9 @@
 	}
 
 	.queue-art {
-		width: 44px;
-		height: 44px;
-		border-radius: 8px;
+		width: clamp(2.25rem, 3vw, 2.75rem);
+		height: clamp(2.25rem, 3vw, 2.75rem);
+		border-radius: var(--radius-sm);
 		object-fit: cover;
 		background: rgba(255, 255, 255, 0.04);
 	}
@@ -853,59 +879,94 @@
 	}
 
 	.queue-meta,
-	.queue-dsp {
+	.forecast-diagnostics {
 		min-width: 0;
 		display: grid;
-		gap: 3px;
+		gap: var(--space-1);
 	}
 
 	.queue-meta strong,
 	.queue-meta span,
-	.queue-dsp span {
+	.forecast-diagnostics span {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	.queue-meta span,
-	.queue-dsp span {
+	.forecast-diagnostics span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
 	}
 
 	.compat-pill {
 		width: fit-content;
 		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-		padding: 4px 8px;
+		gap: var(--space-2);
+		padding: var(--space-1) var(--space-2);
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
 
 	.compat-good {
-		color: #86efac;
-		border-color: rgba(74, 222, 128, 0.28);
-		background: rgba(74, 222, 128, 0.1);
+		color: var(--state-success);
+		border-color: color-mix(in srgb, var(--state-success) 28%, transparent);
+		background: color-mix(in srgb, var(--state-success) 10%, transparent);
 	}
 
 	.compat-okay {
-		color: #fcd34d;
-		border-color: rgba(251, 191, 36, 0.28);
-		background: rgba(251, 191, 36, 0.1);
+		color: var(--state-warning);
+		border-color: color-mix(in srgb, var(--state-warning) 28%, transparent);
+		background: color-mix(in srgb, var(--state-warning) 10%, transparent);
 	}
 
 	.compat-clash {
-		color: #fca5a5;
-		border-color: rgba(248, 113, 113, 0.28);
-		background: rgba(248, 113, 113, 0.1);
+		color: var(--state-error);
+		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
+		background: color-mix(in srgb, var(--state-error) 10%, transparent);
+	}
+
+	.compat-pending {
+		color: var(--text-secondary);
+		border-color: var(--border-subtle);
+		background: rgba(255, 255, 255, 0.04);
+	}
+
+	.forecast-actions {
+		display: flex;
+		gap: var(--space-1);
+	}
+
+	.forecast-action {
+		padding: var(--space-1) var(--space-2);
+		border-radius: 999px;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		line-height: 1;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
+	}
+
+	.forecast-action:hover:not(:disabled) {
+		border-color: var(--accent-line);
+		background: var(--accent-soft);
+		color: var(--text-primary);
+	}
+
+	.forecast-action.danger:hover:not(:disabled) {
+		border-color: color-mix(in srgb, var(--state-error) 45%, transparent);
+		color: var(--state-error);
 	}
 
 	.queue-overflow {
 		color: var(--text-secondary);
 		text-align: center;
-		padding: 8px;
+		padding: var(--space-2);
 	}
 
 	.data-calls {
@@ -914,7 +975,7 @@
 
 	.data-card {
 		display: grid;
-		gap: 10px;
+		gap: var(--space-2);
 	}
 
 	.data-card strong {
@@ -938,14 +999,10 @@
 	}
 
 	@media (max-width: 980px) {
-		.automix-hero,
+		.diagnostic-top,
 		.control-layout,
 		.data-calls {
 			grid-template-columns: 1fr;
-		}
-
-		.mix-radar {
-			grid-template-columns: 160px 1fr;
 		}
 
 		.shuffle-options,
@@ -953,25 +1010,25 @@
 			grid-template-columns: 1fr 1fr;
 		}
 
-		.queue-row {
-			grid-template-columns: 28px 40px minmax(0, 1fr);
+		.forecast-row {
+			grid-template-columns: 1.75rem clamp(2.25rem, 3vw, 2.5rem) minmax(0, 1fr);
 		}
 
-		.queue-dsp {
+		.forecast-diagnostics,
+		.forecast-actions {
 			grid-column: 3 / -1;
 		}
 	}
 
 	@media (max-width: 640px) {
-		.now-card,
-		.mix-radar,
+		.seed-panel,
 		.shuffle-options,
 		.policy-grid {
 			grid-template-columns: 1fr;
 		}
 
-		.now-art-shell {
-			width: min(180px, 70vw);
+		.seed-art-shell {
+			width: min(11rem, 70vw);
 		}
 	}
 </style>
