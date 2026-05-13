@@ -19,13 +19,18 @@ describe('library layout contracts', () => {
 	test('primary category pills stay centered under the search input', () => {
 		expect(source).toContain('class="filter-pill-group filter-pill-group--primary"');
 		expect(source).toContain('class="filter-pill-actions"');
+		expect(source).toContain('class="library-search-meta"');
 		const primaryStart = source.indexOf('class="filter-pill-group filter-pill-group--primary"');
 		const actionsStart = source.indexOf('class="filter-pill-actions"');
 		const randomStart = source.indexOf('title="Random play"');
+		const metaStart = source.indexOf('class="library-search-meta"');
+		const statusStart = source.indexOf('class="library-status"');
 		expect(primaryStart).toBeGreaterThan(-1);
 		expect(actionsStart).toBeGreaterThan(primaryStart);
 		expect(randomStart).toBeGreaterThan(primaryStart);
 		expect(randomStart).toBeLessThan(actionsStart);
+		expect(metaStart).toBeGreaterThan(actionsStart);
+		expect(statusStart).toBeGreaterThan(metaStart);
 
 		const row = cssBlock('.filter-pills');
 		expect(row).toContain('max-width: 720px');
@@ -35,5 +40,9 @@ describe('library layout contracts', () => {
 		const primary = cssBlock('.filter-pill-group--primary');
 		expect(primary).toContain('grid-column: 2');
 		expect(primary).toContain('justify-content: center');
+
+		const meta = cssBlock('.library-search-meta');
+		expect(meta).toContain('min-height');
+		expect(meta).toContain('justify-content: center');
 	});
 });

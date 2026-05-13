@@ -1146,14 +1146,16 @@
 						</button>
 					</div>
 				{/if}
-
-				{#if searchBusy}
-					<span class="library-status">Searching…</span>
-				{:else if isSearchMode}
-					<span class="library-status">{searchSummary}</span>
-					<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
-				{/if}
 			</div>
+		</div>
+
+		<div class="library-search-meta">
+			{#if searchBusy}
+				<span class="library-status">Searching…</span>
+			{:else if isSearchMode}
+				<span class="library-status">{searchSummary}</span>
+				<button class="filter-pill filter-pill--ghost" onclick={() => (searchQuery.set(''))}>Clear</button>
+			{/if}
 		</div>
 	</div>
 
@@ -2507,7 +2509,18 @@
 	.library-status {
 		font-size: var(--font-size-xs);
 		color: var(--text-muted, rgba(255,255,255,0.4));
-		margin-left: 4px;
+	}
+
+	.library-search-meta {
+		min-height: 28px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		width: 100%;
+		max-width: 720px;
+		margin: -4px auto 0;
+		text-align: center;
 	}
 
 	.filter-pills {
