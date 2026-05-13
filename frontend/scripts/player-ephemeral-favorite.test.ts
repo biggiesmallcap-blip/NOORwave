@@ -5,6 +5,7 @@ import type { Track } from '../src/lib/api/client';
 const apiMock = vi.hoisted(() => ({
 	getTrackAudioFeatures: vi.fn().mockResolvedValue({ features: null }),
 	importTidalTrackForRadio: vi.fn(),
+	playTidalTrack: vi.fn().mockResolvedValue({}),
 	setTrackFavorite: vi.fn().mockResolvedValue({}),
 }));
 
@@ -36,7 +37,7 @@ vi.mock('$lib/stores/library', () => ({
 	updateLibraryTrackFavorite: vi.fn(),
 }));
 
-import { currentTrack, toggleTrackFavorite } from '../src/lib/stores/player';
+import { currentTrack, hydratePlayback, playTidalTrackNow, toggleTrackFavorite } from '../src/lib/stores/player';
 
 function ephemeralTrack(): Track {
 	return {
@@ -75,6 +76,7 @@ describe('ephemeral TIDAL favorite import', () => {
 			artist_id: 77,
 			album_id: 66,
 		});
+		apiMock.playTidalTrack.mockResolvedValue({});
 		apiMock.setTrackFavorite.mockResolvedValue({});
 		currentTrack.set(null);
 	});
@@ -95,5 +97,49 @@ describe('ephemeral TIDAL favorite import', () => {
 		expect(get(currentTrack)?.id).toBe(98);
 		expect(get(currentTrack)?.artist_id).toBe(77);
 		expect(get(currentTrack)?.album_id).toBe(66);
+	});
+
+	test('keeps the liked state when playback hydrates the saved track', async () => {
+		await playTidalTrackNow({
+			tidal_id: 222,
+			title: 'Ephemeral Song',
+			artist_name: 'TIDAL Artist',
+			artist_tidal_id: 333,
+			album_title: 'TIDAL Album',
+			album_tidal_id: 444,
+			artwork_url: 'https://example.test/art.jpg',
+			duration_ms: 180000,
+			is_favorite: false,
+		});
+
+		await toggleTrackFavorite(-222, false);
+
+		const savedTrack = {
+			...ephemeralTrack(),
+			id: 98,
+			artist_id: 77,
+			album_id: 66,
+			is_favorite: true,
+			source: 'tidal',
+		};
+		hydratePlayback({
+			state: {
+				current_track: savedTrack,
+				current_queue_item_id: null,
+				position_ms: 0,
+				is_playing: true,
+				volume: 1,
+				shuffle_mode: 'off',
+				repeat_mode: 'one',
+				automix_enabled: false,
+				crossfade_ms: 0,
+				automix_discover_new: false,
+				automix_use_learning: false,
+				automix_allow_external: false,
+			},
+			queue: [],
+		});
+
+		expect(get(currentTrack)?.is_favorite).toBe(true);
 	});
 });

@@ -67,6 +67,7 @@ function enrichTidalTrack(track: Track | null): Track | null {
 	const cached = tidalMetadataById.get(track.tidal_id);
 	if (!cached) return track;
 	const localId = localTidalTrackId({ tidal_id: track.tidal_id, ...cached });
+	const isLocalTrack = track.id > 0;
 	return {
 		...track,
 		id: track.id < 0 ? (localId ?? track.id) : track.id,
@@ -76,7 +77,7 @@ function enrichTidalTrack(track: Track | null): Track | null {
 		album_tidal_id: track.album_tidal_id ?? cached.album_tidal_id ?? null,
 		artwork_url: track.artwork_url ?? cached.artwork_url ?? null,
 		duration_ms: track.duration_ms ?? cached.duration_ms ?? null,
-		is_favorite: cached.is_favorite ?? track.is_favorite,
+		is_favorite: isLocalTrack ? track.is_favorite : (cached.is_favorite ?? track.is_favorite),
 	};
 }
 
@@ -663,6 +664,16 @@ export async function saveQueueAsPlaylist(
 }
 
 export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track?: Track) {
+	if (track?.tidal_id) {
+		const previous = tidalMetadataById.get(track.tidal_id) ?? {};
+		tidalMetadataById.set(track.tidal_id, {
+			...previous,
+			track_id: track.id > 0 ? track.id : previous.track_id,
+			local_id: track.id > 0 ? track.id : previous.local_id,
+			is_in_library: track.id > 0 ? true : previous.is_in_library,
+			is_favorite: favorite,
+		});
+	}
 	currentTrack.update((t) =>
 		t && t.id === trackId ? { ...t, is_favorite: favorite } : t
 	);
