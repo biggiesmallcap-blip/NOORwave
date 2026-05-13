@@ -44,13 +44,16 @@ const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.55;
 /// Winner-tempo band in which the relaxed half-tempo threshold applies.
 /// Lower bound (145) sits comfortably above the prior peak (120) so 120 BPM
 /// metronomes with strong half-tempo subharmonics aren't demoted to 60. Upper
-/// bound (200) matches the practical ceiling for doubled folk/ballad detection
-/// (real folk maxes ~100 BPM → doubled ≤ 200).
+/// bound extended to BPM_MAX so ceiling-pinned detections (e.g. low-energy
+/// ballads landing on 240 via noise-driven autocorrelation) get rescued — a
+/// real 240 BPM song would have such a dominant 8th-note pulse that even the
+/// 0.55 threshold won't promote the half.
 const RELAX_WINNER_MIN: i32 = 145;
-const RELAX_WINNER_MAX: i32 = 200;
-/// Half-tempo band where the relaxed threshold applies. The folk/ballad band.
+const RELAX_WINNER_MAX: i32 = BPM_MAX;
+/// Half-tempo band where the relaxed threshold applies. Upper bound 125 covers
+/// the 240→120 quadruple-rescue case (Julio Iglesias "Con la Misma Piedra").
 const RELAX_HALF_MIN: i32 = 62;
-const RELAX_HALF_MAX: i32 = 100;
+const RELAX_HALF_MAX: i32 = 125;
 /// Calibrates the strength scale: peak-to-mean ratios up to ~5× saturate to 1.0.
 /// Empirical — clean metronomes hit ~5×-mean on the prior-weighted spectrum.
 const STRENGTH_PEAK_TO_MEAN_DENOM: f64 = 4.0;
