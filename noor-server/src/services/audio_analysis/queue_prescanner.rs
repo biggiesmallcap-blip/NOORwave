@@ -52,6 +52,145 @@ pub fn pick_next_unanalyzed(
         .collect()
 }
 
+use crate::AppEvent;
+use crate::SharedState;
+use crate::db::queries;
+use anyhow::{Context, Result};
+use futures::StreamExt;
+
+/// Resolve the TIDAL LOW-quality stream for `track_id`, pull the audio bytes
+/// (capped at 8 MB so the MP4 `moov` atom is included — see `scanner.rs` for
+/// the rationale), decode the first ~30 s to mono f32, run DSP, and persist.
+///
+/// Skips silently (returns `Ok(false)`) when:
+/// - the track is already at `CURRENT_ANALYSIS_VERSION`
+/// - the track has no `tidal_id`
+/// - TIDAL tokens are missing
+/// - the downloaded clip is suspiciously small
+///
+/// Emits `AppEvent::TrackAnalyzed { track_id }` only on a successful save.
+pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> Result<bool> {
+    let (tokens, http_client, db) = {
+        let s = state.read().await;
+        let Some(tokens) = s.tidal_tokens.clone() else {
+            return Ok(false);
+        };
+        (tokens, s.http_client.clone(), s.db.clone())
+    };
+
+    // Race-guard: the passive actor or another prescan pass may have already
+    // bumped this track to the current version since the candidate snapshot.
+    let existing = db
+        .with_conn(|conn| Ok(queries::get_audio_dsp_features(conn, track_id)?))
+        .ok()
+        .flatten();
+    if let Some(f) = &existing {
+        if f.analysis_version == super::CURRENT_ANALYSIS_VERSION {
+            return Ok(false);
+        }
+    }
+
+    let tidal_id: Option<i64> = db
+        .with_conn(|conn| Ok(queries::get_track_tidal_ids(conn, &[track_id])?))
+        .ok()
+        .and_then(|pairs| pairs.into_iter().next().map(|(_, tid)| tid));
+    let Some(tidal_id) = tidal_id else {
+        return Ok(false);
+    };
+
+    let stream_info = crate::services::tidal::stream::get_stream_url(
+        &http_client,
+        &tokens.access_token,
+        tidal_id,
+        "LOW",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("resolve stream url: {}", e))?;
+
+    // 8 MB ≈ 11 min of 96 kbps AAC; keeps the moov atom intact for Symphonia.
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
+    'segments: for seg_url in
+        std::iter::once(&stream_info.url).chain(stream_info.segment_urls.iter())
+    {
+        if buf.len() >= MAX_BYTES {
+            break;
+        }
+        let resp = http_client
+            .get(seg_url)
+            .send()
+            .await
+            .context("fetch segment")?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let c = chunk.context("stream chunk")?;
+            let remaining = MAX_BYTES.saturating_sub(buf.len());
+            if c.len() <= remaining {
+                buf.extend_from_slice(&c);
+            } else {
+                buf.extend_from_slice(&c[..remaining]);
+                break 'segments;
+            }
+        }
+    }
+    if buf.len() < 32 * 1024 {
+        return Ok(false);
+    }
+
+    let audio_bytes = buf;
+    let decode_result: std::result::Result<(Vec<f32>, u32), _> =
+        tokio::task::spawn_blocking(move || {
+            super::scanner::decode_source_to_mono_f32(
+                Box::new(std::io::Cursor::new(audio_bytes)),
+                30,
+            )
+        })
+        .await
+        .context("decode task panicked")?;
+    let (samples, sample_rate) =
+        decode_result.map_err(|e| anyhow::anyhow!("decode failed: {}", e))?;
+
+    // Skip the first 10 s of the preview (intros distort BPM/key) — matches
+    // `scanner.rs` behaviour.
+    const PREVIEW_OFFSET_SEC: usize = 10;
+    let offset_samples = sample_rate as usize * PREVIEW_OFFSET_SEC;
+    let (samples, applied_offset_ms): (Vec<f32>, i64) =
+        if samples.len() > offset_samples + sample_rate as usize * 4 {
+            (
+                samples[offset_samples..].to_vec(),
+                (PREVIEW_OFFSET_SEC * 1000) as i64,
+            )
+        } else {
+            (samples, 0i64)
+        };
+
+    let db_clone = db.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        super::engine::analyze_and_save(
+            &db_clone,
+            &samples,
+            sample_rate,
+            "queue_prescan",
+            track_id,
+            applied_offset_ms,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if saved.is_some() {
+        let _ = state
+            .read()
+            .await
+            .event_tx
+            .send(AppEvent::TrackAnalyzed { track_id });
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
