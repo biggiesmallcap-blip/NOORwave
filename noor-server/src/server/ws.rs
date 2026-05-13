@@ -88,6 +88,10 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         "type": "audio_analysis_complete",
                         "analyzed": analyzed
                     }),
+                    AppEvent::TrackAnalyzed { track_id } => json!({
+                        "type": "track_analyzed",
+                        "track_id": track_id
+                    }),
                     AppEvent::AcrCloudScanProgress { scanned, total, matches_found } => json!({
                         "type": "acrcloud_scan_progress",
                         "scanned": scanned,
