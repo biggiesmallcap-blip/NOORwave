@@ -483,17 +483,17 @@
 		inset: -60px;
 		background-size: cover;
 		background-position: center;
-		filter: blur(60px) saturate(1.6);
-		transform: scale(1.2);
+		filter: blur(72px) saturate(1.08) brightness(0.72);
+		transform: scale(1.16);
 		z-index: -2;
-		opacity: 0.7;
+		opacity: 0.32;
 	}
 
 	.hero-veil {
 		position: absolute;
 		inset: 0;
 		background:
-			linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.42) 68%, var(--bg-base) 100%);
+			linear-gradient(180deg, rgba(11, 11, 15, 0.62) 0%, rgba(11, 11, 15, 0.78) 68%, var(--bg-base) 100%);
 		z-index: -1;
 	}
 

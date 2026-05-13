@@ -22,6 +22,18 @@ describe('shell player bar extraction', () => {
 		expect(layout).not.toContain('.player-error');
 	});
 
+	test('measures title overflow for the now-playing marquee', () => {
+		const metadata = readFileSync('src/lib/components/now-playing/NowPlayingMetadata.svelte', 'utf8');
+
+		expect(metadata).toContain('bind:this={titleShellEl}');
+		expect(metadata).toContain('bind:this={titleTextEl}');
+		expect(metadata).toContain('scrollWidth - titleShellEl.clientWidth');
+		expect(metadata).toContain('--np-title-marquee-distance');
+		expect(metadata).toContain('class:marquee-ready={titleOverflowing}');
+		expect(metadata).toContain('.np-title.marquee-ready:hover .np-title-text');
+		expect(metadata).not.toContain('100% - 220px');
+	});
+
 	test('leaves queue rows in the layout during this slice', () => {
 		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
 

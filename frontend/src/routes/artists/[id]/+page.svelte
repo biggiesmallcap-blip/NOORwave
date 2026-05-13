@@ -25,6 +25,7 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { canPlayTrack } from '$lib/player/playable';
+	import { cleanArtistBio } from '../artist_bio';
 
 	type ArtistRow = {
 		id: number;
@@ -152,6 +153,7 @@
 		tidalBio = null;
 		tidalAvailable = false;
 		spotifyStats = null;
+		bioExpanded = false;
 		void load();
 		void loadDiscography();
 		void loadSpotifyStats();
@@ -196,18 +198,13 @@
 	);
 	let heroHasPhoto = $derived(heroPortraitUrl != null);
 
-	// TIDAL's [wimpLink] markup wraps in-text artist/album/track references.
-	// Stripping is mechanical — we don't currently render them as links, so
-	// keep just the visible text inside the brackets.
-	function stripWimpLinks(s: string | null | undefined): string | null {
-		if (!s) return null;
-		return s.replace(/\[wimpLink[^\]]*\]([^\[]*)\[\/wimpLink\]/g, '$1');
-	}
+	// Artist biographies can arrive with TIDAL link and HTML markup.
+	// The helper keeps only readable text.
 	let bioText = $derived(
-		stripWimpLinks(tidalBio?.text)
-			?? tidalBio?.summary
-			?? artist?.biography
-			?? null,
+		cleanArtistBio(tidalBio?.text)
+			?? cleanArtistBio(tidalBio?.summary)
+			?? cleanArtistBio(artist?.biography)
+			?? null
 	);
 	let bioSource = $derived(tidalBio?.text || tidalBio?.summary ? tidalBio?.source ?? null : null);
 	let bioExpanded = $state(false);
@@ -547,8 +544,10 @@
 						</p>
 					{/if}
 					{#if bioRendered}
-						<p class="hero-bio">
-							{bioRendered}
+						<div class="hero-bio-panel" class:expanded={bioExpanded}>
+							<p class="hero-bio">
+								{bioRendered}
+							</p>
 							{#if bioIsLong}
 								<button
 									type="button"
@@ -556,7 +555,7 @@
 									onclick={() => (bioExpanded = !bioExpanded)}
 								>{bioExpanded ? 'Show less' : 'Show more'}</button>
 							{/if}
-						</p>
+						</div>
 						{#if bioSource}
 							<p class="hero-bio-source">via TIDAL · {bioSource}</p>
 						{/if}
@@ -1026,7 +1025,7 @@
 		min-height: 300px;
 		overflow: hidden;
 		isolation: isolate;
-		align-items: flex-end;
+		align-items: flex-start;
 		border-radius: var(--radius-lg);
 		border: 1px solid var(--border-subtle);
 	}
@@ -1053,7 +1052,7 @@
 	.hero-body {
 		display: flex;
 		flex-direction: row;
-		align-items: flex-end;
+		align-items: flex-start;
 		gap: var(--space-5);
 		width: 100%;
 		max-width: var(--content-width);
@@ -1061,6 +1060,7 @@
 
 	.hero-portrait-wrap {
 		flex-shrink: 0;
+		align-self: flex-start;
 	}
 
 	.hero-portrait {
@@ -1140,19 +1140,33 @@
 		color: var(--text-tertiary);
 	}
 
-	.hero-bio {
+	.hero-bio-panel {
 		margin: 6px 0 0;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+		max-width: 800px;
+	}
+
+	.hero-bio {
+		margin: 0;
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
 		line-height: var(--line-height-loose);
-		max-width: 800px;
+		white-space: pre-line;
+	}
+
+	.hero-bio-panel.expanded .hero-bio {
+		max-height: clamp(10rem, 30vh, 18rem);
+		overflow-y: auto;
+		padding-right: var(--space-1);
 	}
 	.bio-toggle {
 		all: unset;
 		color: var(--accent-strong);
 		cursor: pointer;
 		font-weight: var(--font-weight-semibold);
-		margin-left: 4px;
 	}
 	.bio-toggle:hover {
 		text-decoration: underline;
