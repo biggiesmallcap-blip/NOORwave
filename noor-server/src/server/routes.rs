@@ -648,6 +648,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(audio_analysis_routes::get_track_audio_features),
         )
         .route(
+            "/api/tracks/{id}/bpm-multiplier",
+            post(audio_analysis_routes::set_bpm_multiplier),
+        )
+        .route(
             "/api/library/audio-features/stats",
             get(audio_analysis_routes::get_audio_features_stats),
         )

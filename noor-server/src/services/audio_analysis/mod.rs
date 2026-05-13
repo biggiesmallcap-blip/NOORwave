@@ -93,12 +93,25 @@ pub fn spawn_actor(
                 continue;
             }
 
-            // Skip tracks already on the current analysis version.
+            // Skip tracks already on the current analysis version OR with a
+            // manual BPM override (the user has spoken; don't clobber it).
             let already_analyzed = db
-                .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
-                .ok()
-                .flatten()
-                .map(|f| f.analysis_version == CURRENT_ANALYSIS_VERSION)
+                .with_conn(|conn| -> anyhow::Result<bool> {
+                    use rusqlite::OptionalExtension;
+                    let row: Option<(String, i64)> = conn
+                        .query_row(
+                            "SELECT analysis_version, manual_override FROM audio_dsp_features WHERE track_id = ?1",
+                            rusqlite::params![track_id],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                        )
+                        .optional()?;
+                    Ok(match row {
+                        Some((v, override_flag)) => {
+                            override_flag != 0 || v == CURRENT_ANALYSIS_VERSION
+                        }
+                        None => false,
+                    })
+                })
                 .unwrap_or(false);
 
             let Some((samples, sample_rate)) = prepare_passive_analysis_job(

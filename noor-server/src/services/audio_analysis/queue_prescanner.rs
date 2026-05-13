@@ -91,15 +91,28 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
 
     // Race-guard: the passive actor or another prescan pass may have already
     // bumped this track to the current version since the candidate snapshot.
-    let existing = db
-        .with_conn(|conn| Ok(queries::get_audio_dsp_features(conn, track_id)?))
-        .ok()
-        .flatten();
-    if let Some(f) = &existing {
-        if f.analysis_version == super::CURRENT_ANALYSIS_VERSION {
-            tracing::info!(track_id, "prescanner skip: already at current version");
-            return Ok(false);
-        }
+    // Also skip if the user has manually set a BPM override.
+    let override_or_current = db
+        .with_conn(|conn| -> anyhow::Result<bool> {
+            use rusqlite::OptionalExtension;
+            let row: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT analysis_version, manual_override FROM audio_dsp_features WHERE track_id = ?1",
+                    rusqlite::params![track_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            Ok(match row {
+                Some((v, override_flag)) => {
+                    override_flag != 0 || v == super::CURRENT_ANALYSIS_VERSION
+                }
+                None => false,
+            })
+        })
+        .unwrap_or(false);
+    if override_or_current {
+        tracing::info!(track_id, "prescanner skip: manual override or current version");
+        return Ok(false);
     }
 
     let tidal_id: Option<i64> = db

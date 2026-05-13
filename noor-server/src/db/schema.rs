@@ -40,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_036,
     MIGRATION_037,
     MIGRATION_038,
+    MIGRATION_039,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1090,6 +1091,15 @@ ALTER TABLE sync_metadata ADD COLUMN last_sync_kind TEXT;
 ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_artist_cursor TEXT;
 ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_album_cursor TEXT;
 ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_track_cursor TEXT;
+"#;
+
+/// Manual BPM override flag. When set, the row is treated as authoritative —
+/// automatic analysis (passive actor, queue prescanner, bulk scanner) skips
+/// it even after CURRENT_ANALYSIS_VERSION bumps. Lets users halve / double
+/// slow reggae / folk where every tempo detector (mine, aubio, the madmom-
+/// port BLSTM) doubles the result.
+const MIGRATION_039: &str = r#"
+ALTER TABLE audio_dsp_features ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

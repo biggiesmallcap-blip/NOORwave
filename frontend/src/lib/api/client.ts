@@ -76,6 +76,8 @@ export interface SpotifyArtistStats {
 	tracks: { isrc: string; title: string; playcount: number | null }[];
 }
 
+export type SpotifyTrackStats = SpotifyArtistStats;
+
 export interface TidalDiscographyAlbum {
 	tidal_id: number;
 	local_id: number | null;
@@ -1470,6 +1472,10 @@ export const api = {
 		}>(`/api/albums/${id}/tracks`);
 	},
 
+	getAlbumSpotifyStats(id: number) {
+		return fetchApi<SpotifyTrackStats>(`/api/albums/${id}/spotify-stats`);
+	},
+
 	getArtists(sortBy = 'name', sortDir = 'asc', limit = 50, offset = 0) {
 		return fetchApi<{ artists: Artist[] }>('/api/artists', {
 			sort_by: sortBy,
@@ -2458,6 +2464,20 @@ export const api = {
 
 	getTrackAudioFeatures(trackId: number) {
 		return fetchApi<{ features: AudioDspFeatures | null }>(`/api/tracks/${trackId}/audio-features`);
+	},
+
+	setBpmMultiplier(trackId: number, factor: number) {
+		return fetchApi<{
+			ok: boolean;
+			track_id: number;
+			old_bpm: number;
+			new_bpm: number;
+			manual_override: boolean;
+		}>(`/api/tracks/${trackId}/bpm-multiplier`, undefined, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ factor })
+		});
 	},
 
 	getAudioFeaturesStats() {
