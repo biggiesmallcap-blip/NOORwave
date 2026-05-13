@@ -3,14 +3,20 @@
 use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
-pub(crate) fn mix_to_mono_slice(interleaved: &[f32], channels: usize) -> Vec<f32> {
+pub(crate) fn extend_mono_from_interleaved(
+    out: &mut Vec<f32>,
+    interleaved: &[f32],
+    channels: usize,
+) {
     if channels <= 1 {
-        return interleaved.to_vec();
+        out.extend_from_slice(interleaved);
+        return;
     }
-    interleaved
-        .chunks(channels)
-        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
-        .collect()
+    out.extend(
+        interleaved
+            .chunks(channels)
+            .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32),
+    );
 }
 
 pub(crate) fn adapt_channels(
@@ -174,6 +180,15 @@ mod tests {
     fn adapt_channels_duplicates_mono_to_stereo() {
         let output = adapt_channels(&[0.25, -0.25], 1, 2);
         assert_eq!(output, vec![0.25, 0.25, -0.25, -0.25]);
+    }
+
+    #[test]
+    fn extend_mono_from_interleaved_appends_without_replacing_existing_samples() {
+        let mut out = vec![0.75];
+
+        extend_mono_from_interleaved(&mut out, &[0.25, -0.25, 0.5, -0.5], 2);
+
+        assert_eq!(out, vec![0.75, 0.0, 0.0]);
     }
 
     #[test]

@@ -33,7 +33,7 @@ serde_json = "1"
 
 # Audio decoding + output
 symphonia = { version = "0.5", features = ["all"] }
-cpal = "0.15"
+cpal = "=0.17.3"
 # Sample-rate conversion. Used when a track's native rate doesn't match the
 # device rate (or when sample-rate-follow is off). Polyphase FFT resampler:
 # steeper filter than linear interpolation, no audible aliasing.
@@ -70,7 +70,7 @@ rayon = "1.10"
 rss = "2.0"
 regex = "1"
 
-# Real WASAPI exclusive-mode output (Windows only). cpal 0.15 does not expose
+# Real WASAPI exclusive-mode output (Windows only). cpal does not expose
 # ShareMode::Exclusive, so we drive IAudioClient directly via this crate to
 # bypass the OS mixer and grab the device exclusively.
 [target.'cfg(windows)'.dependencies]

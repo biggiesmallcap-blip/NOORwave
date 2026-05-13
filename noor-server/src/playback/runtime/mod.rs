@@ -16,15 +16,14 @@ pub(crate) mod shared;
 pub use commands::{
     PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerminalReason, PlaybackTrackStatus,
 };
-use device::resolve_device;
 pub use device::{OutputDeviceSelection, enumerate_output_devices};
+use device::{device_display_name, resolve_device};
 use engine::PlaybackEngine;
 #[cfg(test)]
 use engine::SwapPauseGuard;
 pub(crate) use shared::PlaybackSharedState;
 #[cfg(target_os = "windows")]
 pub(crate) use shared::fill_f32_from_shared;
-use shared::{estimate_total_samples_from_duration_ms, samples_from_ms};
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -258,9 +257,7 @@ fn run_runtime_loop(
     let mut device = host
         .default_output_device()
         .ok_or_else(|| anyhow!("no default output device available"))?;
-    let device_name = device
-        .name()
-        .unwrap_or_else(|_| "default output device".to_string());
+    let device_name = device_display_name(&device);
     let supported = device
         .default_output_config()
         .context("failed to read default output config")?;
@@ -269,7 +266,7 @@ fn run_runtime_loop(
 
     let mut state = PlaybackRuntimeLoopState {
         device_name,
-        device_sample_rate: output_config.sample_rate.0,
+        device_sample_rate: output_config.sample_rate,
         device_channels: output_config.channels,
         #[cfg(target_os = "windows")]
         exclusive_sink: ExclusiveRuntimeSink::new(),
@@ -501,7 +498,7 @@ fn run_runtime_loop(
                             event_tx.clone(),
                         ) {
                             Ok(actual_rate) => {
-                                output_config.sample_rate = cpal::SampleRate(actual_rate);
+                                output_config.sample_rate = actual_rate;
                                 state.device_sample_rate = actual_rate;
                             }
                             Err(err) => {
@@ -519,7 +516,7 @@ fn run_runtime_loop(
                                         rebuild_rate,
                                         release_grace_secs,
                                     )?;
-                                    output_config.sample_rate = cpal::SampleRate(actual_rate);
+                                    output_config.sample_rate = actual_rate;
                                     state.device_sample_rate = actual_rate;
                                 }
                             }
@@ -683,9 +680,7 @@ fn run_runtime_loop(
                 };
                 let new_config = new_supported.config();
                 let new_format = new_supported.sample_format();
-                let new_name = new_device
-                    .name()
-                    .unwrap_or_else(|_| "default output device".to_string());
+                let new_name = device_display_name(&new_device);
 
                 let has_live_engines = state.engine.is_some()
                     || state.next_engine.is_some()
@@ -695,7 +690,7 @@ fn run_runtime_loop(
                     sample_rate_follow,
                     has_live_engines,
                     state.device_sample_rate,
-                    new_config.sample_rate.0,
+                    new_config.sample_rate,
                 );
                 let requested_backend = if exclusive {
                     SwapBackend::Exclusive
@@ -747,7 +742,7 @@ fn run_runtime_loop(
                             event_tx.clone(),
                         ) {
                             Ok(actual_rate) => {
-                                actual_config.sample_rate = cpal::SampleRate(actual_rate);
+                                actual_config.sample_rate = actual_rate;
                             }
                             Err(err) => {
                                 warn!(
@@ -773,8 +768,7 @@ fn run_runtime_loop(
                                         exclusive_release_grace_secs,
                                     ) {
                                         Ok(actual_rate) => {
-                                            actual_config.sample_rate =
-                                                cpal::SampleRate(actual_rate);
+                                            actual_config.sample_rate = actual_rate;
                                         }
                                         Err(err) => {
                                             warn!(
@@ -810,7 +804,7 @@ fn run_runtime_loop(
                             exclusive_release_grace_secs,
                         ) {
                             Ok(actual_rate) => {
-                                actual_config.sample_rate = cpal::SampleRate(actual_rate);
+                                actual_config.sample_rate = actual_rate;
                             }
                             Err(err) => {
                                 warn!(
@@ -837,7 +831,7 @@ fn run_runtime_loop(
                 output_config = actual_config;
                 output_sample_format = new_format;
                 state.device_name = new_name.clone();
-                state.device_sample_rate = output_config.sample_rate.0;
+                state.device_sample_rate = output_config.sample_rate;
                 state.device_channels = output_config.channels;
                 state.current_exclusive = exclusive;
                 state.current_sample_rate_follow = sample_rate_follow;
@@ -909,7 +903,7 @@ fn transition_to_job(
         state.device_sample_rate,
     );
     if let Some(update) = output_state_update {
-        output_config.sample_rate = cpal::SampleRate(update.sample_rate);
+        output_config.sample_rate = update.sample_rate;
         state.device_sample_rate = update.sample_rate;
         #[cfg(target_os = "windows")]
         if update.force_exclusive_rebuild && state.current_exclusive {
@@ -982,7 +976,7 @@ fn transition_to_job(
                     event_tx.clone(),
                 ) {
                     Ok(actual_rate) => {
-                        output_config.sample_rate = cpal::SampleRate(actual_rate);
+                        output_config.sample_rate = actual_rate;
                         state.device_sample_rate = actual_rate;
                     }
                     Err(err) => {
@@ -1003,7 +997,7 @@ fn transition_to_job(
                                 ),
                                 state.current_exclusive_release_grace_secs,
                             )?;
-                            output_config.sample_rate = cpal::SampleRate(actual_rate);
+                            output_config.sample_rate = actual_rate;
                             state.device_sample_rate = actual_rate;
                         }
                     }
@@ -1024,7 +1018,7 @@ fn transition_to_job(
                 Arc::clone(position_samples),
             )?;
             let actual_start_rate = eng.shared.device_sample_rate;
-            output_config.sample_rate = cpal::SampleRate(actual_start_rate);
+            output_config.sample_rate = actual_start_rate;
             state.device_sample_rate = actual_start_rate;
             *position_source.lock().unwrap() = Arc::clone(position_samples);
             state.engine = Some(eng);
@@ -1119,18 +1113,15 @@ fn ensure_exclusive_sink_started(
     let exclusive_plan =
         swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
     if !state.exclusive_sink.needs_rebuild() {
-        return Ok(exclusive_plan.stream_config.sample_rate.0);
+        return Ok(exclusive_plan.stream_config.sample_rate);
     }
     state.exclusive_sink.stream = None;
 
-    let device_label = device
-        .name()
-        .unwrap_or_else(|_| "default output device".to_string());
-    let device_name = device.name().ok();
+    let device_label = device_display_name(device);
     match build_exclusive_stream(
-        device_name.as_deref(),
+        Some(device_label.as_str()),
         device_label.clone(),
-        exclusive_plan.stream_config.sample_rate.0,
+        exclusive_plan.stream_config.sample_rate,
         exclusive_plan.stream_config.channels,
         exclusive_release_grace_secs,
         Arc::clone(&state.exclusive_sink.source_bank),
@@ -1144,7 +1135,7 @@ fn ensure_exclusive_sink_started(
                 device_name: device_label,
                 transport_format,
             });
-            Ok(exclusive_plan.stream_config.sample_rate.0)
+            Ok(exclusive_plan.stream_config.sample_rate)
         }
         Err(failure) => {
             let reason = failure.user_message();
@@ -1357,6 +1348,9 @@ mod tests {
         effective_output_config, output_rate_fallback_config,
     };
     use crate::playback::player::PlaybackSourceKind;
+    use crate::playback::runtime::shared::{
+        estimate_total_samples_from_duration_ms, samples_from_ms,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicU32, AtomicU64},
@@ -1366,13 +1360,13 @@ mod tests {
     fn effective_output_config_applies_desired_sample_rate() {
         let base = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(48_000),
+            sample_rate: 48_000,
             buffer_size: cpal::BufferSize::Default,
         };
 
         let effective = effective_output_config(&base, Some(96_000));
 
-        assert_eq!(effective.sample_rate.0, 96_000);
+        assert_eq!(effective.sample_rate, 96_000);
         assert_eq!(effective.channels, 2);
     }
 
@@ -1380,13 +1374,13 @@ mod tests {
     fn effective_output_config_keeps_base_rate_without_override() {
         let base = StreamConfig {
             channels: 6,
-            sample_rate: cpal::SampleRate(44_100),
+            sample_rate: 44_100,
             buffer_size: cpal::BufferSize::Default,
         };
 
         let effective = effective_output_config(&base, None);
 
-        assert_eq!(effective.sample_rate.0, 44_100);
+        assert_eq!(effective.sample_rate, 44_100);
         assert_eq!(effective.channels, 6);
     }
 
@@ -1485,13 +1479,13 @@ mod tests {
     fn swap_stream_plan_uses_track_rate_for_exclusive_backend() {
         let base = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(48_000),
+            sample_rate: 48_000,
             buffer_size: cpal::BufferSize::Default,
         };
 
         let plan = swap_stream_plan(&base, Some(96_000), SwapBackend::Exclusive);
 
-        assert_eq!(plan.stream_config.sample_rate.0, 96_000);
+        assert_eq!(plan.stream_config.sample_rate, 96_000);
         assert_eq!(plan.target_sample_rate, Some(96_000));
     }
 
@@ -1499,13 +1493,13 @@ mod tests {
     fn swap_stream_plan_uses_device_rate_for_shared_fallback() {
         let base = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(48_000),
+            sample_rate: 48_000,
             buffer_size: cpal::BufferSize::Default,
         };
 
         let plan = swap_stream_plan(&base, Some(192_000), SwapBackend::SharedFallback);
 
-        assert_eq!(plan.stream_config.sample_rate.0, 48_000);
+        assert_eq!(plan.stream_config.sample_rate, 48_000);
         assert_eq!(plan.target_sample_rate, Some(48_000));
     }
 
@@ -1513,25 +1507,25 @@ mod tests {
     fn output_rate_fallback_uses_base_when_desired_rate_was_rejected() {
         let base = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(192_000),
+            sample_rate: 192_000,
             buffer_size: cpal::BufferSize::Default,
         };
         let attempted = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(176_400),
+            sample_rate: 176_400,
             buffer_size: cpal::BufferSize::Default,
         };
 
         let fallback = output_rate_fallback_config(&attempted, &base).expect("fallback");
 
-        assert_eq!(fallback.sample_rate.0, 192_000);
+        assert_eq!(fallback.sample_rate, 192_000);
     }
 
     #[test]
     fn output_rate_fallback_is_none_when_attempt_already_uses_base_rate() {
         let base = StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(192_000),
+            sample_rate: 192_000,
             buffer_size: cpal::BufferSize::Default,
         };
 

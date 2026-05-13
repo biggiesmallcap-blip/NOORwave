@@ -16,6 +16,17 @@ impl OutputDeviceSelection {
     }
 }
 
+pub(super) fn device_display_name(device: &cpal::Device) -> String {
+    device_display_name_opt(device).unwrap_or_else(|| "default output device".to_string())
+}
+
+fn device_display_name_opt(device: &cpal::Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_string())
+}
+
 pub(super) fn resolve_device(selection: &OutputDeviceSelection) -> Option<cpal::Device> {
     let host = cpal::default_host();
     match selection {
@@ -23,7 +34,11 @@ pub(super) fn resolve_device(selection: &OutputDeviceSelection) -> Option<cpal::
         OutputDeviceSelection::Named(name) => host
             .output_devices()
             .ok()
-            .and_then(|mut iter| iter.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
+            .and_then(|mut iter| {
+                iter.find(|device| {
+                    device_display_name_opt(device).as_deref() == Some(name.as_str())
+                })
+            })
             .or_else(|| host.default_output_device()),
     }
 }
@@ -39,19 +54,21 @@ pub struct OutputDeviceInfo {
 
 pub fn enumerate_output_devices() -> Vec<OutputDeviceInfo> {
     let host = cpal::default_host();
-    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let default_name = host
+        .default_output_device()
+        .and_then(|device| device_display_name_opt(&device));
 
     host.output_devices()
         .map(|iter| {
             iter.filter_map(|dev| {
-                let name = dev.name().ok()?;
+                let name = device_display_name_opt(&dev)?;
                 let configs: Vec<_> = dev.supported_output_configs().ok()?.collect();
                 let max_channels = configs.iter().map(|c| c.channels()).max().unwrap_or(0);
                 let mut rates: Vec<u32> = configs
                     .iter()
                     .flat_map(|c| {
-                        let min = c.min_sample_rate().0;
-                        let max = c.max_sample_rate().0;
+                        let min = c.min_sample_rate();
+                        let max = c.max_sample_rate();
                         // Common audio rates that fall within the supported range.
                         [44_100, 48_000, 88_200, 96_000, 176_400, 192_000]
                             .into_iter()

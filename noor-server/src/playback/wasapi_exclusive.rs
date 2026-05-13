@@ -1,6 +1,6 @@
 //! Real WASAPI exclusive-mode output stream.
 //!
-//! cpal 0.15 only exposes shared-mode output, which always routes through the
+//! cpal only exposes shared-mode output, which always routes through the
 //! Windows audio engine (mixer, resampler, system DSP). Audiophile users want
 //! bit-perfect playback that bypasses the engine entirely — `ShareMode::Exclusive`.
 //!
@@ -207,9 +207,9 @@ fn exclusive_candidate_formats() -> &'static [CandidateFormat] {
     &[
         CandidateFormat {
             storebits: 32,
-            validbits: 32,
+            validbits: 24,
             sample_type: SampleType::Int,
-            format: Format::I32,
+            format: Format::I24In32,
         },
         CandidateFormat {
             storebits: 24,
@@ -219,9 +219,9 @@ fn exclusive_candidate_formats() -> &'static [CandidateFormat] {
         },
         CandidateFormat {
             storebits: 32,
-            validbits: 24,
+            validbits: 32,
             sample_type: SampleType::Int,
-            format: Format::I24In32,
+            format: Format::I32,
         },
         CandidateFormat {
             storebits: 16,
@@ -763,8 +763,11 @@ fn try_initialize_one(
     let (def_period, min_period) = audio_client
         .get_device_period()
         .map_err(|e| ExclusiveInitFailure::Other(format!("get_device_period: {e}")))?;
+    // Use the device default period for exclusive stability. The near-minimum
+    // period is fragile at 192 kHz when the render path includes Rust mixing,
+    // locking, and integer transport conversion.
     let mut chosen_period = audio_client
-        .calculate_aligned_period_near(3 * min_period / 2, Some(128), &format)
+        .calculate_aligned_period_near(def_period, Some(128), &format)
         .map_err(|e| ExclusiveInitFailure::Other(format!("calculate aligned period: {e}")))?;
     let mode = StreamMode::EventsExclusive {
         period_hns: chosen_period,
@@ -1147,13 +1150,13 @@ mod tests {
     }
 
     #[test]
-    fn candidate_formats_prefer_integer_formats_before_float() {
+    fn candidate_formats_prefer_24_bit_before_full_width_i32() {
         let labels: Vec<_> = exclusive_candidate_formats()
             .iter()
             .map(|candidate| fmt_tag_label(candidate.format))
             .collect();
 
-        assert_eq!(labels, vec!["i32", "i24-packed", "i24-in-32", "i16", "f32"]);
+        assert_eq!(labels, vec!["i24-in-32", "i24-packed", "i32", "i16", "f32"]);
     }
 
     #[test]

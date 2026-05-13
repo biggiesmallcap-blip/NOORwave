@@ -257,7 +257,7 @@ If you complete a run and the model doesn't activate, you'll usually see Coverag
 | Frontend | SvelteKit 2 + Svelte 5 runes, TypeScript, Vite |
 | Desktop shell | Tauri 2 |
 | Audio decode | Symphonia 0.5 |
-| Audio output | CPAL 0.15 (cross-platform) |
+| Audio output | CPAL 0.17 (cross-platform) |
 | Real-time | Tokio broadcast channel → WebSocket |
 | Feed parsing | RSS 2.0 + Atom syndication |
 

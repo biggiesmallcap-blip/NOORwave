@@ -35,8 +35,8 @@ pub(crate) fn swap_stream_plan(
         SwapBackend::SharedFallback => base.clone(),
     };
     let target_sample_rate = match (backend, desired_sample_rate) {
-        (SwapBackend::SharedFallback, Some(_)) => Some(stream_config.sample_rate.0),
-        (_, Some(_)) => Some(stream_config.sample_rate.0),
+        (SwapBackend::SharedFallback, Some(_)) => Some(stream_config.sample_rate),
+        (_, Some(_)) => Some(stream_config.sample_rate),
         (_, None) => None,
     };
 
@@ -52,7 +52,7 @@ pub(crate) fn effective_output_config(
 ) -> StreamConfig {
     let mut config = base.clone();
     if let Some(rate) = desired_sample_rate {
-        config.sample_rate = cpal::SampleRate(rate);
+        config.sample_rate = rate;
     }
     config
 }
@@ -144,7 +144,7 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
         command_tx.clone(),
         event_tx.clone(),
     ) {
-        Ok(stream) => Ok((stream, attempted_config.sample_rate.0)),
+        Ok(stream) => Ok((stream, attempted_config.sample_rate)),
         Err(primary_error) => {
             let Some(fallback_config) =
                 output_rate_fallback_config(attempted_config, fallback_config)
@@ -153,7 +153,7 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
             };
             warn!(
                 "Output stream rejected or failed to start at {} Hz; falling back to {} Hz: {primary_error}",
-                attempted_config.sample_rate.0, fallback_config.sample_rate.0
+                attempted_config.sample_rate, fallback_config.sample_rate
             );
             let stream = build_started_output_stream(
                 device,
@@ -166,10 +166,10 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
             .with_context(|| {
                 format!(
                     "fallback output stream at {} Hz also failed after {} Hz was rejected or failed to start",
-                    fallback_config.sample_rate.0, attempted_config.sample_rate.0
+                    fallback_config.sample_rate, attempted_config.sample_rate
                 )
             })?;
-            Ok((stream, fallback_config.sample_rate.0))
+            Ok((stream, fallback_config.sample_rate))
         }
     }
 }

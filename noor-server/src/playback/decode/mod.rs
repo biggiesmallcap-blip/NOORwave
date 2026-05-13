@@ -1,7 +1,7 @@
 pub mod resample;
 pub mod source;
 
-use self::resample::{StreamResampler, adapt_channels, mix_to_mono_slice};
+use self::resample::{StreamResampler, adapt_channels, extend_mono_from_interleaved};
 use self::source::{
     StreamPipe, append_stream_bytes, build_tidal_cdn_client, dash_background_fetch_window,
     dash_initial_media_count,
@@ -310,8 +310,11 @@ pub(crate) fn decode_and_buffer_job(
 
                 // ── Passive analysis tap: capture first 30 seconds as mono ──────────────
                 if !analysis_sent {
-                    let mono = mix_to_mono_slice(sb.samples(), decoded_channels as usize);
-                    analysis_buf.extend_from_slice(&mono);
+                    extend_mono_from_interleaved(
+                        &mut analysis_buf,
+                        sb.samples(),
+                        decoded_channels as usize,
+                    );
                     if analysis_buf.len() >= decoded_sample_rate as usize * 30 {
                         if let Some(tx) = &config.analysis_tx {
                             let _ = tx.send((

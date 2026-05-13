@@ -113,7 +113,7 @@ impl PlaybackEngine {
                 };
                 warn!(
                     "Playback output rejected {} Hz; cold-starting at {} Hz instead: {primary_error}",
-                    output_config.sample_rate.0, fallback_config.sample_rate.0
+                    output_config.sample_rate, fallback_config.sample_rate
                 );
                 Self::start_with_output_config(
                     config,
@@ -130,7 +130,7 @@ impl PlaybackEngine {
                 .with_context(|| {
                     format!(
                         "fallback playback output at {} Hz failed after {} Hz was rejected",
-                        fallback_config.sample_rate.0, output_config.sample_rate.0
+                        fallback_config.sample_rate, output_config.sample_rate
                     )
                 })
             }
@@ -154,7 +154,7 @@ impl PlaybackEngine {
             config,
             command_tx,
             job,
-            output_config.sample_rate.0,
+            output_config.sample_rate,
             device_channels,
             volume_ctl,
             position_samples,
@@ -306,7 +306,7 @@ impl PlaybackEngine {
             event_tx,
         )?;
         let mut active_plan = shared_plan;
-        active_plan.stream_config.sample_rate = cpal::SampleRate(actual_rate);
+        active_plan.stream_config.sample_rate = actual_rate;
         active_plan.target_sample_rate = Some(actual_rate);
 
         if let Some(target_sample_rate) = active_plan.target_sample_rate {
@@ -316,6 +316,6 @@ impl PlaybackEngine {
         }
         self.stream = Some(OutputStream::Cpal { _stream: stream });
         pause_guard.restore();
-        Ok(active_plan.stream_config.sample_rate.0)
+        Ok(active_plan.stream_config.sample_rate)
     }
 }

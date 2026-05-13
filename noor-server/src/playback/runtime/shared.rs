@@ -139,17 +139,25 @@ fn write_output_buffer<T>(
         0
     };
 
-    if written > 0 {
+    if written == data.len() {
         guard.starved_notified = false;
+    }
+
+    if written > 0 {
         shared
             .position_samples
             .fetch_add(written as u64, Ordering::Relaxed);
-    } else if guard.started && !guard.finished && !guard.starved_notified {
+    }
+
+    if guard.started && !guard.finished && written < data.len() && !guard.starved_notified {
         guard.starved_notified = true;
         warn!(
-            "Playback buffer starved: track_id={}, generation={}, buffered_remaining={}, total_buffered={}, read_pos={}",
+            "Playback buffer underrun: track_id={}, generation={}, requested={}, written={}, zero_filled={}, buffered_remaining={}, total_buffered={}, read_pos={}",
             shared.track_id,
             shared.generation,
+            data.len(),
+            written,
+            data.len().saturating_sub(written),
             guard.samples.len().saturating_sub(guard.read_pos),
             guard.samples.len(),
             guard.read_pos
