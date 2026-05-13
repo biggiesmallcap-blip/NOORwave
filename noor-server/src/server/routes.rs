@@ -9842,6 +9842,7 @@ fn spawn_playback_runtime_listener(
                             output.sample_rate_follow,
                             None,
                             output.exclusive_release_grace_secs,
+                            output.exclusive_latency_mode,
                         )
                     {
                         warn!("Failed to recover released WASAPI exclusive stream: {error}");
@@ -10023,6 +10024,7 @@ async fn handle_near_end(
                         settings.sample_rate_follow,
                         Some(next_rate as u32),
                         settings.exclusive_release_grace_secs,
+                        settings.exclusive_latency_mode,
                     ) {
                         warn!(
                             "Failed to rebuild stream for next track {} at {} Hz: {e}",
@@ -10507,6 +10509,7 @@ struct RuntimeOutputSettings {
     exclusive_mode: bool,
     sample_rate_follow: bool,
     exclusive_release_grace_secs: u32,
+    exclusive_latency_mode: crate::db::audio_settings::ExclusiveLatencyMode,
 }
 
 fn runtime_output_settings_from_audio_settings(
@@ -10519,6 +10522,7 @@ fn runtime_output_settings_from_audio_settings(
         exclusive_mode: settings.exclusive_mode,
         sample_rate_follow: settings.sample_rate_follow,
         exclusive_release_grace_secs: settings.exclusive_release_grace_secs,
+        exclusive_latency_mode: settings.exclusive_latency_mode.clone(),
     }
 }
 
@@ -10544,6 +10548,7 @@ async fn apply_persisted_runtime_output_settings(
         output.sample_rate_follow,
         None,
         output.exclusive_release_grace_secs,
+        output.exclusive_latency_mode,
     ) {
         warn!("Failed to apply persisted audio settings to playback runtime: {e}");
     }
@@ -10590,6 +10595,7 @@ async fn post_audio_exclusive_retry(
             output.sample_rate_follow,
             None,
             output.exclusive_release_grace_secs,
+            output.exclusive_latency_mode,
         ) {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10671,7 +10677,8 @@ async fn put_audio_settings(
         let needs_swap = old.output_device != saved.output_device
             || old.exclusive_mode != saved.exclusive_mode
             || old.sample_rate_follow != saved.sample_rate_follow
-            || old.exclusive_release_grace_secs != saved.exclusive_release_grace_secs;
+            || old.exclusive_release_grace_secs != saved.exclusive_release_grace_secs
+            || old.exclusive_latency_mode != saved.exclusive_latency_mode;
 
         if needs_swap && let Some(runtime) = guard.playback_runtime.as_ref() {
             let output = runtime_output_settings_from_audio_settings(&saved);
@@ -10681,6 +10688,7 @@ async fn put_audio_settings(
                 output.sample_rate_follow,
                 None,
                 output.exclusive_release_grace_secs,
+                output.exclusive_latency_mode,
             ) {
                 warn!("Audio settings update: live device_swap failed: {e}");
             }
@@ -11670,6 +11678,8 @@ mod tests {
         settings.exclusive_mode = true;
         settings.sample_rate_follow = true;
         settings.exclusive_release_grace_secs = 12;
+        settings.exclusive_latency_mode =
+            crate::db::audio_settings::ExclusiveLatencyMode::LowLatency;
 
         let output = runtime_output_settings_from_audio_settings(&settings);
 
@@ -11684,6 +11694,10 @@ mod tests {
         assert!(output.exclusive_mode);
         assert!(output.sample_rate_follow);
         assert_eq!(output.exclusive_release_grace_secs, 12);
+        assert_eq!(
+            output.exclusive_latency_mode,
+            crate::db::audio_settings::ExclusiveLatencyMode::LowLatency
+        );
     }
 
     #[test]

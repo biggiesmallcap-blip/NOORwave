@@ -10,6 +10,7 @@
 		setStoredToken,
 		type AudioDevice,
 		type AudioQuality,
+		type ExclusiveLatencyMode,
 		type VideoQualityMode,
 		type DiscoveryEngine,
 		type DiscoveryStatus,
@@ -1210,6 +1211,12 @@
 		{ value: 'AUTO', label: 'Auto adaptive' }
 	];
 
+	const EXCLUSIVE_LATENCY_OPTIONS: { value: ExclusiveLatencyMode; label: string }[] = [
+		{ value: 'STABLE', label: 'Stable' },
+		{ value: 'LOW_LATENCY', label: 'Low latency' },
+		{ value: 'ULTRA_LOW_LATENCY', label: 'Ultra low latency' }
+	];
+
 	async function loadAudioOutput() {
 		await audioSettings.load();
 		try {
@@ -1243,6 +1250,11 @@
 		if (Number.isFinite(v)) {
 			void audioSettings.patch({ exclusive_release_grace_secs: v });
 		}
+	}
+
+	function onExclusiveLatencyModeChange(e: Event) {
+		const value = (e.target as HTMLSelectElement).value as ExclusiveLatencyMode;
+		void audioSettings.patch({ exclusive_latency_mode: value });
 	}
 
 	let retryingExclusive = $state(false);
@@ -1990,6 +2002,23 @@
 										<span>Exclusive transport</span>
 										<strong>{$exclusiveStatus.transportFormat}</strong>
 									</div>
+								{/if}
+								{#if s.exclusive_mode}
+									<label class="audio-field audio-field-single">
+										<span>Exclusive buffer mode</span>
+										<select
+											class="audio-select"
+											value={s.exclusive_latency_mode}
+											onchange={onExclusiveLatencyModeChange}
+										>
+											{#each EXCLUSIVE_LATENCY_OPTIONS as opt (opt.value)}
+												<option value={opt.value}>{opt.label}</option>
+											{/each}
+										</select>
+									</label>
+									<p class="page-copy setting-caption">
+										Stable is best for music playback. Low latency and ultra low latency reduce output delay when the driver can keep up.
+									</p>
 								{/if}
 								<div class="info-row">
 									<span>Idle release</span>

@@ -35,6 +35,7 @@ use windows_sys::Win32::System::Threading::{
 use super::runtime::{
     PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared,
 };
+use crate::db::audio_settings::ExclusiveLatencyMode;
 
 // AUDCLNT_E_* HRESULTs from <audioclient.h>. Raw i32 reps so we don't have to
 // pull windows / windows-core into noor-server's direct deps just to match a
@@ -297,6 +298,7 @@ pub fn build_exclusive_stream(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
+    latency_mode: ExclusiveLatencyMode,
     source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -319,6 +321,7 @@ pub fn build_exclusive_stream(
                 desired_sample_rate,
                 channels,
                 grace_secs,
+                latency_mode,
                 source_bank,
                 command_tx,
                 event_tx,
@@ -356,6 +359,7 @@ fn run_render_thread(
     desired_sample_rate: u32,
     channels: u16,
     grace_secs: u32,
+    latency_mode: ExclusiveLatencyMode,
     source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -364,7 +368,12 @@ fn run_render_thread(
     init_tx: mpsc::SyncSender<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>,
 ) {
     let _mmcss = enter_mmcss();
-    let init_result = init_audio_client(device_pref.as_deref(), desired_sample_rate, channels);
+    let init_result = init_audio_client(
+        device_pref.as_deref(),
+        desired_sample_rate,
+        channels,
+        &latency_mode,
+    );
     let (audio_client, render_client, event_handle, blockalign, fmt_tag) = match init_result {
         Ok(v) => v,
         Err(e) => {
@@ -600,6 +609,7 @@ fn init_audio_client(
     device_pref: Option<&str>,
     desired_sample_rate: u32,
     channels: u16,
+    latency_mode: &ExclusiveLatencyMode,
 ) -> std::result::Result<
     (
         wasapi::AudioClient,
@@ -641,6 +651,7 @@ fn init_audio_client(
                 desired_sample_rate,
                 channels,
                 candidate.format,
+                latency_mode,
             ) {
                 Ok(v) => {
                     if attempt > 0 {
@@ -717,6 +728,7 @@ fn try_initialize_one(
     desired_sample_rate: u32,
     channels: u16,
     fmt_tag: Format,
+    latency_mode: &ExclusiveLatencyMode,
 ) -> std::result::Result<
     (
         wasapi::AudioClient,
@@ -763,11 +775,9 @@ fn try_initialize_one(
     let (def_period, min_period) = audio_client
         .get_device_period()
         .map_err(|e| ExclusiveInitFailure::Other(format!("get_device_period: {e}")))?;
-    // Use the device default period for exclusive stability. The near-minimum
-    // period is fragile at 192 kHz when the render path includes Rust mixing,
-    // locking, and integer transport conversion.
+    let target_period = target_exclusive_period_hns(def_period, min_period, latency_mode);
     let mut chosen_period = audio_client
-        .calculate_aligned_period_near(def_period, Some(128), &format)
+        .calculate_aligned_period_near(target_period, Some(128), &format)
         .map_err(|e| ExclusiveInitFailure::Other(format!("calculate aligned period: {e}")))?;
     let mode = StreamMode::EventsExclusive {
         period_hns: chosen_period,
@@ -831,11 +841,12 @@ fn try_initialize_one(
 
     info!(
         target: "playback",
-        "WASAPI exclusive stream initialized: {} Hz \u{00d7} {} ch ({:?}), {} bytes/frame, default period {} hns, min period {} hns, chosen period {} hns, buffer {} frames",
+        "WASAPI exclusive stream initialized: {} Hz \u{00d7} {} ch ({:?}), {} bytes/frame, latency {:?}, default period {} hns, min period {} hns, chosen period {} hns, buffer {} frames",
         desired_sample_rate,
         channels,
         fmt_tag_label(fmt_tag),
         blockalign,
+        latency_mode,
         def_period,
         min_period,
         chosen_period,
@@ -849,6 +860,20 @@ fn try_initialize_one(
         blockalign,
         fmt_tag,
     ))
+}
+
+fn target_exclusive_period_hns(
+    default_period: i64,
+    min_period: i64,
+    latency_mode: &ExclusiveLatencyMode,
+) -> i64 {
+    match latency_mode {
+        ExclusiveLatencyMode::Stable => default_period,
+        ExclusiveLatencyMode::LowLatency => {
+            min_period + default_period.saturating_sub(min_period) / 2
+        }
+        ExclusiveLatencyMode::UltraLowLatency => 3 * min_period / 2,
+    }
 }
 
 fn fmt_tag_label(fmt: Format) -> &'static str {
@@ -1157,6 +1182,35 @@ mod tests {
             .collect();
 
         assert_eq!(labels, vec!["i24-in-32", "i24-packed", "i32", "i16", "f32"]);
+    }
+
+    #[test]
+    fn exclusive_latency_modes_pick_expected_period_targets() {
+        use crate::db::audio_settings::ExclusiveLatencyMode;
+
+        let default_period = 10_000;
+        let min_period = 2_000;
+
+        assert_eq!(
+            target_exclusive_period_hns(default_period, min_period, &ExclusiveLatencyMode::Stable),
+            default_period
+        );
+        assert_eq!(
+            target_exclusive_period_hns(
+                default_period,
+                min_period,
+                &ExclusiveLatencyMode::LowLatency
+            ),
+            6_000
+        );
+        assert_eq!(
+            target_exclusive_period_hns(
+                default_period,
+                min_period,
+                &ExclusiveLatencyMode::UltraLowLatency
+            ),
+            3_000
+        );
     }
 
     #[test]

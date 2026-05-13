@@ -47,7 +47,9 @@ function createStore() {
 				qualityChanged ||
 				next.output_device !== before.output_device ||
 				next.exclusive_mode !== before.exclusive_mode ||
-				next.sample_rate_follow !== before.sample_rate_follow;
+				next.sample_rate_follow !== before.sample_rate_follow ||
+				next.exclusive_release_grace_secs !== before.exclusive_release_grace_secs ||
+				next.exclusive_latency_mode !== before.exclusive_latency_mode;
 			update((s) => ({ ...s, settings: next, error: null, pendingApply: isLiveApplyChange }));
 			try {
 				const saved = await api.updateAudioSettings(next);

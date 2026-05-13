@@ -61,6 +61,39 @@ fn default_video_quality_mode() -> VideoQualityMode {
     VideoQualityMode::default()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
+pub enum ExclusiveLatencyMode {
+    #[default]
+    Stable,
+    LowLatency,
+    UltraLowLatency,
+}
+
+impl ExclusiveLatencyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExclusiveLatencyMode::Stable => "STABLE",
+            ExclusiveLatencyMode::LowLatency => "LOW_LATENCY",
+            ExclusiveLatencyMode::UltraLowLatency => "ULTRA_LOW_LATENCY",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "STABLE" => Some(Self::Stable),
+            "LOW_LATENCY" => Some(Self::LowLatency),
+            "ULTRA_LOW_LATENCY" => Some(Self::UltraLowLatency),
+            _ => None,
+        }
+    }
+}
+
+fn default_exclusive_latency_mode() -> ExclusiveLatencyMode {
+    ExclusiveLatencyMode::default()
+}
+
 pub const DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 30;
 pub const MIN_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 5;
 pub const MAX_EXCLUSIVE_RELEASE_GRACE_SECS: u32 = 120;
@@ -85,6 +118,8 @@ pub struct AudioSettings {
     pub sample_rate_follow: bool,
     #[serde(default = "default_video_quality_mode")]
     pub video_quality_mode: VideoQualityMode,
+    #[serde(default = "default_exclusive_latency_mode")]
+    pub exclusive_latency_mode: ExclusiveLatencyMode,
     /// Seconds of continuous silence (paused / no audio) before the exclusive
     /// WASAPI render thread releases the device so other apps can use it. On
     /// next playback the runtime re-grabs exclusive automatically. Clamped to
@@ -101,6 +136,7 @@ impl Default for AudioSettings {
             exclusive_mode: false,
             sample_rate_follow: false,
             video_quality_mode: VideoQualityMode::Max,
+            exclusive_latency_mode: ExclusiveLatencyMode::Stable,
             exclusive_release_grace_secs: DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         }
     }
@@ -126,6 +162,11 @@ pub fn load(conn: &Connection) -> rusqlite::Result<AudioSettings> {
         && let Some(mode) = VideoQualityMode::from_str(&v)
     {
         s.video_quality_mode = mode;
+    }
+    if let Some(v) = read_kv(conn, "audio.exclusive_latency_mode")?
+        && let Some(mode) = ExclusiveLatencyMode::from_str(&v)
+    {
+        s.exclusive_latency_mode = mode;
     }
     if let Some(v) = read_kv(conn, "audio.exclusive_release_grace_secs")?
         && let Ok(parsed) = v.parse::<u32>()
@@ -157,6 +198,11 @@ pub fn save(conn: &Connection, s: &AudioSettings) -> rusqlite::Result<()> {
         },
     )?;
     write_kv(conn, "video.quality_mode", s.video_quality_mode.as_str())?;
+    write_kv(
+        conn,
+        "audio.exclusive_latency_mode",
+        s.exclusive_latency_mode.as_str(),
+    )?;
     write_kv(
         conn,
         "audio.exclusive_release_grace_secs",
@@ -205,6 +251,7 @@ mod tests {
         assert_eq!(s.output_device, None);
         assert!(!s.exclusive_mode);
         assert!(!s.sample_rate_follow);
+        assert_eq!(s.exclusive_latency_mode, ExclusiveLatencyMode::Stable);
         assert_eq!(s.video_quality_mode, VideoQualityMode::Max);
     }
 
@@ -216,6 +263,7 @@ mod tests {
             output_device: Some("USB DAC #1".into()),
             exclusive_mode: true,
             sample_rate_follow: true,
+            exclusive_latency_mode: ExclusiveLatencyMode::LowLatency,
             video_quality_mode: VideoQualityMode::Auto,
             exclusive_release_grace_secs: 60,
         };
@@ -233,6 +281,7 @@ mod tests {
             output_device: Some("Other".into()),
             exclusive_mode: true,
             sample_rate_follow: false,
+            exclusive_latency_mode: ExclusiveLatencyMode::UltraLowLatency,
             video_quality_mode: VideoQualityMode::Max,
             exclusive_release_grace_secs: 90,
         };
@@ -278,5 +327,19 @@ mod tests {
             Some(VideoQualityMode::Auto)
         );
         assert_eq!(VideoQualityMode::from_str("LOW"), None);
+    }
+
+    #[test]
+    fn exclusive_latency_mode_serializes_to_setting_strings() {
+        assert_eq!(ExclusiveLatencyMode::Stable.as_str(), "STABLE");
+        assert_eq!(
+            ExclusiveLatencyMode::from_str("LOW_LATENCY"),
+            Some(ExclusiveLatencyMode::LowLatency)
+        );
+        assert_eq!(
+            ExclusiveLatencyMode::from_str("ULTRA_LOW_LATENCY"),
+            Some(ExclusiveLatencyMode::UltraLowLatency)
+        );
+        assert_eq!(ExclusiveLatencyMode::from_str("FAST"), None);
     }
 }
