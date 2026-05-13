@@ -34,13 +34,17 @@ pub const PRIOR_SIGMA_OCTAVES: f64 = 0.6;
 pub const OCTAVE_RATIO_THRESHOLD: f64 = 0.85;
 const OCTAVE_WEIGHTED_RATIO_MAX: f64 = 0.85;
 /// Step-(b) relaxed threshold for the slow-tempo / doubled-detection case.
-/// Loosened from 0.85 to 0.55 after "Rapper's Delight" (Taggy Matcher reggae
-/// cover, 91 BPM real → 184 detected): skank-on-off-beat patterns push
-/// raw(eighth-note lag) well above raw(quarter-note lag), so the half-tempo
-/// candidate sits much further below the winner than gentle folk fingerpicking
-/// does. The DnB test (pure 174 BPM click train) doesn't enter step (b)
-/// because step (a) promotes the double directly.
-const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.55;
+/// 0.35 is aggressive — folk/reggae/skank-heavy tracks where the eighth-note
+/// grid dominates the autocorrelation still get demoted. DnB at 174 BPM is
+/// unaffected because step (a) promotes the double directly there.
+const HALF_RATIO_THRESHOLD_RELAXED: f64 = 0.35;
+/// Block step (a) from doubling into the upper tail. When the winner sits in
+/// the normal song-tempo band and step (a) would promote into 220+ BPM, the
+/// double is almost certainly an eighth-note artifact. Prevents 110 BPM pop
+/// from being mislabelled 220+.
+const STEP_A_NORMAL_WINNER_MIN: i32 = 100;
+const STEP_A_NORMAL_WINNER_MAX: i32 = 130;
+const STEP_A_BLOCKED_DOUBLE_MIN: i32 = 220;
 /// Winner-tempo band in which the relaxed half-tempo threshold applies.
 /// Lower bound (145) sits comfortably above the prior peak (120) so 120 BPM
 /// metronomes with strong half-tempo subharmonics aren't demoted to 60. Upper
@@ -142,7 +146,11 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
             .find(|t| t.0 == double_bpm)
             .map(|t| t.2)
             .unwrap_or(0.0);
+        let block_ceiling_promotion =
+            (STEP_A_NORMAL_WINNER_MIN..=STEP_A_NORMAL_WINNER_MAX).contains(&best_bpm)
+                && double_bpm >= STEP_A_BLOCKED_DOUBLE_MIN;
         if winner_raw > 0.0
+            && !block_ceiling_promotion
             && r_double >= OCTAVE_RATIO_THRESHOLD * winner_raw
             && weighted_double <= OCTAVE_WEIGHTED_RATIO_MAX * best_weighted
         {

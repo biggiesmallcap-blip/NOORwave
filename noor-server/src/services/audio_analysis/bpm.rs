@@ -16,6 +16,11 @@ const MIN_TEMPO_STRENGTH: f64 = 0.15;
 /// Below this, the Ellis DP backtrace is locking onto noise rather than real onsets.
 /// Hand-tuned: clean metronomes hit ~0.6, noise sits near 0.0–0.05.
 const MIN_BEAT_STRENGTH: f64 = 0.10;
+/// Combined confidence floor (geometric mean of tempogram strength × beat strength).
+/// Below this, the detection is dominated by autocorrelation noise on a sparse
+/// or near-silent clip — the BPM/key/energy values are essentially random.
+/// Refusing the result is better than writing garbage that the user has to undo.
+const MIN_COMBINED_CONFIDENCE: f64 = 0.15;
 
 pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     let env = compute_onset_envelope(samples, sample_rate)?;
@@ -33,6 +38,9 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     }
 
     let combined = (strength * beat_strength).sqrt();
+    if combined < MIN_COMBINED_CONFIDENCE {
+        return None;
+    }
     Some((bpm, combined))
 }
 
