@@ -6813,7 +6813,7 @@ async fn resolve_pending_row(
     };
 
     let client = TidalClient::with_http(
-        http,
+        http.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
@@ -6847,16 +6847,32 @@ async fn resolve_pending_row(
         }
     };
 
+    let artist_tidal_id = metadata.artist_tidal_id;
     let imported = crate::services::tidal::import::import_track_from_metadata(&db, metadata).await;
 
-    let local_id = match imported {
-        Ok(imp) => imp.local_id,
+    let (local_id, artist_local_id) = match imported {
+        Ok(imp) => (imp.local_id, imp.artist_id),
         Err(e) => {
             tracing::warn!(queue_item_id, error = %e, "background resolver: import failed");
             release(&db, queue_item_id);
             return;
         }
     };
+
+    // Fire-and-forget: backfill artist photo when TIDAL track payload didn't
+    // include one. Independent of promotion success — the artist row now
+    // exists either way.
+    if let Some(tid) = artist_tidal_id {
+        let db_bg = db.clone();
+        let http_bg = http.clone();
+        let tok_bg = tokens.clone();
+        tokio::spawn(async move {
+            crate::services::tidal::artist_photo::ensure_photo_url(
+                http_bg, tok_bg, db_bg, artist_local_id, tid,
+            )
+            .await;
+        });
+    }
 
     let score_stored = (score * 1000.0) as i32;
     let promoted = promote_pending_row_emit(&db, &event_tx, queue_item_id, local_id, score_stored);
@@ -6973,15 +6989,28 @@ async fn resolve_pending_current_queue_item(
         }
     };
 
+    let artist_tidal_id = metadata.artist_tidal_id;
     let imported = crate::services::tidal::import::import_track_from_metadata(&db, metadata).await;
 
-    let local_id = match imported {
-        Ok(imp) => imp.local_id,
+    let (local_id, artist_local_id) = match imported {
+        Ok(imp) => (imp.local_id, imp.artist_id),
         Err(_) => {
             release_lock(&db, queue_item_id);
             return None;
         }
     };
+
+    if let Some(tid) = artist_tidal_id {
+        let db_bg = db.clone();
+        let http_bg = state.read().await.http_client.clone();
+        let tok_bg = tokens.clone();
+        tokio::spawn(async move {
+            crate::services::tidal::artist_photo::ensure_photo_url(
+                http_bg, tok_bg, db_bg, artist_local_id, tid,
+            )
+            .await;
+        });
+    }
 
     let score_stored = (score * 1000.0) as i32;
     // Atomic promotion: only one resolver wins even under a race.
