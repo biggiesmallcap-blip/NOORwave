@@ -8537,13 +8537,12 @@ mod tests {
         // 200 plays of one popular track at 124 BPM, 5 plays each of 10 tracks at
         // unrelated BPMs spanning the rest of the range.
         let mut weighted = vec![(124.0_f64, 200_i64)];
-        for (i, bpm) in [
+        for bpm in [
             62.0, 70.0, 78.0, 86.0, 94.0, 100.0, 108.0, 142.0, 160.0, 180.0,
         ]
         .iter()
-        .enumerate()
         {
-            weighted.push((*bpm, 5 + i as i64 * 0)); // 5 each
+            weighted.push((*bpm, 5));
         }
         let med = weighted_median_bpm(&weighted).expect("non-empty");
         assert!(
