@@ -191,6 +191,137 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     }
 }
 
+use tokio::sync::broadcast;
+use tokio::time::Instant;
+
+async fn load_candidates(state: &SharedState) -> Result<(Vec<PrescanCandidate>, i64)> {
+    let db = state.read().await.db.clone();
+    db.with_conn(|conn| -> Result<(Vec<PrescanCandidate>, i64)> {
+        // Current queue position (or -1 if nothing is playing).
+        let current_pos: i64 = conn
+            .query_row(
+                "SELECT COALESCE(
+                    (SELECT q.position FROM queue q
+                     JOIN playback_state ps ON ps.current_queue_item_id = q.id
+                     LIMIT 1),
+                    -1
+                )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+
+        let mut stmt = conn.prepare(
+            "SELECT q.track_id,
+                    q.position,
+                    t.tidal_id IS NOT NULL,
+                    f.analysis_version
+             FROM queue q
+             JOIN tracks t ON t.id = q.track_id
+             LEFT JOIN audio_dsp_features f ON f.track_id = t.id
+             WHERE q.track_id IS NOT NULL
+             ORDER BY q.position ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PrescanCandidate {
+                track_id: row.get(0)?,
+                position: row.get(1)?,
+                has_tidal_id: row.get::<_, bool>(2)?,
+                analysis_version: row.get::<_, Option<String>>(3)?,
+            })
+        })?;
+        let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((candidates, current_pos))
+    })
+}
+
+async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEvent>) {
+    // Respect the global passive-DSP toggle.
+    let passive_on = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| Ok::<_, anyhow::Error>(super::is_passive_enabled(conn)))
+        .unwrap_or(true);
+    if !passive_on {
+        return;
+    }
+
+    let (candidates, current_pos) = match load_candidates(state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("queue prescanner candidate load failed: {}", e);
+            return;
+        }
+    };
+
+    let track_ids = pick_next_unanalyzed(
+        &candidates,
+        current_pos,
+        LOOKAHEAD,
+        super::CURRENT_ANALYSIS_VERSION,
+    );
+
+    for track_id in track_ids {
+        // Mid-batch cancel: if a fresh queue event landed in the broadcast
+        // buffer since the last track, bail and let the outer loop re-debounce.
+        loop {
+            match event_rx.try_recv() {
+                Ok(AppEvent::QueueUpdated) | Ok(AppEvent::TrackChanged { .. }) => return,
+                Ok(_) => continue,
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => return,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            }
+        }
+
+        if let Err(e) = prefetch_and_analyze_track(state, track_id).await {
+            tracing::warn!(track_id, "queue prescanner prefetch failed: {}", e);
+        }
+        tokio::time::sleep(INTER_TRACK_DELAY).await;
+    }
+}
+
+/// Spawn the long-lived queue-lookahead actor. Subscribes to queue/track
+/// change events on the broadcast channel, debounces by `DEBOUNCE`, and runs
+/// a `run_batch` pass on the resulting quiescent state.
+pub fn spawn(state: SharedState) {
+    tokio::spawn(async move {
+        let mut event_rx = {
+            let s = state.read().await;
+            s.event_tx.subscribe()
+        };
+        let mut deadline: Option<Instant> = None;
+
+        loop {
+            let wait = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => std::time::Duration::from_secs(3600),
+            };
+
+            tokio::select! {
+                msg = event_rx.recv() => {
+                    match msg {
+                        Ok(AppEvent::QueueUpdated) | Ok(AppEvent::TrackChanged { .. }) => {
+                            deadline = Some(Instant::now() + DEBOUNCE);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        _ => {}
+                    }
+                }
+                _ = tokio::time::sleep(wait) => {
+                    if let Some(d) = deadline {
+                        if Instant::now() >= d {
+                            deadline = None;
+                            run_batch(&state, &mut event_rx).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
