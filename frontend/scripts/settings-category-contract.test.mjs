@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 
-const source = readFileSync('src/routes/settings/+page.svelte', 'utf8');
+const source = readFileSync('src/routes/settings/+page.svelte', 'utf8').replace(/\r\n/g, '\n');
 
 describe('settings category contract', () => {
 	test('keeps Discovery engine inside the Audio settings category', () => {
