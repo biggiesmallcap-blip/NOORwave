@@ -34,6 +34,19 @@ describe('shell player bar extraction', () => {
 		expect(metadata).not.toContain('100% - 220px');
 	});
 
+	test('lets the volume control handle mouse wheel adjustments', () => {
+		const playerBar = readFileSync('src/lib/shell/PlayerBar.svelte', 'utf8');
+
+		expect(playerBar).toContain('const VOLUME_WHEEL_STEP = 0.05');
+		expect(playerBar).toContain('function clampVolume(value: number)');
+		expect(playerBar).toContain('function handleVolumeWheel(event: WheelEvent)');
+		expect(playerBar).toContain('event.preventDefault()');
+		expect(playerBar).toContain('event.stopPropagation()');
+		expect(playerBar).toContain('const direction = event.deltaY < 0 ? 1 : -1');
+		expect(playerBar).toContain('const nextVolume = clampVolume(volume + direction * VOLUME_WHEEL_STEP)');
+		expect(playerBar).toContain('onwheel={handleVolumeWheel}');
+	});
+
 	test('leaves queue rows in the layout during this slice', () => {
 		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
 

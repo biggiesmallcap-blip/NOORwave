@@ -11,6 +11,8 @@
 		retry?: () => Promise<void>;
 	};
 
+	const VOLUME_WHEEL_STEP = 0.05;
+
 	let {
 		track,
 		streamDisplay,
@@ -93,6 +95,20 @@
 
 	function handleVolumeChange(event: Event) {
 		onVolumeChange(Number((event.currentTarget as HTMLInputElement).value));
+	}
+
+	function clampVolume(value: number) {
+		return Math.min(1, Math.max(0, value));
+	}
+
+	function handleVolumeWheel(event: WheelEvent) {
+		if (event.deltaY === 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const direction = event.deltaY < 0 ? 1 : -1;
+		const nextVolume = clampVolume(volume + direction * VOLUME_WHEEL_STEP);
+		onVolumePreview(Math.round(nextVolume * 100));
+		onVolumeChange(nextVolume);
 	}
 
 	function handleRetryPlayerError() {
@@ -184,7 +200,7 @@
 			aria-pressed={volume === 0}
 			onclick={onToggleMute}
 		>{volume === 0 ? '🔇' : '🔊'}</button>
-		<label class="volume-control">
+		<label class="volume-control" onwheel={handleVolumeWheel}>
 			<span>Vol</span>
 			<input
 				type="range"
