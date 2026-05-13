@@ -41,6 +41,7 @@
 		buildForecastRows,
 		countForecastRows,
 		formatFeatureSummary,
+		invalidateCacheForTrack,
 		type AutomixForecastRow
 	} from './automix_diagnostics';
 	import type { Snapshot } from './$types';
@@ -60,13 +61,32 @@
 		}
 	};
 
+	function handleDspUpdated(event: Event) {
+		const trackId = (event as CustomEvent<{ trackId: number }>).detail?.trackId;
+		if (typeof trackId !== 'number') return;
+		invalidateCacheForTrack(featureCache, trackId);
+		inflight.delete(trackId);
+		requestFeatures(trackId);
+		featureCacheVersion++;
+		void api
+			.getAudioFeaturesStats()
+			.then((res) => {
+				audioStats = res.stats ?? audioStats;
+			})
+			.catch(() => {});
+	}
+
 	onMount(() => {
 		void refreshPlaybackState();
 		void loadControlData();
 		const unsub = crossfadeMs.subscribe((v) => {
 			draftCrossfade = v;
 		});
-		return unsub;
+		window.addEventListener('noor:dsp_updated', handleDspUpdated);
+		return () => {
+			unsub();
+			window.removeEventListener('noor:dsp_updated', handleDspUpdated);
+		};
 	});
 
 	async function loadControlData() {
