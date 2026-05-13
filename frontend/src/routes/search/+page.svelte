@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
@@ -25,6 +25,7 @@
   // Backend caps `limit` at 50 (see tidal_search route). Use the cap as the
   // page size so each round-trip pulls the maximum the upstream allows.
   const SEARCH_PAGE_SIZE = 50
+  const EMPTY_TIDAL_RESULTS: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] }
 
   function loadRecent(): string[] {
     if (typeof localStorage === 'undefined') return []
@@ -54,6 +55,14 @@
   let results = $state<TidalSearchResults | null>(null)
   let audioResults = $state<AudioSearchResult[] | null>(null)
   let loading = $state(false)
+  let searchGeneration = $state(0)
+  let loadingLocal = $state(false)
+  let loadingTidal = $state(false)
+  let loadingTidalPlaylists = $state(false)
+  let loadingSpotifyPlaylists = $state(false)
+  const providerSearchDone = $derived(
+    !loadingLocal && !loadingTidal && !loadingTidalPlaylists && !loadingSpotifyPlaylists
+  )
   let error = $state<string | null>(null)
   let failedArtistImages = $state(new Set<number>())
   let topArtistImageFailed = $state(false)
@@ -151,17 +160,30 @@
     await playTrackNow(track.id)
   }
 
+  function resetProviderLoading() {
+    loadingLocal = false
+    loadingTidal = false
+    loadingTidalPlaylists = false
+    loadingSpotifyPlaylists = false
+  }
+
+  function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
+    return !signal.aborted && searchGeneration === generation && query.trim() === q
+  }
+
   function onInput() {
     clearTimeout(debounceTimer)
     // Cancel any prior in-flight request so its rejection doesn't fire as an error.
     abortController?.abort()
     abortController = null
+    searchGeneration += 1
     if (!query.trim()) {
       results = null
       audioResults = null
       tidalPlaylistResults = []
       spotifyPlaylistResults = []
       loading = false
+      resetProviderLoading()
       error = null
       return
     }
@@ -172,6 +194,7 @@
       const controller = new AbortController()
       abortController = controller
       const signal = controller.signal
+      const generation = searchGeneration
 
       // "play <query>" → fire immediately and clear input
       if (intent.intent.type === 'play') {
@@ -203,6 +226,7 @@
 
       try {
         if (effectiveHasFilters) {
+          resetProviderLoading()
           const res = await api.searchAudio(buildAudioParams(effectiveParsed), signal)
           audioResults = res.tracks
           results = null
@@ -220,50 +244,40 @@
           lastQuery = q
           const cacheKey = q.toLowerCase()
           const cached = resultCache.get(cacheKey)
-          if (cached) {
-            // Cache holds raw TIDAL only — re-run local search every time so
-            // newly-favorited tracks show up without a manual refresh.
-            const [localRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
-              api.search(q, SEARCH_PAGE_SIZE),
-              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
-              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
-            ])
-            const localResults = localRes.status === 'fulfilled' ? localRes.value : null
-            results = localResults ? mergeLocalIntoTidal(localResults, cached) : cached
-            tidalOffset = SEARCH_PAGE_SIZE
-            // Cached page may already cap a category — assume more exists; the
-            // next load-more attempt will discover the truth and flip the flag.
-            tidalPlaylistResults = tidalPlRes.status === 'fulfilled' ? tidalPlRes.value.playlists : []
-            spotifyPlaylistResults = spotifyPlRes.status === 'fulfilled' ? spotifyPlRes.value : []
-            tidalPlaylistOffset = tidalPlaylistResults.length
-            spotifyPlaylistOffset = spotifyPlaylistResults.length
-            if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
-            if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
-          } else {
-            // Fan out all four upstream searches at once. Local DB and TIDAL
-            // both feed the unified results list (library entries float to
-            // top via the in_library sort); the two playlist lookups are
-            // best-effort and degrade to empty arrays. TIDAL-track is the
-            // only one whose failure aborts — no point rendering search with
-            // zero discovery results.
-            const [localRes, tracksRes, tidalPlRes, spotifyPlRes] = await Promise.allSettled([
-              api.search(q, SEARCH_PAGE_SIZE),
-              api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0),
-              api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 }),
-              api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0),
-            ])
+          loadingLocal = true
+          loadingTidal = !cached
+          loadingTidalPlaylists = true
+          loadingSpotifyPlaylists = true
 
-            if (tracksRes.status !== 'fulfilled') {
-              throw tracksRes.reason
+          const localPromise = api.search(q, SEARCH_PAGE_SIZE)
+          const tracksPromise = cached
+            ? Promise.resolve(cached)
+            : api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0)
+          const tidalPlaylistPromise = api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 })
+          const spotifyPlaylistPromise = api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0)
+
+          let localSnapshot: SearchResults | null = null
+          let tidalSnapshot: TidalSearchResults | null = cached ?? null
+
+          void localPromise.then((localResults) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            localSnapshot = localResults
+            results = mergeLocalIntoTidal(localResults, tidalSnapshot ?? EMPTY_TIDAL_RESULTS)
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingLocal = false
+          })
+
+          void tracksPromise.then((tidalResults) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            tidalSnapshot = tidalResults
+            results = localSnapshot ? mergeLocalIntoTidal(localSnapshot, tidalResults) : tidalResults
+            if (!cached) {
+              // Cache only the raw TIDAL response so later hits can re-merge
+              // a fresh local snapshot.
+              resultCache.set(cacheKey, tidalResults)
+              if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
             }
-            const tidalResults = tracksRes.value
-            const localResults = localRes.status === 'fulfilled' ? localRes.value : null
-            const fresh = localResults ? mergeLocalIntoTidal(localResults, tidalResults) : tidalResults
-            results = fresh
-            // Cache only the raw TIDAL response so subsequent hits can re-merge
-            // a fresh local snapshot (favorites change without query change).
-            resultCache.set(cacheKey, tidalResults)
-            if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
             tidalOffset = SEARCH_PAGE_SIZE
             if (
               tidalResults.tracks.length < SEARCH_PAGE_SIZE &&
@@ -272,17 +286,40 @@
             ) {
               hasMoreTidal = false
             }
+          }).catch((e) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            if (!localSnapshot) error = String(e)
+          }).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingTidal = false
+          })
 
-            tidalPlaylistResults = tidalPlRes.status === 'fulfilled' ? tidalPlRes.value.playlists : []
-            spotifyPlaylistResults = spotifyPlRes.status === 'fulfilled' ? spotifyPlRes.value : []
+          void tidalPlaylistPromise.then((playlistResults) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            tidalPlaylistResults = playlistResults.playlists
             tidalPlaylistOffset = tidalPlaylistResults.length
-            spotifyPlaylistOffset = spotifyPlaylistResults.length
             if (tidalPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingTidalPlaylists = false
+          })
+
+          void spotifyPlaylistPromise.then((playlistResults) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            spotifyPlaylistResults = playlistResults
+            spotifyPlaylistOffset = spotifyPlaylistResults.length
             if (spotifyPlaylistResults.length < SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
-          }
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingSpotifyPlaylists = false
+          })
+
+          await Promise.allSettled([localPromise, tracksPromise, tidalPlaylistPromise, spotifyPlaylistPromise])
         }
-        error = null
-        pushRecent(q)
+        if (isCurrentSearch(q, generation, signal)) {
+          error = null
+          pushRecent(q)
+        }
       } catch (e) {
         // Swallow abort errors — the user moved on or typed more.
         if (signal.aborted || (e as Error)?.name === 'AbortError') return
@@ -291,7 +328,7 @@
         if (abortController === controller) abortController = null
         if (!signal.aborted) loading = false
       }
-    }, 300)
+    }, 120)
   }
 
   function pickRecent(q: string) {
@@ -924,11 +961,11 @@
     {#if recent.length === 0}
       <p class="search-hint">Start typing to search Tidal's full catalogue</p>
     {/if}
-  {:else if loading}
+  {:else if loading && !results && audioResults === null}
     <p class="search-hint">Searching…</p>
-  {:else if error}
+  {:else if error && !results && providerSearchDone}
     <p class="search-hint search-error">{error}</p>
-  {:else if isEmpty}
+  {:else if isEmpty && providerSearchDone}
     <p class="search-hint">No results for "{query}"</p>
   {:else if isFilteredEmpty}
     <p class="search-hint">No {filterMode === 'library' ? 'library' : filterMode} matches for "{query}"</p>

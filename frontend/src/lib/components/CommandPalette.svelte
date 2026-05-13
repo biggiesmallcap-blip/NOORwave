@@ -8,6 +8,7 @@
 		type TidalSearchTrack,
 		type TidalSearchAlbum,
 		type TidalSearchArtist,
+		type TidalSearchResults,
 		type SpotifyPlaylistSearchItem,
 	} from '$lib/api/client';
 	import { commandPaletteOpen } from '$lib/stores/command_palette';
@@ -21,6 +22,7 @@
 		startArtistRadio,
 	} from '$lib/stores/player';
 	import { matchCommands, parseSlashInput } from '$lib/search/commands';
+	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
@@ -31,11 +33,18 @@
 	let artists = $state<TidalSearchArtist[]>([]);
 	let spotifyPlaylists = $state<SpotifyPlaylistSearchItem[]>([]);
 	let cursor = $state(0);
+	let searchGeneration = $state(0);
 	let debounceTimer: ReturnType<typeof setTimeout>;
 	let rowEls: (HTMLElement | null)[] = $state([]);
 
 	const isSlashMode = $derived(query.startsWith('/'));
 	const slashMatches = $derived(isSlashMode ? matchCommands(query) : []);
+	const emptyTidalResults: TidalSearchResults = {
+		tracks: [],
+		albums: [],
+		artists: [],
+		videos: [],
+	};
 
 	// Total navigable items count (for cursor wrapping)
 	const totalItems = $derived(
@@ -61,8 +70,60 @@
 		commandPaletteOpen.set(false);
 	}
 
+	function isCurrentPaletteSearch(searchQuery: string, generation: number) {
+		return searchGeneration === generation && query.trim() === searchQuery && !isSlashMode;
+	}
+
+	function applyPaletteResults(next: TidalSearchResults) {
+		tracks = next.tracks.slice(0, 5);
+		albums = next.albums.slice(0, 3);
+		artists = next.artists.slice(0, 3);
+	}
+
+	function runPaletteSearch(searchQuery: string, generation: number) {
+		let visibleResults: TidalSearchResults = emptyTidalResults;
+		const localPromise = api.search(searchQuery, 6);
+
+		localPromise
+			.then((localResults) => {
+				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				visibleResults = mergeLocalIntoTidal(localResults, visibleResults);
+				applyPaletteResults(visibleResults);
+			})
+			.catch(() => undefined);
+
+		api.searchTidal(searchQuery, 6)
+			.then((tidalResults) => {
+				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				visibleResults = tidalResults;
+				localPromise
+					.then((localResults) => {
+						if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+						visibleResults = mergeLocalIntoTidal(localResults, tidalResults);
+						applyPaletteResults(visibleResults);
+					})
+					.catch(() => {
+						if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+						applyPaletteResults(tidalResults);
+					});
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				loading = false;
+			});
+
+		api.searchSpotifyPlaylists(searchQuery, 6)
+			.then((playlists) => {
+				if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+				spotifyPlaylists = playlists.slice(0, 4);
+			})
+			.catch(() => undefined);
+	}
+
 	function onInput() {
 		clearTimeout(debounceTimer);
+		searchGeneration += 1;
 		cursor = 0;
 		if (!query.trim() || isSlashMode) {
 			tracks = [];
@@ -73,25 +134,12 @@
 			return;
 		}
 		loading = true;
-		debounceTimer = setTimeout(async () => {
-			// TIDAL + Spotify playlist searches in parallel. A Sportify outage
-			// must never block TIDAL results from rendering.
-			const [tidalRes, spotifyRes] = await Promise.allSettled([
-				api.searchTidal(query.trim()),
-				api.searchSpotifyPlaylists(query.trim(), 6),
-			]);
-			if (tidalRes.status === 'fulfilled') {
-				tracks = tidalRes.value.tracks.slice(0, 5);
-				albums = tidalRes.value.albums.slice(0, 3);
-				artists = tidalRes.value.artists.slice(0, 3);
-			} else {
-				tracks = [];
-				albums = [];
-				artists = [];
-			}
-			spotifyPlaylists = spotifyRes.status === 'fulfilled' ? spotifyRes.value.slice(0, 4) : [];
-			loading = false;
-		}, 220);
+		const searchQuery = query.trim();
+		const generation = searchGeneration;
+		debounceTimer = setTimeout(() => {
+			if (!isCurrentPaletteSearch(searchQuery, generation)) return;
+			void runPaletteSearch(searchQuery, generation);
+		}, 120);
 	}
 
 	async function selectTrack(track: TidalSearchTrack) {
