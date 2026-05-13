@@ -15,6 +15,16 @@ pub const LOOKAHEAD: usize = 5;
 pub const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Polite pause between tracks within a batch.
 pub const INTER_TRACK_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Minimum wall-clock gap between successive batches. Last.fm radio promotes
+/// pending rows in rapid bursts that each emit `QueueUpdated`; without a
+/// cooldown the prescanner fires back-to-back batches that contend with
+/// playback's own TIDAL stream resolves and trigger backoff. 30 s gives radio
+/// promotions room to settle before the next batch.
+pub const BATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+/// Hard ceiling on the per-track preview download + decode chain. If TIDAL
+/// stalls a segment indefinitely (observed for some catalog rows), the actor
+/// gets stuck. 60 s comfortably exceeds the ~45 s nominal cost.
+pub const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One row of queue state, projected for the pure selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,8 +303,19 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
             }
         }
 
-        if let Err(e) = prefetch_and_analyze_track(state, track_id).await {
-            tracing::warn!(track_id, "queue prescanner prefetch failed: {}", e);
+        match tokio::time::timeout(
+            PREFETCH_TIMEOUT,
+            prefetch_and_analyze_track(state, track_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(track_id, "queue prescanner prefetch failed: {}", e),
+            Err(_) => tracing::warn!(
+                track_id,
+                timeout_secs = PREFETCH_TIMEOUT.as_secs(),
+                "queue prescanner prefetch timed out"
+            ),
         }
         tokio::time::sleep(INTER_TRACK_DELAY).await;
     }
@@ -310,6 +331,7 @@ pub fn spawn(state: SharedState) {
             s.event_tx.subscribe()
         };
         let mut deadline: Option<Instant> = None;
+        let mut last_batch_end: Option<Instant> = None;
 
         loop {
             let wait = match deadline {
@@ -330,8 +352,19 @@ pub fn spawn(state: SharedState) {
                 _ = tokio::time::sleep(wait) => {
                     if let Some(d) = deadline {
                         if Instant::now() >= d {
+                            // Enforce inter-batch cooldown so rapid bursts of
+                            // QueueUpdated (Last.fm radio promotions) don't fire
+                            // back-to-back batches that hammer TIDAL.
+                            if let Some(last) = last_batch_end {
+                                let cooldown_until = last + BATCH_COOLDOWN;
+                                if Instant::now() < cooldown_until {
+                                    deadline = Some(cooldown_until);
+                                    continue;
+                                }
+                            }
                             deadline = None;
                             run_batch(&state, &mut event_rx).await;
+                            last_batch_end = Some(Instant::now());
                         }
                     }
                 }
