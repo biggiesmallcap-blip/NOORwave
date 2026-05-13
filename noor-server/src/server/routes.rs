@@ -29,7 +29,7 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -235,6 +235,7 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tracks/count", get(get_track_count))
         .route("/api/albums", get(get_albums))
         .route("/api/albums/{id}/tracks", get(get_album_tracks))
+        .route("/api/albums/{id}/spotify-stats", get(get_album_spotify_stats))
         .route("/api/artists", get(get_artists))
         .route("/api/artists/{id}", get(get_artist))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
@@ -1051,6 +1052,59 @@ async fn get_album_tracks(
     })))
 }
 
+async fn get_album_spotify_stats(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Json<Value> {
+    let tracks = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
+            .unwrap_or_default()
+    };
+    let isrcs = tracks
+        .iter()
+        .filter_map(|t| {
+            t.isrc
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let cached = {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
+            .unwrap_or_default()
+    };
+
+    Json(json!({
+        "monthly_listeners": null,
+        "tracks": spotify_track_stats_payload(&tracks, &cached),
+    }))
+}
+
+fn spotify_track_stats_payload(
+    tracks: &[crate::db::models::Track],
+    cached: &HashMap<String, i64>,
+) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    tracks
+        .iter()
+        .filter_map(|track| {
+            let isrc = track.isrc.as_deref()?.trim();
+            if isrc.is_empty() || !seen.insert(isrc.to_string()) {
+                return None;
+            }
+            let playcount = cached.get(isrc)?;
+            Some(json!({
+                "isrc": isrc,
+                "title": track.title.clone(),
+                "playcount": *playcount,
+            }))
+        })
+        .collect()
+}
+
 /// Pages through all entries of a single TIDAL discography filter for one
 /// artist. TIDAL's `/artists/{id}/albums` returns at most 50 per call, sorted
 /// newest-first; calling once would silently clip anything older than the 50th
@@ -1415,45 +1469,83 @@ async fn get_artist_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Json<Value> {
-    let (enabled, artist_name, isrc_pairs) = {
+    let (enabled, artist_name, isrc_pairs, mut tracks_by_isrc) = {
         let s = state.read().await;
         let enabled = s.spotify_public_stats_enabled;
-        if !enabled {
-            return Json(json!({ "monthly_listeners": null, "tracks": [] }));
-        }
-        let pairs =
+        let artist_tracks =
             s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
-                .map(|tracks| {
-                    let mut sorted = tracks
-                        .into_iter()
-                        .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.is_empty()))
-                        .collect::<Vec<_>>();
-                    sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
-                    sorted.truncate(10);
-                    sorted
-                        .into_iter()
-                        .map(|t| (t.isrc.unwrap_or_default(), t.title))
-                        .collect::<Vec<(String, String)>>()
-                })
                 .unwrap_or_default();
-        let artist_name = pairs.first().map(|_| String::new()).unwrap_or_default();
-        // Re-look up the artist's display name (any track's artist_name works
-        // - they all share artist_id=id by construction).
-        let name =
-            s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
-                .ok()
-                .and_then(|ts| ts.first().and_then(|t| t.artist_name.clone()))
-                .unwrap_or(artist_name);
-        (enabled, name, pairs)
+        let isrcs = artist_tracks
+            .iter()
+            .filter_map(|t| {
+                t.isrc
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        let cached =
+            s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
+                .unwrap_or_default();
+        let mut tracks_by_isrc = BTreeMap::new();
+        for track in &artist_tracks {
+            let Some(isrc) = track
+                .isrc
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if let Some(playcount) = cached.get(isrc) {
+                tracks_by_isrc.insert(isrc.to_string(), (track.title.clone(), *playcount));
+            }
+        }
+
+        let mut sorted = artist_tracks
+            .into_iter()
+            .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
+            .collect::<Vec<_>>();
+        sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+        sorted.truncate(10);
+        let artist_name = sorted
+            .first()
+            .and_then(|t| t.artist_name.clone())
+            .unwrap_or_default();
+        let pairs = sorted
+            .into_iter()
+            .map(|t| (t.isrc.unwrap_or_default(), t.title))
+            .collect::<Vec<(String, String)>>();
+        (enabled, artist_name, pairs, tracks_by_isrc)
     };
 
-    let result =
-        crate::services::spotify_public::fetch_artist_stats(enabled, &artist_name, &isrc_pairs)
-            .await;
+    let mut monthly_listeners = None;
+    if enabled {
+        let result =
+            crate::services::spotify_public::fetch_artist_stats(enabled, &artist_name, &isrc_pairs)
+                .await;
+        monthly_listeners = result.monthly_listeners;
+        for track in result.tracks {
+            if let Some(playcount) = track.playcount {
+                tracks_by_isrc.insert(track.isrc, (track.title, playcount));
+            }
+        }
+    }
+    let tracks = tracks_by_isrc
+        .into_iter()
+        .map(|(isrc, (title, playcount))| {
+            json!({
+                "isrc": isrc,
+                "title": title,
+                "playcount": playcount,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Json(json!({
-        "monthly_listeners": result.monthly_listeners,
-        "tracks": result.tracks,
+        "monthly_listeners": monthly_listeners,
+        "tracks": tracks,
     }))
 }
 
