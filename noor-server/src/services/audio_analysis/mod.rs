@@ -125,6 +125,7 @@ pub fn spawn_actor(
                     total: 0, // unknown total in passive mode
                     mode: "passive".to_string(),
                 });
+                let _ = event_tx.send(AppEvent::TrackAnalyzed { track_id });
             }
         }
 
