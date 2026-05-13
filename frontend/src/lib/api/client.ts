@@ -1356,6 +1356,7 @@ export interface AcrCloudScanStatus {
 
 export type AudioQuality = 'LOW' | 'HIGH' | 'LOSSLESS' | 'HI_RES_LOSSLESS';
 export type VideoQualityMode = 'MAX' | 'AUTO';
+export type ExclusiveLatencyMode = 'STABLE' | 'LOW_LATENCY' | 'ULTRA_LOW_LATENCY';
 
 export interface AudioDevice {
 	id: string;
@@ -1371,6 +1372,7 @@ export interface AudioSettings {
 	exclusive_mode: boolean;
 	sample_rate_follow: boolean;
 	video_quality_mode: VideoQualityMode;
+	exclusive_latency_mode: ExclusiveLatencyMode;
 	/** Seconds of paused state before WASAPI exclusive releases the device. Server clamps 5..=120. */
 	exclusive_release_grace_secs: number;
 }

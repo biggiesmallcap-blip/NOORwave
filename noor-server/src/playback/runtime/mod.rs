@@ -1,3 +1,4 @@
+use crate::db::audio_settings::ExclusiveLatencyMode;
 use crate::playback::output::cpal_shared::{SwapBackend, swap_stream_plan};
 #[cfg(target_os = "windows")]
 use crate::playback::output::wasapi_exclusive::{
@@ -103,6 +104,7 @@ impl PlaybackRuntimeHandle {
         sample_rate_follow: bool,
         desired_sample_rate: Option<u32>,
         exclusive_release_grace_secs: u32,
+        exclusive_latency_mode: ExclusiveLatencyMode,
     ) -> Result<()> {
         self.send(PlaybackRuntimeCommand::DeviceSwap {
             device,
@@ -110,6 +112,7 @@ impl PlaybackRuntimeHandle {
             sample_rate_follow,
             desired_sample_rate,
             exclusive_release_grace_secs,
+            exclusive_latency_mode,
         })
     }
 
@@ -242,6 +245,8 @@ struct PlaybackRuntimeLoopState {
     /// thread. Used when re-grabbing exclusive on Resume/Play after the render
     /// thread released the device, and when cold-starting new engines.
     current_exclusive_release_grace_secs: u32,
+    /// Last-known WASAPI exclusive callback period policy.
+    current_exclusive_latency_mode: ExclusiveLatencyMode,
 }
 
 fn run_runtime_loop(
@@ -278,6 +283,7 @@ fn run_runtime_loop(
         current_device_selection: OutputDeviceSelection::Default,
         current_exclusive_release_grace_secs:
             crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
+        current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -488,12 +494,14 @@ fn run_runtime_loop(
                             state.device_sample_rate,
                         );
                         let release_grace_secs = state.current_exclusive_release_grace_secs;
+                        let latency_mode = state.current_exclusive_latency_mode.clone();
                         match ensure_exclusive_sink_started(
                             &mut state,
                             &device,
                             &output_config,
                             rebuild_rate,
                             release_grace_secs,
+                            latency_mode,
                             command_tx.clone(),
                             event_tx.clone(),
                         ) {
@@ -649,6 +657,7 @@ fn run_runtime_loop(
                 sample_rate_follow,
                 desired_sample_rate,
                 exclusive_release_grace_secs,
+                exclusive_latency_mode,
             } => {
                 // `exclusive` is honored as of Task 5 (Windows-only low-latency
                 // buffer + dedicated code path; full ShareMode::Exclusive is a
@@ -738,6 +747,7 @@ fn run_runtime_loop(
                             &new_config,
                             desired_rate,
                             exclusive_release_grace_secs,
+                            exclusive_latency_mode.clone(),
                             command_tx.clone(),
                             event_tx.clone(),
                         ) {
@@ -837,6 +847,7 @@ fn run_runtime_loop(
                 state.current_sample_rate_follow = sample_rate_follow;
                 state.current_device_selection = selection;
                 state.current_exclusive_release_grace_secs = exclusive_release_grace_secs;
+                state.current_exclusive_latency_mode = exclusive_latency_mode;
 
                 let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
                     device_name: new_name,
@@ -972,6 +983,7 @@ fn transition_to_job(
                         state.device_sample_rate,
                     ),
                     state.current_exclusive_release_grace_secs,
+                    state.current_exclusive_latency_mode.clone(),
                     command_tx.clone(),
                     event_tx.clone(),
                 ) {
@@ -1107,6 +1119,7 @@ fn ensure_exclusive_sink_started(
     output_config: &StreamConfig,
     desired_sample_rate: Option<u32>,
     exclusive_release_grace_secs: u32,
+    exclusive_latency_mode: ExclusiveLatencyMode,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<u32> {
@@ -1124,6 +1137,7 @@ fn ensure_exclusive_sink_started(
         exclusive_plan.stream_config.sample_rate,
         exclusive_plan.stream_config.channels,
         exclusive_release_grace_secs,
+        exclusive_latency_mode,
         Arc::clone(&state.exclusive_sink.source_bank),
         command_tx,
         event_tx.clone(),

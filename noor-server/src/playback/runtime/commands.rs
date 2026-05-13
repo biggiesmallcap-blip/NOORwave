@@ -1,4 +1,5 @@
 use super::OutputDeviceSelection;
+use crate::db::audio_settings::ExclusiveLatencyMode;
 use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob};
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,9 @@ pub enum PlaybackRuntimeCommand {
         /// Read from `AudioSettings::exclusive_release_grace_secs` by the route
         /// layer. Ignored when `exclusive` is false.
         exclusive_release_grace_secs: u32,
+        /// WASAPI exclusive callback period policy. Ignored when `exclusive`
+        /// is false.
+        exclusive_latency_mode: ExclusiveLatencyMode,
     },
     Shutdown,
 }
