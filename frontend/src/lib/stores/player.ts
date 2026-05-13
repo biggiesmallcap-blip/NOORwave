@@ -195,6 +195,25 @@ export async function refreshPlaybackRuntime() {
 let _lastFeaturesTrackId: number | null = null;
 let _featuresFetchSeq = 0;
 
+function fetchCurrentTrackFeatures(trackId: number, clearFirst: boolean): void {
+	const seq = ++_featuresFetchSeq;
+	if (clearFirst) {
+		// Clear stale features immediately so UI doesn't show the previous track's badge.
+		currentTrackFeatures.set(null);
+	}
+	void api
+		.getTrackAudioFeatures(trackId)
+		.then((res) => {
+			// Guard against out-of-order responses.
+			if (seq !== _featuresFetchSeq) return;
+			currentTrackFeatures.set(res.features ?? null);
+		})
+		.catch(() => {
+			if (seq !== _featuresFetchSeq) return;
+			currentTrackFeatures.set(null);
+		});
+}
+
 currentTrack.subscribe((track) => {
 	const nextId = track?.id ?? null;
 	if (nextId === _lastFeaturesTrackId) return;
@@ -205,22 +224,20 @@ currentTrack.subscribe((track) => {
 		return;
 	}
 
-	const seq = ++_featuresFetchSeq;
-	// Clear stale features immediately so UI doesn't show the previous track's badge.
-	currentTrackFeatures.set(null);
-
-	void api
-		.getTrackAudioFeatures(nextId)
-		.then((res) => {
-			// Guard against out-of-order responses.
-			if (seq !== _featuresFetchSeq) return;
-			currentTrackFeatures.set(res.features ?? null);
-		})
-		.catch(() => {
-			if (seq !== _featuresFetchSeq) return;
-			currentTrackFeatures.set(null);
-		});
+	fetchCurrentTrackFeatures(nextId, true);
 });
+
+// A passive DSP analysis or queue prescan just stamped fresh features for some
+// track. If it's the one currently playing, refresh in place so the badge picks
+// up the new BPM/key/Camelot without waiting for a track change.
+if (typeof window !== 'undefined') {
+	window.addEventListener('noor:dsp_updated', (event) => {
+		const trackId = (event as CustomEvent<{ trackId: number }>).detail?.trackId;
+		if (typeof trackId !== 'number') return;
+		if (trackId !== _lastFeaturesTrackId) return;
+		fetchCurrentTrackFeatures(trackId, false);
+	});
+}
 
 export const isPlaying = writable(false);
 export const position = writable(0);
