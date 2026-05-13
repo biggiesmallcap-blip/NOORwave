@@ -18,7 +18,10 @@
 		setPlayerAutomixAllowExternal,
 		refreshPlaybackRuntime,
 		currentStreamDisplay,
-		refreshPlaybackState
+		refreshPlaybackState,
+		moveQueueTrackNext,
+		removeTrackFromQueue,
+		startSongRadio
 	} from '$lib/stores/player';
 	import {
 		api,
@@ -27,13 +30,19 @@
 		type DiscoveryStatus,
 		type PlaybackRuntimeInfo
 	} from '$lib/api/client';
-	import { harmonicCompat } from '$lib/utils/camelot';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, type MenuTrack } from '$lib/player/track_menu';
+	import {
+		automixHealth,
+		buildForecastRows,
+		countForecastRows,
+		formatFeatureSummary,
+		type AutomixForecastRow
+	} from './automix_diagnostics';
 	import type { Snapshot } from './$types';
 
 	let saving = $state(false);
@@ -192,35 +201,30 @@
 		}
 	});
 
-	const compatibilityRows = $derived.by(() => {
-		const rows: { level: string; keyLabel: string | null; bpmDelta: number | null }[] = [];
-		const visible = queueUpcoming.slice(0, INDICATOR_WINDOW);
-		for (let i = 0; i < visible.length; i += 1) {
-			const previousTrackId = i === 0 ? $currentTrack?.id : visible[i - 1].track.id;
-			const compat = harmonicCompat(featuresFor(previousTrackId), featuresFor(visible[i].track.id));
-			if (compat) rows.push(compat);
-		}
-		return rows;
-	});
+	const forecastRows = $derived(
+		buildForecastRows({
+			currentTrack: $currentTrack,
+			currentFeatures: $currentTrackFeatures,
+			upcoming: queueUpcoming.slice(0, INDICATOR_WINDOW),
+			featuresFor
+		})
+	);
 
-	const goodMixCount = $derived(compatibilityRows.filter((row) => row.level === 'good').length);
-	const clashMixCount = $derived(compatibilityRows.filter((row) => row.level === 'clash').length);
-
-	function bpmDeltaLabel(delta: number | null): string | null {
-		if (delta === null) return null;
-		const sign = delta > 0 ? '+' : '';
-		return `${sign}${delta.toFixed(1)} BPM`;
-	}
-
-	function formatFeatureSummary(features: AudioDspFeatures | null): string {
-		if (!features) return 'DSP pending';
-		const parts = [
-			features.camelot_key ?? features.key_signature,
-			features.bpm ? `${Math.round(features.bpm)} BPM` : null,
-			features.energy != null ? `${Math.round(features.energy * 100)}% energy` : null
-		].filter(Boolean);
-		return parts.join(' / ') || 'DSP pending';
-	}
+	const forecastCounts = $derived(countForecastRows(forecastRows));
+	const health = $derived(
+		automixHealth({
+			automixEnabled: $automixEnabled,
+			currentTrack: $currentTrack,
+			currentFeatures: $currentTrackFeatures,
+			upcomingCount: queueUpcoming.length,
+			pendingCount: pendingQueueCount,
+			runtimeAvailable,
+			runtime,
+			discoveryStatus
+		})
+	);
+	const goodMixCount = $derived(forecastCounts.good);
+	const clashMixCount = $derived(forecastCounts.clash);
 
 	function percentLabel(value: number | null | undefined): string {
 		if (value == null || !Number.isFinite(value)) return '--';
@@ -231,6 +235,33 @@
 		event.preventDefault();
 		event.stopPropagation();
 		openContextMenu(event, buildTrackMenu(track, { queueItemId }), track.title);
+	}
+
+	async function moveForecastRowNext(row: AutomixForecastRow, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		if (row.item.is_pending) return;
+		await runSaving(() => moveQueueTrackNext(row.item.id));
+	}
+
+	async function removeForecastRow(row: AutomixForecastRow, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		await runSaving(() => removeTrackFromQueue(row.item.id));
+	}
+
+	async function refreshForecastRow(row: AutomixForecastRow, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		featureCache.delete(row.item.track.id);
+		requestFeatures(row.item.track.id);
+		featureCacheVersion++;
+	}
+
+	async function startCurrentSongRadio() {
+		const trackId = $currentTrack?.id;
+		if (!trackId) return;
+		await runSaving(() => startSongRadio(trackId));
 	}
 </script>
 
@@ -410,39 +441,37 @@
 			<EmptyState title="Queue is empty" copy={$automixEnabled ? 'Automix will fill it as tracks finish.' : 'Enable automix or add tracks manually.'} />
 		{:else}
 			<div class="queue-list">
-				{#each queueUpcoming.slice(0, INDICATOR_WINDOW) as item, i (`${item.id}-${i}`)}
-					{@const previousTrackId = i === 0 ? $currentTrack?.id : queueUpcoming[i - 1].track.id}
-					{@const compat = harmonicCompat(featuresFor(previousTrackId), featuresFor(item.track.id))}
+				{#each forecastRows as row, i (`${row.item.id}-${i}`)}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
 						class="queue-row"
-						oncontextmenu={(e) => openTrackContextMenu(e, item.track, item.id)}
+						oncontextmenu={(e) => openTrackContextMenu(e, row.item.track, row.item.id)}
 					>
 						<div class="queue-index">{String(i + 1).padStart(2, '0')}</div>
-						{#if item.track.artwork_url}
-							<img class="queue-art" src={item.track.artwork_url} alt="" />
+						{#if row.item.track.artwork_url}
+							<img class="queue-art" src={row.item.track.artwork_url} alt="" />
 						{:else}
 							<div class="queue-art placeholder">♪</div>
 						{/if}
 						<div class="queue-meta">
-							<strong>{item.track.title}</strong>
-							<span>{item.track.artist_name ?? 'Unknown artist'}</span>
+							<strong>{row.item.track.title}</strong>
+							<span>{row.item.track.artist_name ?? 'Unknown artist'}</span>
 						</div>
 						<div class="queue-dsp">
-							<span>{formatFeatureSummary(featuresFor(item.track.id) ?? null)}</span>
-							{#if compat}
-								<b class="compat-pill compat-{compat.level}">
-									{compat.keyLabel ?? compat.level}
-									{#if compat.bpmDelta !== null}
-										<small>{bpmDeltaLabel(compat.bpmDelta)}</small>
+							<span>{formatFeatureSummary(row.nextFeatures)}</span>
+							{#if row.verdict !== 'unknown'}
+								<b class="compat-pill compat-{row.verdict}">
+									{row.keyLabel ?? row.verdict}
+									{#if row.bpmDeltaLabel}
+										<small>{row.bpmDeltaLabel}</small>
 									{/if}
 								</b>
 							{:else}
 								<b class="compat-pill">Analyzing</b>
 							{/if}
 						</div>
-						{#if item.source === 'automix'}
-							<StateBadge label="Automix" tone="active" compact={true} />
+						{#if row.item.source.startsWith('automix')}
+							<StateBadge label={row.sourceLabel} tone="active" compact={true} />
 						{/if}
 					</div>
 				{/each}
