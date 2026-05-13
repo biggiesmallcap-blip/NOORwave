@@ -35,14 +35,19 @@ function track(id: number, title = `Track ${id}`): Track {
 	};
 }
 
-function queueItem(id: number, source = 'automix', isPending = false): QueueItem {
+function queueItem(
+	id: number,
+	source = 'automix',
+	isPending = false,
+	reason: string | null = null
+): QueueItem {
 	return {
 		id,
 		position: id,
 		source,
 		track: track(id),
 		is_pending: isPending,
-		reason: null
+		reason
 	};
 }
 
@@ -112,6 +117,28 @@ describe('automix diagnostics', () => {
 		expect(rows[0].verdict).toBe('good');
 		expect(rows[0].bpmDelta).toBe(4);
 		expect(rows[0].keyLabel).toBe('same key');
+	});
+
+	it('exposes the persisted automix reason prefix', () => {
+		const rows = buildForecastRows({
+			currentTrack: track(1),
+			currentFeatures: features(1),
+			upcoming: [queueItem(2, 'automix', false, 'automix: same source, unplayed | {"score":1.35}')],
+			featuresFor: (id) => (id === 2 ? features(2) : undefined)
+		});
+
+		expect(rows[0].selectionReasonLabel).toBe('automix: same source, unplayed');
+	});
+
+	it('labels old automix rows that have no recorded reason', () => {
+		const rows = buildForecastRows({
+			currentTrack: track(1),
+			currentFeatures: features(1),
+			upcoming: [queueItem(2, 'automix')],
+			featuresFor: (id) => (id === 2 ? features(2) : undefined)
+		});
+
+		expect(rows[0].selectionReasonLabel).toBe('Reason not recorded for this row');
 	});
 
 	it('counts pending external rows separately', () => {

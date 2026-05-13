@@ -108,6 +108,25 @@ struct ScoredTrack {
     score: f64,
 }
 
+#[derive(Debug, Clone)]
+struct AutomixSelection {
+    track: Track,
+    reason: Option<String>,
+}
+
+impl AutomixSelection {
+    fn new(track: Track, reason: impl Into<String>) -> Self {
+        Self {
+            track,
+            reason: Some(reason.into()),
+        }
+    }
+
+    fn into_queue_pair(self) -> (Track, Option<String>) {
+        (self.track, self.reason)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListenSessionEndReason {
     Replaced,
@@ -967,7 +986,7 @@ pub fn ensure_automix_queue_depth(
     }
 
     let needed = (target_upcoming - upcoming_count).max(AUTOMIX_BATCH_SIZE);
-    let extension = build_automix_extension(
+    let extension = build_automix_extension_with_reasons(
         conn,
         current_track,
         &queue_items,
@@ -977,8 +996,13 @@ pub fn ensure_automix_queue_depth(
     )?;
 
     let mut appended = false;
+    let generated_count = extension.len();
     if !extension.is_empty() {
-        queue::append_tracks(conn, &extension, "automix")?;
+        let extension = extension
+            .into_iter()
+            .map(AutomixSelection::into_queue_pair)
+            .collect::<Vec<_>>();
+        queue::append_tracks_with_reasons(conn, &extension, "automix")?;
         appended = true;
     }
 
@@ -987,7 +1011,7 @@ pub fn ensure_automix_queue_depth(
             .ok()
             .flatten()
     {
-        let external_needed = needed.saturating_sub(extension.len()).max(1);
+        let external_needed = needed.saturating_sub(generated_count).max(1);
         let appended_external =
             append_automix_external_candidates(conn, model.id, current_track.id, external_needed)?;
         appended |= appended_external > 0;
@@ -1083,6 +1107,7 @@ fn normalize_external_pair(artist: &str, title: &str) -> (String, String) {
     )
 }
 
+#[cfg(test)]
 fn build_automix_extension(
     conn: &Connection,
     current_track: &Track,
@@ -1091,6 +1116,27 @@ fn build_automix_extension(
     needed: usize,
     use_learning: bool,
 ) -> Result<Vec<Track>> {
+    Ok(build_automix_extension_with_reasons(
+        conn,
+        current_track,
+        queue_items,
+        mode,
+        needed,
+        use_learning,
+    )?
+    .into_iter()
+    .map(|selection| selection.track)
+    .collect())
+}
+
+fn build_automix_extension_with_reasons(
+    conn: &Connection,
+    current_track: &Track,
+    queue_items: &[QueueItem],
+    mode: ShuffleMode,
+    needed: usize,
+    use_learning: bool,
+) -> Result<Vec<AutomixSelection>> {
     if use_learning
         && let Some(model) = queries::get_selected_discovery_embedding_model(conn)
             .ok()
@@ -1108,6 +1154,10 @@ fn build_automix_extension(
             &excluded,
         )?;
         if !neighbors.is_empty() {
+            let neighbor_reasons = neighbors
+                .iter()
+                .map(|row| (row.track_id, automix_neighbor_reason(row)))
+                .collect::<HashMap<_, _>>();
             let neighbor_ids = neighbors.iter().map(|row| row.track_id).collect::<Vec<_>>();
             let tracks = queue::get_tracks_by_ids(conn, &neighbor_ids)?;
             let track_map = tracks
@@ -1116,7 +1166,17 @@ fn build_automix_extension(
                 .collect::<HashMap<_, _>>();
             let ordered = neighbor_ids
                 .into_iter()
-                .filter_map(|track_id| track_map.get(&track_id).cloned())
+                .filter_map(|track_id| {
+                    track_map.get(&track_id).cloned().map(|track| {
+                        AutomixSelection::new(
+                            track,
+                            neighbor_reasons
+                                .get(&track_id)
+                                .cloned()
+                                .unwrap_or_else(|| "automix: learned similarity".to_string()),
+                        )
+                    })
+                })
                 .take(needed)
                 .collect::<Vec<_>>();
             if !ordered.is_empty() {
@@ -1169,7 +1229,13 @@ fn build_automix_extension(
                 "automix: skipping extension — seed has no recommendation signal and no artist/album/genre matches"
             );
         }
-        return Ok(fallback);
+        return Ok(fallback
+            .into_iter()
+            .map(|track| {
+                let reason = automix_metadata_reason(current_track, &track);
+                AutomixSelection::new(track, reason)
+            })
+            .collect());
     }
 
     let mut candidates: Vec<Track> = if similar.len() >= needed {
@@ -1215,7 +1281,137 @@ fn build_automix_extension(
         &candidate_features,
     );
     let ordered = decluster_by_album(ordered);
-    Ok(ordered.into_iter().take(needed).collect())
+    Ok(ordered
+        .into_iter()
+        .take(needed)
+        .map(|track| {
+            let genres = candidate_genres
+                .get(&track.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let candidate_features = candidate_features.get(&track.id);
+            let score = automix_score(
+                &track,
+                genres,
+                &taste,
+                &seed,
+                seed_features.as_ref(),
+                candidate_features,
+            );
+            let reason = automix_scored_reason(
+                &track,
+                genres,
+                &taste,
+                &seed,
+                seed_features.as_ref(),
+                candidate_features,
+                score,
+            );
+            AutomixSelection::new(track, reason)
+        })
+        .collect())
+}
+
+fn automix_neighbor_reason(row: &queries::EmbeddingNeighborRow) -> String {
+    let reason = row
+        .primary_reason
+        .as_deref()
+        .map(format_reason_key)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "learned similarity".to_string());
+    let prefix = format!("automix: {reason}");
+    format!(
+        "{prefix} | {{\"score\":{:.4},\"behavioral_score\":{:.4},\"audio_score\":{:.4},\"metadata_score\":{:.4},\"confidence\":{:.4}}}",
+        row.score, row.behavioral_score, row.audio_score, row.metadata_score, row.confidence
+    )
+}
+
+fn automix_metadata_reason(seed: &Track, track: &Track) -> String {
+    if seed.artist_id != 0 && seed.artist_id == track.artist_id {
+        return "automix: same artist fallback".to_string();
+    }
+    if seed.album_id.is_some() && seed.album_id == track.album_id {
+        return "automix: same album fallback".to_string();
+    }
+    "automix: shared genre fallback".to_string()
+}
+
+fn automix_scored_reason(
+    track: &Track,
+    genres: &[String],
+    taste: &TasteVector,
+    seed: &SeedContext,
+    seed_features: Option<&AudioDspFeatures>,
+    candidate_features: Option<&AudioDspFeatures>,
+    score: f64,
+) -> String {
+    let mut signals = Vec::new();
+
+    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
+        signals.push("same artist".to_string());
+    }
+    if seed.source.as_deref() == Some(track.source.as_str()) {
+        signals.push("same source".to_string());
+    }
+    if track.is_favorite {
+        signals.push("favorite".to_string());
+    }
+    if track.play_count == 0 {
+        signals.push("unplayed".to_string());
+    }
+
+    let shared_genres = genres
+        .iter()
+        .map(|genre| normalize_genre_key(genre))
+        .filter(|genre| seed.genres.contains(genre))
+        .count();
+    if shared_genres > 0 {
+        signals.push(format!(
+            "{shared_genres} shared genre{}",
+            if shared_genres == 1 { "" } else { "s" }
+        ));
+    }
+
+    if track.artist_id != 0
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
+    {
+        if affinity.pos > affinity.neg {
+            signals.push("artist affinity".to_string());
+        } else if affinity.neg > affinity.pos {
+            signals.push("recent skip penalty".to_string());
+        }
+    }
+
+    if let (Some(seed), Some(candidate)) = (seed_features, candidate_features) {
+        let multiplier = compute_harmonic_multiplier(
+            seed.camelot_key.as_deref(),
+            candidate.camelot_key.as_deref(),
+            seed.bpm,
+            candidate.bpm,
+        );
+        if multiplier > 1.0 {
+            signals.push("harmonic fit".to_string());
+        }
+        if let (Some(seed_energy), Some(candidate_energy)) = (seed.energy, candidate.energy)
+            && (seed_energy - candidate_energy).abs() > 0.5
+        {
+            signals.push("energy contrast".to_string());
+        }
+    }
+
+    if signals.is_empty() {
+        signals.push("library score".to_string());
+    }
+
+    let prefix = format!(
+        "automix: {}",
+        signals.into_iter().take(4).collect::<Vec<_>>().join(", ")
+    );
+    format!("{prefix} | {{\"score\":{score:.4}}}")
+}
+
+fn format_reason_key(value: &str) -> String {
+    value.trim().replace('_', " ")
 }
 
 // Metadata-only fallback for seeds with no embedding neighbours and no
@@ -1883,6 +2079,55 @@ mod tests {
         }
     }
 
+    fn blank_dsp_features() -> AudioDspFeatures {
+        AudioDspFeatures {
+            track_id: 0,
+            bpm: None,
+            key_signature: None,
+            camelot_key: None,
+            loudness_lufs: None,
+            energy: None,
+            danceability: None,
+            beat_strength: None,
+            spectral_centroid: None,
+            stereo_width: None,
+            is_instrumental: false,
+            analysis_source: "test".to_string(),
+            analysis_offset_ms: 0,
+            samples_analyzed: None,
+            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
+            analysis_version: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn automix_reason_does_not_claim_harmonic_fit_without_key_or_bpm() {
+        let profile = SessionTasteProfile {
+            current_source: Some("tidal".to_string()),
+            ..SessionTasteProfile::default()
+        };
+        let (taste, seed) = from_session_profile(&profile);
+        let track = track_with_tidal_id(42, Some(42), Some("LOSSLESS"));
+        let seed_features = blank_dsp_features();
+        let candidate_features = blank_dsp_features();
+
+        let reason = automix_scored_reason(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_features),
+            Some(&candidate_features),
+            1.0,
+        );
+
+        assert!(reason.contains("same source"), "got: {reason}");
+        assert!(
+            !reason.contains("harmonic fit"),
+            "missing key and BPM must not be labeled as harmonic fit: {reason}"
+        );
+    }
+
     #[test]
     fn previous_track_moves_back_when_under_threshold() {
         let conn = conn();
@@ -2047,6 +2292,35 @@ mod tests {
         assert_eq!(snapshot.state.current_track.unwrap().id, 3);
         assert!(snapshot.queue.len() > 2);
         assert!(snapshot.queue.iter().any(|item| item.source == "automix"));
+    }
+
+    #[test]
+    fn ensure_automix_queue_depth_records_reasons_for_generated_rows() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 2, position_ms = 0, is_playing = 1, automix_enabled = 1, shuffle_mode = 'off'
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let queue = ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, false).unwrap();
+        let generated = queue
+            .iter()
+            .filter(|item| item.source == "automix")
+            .collect::<Vec<_>>();
+
+        assert!(!generated.is_empty(), "expected generated automix rows");
+        assert!(
+            generated.iter().all(|item| item
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())),
+            "generated automix rows should persist selection reasons: {generated:?}"
+        );
     }
 
     #[test]

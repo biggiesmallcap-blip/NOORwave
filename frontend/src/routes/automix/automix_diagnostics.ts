@@ -6,6 +6,7 @@ import type {
 	Track
 } from '$lib/api/client';
 import { harmonicCompat } from '$lib/utils/camelot';
+import { parseReason } from '$lib/utils/reason';
 
 export type AutomixVerdict = 'good' | 'okay' | 'clash' | 'pending' | 'unknown';
 export type AutomixHealthStatus = 'ready' | 'degraded' | 'blocked';
@@ -22,6 +23,7 @@ export interface AutomixForecastRow {
 	bpmDeltaLabel: string | null;
 	energyDeltaLabel: string | null;
 	sourceLabel: string;
+	selectionReasonLabel: string | null;
 	missing: string[];
 	isExternalPending: boolean;
 }
@@ -87,6 +89,18 @@ export function queueSourceLabel(source: string): string {
 	return source || 'Queued';
 }
 
+export function selectionReasonLabel(
+	reason: string | null | undefined,
+	source: string
+): string | null {
+	const parsed = parseReason(reason);
+	if (parsed?.prefix) return parsed.prefix;
+	if (source.trim().toLowerCase().startsWith('automix')) {
+		return 'Reason not recorded for this row';
+	}
+	return null;
+}
+
 function missingFeatureLabels(
 	previous: AudioDspFeatures | null | undefined,
 	next: AudioDspFeatures | null | undefined
@@ -127,6 +141,7 @@ export function buildForecastRows(input: {
 			bpmDeltaLabel: bpmDeltaLabel(compat?.bpmDelta ?? null),
 			energyDeltaLabel: energyDeltaLabel(previousFeatures, nextFeatures),
 			sourceLabel: queueSourceLabel(item.source),
+			selectionReasonLabel: selectionReasonLabel(item.reason, item.source),
 			missing,
 			isExternalPending
 		};
