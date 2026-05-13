@@ -612,6 +612,9 @@ async fn main() -> Result<()> {
         sportify_resolve_config,
     }));
 
+    services::audio_analysis::queue_prescanner::spawn(state.clone());
+    info!("Queue DSP prescanner spawned");
+
     // Check for auto-sync daily services and trigger sync if needed
     {
         let state_read = state.read().await;
