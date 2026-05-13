@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.44</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.47</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
