@@ -5,6 +5,7 @@ pub mod features;
 pub mod fingerprint;
 pub mod key;
 pub mod onset;
+pub mod queue_prescanner;
 pub mod scanner;
 pub mod tempo;
 
