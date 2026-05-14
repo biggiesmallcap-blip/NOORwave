@@ -1,6 +1,7 @@
 pub mod acrcloud;
 pub mod audio_analysis;
 pub mod auto_enrich;
+pub mod cache_util;
 pub mod charts;
 pub mod crypto;
 pub mod discovery;
