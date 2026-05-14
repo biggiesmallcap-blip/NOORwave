@@ -8727,6 +8727,93 @@ mod tests {
         assert_eq!(s.cohorts.len(), 3);
         assert!(s.audio_profile.loudness_lufs.is_none());
     }
+
+    /// Seed one track with a distinct value in every projected column, so a
+    /// row-shape test can catch any column drift in `track_projection` /
+    /// `track_from_row`.
+    fn seed_fully_populated_track(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (7, 'Projection Artist')",
+            [],
+        )
+        .expect("seed artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, source, artwork_url)
+             VALUES (3, 'Projection Album', 7, 'tidal', 'http://art/proj.jpg')",
+            [],
+        )
+        .expect("seed album");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, album_id, disc_number, track_number,
+                duration_ms, isrc, tidal_id, ytmusic_id, soundcloud_id,
+                best_quality, best_source, fidelity_score, is_favorite,
+                play_count, last_played_at, date_added, source
+             ) VALUES (
+                42, 'Projection Track', 7, 3, 2, 11,
+                234567, 'ISRCPROJ01', 99887, 'ytproj', 55443,
+                'HI_RES', 'tidal', 88, 1,
+                17, '2026-05-01T12:00:00Z', '2026-04-01T00:00:00Z', 'tidal'
+             )",
+            [],
+        )
+        .expect("seed track");
+    }
+
+    /// Every field on `Track` must round-trip through the shared projection.
+    /// `assert_track_is_fully_populated_seed` is reused by the two query-path
+    /// tests below that previously had no direct row-shape coverage.
+    fn assert_track_is_fully_populated_seed(track: &Track) {
+        assert_eq!(track.id, 42);
+        assert_eq!(track.title, "Projection Track");
+        assert_eq!(track.artist_id, 7);
+        assert_eq!(track.artist_name.as_deref(), Some("Projection Artist"));
+        assert_eq!(track.album_id, Some(3));
+        assert_eq!(track.album_title.as_deref(), Some("Projection Album"));
+        assert_eq!(track.disc_number, Some(2));
+        assert_eq!(track.track_number, Some(11));
+        assert_eq!(track.duration_ms, Some(234567));
+        assert_eq!(track.isrc.as_deref(), Some("ISRCPROJ01"));
+        assert_eq!(track.tidal_id, Some(99887));
+        assert_eq!(track.ytmusic_id.as_deref(), Some("ytproj"));
+        assert_eq!(track.soundcloud_id, Some(55443));
+        assert_eq!(track.best_quality.as_deref(), Some("HI_RES"));
+        assert_eq!(track.best_source.as_deref(), Some("tidal"));
+        assert_eq!(track.fidelity_score, 88);
+        assert!(track.is_favorite);
+        assert_eq!(track.play_count, 17);
+        assert_eq!(track.last_played_at.as_deref(), Some("2026-05-01T12:00:00Z"));
+        assert_eq!(track.date_added.as_deref(), Some("2026-04-01T00:00:00Z"));
+        assert_eq!(track.source, "tidal");
+        assert_eq!(track.artwork_url.as_deref(), Some("http://art/proj.jpg"));
+    }
+
+    #[test]
+    fn get_discovery_candidate_tracks_maps_every_projected_column() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_fully_populated_track(&conn);
+
+        let tracks = get_discovery_candidate_tracks(&conn, 10).expect("candidates");
+        assert_eq!(tracks.len(), 1);
+        assert_track_is_fully_populated_seed(&tracks[0]);
+    }
+
+    #[test]
+    fn get_tracks_excluding_with_limit_maps_every_projected_column() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_fully_populated_track(&conn);
+
+        // Empty exclusion list + a generous cap returns the seed track.
+        let tracks = get_tracks_excluding_with_limit(&conn, &[], 50).expect("candidates");
+        assert_eq!(tracks.len(), 1);
+        assert_track_is_fully_populated_seed(&tracks[0]);
+
+        // And the exclusion path still filters correctly.
+        let excluded = get_tracks_excluding_with_limit(&conn, &[42], 50).expect("excluded");
+        assert!(excluded.is_empty(), "id 42 must be excluded");
+    }
 }
 
 /// Load enough metadata about a library track to seed external Tidal discovery.
