@@ -146,9 +146,9 @@ pub fn estimate_tempo(env: &OnsetEnvelope) -> Option<TempoEstimate> {
             .find(|t| t.0 == double_bpm)
             .map(|t| t.2)
             .unwrap_or(0.0);
-        let block_ceiling_promotion =
-            (STEP_A_NORMAL_WINNER_MIN..=STEP_A_NORMAL_WINNER_MAX).contains(&best_bpm)
-                && double_bpm >= STEP_A_BLOCKED_DOUBLE_MIN;
+        let block_ceiling_promotion = (STEP_A_NORMAL_WINNER_MIN..=STEP_A_NORMAL_WINNER_MAX)
+            .contains(&best_bpm)
+            && double_bpm >= STEP_A_BLOCKED_DOUBLE_MIN;
         if winner_raw > 0.0
             && !block_ceiling_promotion
             && r_double >= OCTAVE_RATIO_THRESHOLD * winner_raw

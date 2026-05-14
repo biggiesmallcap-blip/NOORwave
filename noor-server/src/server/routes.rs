@@ -235,7 +235,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/tracks/count", get(get_track_count))
         .route("/api/albums", get(get_albums))
         .route("/api/albums/{id}/tracks", get(get_album_tracks))
-        .route("/api/albums/{id}/spotify-stats", get(get_album_spotify_stats))
+        .route(
+            "/api/albums/{id}/spotify-stats",
+            get(get_album_spotify_stats),
+        )
         .route("/api/artists", get(get_artists))
         .route("/api/artists/{id}", get(get_artist))
         .route("/api/artists/{id}/tracks", get(get_artist_tracks))
@@ -6872,7 +6875,11 @@ async fn resolve_pending_row(
         let tok_bg = tokens.clone();
         tokio::spawn(async move {
             crate::services::tidal::artist_photo::ensure_photo_url(
-                http_bg, tok_bg, db_bg, artist_local_id, tid,
+                http_bg,
+                tok_bg,
+                db_bg,
+                artist_local_id,
+                tid,
             )
             .await;
         });
@@ -7010,7 +7017,11 @@ async fn resolve_pending_current_queue_item(
         let tok_bg = tokens.clone();
         tokio::spawn(async move {
             crate::services::tidal::artist_photo::ensure_photo_url(
-                http_bg, tok_bg, db_bg, artist_local_id, tid,
+                http_bg,
+                tok_bg,
+                db_bg,
+                artist_local_id,
+                tid,
             )
             .await;
         });

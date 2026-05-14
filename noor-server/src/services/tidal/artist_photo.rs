@@ -73,7 +73,9 @@ pub async fn ensure_photo_url(
         .map_err(anyhow::Error::from)
     });
     match written {
-        Ok(n) if n > 0 => tracing::info!(local_artist_id, tidal_artist_id, "artist photo backfilled"),
+        Ok(n) if n > 0 => {
+            tracing::info!(local_artist_id, tidal_artist_id, "artist photo backfilled")
+        }
         Ok(_) => {} // race: someone else filled it between our SELECT and UPDATE
         Err(e) => tracing::warn!(local_artist_id, "artist photo UPDATE failed: {}", e),
     }

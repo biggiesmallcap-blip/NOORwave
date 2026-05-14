@@ -69,9 +69,9 @@ pub struct SportifyTrack {
     #[serde(default)]
     pub artist: Option<String>,
     /// Upstream's `/api/artist/:id/top-tracks` response ships `album` as a
-     /// flat string (e.g. `"album": "Hot Pink"`); every other endpoint sends
-     /// the structured `SportifyAlbumRef` shape. Without this custom path the
-     /// whole `Vec<SportifyTrack>` deserialization fails at the first row.
+    /// flat string (e.g. `"album": "Hot Pink"`); every other endpoint sends
+    /// the structured `SportifyAlbumRef` shape. Without this custom path the
+    /// whole `Vec<SportifyTrack>` deserialization fails at the first row.
     #[serde(default, deserialize_with = "deserialize_album_field")]
     pub album: Option<SportifyAlbumRef>,
     /// Top-level thumbnail URL (track detail + playlist track shape). Album
@@ -472,10 +472,7 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].name.as_deref(), Some("Say So"));
         assert_eq!(
-            tracks[0]
-                .album
-                .as_ref()
-                .and_then(|a| a.name.as_deref()),
+            tracks[0].album.as_ref().and_then(|a| a.name.as_deref()),
             Some("Hot Pink"),
         );
         // Empty string collapses to None so callers don't end up with a

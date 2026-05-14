@@ -111,7 +111,10 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         })
         .unwrap_or(false);
     if override_or_current {
-        tracing::info!(track_id, "prescanner skip: manual override or current version");
+        tracing::info!(
+            track_id,
+            "prescanner skip: manual override or current version"
+        );
         return Ok(false);
     }
 
