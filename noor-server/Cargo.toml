@@ -81,3 +81,12 @@ regex = "1"
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+# aubio-sys 0.2.1 ships prebuilt bindings for x86_64 targets but not
+# aarch64-apple-darwin, where its build script panics with "No prebuilt
+# bindings". On that one target, generate bindings at build time via bindgen
+# (the macOS runner has libclang through Xcode). Cargo only folds these
+# features into the base aubio-rs dependency when building for this target,
+# so every other platform keeps the faster prebuilt-bindings path.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "static", "bindgen"] }
