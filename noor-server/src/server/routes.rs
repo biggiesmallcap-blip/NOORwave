@@ -13186,4 +13186,226 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// Route-registration smoke test. Probes every `/api/*` route registered in
+    /// `api_routes` with a deliberately-wrong HTTP method and asserts the
+    /// response is NOT 404.
+    ///
+    /// Why wrong-method: axum returns 405 METHOD_NOT_ALLOWED when a path is
+    /// registered but the method doesn't match, and 404 NOT_FOUND when the path
+    /// isn't registered at all. Probing with the wrong method means routing
+    /// resolves before any extractor runs - so path params, request bodies, and
+    /// auth never enter the picture. A 404 here means the route is genuinely
+    /// missing, which is exactly the failure mode a careless handler extraction
+    /// introduces: move a handler to a submodule, forget to re-register it.
+    ///
+    /// This is a structural guard, NOT a behavior contract. It deliberately
+    /// does not assert on bodies or success codes. Per-route behavior belongs
+    /// in dedicated tests. When you add a route, add it here too.
+    #[tokio::test]
+    async fn all_api_routes_are_registered() {
+        // (real_method, path). Path params use concrete sentinels; the value is
+        // irrelevant because the wrong-method probe short-circuits at routing.
+        let routes: &[(&str, &str)] = &[
+            ("GET", "/api/tracks"),
+            ("GET", "/api/tracks/count"),
+            ("GET", "/api/albums"),
+            ("GET", "/api/albums/1/tracks"),
+            ("GET", "/api/albums/1/spotify-stats"),
+            ("GET", "/api/artists"),
+            ("GET", "/api/artists/1"),
+            ("GET", "/api/artists/1/tracks"),
+            ("GET", "/api/artists/1/discography"),
+            ("GET", "/api/artists/1/spotify-stats"),
+            ("GET", "/api/tidal/albums/1/tracks"),
+            ("POST", "/api/tidal/albums/1/import"),
+            ("POST", "/api/tidal/tracks/import"),
+            ("GET", "/api/genres"),
+            ("GET", "/api/genres/snapshot"),
+            ("GET", "/api/genres/heat"),
+            ("GET", "/api/genres/co-occurrence"),
+            ("GET", "/api/genres/cohorts"),
+            ("GET", "/api/genres/evolution"),
+            ("GET", "/api/genres/audio-metrics"),
+            ("GET", "/api/genres/1/tracks"),
+            ("GET", "/api/playlists"),
+            ("GET", "/api/playlists/1/tracks"),
+            ("PATCH", "/api/playlists/1/favorite"),
+            ("POST", "/api/smart/playlists"),
+            ("PUT", "/api/smart/playlists/1"),
+            ("GET", "/api/smart/playlists/1/evaluate"),
+            ("GET", "/api/analytics/overview"),
+            ("GET", "/api/analytics/dashboard"),
+            ("GET", "/api/analytics/signals"),
+            ("GET", "/api/analytics/listens/recent"),
+            ("POST", "/api/discovery/preview"),
+            ("POST", "/api/discovery/new"),
+            ("POST", "/api/discovery/save"),
+            ("POST", "/api/discovery/play"),
+            ("POST", "/api/discovery/connections"),
+            ("GET", "/api/discovery/status"),
+            ("POST", "/api/discovery/train"),
+            ("GET", "/api/discovery/train/status"),
+            ("POST", "/api/discovery/train/stop"),
+            ("GET", "/api/discovery/train/intensity"),
+            ("GET", "/api/discovery/train/engine"),
+            ("GET", "/api/discovery/train/safety"),
+            ("GET", "/api/discovery/train/safety-profile"),
+            ("POST", "/api/discovery/feedback"),
+            ("GET", "/api/discovery/presets"),
+            ("POST", "/api/discovery/radio"),
+            ("POST", "/api/discovery/radio/compute"),
+            ("POST", "/api/discovery/space"),
+            ("GET", "/api/resolve/tidal/track"),
+            ("POST", "/api/resolve/tidal/bulk"),
+            ("GET", "/api/resolve/tidal/status"),
+            ("GET", "/api/discovery/sportify/search"),
+            ("GET", "/api/discovery/sportify/track/x"),
+            ("GET", "/api/discovery/sportify/album/x"),
+            ("GET", "/api/discovery/sportify/playlist/x"),
+            ("GET", "/api/discovery/sportify/artist/x"),
+            ("GET", "/api/discovery/sportify/artist/x/top-tracks"),
+            ("GET", "/api/discovery/sportify/artist/x/related"),
+            ("GET", "/api/discovery/sportify/album/x/related"),
+            ("GET", "/api/discovery/sportify/track/x/related"),
+            ("POST", "/api/spotify-playlist/save"),
+            ("POST", "/api/radio/song"),
+            ("POST", "/api/radio/album"),
+            ("POST", "/api/radio/artist"),
+            ("POST", "/api/radio/start"),
+            ("GET", "/api/discovery/space/meta"),
+            ("GET", "/api/discovery/artists"),
+            ("POST", "/api/library/batch/add-to-playlist"),
+            ("POST", "/api/library/batch/delete"),
+            ("POST", "/api/library/batch/set-genre"),
+            ("POST", "/api/library/enrich/musicbrainz"),
+            ("GET", "/api/library/enrich/musicbrainz/status"),
+            ("GET", "/api/library/enrich/musicbrainz/portable"),
+            ("POST", "/api/library/enrich/musicbrainz/portable/export"),
+            ("POST", "/api/library/enrich/musicbrainz/portable/import"),
+            ("POST", "/api/library/tracks/favorite"),
+            ("POST", "/api/library/duplicates/scan"),
+            ("GET", "/api/library/duplicates"),
+            ("POST", "/api/library/duplicates/1/resolve"),
+            ("POST", "/api/library/duplicates/1/dismiss"),
+            ("GET", "/api/playback/state"),
+            ("GET", "/api/playback/runtime"),
+            ("POST", "/api/playback/play"),
+            ("POST", "/api/playback/pause"),
+            ("POST", "/api/playback/resume"),
+            ("POST", "/api/playback/previous"),
+            ("POST", "/api/playback/next"),
+            ("POST", "/api/playback/position"),
+            ("POST", "/api/playback/volume"),
+            ("POST", "/api/playback/shuffle"),
+            ("POST", "/api/playback/repeat"),
+            ("POST", "/api/playback/automix"),
+            ("GET", "/api/playback/queue"),
+            ("POST", "/api/playback/queue/add"),
+            ("POST", "/api/playback/queue/remove"),
+            ("POST", "/api/playback/queue/move"),
+            ("POST", "/api/playback/queue/clear"),
+            ("POST", "/api/queue/play_next"),
+            ("POST", "/api/queue/play_next_many"),
+            ("POST", "/api/queue/append"),
+            ("POST", "/api/queue/append_many"),
+            ("POST", "/api/playlists/from-queue"),
+            ("GET", "/api/audio/devices"),
+            ("GET", "/api/audio/settings"),
+            ("POST", "/api/audio/exclusive/retry"),
+            ("GET", "/api/search"),
+            ("POST", "/api/search/audio"),
+            ("GET", "/api/search/vibe"),
+            ("GET", "/api/search/underrated"),
+            ("POST", "/api/tidal/login"),
+            ("POST", "/api/tidal/login/complete"),
+            ("POST", "/api/tidal/login/poll"),
+            ("POST", "/api/tidal/sync"),
+            ("POST", "/api/tidal/sync/cancel"),
+            ("GET", "/api/tidal/status"),
+            ("GET", "/api/tidal/search"),
+            ("GET", "/api/tidal/videos/search"),
+            ("GET", "/api/tidal/videos/1/playback"),
+            ("GET", "/api/tidal/video-mixes/1/items"),
+            ("GET", "/api/tidal/playlists/search"),
+            ("GET", "/api/tidal/playlists/x/tracks"),
+            ("POST", "/api/tidal/play"),
+            ("GET", "/api/tidal/artists/1"),
+            ("POST", "/api/tidal/logout"),
+            ("POST", "/api/spotify/config"),
+            ("GET", "/api/spotify/status"),
+            ("POST", "/api/library/enrich/spotify"),
+            ("GET", "/api/library/enrich/spotify/status"),
+            ("POST", "/api/library/enrich/spotify/reset"),
+            ("POST", "/api/library/tidal-stream/purge"),
+            ("POST", "/api/lastfm/config"),
+            ("GET", "/api/lastfm/status"),
+            ("POST", "/api/lastfm/auth/start"),
+            ("POST", "/api/lastfm/auth/complete"),
+            ("POST", "/api/lastfm/auth/disconnect"),
+            ("POST", "/api/library/enrich/lastfm"),
+            ("POST", "/api/library/enrich/lastfm/stop"),
+            ("GET", "/api/library/enrich/lastfm/status"),
+            ("POST", "/api/library/enrich/lastfm/reset"),
+            ("POST", "/api/library/analyze/audio-features"),
+            ("POST", "/api/library/analyze/stop"),
+            ("GET", "/api/library/analyze/status"),
+            ("GET", "/api/library/analyze/passive"),
+            ("GET", "/api/tracks/1/audio-features"),
+            ("POST", "/api/tracks/1/bpm-multiplier"),
+            ("GET", "/api/library/audio-features/stats"),
+            ("GET", "/api/library/audio-features/quality"),
+            ("GET", "/api/library/analytics"),
+            ("GET", "/api/library/analyze/reanalyze-stale"),
+            ("POST", "/api/library/analyze/reset"),
+            ("GET", "/api/sync/info"),
+            ("POST", "/api/sync/auto"),
+            ("GET", "/api/status"),
+            ("GET", "/api/home/releases"),
+            ("GET", "/api/home/picks"),
+            ("GET", "/api/home/articles"),
+            ("GET", "/api/home/news"),
+            ("GET", "/api/tidal/mixes"),
+            ("GET", "/api/tidal/mixes/1/tracks"),
+            ("POST", "/api/tidal/play-mix"),
+            ("GET", "/api/tidal/radio-stations"),
+            ("GET", "/api/tidal/home-modules"),
+            ("GET", "/api/tidal/discover-modules/1/items"),
+            ("GET", "/api/charts"),
+            ("GET", "/api/charts/lastfm/genres"),
+            ("GET", "/api/charts/lastfm/countries"),
+            ("GET", "/api/server/token"),
+            ("POST", "/api/server/token/regenerate"),
+            ("GET", "/api/server/info"),
+            ("PUT", "/api/server/host_mode"),
+        ];
+
+        let app = build_test_app().await;
+        let mut missing = Vec::new();
+        for (method, path) in routes {
+            // Probe with a method the route does NOT use, so routing resolves
+            // to 405 (registered) or 404 (not registered) before extractors run.
+            let probe = if *method == "GET" { "POST" } else { "GET" };
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(probe)
+                        .uri(*path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::NOT_FOUND {
+                missing.push(format!("{method} {path}"));
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "routes returned 404 to a wrong-method probe (not registered):\n  {}",
+            missing.join("\n  ")
+        );
+    }
 }
