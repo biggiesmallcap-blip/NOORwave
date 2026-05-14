@@ -152,6 +152,26 @@ fn track_order_clause(sort_by: &str, sort_dir: &str) -> String {
     }
 }
 
+/// The 22-column track projection shared by every query whose rows are mapped
+/// by `track_from_row`. Pass the alias the query uses for the joined `artists`
+/// table: `a` everywhere except `get_tracks_with_dsp`, which joins
+/// `audio_dsp_features` as `a` and so must alias artists as `a_artists`.
+///
+/// Column ORDER is load-bearing: `track_from_row` reads by index, and
+/// `search_tracks_fts` does positional ORDER BY against these columns. Only
+/// ever append a column here, and update `track_from_row` to match.
+fn track_projection(artist_alias: &str) -> String {
+    format!(
+        "t.id, t.title, t.artist_id, {artist_alias}.name as artist_name,
+                t.album_id, al.title as album_title,
+                t.disc_number, t.track_number, t.duration_ms, t.isrc,
+                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
+                t.best_quality, t.best_source, t.fidelity_score,
+                t.is_favorite, t.play_count, t.last_played_at,
+                t.date_added, t.source, al.artwork_url"
+    )
+}
+
 pub fn get_tracks(
     conn: &Connection,
     sort_by: &str,
@@ -228,14 +248,9 @@ pub fn get_tracks_with_dsp(
         format!(" WHERE {}", conditions.join(" AND "))
     };
 
+    let projection = track_projection("a_artists");
     let sql = format!(
-        "SELECT t.id, t.title, t.artist_id, a_artists.name as artist_name,
-                t.album_id, al.title as album_title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+        "SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a_artists ON t.artist_id = a_artists.id
          LEFT JOIN albums al ON t.album_id = al.id
@@ -339,14 +354,8 @@ pub fn get_album_count(conn: &Connection, favorite_only: bool) -> Result<i64> {
 }
 
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
-                t.album_id, al.title as album_title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
@@ -355,7 +364,8 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
             COALESCE(t.disc_number, 1) ASC,
             COALESCE(t.track_number, 999999) ASC,
             t.title COLLATE NOCASE ASC",
-    )?;
+        track_projection("a")
+    ))?;
 
     let tracks = stmt
         .query_map(params![album_id], track_from_row)?
@@ -568,14 +578,9 @@ fn get_artist_tracks_matching(
     artist_id: i64,
     extra_where: &str,
 ) -> Result<Vec<Track>> {
+    let projection = track_projection("a");
     let sql = format!(
-        "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
-                t.album_id, al.title as album_title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+        "SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
@@ -737,20 +742,16 @@ pub fn add_tracks_to_playlist(
 }
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
          FROM playlist_tracks pt
          JOIN tracks t ON pt.track_id = t.id
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          WHERE pt.playlist_id = ?1
          ORDER BY pt.position ASC",
-    )?;
+        track_projection("a")
+    ))?;
 
     let tracks = stmt
         .query_map(params![playlist_id], track_from_row)?
@@ -760,19 +761,14 @@ pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Tr
 }
 
 pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
-                t.album_id, al.title as album_title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          ORDER BY t.date_added DESC, t.id DESC",
-    )?;
+        track_projection("a")
+    ))?;
 
     let tracks = stmt
         .query_map([], track_from_row)?
@@ -1172,6 +1168,7 @@ pub fn get_tracks_by_genre_filtered(
     }
 
     let sub = crate::genre::filter::filter_subquery(filter);
+    let projection = track_projection("a");
     // The Spotify-dominance EXISTS check still queries raw `track_genres` —
     // it's a "did Spotify ever tag this track at all" predicate, independent
     // of the confidence filter that decides which clusters the track is
@@ -1185,12 +1182,7 @@ pub fn get_tracks_by_genre_filtered(
                 FROM genres g
                 JOIN selected_genres sg ON g.parent_id = sg.id
             )
-            SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                    t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                    t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                    t.best_quality, t.best_source, t.fidelity_score,
-                    t.is_favorite, t.play_count, t.last_played_at,
-                    t.date_added, t.source, al.artwork_url
+            SELECT DISTINCT {projection}
              FROM selected_genres sg
              JOIN ({sub}) tg ON tg.genre_id = sg.id
              JOIN tracks t ON tg.track_id = t.id
@@ -1217,12 +1209,7 @@ pub fn get_tracks_by_genre_filtered(
         )
     } else {
         format!(
-            "SELECT DISTINCT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                    t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                    t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                    t.best_quality, t.best_source, t.fidelity_score,
-                    t.is_favorite, t.play_count, t.last_played_at,
-                    t.date_added, t.source, al.artwork_url
+            "SELECT DISTINCT {projection}
              FROM ({sub}) tg
              JOIN tracks t ON tg.track_id = t.id
              LEFT JOIN artists a ON t.artist_id = a.id
@@ -3281,19 +3268,15 @@ pub fn get_genre_evolution(conn: &Connection, days: i64) -> Result<Vec<GenreEvol
 }
 
 pub fn get_discovery_candidate_tracks(conn: &Connection, limit: i64) -> Result<Vec<Track>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          ORDER BY t.is_favorite DESC, t.play_count DESC, t.date_added DESC, t.title ASC
          LIMIT ?1",
-    )?;
+        track_projection("a")
+    ))?;
 
     let tracks = stmt
         .query_map(params![limit.max(1)], track_from_row)?
@@ -3310,16 +3293,12 @@ pub fn get_tracks_excluding_with_limit(
     excluded_track_ids: &[i64],
     max_candidates: usize,
 ) -> Result<Vec<Track>> {
-    let mut sql = String::from(
-        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut sql = format!(
+        "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id",
+        track_projection("a")
     );
 
     if !excluded_track_ids.is_empty() {
@@ -3558,33 +3537,24 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
     //   16 = t.fidelity_score
     //   17 = t.is_favorite
     //   18 = t.play_count
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let projection = track_projection("a");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          JOIN tracks_fts ON tracks_fts.rowid = t.id
          WHERE tracks_fts MATCH ?1
          UNION
-         SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+         SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
          JOIN artists_fts ON artists_fts.rowid = t.artist_id
          WHERE artists_fts MATCH ?1
          ORDER BY 17 DESC, 18 DESC, 16 DESC, 2 ASC
-         LIMIT ?2",
-    )?;
+         LIMIT ?2"
+    ))?;
     stmt.query_map(params![fts_query, limit], track_from_row)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
@@ -3593,13 +3563,8 @@ fn search_tracks_fts(conn: &Connection, fts_query: &str, limit: i64) -> Result<V
 fn search_tracks_like(conn: &Connection, normalized: &str, limit: i64) -> Result<Vec<Track>> {
     let contains_pattern = format!("%{normalized}%");
     let prefix_pattern = format!("{normalized}%");
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.artist_id, a.name, t.album_id, al.title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
@@ -3621,7 +3586,8 @@ fn search_tracks_like(conn: &Connection, normalized: &str, limit: i64) -> Result
             t.fidelity_score DESC,
             t.title ASC
          LIMIT ?4",
-    )?;
+        track_projection("a")
+    ))?;
     stmt.query_map(
         params![contains_pattern, normalized, prefix_pattern, limit],
         track_from_row,
@@ -6291,14 +6257,9 @@ pub fn get_audio_dsp_features(
 
 pub fn get_tracks_missing_dsp_features(conn: &Connection, limit: i64) -> Result<Vec<Track>> {
     // CURRENT_ANALYSIS_VERSION is a compile-time constant — safe to interpolate.
+    let projection = track_projection("a");
     let sql = format!(
-        "SELECT t.id, t.title, t.artist_id, a.name as artist_name,
-                t.album_id, al.title as album_title,
-                t.disc_number, t.track_number, t.duration_ms, t.isrc,
-                t.tidal_id, t.ytmusic_id, t.soundcloud_id,
-                t.best_quality, t.best_source, t.fidelity_score,
-                t.is_favorite, t.play_count, t.last_played_at,
-                t.date_added, t.source, al.artwork_url
+        "SELECT {projection}
          FROM tracks t
          LEFT JOIN artists a ON t.artist_id = a.id
          LEFT JOIN albums al ON t.album_id = al.id
