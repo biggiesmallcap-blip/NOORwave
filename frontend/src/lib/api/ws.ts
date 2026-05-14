@@ -19,6 +19,7 @@ export type WsMessage =
 	| { type: 'listen_history_updated'; track_id: number }
 	| { type: 'playback_failed'; message: string }
 	| { type: 'library_synced' }
+	| { type: 'radio_similarity_computed'; pairs: number }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }
 	| { type: 'sync_failed'; service: string; message: string }

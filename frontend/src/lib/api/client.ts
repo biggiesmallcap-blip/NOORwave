@@ -2087,6 +2087,12 @@ export const api = {
 		});
 	},
 
+	getRadioSimilarityStatus() {
+		return fetchApi<{ row_count: number; computed_at: string | null }>(
+			'/api/discovery/radio/status',
+		);
+	},
+
 	search(query: string, limit = 20) {
 		return fetchApi<SearchResults>('/api/search', { q: query, limit: String(limit) });
 	},

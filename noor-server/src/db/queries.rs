@@ -4124,6 +4124,12 @@ pub fn get_similarity_computed_at(conn: &Connection) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// Row count of the precomputed `track_similarity` index. Zero means the index
+/// was never built, which starves the radio Engine lane.
+pub fn count_track_similarity(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0))?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingTrackRow {
     pub track_id: i64,

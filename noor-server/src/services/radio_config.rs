@@ -139,6 +139,17 @@ pub struct RadioProfile {
 // Don't tune from a single seed-run; aggregate over ≥1000 radio_diagnostics
 // rows per profile before adjusting. Single-flip changes between deploys
 // are easier to attribute than batched edits.
+//
+// Tuning review 2026-05-14: 74 radio_diagnostics rows (2026-05-05..05-13),
+// all profile_name='mixed', and every Tier 2 flag off on every row. All four
+// queries above are flag-gated and return nothing; the penalty/hub/diversity/
+// confidence-penalty knobs have zero observational data. avg_confidence sat at
+// 0.524 (above the 0.5 trigger). No defaults changed — the data does not meet
+// this runbook's bar. The only signal worth chasing is upstream, not here:
+// the engine lane produced 0 candidates across all 74 queues while Last.fm ran
+// 0.77 actual vs 0.40 target — an engine-recall follow-up, not a knob edit.
+// Re-run this review once the flags have been on for 2-4 weeks across all
+// three profiles.
 
 impl RadioProfile {
     pub fn from_blend(blend: RadioBlend) -> Self {
@@ -221,6 +232,9 @@ pub struct RadioDiagnosticsRow {
     pub repetition_skips: i64,
     pub penalty_relaxations: i64,
     pub hub_penalty_total: f64,
+    // True when the track_similarity index is empty, so a zero engine count
+    // means "index never built" rather than "no match for this seed".
+    pub engine_index_empty: bool,
     pub flags: RadioFlags,
 }
 
@@ -244,9 +258,9 @@ pub fn log_radio_diagnostics(conn: &Connection, row: &RadioDiagnosticsRow) -> Re
           same_artist_penalties, same_album_penalties, genre_saturation_penalties,
           repetition_skips, penalty_relaxations, hub_penalty_total,
           normalization_enabled, confidence_penalty_enabled, hub_penalty_enabled,
-          diversity_rerank_enabled, source_quota_bonus_enabled)
+          diversity_rerank_enabled, source_quota_bonus_enabled, engine_index_empty)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             row.seed_track_id,
             row.profile_name,
@@ -271,6 +285,7 @@ pub fn log_radio_diagnostics(conn: &Connection, row: &RadioDiagnosticsRow) -> Re
             row.flags.hub_penalty_enabled as i32,
             row.flags.diversity_rerank_enabled as i32,
             row.flags.source_quota_bonus_enabled as i32,
+            row.engine_index_empty as i32,
         ],
     )?;
     Ok(())

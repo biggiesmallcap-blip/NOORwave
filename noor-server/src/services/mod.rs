@@ -13,6 +13,7 @@ pub mod musicbrainz;
 pub mod neighbor_refresh;
 pub mod radio;
 pub mod radio_config;
+pub mod radio_similarity;
 pub mod rss_feeds;
 pub mod sportify;
 pub mod spotify;

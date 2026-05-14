@@ -61,6 +61,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                 let msg = match event {
                     AppEvent::PlaybackStateChanged => json!({"type": "playback_changed"}),
                     AppEvent::LibrarySynced => json!({"type": "library_synced"}),
+                    AppEvent::RadioSimilarityComputed { pairs } => json!({"type": "radio_similarity_computed", "pairs": pairs}),
                     AppEvent::MusicBrainzEnriched => json!({"type": "musicbrainz_enriched"}),
                     AppEvent::TrackChanged { track_id } => json!({"type": "track_changed", "track_id": track_id}),
                     AppEvent::SyncProgress { service, progress } => json!({"type": "sync_progress", "service": service, "progress": progress}),

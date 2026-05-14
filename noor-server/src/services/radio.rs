@@ -437,9 +437,19 @@ pub async fn orchestrate_song(
             None
         };
 
-        if let Err(err) =
-            db.with_conn(|conn| crate::services::radio_config::log_radio_diagnostics(conn, &diag))
-        {
+        if let Err(err) = db.with_conn(|conn| {
+            // EXISTS, not COUNT(*): this runs on every radio request, and a
+            // populated track_similarity table has hundreds of thousands of
+            // rows — we only need the empty/non-empty bit.
+            diag.engine_index_empty = conn
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM track_similarity)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            crate::services::radio_config::log_radio_diagnostics(conn, &diag)
+        }) {
             // Diagnostics failures should never break a radio request — log and move on.
             tracing::warn!(seed_track_id, error = %err, "failed to log radio diagnostics");
         }

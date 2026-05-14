@@ -377,6 +377,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/discovery/radio/compute",
             post(compute_radio_similarity),
         )
+        .route(
+            "/api/discovery/radio/status",
+            get(radio_similarity_status),
+        )
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
@@ -2296,30 +2300,51 @@ async fn get_radio_tracks(
 async fn compute_radio_similarity(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    // Clone the DB handle before spawning so we don't hold the RwLock during computation
+    let (db, event_tx, running) = {
+        let s = state.read().await;
+        (
+            s.db.clone(),
+            s.event_tx.clone(),
+            s.radio_similarity_running.clone(),
+        )
+    };
+
+    // Shared single-flight + isolated-connection rebuild path: a manual click
+    // and an auto-rebuild can never run the multi-minute job twice, and the
+    // job never holds the shared connection mutex.
+    if crate::services::radio_similarity::try_spawn_rebuild(db, event_tx, running) {
+        Ok(Json(json!({
+            "status": "computation_started",
+            "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+        })))
+    } else {
+        Ok(Json(json!({
+            "status": "already_running",
+            "message": "Similarity computation is already in progress."
+        })))
+    }
+}
+
+/// Status of the radio similarity index: row count + last-built timestamp.
+/// Powers the Settings "Build radio similarity index" panel — the frontend
+/// polls this after triggering a compute to detect completion.
+async fn radio_similarity_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let db = {
         let s = state.read().await;
         s.db.clone()
     };
-    tokio::spawn(async move {
-        tracing::info!(target: "noor.radio", "Starting track similarity computation...");
-        match db.with_conn(queries::compute_track_similarity) {
-            Ok(count) => {
-                tracing::info!(
-                    target: "noor.radio",
-                    count = count,
-                    "Track similarity computation complete"
-                );
-            }
-            Err(e) => {
-                tracing::error!(target: "noor.radio", "Similarity computation failed: {}", e);
-            }
-        }
-    });
-
+    let row_count = db
+        .with_conn(queries::count_track_similarity)
+        .unwrap_or(0);
+    let computed_at = db
+        .with_conn(queries::get_similarity_computed_at)
+        .ok()
+        .flatten();
     Ok(Json(json!({
-        "status": "computation_started",
-        "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+        "row_count": row_count,
+        "computed_at": computed_at,
     })))
 }
 
@@ -11978,6 +12003,7 @@ mod tests {
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            radio_similarity_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::load_or_generate(
