@@ -1965,7 +1965,7 @@ mod tests {
         // Manually invoke the inner machinery: pre-populate queue, then call
         // the rerank with a one-candidate pool. (Easier than coaxing the full
         // function into emitting the same setup.)
-        cands.extend(queue_already.clone().into_iter());
+        cands.extend(queue_already.clone());
         let queue = diversity_rerank(
             cands,
             &profile,
@@ -3436,12 +3436,13 @@ mod radio_diagnostic_harness {
                 cand.track_id,
                 normalize_for_dedup(&cand.artist_name, &cand.title),
             );
-            if let Some(pre) = pre_affinity.get(&key).copied() {
-                if cand.similarity_score > pre * 1.05 && cand.track_id > 0 {
-                    let cg = track_genres(&db, cand.track_id);
-                    if !cg.is_empty() && cg.intersection(&seed_genres).count() == 0 {
-                        h2_promoted += 1;
-                    }
+            if let Some(pre) = pre_affinity.get(&key).copied()
+                && cand.similarity_score > pre * 1.05
+                && cand.track_id > 0
+            {
+                let cg = track_genres(&db, cand.track_id);
+                if !cg.is_empty() && cg.intersection(&seed_genres).count() == 0 {
+                    h2_promoted += 1;
                 }
             }
         }

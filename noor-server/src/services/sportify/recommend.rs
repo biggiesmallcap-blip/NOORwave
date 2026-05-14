@@ -438,7 +438,7 @@ mod tests {
 
     fn open_test_db() -> Database {
         let db = Database::open_in_memory().expect("open memory db");
-        db.with_conn(|conn| schema::run_migrations(conn))
+        db.with_conn(schema::run_migrations)
             .expect("apply migrations");
         db
     }

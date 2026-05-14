@@ -1,15 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub host_mode: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self { host_mode: false }
-    }
 }
 
 fn config_path() -> PathBuf {
