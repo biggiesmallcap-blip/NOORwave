@@ -296,6 +296,8 @@ Created next to the executables on first run: `noor.db` (library + settings), `n
 
 The folder is fully relocatable - rename or move it to another drive and it keeps working.
 
+> Windows builds are currently unsigned. On some Windows 11 installs, Smart App Control may block `noor-server.exe`; if that happens, the app window can open but `127.0.0.1:3334` refuses the connection because the local server never started. Advanced workaround: download the source code and run `.\scripts\build-windows11-release.cmd`. This creates `dist\NOORwave-win11\NOORwave.exe`; the result is still unsigned, so strict Smart App Control setups may still block it.
+
 ---
 
 ### macOS
@@ -714,7 +716,8 @@ A convention so the bug list, roadmap, and limitations don't drift. Future-me, t
 2. For each closed bug since the last tag: remove the row from **Known Bugs**, add a bullet to **What's already shipped** with `(vX.Y.Z)`.
 3. For each shipped roadmap item: remove from **Up next**, add to **What's already shipped** with `(vX.Y.Z)`.
 4. Adjust **Current Limitations** as constraints change - when ACRCloud is wired, move it from "Functionality not yet wired" into a Features bullet; when Linux gets a bit-perfect output path, qualify the WASAPI line; etc.
-5. After `git tag` + `git push --tags`: `gh release edit vX.Y.Z` to prepend a "What's new" section to the auto-generated release body. CI only emits portable-build boilerplate.
+5. Keep the Windows 11 Smart App Control note in the release boilerplate. If Windows signing is added later, update both the release workflow body and the Windows section above.
+6. After `git tag` + `git push --tags`: `gh release edit vX.Y.Z` to prepend a "What's new" section to the auto-generated release body. CI only emits portable-build boilerplate.
 
 ### Verification before declaring a section accurate
 

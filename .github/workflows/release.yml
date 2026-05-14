@@ -6,7 +6,7 @@ name: Release
 #   2. After CI publishes, run `gh release edit vX.Y.Z` to prepend the
 #      "What's new" changelog (CI only writes the portable-build boilerplate).
 #   3. When editing this file, audit every `uses:` for Node-version deprecations.
-#      Dependabot opens weekly grouped PRs (.github/dependabot.yml) — review and merge.
+#      Dependabot opens weekly grouped PRs (.github/dependabot.yml) - review and merge.
 #   4. SHA-pinned action refs MUST keep their `# vN.N.N` trailing comment so
 #      humans can read intent without dereferencing the SHA.
 
@@ -30,7 +30,7 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            **Portable builds — no install required. Unzip/untar anywhere and run.**
+            **Portable builds - no install required. Unzip/untar anywhere and run.**
 
             | Platform | File | Launch |
             |---|---|---|
@@ -40,9 +40,22 @@ jobs:
             | Linux x64 | `NOORwave-vX.X.X-linux-x64.tar.gz` | `./NOORwave` |
 
             ### Contents (all platforms)
-            - `NOORwave` / `NOORwave.exe` — app window + system tray
-            - `noor-server` / `noor-server.exe` — local music server
-            - `www/` — bundled UI (do not delete)
+            - `NOORwave` / `NOORwave.exe` - app window + system tray
+            - `noor-server` / `noor-server.exe` - local music server
+            - `www/` - bundled UI (do not delete)
+
+            ### Windows 11 note
+            Windows builds are currently unsigned. On some Windows 11 installs,
+            Smart App Control may block `noor-server.exe`; if that happens,
+            the app window can open but `127.0.0.1:3334` will refuse the
+            connection because the local server never started.
+
+            Advanced workaround: build locally from source with:
+            ```powershell
+            .\scripts\build-windows11-release.cmd
+            ```
+            This creates `dist\NOORwave-win11\NOORwave.exe`. The result is
+            still unsigned, so strict Smart App Control setups may still block it.
 
             ### macOS note
             First launch may be blocked by Gatekeeper. To clear it:
