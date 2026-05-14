@@ -12007,6 +12007,132 @@ mod tests {
         (db, db_path)
     }
 
+    fn seed_spotify_stats_track(
+        db: &Database,
+        album_id: Option<i64>,
+        title: &str,
+        isrc: &str,
+        spotify_track_id: &str,
+        playcount: i64,
+    ) {
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (42, 'Stats Artist')",
+                [],
+            )?;
+            if let Some(album_id) = album_id {
+                conn.execute(
+                    "INSERT INTO albums (id, title, artist_id, source)
+                     VALUES (?1, 'Stats Album', 42, 'tidal')",
+                    rusqlite::params![album_id],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, album_id, duration_ms, isrc, source, fidelity_score
+                 ) VALUES (77, ?1, 42, ?2, 180000, ?3, 'tidal_stream', 0)",
+                rusqlite::params![title, album_id, isrc],
+            )?;
+
+            let track = crate::services::sportify::models::SportifyTrack {
+                id: Some(spotify_track_id.to_string()),
+                playcount: Some(playcount),
+                external_ids: Some(crate::services::sportify::models::SportifyExternalIds {
+                    isrc: Some(isrc.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            crate::services::sportify::stats::write_track_playcount(conn, &track);
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("seed spotify stats track");
+    }
+
+    #[tokio::test]
+    async fn album_spotify_stats_returns_cached_playcounts() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_spotify_stats_track(
+            &db,
+            Some(9),
+            "Album Stats Track",
+            "ISRCALBUMSTATS",
+            "sp-album-stats",
+            1_234,
+        );
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums/9/spotify-stats")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body bytes"),
+        )
+        .expect("json body");
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0]["isrc"], "ISRCALBUMSTATS");
+        assert_eq!(tracks[0]["title"], "Album Stats Track");
+        assert_eq!(tracks[0]["playcount"], 1_234);
+        assert!(body["monthly_listeners"].is_null());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn artist_spotify_stats_returns_cached_playcounts() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_spotify_stats_track(
+            &db,
+            None,
+            "Artist Stats Track",
+            "ISRCARTISTSTATS",
+            "sp-artist-stats",
+            5_678,
+        );
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/artists/42/spotify-stats")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body bytes"),
+        )
+        .expect("json body");
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0]["isrc"], "ISRCARTISTSTATS");
+        assert_eq!(tracks[0]["title"], "Artist Stats Track");
+        assert_eq!(tracks[0]["playcount"], 5_678);
+        assert!(body["monthly_listeners"].is_null());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     fn seed_basic_tracks(db: &Database) {
         db.with_conn(|conn| {
             conn.execute(

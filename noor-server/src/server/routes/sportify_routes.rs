@@ -108,7 +108,7 @@ pub(super) async fn sportify_discovery_track(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, normalize};
+    use crate::services::sportify::{cache as sp_cache, normalize, stats};
 
     let id = spotify_id.trim();
     if id.is_empty() {
@@ -147,13 +147,17 @@ pub(super) async fn sportify_discovery_track(
             })?;
             db.with_conn(|conn| {
                 sp_cache::put_track_meta(conn, id, &fetched)?;
-                crate::services::sportify::stats::write_track_playcount(conn, &fetched);
                 Ok::<_, anyhow::Error>(())
             })
             .map_err(super::internal)?;
             fetched
         }
     };
+    db.with_conn(|conn| {
+        stats::write_track_playcount(conn, &track);
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(super::internal)?;
 
     let mut row = normalize::track_from_sportify(&track, "sportify_track");
     db.with_conn(|conn| {
@@ -168,7 +172,7 @@ pub(super) async fn sportify_discovery_album(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, normalize};
+    use crate::services::sportify::{cache as sp_cache, normalize, stats};
 
     let id = spotify_id.trim();
     if id.is_empty() {
@@ -207,13 +211,17 @@ pub(super) async fn sportify_discovery_album(
             })?;
             db.with_conn(|conn| {
                 sp_cache::put_album_meta(conn, id, &fetched)?;
-                crate::services::sportify::stats::write_track_playcounts(conn, &fetched.tracks);
                 Ok::<_, anyhow::Error>(())
             })
             .map_err(super::internal)?;
             fetched
         }
     };
+    db.with_conn(|conn| {
+        stats::write_track_playcounts(conn, &album.tracks);
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(super::internal)?;
 
     let mut row = normalize::album_from_sportify(&album, "sportify_album");
     let pending_ids = super::eager_and_lazy_resolve_for_list(&state, &album.tracks).await;
@@ -232,7 +240,7 @@ pub(super) async fn sportify_discovery_playlist(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, normalize};
+    use crate::services::sportify::{cache as sp_cache, normalize, stats};
 
     let id = spotify_id.trim();
     if id.is_empty() {
@@ -271,13 +279,17 @@ pub(super) async fn sportify_discovery_playlist(
             })?;
             db.with_conn(|conn| {
                 sp_cache::put_playlist_meta(conn, id, &fetched)?;
-                crate::services::sportify::stats::write_track_playcounts(conn, &fetched.tracks);
                 Ok::<_, anyhow::Error>(())
             })
             .map_err(super::internal)?;
             fetched
         }
     };
+    db.with_conn(|conn| {
+        stats::write_track_playcounts(conn, &playlist.tracks);
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(super::internal)?;
 
     let mut row = normalize::playlist_from_sportify(&playlist, "sportify_playlist");
     db.with_conn(|conn| {
@@ -296,7 +308,7 @@ pub(super) async fn sportify_discovery_artist(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use crate::services::sportify::{cache as sp_cache, normalize};
+    use crate::services::sportify::{cache as sp_cache, normalize, stats};
 
     let id = spotify_id.trim();
     if id.is_empty() {
@@ -335,13 +347,17 @@ pub(super) async fn sportify_discovery_artist(
             })?;
             db.with_conn(|conn| {
                 sp_cache::put_artist_meta(conn, id, &fetched)?;
-                crate::services::sportify::stats::write_artist_monthly_listeners(conn, &fetched);
                 Ok::<_, anyhow::Error>(())
             })
             .map_err(super::internal)?;
             fetched
         }
     };
+    db.with_conn(|conn| {
+        stats::write_artist_monthly_listeners(conn, &artist);
+        Ok::<_, anyhow::Error>(())
+    })
+    .map_err(super::internal)?;
 
     let row = normalize::artist_from_sportify(&artist);
     Ok(Json(serde_json::to_value(row).unwrap_or(json!({}))))
