@@ -5,7 +5,7 @@
 //! deserialize permissively: every nested struct uses `#[serde(default)]`
 //! and unknown fields are kept in `extra` for forward compatibility.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -68,7 +68,11 @@ pub struct SportifyTrack {
     /// string only. Consumers go through [`SportifyTrack::primary_artist`].
     #[serde(default)]
     pub artist: Option<String>,
-    #[serde(default)]
+    /// Upstream's `/api/artist/:id/top-tracks` response ships `album` as a
+     /// flat string (e.g. `"album": "Hot Pink"`); every other endpoint sends
+     /// the structured `SportifyAlbumRef` shape. Without this custom path the
+     /// whole `Vec<SportifyTrack>` deserialization fails at the first row.
+    #[serde(default, deserialize_with = "deserialize_album_field")]
     pub album: Option<SportifyAlbumRef>,
     /// Top-level thumbnail URL (track detail + playlist track shape). Album
     /// artwork lives here when there's no nested `album.images`.
@@ -295,6 +299,27 @@ impl SportifyPlaylist {
     }
 }
 
+fn deserialize_album_field<'de, D>(deserializer: D) -> Result<Option<SportifyAlbumRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Name(String),
+        Object(SportifyAlbumRef),
+    }
+    let opt = Option::<Repr>::deserialize(deserializer)?;
+    Ok(opt.and_then(|r| match r {
+        Repr::Name(s) if s.trim().is_empty() => None,
+        Repr::Name(s) => Some(SportifyAlbumRef {
+            name: Some(s),
+            ..Default::default()
+        }),
+        Repr::Object(o) => Some(o),
+    }))
+}
+
 fn extra_string(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
     extra.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
@@ -414,6 +439,65 @@ mod tests {
             nested.owner.as_ref().and_then(|o| o.display_name()),
             Some("Bob"),
         );
+    }
+
+    /// Regression: upstream `/api/artist/:id/top-tracks` ships every track
+    /// with `"album"` as a flat string, not the structured
+    /// `SportifyAlbumRef`. Before the custom deserializer the whole
+    /// `Vec<SportifyTrack>` failed at the first row and worldPlayCount
+    /// writeback never ran.
+    #[test]
+    fn sportify_top_tracks_parses_flat_album_string() {
+        let payload = r#"[
+            {
+                "id": "3Dv1eDb0MEgF93GpLXlucZ",
+                "title": "Say So",
+                "artist": "Doja Cat",
+                "album": "Hot Pink",
+                "thumbnail": "https://example.com/a.jpg",
+                "duration_ms": 237894,
+                "explicit": true,
+                "url": "https://open.spotify.com/track/3Dv1eDb0MEgF93GpLXlucZ"
+            },
+            {
+                "id": "abc",
+                "title": "Other",
+                "artist": "Doja Cat",
+                "album": "",
+                "duration_ms": 100000
+            }
+        ]"#;
+        let tracks: Vec<SportifyTrack> =
+            serde_json::from_str(payload).expect("top-tracks vec parse");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name.as_deref(), Some("Say So"));
+        assert_eq!(
+            tracks[0]
+                .album
+                .as_ref()
+                .and_then(|a| a.name.as_deref()),
+            Some("Hot Pink"),
+        );
+        // Empty string collapses to None so callers don't end up with a
+        // SportifyAlbumRef whose name is "".
+        assert!(tracks[1].album.is_none());
+    }
+
+    /// Structured `album` objects (track-detail, album-tracks, search) must
+    /// keep parsing. Locks in that the custom deserializer didn't break the
+    /// existing path.
+    #[test]
+    fn sportify_top_tracks_still_accepts_structured_album() {
+        let payload = r#"{
+            "id": "t",
+            "title": "T",
+            "album": { "id": "alb1", "name": "Hot Pink", "total_tracks": 12 }
+        }"#;
+        let track: SportifyTrack = serde_json::from_str(payload).expect("structured album");
+        let album = track.album.expect("album present");
+        assert_eq!(album.id.as_deref(), Some("alb1"));
+        assert_eq!(album.name.as_deref(), Some("Hot Pink"));
+        assert_eq!(album.total_tracks, Some(12));
     }
 
     #[test]
