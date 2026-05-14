@@ -5,7 +5,7 @@
 //! deserialize permissively: every nested struct uses `#[serde(default)]`
 //! and unknown fields are kept in `extra` for forward compatibility.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -68,7 +68,11 @@ pub struct SportifyTrack {
     /// string only. Consumers go through [`SportifyTrack::primary_artist`].
     #[serde(default)]
     pub artist: Option<String>,
-    #[serde(default)]
+    /// Upstream's `/api/artist/:id/top-tracks` response ships `album` as a
+     /// flat string (e.g. `"album": "Hot Pink"`); every other endpoint sends
+     /// the structured `SportifyAlbumRef` shape. Without this custom path the
+     /// whole `Vec<SportifyTrack>` deserialization fails at the first row.
+    #[serde(default, deserialize_with = "deserialize_album_field")]
     pub album: Option<SportifyAlbumRef>,
     /// Top-level thumbnail URL (track detail + playlist track shape). Album
     /// artwork lives here when there's no nested `album.images`.
@@ -86,9 +90,14 @@ pub struct SportifyTrack {
     pub preview_url: Option<String>,
     #[serde(default)]
     pub popularity: Option<i32>,
-    #[serde(default, rename = "playcount")]
+    #[serde(
+        default,
+        rename = "playcount",
+        alias = "play_count",
+        alias = "playCount"
+    )]
     pub playcount: Option<i64>,
-    #[serde(default, rename = "external_ids")]
+    #[serde(default, rename = "external_ids", alias = "externalIds")]
     pub external_ids: Option<SportifyExternalIds>,
     #[serde(default, rename = "external_urls")]
     pub external_urls: HashMap<String, String>,
@@ -146,7 +155,7 @@ pub struct SportifyAlbum {
     pub genres: Vec<String>,
     #[serde(default)]
     pub tracks: Vec<SportifyTrack>,
-    #[serde(default, rename = "external_ids")]
+    #[serde(default, rename = "external_ids", alias = "externalIds")]
     pub external_ids: Option<SportifyExternalIds>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -164,7 +173,7 @@ pub struct SportifyArtist {
     pub images: Vec<SportifyImage>,
     #[serde(default)]
     pub popularity: Option<i32>,
-    #[serde(default, rename = "monthly_listeners")]
+    #[serde(default, rename = "monthly_listeners", alias = "monthlyListeners")]
     pub monthly_listeners: Option<i64>,
     #[serde(default)]
     pub followers: Option<i64>,
@@ -290,6 +299,27 @@ impl SportifyPlaylist {
     }
 }
 
+fn deserialize_album_field<'de, D>(deserializer: D) -> Result<Option<SportifyAlbumRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Name(String),
+        Object(SportifyAlbumRef),
+    }
+    let opt = Option::<Repr>::deserialize(deserializer)?;
+    Ok(opt.and_then(|r| match r {
+        Repr::Name(s) if s.trim().is_empty() => None,
+        Repr::Name(s) => Some(SportifyAlbumRef {
+            name: Some(s),
+            ..Default::default()
+        }),
+        Repr::Object(o) => Some(o),
+    }))
+}
+
 fn extra_string(extra: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
     extra.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
@@ -361,6 +391,35 @@ mod tests {
         assert_eq!(track.primary_artist(), Some("Structured Name"));
     }
 
+    #[test]
+    fn deserializes_stats_field_aliases() {
+        let track: SportifyTrack = serde_json::from_str(
+            r#"{
+                "id": "track1",
+                "playCount": 123456,
+                "externalIds": { "isrc": "USRC17607839" }
+            }"#,
+        )
+        .expect("track stats aliases");
+        assert_eq!(track.playcount, Some(123456));
+        assert_eq!(
+            track
+                .external_ids
+                .as_ref()
+                .and_then(|ids| ids.isrc.as_deref()),
+            Some("USRC17607839"),
+        );
+
+        let artist: SportifyArtist = serde_json::from_str(
+            r#"{
+                "id": "artist1",
+                "monthlyListeners": 47000000
+            }"#,
+        )
+        .expect("artist stats aliases");
+        assert_eq!(artist.monthly_listeners, Some(47000000));
+    }
+
     /// Playlist owner can be a plain string ("Lofi Girl") or a nested
     /// `{ id, display_name }`. Both must round-trip through the enum.
     #[test]
@@ -380,6 +439,65 @@ mod tests {
             nested.owner.as_ref().and_then(|o| o.display_name()),
             Some("Bob"),
         );
+    }
+
+    /// Regression: upstream `/api/artist/:id/top-tracks` ships every track
+    /// with `"album"` as a flat string, not the structured
+    /// `SportifyAlbumRef`. Before the custom deserializer the whole
+    /// `Vec<SportifyTrack>` failed at the first row and worldPlayCount
+    /// writeback never ran.
+    #[test]
+    fn sportify_top_tracks_parses_flat_album_string() {
+        let payload = r#"[
+            {
+                "id": "3Dv1eDb0MEgF93GpLXlucZ",
+                "title": "Say So",
+                "artist": "Doja Cat",
+                "album": "Hot Pink",
+                "thumbnail": "https://example.com/a.jpg",
+                "duration_ms": 237894,
+                "explicit": true,
+                "url": "https://open.spotify.com/track/3Dv1eDb0MEgF93GpLXlucZ"
+            },
+            {
+                "id": "abc",
+                "title": "Other",
+                "artist": "Doja Cat",
+                "album": "",
+                "duration_ms": 100000
+            }
+        ]"#;
+        let tracks: Vec<SportifyTrack> =
+            serde_json::from_str(payload).expect("top-tracks vec parse");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name.as_deref(), Some("Say So"));
+        assert_eq!(
+            tracks[0]
+                .album
+                .as_ref()
+                .and_then(|a| a.name.as_deref()),
+            Some("Hot Pink"),
+        );
+        // Empty string collapses to None so callers don't end up with a
+        // SportifyAlbumRef whose name is "".
+        assert!(tracks[1].album.is_none());
+    }
+
+    /// Structured `album` objects (track-detail, album-tracks, search) must
+    /// keep parsing. Locks in that the custom deserializer didn't break the
+    /// existing path.
+    #[test]
+    fn sportify_top_tracks_still_accepts_structured_album() {
+        let payload = r#"{
+            "id": "t",
+            "title": "T",
+            "album": { "id": "alb1", "name": "Hot Pink", "total_tracks": 12 }
+        }"#;
+        let track: SportifyTrack = serde_json::from_str(payload).expect("structured album");
+        let album = track.album.expect("album present");
+        assert_eq!(album.id.as_deref(), Some("alb1"));
+        assert_eq!(album.name.as_deref(), Some("Hot Pink"));
+        assert_eq!(album.total_tracks, Some(12));
     }
 
     #[test]

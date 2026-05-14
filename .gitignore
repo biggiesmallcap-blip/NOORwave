@@ -61,3 +61,8 @@ docs/assets/gif/
 # Asset-pack swap backups — pre-swap copies kept on disk for reference
 frontend/static/svg_old/
 noor-app/icons_old/
+
+# repowise API keys (local)
+.repowise/
+.repowise/.env
+.mcp.json

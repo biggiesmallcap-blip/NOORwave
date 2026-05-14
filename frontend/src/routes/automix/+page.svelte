@@ -41,6 +41,7 @@
 		buildForecastRows,
 		countForecastRows,
 		formatFeatureSummary,
+		invalidateCacheForTrack,
 		type AutomixForecastRow
 	} from './automix_diagnostics';
 	import type { Snapshot } from './$types';
@@ -60,13 +61,32 @@
 		}
 	};
 
+	function handleDspUpdated(event: Event) {
+		const trackId = (event as CustomEvent<{ trackId: number }>).detail?.trackId;
+		if (typeof trackId !== 'number') return;
+		invalidateCacheForTrack(featureCache, trackId);
+		inflight.delete(trackId);
+		requestFeatures(trackId);
+		featureCacheVersion++;
+		void api
+			.getAudioFeaturesStats()
+			.then((res) => {
+				audioStats = res.stats ?? audioStats;
+			})
+			.catch(() => {});
+	}
+
 	onMount(() => {
 		void refreshPlaybackState();
 		void loadControlData();
 		const unsub = crossfadeMs.subscribe((v) => {
 			draftCrossfade = v;
 		});
-		return unsub;
+		window.addEventListener('noor:dsp_updated', handleDspUpdated);
+		return () => {
+			unsub();
+			window.removeEventListener('noor:dsp_updated', handleDspUpdated);
+		};
 	});
 
 	async function loadControlData() {
@@ -103,6 +123,24 @@
 
 	function applyAutomix(enabled: boolean) {
 		return runSaving(() => setPlayerAutomixEnabled(enabled, draftCrossfade));
+	}
+
+	let bpmOverrideSaving = $state(false);
+
+	async function applyBpmMultiplier(factor: number) {
+		const trackId = $currentTrack?.id;
+		if (!trackId || !$currentTrackFeatures) return;
+		bpmOverrideSaving = true;
+		try {
+			await api.setBpmMultiplier(trackId, factor);
+			// The backend emits TrackAnalyzed → noor:dsp_updated, which the
+			// player store already listens for and refetches features. Nothing
+			// else to do here.
+		} catch (e) {
+			errorMsg = `BPM override failed: ${String(e)}`;
+		} finally {
+			bpmOverrideSaving = false;
+		}
 	}
 
 	function toggleDiscoverNew() {
@@ -312,6 +350,26 @@
 				<p>{$currentTrack?.artist_name ?? 'Start playback to seed Automix.'}</p>
 				<div class="signal-strip">
 					<span>{currentFeatureSummary}</span>
+					{#if $currentTrackFeatures && $currentTrack}
+						<button
+							type="button"
+							class="bpm-tweak"
+							title="Halve the detected BPM (for doubled-tempo detections)"
+							disabled={bpmOverrideSaving}
+							onclick={() => applyBpmMultiplier(0.5)}
+						>
+							÷2
+						</button>
+						<button
+							type="button"
+							class="bpm-tweak"
+							title="Double the detected BPM (for half-time detections)"
+							disabled={bpmOverrideSaving}
+							onclick={() => applyBpmMultiplier(2.0)}
+						>
+							×2
+						</button>
+					{/if}
 					<span>{$currentStreamDisplay?.audio_quality ?? 'Stream idle'}</span>
 					<span>{runtime?.device_name ?? (runtimeAvailable ? 'Runtime ready' : 'Runtime offline')}</span>
 				</div>
@@ -634,6 +692,28 @@
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
+	}
+
+	.bpm-tweak {
+		padding: var(--space-1) var(--space-2);
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: rgba(255, 255, 255, 0.035);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		cursor: pointer;
+		transition: background-color 120ms ease, color 120ms ease;
+	}
+
+	.bpm-tweak:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.08);
+		color: var(--text-primary);
+	}
+
+	.bpm-tweak:disabled {
+		cursor: progress;
+		opacity: 0.6;
 	}
 
 	.radar-stats span,

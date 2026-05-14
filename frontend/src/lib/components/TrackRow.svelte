@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatTrackDuration } from '$lib/utils/format';
+	import { formatCompactCount, formatTrackDuration } from '$lib/utils/format';
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import {
 		buildTrackMenu,
@@ -36,7 +36,8 @@
 		onRowClick,
 		menuOptions,
 		selected = false,
-		onSelect
+		onSelect,
+		worldPlayCount = null
 	}: {
 		track: TrackInput;
 		variant: TrackRowVariant;
@@ -50,6 +51,7 @@
 		menuOptions?: BuildTrackMenuOptions;
 		selected?: boolean;
 		onSelect?: (e: MouseEvent | KeyboardEvent) => void;
+		worldPlayCount?: number | null;
 	} = $props();
 
 	let playable = $derived(canPlayTrack(track));
@@ -173,7 +175,20 @@
 			{/if}
 		</div>
 		{#if showPlayCount}
-			<span class="cell-plays">{(track.play_count ?? 0).toLocaleString()}</span>
+			<span
+				class="cell-plays"
+				title={worldPlayCount != null
+					? `${(track.play_count ?? 0).toLocaleString()} local plays, ${worldPlayCount.toLocaleString()} Spotify plays`
+					: `${(track.play_count ?? 0).toLocaleString()} local plays`}
+			>
+				<span class="play-count-local">
+					<span>{(track.play_count ?? 0).toLocaleString()}</span>
+					<span class="play-count-local-label">local</span>
+				</span>
+				{#if worldPlayCount != null}
+					<span class="play-count-world">{formatCompactCount(worldPlayCount)} world</span>
+				{/if}
+			</span>
 		{/if}
 		<div class="cell-actions">
 			<button
@@ -255,7 +270,20 @@
 			{/if}
 		</div>
 		{#if showPlayCount}
-			<span class="cell-plays">{(track.play_count ?? 0).toLocaleString()}</span>
+			<span
+				class="cell-plays"
+				title={worldPlayCount != null
+					? `${(track.play_count ?? 0).toLocaleString()} local plays, ${worldPlayCount.toLocaleString()} Spotify plays`
+					: `${(track.play_count ?? 0).toLocaleString()} local plays`}
+			>
+				<span class="play-count-local">
+					<span>{(track.play_count ?? 0).toLocaleString()}</span>
+					<span class="play-count-local-label">local</span>
+				</span>
+				{#if worldPlayCount != null}
+					<span class="play-count-world">{formatCompactCount(worldPlayCount)} world</span>
+				{/if}
+			</span>
 		{/if}
 		<div class="cell-actions">
 			<button
@@ -411,7 +439,7 @@
 
 	/* ── numbered (artist popular list) ─────────────────────────── */
 	.track-row.numbered {
-		grid-template-columns: 32px 42px 1fr 90px auto 60px;
+		grid-template-columns: 32px 42px 1fr 150px auto 60px;
 		gap: 14px;
 		padding: 8px 12px;
 	}
@@ -444,7 +472,7 @@
 
 	/* ── indexed (album track list) ──────────────────────────────── */
 	.track-row.indexed {
-		grid-template-columns: 40px 1fr 80px auto 64px;
+		grid-template-columns: 40px 1fr 132px auto 64px;
 	}
 
 	.track-row.indexed .cell-num {
@@ -572,6 +600,30 @@
 		font-size: var(--font-size-sm);
 		text-align: right;
 		font-variant-numeric: tabular-nums;
+		display: inline-flex;
+		align-items: baseline;
+		justify-content: flex-end;
+		gap: 6px;
+		white-space: nowrap;
+		min-width: 0;
+	}
+
+	.play-count-world {
+		color: color-mix(in srgb, var(--service-spotify) 90%, var(--text-secondary));
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.play-count-local,
+	.play-count-world {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 3px;
+	}
+
+	.play-count-local-label {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
 	}
 
 	.cell-duration {

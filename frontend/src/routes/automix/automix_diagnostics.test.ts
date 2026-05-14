@@ -6,6 +6,7 @@ import {
 	countForecastRows,
 	energyDeltaLabel,
 	formatFeatureSummary,
+	invalidateCacheForTrack,
 	type AutomixFeatureLookup
 } from './automix_diagnostics';
 
@@ -163,5 +164,30 @@ describe('automix diagnostics', () => {
 		expect(energyDeltaLabel(features(1, { energy: 0.4 }), features(2, { energy: 0.72 }))).toBe(
 			'+32% energy'
 		);
+	});
+});
+
+describe('invalidateCacheForTrack', () => {
+	it('removes the entry for a known track and reports true', () => {
+		const cache = new Map<number, AudioDspFeatures | null>([
+			[1, null],
+			[2, { bpm: 120, energy: 0.5 } as unknown as AudioDspFeatures]
+		]);
+		const changed = invalidateCacheForTrack(cache, 2);
+		expect(changed).toBe(true);
+		expect(cache.has(2)).toBe(false);
+		expect(cache.has(1)).toBe(true);
+	});
+
+	it('returns false for an unknown track and leaves the cache alone', () => {
+		const cache = new Map<number, AudioDspFeatures | null>([[1, null]]);
+		const changed = invalidateCacheForTrack(cache, 99);
+		expect(changed).toBe(false);
+		expect(cache.has(1)).toBe(true);
+	});
+
+	it('returns false when the cache is empty', () => {
+		const cache = new Map<number, AudioDspFeatures | null>();
+		expect(invalidateCacheForTrack(cache, 42)).toBe(false);
 	});
 });

@@ -50,6 +50,11 @@ strsim = "0.11"
 
 # Audio analysis
 rustfft = "6"
+aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "static"] }
+# Vendored from https://github.com/creightonlinza/madmom-beats-port — Rust port
+# of madmom's RNN beat tracker + DBN downbeat decoder. Code is MIT/Apache, the
+# BLSTM model weights under vendor/madmom_beats_port_core/models/ are CC BY-NC-SA 4.0.
+madmom_beats_port_core = { path = "vendor/madmom_beats_port_core" }
 num-complex = "0.4"
 hmac = "0.12"
 sha1 = "0.10"

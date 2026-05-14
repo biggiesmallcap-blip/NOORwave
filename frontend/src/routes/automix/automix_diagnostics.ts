@@ -171,3 +171,18 @@ export function automixHealth(input: AutomixHealthInput): AutomixHealth {
 
 	return { status: 'ready', label: 'Ready', reasons: ['Automix has seed, queue, DSP, and runtime data'] };
 }
+
+/**
+ * Drop the cached features entry for a track. Returned boolean lets the caller
+ * decide whether to refetch + bump a reactivity counter; an unknown trackId is
+ * a no-op (the WS event may fire for a track the cockpit isn't currently
+ * rendering features for).
+ */
+export function invalidateCacheForTrack(
+	cache: Map<number, AudioDspFeatures | null>,
+	trackId: number
+): boolean {
+	if (!cache.has(trackId)) return false;
+	cache.delete(trackId);
+	return true;
+}

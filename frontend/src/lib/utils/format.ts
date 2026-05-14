@@ -253,6 +253,15 @@ export function formatCount(value: number | null | undefined): string {
 	return Math.round(value).toLocaleString();
 }
 
+export function formatCompactCount(value: number | null | undefined): string {
+	if (isMissing(value)) return EMPTY;
+	const rounded = Math.round(value);
+	if (rounded >= 1_000_000_000) return `${(rounded / 1_000_000_000).toFixed(1)}B`;
+	if (rounded >= 1_000_000) return `${(rounded / 1_000_000).toFixed(1)}M`;
+	if (rounded >= 1_000) return `${(rounded / 1_000).toFixed(1)}K`;
+	return rounded.toLocaleString();
+}
+
 /** Signed tilt → "+2.3" / "-1.1" (one decimal, always signed). Used for BASS/TREBLE TILT. */
 export function formatTilt(value: number | null | undefined): string {
 	if (isMissing(value)) return EMPTY;

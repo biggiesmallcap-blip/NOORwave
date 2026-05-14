@@ -11,6 +11,7 @@
 import { describe, expect, test } from 'vitest';
 import {
 	formatBpm,
+	formatCompactCount,
 	formatCount,
 	formatDate,
 	formatDateShort,
@@ -72,6 +73,15 @@ describe('formatDuration', () => {
 });
 
 // ─── formatPercent ───────────────────────────────────────────────────────────
+
+describe('formatCompactCount', () => {
+	test('renders large play counts with compact suffixes', () => {
+		expect(formatCompactCount(1_250_000_000)).toBe('1.3B');
+		expect(formatCompactCount(12_400_000)).toBe('12.4M');
+		expect(formatCompactCount(12_400)).toBe('12.4K');
+		expect(formatCompactCount(999)).toBe('999');
+	});
+});
 
 describe('formatPercent', () => {
 	test('decimals: 0 rounds with toFixed', () => {

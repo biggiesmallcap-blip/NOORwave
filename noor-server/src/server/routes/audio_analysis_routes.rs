@@ -254,3 +254,86 @@ pub(super) async fn reanalyze_stale_tracks(
         }
     })))
 }
+
+#[derive(Deserialize)]
+pub(super) struct BpmMultiplierRequest {
+    factor: f64,
+}
+
+/// POST /api/tracks/{id}/bpm-multiplier — manual BPM override
+///
+/// Body: `{ "factor": 0.5 }` to halve, `{ "factor": 2.0 }` to double, or any
+/// other positive multiplier. Updates `audio_dsp_features.bpm` in place,
+/// sets `manual_override = 1` so future auto-analysis runs leave it alone,
+/// and broadcasts `TrackAnalyzed` so any connected client refreshes its
+/// cached features.
+pub(super) async fn set_bpm_multiplier(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<BpmMultiplierRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    if !payload.factor.is_finite() || payload.factor <= 0.0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let (db, event_tx) = {
+        let s = state.read().await;
+        (s.db.clone(), s.event_tx.clone())
+    };
+
+    let current_bpm: Option<f64> = db
+        .with_conn(|conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT bpm FROM audio_dsp_features WHERE track_id = ?1",
+                rusqlite::params![id],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+            .map(|opt| opt.flatten())
+        })
+        .map_err(|e| {
+            tracing::warn!(track_id = id, "bpm-multiplier lookup failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(current_bpm) = current_bpm else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let new_bpm = current_bpm * payload.factor;
+    if !new_bpm.is_finite() || !(15.0..=400.0).contains(&new_bpm) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE audio_dsp_features SET bpm = ?1, manual_override = 1 WHERE track_id = ?2",
+            rusqlite::params![new_bpm, id],
+        )
+        .map_err(anyhow::Error::from)
+    })
+    .map_err(|e| {
+        tracing::warn!(track_id = id, "bpm-multiplier UPDATE failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let _ = event_tx.send(crate::AppEvent::TrackAnalyzed { track_id: id });
+
+    tracing::info!(
+        track_id = id,
+        old_bpm = current_bpm,
+        new_bpm,
+        factor = payload.factor,
+        "manual BPM override applied"
+    );
+
+    Ok(Json(json!({
+        "ok": true,
+        "track_id": id,
+        "old_bpm": current_bpm,
+        "new_bpm": new_bpm,
+        "manual_override": true,
+    })))
+}

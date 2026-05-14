@@ -5,10 +5,11 @@ pub mod features;
 pub mod fingerprint;
 pub mod key;
 pub mod onset;
+pub mod queue_prescanner;
 pub mod scanner;
 pub mod tempo;
 
-pub const CURRENT_ANALYSIS_VERSION: &str = "v5";
+pub const CURRENT_ANALYSIS_VERSION: &str = "v9";
 
 /// Server-config key controlling whether the playback-driven actor analyses
 /// audio at all. Defaults to enabled. Stored in the `server_config` k/v table
@@ -23,8 +24,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
-
-use crate::db::queries;
 
 pub fn is_passive_enabled(conn: &Connection) -> bool {
     conn.query_row(
@@ -92,12 +91,25 @@ pub fn spawn_actor(
                 continue;
             }
 
-            // Skip tracks already on the current analysis version.
+            // Skip tracks already on the current analysis version OR with a
+            // manual BPM override (the user has spoken; don't clobber it).
             let already_analyzed = db
-                .with_conn(|conn| queries::get_audio_dsp_features(conn, track_id))
-                .ok()
-                .flatten()
-                .map(|f| f.analysis_version == CURRENT_ANALYSIS_VERSION)
+                .with_conn(|conn| -> anyhow::Result<bool> {
+                    use rusqlite::OptionalExtension;
+                    let row: Option<(String, i64)> = conn
+                        .query_row(
+                            "SELECT analysis_version, manual_override FROM audio_dsp_features WHERE track_id = ?1",
+                            rusqlite::params![track_id],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                        )
+                        .optional()?;
+                    Ok(match row {
+                        Some((v, override_flag)) => {
+                            override_flag != 0 || v == CURRENT_ANALYSIS_VERSION
+                        }
+                        None => false,
+                    })
+                })
                 .unwrap_or(false);
 
             let Some((samples, sample_rate)) = prepare_passive_analysis_job(
@@ -125,6 +137,7 @@ pub fn spawn_actor(
                     total: 0, // unknown total in passive mode
                     mode: "passive".to_string(),
                 });
+                let _ = event_tx.send(AppEvent::TrackAnalyzed { track_id });
             }
         }
 

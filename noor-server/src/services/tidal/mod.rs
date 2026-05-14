@@ -1,3 +1,4 @@
+pub mod artist_photo;
 pub mod auth;
 pub mod backoff;
 pub mod cache;

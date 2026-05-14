@@ -223,6 +223,14 @@ pub enum AppEvent {
     AudioAnalysisComplete {
         analyzed: u32,
     },
+    /// Emitted by the passive analysis actor once a single track's DSP
+    /// features have been written. Carries the track id so the frontend
+    /// can invalidate per-track caches (currentTrackFeatures, automix
+    /// featureCache) without a page reload. Distinct from the progress
+    /// counter event which is shape-stable for the status UI.
+    TrackAnalyzed {
+        track_id: i64,
+    },
     // ACRCloud events
     AcrCloudScanProgress {
         scanned: u32,
@@ -603,6 +611,9 @@ async fn main() -> Result<()> {
         sportify_cache_config,
         sportify_resolve_config,
     }));
+
+    services::audio_analysis::queue_prescanner::spawn(state.clone());
+    info!("Queue DSP prescanner spawned");
 
     // Check for auto-sync daily services and trigger sync if needed
     {

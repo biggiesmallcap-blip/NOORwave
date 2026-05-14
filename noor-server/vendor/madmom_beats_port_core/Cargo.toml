@@ -1,0 +1,18 @@
+[package]
+name = "madmom_beats_port_core"
+version = "4.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Vendored copy of madmom-beats-port core (https://github.com/creightonlinza/madmom-beats-port) — pin a specific upstream rev when updating."
+
+[dependencies]
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ndarray = "0.15"
+ndarray-npy = "0.8"
+rustfft = "6"
+
+[dev-dependencies]
+anyhow = "1"
+hound = "3"

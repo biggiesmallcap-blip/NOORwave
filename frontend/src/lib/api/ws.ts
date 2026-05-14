@@ -25,6 +25,7 @@ export type WsMessage =
 	| { type: 'training_progress'; stage: string; progress: number; message: string; current_track_id: number | null; current_track_title: string | null; tracks_done: number; tracks_total: number }
 	| { type: 'audio_analysis_progress'; analyzed: number; total: number; mode: string }
 	| { type: 'audio_analysis_complete'; analyzed: number }
+	| { type: 'track_analyzed'; track_id: number }
 	| { type: 'acrcloud_scan_progress'; scanned: number; total: number; matches_found: number }
 	| { type: 'acrcloud_scan_complete'; scanned: number; matches_found: number }
 	| { type: 'discovery_space_refresh_progress'; seed_track_id: number; stage: string; progress: number }
@@ -113,6 +114,13 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'audio_analysis_complete') {
 				handleAnalysisComplete(data);
+			}
+			if (data?.type === 'track_analyzed') {
+				window.dispatchEvent(
+					new CustomEvent('noor:dsp_updated', {
+						detail: { trackId: data.track_id }
+					})
+				);
 			}
 			if (data?.type === 'acrcloud_scan_progress') {
 				handleAcrCloudProgress(data);

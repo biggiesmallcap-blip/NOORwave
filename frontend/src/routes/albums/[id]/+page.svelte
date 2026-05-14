@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { Snapshot } from './$types';
-	import { api, type Track, type TidalDiscographyTrack, type TidalPlayable } from '$lib/api/client';
+	import { api, type Track, type TidalDiscographyTrack, type TidalPlayable, type SpotifyTrackStats } from '$lib/api/client';
 	import {
 		playAlbum,
 		playTidalAlbum,
@@ -35,6 +35,14 @@
 	let artistTracks = $state<Track[]>([]);
 	let moreLoading = $state(false);
 	let moreLoaded = $state(false);
+	let spotifyStats = $state<SpotifyTrackStats | null>(null);
+	let playcountByIsrc = $derived.by(() => {
+		const map = new Map<string, number>();
+		for (const t of spotifyStats?.tracks ?? []) {
+			if (t.playcount != null) map.set(t.isrc, t.playcount);
+		}
+		return map;
+	});
 
 	// Phase 5B — back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
@@ -67,6 +75,8 @@
 		artistTracks = [];
 		moreLoaded = false;
 		moreLoading = false;
+		spotifyStats = null;
+		void loadSpotifyStats(albumId);
 	});
 
 	$effect(() => {
@@ -86,6 +96,16 @@
 			console.error('Failed to load artist tracks', err);
 		} finally {
 			moreLoading = false;
+		}
+	}
+
+	async function loadSpotifyStats(albumIdToLoad: number) {
+		try {
+			const stats = await api.getAlbumSpotifyStats(albumIdToLoad);
+			if (albumId === albumIdToLoad) spotifyStats = stats;
+		} catch (err) {
+			console.error('Failed to load Spotify stats', err);
+			if (albumId === albumIdToLoad) spotifyStats = null;
 		}
 	}
 
@@ -326,6 +346,7 @@
 						isPlaying={$isPlaying}
 						showAlbum={false}
 						showPlayCount={true}
+						worldPlayCount={track.isrc ? playcountByIsrc.get(track.isrc) : null}
 						onRowClick={() => onRowClick(track)}
 						menuOptions={{ hideAlbumActions: true }}
 					/>
@@ -648,7 +669,7 @@
 
 	.track-header {
 		display: grid;
-		grid-template-columns: 40px 1fr 80px auto 64px;
+		grid-template-columns: 40px 1fr 132px auto 64px;
 		align-items: center;
 		gap: 14px;
 		padding: 6px 16px 10px;
@@ -677,7 +698,7 @@
 	   .track-header so it lines up cleanly with TrackRow above. */
 	.tidal-album-row {
 		display: grid;
-		grid-template-columns: 40px 1fr 80px auto 64px;
+		grid-template-columns: 40px 1fr 132px auto 64px;
 		align-items: center;
 		gap: 14px;
 		padding: 8px 16px;

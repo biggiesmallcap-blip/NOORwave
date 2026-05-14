@@ -68,6 +68,10 @@ pub async fn cached_track(
     id: &str,
 ) -> Result<SportifyTrack> {
     if let Some(t) = db.with_conn(|conn| sp_cache::get_track_meta(conn, cfg, id))? {
+        db.with_conn(|conn| {
+            stats::write_track_playcount(conn, &t);
+            Ok::<_, anyhow::Error>(())
+        })?;
         return Ok(t);
     }
     let fetched = client.track(id).await?;
@@ -88,6 +92,10 @@ pub async fn cached_album(
     id: &str,
 ) -> Result<SportifyAlbum> {
     if let Some(a) = db.with_conn(|conn| sp_cache::get_album_meta(conn, cfg, id))? {
+        db.with_conn(|conn| {
+            stats::write_track_playcounts(conn, &a.tracks);
+            Ok::<_, anyhow::Error>(())
+        })?;
         return Ok(a);
     }
     let fetched = client.album(id).await?;
@@ -106,6 +114,10 @@ pub async fn cached_artist(
     id: &str,
 ) -> Result<SportifyArtist> {
     if let Some(a) = db.with_conn(|conn| sp_cache::get_artist_meta(conn, cfg, id))? {
+        db.with_conn(|conn| {
+            stats::write_artist_monthly_listeners(conn, &a);
+            Ok::<_, anyhow::Error>(())
+        })?;
         return Ok(a);
     }
     let fetched = client.artist(id).await?;
@@ -124,6 +136,10 @@ pub async fn cached_playlist(
     id: &str,
 ) -> Result<SportifyPlaylist> {
     if let Some(p) = db.with_conn(|conn| sp_cache::get_playlist_meta(conn, cfg, id))? {
+        db.with_conn(|conn| {
+            stats::write_track_playcounts(conn, &p.tracks);
+            Ok::<_, anyhow::Error>(())
+        })?;
         return Ok(p);
     }
     let fetched = client.playlist(id).await?;
@@ -414,7 +430,38 @@ fn primary_artist_matches(track: &SportifyTrack, artist_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::sportify::models::{SportifyArtistRef, SportifyTrack};
+    use crate::db::schema;
+    use crate::services::sportify::client::SportifyClientConfig;
+    use crate::services::sportify::models::{
+        SportifyArtistRef, SportifyExternalIds, SportifyTrack,
+    };
+
+    fn open_test_db() -> Database {
+        let db = Database::open_in_memory().expect("open memory db");
+        db.with_conn(|conn| schema::run_migrations(conn))
+            .expect("apply migrations");
+        db
+    }
+
+    fn test_client() -> SportifyClient {
+        SportifyClient::new(SportifyClientConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            user_agent: "noor-test".to_string(),
+        })
+        .expect("sportify client")
+    }
+
+    fn track_with_stats(id: &str, isrc: &str, playcount: i64) -> SportifyTrack {
+        SportifyTrack {
+            id: Some(id.to_string()),
+            playcount: Some(playcount),
+            external_ids: Some(SportifyExternalIds {
+                isrc: Some(isrc.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn primary_artist_matches_case_insensitive() {
@@ -434,5 +481,78 @@ mod tests {
     fn primary_artist_matches_handles_no_artist() {
         let t = SportifyTrack::default();
         assert!(!primary_artist_matches(&t, "Daft Punk"));
+    }
+
+    #[tokio::test]
+    async fn cached_spotify_metadata_backfills_stats_tables() {
+        let db = open_test_db();
+        let client = test_client();
+        let cfg = SportifyCacheConfig::default();
+        let track = track_with_stats("sp-track", "ISRCTRACK", 123);
+        let album = SportifyAlbum {
+            tracks: vec![track_with_stats("sp-album-track", "ISRCALBUM", 456)],
+            ..Default::default()
+        };
+        let playlist = SportifyPlaylist {
+            tracks: vec![track_with_stats("sp-playlist-track", "ISRCPLAYLIST", 789)],
+            ..Default::default()
+        };
+        let artist = SportifyArtist {
+            id: Some("sp-artist".to_string()),
+            monthly_listeners: Some(321),
+            ..Default::default()
+        };
+
+        db.with_conn(|conn| {
+            sp_cache::put_track_meta(conn, "sp-track", &track)?;
+            sp_cache::put_album_meta(conn, "sp-album", &album)?;
+            sp_cache::put_playlist_meta(conn, "sp-playlist", &playlist)?;
+            sp_cache::put_artist_meta(conn, "sp-artist", &artist)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("seed cached sportify metadata");
+
+        let _ = cached_track(&client, &db, &cfg, "sp-track")
+            .await
+            .expect("cached track");
+        let _ = cached_album(&client, &db, &cfg, "sp-album")
+            .await
+            .expect("cached album");
+        let _ = cached_playlist(&client, &db, &cfg, "sp-playlist")
+            .await
+            .expect("cached playlist");
+        let _ = cached_artist(&client, &db, &cfg, "sp-artist")
+            .await
+            .expect("cached artist");
+
+        db.with_conn(|conn| {
+            let playcount: i64 = conn.query_row(
+                "SELECT playcount FROM spotify_track_stats WHERE spotify_track_id = ?1",
+                ["sp-track"],
+                |row| row.get(0),
+            )?;
+            let album_isrc: String = conn.query_row(
+                "SELECT isrc FROM spotify_isrc_map WHERE spotify_track_id = ?1",
+                ["sp-album-track"],
+                |row| row.get(0),
+            )?;
+            let playlist_isrc: String = conn.query_row(
+                "SELECT isrc FROM spotify_isrc_map WHERE spotify_track_id = ?1",
+                ["sp-playlist-track"],
+                |row| row.get(0),
+            )?;
+            let listeners: i64 = conn.query_row(
+                "SELECT monthly_listeners FROM spotify_artist_stats WHERE spotify_artist_id = ?1",
+                ["sp-artist"],
+                |row| row.get(0),
+            )?;
+
+            assert_eq!(playcount, 123);
+            assert_eq!(album_isrc, "ISRCALBUM");
+            assert_eq!(playlist_isrc, "ISRCPLAYLIST");
+            assert_eq!(listeners, 321);
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("backfilled normalized stats");
     }
 }

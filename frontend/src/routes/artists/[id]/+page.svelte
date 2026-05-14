@@ -25,6 +25,7 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { canPlayTrack } from '$lib/player/playable';
+	import { formatCompactCount } from '$lib/utils/format';
 	import { cleanArtistBio } from '../artist_bio';
 
 	type ArtistRow = {
@@ -65,13 +66,6 @@
 		}
 		return map;
 	});
-
-	function formatStreamCount(n: number): string {
-		if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-		if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-		return n.toString();
-	}
 
 	// Phase 5B — back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{ scrollY: number }> = {
@@ -535,7 +529,7 @@
 							{#if spotifyStats?.monthly_listeners != null}<span class="dot">·</span>{/if}
 						{/if}
 						{#if spotifyStats?.monthly_listeners != null}
-							<span class="hero-listeners">{formatStreamCount(spotifyStats.monthly_listeners)} monthly listeners</span>
+							<span class="hero-listeners">{formatCompactCount(spotifyStats.monthly_listeners)} monthly listeners</span>
 						{/if}
 					</p>
 					{#if h.library_track_count > 0}
@@ -629,14 +623,10 @@
 								isPlaying={$isPlaying}
 								showArtist={false}
 								showPlayCount={true}
+								worldPlayCount={streamCount ?? null}
 								onRowClick={() => void playArtist(artistId, track.id)}
 								menuOptions={{ hideArtistActions: true }}
 							/>
-							{#if streamCount != null}
-								<span class="stream-badge" title="{streamCount.toLocaleString()} streams on Spotify">
-									{formatStreamCount(streamCount)}
-								</span>
-							{/if}
 						</div>
 					{/each}
 					{#each filteredTidalPopular as track, idx (`tidal-${track.tidal_id}`)}
@@ -1617,20 +1607,4 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.stream-badge {
-		position: absolute;
-		right: 60px;
-		top: 50%;
-		transform: translateY(-50%);
-		padding: 2px 8px;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--service-spotify) 14%, transparent);
-		border: 1px solid color-mix(in srgb, var(--service-spotify) 32%, transparent);
-		color: color-mix(in srgb, var(--service-spotify) 95%, transparent);
-		font-size: var(--font-size-xs);
-		font-variant-numeric: tabular-nums;
-		font-weight: var(--font-weight-semibold);
-		pointer-events: none;
-		z-index: 2;
-	}
 </style>
