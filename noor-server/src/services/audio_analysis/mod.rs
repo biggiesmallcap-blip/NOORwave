@@ -25,8 +25,6 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
-use crate::db::queries;
-
 pub fn is_passive_enabled(conn: &Connection) -> bool {
     conn.query_row(
         "SELECT value FROM server_config WHERE key = ?1",
