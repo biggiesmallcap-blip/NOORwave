@@ -37,4 +37,9 @@ describe('artist page layout contracts', () => {
 		const bio = cssBlock('.hero-bio');
 		expect(bio).toContain('white-space: pre-line');
 	});
+
+	test('shows Spotify world plays beside local plays only through TrackRow', () => {
+		expect(source).toContain('worldPlayCount={streamCount ?? null}');
+		expect(source).not.toContain('class="stream-badge"');
+	});
 });
