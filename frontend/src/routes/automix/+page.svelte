@@ -448,6 +448,9 @@
 						</div>
 						<div class="forecast-diagnostics">
 							<span>{formatFeatureSummary(row.nextFeatures)}</span>
+							{#if row.selectionReasonLabel}
+								<span class="selection-reason"><b>Why</b>{row.selectionReasonLabel}</span>
+							{/if}
 							{#if row.verdict !== 'unknown'}
 								<b class="compat-pill compat-{row.verdict}">
 									{row.keyLabel ?? row.verdict}
@@ -462,19 +465,37 @@
 								<span>{row.energyDeltaLabel}</span>
 							{/if}
 							{#if row.missing.length > 0}
-								<span>{row.missing.join(', ')}</span>
+								<span class="dsp-missing"><b>DSP</b>{row.missing.join(', ')}</span>
 							{/if}
 						</div>
 						<StateBadge label={row.sourceLabel} tone={row.isExternalPending ? 'default' : 'active'} compact={true} />
 						<div class="forecast-actions">
-							<button class="forecast-action" onclick={(event) => void moveForecastRowNext(row, event)} disabled={saving || row.item.is_pending}>
-								Next
+							<button
+								class="forecast-action icon"
+								aria-label="Move next"
+								title="Move next"
+								onclick={(event) => void moveForecastRowNext(row, event)}
+								disabled={saving || row.item.is_pending}
+							>
+								↑
 							</button>
-							<button class="forecast-action" onclick={(event) => void refreshForecastRow(row, event)} disabled={saving}>
-								Refresh
+							<button
+								class="forecast-action icon"
+								aria-label="Refresh DSP"
+								title="Refresh DSP"
+								onclick={(event) => void refreshForecastRow(row, event)}
+								disabled={saving}
+							>
+								↻
 							</button>
-							<button class="forecast-action danger" onclick={(event) => void removeForecastRow(row, event)} disabled={saving}>
-								Remove
+							<button
+								class="forecast-action icon danger"
+								aria-label="Remove from queue"
+								title="Remove from queue"
+								onclick={(event) => void removeForecastRow(row, event)}
+								disabled={saving}
+							>
+								×
 							</button>
 						</div>
 					</div>
@@ -967,7 +988,9 @@
 
 	.queue-meta strong,
 	.queue-meta span,
-	.forecast-diagnostics span {
+	.forecast-diagnostics span,
+	.selection-reason,
+	.dsp-missing {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -978,6 +1001,33 @@
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		line-height: var(--line-height-snug);
+	}
+
+	.selection-reason,
+	.dsp-missing {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1);
+		min-width: 0;
+		color: var(--text-primary);
+	}
+
+	.selection-reason b,
+	.dsp-missing b {
+		flex: 0 0 auto;
+		color: var(--accent);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		line-height: 1;
+		text-transform: uppercase;
+	}
+
+	.dsp-missing {
+		color: var(--text-secondary);
+	}
+
+	.dsp-missing b {
+		color: var(--state-warning);
 	}
 
 	.compat-pill {
@@ -1021,7 +1071,7 @@
 	}
 
 	.forecast-action {
-		padding: var(--space-1) var(--space-2);
+		padding: var(--space-1);
 		border-radius: 999px;
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
@@ -1030,6 +1080,15 @@
 			background var(--motion-fast),
 			border-color var(--motion-fast),
 			color var(--motion-fast);
+	}
+
+	.forecast-action.icon {
+		display: inline-grid;
+		place-items: center;
+		width: clamp(1.75rem, 2vw, 2rem);
+		height: clamp(1.75rem, 2vw, 2rem);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-bold);
 	}
 
 	.forecast-action:hover:not(:disabled) {

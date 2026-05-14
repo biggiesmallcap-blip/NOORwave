@@ -107,10 +107,10 @@ pub fn append_tracks(conn: &Connection, tracks: &[Track], source: &str) -> Resul
 
 /// Append tracks with per-row reason strings.
 ///
-/// Radio is the producer of reasons today; automix and manual paths
-/// pass `None` via [`append_tracks`]. The reason column stays
-/// queryable but the frontend treats NULL as "no provenance recorded"
-/// and renders no tooltip.
+/// Radio and automix are the producers of reasons today; manual paths
+/// pass `None` via [`append_tracks`]. The reason column stays queryable
+/// but the frontend treats NULL as "no provenance recorded" and renders
+/// no tooltip.
 pub fn append_tracks_with_reasons(
     conn: &Connection,
     tracks: &[(Track, Option<String>)],

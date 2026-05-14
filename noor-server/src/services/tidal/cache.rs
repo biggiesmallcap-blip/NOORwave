@@ -8,7 +8,8 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::services::cache_util::{fresh, hex_encode, now_secs};
 
 use super::client::TidalSearchCatalog;
 
@@ -27,35 +28,11 @@ impl Default for TidalSearchCacheConfig {
     }
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn fresh(fetched_at: i64, ttl: i64) -> bool {
-    now_secs().saturating_sub(fetched_at) < ttl
-}
-
 fn hash_query(query: &str, limit: i32, offset: i32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(query.trim().to_lowercase().as_bytes());
     hasher.update(format!("|{}|{}", limit, offset).as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let bytes = bytes.as_ref();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
-        }
-        out
-    }
+    hex_encode(hasher.finalize())
 }
 
 pub fn get_search(

@@ -454,7 +454,7 @@ mod tests {
 
         let shuffled = weighted_shuffle_with_rng(&[low.clone(), high.clone()], &profile, &mut rng);
 
-        assert_eq!(profile.weight_for(&high) > profile.weight_for(&low), true);
+        assert!(profile.weight_for(&high) > profile.weight_for(&low));
         assert_eq!(shuffled.first().map(|track| track.id), Some(high.id));
     }
 
@@ -553,7 +553,7 @@ mod tests {
             track(7, 2, "B", false, 1, None, 10), // B
         ];
         let key_fn = |t: &Track| t.artist_name.clone().unwrap_or_default();
-        let stabilized = stabilize_adjacent_keys(tracks, key_fn.clone());
+        let stabilized = stabilize_adjacent_keys(tracks, key_fn);
 
         let keys: Vec<String> = stabilized.iter().map(key_fn).collect();
         // A valid arrangement of 4×A + 3×B has at most one same-A adjacency

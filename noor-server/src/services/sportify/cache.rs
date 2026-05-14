@@ -17,7 +17,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::services::cache_util::{fresh, hex_encode, now_secs};
 
 use super::client::SportifySearchKind;
 use super::models::{
@@ -84,38 +85,13 @@ pub struct UnresolvedRecord {
     pub reason: Option<String>,
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn fresh(fetched_at: i64, ttl: i64) -> bool {
-    now_secs().saturating_sub(fetched_at) < ttl
-}
-
 fn hash_query(query: &str, kind: SportifySearchKind, limit: u32, offset: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(query.trim().to_lowercase().as_bytes());
     hasher.update(format!("|{}|{}", limit, offset).as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-// `hex` is not in the existing dep tree; we encode by hand to avoid a new dep.
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let bytes = bytes.as_ref();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
-        }
-        out
-    }
+    hex_encode(hasher.finalize())
 }
 
 fn read_meta<T: DeserializeOwned>(

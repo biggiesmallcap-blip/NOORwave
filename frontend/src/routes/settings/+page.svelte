@@ -99,6 +99,13 @@
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
 
+	let radioSimilarityRowCount = $state<number | null>(null);
+	let radioSimilarityBuiltAt = $state<string | null>(null);
+	let radioSimilarityBusy = $state(false);
+	let radioSimilarityLabel = $state('');
+	// Set on unmount so the build poll loop can't outlive the component.
+	let componentUnmounted = false;
+
 	let spotifyConfigured = $state(false);
 	let spotifyClientId = $state('');
 	let spotifyClientSecret = $state('');
@@ -295,6 +302,16 @@
 			) {
 				void loadPlaybackRuntime();
 			}
+
+			if (latest.type === 'radio_similarity_computed') {
+				void loadRadioSimilarityStatus();
+				if (!radioSimilarityBusy) {
+					const pairs = typeof latest.pairs === 'number' ? latest.pairs : null;
+					radioSimilarityLabel = pairs
+						? `Index rebuilt automatically: ${pairs.toLocaleString()} pairs.`
+						: 'Radio similarity index rebuilt automatically.';
+				}
+			}
 		});
 
 		void refreshTidalStatus();
@@ -307,6 +324,7 @@
 		void loadDiscoveryIntensity();
 		void loadDiscoverySafetyProfile();
 		void loadDiscoverySafety();
+		void loadRadioSimilarityStatus();
 		void loadAudioStats();
 		void syncAnalysisStatus();
 		void loadPassiveDspState();
@@ -320,6 +338,7 @@
 			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
 			wsUnsubscribe?.();
+			componentUnmounted = true;
 		};
 	});
 
@@ -845,6 +864,65 @@
 	let discoveryIsRunning = $derived(
 		discoveryStatus?.latest_run?.status === 'running'
 	);
+
+	async function loadRadioSimilarityStatus() {
+		try {
+			const status = await api.getRadioSimilarityStatus();
+			radioSimilarityRowCount = status.row_count;
+			radioSimilarityBuiltAt = status.built_at;
+			markServerOnline();
+		} catch (error) {
+			if (isFetchConnectionError(error)) markServerOffline();
+		}
+	}
+
+	// The compute route is fire-and-forget. Completion normally arrives via the
+	// `radio_similarity_computed` WS event; this poll is the fallback for a
+	// dropped socket. It exits when the row count moves, on unmount, or after
+	// the deadline.
+	async function buildRadioSimilarity() {
+		if (radioSimilarityBusy) return;
+		radioSimilarityBusy = true;
+		// Detect completion by a change in built_at, not row count — a rebuild
+		// can legitimately produce the same number of pairs, or zero.
+		const before = radioSimilarityBuiltAt;
+		try {
+			const response = await api.computeRadioSimilarity();
+			markServerOnline();
+			if (response.status === 'busy') {
+				// The server declined: a sync/playback/enrichment writer is
+				// active. Nothing is building, so don't poll.
+				radioSimilarityLabel = response.message;
+				return;
+			}
+			radioSimilarityLabel =
+				response.status === 'already_running'
+					? 'A rebuild is already running. Watching for it to finish…'
+					: 'Building radio similarity index…';
+			const deadline = Date.now() + 10 * 60 * 1000;
+			while (Date.now() < deadline && !componentUnmounted) {
+				await new Promise((resolve) => setTimeout(resolve, 3000));
+				if (componentUnmounted) return;
+				await loadRadioSimilarityStatus();
+				if (radioSimilarityBuiltAt !== before) {
+					radioSimilarityLabel = `Index ready: ${radioSimilarityRowCount?.toLocaleString()} pairs.`;
+					return;
+				}
+			}
+			if (!componentUnmounted) {
+				radioSimilarityLabel = 'Still building. Check back in a few minutes.';
+			}
+		} catch (error) {
+			if (isFetchConnectionError(error)) {
+				markServerOffline();
+				radioSimilarityLabel = SERVER_UNREACHABLE_MESSAGE;
+			} else {
+				radioSimilarityLabel = `Build failed: ${error}`;
+			}
+		} finally {
+			radioSimilarityBusy = false;
+		}
+	}
 
 	// Intensity tier + safety estimate. Both load once on mount and refresh
 	// after the intensity changes so the safety preview reflects the new
@@ -2437,6 +2515,35 @@
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop</button>
 					{/if}
 				</div>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader
+					eyebrow="Learning"
+					title="Radio similarity index"
+					subtitle="Metadata-heuristic recall lane for radio (co-album, co-artist, co-listen, genre)."
+				/>
+				<p>
+					The radio Engine lane reads a precomputed <code>track_similarity</code> index. It's separate from the discovery model's learned neighbours — radio uses both. If it's never built, the Engine lane silently contributes nothing. Building it can take a few minutes on large libraries.
+				</p>
+				<div class="info-list">
+					<div class="info-row">
+						<span>Indexed pairs</span>
+						<strong>{radioSimilarityRowCount === null ? '—' : radioSimilarityRowCount.toLocaleString()}</strong>
+					</div>
+					<div class="info-row">
+						<span>Last built</span>
+						<strong>{radioSimilarityBuiltAt ?? 'Never'}</strong>
+					</div>
+				</div>
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={() => void buildRadioSimilarity()} disabled={radioSimilarityBusy}>
+						{radioSimilarityBusy ? 'Building…' : 'Build radio similarity index'}
+					</button>
+				</div>
+				{#if radioSimilarityLabel}
+					<p class="galaxy-refresh-label">{radioSimilarityLabel}</p>
+				{/if}
 			</section>
 			{/if}
 		</div>

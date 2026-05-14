@@ -41,6 +41,7 @@ mod discovery_routes;
 mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
+mod library_batch_routes;
 mod search_routes;
 mod sportify_routes;
 mod tidal_home_routes;
@@ -152,24 +153,6 @@ pub struct PlaylistFromQueueRequest {
     name: String,
     #[serde(default)]
     include_tidal_only: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchPlaylistRequest {
-    playlist_id: i64,
-    track_ids: Vec<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchDeleteRequest {
-    track_ids: Option<Vec<i64>>,
-    album_ids: Option<Vec<i64>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchGenreRequest {
-    genre_id: i64,
-    track_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,6 +360,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/discovery/radio/compute",
             post(compute_radio_similarity),
         )
+        .route("/api/discovery/radio/status", get(radio_similarity_status))
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
@@ -440,10 +424,16 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/artists", get(get_discovery_artists))
         .route(
             "/api/library/batch/add-to-playlist",
-            post(batch_add_to_playlist),
+            post(library_batch_routes::batch_add_to_playlist),
         )
-        .route("/api/library/batch/delete", post(batch_delete_items))
-        .route("/api/library/batch/set-genre", post(batch_set_genre))
+        .route(
+            "/api/library/batch/delete",
+            post(library_batch_routes::batch_delete_items),
+        )
+        .route(
+            "/api/library/batch/set-genre",
+            post(library_batch_routes::batch_set_genre),
+        )
         .route(
             "/api/library/enrich/musicbrainz",
             post(enrichment_routes::start_musicbrainz_enrichment),
@@ -2296,30 +2286,63 @@ async fn get_radio_tracks(
 async fn compute_radio_similarity(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    // Clone the DB handle before spawning so we don't hold the RwLock during computation
+    let (db, event_tx, running, busy) = {
+        let s = state.read().await;
+        let busy = crate::services::radio_similarity::busy_reason(&s, &s.db);
+        (
+            s.db.clone(),
+            s.event_tx.clone(),
+            s.radio_similarity_running.clone(),
+            busy,
+        )
+    };
+
+    // A rebuild owns SQLite's single writer slot for minutes. The manual route
+    // gates on the same idle check as the auto path — clicking the button does
+    // not justify failing an in-flight sync or listen-history write.
+    if let Some(reason) = busy {
+        return Ok(Json(json!({
+            "status": "busy",
+            "message": format!("Can't rebuild while {reason} is active. Try again once it's finished.")
+        })));
+    }
+
+    // Shared single-flight + isolated-connection rebuild path: a manual click
+    // and an auto-rebuild can never run the multi-minute job twice, and the
+    // job never holds the shared connection mutex.
+    if crate::services::radio_similarity::try_spawn_rebuild(db, event_tx, running) {
+        Ok(Json(json!({
+            "status": "computation_started",
+            "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+        })))
+    } else {
+        Ok(Json(json!({
+            "status": "already_running",
+            "message": "Similarity computation is already in progress."
+        })))
+    }
+}
+
+/// Status of the radio similarity index: row count + last-built timestamp.
+/// Powers the Settings "Build radio similarity index" panel — the frontend
+/// polls this after triggering a compute to detect completion. `built_at`
+/// comes from `server_config`, not the table's rows, so a legitimate zero-row
+/// rebuild still reads as built.
+async fn radio_similarity_status(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let db = {
         let s = state.read().await;
         s.db.clone()
     };
-    tokio::spawn(async move {
-        tracing::info!(target: "noor.radio", "Starting track similarity computation...");
-        match db.with_conn(queries::compute_track_similarity) {
-            Ok(count) => {
-                tracing::info!(
-                    target: "noor.radio",
-                    count = count,
-                    "Track similarity computation complete"
-                );
-            }
-            Err(e) => {
-                tracing::error!(target: "noor.radio", "Similarity computation failed: {}", e);
-            }
-        }
-    });
-
+    let row_count = db.with_conn(queries::count_track_similarity).unwrap_or(0);
+    let built_at = db
+        .with_conn(queries::get_radio_similarity_built_at)
+        .ok()
+        .flatten();
     Ok(Json(json!({
-        "status": "computation_started",
-        "message": "Similarity computation running in background. This may take a few minutes for large libraries."
+        "row_count": row_count,
+        "built_at": built_at,
     })))
 }
 
@@ -5606,205 +5629,6 @@ async fn overlay_snapshot_with_external_track_and_position(
     snapshot
 }
 
-async fn batch_add_to_playlist(
-    State(state): State<SharedState>,
-    Json(payload): Json<BatchPlaylistRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let track_ids = dedupe_positive_ids(&payload.track_ids);
-    if track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
-
-    let (playlist, track_pairs) = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                let playlist = queries::get_playlist(conn, payload.playlist_id)?
-                    .ok_or_else(|| anyhow::anyhow!("playlist not found"))?;
-                let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
-                Ok((playlist, track_pairs))
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    let playlist_uuid = playlist.tidal_uuid.ok_or(StatusCode::BAD_REQUEST)?;
-    let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-    if tidal_track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    tidal_mutations::add_to_playlist(
-        &http,
-        &tokens.access_token,
-        &playlist_uuid,
-        &tidal_track_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch add to playlist failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
-
-    let added = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                let mut position: i64 = conn.query_row(
-                    "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
-                    rusqlite::params![payload.playlist_id],
-                    |row| row.get(0),
-                )?;
-                let mut added = 0;
-                for (track_id, _) in &track_pairs {
-                    added += conn.execute(
-                        "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![payload.playlist_id, track_id, position],
-                    )?;
-                    position += 1;
-                }
-                conn.execute(
-                    "UPDATE playlists
-                     SET track_count = (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1),
-                         updated_at = datetime('now')
-                     WHERE id = ?1",
-                    rusqlite::params![payload.playlist_id],
-                )?;
-                Ok(added)
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::LibrarySynced);
-    }
-
-    Ok(Json(json!({
-        "playlist_id": payload.playlist_id,
-        "requested_tracks": track_ids.len(),
-        "resolved_tracks": track_pairs.len(),
-        "added": added
-    })))
-}
-
-async fn batch_delete_items(
-    State(state): State<SharedState>,
-    Json(payload): Json<BatchDeleteRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let track_ids = dedupe_positive_ids(payload.track_ids.as_deref().unwrap_or(&[]));
-    let album_ids = dedupe_positive_ids(payload.album_ids.as_deref().unwrap_or(&[]));
-    if track_ids.is_empty() && album_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let (http, tokens) = {
-        let state = state.read().await;
-        let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-        (state.http_client.clone(), tokens)
-    };
-
-    let (track_pairs, album_pairs) = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                Ok((
-                    queries::get_track_tidal_ids(conn, &track_ids)?,
-                    queries::get_album_tidal_ids(conn, &album_ids)?,
-                ))
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    let remote_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-    let remote_album_ids: Vec<i64> = album_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-
-    let removed_tracks = tidal_mutations::remove_favorite_tracks(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_track_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete tracks failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
-
-    let removed_albums = tidal_mutations::remove_favorite_albums(
-        &http,
-        &tokens.access_token,
-        &tokens.user_id,
-        &remote_album_ids,
-        &tokens.country_code,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!("Batch delete albums failed: {error}");
-        StatusCode::BAD_GATEWAY
-    })?;
-
-    // Also delete from local DB so removed items disappear immediately.
-    let db = {
-        let s = state.read().await;
-        s.db.clone()
-    };
-    let deleted_track_ids: Vec<i64> = track_pairs.iter().map(|(local_id, _)| *local_id).collect();
-    let outcome = match db.with_conn(|conn| {
-        for &(local_id, _) in &track_pairs {
-            conn.execute(
-                "DELETE FROM tracks WHERE id = ?1",
-                rusqlite::params![local_id],
-            )?;
-        }
-        for &(local_id, _) in &album_pairs {
-            conn.execute(
-                "DELETE FROM albums WHERE id = ?1",
-                rusqlite::params![local_id],
-            )?;
-        }
-        let outcome = player::reconcile_after_track_delete(conn, &deleted_track_ids)?;
-        Ok::<player::ReconcileOutcome, anyhow::Error>(outcome)
-    }) {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("Batch delete: local DB cleanup failed: {e}");
-            player::ReconcileOutcome::default()
-        }
-    };
-
-    {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::LibrarySynced);
-        if outcome.queue_changed {
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
-        }
-        if outcome.current_changed {
-            let _ = state.event_tx.send(AppEvent::PlaybackStateChanged);
-        }
-    }
-
-    Ok(Json(json!({
-        "requested_tracks": track_ids.len(),
-        "requested_albums": album_ids.len(),
-        "removed_tracks": removed_tracks,
-        "removed_albums": removed_albums,
-        "resolved_tracks": track_pairs.len(),
-        "resolved_albums": album_pairs.len()
-    })))
-}
-
 async fn set_track_favorite(
     State(state): State<SharedState>,
     Json(payload): Json<TrackFavoriteRequest>,
@@ -5980,37 +5804,6 @@ async fn set_track_favorite(
         "tidal_id": tidal_id,
         "favorite": payload.favorite,
         "updated": state_changed
-    })))
-}
-
-async fn batch_set_genre(
-    State(state): State<SharedState>,
-    Json(payload): Json<BatchGenreRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let track_ids = dedupe_positive_ids(&payload.track_ids);
-    if track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let affected = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                queries::assign_genre_to_tracks(conn, payload.genre_id, &track_ids, "manual")
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::LibrarySynced);
-    }
-
-    Ok(Json(json!({
-        "genre_id": payload.genre_id,
-        "requested_tracks": track_ids.len(),
-        "affected": affected
     })))
 }
 
@@ -8069,21 +7862,6 @@ async fn status() -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "status": "running"
     }))
-}
-
-fn dedupe_positive_ids(ids: &[i64]) -> Vec<i64> {
-    let (filtered, dropped): (Vec<i64>, Vec<i64>) = ids.iter().copied().partition(|id| *id > 0);
-    if !dropped.is_empty() {
-        warn!(
-            "dedupe_positive_ids: dropped {} non-positive IDs (ephemeral/discovery tracks): {:?}",
-            dropped.len(),
-            &dropped[..dropped.len().min(5)]
-        );
-    }
-    let mut ids: Vec<i64> = filtered;
-    ids.sort_unstable();
-    ids.dedup();
-    ids
 }
 
 fn resolve_smart_playlist_tracks_with_context(
@@ -11978,6 +11756,7 @@ mod tests {
             lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            radio_similarity_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::load_or_generate(
@@ -13302,4 +13081,226 @@ mod tests {
     //   - favorite_only_preserves_legacy_union_behavior (queries.rs:7949)
     //   - liked_only_takes_precedence_over_favorite_only (queries.rs:8036)
     // Do not add duplicates here.
+
+    /// Route-registration smoke test. Probes every `/api/*` route registered in
+    /// `api_routes` with a deliberately-wrong HTTP method and asserts the
+    /// response is NOT 404.
+    ///
+    /// Why wrong-method: axum returns 405 METHOD_NOT_ALLOWED when a path is
+    /// registered but the method doesn't match, and 404 NOT_FOUND when the path
+    /// isn't registered at all. Probing with the wrong method means routing
+    /// resolves before any extractor runs - so path params, request bodies, and
+    /// auth never enter the picture. A 404 here means the route is genuinely
+    /// missing, which is exactly the failure mode a careless handler extraction
+    /// introduces: move a handler to a submodule, forget to re-register it.
+    ///
+    /// This is a structural guard, NOT a behavior contract. It deliberately
+    /// does not assert on bodies or success codes. Per-route behavior belongs
+    /// in dedicated tests. When you add a route, add it here too.
+    #[tokio::test]
+    async fn all_api_routes_are_registered() {
+        // (real_method, path). Path params use concrete sentinels; the value is
+        // irrelevant because the wrong-method probe short-circuits at routing.
+        let routes: &[(&str, &str)] = &[
+            ("GET", "/api/tracks"),
+            ("GET", "/api/tracks/count"),
+            ("GET", "/api/albums"),
+            ("GET", "/api/albums/1/tracks"),
+            ("GET", "/api/albums/1/spotify-stats"),
+            ("GET", "/api/artists"),
+            ("GET", "/api/artists/1"),
+            ("GET", "/api/artists/1/tracks"),
+            ("GET", "/api/artists/1/discography"),
+            ("GET", "/api/artists/1/spotify-stats"),
+            ("GET", "/api/tidal/albums/1/tracks"),
+            ("POST", "/api/tidal/albums/1/import"),
+            ("POST", "/api/tidal/tracks/import"),
+            ("GET", "/api/genres"),
+            ("GET", "/api/genres/snapshot"),
+            ("GET", "/api/genres/heat"),
+            ("GET", "/api/genres/co-occurrence"),
+            ("GET", "/api/genres/cohorts"),
+            ("GET", "/api/genres/evolution"),
+            ("GET", "/api/genres/audio-metrics"),
+            ("GET", "/api/genres/1/tracks"),
+            ("GET", "/api/playlists"),
+            ("GET", "/api/playlists/1/tracks"),
+            ("PATCH", "/api/playlists/1/favorite"),
+            ("POST", "/api/smart/playlists"),
+            ("PUT", "/api/smart/playlists/1"),
+            ("GET", "/api/smart/playlists/1/evaluate"),
+            ("GET", "/api/analytics/overview"),
+            ("GET", "/api/analytics/dashboard"),
+            ("GET", "/api/analytics/signals"),
+            ("GET", "/api/analytics/listens/recent"),
+            ("POST", "/api/discovery/preview"),
+            ("POST", "/api/discovery/new"),
+            ("POST", "/api/discovery/save"),
+            ("POST", "/api/discovery/play"),
+            ("POST", "/api/discovery/connections"),
+            ("GET", "/api/discovery/status"),
+            ("POST", "/api/discovery/train"),
+            ("GET", "/api/discovery/train/status"),
+            ("POST", "/api/discovery/train/stop"),
+            ("GET", "/api/discovery/train/intensity"),
+            ("GET", "/api/discovery/train/engine"),
+            ("GET", "/api/discovery/train/safety"),
+            ("GET", "/api/discovery/train/safety-profile"),
+            ("POST", "/api/discovery/feedback"),
+            ("GET", "/api/discovery/presets"),
+            ("POST", "/api/discovery/radio"),
+            ("POST", "/api/discovery/radio/compute"),
+            ("POST", "/api/discovery/space"),
+            ("GET", "/api/resolve/tidal/track"),
+            ("POST", "/api/resolve/tidal/bulk"),
+            ("GET", "/api/resolve/tidal/status"),
+            ("GET", "/api/discovery/sportify/search"),
+            ("GET", "/api/discovery/sportify/track/x"),
+            ("GET", "/api/discovery/sportify/album/x"),
+            ("GET", "/api/discovery/sportify/playlist/x"),
+            ("GET", "/api/discovery/sportify/artist/x"),
+            ("GET", "/api/discovery/sportify/artist/x/top-tracks"),
+            ("GET", "/api/discovery/sportify/artist/x/related"),
+            ("GET", "/api/discovery/sportify/album/x/related"),
+            ("GET", "/api/discovery/sportify/track/x/related"),
+            ("POST", "/api/spotify-playlist/save"),
+            ("POST", "/api/radio/song"),
+            ("POST", "/api/radio/album"),
+            ("POST", "/api/radio/artist"),
+            ("POST", "/api/radio/start"),
+            ("GET", "/api/discovery/space/meta"),
+            ("GET", "/api/discovery/artists"),
+            ("POST", "/api/library/batch/add-to-playlist"),
+            ("POST", "/api/library/batch/delete"),
+            ("POST", "/api/library/batch/set-genre"),
+            ("POST", "/api/library/enrich/musicbrainz"),
+            ("GET", "/api/library/enrich/musicbrainz/status"),
+            ("GET", "/api/library/enrich/musicbrainz/portable"),
+            ("POST", "/api/library/enrich/musicbrainz/portable/export"),
+            ("POST", "/api/library/enrich/musicbrainz/portable/import"),
+            ("POST", "/api/library/tracks/favorite"),
+            ("POST", "/api/library/duplicates/scan"),
+            ("GET", "/api/library/duplicates"),
+            ("POST", "/api/library/duplicates/1/resolve"),
+            ("POST", "/api/library/duplicates/1/dismiss"),
+            ("GET", "/api/playback/state"),
+            ("GET", "/api/playback/runtime"),
+            ("POST", "/api/playback/play"),
+            ("POST", "/api/playback/pause"),
+            ("POST", "/api/playback/resume"),
+            ("POST", "/api/playback/previous"),
+            ("POST", "/api/playback/next"),
+            ("POST", "/api/playback/position"),
+            ("POST", "/api/playback/volume"),
+            ("POST", "/api/playback/shuffle"),
+            ("POST", "/api/playback/repeat"),
+            ("POST", "/api/playback/automix"),
+            ("GET", "/api/playback/queue"),
+            ("POST", "/api/playback/queue/add"),
+            ("POST", "/api/playback/queue/remove"),
+            ("POST", "/api/playback/queue/move"),
+            ("POST", "/api/playback/queue/clear"),
+            ("POST", "/api/queue/play_next"),
+            ("POST", "/api/queue/play_next_many"),
+            ("POST", "/api/queue/append"),
+            ("POST", "/api/queue/append_many"),
+            ("POST", "/api/playlists/from-queue"),
+            ("GET", "/api/audio/devices"),
+            ("GET", "/api/audio/settings"),
+            ("POST", "/api/audio/exclusive/retry"),
+            ("GET", "/api/search"),
+            ("POST", "/api/search/audio"),
+            ("GET", "/api/search/vibe"),
+            ("GET", "/api/search/underrated"),
+            ("POST", "/api/tidal/login"),
+            ("POST", "/api/tidal/login/complete"),
+            ("POST", "/api/tidal/login/poll"),
+            ("POST", "/api/tidal/sync"),
+            ("POST", "/api/tidal/sync/cancel"),
+            ("GET", "/api/tidal/status"),
+            ("GET", "/api/tidal/search"),
+            ("GET", "/api/tidal/videos/search"),
+            ("GET", "/api/tidal/videos/1/playback"),
+            ("GET", "/api/tidal/video-mixes/1/items"),
+            ("GET", "/api/tidal/playlists/search"),
+            ("GET", "/api/tidal/playlists/x/tracks"),
+            ("POST", "/api/tidal/play"),
+            ("GET", "/api/tidal/artists/1"),
+            ("POST", "/api/tidal/logout"),
+            ("POST", "/api/spotify/config"),
+            ("GET", "/api/spotify/status"),
+            ("POST", "/api/library/enrich/spotify"),
+            ("GET", "/api/library/enrich/spotify/status"),
+            ("POST", "/api/library/enrich/spotify/reset"),
+            ("POST", "/api/library/tidal-stream/purge"),
+            ("POST", "/api/lastfm/config"),
+            ("GET", "/api/lastfm/status"),
+            ("POST", "/api/lastfm/auth/start"),
+            ("POST", "/api/lastfm/auth/complete"),
+            ("POST", "/api/lastfm/auth/disconnect"),
+            ("POST", "/api/library/enrich/lastfm"),
+            ("POST", "/api/library/enrich/lastfm/stop"),
+            ("GET", "/api/library/enrich/lastfm/status"),
+            ("POST", "/api/library/enrich/lastfm/reset"),
+            ("POST", "/api/library/analyze/audio-features"),
+            ("POST", "/api/library/analyze/stop"),
+            ("GET", "/api/library/analyze/status"),
+            ("GET", "/api/library/analyze/passive"),
+            ("GET", "/api/tracks/1/audio-features"),
+            ("POST", "/api/tracks/1/bpm-multiplier"),
+            ("GET", "/api/library/audio-features/stats"),
+            ("GET", "/api/library/audio-features/quality"),
+            ("GET", "/api/library/analytics"),
+            ("GET", "/api/library/analyze/reanalyze-stale"),
+            ("POST", "/api/library/analyze/reset"),
+            ("GET", "/api/sync/info"),
+            ("POST", "/api/sync/auto"),
+            ("GET", "/api/status"),
+            ("GET", "/api/home/releases"),
+            ("GET", "/api/home/picks"),
+            ("GET", "/api/home/articles"),
+            ("GET", "/api/home/news"),
+            ("GET", "/api/tidal/mixes"),
+            ("GET", "/api/tidal/mixes/1/tracks"),
+            ("POST", "/api/tidal/play-mix"),
+            ("GET", "/api/tidal/radio-stations"),
+            ("GET", "/api/tidal/home-modules"),
+            ("GET", "/api/tidal/discover-modules/1/items"),
+            ("GET", "/api/charts"),
+            ("GET", "/api/charts/lastfm/genres"),
+            ("GET", "/api/charts/lastfm/countries"),
+            ("GET", "/api/server/token"),
+            ("POST", "/api/server/token/regenerate"),
+            ("GET", "/api/server/info"),
+            ("PUT", "/api/server/host_mode"),
+        ];
+
+        let app = build_test_app().await;
+        let mut missing = Vec::new();
+        for (method, path) in routes {
+            // Probe with a method the route does NOT use, so routing resolves
+            // to 405 (registered) or 404 (not registered) before extractors run.
+            let probe = if *method == "GET" { "POST" } else { "GET" };
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(probe)
+                        .uri(*path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::NOT_FOUND {
+                missing.push(format!("{method} {path}"));
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "routes returned 404 to a wrong-method probe (not registered):\n  {}",
+            missing.join("\n  ")
+        );
+    }
 }

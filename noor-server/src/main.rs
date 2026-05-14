@@ -125,6 +125,10 @@ pub struct AppState {
     /// Discovery training cancel flag — flipped to true by POST /api/discovery/train/stop,
     /// reset to false at the start of each training run.
     pub discovery_train_cancel: Arc<AtomicBool>,
+    /// Single-flight guard for the radio similarity index rebuild. Held while
+    /// `compute_track_similarity` runs so overlapping `LibrarySynced` events and
+    /// the daily catch-up ticker don't kick off a second multi-minute rebuild.
+    pub radio_similarity_running: Arc<AtomicBool>,
     /// Seeds already refreshed this session, with model_id + timestamp.
     /// Entries expire after `REFRESH_TTL` or whenever the active model_id changes,
     /// so re-training or long sessions don't pin stale neighbor data.
@@ -186,6 +190,12 @@ pub struct AppState {
 pub enum AppEvent {
     PlaybackStateChanged,
     LibrarySynced,
+    /// Emitted when the radio similarity index (`track_similarity`) finishes
+    /// rebuilding, manually or via the auto-rebuild listener. Carries the pair
+    /// count so the Settings panel can refresh without polling.
+    RadioSimilarityComputed {
+        pairs: i64,
+    },
     MusicBrainzEnriched,
     TrackChanged {
         track_id: i64,
@@ -324,11 +334,11 @@ mod tests {
     #[test]
     fn host_flag_detection() {
         // Simulate args: just test the parsing logic directly
-        let args = vec!["noor-server".to_string(), "--host".to_string()];
+        let args = ["noor-server".to_string(), "--host".to_string()];
         let has_host = args.iter().any(|a| a == "--host");
         assert!(has_host);
 
-        let args_no_flag = vec!["noor-server".to_string()];
+        let args_no_flag = ["noor-server".to_string()];
         let has_host = args_no_flag.iter().any(|a| a == "--host");
         assert!(!has_host);
     }
@@ -633,7 +643,7 @@ async fn main() -> Result<()> {
                     services::tidal::auth::decode_persisted_tidal_tokens(&master_key, &bytes)
                         .ok()
                         .flatten()
-                        .and_then(|persisted| {
+                        .map(|persisted| {
                             let needs_rewrite = persisted.needs_encrypted_rewrite();
                             let tokens = persisted.into_tokens();
                             if needs_rewrite
@@ -648,7 +658,7 @@ async fn main() -> Result<()> {
                             rusqlite::params![blob],
                         );
                             }
-                            Some(tokens)
+                            tokens
                         })
                         .inspect(|t: &services::tidal::auth::TidalTokens| {
                             info!("Loaded persisted TIDAL tokens for user {}", t.user_id);
@@ -728,6 +738,7 @@ async fn main() -> Result<()> {
         lastfm_prefetch_done: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         lastfm_enrich_started_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         discovery_train_cancel: Arc::new(AtomicBool::new(false)),
+        radio_similarity_running: Arc::new(AtomicBool::new(false)),
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
         master_key,
@@ -867,6 +878,70 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 services::auto_enrich::run_if_idle(loop_state.clone()).await;
+            }
+        });
+    }
+
+    // Radio similarity index auto-rebuild.
+    //
+    // `track_similarity` feeds radio's Engine recall lane but has no trigger of
+    // its own — left alone it stays empty and the Engine lane silently
+    // contributes nothing. These two tasks keep it fresh:
+    //
+    // 1. Listener — every `LibrarySynced` event means the library changed, so
+    //    the index is stale. `run_if_stale` debounces bursts and defers while
+    //    the app is busy, marking a dirty flag so the change isn't lost.
+    // 2. Hourly ticker — rebuilds a debounced/deferred change once its window
+    //    clears, and catches an aging index on installs that rarely sync.
+    //
+    // Both short-circuit on the `radio_similarity_running` atomic, so a rebuild
+    // in flight is never doubled up. See services::radio_similarity.
+    {
+        let listener_state = state.clone();
+        let mut event_rx = listener_state.read().await.event_tx.subscribe();
+        tokio::spawn(async move {
+            // Defer past the boot-time sync so we don't contend with it.
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            use services::radio_similarity::RebuildTrigger;
+            loop {
+                match event_rx.recv().await {
+                    Ok(AppEvent::LibrarySynced) => {
+                        services::radio_similarity::run_if_stale(
+                            listener_state.clone(),
+                            RebuildTrigger::LibrarySynced,
+                        )
+                        .await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(target: "noor.radio_similarity", lagged = n, "event listener lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let loop_state = state.clone();
+        tokio::spawn(async move {
+            use services::radio_similarity::RebuildTrigger;
+            // First sweep 150s after boot — behind the auto-enrich head start.
+            tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+            services::radio_similarity::run_if_stale(loop_state.clone(), RebuildTrigger::Periodic)
+                .await;
+
+            // Hourly: frequent enough that a debounced change is picked up soon
+            // after its 6h window clears, cheap enough to no-op the rest of the
+            // time (one age check, then the idle gate).
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3_600));
+            ticker.tick().await; // consume the immediate first tick
+            loop {
+                ticker.tick().await;
+                services::radio_similarity::run_if_stale(
+                    loop_state.clone(),
+                    RebuildTrigger::Periodic,
+                )
+                .await;
             }
         });
     }

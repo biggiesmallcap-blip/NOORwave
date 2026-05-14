@@ -216,6 +216,30 @@ fn camelot_number_diff(a: &str, b: &str) -> u32 {
     diff.min(12 - diff)
 }
 
+/// How two Camelot keys relate harmonically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CamelotRelation {
+    /// Same key, relative major/minor, or one step around the wheel.
+    Compatible,
+    /// Adjacent on the wheel but not compatible.
+    Adjacent,
+    /// Neither — a harmonic clash.
+    Clash,
+}
+
+/// Classify the harmonic relationship between two Camelot keys. Single source
+/// of truth shared by `compute_harmonic_multiplier` and automix's reason
+/// signals, so the score multiplier and the user-facing "Why" can't drift.
+pub fn camelot_relation(a: &str, b: &str) -> CamelotRelation {
+    if camelot_compatible(a, b) {
+        CamelotRelation::Compatible
+    } else if camelot_adjacent(a, b) {
+        CamelotRelation::Adjacent
+    } else {
+        CamelotRelation::Clash
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,13 +313,11 @@ pub fn compute_harmonic_multiplier(
     let mut mult = 1.0_f64;
 
     if let (Some(a), Some(b)) = (seed_camelot, cand_camelot) {
-        if camelot_compatible(a, b) {
-            mult *= 2.2;
-        } else if camelot_adjacent(a, b) {
-            mult *= 1.4;
-        } else {
-            mult *= 0.6;
-        }
+        mult *= match camelot_relation(a, b) {
+            CamelotRelation::Compatible => 2.2,
+            CamelotRelation::Adjacent => 1.4,
+            CamelotRelation::Clash => 0.6,
+        };
     }
 
     if let (Some(a), Some(b)) = (seed_bpm, cand_bpm) {
