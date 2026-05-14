@@ -631,8 +631,14 @@ mod tests {
         let w_never = profile.weight_for(&never_played);
 
         // Malformed and very-old share the no-penalty path.
-        assert!((w_malformed - w_old).abs() < 1e-9, "malformed should match ancient: {w_malformed} vs {w_old}");
+        assert!(
+            (w_malformed - w_old).abs() < 1e-9,
+            "malformed should match ancient: {w_malformed} vs {w_old}"
+        );
         // Never-played takes the boost branch instead, which is distinguishable.
-        assert!((w_malformed - w_never).abs() > 0.01, "malformed should NOT match never-played: {w_malformed} vs {w_never}");
+        assert!(
+            (w_malformed - w_never).abs() > 0.01,
+            "malformed should NOT match never-played: {w_malformed} vs {w_never}"
+        );
     }
 }

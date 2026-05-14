@@ -13201,7 +13201,10 @@ mod tests {
         // path. To exercise the "no TIDAL session" branch (routes.rs:995) we
         // need a TIDAL-mapped album with no session.
         db.with_conn(|conn| {
-            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Local Artist')", [])?;
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+                [],
+            )?;
             conn.execute(
                 "INSERT INTO albums (id, tidal_id, title, artist_id, source)
                  VALUES (5, 8888, 'Local Album', 1, 'tidal')",
@@ -13245,8 +13248,14 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0]["title"], "Local Track");
         let tidal_tracks = body["tidal_tracks"].as_array().expect("tidal_tracks array");
-        assert!(tidal_tracks.is_empty(), "tidal_tracks must be [] when disconnected");
-        assert_eq!(body["album_tidal_id"], 8888, "album_tidal_id must survive even when session is absent");
+        assert!(
+            tidal_tracks.is_empty(),
+            "tidal_tracks must be [] when disconnected"
+        );
+        assert_eq!(
+            body["album_tidal_id"], 8888,
+            "album_tidal_id must survive even when session is absent"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }

@@ -3374,7 +3374,10 @@ mod parity_tests {
     fn parse_days_since_last_played_returns_f64_max_on_malformed_input() {
         assert_eq!(parse_days_since_last_played("not a date"), f64::MAX);
         assert_eq!(parse_days_since_last_played(""), f64::MAX);
-        assert_eq!(parse_days_since_last_played("2026-99-99T99:99:99Z"), f64::MAX);
+        assert_eq!(
+            parse_days_since_last_played("2026-99-99T99:99:99Z"),
+            f64::MAX
+        );
         // Sanity: the 14-day penalty gate in automix_score is NOT triggered.
         assert!(parse_days_since_last_played("malformed") >= 14.0);
         // Sanity: a well-formed timestamp parses to a small positive number.

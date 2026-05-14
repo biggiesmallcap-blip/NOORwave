@@ -397,39 +397,66 @@ mod tests {
 
         // Post-conditions.
         db.with_conn(|conn| {
-            let queue_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
+            let queue_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
             assert_eq!(queue_count, 0, "queue must be empty after boot wipe");
 
-            let (is_playing, current_track_id, current_queue_item_id, position_ms, volume, shuffle_mode, repeat_mode, automix_enabled): (
-                i64, Option<i64>, Option<i64>, i64, f64, String, String, i64,
-            ) = conn.query_row(
+            let (
+                is_playing,
+                current_track_id,
+                current_queue_item_id,
+                position_ms,
+                volume,
+                shuffle_mode,
+                repeat_mode,
+                automix_enabled,
+            ): (i64, Option<i64>, Option<i64>, i64, f64, String, String, i64) = conn.query_row(
                 "SELECT is_playing, current_track_id, current_queue_item_id, position_ms,
                         volume, shuffle_mode, repeat_mode, automix_enabled
                  FROM playback_state WHERE id = 1",
                 [],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
             )?;
             // Cleared:
             assert_eq!(is_playing, 0, "is_playing must reset to 0");
-            assert!(current_track_id.is_none(), "current_track_id must reset to NULL");
-            assert!(current_queue_item_id.is_none(), "current_queue_item_id must reset to NULL");
+            assert!(
+                current_track_id.is_none(),
+                "current_track_id must reset to NULL"
+            );
+            assert!(
+                current_queue_item_id.is_none(),
+                "current_queue_item_id must reset to NULL"
+            );
             assert_eq!(position_ms, 0, "position_ms must reset to 0");
             // Preserved (CLAUDE.md guarantee):
-            assert!((volume - 0.73).abs() < 1e-9, "user prefs: volume must survive boot wipe, got {volume}");
-            assert_eq!(shuffle_mode, "weighted", "user prefs: shuffle_mode must survive");
+            assert!(
+                (volume - 0.73).abs() < 1e-9,
+                "user prefs: volume must survive boot wipe, got {volume}"
+            );
+            assert_eq!(
+                shuffle_mode, "weighted",
+                "user prefs: shuffle_mode must survive"
+            );
             assert_eq!(repeat_mode, "one", "user prefs: repeat_mode must survive");
             assert_eq!(automix_enabled, 1, "user prefs: automix flag must survive");
 
-            let training_status: String = conn.query_row(
-                "SELECT status FROM training_runs LIMIT 1",
-                [],
-                |r| r.get(0),
-            )?;
-            assert_eq!(training_status, "failed", "orphan training_runs must be marked failed");
+            let training_status: String =
+                conn.query_row("SELECT status FROM training_runs LIMIT 1", [], |r| r.get(0))?;
+            assert_eq!(
+                training_status, "failed",
+                "orphan training_runs must be marked failed"
+            );
 
             Ok::<_, anyhow::Error>(())
         })
