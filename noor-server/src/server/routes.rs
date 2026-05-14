@@ -12966,6 +12966,122 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    // Characterization tests for TIDAL-handler failure shapes. These differ on
+    // purpose: the album endpoint is "best-effort" (TIDAL is enrichment) while
+    // tidal_search treats a disconnected session as a user-visible error.
+    // A single shared error helper would erase this distinction - so these tests
+    // exist to flag any refactor that does.
+
+    #[tokio::test]
+    async fn get_album_tracks_returns_local_tracks_when_tidal_session_absent() {
+        let (db, db_path) = fresh_migrated_db();
+        // The album MUST have a tidal_id, otherwise the handler returns at
+        // routes.rs:977 with album_tidal_id: null - which is a different code
+        // path. To exercise the "no TIDAL session" branch (routes.rs:995) we
+        // need a TIDAL-mapped album with no session.
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Local Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO albums (id, tidal_id, title, artist_id, source)
+                 VALUES (5, 8888, 'Local Album', 1, 'tidal')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, album_id, duration_ms, source, fidelity_score
+                 ) VALUES (10, 'Local Track', 1, 5, 180000, 'tidal_stream', 0)",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("seed");
+
+        // fresh_test_state has tidal_tokens: None -> the session is "disconnected".
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums/5/tracks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Best-effort path: the album still resolves, local tracks are returned,
+        // tidal_tracks is empty, album_tidal_id is preserved. Do NOT change this
+        // to 400 / 502 / hide the album_tidal_id in a refactor.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0]["title"], "Local Track");
+        let tidal_tracks = body["tidal_tracks"].as_array().expect("tidal_tracks array");
+        assert!(
+            tidal_tracks.is_empty(),
+            "tidal_tracks must be [] when disconnected"
+        );
+        assert_eq!(
+            body["album_tidal_id"], 8888,
+            "album_tidal_id must survive even when session is absent"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn tidal_search_returns_400_when_tidal_session_absent() {
+        // Opposite of the album endpoint: tidal_search has no library fallback,
+        // so a missing session must surface as a user-visible 400, not silently
+        // return an empty result set.
+        let app = build_test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tidal/search?q=foo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("TIDAL not connected"),
+            "expected 'TIDAL not connected' error, got: {body}"
+        );
+    }
+
+    // Note: an integration test for the recover_tidal_session path on a 401 upstream
+    // response is deferred - it requires intercepting the reqwest::Client, which
+    // requires wiremock or a trait-based http client. Until that infra lands, the
+    // refresh-on-auth path in tidal_search / tidal_video_playback / tidal_playlist_*
+    // remains uncovered.
+
+    // Library-track filter predicate (favorite_only / liked_only) is already
+    // covered by characterization-grade tests in db/queries.rs:
+    //   - liked_only_excludes_album_favorited_tracks (queries.rs:7931)
+    //   - favorite_only_preserves_legacy_union_behavior (queries.rs:7949)
+    //   - liked_only_takes_precedence_over_favorite_only (queries.rs:8036)
+    // Do not add duplicates here.
+
     /// Route-registration smoke test. Probes every `/api/*` route registered in
     /// `api_routes` with a deliberately-wrong HTTP method and asserts the
     /// response is NOT 404.

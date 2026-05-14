@@ -600,4 +600,45 @@ mod tests {
         assert_eq!(genre_order.len(), 4);
         assert_ne!(genre_order[0], genre_order[1]);
     }
+
+    // Characterization test. shuffle.rs's parse_days_since returns 999.0 on
+    // parse failure, NOT the same fallback as player.rs's parser (which uses
+    // f64::MAX). The two pickers behave differently on malformed input:
+    //   - shuffle treats malformed as "ancient" (gets full decay → no penalty)
+    //   - player treats malformed as "unknown" (skips the 14-day gate → no penalty)
+    // The end result is the same (no recent-play penalty in either path), but
+    // through different code. This test pins both pieces.
+    #[test]
+    fn parse_days_since_returns_999_on_malformed_input() {
+        assert_eq!(parse_days_since("not a date"), 999.0);
+        assert_eq!(parse_days_since(""), 999.0);
+        assert_eq!(parse_days_since("2026-99-99T99:99:99Z"), 999.0);
+    }
+
+    #[test]
+    fn weighted_shuffle_malformed_last_played_applies_no_recent_play_penalty() {
+        // weight_for branches: Some(last_played) → time-decay scaled penalty;
+        //                      None              → never_played_boost (separate code path).
+        // Malformed → parse_days_since=999 → decay=1.0 → penalty multiplier=1.0 (no penalty).
+        // Very-old plays converge to the same multiplier; never-played hits the boost branch.
+        let profile = WeightedShuffleProfile::default();
+        let malformed = track(1, 1, "A", false, 1, Some("not a date"), 0);
+        let very_old = track(2, 1, "A", false, 1, Some("1999-01-01T00:00:00Z"), 0);
+        let never_played = track(3, 1, "A", false, 1, None, 0);
+
+        let w_malformed = profile.weight_for(&malformed);
+        let w_old = profile.weight_for(&very_old);
+        let w_never = profile.weight_for(&never_played);
+
+        // Malformed and very-old share the no-penalty path.
+        assert!(
+            (w_malformed - w_old).abs() < 1e-9,
+            "malformed should match ancient: {w_malformed} vs {w_old}"
+        );
+        // Never-played takes the boost branch instead, which is distinguishable.
+        assert!(
+            (w_malformed - w_never).abs() > 0.01,
+            "malformed should NOT match never-played: {w_malformed} vs {w_never}"
+        );
+    }
 }
