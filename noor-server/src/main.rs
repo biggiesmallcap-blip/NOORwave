@@ -332,6 +332,109 @@ mod tests {
         let has_host = args_no_flag.iter().any(|a| a == "--host");
         assert!(!has_host);
     }
+
+    // Characterization test for the boot-time wipe at main.rs:383-399. This
+    // re-runs the exact SQL the boot path runs so a future refactor (e.g. extracting
+    // it to a `reset_ephemeral_session` function) can be checked against the
+    // current behavior. CLAUDE.md flags this wipe as load-bearing: queue and
+    // current_track_id MUST be cleared, but user prefs (volume, shuffle, repeat,
+    // automix flags) MUST survive.
+    #[test]
+    fn boot_wipe_clears_queue_resets_playback_state_and_marks_orphan_runs_failed() {
+        let db = crate::db::Database::open_in_memory().expect("open in-memory db");
+        db.run_migrations().expect("migrations");
+
+        // Seed: a stale session (track playing mid-position, queue with rows),
+        // a "running" training run that would otherwise be orphaned, AND user
+        // prefs we expect the wipe to PRESERVE.
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (
+                    id, title, artist_id, duration_ms, source, fidelity_score
+                 ) VALUES (1, 'T', 1, 180000, 'tidal_stream', 0)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE playback_state
+                 SET is_playing = 1, current_track_id = 1, position_ms = 12345,
+                     volume = 0.73, shuffle_mode = 'weighted', repeat_mode = 'one',
+                     automix_enabled = 1
+                 WHERE id = 1",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO training_runs (stage, status, started_at)
+                 VALUES ('train', 'running', datetime('now'))",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("seed");
+
+        // Run the boot-wipe SQL verbatim from main.rs:383-399.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE playback_state SET is_playing = 0, current_track_id = NULL, current_queue_item_id = NULL, position_ms = 0 WHERE id = 1",
+                [],
+            )?;
+            conn.execute("DELETE FROM queue", [])?;
+            conn.execute(
+                "UPDATE training_runs
+                 SET status = 'failed',
+                     finished_at = datetime('now'),
+                     error_text = COALESCE(error_text, 'interrupted by server restart')
+                 WHERE status = 'running'",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("wipe");
+
+        // Post-conditions.
+        db.with_conn(|conn| {
+            let queue_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM queue", [], |r| r.get(0))?;
+            assert_eq!(queue_count, 0, "queue must be empty after boot wipe");
+
+            let (is_playing, current_track_id, current_queue_item_id, position_ms, volume, shuffle_mode, repeat_mode, automix_enabled): (
+                i64, Option<i64>, Option<i64>, i64, f64, String, String, i64,
+            ) = conn.query_row(
+                "SELECT is_playing, current_track_id, current_queue_item_id, position_ms,
+                        volume, shuffle_mode, repeat_mode, automix_enabled
+                 FROM playback_state WHERE id = 1",
+                [],
+                |r| Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                    r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+                )),
+            )?;
+            // Cleared:
+            assert_eq!(is_playing, 0, "is_playing must reset to 0");
+            assert!(current_track_id.is_none(), "current_track_id must reset to NULL");
+            assert!(current_queue_item_id.is_none(), "current_queue_item_id must reset to NULL");
+            assert_eq!(position_ms, 0, "position_ms must reset to 0");
+            // Preserved (CLAUDE.md guarantee):
+            assert!((volume - 0.73).abs() < 1e-9, "user prefs: volume must survive boot wipe, got {volume}");
+            assert_eq!(shuffle_mode, "weighted", "user prefs: shuffle_mode must survive");
+            assert_eq!(repeat_mode, "one", "user prefs: repeat_mode must survive");
+            assert_eq!(automix_enabled, 1, "user prefs: automix flag must survive");
+
+            let training_status: String = conn.query_row(
+                "SELECT status FROM training_runs LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(training_status, "failed", "orphan training_runs must be marked failed");
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("assert");
+    }
 }
 
 #[tokio::main]

@@ -3362,4 +3362,23 @@ mod parity_tests {
             panic!("top-{n} ranking diverged.\n  old: {old_top:?}\n  new: {new_top:?}");
         }
     }
+
+    // Characterization test. The previous refactor plan got this exactly backwards:
+    // it claimed malformed timestamps incur "maximum recency penalty". They do not.
+    // parse_days_since_last_played returns f64::MAX on parse failure, and the caller
+    // in automix_score only applies a penalty when `days_since < 14.0` (player.rs:1586).
+    // f64::MAX is never < 14.0, so the penalty branch is skipped and the candidate
+    // keeps its base score. This test pins that behavior so a future "cleanup" that
+    // returns 0.0 or 999.0 on error would be caught.
+    #[test]
+    fn parse_days_since_last_played_returns_f64_max_on_malformed_input() {
+        assert_eq!(parse_days_since_last_played("not a date"), f64::MAX);
+        assert_eq!(parse_days_since_last_played(""), f64::MAX);
+        assert_eq!(parse_days_since_last_played("2026-99-99T99:99:99Z"), f64::MAX);
+        // Sanity: the 14-day penalty gate in automix_score is NOT triggered.
+        assert!(parse_days_since_last_played("malformed") >= 14.0);
+        // Sanity: a well-formed timestamp parses to a small positive number.
+        let recent = parse_days_since_last_played("2026-05-13T12:00:00Z");
+        assert!(recent >= 0.0 && recent < 365.0);
+    }
 }
