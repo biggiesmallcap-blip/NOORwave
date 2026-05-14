@@ -25,4 +25,18 @@ describe('remote route contract', () => {
 		const page = read(routePath);
 		expect(page).not.toMatch(/\sstyle=/);
 	});
+
+	test('remote imports the dedicated transport component', () => {
+		const page = read(routePath);
+		expect(page).toContain("RemoteTransport from '$lib/components/remote/RemoteTransport.svelte'");
+		expect(page).toContain('<RemoteTransport');
+	});
+
+	test('transport exposes expected playback controls', () => {
+		const transportPath = resolve(root, 'src/lib/components/remote/RemoteTransport.svelte');
+		const transport = read(transportPath);
+		for (const label of ['Previous', 'Play or pause', 'Next', 'Seek playback', 'Volume']) {
+			expect(transport).toContain(`aria-label="${label}"`);
+		}
+	});
 });
