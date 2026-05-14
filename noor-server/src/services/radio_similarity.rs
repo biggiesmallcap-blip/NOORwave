@@ -15,18 +15,20 @@
 //!
 //! ## Freshness model
 //!
-//! Two timestamps in `server_config` drive everything; nothing is derived from
+//! Two `server_config` values drive everything; nothing is derived from
 //! `track_similarity`'s own rows (a valid library can legitimately produce zero
 //! similarity pairs, which must not read as "never built"):
-//!   - `radio_similarity_built_at` — the *start* time of the last successful
-//!     rebuild. Start, not finish, so a `LibrarySynced` that lands during a
-//!     rebuild stays "newer" and re-triggers instead of being absorbed.
-//!   - `radio_similarity_library_changed_at` — stamped on *every* `LibrarySynced`,
-//!     unconditionally and before any other check, so a change observed while a
-//!     rebuild is running, during the debounce window, or while the app is busy
-//!     is never lost.
-//! `dirty` is simply `library_changed_at > built_at` — no flag to clear, no
-//! clear/set race.
+//!   - `radio_similarity_built_at` — the *start* timestamp of the last
+//!     successful rebuild, used only for the staleness *age*.
+//!   - `radio_similarity_change_gen` — a monotonic counter bumped on *every*
+//!     `LibrarySynced`, unconditionally and before any other check. The rebuild
+//!     records the counter value it observed at start as `radio_similarity_
+//!     built_gen`; `dirty` is `change_gen > built_gen`.
+//!
+//! A monotonic counter, not a timestamp comparison: a `LibrarySynced` that
+//! lands in the same wall-clock second as the rebuild's start still bumps
+//! `change_gen` past `built_gen`, so a change during a rebuild can never be
+//! silently absorbed.
 //!
 //! ## Safety
 //!   - **Reads never freeze.** The rebuild runs on an isolated connection
@@ -34,8 +36,8 @@
 //!     shared connection mutex nor an async worker.
 //!   - **Writes are not starved.** The rebuild is a multi-minute SQLite write
 //!     transaction, and WAL allows only one writer. Both the auto path *and*
-//!     the manual Settings route gate on `busy_reason`: a rebuild only starts
-//!     when no other writer (playback, sync, enrichment, analysis) is active.
+//!     the manual Settings route gate on `busy_reason`, which covers the
+//!     in-memory writer atomics *and* the DB-backed discovery-training state.
 //!   - **No thrash.** Single-flight via the `radio_similarity_running` atomic;
 //!     `LibrarySynced` rebuilds debounced by `MIN_REBUILD_INTERVAL_SECS`.
 
@@ -55,8 +57,11 @@ const MIN_REBUILD_INTERVAL_SECS: i64 = 6 * 3600;
 const MAX_STALE_AGE_SECS: i64 = 7 * 24 * 3600;
 /// `server_config` key: start timestamp of the last successful rebuild.
 const BUILT_AT_KEY: &str = "radio_similarity_built_at";
-/// `server_config` key: timestamp the library last changed (any `LibrarySynced`).
-const LIBRARY_CHANGED_AT_KEY: &str = "radio_similarity_library_changed_at";
+/// `server_config` key: the `change_gen` value observed at the last rebuild's
+/// start. `change_gen > built_gen` means the library changed since.
+const BUILT_GEN_KEY: &str = "radio_similarity_built_gen";
+/// `server_config` key: monotonic counter, bumped on every `LibrarySynced`.
+const CHANGE_GEN_KEY: &str = "radio_similarity_change_gen";
 
 /// What asked for the rebuild — determines the freshness rule.
 #[derive(Debug, Clone, Copy)]
@@ -87,18 +92,19 @@ struct Freshness {
 pub async fn run_if_stale(state: SharedState, trigger: RebuildTrigger) {
     let (db, event_tx, running, busy) = {
         let s = state.read().await;
+        let busy = busy_reason(&s, &s.db);
         (
             s.db.clone(),
             s.event_tx.clone(),
             s.radio_similarity_running.clone(),
-            busy_reason(&s),
+            busy,
         )
     };
 
     // Record the library change first — before the running, freshness, and
     // idle checks — so a change observed mid-rebuild, mid-debounce, or while
     // the app is busy is never lost. It is only ever resolved by a later
-    // rebuild stamping `built_at` past it.
+    // rebuild recording a `built_gen` that catches up to it.
     if matches!(trigger, RebuildTrigger::LibrarySynced) {
         mark_library_changed(&db);
     }
@@ -129,8 +135,8 @@ pub async fn run_if_stale(state: SharedState, trigger: RebuildTrigger) {
 
     // A rebuild is warranted, but it owns SQLite's single writer slot for
     // minutes. Run it only while the app is otherwise quiet; otherwise defer.
-    // The change is already recorded in `library_changed_at`, so the hourly
-    // ticker will retry once things settle.
+    // The change is already recorded in `change_gen`, so the hourly ticker
+    // will retry once things settle.
     if let Some(reason) = busy {
         debug!(target: "noor.radio_similarity", ?trigger, reason, "app busy, deferring rebuild");
         return;
@@ -149,26 +155,42 @@ pub async fn run_if_stale(state: SharedState, trigger: RebuildTrigger) {
 /// The active foreground job that should hold off a rebuild, or `None` if the
 /// app is idle enough. A rebuild owns SQLite's single writer slot for minutes,
 /// so neither the auto path nor the manual Settings route may run one while
-/// another writer is active.
-pub fn busy_reason(state: &crate::AppState) -> Option<&'static str> {
+/// another writer is active. Covers the in-memory writer atomics *and* the
+/// DB-backed discovery-training run state.
+pub fn busy_reason(state: &crate::AppState, db: &Database) -> Option<&'static str> {
     use std::sync::atomic::Ordering::SeqCst;
     if state.audio_active.load(SeqCst) {
-        Some("audio playback")
-    } else if state.tidal_sync_running.load(SeqCst) {
-        Some("a TIDAL sync")
-    } else if state.lastfm_enrich_running.load(SeqCst) {
-        Some("Last.fm enrichment")
-    } else if state.musicbrainz_enrich_running.load(SeqCst) {
-        Some("MusicBrainz enrichment")
-    } else if state.spotify_enrich_running.load(SeqCst) {
-        Some("Spotify enrichment")
-    } else if state.audio_analysis_running.load(SeqCst) {
-        Some("audio analysis")
-    } else if state.acrcloud_scan_running.load(SeqCst) {
-        Some("an ACRCloud scan")
-    } else {
-        None
+        return Some("audio playback");
     }
+    if state.tidal_sync_running.load(SeqCst) {
+        return Some("a TIDAL sync");
+    }
+    if state.lastfm_enrich_running.load(SeqCst) {
+        return Some("Last.fm enrichment");
+    }
+    if state.musicbrainz_enrich_running.load(SeqCst) {
+        return Some("MusicBrainz enrichment");
+    }
+    if state.spotify_enrich_running.load(SeqCst) {
+        return Some("Spotify enrichment");
+    }
+    if state.audio_analysis_running.load(SeqCst) {
+        return Some("audio analysis");
+    }
+    if state.acrcloud_scan_running.load(SeqCst) {
+        return Some("an ACRCloud scan");
+    }
+    // Discovery training is DB-backed, not an atomic. It writes heavily through
+    // the shared connection for the length of a run; a rebuild's long write
+    // transaction running alongside it would starve those writes past the busy
+    // timeout and fail the run.
+    if db
+        .with_conn(crate::db::queries::is_discovery_training_running)
+        .unwrap_or(false)
+    {
+        return Some("discovery training");
+    }
+    None
 }
 
 /// Pure rebuild decision, split out so the freshness logic is unit-testable.
@@ -179,7 +201,7 @@ fn should_rebuild(built_age: Option<i64>, dirty: bool, trigger: RebuildTrigger) 
         // Never built — always worth building, whatever asked.
         (None, _) => true,
         // A library change: rebuild once past the debounce window. Inside the
-        // window the change stays recorded in `library_changed_at`.
+        // window the change stays recorded in `change_gen`.
         (Some(age), RebuildTrigger::LibrarySynced) => age >= MIN_REBUILD_INTERVAL_SECS,
         // Periodic catch-up: a genuinely old index, or a debounced/deferred
         // change that is now past the debounce window.
@@ -198,12 +220,18 @@ fn read_config(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>>
     .optional()
 }
 
+/// Read an integer counter from `server_config`, defaulting to 0 when absent or
+/// unparseable.
+fn read_gen(conn: &Connection, key: &str) -> rusqlite::Result<i64> {
+    Ok(read_config(conn, key)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
+}
+
 /// Read index freshness from `server_config`. Deliberately does not touch
 /// `track_similarity` — see the module's freshness-model note.
 fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
     let built_at = read_config(conn, BUILT_AT_KEY)?;
-    let library_changed_at = read_config(conn, LIBRARY_CHANGED_AT_KEY)?;
-
     let built_age_secs: Option<i64> = if built_at.is_some() {
         conn.query_row(
             "SELECT CAST((julianday('now') - julianday(value)) * 86400 AS INTEGER)
@@ -216,12 +244,11 @@ fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
         None
     };
 
-    // ISO-8601-ish timestamps from datetime('now') sort correctly as text.
-    let dirty = match (&library_changed_at, &built_at) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some(changed), Some(built)) => changed.as_str() > built.as_str(),
-    };
+    // Monotonic counters, not timestamps: a LibrarySynced in the same second as
+    // the rebuild's start still bumps change_gen past built_gen.
+    let change_gen = read_gen(conn, CHANGE_GEN_KEY)?;
+    let built_gen = read_gen(conn, BUILT_GEN_KEY)?;
+    let dirty = change_gen > built_gen;
 
     Ok(Freshness {
         built_age_secs,
@@ -229,18 +256,20 @@ fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
     })
 }
 
-/// Stamp `library_changed_at = now`. Called for every `LibrarySynced` before
-/// any other check, so the change survives a busy app or an in-flight rebuild.
+/// Bump the monotonic library-change counter. Called for every `LibrarySynced`
+/// before any other check, so the change survives a busy app or an in-flight
+/// rebuild. Single statement — the increment is atomic.
 fn mark_library_changed(db: &Database) {
     let result = db.with_conn(|conn| {
         conn.execute(
-            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, datetime('now'))",
-            rusqlite::params![LIBRARY_CHANGED_AT_KEY],
+            "INSERT OR REPLACE INTO server_config (key, value)
+             VALUES (?1, CAST(COALESCE((SELECT value FROM server_config WHERE key = ?1), '0') AS INTEGER) + 1)",
+            rusqlite::params![CHANGE_GEN_KEY],
         )?;
         Ok(())
     });
     if let Err(err) = result {
-        warn!(target: "noor.radio_similarity", error = %err, "failed to record library change");
+        warn!(target: "noor.radio_similarity", error = %err, "failed to bump library-change counter");
     }
 }
 
@@ -267,19 +296,28 @@ pub fn try_spawn_rebuild(
         let _guard = RunningGuard(running);
         let result = (|| -> anyhow::Result<usize> {
             let conn = db.open_isolated()?;
-            // Capture the start time before the rebuild reads any data: a
-            // LibrarySynced that lands during the rebuild stamps a later
-            // `library_changed_at`, which stays newer than this `built_at` and
-            // so re-triggers a rebuild instead of being silently absorbed.
+            // Capture the start time and the library-change generation before
+            // the rebuild reads any data. A LibrarySynced that lands during the
+            // rebuild bumps change_gen past this value, so the freshness check
+            // stays dirty and re-triggers — no same-second timestamp race.
             let started_at: String =
                 conn.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
+            let change_gen_at_start: i64 = conn.query_row(
+                "SELECT CAST(COALESCE((SELECT value FROM server_config WHERE key = ?1), '0') AS INTEGER)",
+                rusqlite::params![CHANGE_GEN_KEY],
+                |r| r.get(0),
+            )?;
             let pairs = crate::db::queries::compute_track_similarity(&conn)?;
-            // Record completion independently of row count — a valid library
-            // can legitimately produce zero pairs, which must not read as
-            // "never built".
+            // Record completion: built_at drives the staleness age (independent
+            // of row count — a valid library can produce zero pairs), built_gen
+            // resolves everything that changed up to the rebuild's start.
             conn.execute(
                 "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
                 rusqlite::params![BUILT_AT_KEY, started_at],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+                rusqlite::params![BUILT_GEN_KEY, change_gen_at_start.to_string()],
             )?;
             Ok(pairs)
         })();
@@ -380,10 +418,9 @@ mod tests {
 
     #[test]
     fn freshness_zero_row_index_is_not_never_built() {
-        // Regression for the Codex finding: a successful rebuild that produced
-        // zero similarity rows still stamps built_at, so freshness must read it
-        // as built (Some age), not None — `read_freshness` never looks at
-        // `track_similarity` rows at all.
+        // A successful rebuild that produced zero similarity rows still stamps
+        // built_at, so freshness must read it as built (Some age), not None —
+        // `read_freshness` never looks at `track_similarity` rows at all.
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
@@ -396,21 +433,26 @@ mod tests {
     }
 
     #[test]
-    fn freshness_dirty_when_library_changed_after_build() {
+    fn freshness_dirty_when_change_gen_exceeds_built_gen() {
+        // Regression for the same-second timestamp finding: dirtiness is a
+        // monotonic counter comparison, so a library change is detected even
+        // when it would have shared a wall-clock timestamp with the rebuild.
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
-        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 01:00:00");
+        set_config(&db, BUILT_GEN_KEY, "5");
+        set_config(&db, CHANGE_GEN_KEY, "6");
         let f = db.with_conn(read_freshness).unwrap();
-        assert!(f.dirty);
+        assert!(f.dirty, "change_gen > built_gen must read dirty");
     }
 
     #[test]
-    fn freshness_not_dirty_when_build_is_newer() {
+    fn freshness_not_dirty_when_gens_equal() {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 00:00:00");
-        set_config(&db, BUILT_AT_KEY, "2026-05-14 02:00:00");
+        set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
+        set_config(&db, BUILT_GEN_KEY, "5");
+        set_config(&db, CHANGE_GEN_KEY, "5");
         let f = db.with_conn(read_freshness).unwrap();
         assert!(!f.dirty);
     }
@@ -419,9 +461,22 @@ mod tests {
     fn freshness_dirty_when_changed_but_never_built() {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 00:00:00");
+        set_config(&db, CHANGE_GEN_KEY, "1");
         let f = db.with_conn(read_freshness).unwrap();
         assert_eq!(f.built_age_secs, None);
         assert!(f.dirty);
+    }
+
+    #[test]
+    fn mark_library_changed_increments_monotonically() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        // Starts unset (treated as 0).
+        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 0);
+        mark_library_changed(&db);
+        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 1);
+        mark_library_changed(&db);
+        mark_library_changed(&db);
+        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 3);
     }
 }

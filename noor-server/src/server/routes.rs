@@ -2302,11 +2302,12 @@ async fn compute_radio_similarity(
 ) -> Result<Json<Value>, StatusCode> {
     let (db, event_tx, running, busy) = {
         let s = state.read().await;
+        let busy = crate::services::radio_similarity::busy_reason(&s, &s.db);
         (
             s.db.clone(),
             s.event_tx.clone(),
             s.radio_similarity_running.clone(),
-            crate::services::radio_similarity::busy_reason(&s),
+            busy,
         )
     };
 

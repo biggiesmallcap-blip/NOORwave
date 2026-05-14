@@ -4142,6 +4142,18 @@ pub fn get_radio_similarity_built_at(conn: &Connection) -> Result<Option<String>
         .optional()?)
 }
 
+/// True when a discovery training run is in progress. The radio similarity
+/// rebuild must not run alongside training: training writes heavily through the
+/// shared connection, and the rebuild's long write transaction would starve it
+/// past the busy timeout and fail the run.
+pub fn is_discovery_training_running(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM training_runs WHERE status = 'running')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingTrackRow {
     pub track_id: i64,
@@ -6920,6 +6932,31 @@ mod tests {
             .expect("selected legacy model");
         assert_eq!(selected.id, legacy.id);
         assert_eq!(selected.family, "discovery-fusion");
+    }
+
+    #[test]
+    fn is_discovery_training_running_tracks_run_status() {
+        // Regression: the radio similarity rebuild gates on this so it can't run
+        // a multi-minute write transaction alongside discovery training.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        assert!(
+            !is_discovery_training_running(&conn).expect("query"),
+            "no runs => not training"
+        );
+
+        let run = create_training_run(&conn, None, "behavioral", "running").expect("create run");
+        assert!(
+            is_discovery_training_running(&conn).expect("query"),
+            "a running row => training in progress, rebuild must defer"
+        );
+
+        finish_training_run(&conn, run.id, "completed").expect("finish run");
+        assert!(
+            !is_discovery_training_running(&conn).expect("query"),
+            "completed run => training done, rebuild may proceed"
+        );
     }
 
     #[test]
