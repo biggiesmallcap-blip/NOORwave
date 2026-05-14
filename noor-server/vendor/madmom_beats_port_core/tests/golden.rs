@@ -109,6 +109,14 @@ fn golden_parity_all() {
     let fixtures = fixtures_root();
     let golden_root = fixtures.join("golden");
     let audio_root = fixtures.join("audio");
+    if !golden_root.is_dir() || !audio_root.is_dir() {
+        eprintln!(
+            "skipping golden parity test: fixtures missing at {}",
+            fixtures.display()
+        );
+        return;
+    }
+
     let mut config = CoreConfig::default();
     let models_root = repo_root().join("models");
     config.model.model_json = models_root
