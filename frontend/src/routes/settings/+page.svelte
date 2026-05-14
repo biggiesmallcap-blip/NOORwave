@@ -100,7 +100,7 @@
 	let galaxyRefreshLabel = $state('');
 
 	let radioSimilarityRowCount = $state<number | null>(null);
-	let radioSimilarityComputedAt = $state<string | null>(null);
+	let radioSimilarityBuiltAt = $state<string | null>(null);
 	let radioSimilarityBusy = $state(false);
 	let radioSimilarityLabel = $state('');
 	// Set on unmount so the build poll loop can't outlive the component.
@@ -869,7 +869,7 @@
 		try {
 			const status = await api.getRadioSimilarityStatus();
 			radioSimilarityRowCount = status.row_count;
-			radioSimilarityComputedAt = status.computed_at;
+			radioSimilarityBuiltAt = status.built_at;
 			markServerOnline();
 		} catch (error) {
 			if (isFetchConnectionError(error)) markServerOffline();
@@ -883,12 +883,18 @@
 	async function buildRadioSimilarity() {
 		if (radioSimilarityBusy) return;
 		radioSimilarityBusy = true;
-		// Detect completion by a change in computed_at, not row count — a rebuild
-		// can legitimately produce the same number of pairs.
-		const before = radioSimilarityComputedAt;
+		// Detect completion by a change in built_at, not row count — a rebuild
+		// can legitimately produce the same number of pairs, or zero.
+		const before = radioSimilarityBuiltAt;
 		try {
 			const response = await api.computeRadioSimilarity();
 			markServerOnline();
+			if (response.status === 'busy') {
+				// The server declined: a sync/playback/enrichment writer is
+				// active. Nothing is building, so don't poll.
+				radioSimilarityLabel = response.message;
+				return;
+			}
 			radioSimilarityLabel =
 				response.status === 'already_running'
 					? 'A rebuild is already running. Watching for it to finish…'
@@ -898,7 +904,7 @@
 				await new Promise((resolve) => setTimeout(resolve, 3000));
 				if (componentUnmounted) return;
 				await loadRadioSimilarityStatus();
-				if (radioSimilarityComputedAt !== before) {
+				if (radioSimilarityBuiltAt !== before) {
 					radioSimilarityLabel = `Index ready: ${radioSimilarityRowCount?.toLocaleString()} pairs.`;
 					return;
 				}
@@ -2527,7 +2533,7 @@
 					</div>
 					<div class="info-row">
 						<span>Last built</span>
-						<strong>{radioSimilarityComputedAt ?? 'Never'}</strong>
+						<strong>{radioSimilarityBuiltAt ?? 'Never'}</strong>
 					</div>
 				</div>
 				<div class="action-row">

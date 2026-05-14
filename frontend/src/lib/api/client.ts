@@ -2088,7 +2088,7 @@ export const api = {
 	},
 
 	getRadioSimilarityStatus() {
-		return fetchApi<{ row_count: number; computed_at: string | null }>(
+		return fetchApi<{ row_count: number; built_at: string | null }>(
 			'/api/discovery/radio/status',
 		);
 	},

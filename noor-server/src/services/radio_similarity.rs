@@ -13,27 +13,35 @@
 //!   2. An hourly catch-up ticker — picks up changes that were debounced or
 //!      deferred, and rebuilds a genuinely old index even on quiet installs.
 //!
-//! Three safety properties matter here:
-//!   - **It must not freeze reads.** `compute_track_similarity` runs on an
-//!     isolated connection (`Database::open_isolated`) inside `spawn_blocking`,
-//!     so it holds neither the shared connection mutex nor an async worker —
-//!     request-path reads keep flowing in WAL mode throughout, and see a
-//!     consistent snapshot until the rebuild's single transaction commits.
-//!   - **It must not starve writes.** The rebuild is a multi-minute SQLite
-//!     write transaction, and WAL still allows only one writer. So the auto
-//!     path runs only while the app is otherwise quiet (no playback, sync,
-//!     enrichment, or analysis) — see the idle gate in `run_if_stale`. The
-//!     manual Settings button is intentionally *not* gated: the user asked.
-//!   - **It must not lose changes or thrash.** Concurrency is gated by the
-//!     `radio_similarity_running` atomic; `LibrarySynced` rebuilds are
-//!     debounced by `MIN_REBUILD_INTERVAL_SECS`; and a `LibrarySynced` that is
-//!     debounced or idle-deferred sets a persistent `radio_similarity_dirty`
-//!     flag so the hourly ticker rebuilds once the window clears, rather than
-//!     the change waiting for the `MAX_STALE_AGE_SECS` sweep.
+//! ## Freshness model
+//!
+//! Two timestamps in `server_config` drive everything; nothing is derived from
+//! `track_similarity`'s own rows (a valid library can legitimately produce zero
+//! similarity pairs, which must not read as "never built"):
+//!   - `radio_similarity_built_at` — the *start* time of the last successful
+//!     rebuild. Start, not finish, so a `LibrarySynced` that lands during a
+//!     rebuild stays "newer" and re-triggers instead of being absorbed.
+//!   - `radio_similarity_library_changed_at` — stamped on *every* `LibrarySynced`,
+//!     unconditionally and before any other check, so a change observed while a
+//!     rebuild is running, during the debounce window, or while the app is busy
+//!     is never lost.
+//! `dirty` is simply `library_changed_at > built_at` — no flag to clear, no
+//! clear/set race.
+//!
+//! ## Safety
+//!   - **Reads never freeze.** The rebuild runs on an isolated connection
+//!     (`Database::open_isolated`) inside `spawn_blocking`, holding neither the
+//!     shared connection mutex nor an async worker.
+//!   - **Writes are not starved.** The rebuild is a multi-minute SQLite write
+//!     transaction, and WAL allows only one writer. Both the auto path *and*
+//!     the manual Settings route gate on `busy_reason`: a rebuild only starts
+//!     when no other writer (playback, sync, enrichment, analysis) is active.
+//!   - **No thrash.** Single-flight via the `radio_similarity_running` atomic;
+//!     `LibrarySynced` rebuilds debounced by `MIN_REBUILD_INTERVAL_SECS`.
 
 use crate::db::Database;
 use crate::{AppEvent, SharedState};
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
@@ -45,9 +53,10 @@ const MIN_REBUILD_INTERVAL_SECS: i64 = 6 * 3600;
 /// The hourly catch-up ticker rebuilds once the index crosses this age even
 /// with no observed library change — a long-stop for quiet, drifting installs.
 const MAX_STALE_AGE_SECS: i64 = 7 * 24 * 3600;
-/// `server_config` key: "1" when a library change was observed but the rebuild
-/// was debounced or deferred, so the ticker knows a rebuild is owed.
-const DIRTY_FLAG_KEY: &str = "radio_similarity_dirty";
+/// `server_config` key: start timestamp of the last successful rebuild.
+const BUILT_AT_KEY: &str = "radio_similarity_built_at";
+/// `server_config` key: timestamp the library last changed (any `LibrarySynced`).
+const LIBRARY_CHANGED_AT_KEY: &str = "radio_similarity_library_changed_at";
 
 /// What asked for the rebuild — determines the freshness rule.
 #[derive(Debug, Clone, Copy)]
@@ -62,135 +71,115 @@ pub enum RebuildTrigger {
     Periodic,
 }
 
+/// Index freshness, read from `server_config` and independent of how many rows
+/// `track_similarity` happens to hold.
+#[derive(Debug)]
+struct Freshness {
+    /// Seconds since the last successful rebuild started; `None` = never built.
+    built_age_secs: Option<i64>,
+    /// True when the library changed after the last rebuild started.
+    dirty: bool,
+}
+
 /// Rebuild the radio similarity index in the background if it is stale for the
 /// given trigger, the app is idle, and no rebuild is already running. Returns
 /// immediately; never blocks the caller.
 pub async fn run_if_stale(state: SharedState, trigger: RebuildTrigger) {
-    let (
-        db,
-        event_tx,
-        running,
-        audio_active,
-        tidal_sync_running,
-        lastfm_enrich_running,
-        musicbrainz_enrich_running,
-        spotify_enrich_running,
-        audio_analysis_running,
-        acrcloud_scan_running,
-    ) = {
+    let (db, event_tx, running, busy) = {
         let s = state.read().await;
         (
             s.db.clone(),
             s.event_tx.clone(),
             s.radio_similarity_running.clone(),
-            s.audio_active.clone(),
-            s.tidal_sync_running.clone(),
-            s.lastfm_enrich_running.clone(),
-            s.musicbrainz_enrich_running.clone(),
-            s.spotify_enrich_running.clone(),
-            s.audio_analysis_running.clone(),
-            s.acrcloud_scan_running.clone(),
+            busy_reason(&s),
         )
     };
+
+    // Record the library change first — before the running, freshness, and
+    // idle checks — so a change observed mid-rebuild, mid-debounce, or while
+    // the app is busy is never lost. It is only ever resolved by a later
+    // rebuild stamping `built_at` past it.
+    if matches!(trigger, RebuildTrigger::LibrarySynced) {
+        mark_library_changed(&db);
+    }
 
     if running.load(Ordering::SeqCst) {
         debug!(target: "noor.radio_similarity", "rebuild already running, skipping");
         return;
     }
 
-    // Freshness inputs in one connection grab: index age (None = never built)
-    // and the pending-rebuild flag.
-    let snapshot = db.with_conn(|conn| {
-        let age_secs: Option<i64> = conn.query_row(
-            "SELECT CAST((julianday('now') - julianday(MAX(computed_at))) * 86400 AS INTEGER)
-             FROM track_similarity",
-            [],
-            |r| r.get(0),
-        )?;
-        let dirty: bool = conn
-            .query_row(
-                "SELECT value FROM server_config WHERE key = ?1",
-                rusqlite::params![DIRTY_FLAG_KEY],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        Ok((age_secs, dirty))
-    });
-    let (age_secs, dirty) = match snapshot {
-        Ok(v) => v,
+    let freshness = match db.with_conn(read_freshness) {
+        Ok(f) => f,
         Err(err) => {
             warn!(target: "noor.radio_similarity", error = %err, "freshness check failed");
             return;
         }
     };
 
-    if !should_rebuild(age_secs, dirty, trigger) {
-        // A `LibrarySynced` inside the debounce window still changed the
-        // library — record it so the hourly ticker rebuilds once the window
-        // clears, instead of the change waiting for the stale-age sweep.
-        if matches!(trigger, RebuildTrigger::LibrarySynced) {
-            mark_dirty(&db);
-        }
+    if !should_rebuild(freshness.built_age_secs, freshness.dirty, trigger) {
         debug!(
             target: "noor.radio_similarity",
-            ?trigger, age_secs, dirty, "index fresh for this trigger, skipping rebuild"
+            ?trigger,
+            built_age_secs = ?freshness.built_age_secs,
+            dirty = freshness.dirty,
+            "index fresh for this trigger, skipping rebuild"
         );
         return;
     }
 
-    // A rebuild is warranted — but it is a multi-minute SQLite write
-    // transaction, and WAL allows only one writer. Run it only while the app
-    // is otherwise quiet, so foreground writes (listen history, queue/runtime
-    // state, sync metadata) don't fail on the busy timeout. If something is
-    // active, defer: a `LibrarySynced` trigger leaves the dirty flag set so the
-    // ticker retries; a `Periodic` trigger simply re-evaluates next tick.
-    let busy_reason = if audio_active.load(Ordering::SeqCst) {
-        Some("audio playback")
-    } else if tidal_sync_running.load(Ordering::SeqCst) {
-        Some("tidal sync")
-    } else if lastfm_enrich_running.load(Ordering::SeqCst) {
-        Some("last.fm enrichment")
-    } else if musicbrainz_enrich_running.load(Ordering::SeqCst) {
-        Some("musicbrainz enrichment")
-    } else if spotify_enrich_running.load(Ordering::SeqCst) {
-        Some("spotify enrichment")
-    } else if audio_analysis_running.load(Ordering::SeqCst) {
-        Some("audio analysis")
-    } else if acrcloud_scan_running.load(Ordering::SeqCst) {
-        Some("acrcloud scan")
-    } else {
-        None
-    };
-    if let Some(reason) = busy_reason {
-        if matches!(trigger, RebuildTrigger::LibrarySynced) {
-            mark_dirty(&db);
-        }
-        debug!(
-            target: "noor.radio_similarity",
-            ?trigger, reason, "app busy, deferring rebuild"
-        );
+    // A rebuild is warranted, but it owns SQLite's single writer slot for
+    // minutes. Run it only while the app is otherwise quiet; otherwise defer.
+    // The change is already recorded in `library_changed_at`, so the hourly
+    // ticker will retry once things settle.
+    if let Some(reason) = busy {
+        debug!(target: "noor.radio_similarity", ?trigger, reason, "app busy, deferring rebuild");
         return;
     }
 
     if try_spawn_rebuild(db, event_tx, running) {
         info!(
             target: "noor.radio_similarity",
-            ?trigger, age_secs, "radio similarity rebuild started"
+            ?trigger,
+            built_age_secs = ?freshness.built_age_secs,
+            "radio similarity rebuild started"
         );
+    }
+}
+
+/// The active foreground job that should hold off a rebuild, or `None` if the
+/// app is idle enough. A rebuild owns SQLite's single writer slot for minutes,
+/// so neither the auto path nor the manual Settings route may run one while
+/// another writer is active.
+pub fn busy_reason(state: &crate::AppState) -> Option<&'static str> {
+    use std::sync::atomic::Ordering::SeqCst;
+    if state.audio_active.load(SeqCst) {
+        Some("audio playback")
+    } else if state.tidal_sync_running.load(SeqCst) {
+        Some("a TIDAL sync")
+    } else if state.lastfm_enrich_running.load(SeqCst) {
+        Some("Last.fm enrichment")
+    } else if state.musicbrainz_enrich_running.load(SeqCst) {
+        Some("MusicBrainz enrichment")
+    } else if state.spotify_enrich_running.load(SeqCst) {
+        Some("Spotify enrichment")
+    } else if state.audio_analysis_running.load(SeqCst) {
+        Some("audio analysis")
+    } else if state.acrcloud_scan_running.load(SeqCst) {
+        Some("an ACRCloud scan")
+    } else {
+        None
     }
 }
 
 /// Pure rebuild decision, split out so the freshness logic is unit-testable.
 /// Considers only index age, the dirty flag, and the trigger — not app
 /// activity (the idle gate) or the single-flight slot.
-fn should_rebuild(age_secs: Option<i64>, dirty: bool, trigger: RebuildTrigger) -> bool {
-    match (age_secs, trigger) {
+fn should_rebuild(built_age: Option<i64>, dirty: bool, trigger: RebuildTrigger) -> bool {
+    match (built_age, trigger) {
         // Never built — always worth building, whatever asked.
         (None, _) => true,
         // A library change: rebuild once past the debounce window. Inside the
-        // window the caller records the change via the dirty flag instead.
+        // window the change stays recorded in `library_changed_at`.
         (Some(age), RebuildTrigger::LibrarySynced) => age >= MIN_REBUILD_INTERVAL_SECS,
         // Periodic catch-up: a genuinely old index, or a debounced/deferred
         // change that is now past the debounce window.
@@ -200,18 +189,58 @@ fn should_rebuild(age_secs: Option<i64>, dirty: bool, trigger: RebuildTrigger) -
     }
 }
 
-/// Record that a library change is owed a rebuild. Cleared by `try_spawn_rebuild`
-/// once a rebuild completes.
-fn mark_dirty(db: &Database) {
+fn read_config(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM server_config WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Read index freshness from `server_config`. Deliberately does not touch
+/// `track_similarity` — see the module's freshness-model note.
+fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
+    let built_at = read_config(conn, BUILT_AT_KEY)?;
+    let library_changed_at = read_config(conn, LIBRARY_CHANGED_AT_KEY)?;
+
+    let built_age_secs: Option<i64> = if built_at.is_some() {
+        conn.query_row(
+            "SELECT CAST((julianday('now') - julianday(value)) * 86400 AS INTEGER)
+             FROM server_config WHERE key = ?1",
+            rusqlite::params![BUILT_AT_KEY],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+
+    // ISO-8601-ish timestamps from datetime('now') sort correctly as text.
+    let dirty = match (&library_changed_at, &built_at) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(changed), Some(built)) => changed.as_str() > built.as_str(),
+    };
+
+    Ok(Freshness {
+        built_age_secs,
+        dirty,
+    })
+}
+
+/// Stamp `library_changed_at = now`. Called for every `LibrarySynced` before
+/// any other check, so the change survives a busy app or an in-flight rebuild.
+fn mark_library_changed(db: &Database) {
     let result = db.with_conn(|conn| {
         conn.execute(
-            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, '1')",
-            rusqlite::params![DIRTY_FLAG_KEY],
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, datetime('now'))",
+            rusqlite::params![LIBRARY_CHANGED_AT_KEY],
         )?;
         Ok(())
     });
     if let Err(err) = result {
-        warn!(target: "noor.radio_similarity", error = %err, "failed to set dirty flag");
+        warn!(target: "noor.radio_similarity", error = %err, "failed to record library change");
     }
 }
 
@@ -219,8 +248,9 @@ fn mark_dirty(db: &Database) {
 /// connection. Returns `false` (without spawning) if a rebuild is already
 /// running. Shared by the auto-rebuild triggers and the manual Settings route.
 ///
-/// The `swap` is the real single-flight guard: callers may race past the
-/// cheaper `load` check in `run_if_stale`, but only one wins the swap.
+/// Callers are responsible for the idle gate (`busy_reason`); this only owns
+/// the single-flight `swap` — callers may race past the cheaper `load` check,
+/// but only one wins the swap.
 pub fn try_spawn_rebuild(
     db: Database,
     event_tx: broadcast::Sender<AppEvent>,
@@ -235,18 +265,24 @@ pub fn try_spawn_rebuild(
         // Releases the single-flight flag on drop, including on panic — a
         // wedged flag would silently block every future rebuild.
         let _guard = RunningGuard(running);
-        let result = db.open_isolated().and_then(|conn| {
+        let result = (|| -> anyhow::Result<usize> {
+            let conn = db.open_isolated()?;
+            // Capture the start time before the rebuild reads any data: a
+            // LibrarySynced that lands during the rebuild stamps a later
+            // `library_changed_at`, which stays newer than this `built_at` and
+            // so re-triggers a rebuild instead of being silently absorbed.
+            let started_at: String =
+                conn.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
             let pairs = crate::db::queries::compute_track_similarity(&conn)?;
-            // The index now reflects current library state — clear the pending
-            // flag so the ticker doesn't rebuild again needlessly.
-            if let Err(err) = conn.execute(
-                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, '0')",
-                rusqlite::params![DIRTY_FLAG_KEY],
-            ) {
-                warn!(target: "noor.radio_similarity", error = %err, "failed to clear dirty flag");
-            }
+            // Record completion independently of row count — a valid library
+            // can legitimately produce zero pairs, which must not read as
+            // "never built".
+            conn.execute(
+                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+                rusqlite::params![BUILT_AT_KEY, started_at],
+            )?;
             Ok(pairs)
-        });
+        })();
         match result {
             Ok(pairs) => {
                 info!(
@@ -278,6 +314,7 @@ impl Drop for RunningGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
 
     #[test]
     fn never_built_always_rebuilds() {
@@ -287,12 +324,8 @@ mod tests {
 
     #[test]
     fn library_synced_debounces_recent_rebuilds() {
-        // Inside the debounce window — skip (the caller marks it dirty).
-        assert!(!should_rebuild(
-            Some(60),
-            false,
-            RebuildTrigger::LibrarySynced
-        ));
+        // Inside the debounce window — skip (the change stays recorded).
+        assert!(!should_rebuild(Some(60), false, RebuildTrigger::LibrarySynced));
         // Past the debounce window — rebuild.
         assert!(should_rebuild(
             Some(MIN_REBUILD_INTERVAL_SECS),
@@ -323,5 +356,72 @@ mod tests {
             false,
             RebuildTrigger::Periodic
         ));
+    }
+
+    fn set_config(db: &Database, key: &str, value: &str) {
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn freshness_never_built_never_changed() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let f = db.with_conn(read_freshness).unwrap();
+        assert_eq!(f.built_age_secs, None);
+        assert!(!f.dirty);
+    }
+
+    #[test]
+    fn freshness_zero_row_index_is_not_never_built() {
+        // Regression for the Codex finding: a successful rebuild that produced
+        // zero similarity rows still stamps built_at, so freshness must read it
+        // as built (Some age), not None — `read_freshness` never looks at
+        // `track_similarity` rows at all.
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
+        let f = db.with_conn(read_freshness).unwrap();
+        assert!(
+            f.built_age_secs.is_some(),
+            "built_at must drive freshness, not row count"
+        );
+        assert!(!f.dirty);
+    }
+
+    #[test]
+    fn freshness_dirty_when_library_changed_after_build() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
+        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 01:00:00");
+        let f = db.with_conn(read_freshness).unwrap();
+        assert!(f.dirty);
+    }
+
+    #[test]
+    fn freshness_not_dirty_when_build_is_newer() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 00:00:00");
+        set_config(&db, BUILT_AT_KEY, "2026-05-14 02:00:00");
+        let f = db.with_conn(read_freshness).unwrap();
+        assert!(!f.dirty);
+    }
+
+    #[test]
+    fn freshness_dirty_when_changed_but_never_built() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        set_config(&db, LIBRARY_CHANGED_AT_KEY, "2026-05-14 00:00:00");
+        let f = db.with_conn(read_freshness).unwrap();
+        assert_eq!(f.built_age_secs, None);
+        assert!(f.dirty);
     }
 }

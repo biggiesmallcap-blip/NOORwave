@@ -2300,14 +2300,25 @@ async fn get_radio_tracks(
 async fn compute_radio_similarity(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let (db, event_tx, running) = {
+    let (db, event_tx, running, busy) = {
         let s = state.read().await;
         (
             s.db.clone(),
             s.event_tx.clone(),
             s.radio_similarity_running.clone(),
+            crate::services::radio_similarity::busy_reason(&s),
         )
     };
+
+    // A rebuild owns SQLite's single writer slot for minutes. The manual route
+    // gates on the same idle check as the auto path — clicking the button does
+    // not justify failing an in-flight sync or listen-history write.
+    if let Some(reason) = busy {
+        return Ok(Json(json!({
+            "status": "busy",
+            "message": format!("Can't rebuild while {reason} is active. Try again once it's finished.")
+        })));
+    }
 
     // Shared single-flight + isolated-connection rebuild path: a manual click
     // and an auto-rebuild can never run the multi-minute job twice, and the
@@ -2327,7 +2338,9 @@ async fn compute_radio_similarity(
 
 /// Status of the radio similarity index: row count + last-built timestamp.
 /// Powers the Settings "Build radio similarity index" panel — the frontend
-/// polls this after triggering a compute to detect completion.
+/// polls this after triggering a compute to detect completion. `built_at`
+/// comes from `server_config`, not the table's rows, so a legitimate zero-row
+/// rebuild still reads as built.
 async fn radio_similarity_status(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
@@ -2338,13 +2351,13 @@ async fn radio_similarity_status(
     let row_count = db
         .with_conn(queries::count_track_similarity)
         .unwrap_or(0);
-    let computed_at = db
-        .with_conn(queries::get_similarity_computed_at)
+    let built_at = db
+        .with_conn(queries::get_radio_similarity_built_at)
         .ok()
         .flatten();
     Ok(Json(json!({
         "row_count": row_count,
-        "computed_at": computed_at,
+        "built_at": built_at,
     })))
 }
 

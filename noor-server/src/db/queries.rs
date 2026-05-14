@@ -4124,10 +4124,22 @@ pub fn get_similarity_computed_at(conn: &Connection) -> Result<Option<String>> {
         .optional()?)
 }
 
-/// Row count of the precomputed `track_similarity` index. Zero means the index
-/// was never built, which starves the radio Engine lane.
+/// Row count of the precomputed `track_similarity` index.
 pub fn count_track_similarity(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0))?)
+}
+
+/// Start timestamp of the last successful radio similarity rebuild. Recorded in
+/// `server_config` independently of row count — a valid library can produce
+/// zero similarity pairs, so an empty table is not the same as "never built".
+pub fn get_radio_similarity_built_at(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'radio_similarity_built_at'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
