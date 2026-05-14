@@ -324,11 +324,11 @@ mod tests {
     #[test]
     fn host_flag_detection() {
         // Simulate args: just test the parsing logic directly
-        let args = vec!["noor-server".to_string(), "--host".to_string()];
+        let args = ["noor-server".to_string(), "--host".to_string()];
         let has_host = args.iter().any(|a| a == "--host");
         assert!(has_host);
 
-        let args_no_flag = vec!["noor-server".to_string()];
+        let args_no_flag = ["noor-server".to_string()];
         let has_host = args_no_flag.iter().any(|a| a == "--host");
         assert!(!has_host);
     }
@@ -503,7 +503,7 @@ async fn main() -> Result<()> {
                     services::tidal::auth::decode_persisted_tidal_tokens(&master_key, &bytes)
                         .ok()
                         .flatten()
-                        .and_then(|persisted| {
+                        .map(|persisted| {
                             let needs_rewrite = persisted.needs_encrypted_rewrite();
                             let tokens = persisted.into_tokens();
                             if needs_rewrite
@@ -518,7 +518,7 @@ async fn main() -> Result<()> {
                             rusqlite::params![blob],
                         );
                             }
-                            Some(tokens)
+                            tokens
                         })
                         .inspect(|t: &services::tidal::auth::TidalTokens| {
                             info!("Loaded persisted TIDAL tokens for user {}", t.user_id);

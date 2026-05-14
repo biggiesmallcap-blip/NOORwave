@@ -2322,7 +2322,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(hints.iter().filter(|hint| **hint == Some(99001)).count(), 1);
-        assert!(hints.iter().any(|hint| *hint == Some(99002)));
+        assert!(hints.contains(&Some(99002)));
     }
 
     #[test]
@@ -2990,10 +2990,10 @@ mod parity_tests {
                 cand.bpm,
             );
 
-            if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy) {
-                if (seed_energy - cand_energy).abs() > 0.5 {
-                    score *= 0.7;
-                }
+            if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
+                && (seed_energy - cand_energy).abs() > 0.5
+            {
+                score *= 0.7;
             }
         }
 
