@@ -100,6 +100,7 @@
 	let authReady = $state(false);
 	let onboardingChecked = $state(false);
 	let isOnboardingRoute = $derived(page.url.pathname.startsWith('/onboarding'));
+	let isRemoteRoute = $derived(page.url.pathname.startsWith('/remote'));
 	let showConnect = $state(false);
 	let connectTokenInput = $state('');
 	let connectError = $state('');
@@ -1076,6 +1077,10 @@
 		<img class="check-mark" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 		<p>Checking setup…</p>
 	</div>
+{:else if isRemoteRoute}
+	<div class="remote-shell">
+		{@render children()}
+	</div>
 {:else}
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
 	<header class="mobile-top-bar">
@@ -1812,6 +1817,14 @@
 		filter: blur(var(--wallpaper-blur, 10px)) saturate(1.08);
 		transform: scale(var(--wallpaper-scale, 1.025));
 		transform-origin: center;
+	}
+
+	.remote-shell {
+		position: relative;
+		z-index: 1;
+		min-height: 100svh;
+		background: var(--surface-0);
+		color: var(--text-primary);
 	}
 
 	.app-shell {
