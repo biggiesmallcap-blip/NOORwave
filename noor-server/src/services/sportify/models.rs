@@ -86,9 +86,14 @@ pub struct SportifyTrack {
     pub preview_url: Option<String>,
     #[serde(default)]
     pub popularity: Option<i32>,
-    #[serde(default, rename = "playcount")]
+    #[serde(
+        default,
+        rename = "playcount",
+        alias = "play_count",
+        alias = "playCount"
+    )]
     pub playcount: Option<i64>,
-    #[serde(default, rename = "external_ids")]
+    #[serde(default, rename = "external_ids", alias = "externalIds")]
     pub external_ids: Option<SportifyExternalIds>,
     #[serde(default, rename = "external_urls")]
     pub external_urls: HashMap<String, String>,
@@ -146,7 +151,7 @@ pub struct SportifyAlbum {
     pub genres: Vec<String>,
     #[serde(default)]
     pub tracks: Vec<SportifyTrack>,
-    #[serde(default, rename = "external_ids")]
+    #[serde(default, rename = "external_ids", alias = "externalIds")]
     pub external_ids: Option<SportifyExternalIds>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -164,7 +169,7 @@ pub struct SportifyArtist {
     pub images: Vec<SportifyImage>,
     #[serde(default)]
     pub popularity: Option<i32>,
-    #[serde(default, rename = "monthly_listeners")]
+    #[serde(default, rename = "monthly_listeners", alias = "monthlyListeners")]
     pub monthly_listeners: Option<i64>,
     #[serde(default)]
     pub followers: Option<i64>,
@@ -359,6 +364,35 @@ mod tests {
         }"#;
         let track: SportifyTrack = serde_json::from_str(json).expect("parse");
         assert_eq!(track.primary_artist(), Some("Structured Name"));
+    }
+
+    #[test]
+    fn deserializes_stats_field_aliases() {
+        let track: SportifyTrack = serde_json::from_str(
+            r#"{
+                "id": "track1",
+                "playCount": 123456,
+                "externalIds": { "isrc": "USRC17607839" }
+            }"#,
+        )
+        .expect("track stats aliases");
+        assert_eq!(track.playcount, Some(123456));
+        assert_eq!(
+            track
+                .external_ids
+                .as_ref()
+                .and_then(|ids| ids.isrc.as_deref()),
+            Some("USRC17607839"),
+        );
+
+        let artist: SportifyArtist = serde_json::from_str(
+            r#"{
+                "id": "artist1",
+                "monthlyListeners": 47000000
+            }"#,
+        )
+        .expect("artist stats aliases");
+        assert_eq!(artist.monthly_listeners, Some(47000000));
     }
 
     /// Playlist owner can be a plain string ("Lofi Girl") or a nested
