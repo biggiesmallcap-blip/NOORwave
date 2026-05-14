@@ -6,7 +6,9 @@ use crate::db::{
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleMode};
 use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
-use crate::services::audio_analysis::compute_harmonic_multiplier;
+use crate::services::audio_analysis::{
+    CamelotRelation, camelot_relation, compute_harmonic_multiplier,
+};
 use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
 use crate::smart::taste_vector::adapters::from_session_profile;
 use crate::smart::taste_vector::{SeedContext, TasteVector};
@@ -125,6 +127,46 @@ impl AutomixSelection {
     fn into_queue_pair(self) -> (Track, Option<String>) {
         (self.track, self.reason)
     }
+}
+
+/// Whether a scoring factor helped a candidate get picked or worked against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomixSignalKind {
+    Boost,
+    Penalty,
+}
+
+/// One human-readable factor that moved a candidate's automix score, tagged
+/// with its direction. Emitted by `automix_score` itself so the user-facing
+/// "Why" is derived from the same pass that ranked the track and can never
+/// contradict it.
+#[derive(Debug, Clone)]
+struct AutomixSignal {
+    label: &'static str,
+    kind: AutomixSignalKind,
+}
+
+impl AutomixSignal {
+    fn boost(label: &'static str) -> Self {
+        Self {
+            label,
+            kind: AutomixSignalKind::Boost,
+        }
+    }
+
+    fn penalty(label: &'static str) -> Self {
+        Self {
+            label,
+            kind: AutomixSignalKind::Penalty,
+        }
+    }
+}
+
+/// A candidate's automix score plus the signals that produced it.
+#[derive(Debug, Clone)]
+struct AutomixScore {
+    value: f64,
+    signals: Vec<AutomixSignal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1107,28 +1149,6 @@ fn normalize_external_pair(artist: &str, title: &str) -> (String, String) {
     )
 }
 
-#[cfg(test)]
-fn build_automix_extension(
-    conn: &Connection,
-    current_track: &Track,
-    queue_items: &[QueueItem],
-    mode: ShuffleMode,
-    needed: usize,
-    use_learning: bool,
-) -> Result<Vec<Track>> {
-    Ok(build_automix_extension_with_reasons(
-        conn,
-        current_track,
-        queue_items,
-        mode,
-        needed,
-        use_learning,
-    )?
-    .into_iter()
-    .map(|selection| selection.track)
-    .collect())
-}
-
 fn build_automix_extension_with_reasons(
     conn: &Connection,
     current_track: &Track,
@@ -1289,24 +1309,15 @@ fn build_automix_extension_with_reasons(
                 .get(&track.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let candidate_features = candidate_features.get(&track.id);
             let score = automix_score(
                 &track,
                 genres,
                 &taste,
                 &seed,
                 seed_features.as_ref(),
-                candidate_features,
+                candidate_features.get(&track.id),
             );
-            let reason = automix_scored_reason(
-                &track,
-                genres,
-                &taste,
-                &seed,
-                seed_features.as_ref(),
-                candidate_features,
-                score,
-            );
+            let reason = automix_scored_reason(&score);
             AutomixSelection::new(track, reason)
         })
         .collect())
@@ -1336,78 +1347,38 @@ fn automix_metadata_reason(seed: &Track, track: &Track) -> String {
     "automix: shared genre fallback".to_string()
 }
 
-fn automix_scored_reason(
-    track: &Track,
-    genres: &[String],
-    taste: &TasteVector,
-    seed: &SeedContext,
-    seed_features: Option<&AudioDspFeatures>,
-    candidate_features: Option<&AudioDspFeatures>,
-    score: f64,
-) -> String {
-    let mut signals = Vec::new();
-
-    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
-        signals.push("same artist".to_string());
-    }
-    if seed.source.as_deref() == Some(track.source.as_str()) {
-        signals.push("same source".to_string());
-    }
-    if track.is_favorite {
-        signals.push("favorite".to_string());
-    }
-    if track.play_count == 0 {
-        signals.push("unplayed".to_string());
-    }
-
-    let shared_genres = genres
+/// Build the persisted "Why" string for a scored automix pick from the score's
+/// own signal breakdown. Boost signals lead the reason; penalties are rendered
+/// explicitly as "despite …" so the explanation can never present a factor that
+/// actually counted *against* the track as the reason it was picked.
+fn automix_scored_reason(score: &AutomixScore) -> String {
+    let boosts: Vec<&str> = score
+        .signals
         .iter()
-        .map(|genre| normalize_genre_key(genre))
-        .filter(|genre| seed.genres.contains(genre))
-        .count();
-    if shared_genres > 0 {
-        signals.push(format!(
-            "{shared_genres} shared genre{}",
-            if shared_genres == 1 { "" } else { "s" }
-        ));
-    }
+        .filter(|signal| signal.kind == AutomixSignalKind::Boost)
+        .map(|signal| signal.label)
+        .collect();
+    let penalties: Vec<&str> = score
+        .signals
+        .iter()
+        .filter(|signal| signal.kind == AutomixSignalKind::Penalty)
+        .map(|signal| signal.label)
+        .collect();
 
-    if track.artist_id != 0
-        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
-    {
-        if affinity.pos > affinity.neg {
-            signals.push("artist affinity".to_string());
-        } else if affinity.neg > affinity.pos {
-            signals.push("recent skip penalty".to_string());
-        }
-    }
-
-    if let (Some(seed), Some(candidate)) = (seed_features, candidate_features) {
-        let multiplier = compute_harmonic_multiplier(
-            seed.camelot_key.as_deref(),
-            candidate.camelot_key.as_deref(),
-            seed.bpm,
-            candidate.bpm,
-        );
-        if multiplier > 1.0 {
-            signals.push("harmonic fit".to_string());
-        }
-        if let (Some(seed_energy), Some(candidate_energy)) = (seed.energy, candidate.energy)
-            && (seed_energy - candidate_energy).abs() > 0.5
-        {
-            signals.push("energy contrast".to_string());
-        }
-    }
-
-    if signals.is_empty() {
-        signals.push("library score".to_string());
-    }
-
-    let prefix = format!(
-        "automix: {}",
-        signals.into_iter().take(4).collect::<Vec<_>>().join(", ")
-    );
-    format!("{prefix} | {{\"score\":{score:.4}}}")
+    let lead = if boosts.is_empty() {
+        "library score".to_string()
+    } else {
+        boosts.into_iter().take(4).collect::<Vec<_>>().join(", ")
+    };
+    let prefix = if penalties.is_empty() {
+        format!("automix: {lead}")
+    } else {
+        format!(
+            "automix: {lead} despite {}",
+            penalties.into_iter().take(3).collect::<Vec<_>>().join(", ")
+        )
+    };
+    format!("{prefix} | {{\"score\":{:.4}}}", score.value)
 }
 
 fn format_reason_key(value: &str) -> String {
@@ -1634,7 +1605,8 @@ fn order_automix_candidates(
                 seed,
                 seed_features,
                 candidate_features.get(&track.id),
-            );
+            )
+            .value;
             ScoredTrack { track, score }
         })
         .collect::<Vec<_>>();
@@ -1744,6 +1716,11 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     result
 }
 
+/// Score a candidate for automix selection *and* emit the signals that
+/// produced that score. The reason shown to the user is built from these
+/// signals (see `automix_scored_reason`), so the explanation is derived from
+/// the same pass that ranked the track — it cannot drift from or contradict
+/// the score. `value` is byte-identical to the pre-signal scorer.
 fn automix_score(
     track: &Track,
     genres: &[String],
@@ -1751,37 +1728,44 @@ fn automix_score(
     seed: &SeedContext,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
-) -> f64 {
+) -> AutomixScore {
     let mut score = 1.0;
+    let mut signals = Vec::new();
 
     // Hard suppression for recently skipped tracks
     if taste.skipped_track_ids.contains(&track.id) {
         score *= 0.1;
+        signals.push(AutomixSignal::penalty("recently skipped"));
     }
 
     // Same-artist: gentle familiarity boost, not enough to cause artist runs.
     // Artist spread is handled at the queue level by decluster_by_album.
     if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
         score *= 1.1;
+        signals.push(AutomixSignal::boost("same artist"));
     }
 
     if seed.source.as_deref() == Some(track.source.as_str()) {
         score *= 1.05;
+        signals.push(AutomixSignal::boost("same source"));
     }
 
     if track.is_favorite {
         score *= 1.2;
+        signals.push(AutomixSignal::boost("favorite"));
     }
 
     // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
     if track.play_count == 0 {
         score *= 1.35;
+        signals.push(AutomixSignal::boost("unplayed"));
     } else if let Some(last_played) = track.last_played_at.as_deref() {
         // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
         let days_since = parse_days_since_last_played(last_played);
         if days_since < 14.0 {
             let penalty = 0.5 + 0.5 * (days_since / 14.0);
             score *= penalty;
+            signals.push(AutomixSignal::penalty("recently played"));
         }
     }
 
@@ -1790,17 +1774,36 @@ fn automix_score(
     {
         score += affinity.pos * 0.5;
         score -= affinity.neg * 0.65;
+        // Label by the net effect on the score, not the raw counts.
+        let net = affinity.pos * 0.5 - affinity.neg * 0.65;
+        if net > 0.0 {
+            signals.push(AutomixSignal::boost("artist affinity"));
+        } else if net < 0.0 {
+            signals.push(AutomixSignal::penalty("recent skip penalty"));
+        }
     }
 
+    let mut shares_seed_genre = false;
+    let mut genre_affinity_net = 0.0;
     let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
     for genre in normalized_genres {
         if seed.genres.contains(&genre) {
             score += 1.8;
+            shares_seed_genre = true;
         }
         if let Some(affinity) = taste.genre_affinity.get(&genre) {
             score += affinity.pos * 0.4;
             score -= affinity.neg * 0.5;
+            genre_affinity_net += affinity.pos * 0.4 - affinity.neg * 0.5;
         }
+    }
+    if shares_seed_genre {
+        signals.push(AutomixSignal::boost("shared genres"));
+    }
+    if genre_affinity_net > 0.0 {
+        signals.push(AutomixSignal::boost("genre affinity"));
+    } else if genre_affinity_net < 0.0 {
+        signals.push(AutomixSignal::penalty("genre mismatch"));
     }
 
     score += (track.fidelity_score.max(0) as f64) * 0.003;
@@ -1816,15 +1819,32 @@ fn automix_score(
             cand.bpm,
         );
 
+        // The multiplier folds Camelot *and* BPM together, so it can read >1.0
+        // even on a key clash that happens to share a tempo. Derive the
+        // harmonic signal from the Camelot relationship directly — via the same
+        // `camelot_relation` the multiplier uses — so the "Why" never claims a
+        // fit the keys don't have, and the two can't drift apart.
+        if let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref()) {
+            signals.push(match camelot_relation(a, b) {
+                CamelotRelation::Compatible => AutomixSignal::boost("harmonic match"),
+                CamelotRelation::Adjacent => AutomixSignal::boost("adjacent key"),
+                CamelotRelation::Clash => AutomixSignal::penalty("key clash"),
+            });
+        }
+
         // Energy whiplash penalty.
         if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
             && (seed_energy - cand_energy).abs() > 0.5
         {
             score *= 0.7;
+            signals.push(AutomixSignal::penalty("energy whiplash"));
         }
     }
 
-    score.max(0.05)
+    AutomixScore {
+        value: score.max(0.05),
+        signals,
+    }
 }
 
 /// Parse an ISO-8601 timestamp and return days elapsed since then.
@@ -2101,7 +2121,7 @@ mod tests {
     }
 
     #[test]
-    fn automix_reason_does_not_claim_harmonic_fit_without_key_or_bpm() {
+    fn automix_reason_does_not_claim_harmonic_match_without_key_or_bpm() {
         let profile = SessionTasteProfile {
             current_source: Some("tidal".to_string()),
             ..SessionTasteProfile::default()
@@ -2111,20 +2131,127 @@ mod tests {
         let seed_features = blank_dsp_features();
         let candidate_features = blank_dsp_features();
 
-        let reason = automix_scored_reason(
+        let score = automix_score(
             &track,
             &[],
             &taste,
             &seed,
             Some(&seed_features),
             Some(&candidate_features),
-            1.0,
         );
+        let reason = automix_scored_reason(&score);
 
         assert!(reason.contains("same source"), "got: {reason}");
         assert!(
-            !reason.contains("harmonic fit"),
-            "missing key and BPM must not be labeled as harmonic fit: {reason}"
+            !reason.contains("harmonic")
+                && !reason.contains("key clash")
+                && !reason.contains("adjacent key"),
+            "missing key and BPM must produce no harmonic signal at all: {reason}"
+        );
+    }
+
+    #[test]
+    fn automix_reason_marks_recent_skip_as_penalty_not_cause() {
+        // The candidate's artist carries negative session affinity, so
+        // automix_score penalizes it. The reason must render that as a
+        // "despite" clause, never as a cause the track was picked.
+        let profile = SessionTasteProfile {
+            current_source: Some("tidal".to_string()),
+            negative_artists: HashMap::from([(1, 1.0)]),
+            ..SessionTasteProfile::default()
+        };
+        let (taste, seed) = from_session_profile(&profile);
+        let track = track_with_tidal_id(42, Some(42), Some("LOSSLESS"));
+
+        let score = automix_score(&track, &[], &taste, &seed, None, None);
+        let reason = automix_scored_reason(&score);
+
+        assert!(
+            reason.contains("despite") && reason.contains("recent skip penalty"),
+            "a penalizing signal must be rendered as a penalty: {reason}"
+        );
+        let lead = reason.split(" despite ").next().unwrap_or("");
+        assert!(
+            !lead.contains("recent skip penalty"),
+            "a penalty must never appear in the selection-cause lead: {reason}"
+        );
+    }
+
+    #[test]
+    fn automix_reason_marks_energy_whiplash_as_penalty() {
+        // A large energy jump multiplies the score *down*; the old reason
+        // builder mislabeled it "energy contrast" as if it were a cause.
+        let profile = SessionTasteProfile {
+            current_source: Some("tidal".to_string()),
+            ..SessionTasteProfile::default()
+        };
+        let (taste, seed) = from_session_profile(&profile);
+        let track = track_with_tidal_id(42, Some(42), Some("LOSSLESS"));
+        let seed_features = AudioDspFeatures {
+            energy: Some(0.2),
+            ..blank_dsp_features()
+        };
+        let candidate_features = AudioDspFeatures {
+            energy: Some(0.9),
+            ..blank_dsp_features()
+        };
+
+        let score = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_features),
+            Some(&candidate_features),
+        );
+        let reason = automix_scored_reason(&score);
+
+        assert!(
+            reason.contains("despite") && reason.contains("energy whiplash"),
+            "a large energy jump is a penalty, not a selection cause: {reason}"
+        );
+    }
+
+    #[test]
+    fn automix_reason_does_not_claim_harmonic_match_on_key_clash_with_close_bpm() {
+        // 8A vs 10A is a Camelot clash, but a near-identical BPM pushes the
+        // *combined* harmonic multiplier above 1.0. The reason must still call
+        // it a key clash — deriving the signal from the Camelot relationship,
+        // not the blended multiplier.
+        let profile = SessionTasteProfile {
+            current_source: Some("tidal".to_string()),
+            ..SessionTasteProfile::default()
+        };
+        let (taste, seed) = from_session_profile(&profile);
+        let track = track_with_tidal_id(42, Some(42), Some("LOSSLESS"));
+        let seed_features = AudioDspFeatures {
+            camelot_key: Some("8A".to_string()),
+            bpm: Some(120.0),
+            ..blank_dsp_features()
+        };
+        let candidate_features = AudioDspFeatures {
+            camelot_key: Some("10A".to_string()),
+            bpm: Some(122.0),
+            ..blank_dsp_features()
+        };
+
+        let score = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_features),
+            Some(&candidate_features),
+        );
+        let reason = automix_scored_reason(&score);
+
+        assert!(
+            reason.contains("key clash"),
+            "a Camelot clash must be labeled a key clash: {reason}"
+        );
+        assert!(
+            !reason.contains("harmonic match") && !reason.contains("adjacent key"),
+            "a key clash must never be shown as a harmonic match: {reason}"
         );
     }
 
@@ -2887,9 +3014,34 @@ mod tests {
         assert_eq!(state.current_track.as_ref().map(|t| t.id), Some(1));
     }
 
+    /// Test-only convenience: run the automix extension builder and discard
+    /// the per-row reasons, returning just the tracks. Keeps the extension
+    /// tests focused on selection behaviour without threading through
+    /// `AutomixSelection` at every call site.
+    fn extension_tracks(
+        conn: &Connection,
+        current_track: &Track,
+        queue_items: &[QueueItem],
+        mode: ShuffleMode,
+        needed: usize,
+        use_learning: bool,
+    ) -> Result<Vec<Track>> {
+        Ok(build_automix_extension_with_reasons(
+            conn,
+            current_track,
+            queue_items,
+            mode,
+            needed,
+            use_learning,
+        )?
+        .into_iter()
+        .map(|selection| selection.track)
+        .collect())
+    }
+
     /// Build an isolated DB fixture with the full surface
-    /// `build_automix_extension` needs (the standard `conn()` helper
-    /// above lacks `embedding_models`, `track_embeddings`, and
+    /// `build_automix_extension_with_reasons` needs (the standard `conn()`
+    /// helper above lacks `embedding_models`, `track_embeddings`, and
     /// `track_similarity`). Returns a connection with one seed track
     /// inserted but **no** embedding row and **no** similarity rows —
     /// the "no recommendation signal" case the guard targets.
@@ -3012,7 +3164,7 @@ mod tests {
     #[test]
     fn build_automix_extension_returns_empty_when_seed_has_no_signal() {
         let (conn, seed) = empty_signal_conn();
-        let extension = build_automix_extension(
+        let extension = extension_tracks(
             &conn,
             &seed,
             &[], // empty queue
@@ -3051,7 +3203,7 @@ mod tests {
         )
         .unwrap();
 
-        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+        let extension = extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 12, true)
             .expect("extension call");
 
         // We don't pin contents — only that the empty-signal guard
@@ -3081,7 +3233,7 @@ mod tests {
             .unwrap();
         }
 
-        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+        let extension = extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 12, true)
             .expect("extension call");
 
         assert!(
@@ -3106,7 +3258,7 @@ mod tests {
     fn build_automix_extension_returns_empty_when_no_artist_album_or_genre() {
         let (conn, seed) = empty_signal_conn();
         // No additional tracks, no genre rows — seed is completely isolated.
-        let extension = build_automix_extension(&conn, &seed, &[], ShuffleMode::Off, 12, true)
+        let extension = extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 12, true)
             .expect("extension call");
 
         assert!(
@@ -3462,7 +3614,8 @@ mod parity_tests {
                     &seed,
                     fixture.seed_features.as_ref(),
                     cand.features.as_ref(),
-                );
+                )
+                .value;
                 (cand.track.id, score)
             })
             .collect()
