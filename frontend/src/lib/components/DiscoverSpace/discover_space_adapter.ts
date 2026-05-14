@@ -274,48 +274,4 @@ export function adaptResponse(
 	return { nodes, edges };
 }
 
-// ─── Ghost node factory (for radio route candidates not in space graph) ────────
 
-export function makeGhostNode(
-	trackId: number,
-	title: string,
-	artist: string,
-	reason: DiscoverReason,
-	prevNode: DiscoverTrackNode,
-	seedId: number | null
-): DiscoverTrackNode {
-	const angle = Math.random() * Math.PI * 2;
-	const drift = 80 + Math.random() * 60;
-	return {
-		id: `track-${trackId}`,
-		trackId,
-		title,
-		artist,
-		playable: {
-			kind: 'pending-lastfm',
-			artist,
-			title,
-			reason,
-		},
-		source: 'engine',
-		isInLibrary: false,
-		isColdStart: true,
-		genres: [],
-		score: 0.3,
-		confidence: 0.3,
-		supportCount: 0,
-		inDegree: 0,
-		inDegreePctile: 0,
-		primaryReason: reason,
-		reasonTags: [reason],
-		isSeed: false,
-		isPlaying: false,
-		inPlaylistBuilder: false,
-		isRouteOnly: true,
-		x: prevNode.x + Math.cos(angle) * drift,
-		y: prevNode.y + Math.sin(angle) * drift,
-		vx: 0,
-		vy: 0,
-		radius: 6,
-	};
-}
