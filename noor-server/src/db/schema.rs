@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_037,
     MIGRATION_038,
     MIGRATION_039,
+    MIGRATION_040,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1100,6 +1101,14 @@ ALTER TABLE sync_metadata ADD COLUMN tidal_favorite_track_cursor TEXT;
 /// port BLSTM) doubles the result.
 const MIGRATION_039: &str = r#"
 ALTER TABLE audio_dsp_features ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0;
+"#;
+
+// Health signal for the radio Engine lane. `actual_engine_count = 0` alone is
+// ambiguous: it can mean "no track_similarity match for this seed" or "the
+// track_similarity index was never built". This flag disambiguates so an empty
+// index is an obvious signal in radio_diagnostics rather than a silent zero.
+const MIGRATION_040: &str = r#"
+ALTER TABLE radio_diagnostics ADD COLUMN engine_index_empty INTEGER NOT NULL DEFAULT 0;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

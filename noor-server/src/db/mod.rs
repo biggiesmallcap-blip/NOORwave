@@ -5,30 +5,37 @@ pub mod schema;
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::info;
+
+/// Per-connection pragmas. Applied to the shared connection and to every
+/// isolated connection from `open_isolated`, so a background worker behaves
+/// identically to the request path.
+const CONNECTION_PRAGMAS: &str = "PRAGMA journal_mode = WAL;
+     PRAGMA synchronous = NORMAL;
+     PRAGMA foreign_keys = ON;
+     PRAGMA busy_timeout = 5000;
+     PRAGMA cache_size = -64000;";
 
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    /// The database file path, kept so background jobs can open their own
+    /// connection via `open_isolated`. `None` for in-memory test databases,
+    /// which cannot be shared across connections.
+    path: Option<PathBuf>,
 }
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
-
-        // Performance settings
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA cache_size = -64000;",
-        )?;
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(CONNECTION_PRAGMAS)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            path: Some(path),
         })
     }
 
@@ -38,7 +45,24 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            path: None,
         })
+    }
+
+    /// Open a fresh, independent connection to the same database file.
+    ///
+    /// Used by long-running background jobs (e.g. the radio similarity index
+    /// rebuild) so they never hold the shared connection mutex: a multi-minute
+    /// write transaction on this connection lets every request-path read keep
+    /// flowing in WAL mode instead of freezing the whole server. Errors for an
+    /// in-memory database, which has no shareable file.
+    pub fn open_isolated(&self) -> Result<Connection> {
+        let path = self.path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("cannot open an isolated connection for an in-memory database")
+        })?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(CONNECTION_PRAGMAS)?;
+        Ok(conn)
     }
 
     pub fn run_migrations(&self) -> Result<()> {
