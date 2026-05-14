@@ -4126,7 +4126,11 @@ pub fn get_similarity_computed_at(conn: &Connection) -> Result<Option<String>> {
 
 /// Row count of the precomputed `track_similarity` index.
 pub fn count_track_similarity(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| row.get(0))?)
+    Ok(
+        conn.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| {
+            row.get(0)
+        })?,
+    )
 }
 
 /// Start timestamp of the last successful radio similarity rebuild. Recorded in
@@ -8837,7 +8841,10 @@ mod tests {
         assert_eq!(track.fidelity_score, 88);
         assert!(track.is_favorite);
         assert_eq!(track.play_count, 17);
-        assert_eq!(track.last_played_at.as_deref(), Some("2026-05-01T12:00:00Z"));
+        assert_eq!(
+            track.last_played_at.as_deref(),
+            Some("2026-05-01T12:00:00Z")
+        );
         assert_eq!(track.date_added.as_deref(), Some("2026-04-01T00:00:00Z"));
         assert_eq!(track.source, "tidal");
         assert_eq!(track.artwork_url.as_deref(), Some("http://art/proj.jpg"));

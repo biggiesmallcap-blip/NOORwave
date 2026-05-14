@@ -300,8 +300,7 @@ pub fn try_spawn_rebuild(
             // the rebuild reads any data. A LibrarySynced that lands during the
             // rebuild bumps change_gen past this value, so the freshness check
             // stays dirty and re-triggers — no same-second timestamp race.
-            let started_at: String =
-                conn.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
+            let started_at: String = conn.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
             let change_gen_at_start: i64 = conn.query_row(
                 "SELECT CAST(COALESCE((SELECT value FROM server_config WHERE key = ?1), '0') AS INTEGER)",
                 rusqlite::params![CHANGE_GEN_KEY],
@@ -363,7 +362,11 @@ mod tests {
     #[test]
     fn library_synced_debounces_recent_rebuilds() {
         // Inside the debounce window — skip (the change stays recorded).
-        assert!(!should_rebuild(Some(60), false, RebuildTrigger::LibrarySynced));
+        assert!(!should_rebuild(
+            Some(60),
+            false,
+            RebuildTrigger::LibrarySynced
+        ));
         // Past the debounce window — rebuild.
         assert!(should_rebuild(
             Some(MIN_REBUILD_INTERVAL_SECS),
@@ -472,11 +475,20 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         // Starts unset (treated as 0).
-        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 0);
+        assert_eq!(
+            db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(),
+            0
+        );
         mark_library_changed(&db);
-        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 1);
+        assert_eq!(
+            db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(),
+            1
+        );
         mark_library_changed(&db);
         mark_library_changed(&db);
-        assert_eq!(db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(), 3);
+        assert_eq!(
+            db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(),
+            3
+        );
     }
 }

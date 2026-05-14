@@ -377,10 +377,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/discovery/radio/compute",
             post(compute_radio_similarity),
         )
-        .route(
-            "/api/discovery/radio/status",
-            get(radio_similarity_status),
-        )
+        .route("/api/discovery/radio/status", get(radio_similarity_status))
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
@@ -2349,9 +2346,7 @@ async fn radio_similarity_status(
         let s = state.read().await;
         s.db.clone()
     };
-    let row_count = db
-        .with_conn(queries::count_track_similarity)
-        .unwrap_or(0);
+    let row_count = db.with_conn(queries::count_track_similarity).unwrap_or(0);
     let built_at = db
         .with_conn(queries::get_radio_similarity_built_at)
         .ok()
