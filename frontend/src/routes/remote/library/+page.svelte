@@ -86,7 +86,10 @@
 			// `liked_only=true` strictly filters to user-favourited tracks
 			// (the looser `favorite_only` also includes tracks whose parent
 			// album is favourited — that's not what the user asked for here).
-			const res = await api.getTracks('title', 'asc', PAGE, offset, true, true);
+			// Default sort is recency-first: the most recently liked tracks
+			// surface at the top, matching how Spotify / Apple Music order
+			// their "Liked Songs" view on mobile.
+			const res = await api.getTracks('date_added', 'desc', PAGE, offset, true, true);
 			tracks = [...tracks, ...res.tracks];
 			if (res.tracks.length < PAGE) tracksHasMore = false;
 		} catch {
