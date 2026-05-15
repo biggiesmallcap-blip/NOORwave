@@ -85,6 +85,10 @@ export interface TidalDiscographyAlbum {
 	artwork_url: string | null;
 	release_date: string | null;
 	release_type: string | null;
+	// TIDAL's editorial filter that surfaced this album. More reliable than
+	// release_type for bucketing — release_type on the body field disagrees
+	// with the filter often enough to leave whole sections empty.
+	source_filter: 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS' | 'LIVE' | null;
 	number_of_tracks: number | null;
 	artist_name: string;
 	in_library: boolean;

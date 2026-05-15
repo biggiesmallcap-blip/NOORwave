@@ -289,6 +289,20 @@
 
 	type DiscoCategory = 'album' | 'ep_single' | 'compilation' | 'live';
 	function categorize(a: TidalDiscographyAlbum): DiscoCategory {
+		// The TIDAL editorial filter is more authoritative than the per-album
+		// release_type body field — a compilation tagged release_type:"ALBUM"
+		// used to land in the Albums shelf and the Compilations shelf stayed
+		// empty even though the data was fetched.
+		switch (a.source_filter) {
+			case 'COMPILATIONS':
+				return 'compilation';
+			case 'LIVE':
+				return 'live';
+			case 'EPSANDSINGLES':
+				return 'ep_single';
+			case 'ALBUMS':
+				return 'album';
+		}
 		const type = (a.release_type ?? '').toUpperCase();
 		if (type === 'COMPILATION') return 'compilation';
 		if (type === 'LIVE') return 'live';
@@ -298,9 +312,17 @@
 	}
 
 	function sortByDate(list: TidalDiscographyAlbum[]): TidalDiscographyAlbum[] {
-		return [...list].sort(
-			(a, b) => (releaseYear(b.release_date) ?? 0) - (releaseYear(a.release_date) ?? 0)
-		);
+		// Compare full ISO date strings (YYYY-MM-DD sorts lexicographically)
+		// not just the year — a Dec 2024 release should sit above a Jan 2024
+		// one. Missing dates sort to the bottom.
+		return [...list].sort((a, b) => {
+			const ad = a.release_date ?? '';
+			const bd = b.release_date ?? '';
+			if (ad === bd) return 0;
+			if (!ad) return 1;
+			if (!bd) return -1;
+			return bd.localeCompare(ad);
+		});
 	}
 
 	let tidalFullAlbums = $derived(sortByDate(tidalAlbums.filter((a) => categorize(a) === 'album')));
@@ -855,19 +877,6 @@
 				</section>
 			{/if}
 
-			{#if tidalSimilarArtists.length > 0}
-				<section class="section">
-					<div class="shelf-head">
-						<h2 class="section-title">Fans also like</h2>
-						<span class="shelf-count">{tidalSimilarArtists.length}</span>
-					</div>
-					<MediaRail items={tidalSimilarArtists} getKey={(a) => a.tidal_id}>
-						{#snippet card(similar)}
-							{@render similarArtistCard(similar)}
-						{/snippet}
-					</MediaRail>
-				</section>
-			{/if}
 		{:else}
 			{#if fallbackFullAlbums.length > 0}
 				<section class="section">
@@ -952,6 +961,22 @@
 			{#if tidalLoading}
 				<p class="status subtle">Loading full discography from TIDAL…</p>
 			{/if}
+		{/if}
+
+		<!-- Similar artists are not gated on tidalAvailable: a transient TIDAL
+		     fetch hiccup on /artists used to drop this section silently. -->
+		{#if tidalSimilarArtists.length > 0}
+			<section class="section">
+				<div class="shelf-head">
+					<h2 class="section-title">Fans also like</h2>
+					<span class="shelf-count">{tidalSimilarArtists.length}</span>
+				</div>
+				<MediaRail items={tidalSimilarArtists} getKey={(a) => a.tidal_id}>
+					{#snippet card(similar)}
+						{@render similarArtistCard(similar)}
+					{/snippet}
+				</MediaRail>
+			</section>
 		{/if}
 	{/if}
 </div>
