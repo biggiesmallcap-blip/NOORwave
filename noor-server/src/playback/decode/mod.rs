@@ -146,16 +146,41 @@ pub(crate) fn decode_and_buffer_job(
                             } else {
                                 let _ = len_tx.send(None);
                                 let total_segments = segment_urls.len();
+                                let fetch_window = dash_background_fetch_window();
                                 let mut sent_segments = 0usize;
                                 let mut sent_bytes = 0usize;
-                                for (idx, seg_url) in segment_urls.into_iter().enumerate() {
-                                    let bytes = append_stream_bytes(
-                                        &http,
-                                        &seg_url,
-                                        initial_media_segments + idx + 1,
-                                    )
-                                    .await?;
-                                    sent_bytes += bytes.len();
+                                let mut slowest_fetch_ms: u64 = 0;
+                                let fetch_stream = futures::stream::iter(
+                                    segment_urls.into_iter().enumerate(),
+                                )
+                                .map(|(idx, seg_url)| {
+                                    // Clone the reqwest client per future; reqwest::Client is
+                                    // Arc-backed internally so this is cheap and the connection
+                                    // pool is shared across concurrent segment fetches.
+                                    let http = http.clone();
+                                    async move {
+                                        let started = std::time::Instant::now();
+                                        let result = append_stream_bytes(
+                                            &http,
+                                            &seg_url,
+                                            initial_media_segments + idx + 1,
+                                        )
+                                        .await;
+                                        (idx, started.elapsed(), result)
+                                    }
+                                })
+                                .buffered(fetch_window);
+                                tokio::pin!(fetch_stream);
+                                while let Some((idx, elapsed, result)) =
+                                    fetch_stream.next().await
+                                {
+                                    let bytes = result?;
+                                    let fetch_ms = elapsed.as_millis() as u64;
+                                    let byte_count = bytes.len();
+                                    sent_bytes += byte_count;
+                                    if fetch_ms > slowest_fetch_ms {
+                                        slowest_fetch_ms = fetch_ms;
+                                    }
                                     if chunk_tx.send(Some(bytes)).is_err() {
                                         warn!(
                                             "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
@@ -166,25 +191,27 @@ pub(crate) fn decode_and_buffer_job(
                                         break;
                                     }
                                     sent_segments += 1;
-                                    if sent_segments <= 3
-                                        || sent_segments == total_segments
-                                        || sent_segments % 10 == 0
-                                    {
-                                        debug!(
-                                            "TIDAL DASH segment queued: track_id={}, sent_segments={}, total_remaining_segments={}, fetch_window={}",
-                                            download_track_id,
-                                            sent_segments,
-                                            total_segments,
-                                            dash_background_fetch_window()
-                                        );
-                                    }
+                                    tracing::info!(
+                                        target: "noor.dash",
+                                        event = "dash_segment_fetched",
+                                        track_id = download_track_id,
+                                        segment_index = idx,
+                                        fetch_ms,
+                                        bytes = byte_count,
+                                        sent_segments,
+                                        total_remaining_segments = total_segments,
+                                        fetch_window,
+                                        "DASH segment fetched"
+                                    );
                                 }
                                 debug!(
-                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}",
+                                    "TIDAL DASH download EOF: track_id={}, sent_segments={}, total_remaining_segments={}, bytes={}, slowest_fetch_ms={}, fetch_window={}",
                                     download_track_id,
                                     sent_segments,
                                     total_segments,
-                                    sent_bytes
+                                    sent_bytes,
+                                    slowest_fetch_ms,
+                                    fetch_window
                                 );
                             }
                             Ok(())
