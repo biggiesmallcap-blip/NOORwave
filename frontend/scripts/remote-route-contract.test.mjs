@@ -54,4 +54,19 @@ describe('remote route contract', () => {
 		expect(queue).toContain('aria-label="Play queued track"');
 		expect(queue).toContain('aria-label="Remove from queue"');
 	});
+
+	test('remote imports the mini search component', () => {
+		const page = read(routePath);
+		expect(page).toContain("RemoteMiniSearch from '$lib/components/remote/RemoteMiniSearch.svelte'");
+		expect(page).toContain('<RemoteMiniSearch');
+	});
+
+	test('mini search uses local search and queue actions', () => {
+		const searchPath = resolve(root, 'src/lib/components/remote/RemoteMiniSearch.svelte');
+		const search = read(searchPath);
+		expect(search).toContain('api.search');
+		expect(search).toContain('playTrackNow');
+		expect(search).toContain('playTrackNext');
+		expect(search).toContain('addTrackToQueue');
+	});
 });

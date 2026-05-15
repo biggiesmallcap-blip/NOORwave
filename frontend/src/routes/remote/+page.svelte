@@ -1,4 +1,5 @@
 <script lang="ts">
+	import RemoteMiniSearch from '$lib/components/remote/RemoteMiniSearch.svelte';
 	import RemoteQueue from '$lib/components/remote/RemoteQueue.svelte';
 	import RemoteTransport from '$lib/components/remote/RemoteTransport.svelte';
 	import {
@@ -22,6 +23,8 @@
 	</header>
 
 	<RemoteTransport track={$currentTrack} isPlaying={$isPlaying} position={$position} volume={$volume} />
+
+	<RemoteMiniSearch />
 
 	<RemoteQueue queue={$playbackQueue} />
 </main>
