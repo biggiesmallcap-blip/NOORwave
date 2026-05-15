@@ -8,7 +8,7 @@
 		playTrackNext,
 		playTrackNow
 	} from '$lib/stores/player';
-	import { normalizeRemoteSearchQuery, shouldRunRemoteSearch } from '$lib/remote/search';
+	import { createRemoteSearchGate, normalizeRemoteSearchQuery, shouldRunRemoteSearch } from '$lib/remote/search';
 
 	let query = $state('');
 	let open = $state(false);
@@ -17,44 +17,47 @@
 	let mode = $state<'library' | 'tidal'>('library');
 	let results = $state<Track[]>([]);
 	let tidalResults = $state<TidalSearchTrack[]>([]);
-	let searchSeq = 0;
+	const searchGate = createRemoteSearchGate();
 
 	$effect(() => {
 		const normalized = normalizeRemoteSearchQuery(query);
 		const activeMode = mode;
 		if (!shouldRunRemoteSearch(normalized)) {
+			// Advance the gate so a request still in flight can't repopulate
+			// results the user just cleared.
+			searchGate.invalidate();
 			results = [];
 			tidalResults = [];
 			error = '';
 			busy = false;
 			return;
 		}
-		const seq = ++searchSeq;
+		const token = searchGate.begin();
 		busy = true;
 		const timer = setTimeout(() => {
 			const request =
 				activeMode === 'tidal'
 					? api.searchTidal(normalized, 8).then((data) => {
-							if (seq !== searchSeq) return;
+							if (!searchGate.isCurrent(token)) return;
 							tidalResults = data.tracks;
 							results = [];
 							error = '';
 						})
 					: api.search(normalized, 8).then((data) => {
-							if (seq !== searchSeq) return;
+							if (!searchGate.isCurrent(token)) return;
 							results = data.tracks;
 							tidalResults = [];
 							error = '';
 						});
 			void request
 				.catch(() => {
-					if (seq !== searchSeq) return;
+					if (!searchGate.isCurrent(token)) return;
 					results = [];
 					tidalResults = [];
 					error = 'Search failed.';
 				})
 				.finally(() => {
-					if (seq === searchSeq) busy = false;
+					if (searchGate.isCurrent(token)) busy = false;
 				});
 		}, 180);
 		return () => clearTimeout(timer);

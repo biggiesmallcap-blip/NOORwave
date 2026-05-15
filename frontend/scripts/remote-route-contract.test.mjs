@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = resolve(__dirname, '..');
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(here, '..');
 const routePath = resolve(root, 'src/routes/remote/+page.svelte');
 const layoutPath = resolve(root, 'src/routes/+layout.svelte');
 
