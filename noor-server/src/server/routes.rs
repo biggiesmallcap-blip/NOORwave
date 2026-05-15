@@ -5184,13 +5184,57 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                     _ => 200,
                 };
 
+                // The candidate carries album metadata from TIDAL search; without
+                // linking a row here the track ends up orphan-artworked because
+                // `track.artwork_url` reads from `albums.artwork_url` via join.
+                let album_id: Option<i64> = match (
+                    candidate.album_title.as_deref(),
+                    candidate.artwork_url.as_deref(),
+                ) {
+                    (Some(album_title), artwork) if !album_title.is_empty() => {
+                        match conn.query_row(
+                            "SELECT id FROM albums
+                             WHERE artist_id = ?1 AND LOWER(title) = LOWER(?2)
+                             LIMIT 1",
+                            rusqlite::params![artist_id, album_title],
+                            |row| row.get::<_, i64>(0),
+                        ) {
+                            Ok(id) => {
+                                if let Some(url) = artwork {
+                                    let _ = conn.execute(
+                                        "UPDATE albums SET artwork_url = ?1
+                                         WHERE id = ?2 AND (artwork_url IS NULL OR artwork_url = '')",
+                                        rusqlite::params![url, id],
+                                    );
+                                }
+                                Some(id)
+                            }
+                            Err(_) => {
+                                if conn
+                                    .execute(
+                                        "INSERT INTO albums (title, artist_id, artwork_url, source)
+                                         VALUES (?1, ?2, ?3, 'tidal')",
+                                        rusqlite::params![album_title, artist_id, artwork],
+                                    )
+                                    .is_ok()
+                                {
+                                    Some(conn.last_insert_rowid())
+                                } else {
+                                    None
+                                }
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+
                 if conn
                     .execute(
-                        "INSERT INTO tracks (tidal_id, title, artist_id, duration_ms, best_quality, best_source, fidelity_score, is_favorite, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, 'tidal', ?6, 0, 'tidal')
+                        "INSERT INTO tracks (tidal_id, title, artist_id, album_id, duration_ms, best_quality, best_source, fidelity_score, is_favorite, source)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'tidal', ?7, 0, 'tidal')
                          ON CONFLICT(tidal_id) DO NOTHING",
                         rusqlite::params![
-                            tidal_id, candidate.title, artist_id,
+                            tidal_id, candidate.title, artist_id, album_id,
                             duration_ms, quality, fidelity
                         ],
                     )

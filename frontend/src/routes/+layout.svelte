@@ -100,6 +100,7 @@
 	let authReady = $state(false);
 	let onboardingChecked = $state(false);
 	let isOnboardingRoute = $derived(page.url.pathname.startsWith('/onboarding'));
+	let isRemoteRoute = $derived(page.url.pathname.startsWith('/remote'));
 	let showConnect = $state(false);
 	let connectTokenInput = $state('');
 	let connectError = $state('');
@@ -1040,8 +1041,11 @@
 	</div>
 {/if}
 
+<!-- Skipped on the phone remote: the fixed shader layer shows through and
+     flickers when the mobile address bar collapses past 100svh, and the
+     remote shell is opaque anyway. -->
 <div class="wallpaper-layer" aria-hidden="true">
-	{#if activeWallpaper.shader}
+	{#if activeWallpaper.shader && !isRemoteRoute}
 		<ShaderWallpaper shader={activeWallpaper.shader} interactive={false} maxDpr={1} targetFps={$wallpaperFps} />
 	{/if}
 </div>
@@ -1075,6 +1079,10 @@
 	<div class="onboarding-check">
 		<img class="check-mark" src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
 		<p>Checking setup…</p>
+	</div>
+{:else if isRemoteRoute}
+	<div class="remote-shell">
+		{@render children()}
 	</div>
 {:else}
 <div class="app-shell" class:mobile-player-active={mobilePlayerVisible} class:has-wallpaper={$wallpaper !== 'none'}>
@@ -1812,6 +1820,29 @@
 		filter: blur(var(--wallpaper-blur, 10px)) saturate(1.08);
 		transform: scale(var(--wallpaper-scale, 1.025));
 		transform-origin: center;
+	}
+
+	.remote-shell {
+		position: relative;
+		z-index: 1;
+		min-height: 100svh;
+		background: var(--surface-0);
+		color: var(--text-primary);
+		/* The remote is a phone-first surface; long-press on track titles,
+		 * artist text, etc. should never trigger iOS text selection — it's
+		 * useless for a remote and gets in the way of the long-press menu.
+		 * Suppress selection across the whole shell and opt back in only on
+		 * actual text inputs (search bars, filter fields). */
+		user-select: none;
+		-webkit-user-select: none;
+		-webkit-touch-callout: none;
+	}
+
+	.remote-shell :global(input),
+	.remote-shell :global(textarea) {
+		user-select: text;
+		-webkit-user-select: text;
+		-webkit-touch-callout: default;
 	}
 
 	.app-shell {

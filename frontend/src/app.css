@@ -13,6 +13,13 @@
 	--bg-surface:    rgba(255, 255, 255, 0.032);
 	--bg-hover:      rgba(255, 255, 255, 0.05);
 
+	/* Stepped surface tokens used by the mobile remote chrome. -0 is the page
+	 * base (matches body and html so iOS overscroll bounce stays in-theme); -1
+	 * is a card/chip plate; -2 is the pressed/active state. */
+	--surface-0:     #0b0b0f;
+	--surface-1:     rgba(255, 255, 255, 0.06);
+	--surface-2:     rgba(255, 255, 255, 0.10);
+
 	--panel-bg:      rgba(255, 255, 255, 0.038);
 	--panel-border:  rgba(255, 255, 255, 0.08);
 	--panel-shadow:  0 8px 40px rgba(0, 0, 0, 0.36);
@@ -88,6 +95,10 @@
 	--bg-raised:     #eeecea;
 	--bg-surface:    rgba(0, 0, 0, 0.028);
 	--bg-hover:      rgba(0, 0, 0, 0.046);
+
+	--surface-0:     #f5f4f2;
+	--surface-1:     rgba(0, 0, 0, 0.04);
+	--surface-2:     rgba(0, 0, 0, 0.08);
 
 	--panel-bg:      rgba(255, 255, 255, 0.78);
 	--panel-border:  rgba(0, 0, 0, 0.09);
@@ -260,6 +271,9 @@ html {
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 	text-rendering: optimizeLegibility;
+	/* iOS Safari paints the overscroll rubber-band zone in html's bg, not
+	 * body's, so match it to the theme base or the bounce shows white/black. */
+	background-color: var(--bg-base);
 }
 
 body {

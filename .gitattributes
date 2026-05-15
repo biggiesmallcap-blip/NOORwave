@@ -1,0 +1,5 @@
+# Force LF line endings on checkout for all text files. Windows checkouts with
+# core.autocrlf=true were materializing CRLF, which breaks the svelte /
+# vite-plugin-svelte build (`pnpm run build` -> js_parse_error). CI runs on
+# Linux so it never saw it. git auto-detects binary files and leaves them alone.
+* text=auto eol=lf

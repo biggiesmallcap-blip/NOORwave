@@ -35,6 +35,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local server / dev logs — never commit
+*.log
+
 # Local agent / design tooling — not shared
 AGENTS.md
 CLAUDE.md
@@ -43,6 +46,7 @@ CLAUDE.md
 .claude/skills/
 .claude/superpowers/
 .claude/worktrees/
+.claude/*.lock
 .design-refresh/
 .superpowers/
 .worktrees/

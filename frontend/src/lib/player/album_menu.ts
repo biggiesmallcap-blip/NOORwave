@@ -30,6 +30,11 @@ export interface BuildAlbumMenuOptions {
 	addToPlaylistSubmenu?: MenuItem[];
 	onSelect?: () => void;
 	onRemove?: () => void;
+	/**
+	 * Route "Go to artist" / "Open album" via the /remote/* counterparts so a
+	 * menu opened from the mobile remote stays inside the mobile shell.
+	 */
+	remoteRoutes?: boolean;
 }
 
 const SEPARATOR: MenuItem = { separator: true, label: '' };
@@ -86,11 +91,13 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 		items.push(SEPARATOR);
 	}
 
+	const navPrefix = options.remoteRoutes ? '/remote' : '';
+
 	if (hasArtist) {
 		items.push({
 			label: `Go to ${album.artist_name}`,
 			icon: '→',
-			onSelect: () => void goto(`/artists/${album.artist_id}`),
+			onSelect: () => void goto(`${navPrefix}/artists/${album.artist_id}`),
 		});
 	}
 
@@ -99,13 +106,13 @@ export function buildAlbumMenu(album: AlbumLike, options: BuildAlbumMenuOptions 
 			items.push({
 				label: 'Open album',
 				icon: '↗',
-				onSelect: () => void goto(`/albums/${localId}`),
+				onSelect: () => void goto(`${navPrefix}/albums/${localId}`),
 			});
 		} else if (tidalId != null) {
 			items.push({
 				label: 'Open on Tidal',
 				icon: '↗',
-				onSelect: () => void goto(`/tidal/albums/${tidalId}`),
+				onSelect: () => void goto(`${navPrefix}/tidal/albums/${tidalId}`),
 			});
 		}
 	}
