@@ -88,6 +88,13 @@ describe('remote route contract', () => {
 		expect(manifest.icons.some((icon) => icon.sizes === '192x192')).toBe(true);
 	});
 
+	test('manifest ships a 512px install icon present on disk', () => {
+		const manifest = JSON.parse(read(resolve(root, 'static/manifest.webmanifest')));
+		const icon512 = manifest.icons.find((icon) => icon.sizes === '512x512');
+		expect(icon512).toBeDefined();
+		expect(existsSync(resolve(root, 'static', icon512.src.replace(/^\//, '')))).toBe(true);
+	});
+
 	test('service worker caches only app shell assets', () => {
 		const workerPath = resolve(root, 'src/service-worker.ts');
 		const worker = read(workerPath);
