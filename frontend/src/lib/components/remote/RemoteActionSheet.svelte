@@ -212,6 +212,15 @@
 		z-index: 70;
 	}
 
+	/* While the sheet is sliding out (presented flips false but the element
+	   stays mounted for the transition), kill pointer events on the whole
+	   overlay so taps land on whatever is behind it. Without this, the back
+	   button under the scrim swallows the first 1-3 taps that happen during
+	   the 300ms exit animation. */
+	.remote-actions-overlay:not(.presented) {
+		pointer-events: none;
+	}
+
 	.remote-actions-scrim {
 		position: absolute;
 		inset: 0;
