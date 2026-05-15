@@ -68,6 +68,10 @@
 		border-radius: 999px;
 		background: var(--surface-1);
 		color: var(--text-primary);
+		/* Kill iOS Safari's 300ms tap-delay and double-tap zoom on this
+		   button so rapid back taps fire reliably. */
+		touch-action: manipulation;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.remote-shell-back:active {
@@ -77,6 +81,10 @@
 	.remote-shell-back svg {
 		width: 22px;
 		height: 22px;
+		/* iOS Safari can deliver the tap to the inner SVG instead of the
+		   button when the parent has a backdrop-filter stacking context.
+		   Send pointer events straight to the button. */
+		pointer-events: none;
 	}
 
 	.remote-shell-head h1 {
