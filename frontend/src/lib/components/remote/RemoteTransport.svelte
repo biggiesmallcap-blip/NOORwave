@@ -315,7 +315,7 @@
 		use:longPress={openTrackActions}
 	>
 		{#if artworkUrl}
-			<img src={artworkUrl} alt="" draggable="false" />
+			<img src={artworkUrl} alt="" draggable="false" decoding="async" />
 		{:else}
 			<div class="remote-art-empty" aria-hidden="true">NOOR</div>
 		{/if}

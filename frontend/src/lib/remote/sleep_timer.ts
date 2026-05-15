@@ -24,6 +24,13 @@ export interface SleepTimerState {
 }
 
 const STORAGE_KEY = 'noor.remote.sleepTimer';
+// If `fireAt` is more than this far in the past when we discover it, drop it
+// without firing. The timer is supposed to fire AT fireAt — if we missed
+// that deadline by minutes-to-hours (PWA suspended, then user resumed playback
+// from the desktop or another controller), pausing now would be a stale,
+// destructive command against an unrelated playback session. The grace covers
+// brief screen-off / OS-throttle gaps where firing is still the right thing.
+const STALE_GRACE_MS = 120_000;
 const initial: SleepTimerState = { fireAt: null, minutes: null };
 
 function readPersisted(): SleepTimerState {
@@ -80,10 +87,26 @@ async function fire() {
 	}
 }
 
+function discardStale() {
+	// Drop the persisted timer without firing pausePlayer. Used when we detect
+	// the deadline missed its window so long that pausing now would be acting
+	// on a different playback session entirely.
+	clearHandle();
+	const next: SleepTimerState = { fireAt: null, minutes: null };
+	sleepTimer.set(next);
+	persist(next);
+}
+
 function schedule(fireAt: number) {
 	clearHandle();
 	const delay = fireAt - Date.now();
 	if (delay <= 0) {
+		// Overdue by a grace window or less → still fire (user's session is
+		// probably the same one). Past that, drop silently — see STALE_GRACE_MS.
+		if (-delay > STALE_GRACE_MS) {
+			discardStale();
+			return;
+		}
 		void fire();
 		return;
 	}
@@ -94,11 +117,17 @@ function schedule(fireAt: number) {
  * Called when the tab returns to foreground. If our timer was supposed to
  * fire while we were suspended, pause immediately. Otherwise reschedule with
  * the remaining wall-clock time so a long suspension doesn't shift the deadline.
+ * If overdue by more than STALE_GRACE_MS, discard without firing — a long-
+ * dormant timer can't prove the playback session it was set against is still
+ * the active one.
  */
 function flushIfOverdueOrReschedule() {
 	const state = get(sleepTimer);
 	if (state.fireAt === null) return;
-	if (Date.now() >= state.fireAt) {
+	const overdue = Date.now() - state.fireAt;
+	if (overdue > STALE_GRACE_MS) {
+		discardStale();
+	} else if (overdue >= 0) {
 		void fire();
 	} else {
 		schedule(state.fireAt);
@@ -117,19 +146,12 @@ function ensureVisibilityHandler() {
 	visibilityBound = true;
 }
 
-// Boot rehydration: if localStorage already held a future fireAt, reschedule
-// it on module load; if it was already overdue, fire as soon as the player
-// store is reachable.
+// Boot rehydration: reuse the visibility-resume logic so the stale-grace
+// check runs on cold start too (matters when the PWA is killed entirely and
+// later relaunched after the deadline passed by hours).
 if (typeof window !== 'undefined') {
 	ensureVisibilityHandler();
-	const persisted = get(sleepTimer);
-	if (persisted.fireAt !== null) {
-		if (Date.now() >= persisted.fireAt) {
-			void fire();
-		} else {
-			schedule(persisted.fireAt);
-		}
-	}
+	flushIfOverdueOrReschedule();
 }
 
 export function startSleepTimer(minutes: number) {

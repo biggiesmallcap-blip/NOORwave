@@ -5184,23 +5184,31 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                     _ => 200,
                 };
 
-                // The candidate carries album metadata from TIDAL search; without
-                // linking a row here the track ends up orphan-artworked because
-                // `track.artwork_url` reads from `albums.artwork_url` via join.
+                // Link the new track to an album row when we have a stable
+                // TIDAL album id. Without an id we previously inserted a stub
+                // row keyed on (artist_id, LOWER(title)), which collides on a
+                // later sync that upserts the real album by tidal_id — the
+                // result is two album rows for the same release and the
+                // discovery-injected track hanging off the orphan stub.
+                //
+                // The fixed shape: look up by `tidal_id`; if missing, insert
+                // with the tidal_id set so the next sync finds it. When the
+                // candidate has no album tidal id (unknown source), leave
+                // `album_id` NULL — the artwork falls back to track.artwork_url
+                // via the existing render path and a future sync can attach
+                // it cleanly. No more orphan stubs.
                 let album_id: Option<i64> = match (
+                    candidate.album_tidal_id,
                     candidate.album_title.as_deref(),
-                    candidate.artwork_url.as_deref(),
                 ) {
-                    (Some(album_title), artwork) if !album_title.is_empty() => {
+                    (Some(album_tidal_id), Some(album_title)) if !album_title.is_empty() => {
                         match conn.query_row(
-                            "SELECT id FROM albums
-                             WHERE artist_id = ?1 AND LOWER(title) = LOWER(?2)
-                             LIMIT 1",
-                            rusqlite::params![artist_id, album_title],
+                            "SELECT id FROM albums WHERE tidal_id = ?1",
+                            rusqlite::params![album_tidal_id],
                             |row| row.get::<_, i64>(0),
                         ) {
                             Ok(id) => {
-                                if let Some(url) = artwork {
+                                if let Some(url) = candidate.artwork_url.as_deref() {
                                     let _ = conn.execute(
                                         "UPDATE albums SET artwork_url = ?1
                                          WHERE id = ?2 AND (artwork_url IS NULL OR artwork_url = '')",
@@ -5212,13 +5220,28 @@ async fn inject_discovery_tracks(state: &SharedState, current_track: &crate::db:
                             Err(_) => {
                                 if conn
                                     .execute(
-                                        "INSERT INTO albums (title, artist_id, artwork_url, source)
-                                         VALUES (?1, ?2, ?3, 'tidal')",
-                                        rusqlite::params![album_title, artist_id, artwork],
+                                        "INSERT INTO albums (tidal_id, title, artist_id, artwork_url, source)
+                                         VALUES (?1, ?2, ?3, ?4, 'tidal')
+                                         ON CONFLICT(tidal_id) DO NOTHING",
+                                        rusqlite::params![
+                                            album_tidal_id,
+                                            album_title,
+                                            artist_id,
+                                            candidate.artwork_url.as_deref()
+                                        ],
                                     )
                                     .is_ok()
                                 {
-                                    Some(conn.last_insert_rowid())
+                                    // The conflict path means another writer just
+                                    // inserted the same album — fetch its id instead
+                                    // of relying on last_insert_rowid (which would be
+                                    // 0 on conflict).
+                                    conn.query_row(
+                                        "SELECT id FROM albums WHERE tidal_id = ?1",
+                                        rusqlite::params![album_tidal_id],
+                                        |row| row.get::<_, i64>(0),
+                                    )
+                                    .ok()
                                 } else {
                                     None
                                 }

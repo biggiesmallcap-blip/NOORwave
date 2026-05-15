@@ -107,11 +107,16 @@
 		opacity: 0.35;
 		filter: blur(60px) saturate(160%);
 		transform: scale(1.1);
+		/* Pin to its own compositing layer so the expensive blur+saturate
+		   filter is rasterized once and reused across page swaps instead of
+		   re-running on every navigation paint. */
+		will-change: transform;
 	}
 
 	.remote-layout-banner {
-		position: sticky;
-		top: 0;
+		/* Flex item at top of the .remote-shell column — no sticky needed
+		   because the parent is overflow: hidden so this stays in view. */
+		flex: 0 0 auto;
 		z-index: 40;
 		display: flex;
 		align-items: center;

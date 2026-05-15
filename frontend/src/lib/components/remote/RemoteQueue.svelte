@@ -244,7 +244,12 @@
 						onclick={() => void onPlayRow(item)}
 					>
 						{#if item.track.artwork_url}
-							<img src={upscaleTidalArtwork(item.track.artwork_url, 320)} alt="" />
+							<img
+								src={upscaleTidalArtwork(item.track.artwork_url, 320)}
+								alt=""
+								loading="lazy"
+								decoding="async"
+							/>
 						{:else}
 							<span class="remote-queue-thumb-empty" aria-hidden="true">NOOR</span>
 						{/if}
@@ -308,6 +313,10 @@
 		display: grid;
 		gap: 8px;
 	}
+
+	/* content-visibility: auto on queue rows was thrashing iOS Safari scroll
+	   on long queues — same issue as the library list. Lazy-loaded images
+	   are enough for the perf budget here. */
 
 	.remote-queue {
 		gap: 12px;

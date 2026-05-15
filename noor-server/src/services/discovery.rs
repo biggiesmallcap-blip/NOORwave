@@ -16,6 +16,12 @@ pub struct DiscoveryCandidateTrack {
     pub title: String,
     pub artist_name: Option<String>,
     pub album_title: Option<String>,
+    // TIDAL's album id. Carried through so the injection path can upsert
+    // albums by external id instead of fuzzy (artist_id, title) — otherwise
+    // a discovery-injected stub album collides with the real album on a
+    // later sync and the user ends up with two album rows for the same
+    // release. Optional because not every seed source includes it.
+    pub album_tidal_id: Option<i64>,
     pub artwork_url: Option<String>,
     pub duration_ms: Option<i64>,
     pub audio_quality: Option<String>,
@@ -106,6 +112,7 @@ impl TidalDiscoveryProvider {
             title: track.title,
             artist_name: track.artist_name,
             album_title: track.album_title,
+            album_tidal_id: track.album_id,
             artwork_url: track.artwork_url,
             duration_ms: Some(track.duration.saturating_mul(1000)),
             audio_quality: track.audio_quality,

@@ -65,7 +65,15 @@
 	.remote-page {
 		position: relative;
 		z-index: 1;
-		min-height: 100svh;
+		/* Single bounded scroll container — the parent .remote-shell is a
+		   flex column with overflow: hidden, so .remote-page flexes to fill
+		   the viewport and provides the only scroll surface. */
+		flex: 1 1 0;
+		min-height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior-y: contain;
 		padding: max(18px, env(safe-area-inset-top)) 16px max(22px, env(safe-area-inset-bottom));
 		color: var(--text-primary);
 		display: grid;

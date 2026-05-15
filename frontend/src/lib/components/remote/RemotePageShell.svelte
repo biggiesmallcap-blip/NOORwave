@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { tap } from '$lib/remote/tap';
 	import type { Snippet } from 'svelte';
 
 	// Backdrop and disconnect banner are owned by /remote/+layout.svelte so
@@ -25,7 +26,7 @@
 </script>
 
 <header class="remote-shell-head">
-	<button type="button" class="remote-shell-back" aria-label="Back" onclick={onBack}>
+	<button type="button" class="remote-shell-back" aria-label="Back" use:tap={onBack}>
 		<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 			<path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
 		</svg>
@@ -42,8 +43,12 @@
 
 <style>
 	.remote-shell-head {
-		position: sticky;
-		top: 0;
+		/* No longer sticky — the parent .remote-shell is a flex column and
+		   the header is a fixed flex item at top while main flexes to fill.
+		   Saves the sticky compositing overhead and avoids a known iOS
+		   issue where sticky elements over a bounded scroller occasionally
+		   capture touches that should reach the scroll. */
+		position: relative;
 		z-index: 5;
 		display: grid;
 		grid-template-columns: 44px 1fr 44px;
@@ -52,12 +57,11 @@
 		padding: max(10px, env(safe-area-inset-top)) 16px 10px;
 		background: linear-gradient(
 			180deg,
-			color-mix(in oklab, var(--bg-base) 92%, transparent) 0%,
-			color-mix(in oklab, var(--bg-base) 70%, transparent) 80%,
-			transparent 100%
+			color-mix(in oklab, var(--bg-base) 96%, transparent) 0%,
+			color-mix(in oklab, var(--bg-base) 82%, transparent) 70%,
+			color-mix(in oklab, var(--bg-base) 60%, transparent) 100%
 		);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
+		flex: 0 0 auto;
 	}
 
 	.remote-shell-back {
@@ -68,6 +72,10 @@
 		border-radius: 999px;
 		background: var(--surface-1);
 		color: var(--text-primary);
+		/* Kill iOS Safari's 300ms tap-delay and double-tap zoom on this
+		   button so rapid back taps fire reliably. */
+		touch-action: manipulation;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.remote-shell-back:active {
@@ -77,6 +85,10 @@
 	.remote-shell-back svg {
 		width: 22px;
 		height: 22px;
+		/* iOS Safari can deliver the tap to the inner SVG instead of the
+		   button when the parent has a backdrop-filter stacking context.
+		   Send pointer events straight to the button. */
+		pointer-events: none;
 	}
 
 	.remote-shell-head h1 {
@@ -98,7 +110,16 @@
 	.remote-shell-main {
 		position: relative;
 		z-index: 1;
-		min-height: 100svh;
+		/* Bounded scroll container — viewport minus the header. iOS Safari
+		   handles bounded scroll containers cleanly; uncontained body
+		   scroll on a long list was the source of the silent "scroll
+		   latch" mid-list. */
+		flex: 1 1 0;
+		min-height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior-y: contain;
 		padding: 4px 16px max(22px, env(safe-area-inset-bottom));
 		color: var(--text-primary);
 		display: grid;
