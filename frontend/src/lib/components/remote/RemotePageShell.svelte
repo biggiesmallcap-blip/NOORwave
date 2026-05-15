@@ -115,5 +115,10 @@
 		display: grid;
 		gap: 18px;
 		align-content: start;
+		/* iOS PWA rubber-band overscroll can silently lock the scroll
+		   position on long lists after a hard reversal. `contain` keeps
+		   the chain inside the main area without disabling normal scroll
+		   momentum. */
+		overscroll-behavior-y: contain;
 	}
 </style>

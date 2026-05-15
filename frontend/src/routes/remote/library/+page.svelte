@@ -213,7 +213,7 @@
 						type="button"
 						class="remote-recent-tile"
 						aria-label="Play {entry.track_title}"
-						use:tap={() => pickRecent(entry)}
+						onclick={() => pickRecent(entry)}
 					>
 						<span class="remote-recent-art">
 							{#if entry.artwork_url}
@@ -244,7 +244,7 @@
 						type="button"
 						class="remote-top-artist"
 						aria-label="Open {a.artist_name}"
-						use:tap={() => pickArtist(a.artist_id)}
+						onclick={() => pickArtist(a.artist_id)}
 					>
 						<span class="remote-top-artist-portrait" aria-hidden="true">
 							{a.artist_name.slice(0, 1)}
@@ -319,7 +319,7 @@
 		<ul class="remote-row-list" hidden={tab !== 'artists'} aria-hidden={tab !== 'artists'}>
 			{#each filteredArtists as artist (artist.id)}
 				<li>
-					<button type="button" class="remote-row" use:tap={() => pickArtist(artist.id)}>
+					<button type="button" class="remote-row" onclick={() => pickArtist(artist.id)}>
 						<span class="remote-row-thumb">
 							{#if artistPortrait(artist)}
 								<img
@@ -343,7 +343,7 @@
 		<ul class="remote-row-list" hidden={tab !== 'albums'} aria-hidden={tab !== 'albums'}>
 			{#each filteredAlbums as album (album.id)}
 				<li>
-					<button type="button" class="remote-row" use:tap={() => pickAlbum(album.id)}>
+					<button type="button" class="remote-row" onclick={() => pickAlbum(album.id)}>
 						<span class="remote-row-thumb">
 							{#if album.artwork_url}
 								<img
@@ -368,7 +368,7 @@
 		<ul class="remote-row-list" hidden={tab !== 'tracks'} aria-hidden={tab !== 'tracks'}>
 			{#each filteredTracks as track (track.id)}
 				<li>
-					<button type="button" class="remote-row" use:tap={() => pickTrack(track)}>
+					<button type="button" class="remote-row" onclick={() => pickTrack(track)}>
 						<span class="remote-row-thumb">
 							{#if track.artwork_url}
 								<img
