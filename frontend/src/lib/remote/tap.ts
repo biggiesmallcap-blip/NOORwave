@@ -68,10 +68,17 @@ export function tap(node: HTMLElement, handler: () => void) {
 		fire();
 	}
 
-	node.addEventListener('pointerdown', onPointerDown);
-	node.addEventListener('pointermove', onPointerMove);
+	// Pointer listeners must be passive where possible so iOS Safari can
+	// hand the touch over to native scroll the moment the user starts a
+	// vertical drag. A non-passive pointermove on every row of a long list
+	// makes single-finger scroll get stuck (two-finger still works because
+	// gesture events bypass this path). Only pointerup is non-passive
+	// because we preventDefault on it to suppress the synthetic click.
+	const passive = { passive: true } as const;
+	node.addEventListener('pointerdown', onPointerDown, passive);
+	node.addEventListener('pointermove', onPointerMove, passive);
 	node.addEventListener('pointerup', onPointerUp);
-	node.addEventListener('pointercancel', onPointerCancel);
+	node.addEventListener('pointercancel', onPointerCancel, passive);
 	node.addEventListener('click', onClick);
 
 	return {

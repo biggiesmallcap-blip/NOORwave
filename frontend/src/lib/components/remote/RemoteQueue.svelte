@@ -314,14 +314,9 @@
 		gap: 8px;
 	}
 
-	/* Skip layout + paint for queue rows scrolled out of view. `auto` makes
-	   the browser remember each row's last rendered size instead of using
-	   a fixed placeholder, so reversing scroll direction doesn't fight the
-	   user as rows re-expand to their real height. */
-	.remote-queue-row {
-		content-visibility: auto;
-		contain-intrinsic-size: auto 56px;
-	}
+	/* content-visibility: auto on queue rows was thrashing iOS Safari scroll
+	   on long queues — same issue as the library list. Lazy-loaded images
+	   are enough for the perf budget here. */
 
 	.remote-queue {
 		gap: 12px;

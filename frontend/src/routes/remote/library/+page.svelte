@@ -438,6 +438,7 @@
 		text-align: left;
 		border-radius: 12px;
 		scroll-snap-align: start;
+		touch-action: manipulation;
 	}
 
 	.remote-recent-tile:active {
@@ -490,6 +491,7 @@
 		text-align: center;
 		border-radius: 12px;
 		scroll-snap-align: start;
+		touch-action: manipulation;
 	}
 
 	.remote-top-artist:active {
@@ -536,6 +538,7 @@
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		border-radius: 9px;
+		touch-action: manipulation;
 	}
 
 	.remote-segmented button.active {
@@ -606,15 +609,11 @@
 		display: none;
 	}
 
-	/* Skip layout + paint for rows scrolled out of view. The `auto` keyword
-	   tells the browser to remember each row's last rendered size instead
-	   of collapsing it to a fixed 56px placeholder — otherwise rows shrink
-	   on the way out and re-expand on the way back, fighting the scroll
-	   position when the user reverses direction. */
-	.remote-row-list > li {
-		content-visibility: auto;
-		contain-intrinsic-size: auto 56px;
-	}
+	/* `content-visibility: auto` on these rows looks great in isolation but
+	   iOS Safari (as of iOS 18-26) thrashes layout on rapid scroll reversals
+	   with hundreds of rows, occasionally freezing the scroll until the
+	   gesture stops. loading="lazy" on the row images is enough on its own
+	   for the perf budget here — leave the rows fully laid out. */
 
 	.remote-row {
 		display: flex;
@@ -627,6 +626,11 @@
 		text-align: left;
 		border-radius: 10px;
 		min-height: 56px;
+		/* Tell iOS Safari this button is a fast-tap target that still
+		   allows vertical scrolling. Without it, holding-then-dragging
+		   on a row could be interpreted as a selection/callout intent
+		   and stop the page from scrolling. */
+		touch-action: manipulation;
 	}
 
 	.remote-row:active {
