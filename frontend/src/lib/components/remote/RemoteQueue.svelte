@@ -244,7 +244,12 @@
 						onclick={() => void onPlayRow(item)}
 					>
 						{#if item.track.artwork_url}
-							<img src={upscaleTidalArtwork(item.track.artwork_url, 320)} alt="" />
+							<img
+								src={upscaleTidalArtwork(item.track.artwork_url, 320)}
+								alt=""
+								loading="lazy"
+								decoding="async"
+							/>
 						{:else}
 							<span class="remote-queue-thumb-empty" aria-hidden="true">NOOR</span>
 						{/if}
@@ -307,6 +312,14 @@
 	.remote-queue-list {
 		display: grid;
 		gap: 8px;
+	}
+
+	/* Skip layout + paint for queue rows scrolled out of view. Cuts the cost
+	   of mounting this component on every navigation back to /remote when
+	   the queue has many entries. */
+	.remote-queue-row {
+		content-visibility: auto;
+		contain-intrinsic-size: 0 56px;
 	}
 
 	.remote-queue {

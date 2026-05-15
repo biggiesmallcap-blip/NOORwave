@@ -157,7 +157,12 @@
 					>
 						<span class="remote-recent-art">
 							{#if entry.artwork_url}
-								<img src={upscaleTidalArtwork(entry.artwork_url, 320)} alt="" />
+								<img
+									src={upscaleTidalArtwork(entry.artwork_url, 320)}
+									alt=""
+									loading="lazy"
+									decoding="async"
+								/>
 							{:else}
 								<span aria-hidden="true">NOOR</span>
 							{/if}
@@ -242,7 +247,12 @@
 						<button type="button" class="remote-row" onclick={() => pickArtist(artist.id)}>
 							<span class="remote-row-thumb">
 								{#if artistPortrait(artist)}
-									<img src={artistPortrait(artist)} alt="" />
+									<img
+										src={artistPortrait(artist)}
+										alt=""
+										loading="lazy"
+										decoding="async"
+									/>
 								{:else}
 									<span aria-hidden="true">{artist.name.slice(0, 1)}</span>
 								{/if}
@@ -264,7 +274,12 @@
 						<button type="button" class="remote-row" onclick={() => pickAlbum(album.id)}>
 							<span class="remote-row-thumb">
 								{#if album.artwork_url}
-									<img src={upscaleTidalArtwork(album.artwork_url, 320)} alt="" />
+									<img
+										src={upscaleTidalArtwork(album.artwork_url, 320)}
+										alt=""
+										loading="lazy"
+										decoding="async"
+									/>
 								{:else}
 									<span aria-hidden="true">{album.title.slice(0, 1)}</span>
 								{/if}
@@ -480,6 +495,15 @@
 		padding: 0;
 		display: grid;
 		gap: 2px;
+	}
+
+	/* Skip layout + paint for rows scrolled out of view. Cuts unmount cost
+	   noticeably when the list has 100+ entries because the browser never
+	   has to dispose the rendered subtrees for off-screen rows. Falls back
+	   to normal rendering on browsers that don't support it. */
+	.remote-row-list > li {
+		content-visibility: auto;
+		contain-intrinsic-size: 0 56px;
 	}
 
 	.remote-row {
