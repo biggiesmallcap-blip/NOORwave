@@ -11,6 +11,7 @@
 	import RemotePageShell from '$lib/components/remote/RemotePageShell.svelte';
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { hapticTap } from '$lib/remote/haptics';
+	import { tap } from '$lib/remote/tap';
 	import { goto } from '$app/navigation';
 
 	type Tab = 'artists' | 'albums';
@@ -153,7 +154,7 @@
 						type="button"
 						class="remote-recent-tile"
 						aria-label="Play {entry.track_title}"
-						onclick={() => pickRecent(entry)}
+						use:tap={() => pickRecent(entry)}
 					>
 						<span class="remote-recent-art">
 							{#if entry.artwork_url}
@@ -184,7 +185,7 @@
 						type="button"
 						class="remote-top-artist"
 						aria-label="Open {a.artist_name}"
-						onclick={() => pickArtist(a.artist_id)}
+						use:tap={() => pickArtist(a.artist_id)}
 					>
 						<span class="remote-top-artist-portrait" aria-hidden="true">
 							{a.artist_name.slice(0, 1)}
@@ -244,7 +245,7 @@
 			<ul class="remote-row-list">
 				{#each filteredArtists as artist (artist.id)}
 					<li>
-						<button type="button" class="remote-row" onclick={() => pickArtist(artist.id)}>
+						<button type="button" class="remote-row" use:tap={() => pickArtist(artist.id)}>
 							<span class="remote-row-thumb">
 								{#if artistPortrait(artist)}
 									<img
@@ -271,7 +272,7 @@
 			<ul class="remote-row-list">
 				{#each filteredAlbums as album (album.id)}
 					<li>
-						<button type="button" class="remote-row" onclick={() => pickAlbum(album.id)}>
+						<button type="button" class="remote-row" use:tap={() => pickAlbum(album.id)}>
 							<span class="remote-row-thumb">
 								{#if album.artwork_url}
 									<img

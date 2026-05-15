@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { tap } from '$lib/remote/tap';
 	import type { Snippet } from 'svelte';
 
 	// Backdrop and disconnect banner are owned by /remote/+layout.svelte so
@@ -12,17 +13,7 @@
 		children: Snippet;
 	} = $props();
 
-	// iOS Safari standalone (PWA) frequently drops synthetic `click` events on
-	// controls inside a stacking context (backdrop-filter, transform layer,
-	// etc.). Listening on `pointerup` fires on touch release directly without
-	// waiting for the synthetic click. A short debounce coalesces the
-	// pointerup + click pair so the navigation runs exactly once whichever
-	// path the browser delivers first.
-	let lastFired = 0;
 	function onBack() {
-		const now = performance.now();
-		if (now - lastFired < 400) return;
-		lastFired = now;
 		// `history.length` is 1 on a cold deep-link (or 2 on some browsers); fall
 		// back to the remote home in that case so the back button never feels
 		// dead-ended.
@@ -32,25 +23,10 @@
 			void goto('/remote');
 		}
 	}
-
-	function onBackPointerUp(event: PointerEvent) {
-		// Only fire on touch/pen. Mouse goes through the normal click path so
-		// keyboard activation (Enter on focused button) still works through
-		// the synthetic click handler.
-		if (event.pointerType === 'mouse') return;
-		event.preventDefault();
-		onBack();
-	}
 </script>
 
 <header class="remote-shell-head">
-	<button
-		type="button"
-		class="remote-shell-back"
-		aria-label="Back"
-		onclick={onBack}
-		onpointerup={onBackPointerUp}
-	>
+	<button type="button" class="remote-shell-back" aria-label="Back" use:tap={onBack}>
 		<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 			<path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
 		</svg>
