@@ -69,4 +69,14 @@ describe('remote route contract', () => {
 		expect(search).toContain('playTrackNext');
 		expect(search).toContain('addTrackToQueue');
 	});
+
+	test('mini search can query TIDAL when the TIDAL segment is selected', () => {
+		const searchPath = resolve(root, 'src/lib/components/remote/RemoteMiniSearch.svelte');
+		const search = read(searchPath);
+		expect(search).toContain("let mode = $state<'library' | 'tidal'>('library')");
+		expect(search).toContain('api.searchTidal');
+		expect(search).toContain('playTidalTrackNow');
+		expect(search).toContain('playTidalTrackNext');
+		expect(search).toContain('addTidalTrackToQueue');
+	});
 });
