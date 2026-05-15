@@ -314,12 +314,13 @@
 		gap: 8px;
 	}
 
-	/* Skip layout + paint for queue rows scrolled out of view. Cuts the cost
-	   of mounting this component on every navigation back to /remote when
-	   the queue has many entries. */
+	/* Skip layout + paint for queue rows scrolled out of view. `auto` makes
+	   the browser remember each row's last rendered size instead of using
+	   a fixed placeholder, so reversing scroll direction doesn't fight the
+	   user as rows re-expand to their real height. */
 	.remote-queue-row {
 		content-visibility: auto;
-		contain-intrinsic-size: 0 56px;
+		contain-intrinsic-size: auto 56px;
 	}
 
 	.remote-queue {

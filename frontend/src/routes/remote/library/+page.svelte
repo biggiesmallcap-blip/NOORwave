@@ -4,7 +4,8 @@
 		type Album,
 		type AnalyticsTopArtist,
 		type Artist,
-		type ListenHistoryEntry
+		type ListenHistoryEntry,
+		type Track
 	} from '$lib/api/client';
 	import { playTrackNow } from '$lib/stores/player';
 	import RemoteAlbumTile from '$lib/components/remote/RemoteAlbumTile.svelte';
@@ -14,7 +15,7 @@
 	import { tap } from '$lib/remote/tap';
 	import { goto } from '$app/navigation';
 
-	type Tab = 'artists' | 'albums';
+	type Tab = 'artists' | 'albums' | 'tracks';
 
 	let tab = $state<Tab>('artists');
 	let filter = $state('');
@@ -31,6 +32,9 @@
 	let albums = $state<Album[]>([]);
 	let albumsHasMore = $state(true);
 	let albumsLoading = $state(false);
+	let tracks = $state<Track[]>([]);
+	let tracksHasMore = $state(true);
+	let tracksLoading = $state(false);
 
 	async function loadDashboard() {
 		try {
@@ -74,17 +78,40 @@
 		}
 	}
 
+	async function loadTracksPage() {
+		if (tracksLoading || !tracksHasMore) return;
+		tracksLoading = true;
+		try {
+			const offset = tracks.length;
+			// `liked_only=true` strictly filters to user-favourited tracks
+			// (the looser `favorite_only` also includes tracks whose parent
+			// album is favourited — that's not what the user asked for here).
+			const res = await api.getTracks('title', 'asc', PAGE, offset, true, true);
+			tracks = [...tracks, ...res.tracks];
+			if (res.tracks.length < PAGE) tracksHasMore = false;
+		} catch {
+			tracksHasMore = false;
+		} finally {
+			tracksLoading = false;
+		}
+	}
+
 	$effect(() => {
 		void loadDashboard();
 		void loadArtistsPage();
 	});
 
-	// Lazy-load the albums tab only when the user switches to it the first time.
+	// Lazy-load each tab the first time the user opens it.
 	let albumsTouched = $state(false);
+	let tracksTouched = $state(false);
 	$effect(() => {
 		if (tab === 'albums' && !albumsTouched) {
 			albumsTouched = true;
 			void loadAlbumsPage();
+		}
+		if (tab === 'tracks' && !tracksTouched) {
+			tracksTouched = true;
+			void loadTracksPage();
 		}
 	});
 
@@ -100,6 +127,15 @@
 			(a) =>
 				a.title.toLowerCase().includes(q) ||
 				(a.artist_name ?? '').toLowerCase().includes(q)
+		);
+	});
+	let filteredTracks = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		if (!q) return tracks;
+		return tracks.filter(
+			(t) =>
+				t.title.toLowerCase().includes(q) ||
+				(t.artist_name ?? '').toLowerCase().includes(q)
 		);
 	});
 
@@ -118,6 +154,11 @@
 		void goto(`/remote/albums/${id}`);
 	}
 
+	function pickTrack(t: Track) {
+		hapticTap();
+		void playTrackNow(t.id);
+	}
+
 	// Scroll-driven pagination. When the sentinel below the visible list enters
 	// the viewport, request the next page for whichever tab is active.
 	let sentinelEl: HTMLDivElement | null = $state(null);
@@ -126,7 +167,8 @@
 		const observer = new IntersectionObserver((entries) => {
 			if (!entries.some((entry) => entry.isIntersecting)) return;
 			if (tab === 'artists') void loadArtistsPage();
-			else void loadAlbumsPage();
+			else if (tab === 'albums') void loadAlbumsPage();
+			else void loadTracksPage();
 		}, { rootMargin: '300px' });
 		observer.observe(sentinelEl);
 		return () => observer.disconnect();
@@ -138,6 +180,23 @@
 		if ('photo_url' in a) return upscaleTidalArtwork(a.photo_url ?? null, 320);
 		return null;
 	}
+
+	let activeLoading = $derived(
+		tab === 'artists' ? artistsLoading : tab === 'albums' ? albumsLoading : tracksLoading
+	);
+	let activeHasMore = $derived(
+		tab === 'artists' ? artistsHasMore : tab === 'albums' ? albumsHasMore : tracksHasMore
+	);
+	let activeEmpty = $derived(
+		tab === 'artists'
+			? filteredArtists.length === 0 && !artistsLoading
+			: tab === 'albums'
+				? filteredAlbums.length === 0 && !albumsLoading
+				: filteredTracks.length === 0 && !tracksLoading
+	);
+	let filterPlaceholder = $derived(
+		tab === 'artists' ? 'Filter artists' : tab === 'albums' ? 'Filter albums' : 'Filter tracks'
+	);
 </script>
 
 <svelte:head>
@@ -204,7 +263,7 @@
 				role="tab"
 				aria-selected={tab === 'artists'}
 				class:active={tab === 'artists'}
-				onclick={() => {
+				use:tap={() => {
 					tab = 'artists';
 				}}
 			>
@@ -215,11 +274,22 @@
 				role="tab"
 				aria-selected={tab === 'albums'}
 				class:active={tab === 'albums'}
-				onclick={() => {
+				use:tap={() => {
 					tab = 'albums';
 				}}
 			>
 				Albums
+			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={tab === 'tracks'}
+				class:active={tab === 'tracks'}
+				use:tap={() => {
+					tab = 'tracks';
+				}}
+			>
+				Tracks
 			</button>
 			<span class="remote-segmented-thumb" data-tab={tab} aria-hidden="true"></span>
 		</div>
@@ -236,72 +306,98 @@
 				autocomplete="off"
 				autocapitalize="off"
 				spellcheck="false"
-				placeholder={tab === 'artists' ? 'Filter artists' : 'Filter albums'}
+				placeholder={filterPlaceholder}
 				aria-label="Filter library"
 			/>
 		</div>
 
-		{#if tab === 'artists'}
-			<ul class="remote-row-list">
-				{#each filteredArtists as artist (artist.id)}
-					<li>
-						<button type="button" class="remote-row" use:tap={() => pickArtist(artist.id)}>
-							<span class="remote-row-thumb">
-								{#if artistPortrait(artist)}
-									<img
-										src={artistPortrait(artist)}
-										alt=""
-										loading="lazy"
-										decoding="async"
-									/>
-								{:else}
-									<span aria-hidden="true">{artist.name.slice(0, 1)}</span>
-								{/if}
-							</span>
-							<span class="remote-row-copy">
-								<strong>{artist.name}</strong>
-							</span>
-						</button>
-					</li>
-				{/each}
-			</ul>
-			{#if filteredArtists.length === 0 && !artistsLoading}
-				<p class="remote-empty">No artists match.</p>
-			{/if}
-		{:else}
-			<ul class="remote-row-list">
-				{#each filteredAlbums as album (album.id)}
-					<li>
-						<button type="button" class="remote-row" use:tap={() => pickAlbum(album.id)}>
-							<span class="remote-row-thumb">
-								{#if album.artwork_url}
-									<img
-										src={upscaleTidalArtwork(album.artwork_url, 320)}
-										alt=""
-										loading="lazy"
-										decoding="async"
-									/>
-								{:else}
-									<span aria-hidden="true">{album.title.slice(0, 1)}</span>
-								{/if}
-							</span>
-							<span class="remote-row-copy">
-								<strong>{album.title}</strong>
-								<small>{album.artist_name ?? 'Unknown artist'}</small>
-							</span>
-						</button>
-					</li>
-				{/each}
-			</ul>
-			{#if filteredAlbums.length === 0 && !albumsLoading}
-				<p class="remote-empty">No albums match.</p>
-			{/if}
+		<!-- All three lists are always rendered with the inactive ones hidden
+		     via CSS. Switching tabs becomes a class toggle instead of a DOM
+		     unmount/remount, so the tap registers and the new list paints in
+		     the same frame. content-visibility: auto on the rows means the
+		     hidden lists' rows pay no layout cost while inactive. -->
+		<ul class="remote-row-list" hidden={tab !== 'artists'} aria-hidden={tab !== 'artists'}>
+			{#each filteredArtists as artist (artist.id)}
+				<li>
+					<button type="button" class="remote-row" use:tap={() => pickArtist(artist.id)}>
+						<span class="remote-row-thumb">
+							{#if artistPortrait(artist)}
+								<img
+									src={artistPortrait(artist)}
+									alt=""
+									loading="lazy"
+									decoding="async"
+								/>
+							{:else}
+								<span aria-hidden="true">{artist.name.slice(0, 1)}</span>
+							{/if}
+						</span>
+						<span class="remote-row-copy">
+							<strong>{artist.name}</strong>
+						</span>
+					</button>
+				</li>
+			{/each}
+		</ul>
+
+		<ul class="remote-row-list" hidden={tab !== 'albums'} aria-hidden={tab !== 'albums'}>
+			{#each filteredAlbums as album (album.id)}
+				<li>
+					<button type="button" class="remote-row" use:tap={() => pickAlbum(album.id)}>
+						<span class="remote-row-thumb">
+							{#if album.artwork_url}
+								<img
+									src={upscaleTidalArtwork(album.artwork_url, 320)}
+									alt=""
+									loading="lazy"
+									decoding="async"
+								/>
+							{:else}
+								<span aria-hidden="true">{album.title.slice(0, 1)}</span>
+							{/if}
+						</span>
+						<span class="remote-row-copy">
+							<strong>{album.title}</strong>
+							<small>{album.artist_name ?? 'Unknown artist'}</small>
+						</span>
+					</button>
+				</li>
+			{/each}
+		</ul>
+
+		<ul class="remote-row-list" hidden={tab !== 'tracks'} aria-hidden={tab !== 'tracks'}>
+			{#each filteredTracks as track (track.id)}
+				<li>
+					<button type="button" class="remote-row" use:tap={() => pickTrack(track)}>
+						<span class="remote-row-thumb">
+							{#if track.artwork_url}
+								<img
+									src={upscaleTidalArtwork(track.artwork_url, 320)}
+									alt=""
+									loading="lazy"
+									decoding="async"
+								/>
+							{:else}
+								<span aria-hidden="true">{track.title.slice(0, 1)}</span>
+							{/if}
+						</span>
+						<span class="remote-row-copy">
+							<strong>{track.title}</strong>
+							<small>{track.artist_name ?? 'Unknown artist'}</small>
+						</span>
+					</button>
+				</li>
+			{/each}
+		</ul>
+
+		{#if activeEmpty}
+			<p class="remote-empty">No {tab} match.</p>
 		{/if}
 
 		<div bind:this={sentinelEl} class="remote-sentinel" aria-hidden="true">
-			{#if (tab === 'artists' ? artistsLoading : albumsLoading)}
+			{#if activeLoading}
 				<span>Loading more…</span>
-			{:else if (tab === 'artists' ? !artistsHasMore : !albumsHasMore)}
+			{:else if !activeHasMore}
 				<span class="remote-end">End of list</span>
 			{/if}
 		</div>
@@ -424,7 +520,7 @@
 	.remote-segmented {
 		position: relative;
 		display: grid;
-		grid-template-columns: repeat(2, 1fr);
+		grid-template-columns: repeat(3, 1fr);
 		padding: 4px;
 		background: var(--surface-1);
 		border-radius: 12px;
@@ -452,7 +548,7 @@
 		top: 4px;
 		bottom: 4px;
 		left: 4px;
-		width: calc(50% - 4px);
+		width: calc((100% - 8px) / 3);
 		border-radius: 9px;
 		background: var(--surface-2);
 		transition: transform 240ms cubic-bezier(0.22, 1.2, 0.36, 1);
@@ -460,6 +556,10 @@
 
 	.remote-segmented-thumb[data-tab='albums'] {
 		transform: translateX(100%);
+	}
+
+	.remote-segmented-thumb[data-tab='tracks'] {
+		transform: translateX(200%);
 	}
 
 	.remote-search-bar {
@@ -498,13 +598,14 @@
 		gap: 2px;
 	}
 
-	/* Skip layout + paint for rows scrolled out of view. Cuts unmount cost
-	   noticeably when the list has 100+ entries because the browser never
-	   has to dispose the rendered subtrees for off-screen rows. Falls back
-	   to normal rendering on browsers that don't support it. */
+	/* Skip layout + paint for rows scrolled out of view. The `auto` keyword
+	   tells the browser to remember each row's last rendered size instead
+	   of collapsing it to a fixed 56px placeholder — otherwise rows shrink
+	   on the way out and re-expand on the way back, fighting the scroll
+	   position when the user reverses direction. */
 	.remote-row-list > li {
 		content-visibility: auto;
-		contain-intrinsic-size: 0 56px;
+		contain-intrinsic-size: auto 56px;
 	}
 
 	.remote-row {
