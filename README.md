@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.47</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.50</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -227,6 +227,21 @@ If you complete a run and the model doesn't activate, you'll usually see Coverag
 - ACRCloud fingerprint sample recognition *(placeholder - not fully functional)*
 - Analytics page (recently reimagined): listen history, top tracks/artists, genre heatmap, activity graph, completion rate, skip patterns
 - Automix page (recently reimagined): full surface for tuning the harmonic mixing engine
+
+</details>
+
+<details>
+<summary><strong>Mobile remote</strong> - installable iOS/Android PWA at <code>/remote</code> for controlling NOORwave from your phone</summary>
+
+- **Installable PWA** - open `http://<your-machine>:3334/remote` from a phone on the LAN, "Add to Home Screen", and it launches standalone (no browser chrome). 512px icon, manifest, dedicated service worker with N=2 cache retention so a server rebuild doesn't 404 lazy chunks for clients still running the previous bundle
+- **Bounded-scroll shell** - the player surface stays viewport-sized; sub-pages scroll inside a contained region so iOS rubber-band can't latch a stuck scroll. Persistent `/remote/+layout.svelte` keeps the action sheet, blurred backdrop, MediaSession bridge, silent-audio keepalive, and wake-lock alive across navigations so jumping between pages is instant
+- **Transport** - full playback, seek and volume sliders (guarded against ticker overwrites mid-drag), like, shuffle, repeat, automix, queue, sleep timer
+- **Sub-pages** - `/remote/library`, `/remote/artists/[id]`, `/remote/albums/[id]`, `/remote/playlists/[id]`, plus TIDAL previews at `/remote/tidal/artists/[id]` and `/remote/tidal/albums/[id]`. Library page has Artists / Albums / Tracks segmented control (Tracks defaults to liked-only, sorted by date added)
+- **Mini search sheet** - Library / TIDAL / Playlists tabs with debounced server-side search, race-safe result merging, and inline play / queue / radio actions
+- **Long-press action sheet** - same `buildTrackMenu` as the desktop right-click menu, presented as an iOS-style sheet. Swipe down to dismiss with composed-transform animation; tap-through is suppressed during the dismiss tween
+- **Haptics** - `navigator.vibrate` fires on every tap, long-press, and transport action when the device supports it
+- **iOS PWA reliability pass** - `touch-action: manipulation` and parallel pointerup/click on every tap surface to suppress 300ms tap delay and ghost clicks under backdrop-filter stacking contexts; passive pointer listeners so single-finger scroll handoff doesn't fight gesture arbitration
+- **Sleep timer with stale-fire guard** - 2-minute grace window on rehydration; if the saved fireAt is older than that (laptop slept overnight) the timer is discarded rather than firing pause as soon as you unlock the phone
 
 </details>
 
@@ -496,6 +511,14 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 
 **Recent release highlights**
 
+- [x] **Mobile remote PWA** - installable `/remote` surface (512px icon, manifest, service worker with N=2 cache retention). Bounded-scroll shell with persistent `/remote/+layout.svelte` so action sheet, blurred backdrop, MediaSession bridge, silent-loop keepalive, and wake lock survive sub-page navigation (v0.1.50)
+- [x] **Remote sub-pages** - artists, albums, playlists, and TIDAL artist/album previews live inside `/remote/*` so navigation from the phone never falls into the heavy desktop chrome. Library page adds an Artists / Albums / Tracks segmented control (Tracks defaults to liked-only, sorted by date added) (v0.1.50)
+- [x] **Long-press action sheet + mini search** - iOS-style sheet with swipe-to-dismiss and ghost-click suppression; Library / TIDAL / Playlists tabs in the search sheet with race-safe result merging (v0.1.50)
+- [x] **Sleep timer with stale-fire guard** - 2-minute grace window on rehydration so a saved fireAt from an overnight-slept device is discarded instead of firing pause the moment you unlock (v0.1.50)
+- [x] **iOS PWA reliability pass** - `touch-action: manipulation` and parallel pointerup/click on tap surfaces to suppress 300ms tap delay and ghost clicks; passive pointer listeners so single-finger scroll handoff isn't fighting gesture arbitration; back button no longer needs multiple taps (v0.1.50)
+- [x] **Seek/volume slider hardening** - guarded against ticker overwrites mid-drag so the thumb doesn't snap back while you're dragging (v0.1.50)
+- [x] **Discovery album linking** - injecting TIDAL discovery tracks now resolves albums by `tidal_id` with `ON CONFLICT DO NOTHING`, no fuzzy stubs (v0.1.50)
+- [x] **Svelte 5.55.7** - XSS fix bump (v0.1.50)
 - [x] **Settings cleanup** - Discovery engine training, intensity, safety preview, progress, and active-model controls now live under Audio instead of a separate top-level Discovery tab (v0.1.44)
 - [x] **Incremental TIDAL library sync** - favorite cursors let routine syncs stop once they hit known items, while full sync markers remain intact (v0.1.44)
 - [x] **WASAPI exclusive renderer reliability** - format recovery, device-busy retry caps, active-source swapping, idle release, and gapless rules tightened across the exclusive path (v0.1.44)
