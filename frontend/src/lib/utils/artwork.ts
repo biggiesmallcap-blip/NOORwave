@@ -37,3 +37,15 @@ function firstString(...values: (string | null | undefined)[]): string | null {
 	}
 	return null;
 }
+
+// TIDAL bakes the resolution into the artwork path (`.../640x640.jpg`). The
+// backend hands us 640px covers, which upscale badly on a phone showing art at
+// 2-3x device-pixel density. Swap in a larger size for surfaces that render art
+// big; leave non-TIDAL URLs untouched.
+const TIDAL_ARTWORK_SIZE = /\/\d+x\d+\.jpg(\?.*)?$/i;
+
+export function upscaleTidalArtwork(url: string | null | undefined, size = 1280): string | null {
+	if (!url) return null;
+	if (!url.includes('resources.tidal.com')) return url;
+	return url.replace(TIDAL_ARTWORK_SIZE, `/${size}x${size}.jpg$1`);
+}

@@ -6,10 +6,10 @@ const FPS_STORAGE_KEY = 'noor-wallpaper-fps';
 const BLUR_STORAGE_KEY = 'noor-wallpaper-blur';
 export const WALLPAPER_FPS_MIN = 24;
 export const WALLPAPER_FPS_MAX = 60;
-export const WALLPAPER_FPS_DEFAULT = 45;
+export const WALLPAPER_FPS_DEFAULT = 60;
 export const WALLPAPER_BLUR_MIN = 0;
 export const WALLPAPER_BLUR_MAX = 18;
-export const WALLPAPER_BLUR_DEFAULT = 10;
+export const WALLPAPER_BLUR_DEFAULT = 7;
 const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'topo',
                                'topo-noir', 'aurora-deep', 'chrome-brushed',
                                'zen', 'galaxy',
@@ -22,7 +22,9 @@ const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula', 'top
                                'pattern-melt', 'pattern-speed', 'pattern-vortex',
                                'pattern-shards', 'pattern-vector'];
 
-const DEFAULT: WallpaperId = 'pattern-speed';
+// Matches the shader forced during the /onboarding route, so a fresh install
+// keeps the wallpaper the user saw on first launch.
+const DEFAULT: WallpaperId = 'standing-wave';
 
 function readInitial(): WallpaperId {
 	if (typeof localStorage === 'undefined') return DEFAULT;

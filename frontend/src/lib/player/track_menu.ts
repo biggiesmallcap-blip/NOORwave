@@ -44,10 +44,18 @@ export interface BuildTrackMenuOptions {
 	/** Phase 2c-ii-a: pending rows have no resolved track_id; strip all actions
 	 *  that require one, leaving only Remove from queue. */
 	isPending?: boolean;
+	/**
+	 * When true, "Go to artist" / "Go to album" route to the /remote/* mobile
+	 * counterparts instead of the desktop pages. Used by surfaces under /remote
+	 * so navigation stays inside the mobile shell.
+	 */
+	remoteRoutes?: boolean;
 }
 
 export interface BuildTidalTrackMenuOptions {
 	inQueue?: boolean;
+	/** See BuildTrackMenuOptions.remoteRoutes. */
+	remoteRoutes?: boolean;
 }
 
 function tidalLocalTrackId(track: TidalPlayable): number | null {
@@ -136,18 +144,19 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	items.push(SEPARATOR);
 
+	const navPrefix = options.remoteRoutes ? '/remote' : '';
 	if (hasArtist) {
 		items.push({
 			label: `Go to ${track.artist_name ?? 'artist'}`,
 			icon: '→',
-			onSelect: () => void goto(`/artists/${track.artist_id}`)
+			onSelect: () => void goto(`${navPrefix}/artists/${track.artist_id}`)
 		});
 	}
 	if (hasAlbum) {
 		items.push({
 			label: `Go to ${track.album_title ?? 'album'}`,
 			icon: '→',
-			onSelect: () => void goto(`/albums/${track.album_id}`)
+			onSelect: () => void goto(`${navPrefix}/albums/${track.album_id}`)
 		});
 	}
 
@@ -205,18 +214,19 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		SEPARATOR,
 	];
 
+	const tidalNavPrefix = options.remoteRoutes ? '/remote' : '';
 	if (track.artist_tidal_id != null) {
 		items.push({
 			label: `Go to ${track.artist_name ?? 'artist'}`,
 			icon: '→',
-			onSelect: () => void goto(`/tidal/artists/${track.artist_tidal_id}`),
+			onSelect: () => void goto(`${tidalNavPrefix}/tidal/artists/${track.artist_tidal_id}`),
 		});
 	}
 	if (track.album_tidal_id != null) {
 		items.push({
 			label: `Go to ${track.album_title ?? 'album'}`,
 			icon: '→',
-			onSelect: () => void goto(`/tidal/albums/${track.album_tidal_id}`),
+			onSelect: () => void goto(`${tidalNavPrefix}/tidal/albums/${track.album_tidal_id}`),
 		});
 	}
 	if (track.artist_tidal_id != null || track.album_tidal_id != null) {

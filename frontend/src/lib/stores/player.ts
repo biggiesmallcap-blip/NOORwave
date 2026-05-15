@@ -374,6 +374,34 @@ export async function togglePlayback() {
 	}
 }
 
+/**
+ * Explicit pause/resume helpers for callers that have a definite intent (e.g.
+ * MediaSession lockscreen / headset buttons, or sleep timer). Using these
+ * instead of `togglePlayback` avoids the "stale isPlaying flipped my command
+ * inside out" race when the WS hasn't yet delivered the latest state.
+ */
+export async function pausePlayer() {
+	playerError.set(null);
+	try {
+		const result = await api.pausePlayback();
+		applyState(result.state);
+		noteSuccess();
+	} catch (error) {
+		setError('pause playback', error, () => pausePlayer());
+	}
+}
+
+export async function resumePlayer() {
+	playerError.set(null);
+	try {
+		const result = await api.resumePlayback();
+		applyState(result.state);
+		noteSuccess();
+	} catch (error) {
+		setError('resume playback', error, () => resumePlayer());
+	}
+}
+
 export async function playPreviousTrack() {
 	playerError.set(null);
 	try {
@@ -559,22 +587,47 @@ export async function addTrackToQueue(trackId: number) {
 	}
 }
 
+/**
+ * Compute the `new_pos` argument for `api.moveQueueTrack` so the row at
+ * `targetIndex` lands immediately after the currently-playing row. Exported
+ * for unit testing. `new_pos` is measured AFTER the moving row has been
+ * removed from the queue, matching moveQueueItem's contract.
+ *
+ * Returns `null` when the move is a no-op (target is already in place, the
+ * queue is too short, or targetIndex is out of bounds).
+ */
+export function computePlayNextPos(
+	targetIndex: number,
+	currentIndex: number,
+	queueLength: number
+): number | null {
+	if (queueLength <= 1) return null;
+	if (targetIndex < 0 || targetIndex >= queueLength) return null;
+	let newPos = currentIndex >= 0 ? currentIndex + 1 : 0;
+	if (targetIndex < newPos) newPos -= 1;
+	if (newPos === targetIndex) return null;
+	return newPos;
+}
+
 export async function moveQueueTrackNext(queueItemId: number) {
 	playerError.set(null);
-	const queue = [...get(playbackQueue)];
+	const queue = get(playbackQueue);
 	const targetIndex = queue.findIndex((item) => item.id === queueItemId);
-	if (targetIndex === -1 || queue.length <= 1) return;
+	if (targetIndex === -1) return;
 
-	const [targetItem] = queue.splice(targetIndex, 1);
+	// Use the item-id based move endpoint, not replacePlaybackQueue(track_ids).
+	// The latter drops queue rows whose track_id is negative (ephemeral TIDAL
+	// rows that haven't been imported into the library yet), silently corrupting
+	// a mixed library + TIDAL queue when the user picks "Play next".
 	const currentTrackId = get(currentTrack)?.id ?? null;
 	const currentIndex = currentTrackId
 		? queue.findIndex((item) => item.track.id === currentTrackId)
 		: -1;
-	const insertIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
-	queue.splice(insertIndex, 0, targetItem);
+	const newPos = computePlayNextPos(targetIndex, currentIndex, queue.length);
+	if (newPos === null) return;
 
 	try {
-		const result = await api.replacePlaybackQueue(queue.map((item) => item.track.id));
+		const result = await api.moveQueueTrack(queueItemId, newPos);
 		setPlaybackQueue(result.queue);
 		noteSuccess();
 	} catch (error) {
@@ -902,6 +955,34 @@ export async function shufflePlaylist(
 	const shuffled = shuffleArray([...tracks]);
 	await loadQueueAndPlay(shuffled.map((t) => t.id));
 	showToast('Shuffling playlist', 'success');
+}
+
+/**
+ * Play an entire playlist in order, optionally jumping to a specific track
+ * first. Mirrors the `playAlbum` shape so callers can swap one for the other.
+ * Without this helper the desktop pattern only plays `tracks[0]` and relies on
+ * automix to drag the rest along, which doesn't match user expectation when
+ * they tap Play on a playlist.
+ */
+export async function playPlaylist(playlistId: number, startTrackId?: number) {
+	if (!assertOnline()) return;
+	playerError.set(null);
+	try {
+		const { tracks } = await api.getPlaylistTracks(playlistId);
+		if (tracks.length === 0) {
+			playerError.set({ message: 'Playlist is empty.' });
+			return;
+		}
+		const ordered = startTrackId
+			? [
+					...tracks.filter((t) => t.id === startTrackId),
+					...tracks.filter((t) => t.id !== startTrackId)
+				]
+			: tracks;
+		await loadQueueAndPlay(ordered.map((t) => t.id));
+	} catch (error) {
+		setError('play that playlist', error, () => playPlaylist(playlistId, startTrackId));
+	}
 }
 
 export async function startPlaylistRadio(tracks: { id: number; play_count?: number }[]) {
