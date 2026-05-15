@@ -79,4 +79,20 @@ describe('remote route contract', () => {
 		expect(search).toContain('playTidalTrackNext');
 		expect(search).toContain('addTidalTrackToQueue');
 	});
+
+	test('manifest launches the remote route in standalone mode', () => {
+		const manifest = JSON.parse(read(resolve(root, 'static/manifest.webmanifest')));
+		expect(manifest.display).toBe('standalone');
+		expect(manifest.start_url).toBe('/remote');
+		expect(manifest.scope).toBe('/');
+		expect(manifest.icons.some((icon) => icon.sizes === '192x192')).toBe(true);
+	});
+
+	test('service worker caches only app shell assets', () => {
+		const workerPath = resolve(root, 'src/service-worker.ts');
+		const worker = read(workerPath);
+		expect(worker).toContain("import { build, files, version } from '$service-worker'");
+		expect(worker).toContain('event.request.method !==');
+		expect(worker).not.toContain('/api/');
+	});
 });
