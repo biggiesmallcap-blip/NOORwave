@@ -598,6 +598,14 @@
 		gap: 2px;
 	}
 
+	/* The `hidden` HTML attribute applies `display: none` by default, but
+	   `.remote-row-list { display: grid }` above overrides it — so the
+	   inactive lists end up rendered on top of the active one and the user
+	   only sees the first tab. Restore the hidden semantics. */
+	.remote-row-list[hidden] {
+		display: none;
+	}
+
 	/* Skip layout + paint for rows scrolled out of view. The `auto` keyword
 	   tells the browser to remember each row's last rendered size instead
 	   of collapsing it to a fixed 56px placeholder — otherwise rows shrink
