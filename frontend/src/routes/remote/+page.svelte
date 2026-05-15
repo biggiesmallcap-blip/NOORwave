@@ -1,4 +1,5 @@
 <script lang="ts">
+	import RemoteQueue from '$lib/components/remote/RemoteQueue.svelte';
 	import RemoteTransport from '$lib/components/remote/RemoteTransport.svelte';
 	import {
 		currentTrack,
@@ -22,9 +23,7 @@
 
 	<RemoteTransport track={$currentTrack} isPlaying={$isPlaying} position={$position} volume={$volume} />
 
-	<section class="remote-placeholder" aria-label="Remote status">
-		<span>{$playbackQueue.length} queued</span>
-	</section>
+	<RemoteQueue queue={$playbackQueue} />
 </main>
 
 <style>
@@ -55,14 +54,5 @@
 	.remote-header span {
 		color: var(--text-muted);
 		font-size: var(--font-size-xs);
-	}
-
-	.remote-placeholder {
-		display: grid;
-		gap: 8px;
-	}
-
-	.remote-placeholder span {
-		margin: 0;
 	}
 </style>

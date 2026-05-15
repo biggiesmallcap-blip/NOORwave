@@ -39,4 +39,19 @@ describe('remote route contract', () => {
 			expect(transport).toContain(`aria-label="${label}"`);
 		}
 	});
+
+	test('remote imports the dedicated queue component', () => {
+		const page = read(routePath);
+		expect(page).toContain("RemoteQueue from '$lib/components/remote/RemoteQueue.svelte'");
+		expect(page).toContain('<RemoteQueue');
+	});
+
+	test('queue component supports play and remove actions', () => {
+		const queuePath = resolve(root, 'src/lib/components/remote/RemoteQueue.svelte');
+		const queue = read(queuePath);
+		expect(queue).toContain('playTrackNow');
+		expect(queue).toContain('removeTrackFromQueue');
+		expect(queue).toContain('aria-label="Play queued track"');
+		expect(queue).toContain('aria-label="Remove from queue"');
+	});
 });
