@@ -999,8 +999,54 @@ async fn get_album_tracks(
         tokens.country_code.clone(),
     );
 
+    // Pre-fix legacy rows that landed with NULL track_number — `TidalTrack`
+    // shipped without #[serde(rename = "trackNumber")] for a long time, so
+    // every TIDAL-imported track row stored NULL and the album sort fell
+    // back to alphabetical. Backfill from the live TIDAL payload on first
+    // view post-fix.
+    let needs_backfill = tracks
+        .iter()
+        .any(|t| t.track_number.is_none() && t.tidal_id.is_some());
+
     let tidal_tracks_payload: Vec<Value> = match client.get_album_tracks(tidal_album_id).await {
         Ok(resp) => {
+            if needs_backfill {
+                let backfill_pairs: Vec<(i64, i32, i32)> = resp
+                    .items
+                    .iter()
+                    .filter_map(|t| Some((t.id, t.track_number?, t.volume_number.unwrap_or(1))))
+                    .collect();
+                if !backfill_pairs.is_empty() {
+                    let s = state.read().await;
+                    let _ = s.db.with_conn(|conn| {
+                        let tx = conn.unchecked_transaction()?;
+                        let mut count = 0i64;
+                        {
+                            let mut stmt = tx.prepare(
+                                "UPDATE tracks
+                                 SET track_number = COALESCE(track_number, ?2),
+                                     disc_number  = COALESCE(disc_number, ?3)
+                                 WHERE tidal_id = ?1
+                                   AND (track_number IS NULL OR disc_number IS NULL)",
+                            )?;
+                            for (tid, tn, dn) in &backfill_pairs {
+                                count += stmt.execute(rusqlite::params![tid, tn, dn])? as i64;
+                            }
+                        }
+                        tx.commit()?;
+                        if count > 0 {
+                            tracing::info!(
+                                target: "noor.album",
+                                event = "tracknumber_backfill",
+                                album_id = id,
+                                updated = count
+                            );
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    });
+                }
+            }
+
             // Local rows that came from TIDAL carry a `tidal_id`; dedupe so
             // the same track doesn't appear twice (once styled as library,
             // once as TIDAL-only).
@@ -1040,6 +1086,17 @@ async fn get_album_tracks(
             tracing::warn!(?e, "TIDAL get_album_tracks failed; serving library only");
             Vec::new()
         }
+    };
+
+    // Reload tracks so the response reflects backfilled track/disc numbers
+    // (the original `get_album_tracks` query ordered by COALESCE(..., 999999)
+    // and may have produced alphabetical fallback order before the UPDATE).
+    let tracks = if needs_backfill {
+        let s = state.read().await;
+        s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
+            .unwrap_or(tracks)
+    } else {
+        tracks
     };
 
     Ok(Json(json!({
@@ -1285,21 +1342,28 @@ async fn get_artist_discography(
 
     // TIDAL can return the same release under multiple filters (e.g. an album
     // re-issue tagged both ALBUMS and COMPILATIONS). Dedupe by tidal_id while
-    // preserving the order of first appearance.
+    // preserving the order of first appearance. Each entry remembers the
+    // filter it came from so the frontend can bucket it correctly — TIDAL's
+    // per-album `release_type` body field is unreliable and was the original
+    // reason Singles / Compilations sections were silently empty.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut all_albums: Vec<crate::services::tidal::client::TidalAlbum> = Vec::new();
-    for r in [albums_res, eps_res, comps_res, live_res]
-        .into_iter()
-        .flatten()
-    {
-        for item in r {
+    let mut all_albums: Vec<(crate::services::tidal::client::TidalAlbum, &'static str)> =
+        Vec::new();
+    for (r, filter) in [
+        (albums_res, "ALBUMS"),
+        (eps_res, "EPSANDSINGLES"),
+        (comps_res, "COMPILATIONS"),
+        (live_res, "LIVE"),
+    ] {
+        let Ok(items) = r else { continue };
+        for item in items {
             if seen.insert(item.id) {
-                all_albums.push(item);
+                all_albums.push((item, filter));
             }
         }
     }
 
-    let tidal_album_ids: Vec<i64> = all_albums.iter().map(|a| a.id).collect();
+    let tidal_album_ids: Vec<i64> = all_albums.iter().map(|(a, _)| a.id).collect();
     let known_map = {
         let s = state.read().await;
         s.db.with_conn(|conn| queries::get_known_album_tidal_ids(conn, &tidal_album_ids))
@@ -1308,7 +1372,7 @@ async fn get_artist_discography(
 
     let albums_payload: Vec<Value> = all_albums
         .into_iter()
-        .map(|a| {
+        .map(|(a, source_filter)| {
             let artwork =
                 crate::services::tidal::client::TidalClient::get_artwork_url(&a.cover, 320);
             let local_id = known_map.get(&a.id).copied();
@@ -1319,6 +1383,7 @@ async fn get_artist_discography(
                 "artwork_url": artwork,
                 "release_date": a.release_date,
                 "release_type": a.release_type,
+                "source_filter": source_filter,
                 "number_of_tracks": a.number_of_tracks,
                 "artist_name": a.artist.name,
                 "in_library": local_id.is_some()

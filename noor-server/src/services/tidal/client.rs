@@ -43,7 +43,9 @@ pub struct TidalTrack {
     pub id: i64,
     pub title: String,
     pub duration: i64,
+    #[serde(rename = "trackNumber")]
     pub track_number: Option<i32>,
+    #[serde(rename = "volumeNumber")]
     pub volume_number: Option<i32>,
     pub isrc: Option<String>,
     pub artist: TidalArtist,
@@ -1818,5 +1820,25 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, 1);
         assert_eq!(items[0].artist_name.as_deref(), Some("Artist"));
+    }
+
+    /// Regression: TIDAL's per-track payload ships `trackNumber` / `volumeNumber`
+    /// in camelCase. Both fields had no #[serde(rename)] for a long time, so
+    /// every TIDAL-imported track row stored NULL and the album sort fell
+    /// back to alphabetical (e.g. Red Headed Stranger out of narrative order).
+    #[test]
+    fn tidal_track_deserializes_camel_case_numbers() {
+        let payload = json!({
+            "id": 12345,
+            "title": "Time of the Preacher",
+            "duration": 167,
+            "trackNumber": 1,
+            "volumeNumber": 1,
+            "isrc": "USAB10000001",
+            "artist": { "id": 1, "name": "Willie Nelson" }
+        });
+        let track: TidalTrack = serde_json::from_value(payload).unwrap();
+        assert_eq!(track.track_number, Some(1));
+        assert_eq!(track.volume_number, Some(1));
     }
 }
