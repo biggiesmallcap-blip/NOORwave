@@ -43,24 +43,25 @@
 
 <style>
 	.remote-shell-head {
-		position: sticky;
-		top: 0;
+		/* No longer sticky — the parent .remote-shell is a flex column and
+		   the header is a fixed flex item at top while main flexes to fill.
+		   Saves the sticky compositing overhead and avoids a known iOS
+		   issue where sticky elements over a bounded scroller occasionally
+		   capture touches that should reach the scroll. */
+		position: relative;
 		z-index: 5;
 		display: grid;
 		grid-template-columns: 44px 1fr 44px;
 		align-items: center;
 		gap: 8px;
 		padding: max(10px, env(safe-area-inset-top)) 16px 10px;
-		/* No backdrop-filter on iOS PWA — it creates a stacking context that
-		   has been observed to drop touch events on descendant controls in
-		   standalone mode. A solid-ish gradient gives the same visual read
-		   without the input glitch. */
 		background: linear-gradient(
 			180deg,
 			color-mix(in oklab, var(--bg-base) 96%, transparent) 0%,
 			color-mix(in oklab, var(--bg-base) 82%, transparent) 70%,
 			color-mix(in oklab, var(--bg-base) 60%, transparent) 100%
 		);
+		flex: 0 0 auto;
 	}
 
 	.remote-shell-back {
@@ -109,16 +110,20 @@
 	.remote-shell-main {
 		position: relative;
 		z-index: 1;
-		min-height: 100svh;
+		/* Bounded scroll container — viewport minus the header. iOS Safari
+		   handles bounded scroll containers cleanly; uncontained body
+		   scroll on a long list was the source of the silent "scroll
+		   latch" mid-list. */
+		flex: 1 1 0;
+		min-height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior-y: contain;
 		padding: 4px 16px max(22px, env(safe-area-inset-bottom));
 		color: var(--text-primary);
 		display: grid;
 		gap: 18px;
 		align-content: start;
-		/* iOS PWA rubber-band overscroll can silently lock the scroll
-		   position on long lists after a hard reversal. `contain` keeps
-		   the chain inside the main area without disabling normal scroll
-		   momentum. */
-		overscroll-behavior-y: contain;
 	}
 </style>

@@ -1825,7 +1825,15 @@
 	.remote-shell {
 		position: relative;
 		z-index: 1;
-		min-height: 100svh;
+		/* Viewport-sized flex column with no body scroll. The page's main
+		 * area becomes the single bounded scroll container — keeps iOS
+		 * Safari from "latching" the scroll mid-list on long pages
+		 * (a known issue with very tall body-scrolled content in PWA
+		 * standalone mode). */
+		height: 100dvh;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
 		background: var(--surface-0);
 		color: var(--text-primary);
 		/* The remote is a phone-first surface; long-press on track titles,

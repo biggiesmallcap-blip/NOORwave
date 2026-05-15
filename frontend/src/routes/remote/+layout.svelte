@@ -114,8 +114,9 @@
 	}
 
 	.remote-layout-banner {
-		position: sticky;
-		top: 0;
+		/* Flex item at top of the .remote-shell column — no sticky needed
+		   because the parent is overflow: hidden so this stays in view. */
+		flex: 0 0 auto;
 		z-index: 40;
 		display: flex;
 		align-items: center;
