@@ -21,22 +21,35 @@
 		volume: number;
 	} = $props();
 
-	let localPosition = $state(position);
-	let localVolume = $state(Math.round(volume * 100));
+	let isScrubbing = $state(false);
+	let localPosition = $state(0);
+	let isAdjustingVolume = $state(false);
+	let localVolume = $state(0);
 
+	// Don't let the 250ms position ticker snap the slider back from under a drag.
 	$effect(() => {
-		localPosition = position;
+		if (!isScrubbing) localPosition = position;
 	});
 
 	$effect(() => {
-		localVolume = Math.round(volume * 100);
+		if (!isAdjustingVolume) localVolume = Math.round(volume * 100);
 	});
+
+	function beginSeek() {
+		isScrubbing = true;
+	}
 
 	function commitSeek() {
+		isScrubbing = false;
 		void setPlayerPosition(localPosition);
 	}
 
+	function beginVolume() {
+		isAdjustingVolume = true;
+	}
+
 	function commitVolume() {
+		isAdjustingVolume = false;
 		void setPlayerVolume(localVolume / 100);
 	}
 </script>
@@ -62,6 +75,7 @@
 			max={track?.duration_ms ?? 0}
 			step="1000"
 			bind:value={localPosition}
+			oninput={beginSeek}
 			onchange={commitSeek}
 			disabled={!track?.duration_ms}
 			aria-label="Seek playback"
@@ -82,7 +96,7 @@
 
 	<label class="remote-volume">
 		<span>Volume</span>
-		<input type="range" min="0" max="100" step="1" bind:value={localVolume} onchange={commitVolume} aria-label="Volume" />
+		<input type="range" min="0" max="100" step="1" bind:value={localVolume} oninput={beginVolume} onchange={commitVolume} aria-label="Volume" />
 	</label>
 </section>
 
