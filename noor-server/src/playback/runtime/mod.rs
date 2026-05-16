@@ -63,6 +63,15 @@ pub struct PlaybackRuntimeHandle {
     /// Redirectable position reader. Normally points to the active engine's
     /// position counter. Swapped at crossfade promotion so the handle always
     /// reads from the engine that's audibly current, not the fading-out one.
+    ///
+    /// Real-time-safety / unwrap audit (Task 15): every access site uses
+    /// `position_source.lock().unwrap()` because the protected payload is an
+    /// `Arc<AtomicU64>` - mutex poisoning leaves it valid (Arc is either the
+    /// old reference or the new one, both safe to read/write). The only way
+    /// `.unwrap()` panics is if a code path inside the guard panics first,
+    /// which is then caught by `handle_panic_in_runtime_loop` (Task 7) and
+    /// surfaced to the user as `PlaybackRuntimeEvent::Error`. So these
+    /// unwraps are bounded-failure, not silent corruption.
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
 }
 
