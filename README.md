@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.50</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.51</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -97,6 +97,8 @@ Recent searches auto-save as clickable chips.
 <summary><strong>Playback</strong> - lossless hi-fi, gapless, harmonic Automix</summary>
 
 - Lossless hi-fi streaming via TIDAL with PKCE login, encrypted token storage, automatic token refresh, and **MPEG-DASH segmented streaming** for high-bitrate sources
+- **True DASH segment seek** - dragging the scrubber anywhere on a fresh TIDAL track triggers a forced engine restart at the nearest DASH segment boundary instead of snapping back to the buffered region; in-buffer seeks still take the fast path
+- **Buffered-bar scrubber** - the now-playing progress bar renders the decoded region behind the playhead as a visual cue; pre-resolve / no-segment targets get an HTTP 409 ack with a corrective live snapshot so the UI snaps back cleanly
 - **WASAPI exclusive-mode bit-perfect output** (Windows) with quality live-apply, sample-rate-follow, idle device release, and shared-mode fallback
 - Audio device enumeration + live device switching (`DeviceSwap` rebuilds the output stream); sample rate follows source on track transition
 - Gapless playback: NearEnd event fires 15 s before track end, triggering pre-buffer engine swap for zero-gap transitions
@@ -511,6 +513,10 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 
 **Recent release highlights**
 
+- [x] **True DASH segment seek (option C)** - past-buffer scrubber targets on TIDAL tracks now trigger a forced engine restart at the nearest DASH segment boundary; absolute-track sample accounting in the runtime; `evaluate_seek_decision` moved into the playback module with both bounds (`[offset, buffered]`); `POST /api/playback/position` accepts `allow_segment_seek` and returns 202 / 409 / 500 honestly (v0.1.51)
+- [x] **Buffered-bar scrubber + route-side seek ack** - now-playing progress bar renders the decoded region behind the playhead; redirectable `buffered_source` mirror on the runtime handle survives Switch and crossfade promotion; route-side 409 with a live snapshot for pre-resolve targets so the UI snaps back instead of fighting WS resyncs (v0.1.51)
+- [x] **Playback runtime hardening** - error / panic / cancel observability rework: every long-running stage observes a stop flag; orphan decoder threads tracked via a background-join helper so Stop returns within ~250ms; transition failures emit typed `Error+Stopped` event pairs; one-shot growth-warn telemetry on unbounded buffer drift (v0.1.51)
+- [x] **Artist / album page fixes** - corrected discography ordering and restored missing sections on artist pages (v0.1.51)
 - [x] **Mobile remote PWA** - installable `/remote` surface (512px icon, manifest, service worker with N=2 cache retention). Bounded-scroll shell with persistent `/remote/+layout.svelte` so action sheet, blurred backdrop, MediaSession bridge, silent-loop keepalive, and wake lock survive sub-page navigation (v0.1.50)
 - [x] **Remote sub-pages** - artists, albums, playlists, and TIDAL artist/album previews live inside `/remote/*` so navigation from the phone never falls into the heavy desktop chrome. Library page adds an Artists / Albums / Tracks segmented control (Tracks defaults to liked-only, sorted by date added) (v0.1.50)
 - [x] **Long-press action sheet + mini search** - iOS-style sheet with swipe-to-dismiss and ghost-click suppression; Library / TIDAL / Playlists tabs in the search sheet with race-safe result merging (v0.1.50)
