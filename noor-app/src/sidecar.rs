@@ -46,6 +46,14 @@ const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024;
 const SERVER_PING_URL: &str = "http://127.0.0.1:3334/api/ping";
 const SERVER_SETUP_TOKEN_URL: &str = "http://127.0.0.1:3334/api/setup/token";
 const SERVER_SHUTDOWN_URL: &str = "http://127.0.0.1:3334/api/shutdown";
+const READY_REQUEST_TIMEOUT_MS: u64 = 500;
+
+fn ready_http_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(READY_REQUEST_TIMEOUT_MS))
+        .build()
+        .ok()
+}
 
 fn rotate_log_if_oversized(path: &PathBuf) {
     let size = match std::fs::metadata(path) {
@@ -185,12 +193,16 @@ pub fn restart_server(state: &Arc<SidecarState>) {
 
 /// Blocks until noor-server responds to /api/ping (max 10 s).
 /// Returns the server auth token fetched from /api/setup/token.
+///
+/// Uses a per-request 500 ms client-level timeout so a wedged server cannot
+/// consume the entire 10 s readiness budget in a single request.
 pub fn wait_for_ready(state: &Arc<SidecarState>) -> Option<String> {
+    let client = ready_http_client()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Ok(resp) = reqwest::blocking::get(SERVER_PING_URL) {
+        if let Ok(resp) = client.get(SERVER_PING_URL).send() {
             if resp.status().is_success() {
-                if let Ok(r) = reqwest::blocking::get(SERVER_SETUP_TOKEN_URL) {
+                if let Ok(r) = client.get(SERVER_SETUP_TOKEN_URL).send() {
                     if let Ok(body) = r.json::<serde_json::Value>() {
                         let token = body["token"].as_str().map(|s| s.to_owned());
                         *state.server_token.lock().unwrap() = token.clone();
@@ -214,5 +226,10 @@ mod tests {
         assert!(should_shutdown_stale_server_before_spawn(false, true));
         assert!(!should_shutdown_stale_server_before_spawn(true, true));
         assert!(!should_shutdown_stale_server_before_spawn(false, false));
+    }
+
+    #[test]
+    fn ready_http_client_builds_with_timeout() {
+        assert!(ready_http_client().is_some());
     }
 }
