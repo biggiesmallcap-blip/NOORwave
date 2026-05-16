@@ -85,10 +85,19 @@ fn write_output_buffer<T>(
             .compare_exchange(seek_target, u64::MAX, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
     {
-        guard.seek_to(seek_target as usize);
-        shared
-            .position_samples
-            .store(seek_target, Ordering::Relaxed);
+        if guard.seek_to(seek_target as usize) {
+            shared
+                .position_samples
+                .store(seek_target, Ordering::Relaxed);
+        } else {
+            warn!(
+                "Playback seek target is not decoded yet: track_id={}, generation={}, target_samples={}, buffered_samples={}",
+                shared.track_id,
+                shared.generation,
+                seek_target,
+                guard.samples.len()
+            );
+        }
     }
 
     let ready_to_start = guard.is_ready();
@@ -365,7 +374,10 @@ impl PlaybackBuffer {
         self.finished = true;
     }
 
-    fn seek_to(&mut self, target_samples: usize) {
+    fn seek_to(&mut self, target_samples: usize) -> bool {
+        if target_samples > self.samples.len() && !self.finished {
+            return false;
+        }
         self.read_pos = target_samples.min(self.samples.len());
         self.finished_notified = false;
         self.starved_notified = false;
@@ -373,6 +385,7 @@ impl PlaybackBuffer {
             self.started = false;
             self.started_notified = false;
         }
+        true
     }
 
     fn reset(&mut self) {
@@ -409,4 +422,43 @@ pub(crate) fn estimate_total_samples_from_duration_ms(
         return None;
     }
     Some((duration_ms as u64 * sample_rate as u64 * channels as u64) / 1_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_to_decoded_position_applies_immediately() {
+        let mut buffer = PlaybackBuffer::new(0);
+        buffer.samples = vec![0.0; 1_000];
+        buffer.started = true;
+
+        assert!(buffer.seek_to(400));
+        assert_eq!(buffer.read_pos, 400);
+        assert!(!buffer.finished_notified);
+        assert!(!buffer.starved_notified);
+    }
+
+    #[test]
+    fn seek_to_undecoded_position_is_rejected_until_finished() {
+        let mut buffer = PlaybackBuffer::new(0);
+        buffer.samples = vec![0.0; 1_000];
+        buffer.started = true;
+        buffer.read_pos = 100;
+
+        assert!(!buffer.seek_to(1_500));
+        assert_eq!(buffer.read_pos, 100);
+    }
+
+    #[test]
+    fn seek_to_end_of_finished_buffer_applies() {
+        let mut buffer = PlaybackBuffer::new(0);
+        buffer.samples = vec![0.0; 1_000];
+        buffer.started = true;
+        buffer.finished = true;
+
+        assert!(buffer.seek_to(1_500));
+        assert_eq!(buffer.read_pos, 1_000);
+    }
 }

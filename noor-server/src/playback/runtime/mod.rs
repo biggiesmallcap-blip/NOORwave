@@ -347,18 +347,16 @@ fn run_runtime_loop(
                         * state.device_sample_rate as u64
                         * state.device_channels as u64)
                         / 1000;
-                    // Tell the CPAL callback to seek on the next write.
+                    // Tell the CPAL callback to seek on the next write. The
+                    // callback will accept (and update position_samples) only
+                    // if the target is within already-decoded samples or the
+                    // buffer is finished; otherwise it warns and leaves the
+                    // position counter untouched. This keeps the runtime-side
+                    // position honest about what has actually been played.
+                    // (Route/UI-side position handling is a separate follow-up.)
                     engine
                         .shared
                         .seek_target_samples
-                        .store(target_samples, Ordering::Relaxed);
-                    // Mirror into the engine's counter immediately so get_position_ms()
-                    // is correct before the CPAL callback runs (up to one buffer period later).
-                    // position_source always points to this engine's counter, so no
-                    // separate handle-counter write is needed.
-                    engine
-                        .shared
-                        .position_samples
                         .store(target_samples, Ordering::Relaxed);
                     // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
                     // if the user seeks backward past those thresholds.
