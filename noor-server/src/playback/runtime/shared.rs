@@ -176,9 +176,12 @@ fn write_output_buffer<T>(
             .fetch_add(written as u64, Ordering::Relaxed);
     }
 
-    // Real-time-safe growth signal: this is just a load + conditional CAS,
-    // no allocation. The decoder thread observes growth_warned and emits the
+    // Real-time-safe telemetry: a relaxed atomic store + a load + conditional
+    // CAS, no allocation. The buffered_samples mirror lets the HTTP /
+    // route-side seek ack read "how much is decoded" without taking the
+    // buffer mutex. The decoder thread observes growth_warned and emits the
     // actual log line off this thread.
+    shared.publish_buffered_samples(guard.samples.len());
     shared.signal_buffer_growth_if_threshold_crossed(guard.samples.len());
 
     if guard.started && !guard.finished && written < data.len() && !guard.starved_notified {
@@ -279,6 +282,11 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) position_samples: Arc<AtomicU64>,
     pub(crate) seek_target_samples: AtomicU64,
     pub(crate) total_samples: AtomicU64,
+    /// Mirror of `buffer.samples.len()` published from the audio callback so
+    /// HTTP / route-side consumers can read "how much of this track is
+    /// decoded" without taking the buffer mutex. Used by the route-side seek
+    /// ack path and the buffered-bar scrubber in the frontend.
+    pub(crate) buffered_samples: AtomicU64,
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
@@ -326,6 +334,7 @@ impl PlaybackSharedState {
             position_samples,
             seek_target_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
+            buffered_samples: AtomicU64::new(0),
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
@@ -353,6 +362,16 @@ impl PlaybackSharedState {
     /// invariant to protect.
     pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stopped)
+    }
+
+    /// Audio-thread-safe: publish the current decoded-sample count for
+    /// consumers outside the buffer mutex (the route-side seek ack and the
+    /// frontend buffered-bar scrubber). Cost: a single Relaxed atomic store,
+    /// no allocation - consistent with the other telemetry atomics flipped
+    /// inside the CPAL critical section.
+    pub(crate) fn publish_buffered_samples(&self, samples_len: usize) {
+        self.buffered_samples
+            .store(samples_len as u64, Ordering::Relaxed);
     }
 
     /// Audio-thread-safe signal: when the underlying buffer crosses
@@ -504,6 +523,27 @@ mod tests {
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
         ))
+    }
+
+    #[test]
+    fn publish_buffered_samples_mirrors_value_atomically() {
+        let shared = test_shared_state();
+        assert_eq!(
+            shared.buffered_samples.load(Ordering::Relaxed),
+            0,
+            "fresh state must start at 0 buffered samples"
+        );
+
+        shared.publish_buffered_samples(12_345);
+        assert_eq!(
+            shared.buffered_samples.load(Ordering::Relaxed),
+            12_345,
+            "publish must store the exact sample count"
+        );
+
+        // Idempotent overwrite is fine - the callback re-publishes on every drain.
+        shared.publish_buffered_samples(0);
+        assert_eq!(shared.buffered_samples.load(Ordering::Relaxed), 0);
     }
 
     #[test]
