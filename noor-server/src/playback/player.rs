@@ -53,6 +53,50 @@ pub struct PreparedPlaybackJob {
     pub gapless: GaplessPlan,
     pub generation: u64,
     pub output_sample_rate: Option<u32>,
+    // Segment-aware seek (option C): for DASH-segmented sources, these tell the
+    // decoder to skip ahead by `start_from_segment_index` segments. Position
+    // accounting in `PlaybackSharedState` is then absolute-track-samples seeded
+    // from `start_from_offset_ms`. A fresh play has both = 0.
+    pub start_from_segment_index: usize,
+    pub start_from_offset_ms: u64,
+}
+
+impl PreparedPlaybackJob {
+    #[cfg(test)]
+    pub fn test_fixture(track_id: i64, generation: u64) -> Self {
+        Self {
+            track: Track {
+                id: track_id,
+                title: format!("test-track-{track_id}"),
+                artist_id: 1,
+                artist_name: None,
+                album_id: None,
+                album_title: None,
+                disc_number: None,
+                track_number: None,
+                duration_ms: Some(180_000),
+                isrc: None,
+                tidal_id: None,
+                ytmusic_id: None,
+                soundcloud_id: None,
+                best_quality: None,
+                best_source: None,
+                fidelity_score: 0,
+                is_favorite: false,
+                play_count: 0,
+                last_played_at: None,
+                date_added: None,
+                source: "local".to_string(),
+                artwork_url: None,
+            },
+            source: PlaybackSourceRequest::LocalLibrary,
+            gapless: GaplessPlan::disabled(),
+            generation,
+            output_sample_rate: None,
+            start_from_segment_index: 0,
+            start_from_offset_ms: 0,
+        }
+    }
 }
 
 pub type PlaybackPreparation = PreparedPlaybackJob;
@@ -200,6 +244,8 @@ impl PreparedPlaybackJob {
             gapless,
             generation: 0,
             output_sample_rate: None,
+            start_from_segment_index: 0,
+            start_from_offset_ms: 0,
         }
     }
 
@@ -374,9 +420,11 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
         automix_discover_new: row.8,
         automix_use_learning: row.9,
         automix_allow_external: row.10,
-        // buffered_ms is a runtime-only field overlaid by the live snapshot
-        // helper in routes.rs; the DB has no column for it.
+        // buffered_ms and buffered_start_ms are runtime-only fields overlaid
+        // by the live snapshot helper in routes.rs; the DB has no column for
+        // either of them.
         buffered_ms: 0,
+        buffered_start_ms: 0,
     })
 }
 
@@ -617,14 +665,6 @@ pub fn pause(conn: &Connection) -> Result<PlaybackSnapshot> {
 
 pub fn resume(conn: &Connection) -> Result<PlaybackSnapshot> {
     conn.execute("UPDATE playback_state SET is_playing = 1 WHERE id = 1", [])?;
-    load_snapshot(conn)
-}
-
-pub fn set_position(conn: &Connection, position_ms: i64) -> Result<PlaybackSnapshot> {
-    conn.execute(
-        "UPDATE playback_state SET position_ms = ?1 WHERE id = 1",
-        params![position_ms],
-    )?;
     load_snapshot(conn)
 }
 
@@ -2371,6 +2411,7 @@ mod tests {
         let stream = StreamInfo {
             url: "https://example.com/stream.flac".to_string(),
             segment_urls: vec![],
+            segment_offsets_ms: vec![],
             track_id: 77,
             audio_quality: "LOSSLESS".to_string(),
             codec: "audio/flac".to_string(),

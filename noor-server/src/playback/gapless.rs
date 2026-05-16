@@ -123,6 +123,7 @@ mod tests {
         StreamInfo {
             url: "https://example.com/stream.flac".to_string(),
             segment_urls: vec![],
+            segment_offsets_ms: vec![],
             track_id: 1,
             audio_quality: "LOSSLESS".to_string(),
             codec: codec.to_string(),

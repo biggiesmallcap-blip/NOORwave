@@ -514,16 +514,20 @@ export async function toggleMute() {
 export async function setPlayerPosition(nextPositionMs: number) {
 	playerError.set(null);
 	try {
-		const result = await api.setPlaybackPosition(nextPositionMs);
+		// Always opt in to the segment-restart path (option C). With
+		// allow_segment_seek=true the backend treats out-of-buffer targets
+		// as a forced restart at the nearest DASH segment instead of a 409.
+		// Pre-resolve / non-DASH targets still get 409 (the catch below
+		// applies the corrective snapshot); transition errors get 500
+		// (treat as recoverable error - the user can retry the drag).
+		const result = await api.setPlaybackPosition(nextPositionMs, true);
 		applyState(result.state);
 		noteSuccess();
 	} catch (error) {
-		// HTTP 409 = route-side seek ack: target was past the decoded buffer.
-		// The frontend scrubber clamps to bufferedMs so this should be
-		// unreachable in practice; if another client (mobile /remote) or a
-		// race makes it fire, apply the corrective live snapshot the server
-		// included in the body and stay silent (no error toast - the seek
-		// just didn't happen, the user can see the scrubber stayed put).
+		// HTTP 409 = pre-resolve race or unparseable manifest (no segment
+		// offsets to restart at). Apply the corrective live snapshot the
+		// server included in the body so the scrubber visibly snaps back,
+		// stay silent (no error toast).
 		if (error instanceof ApiError && error.status === 409) {
 			const body = error.body as { state?: PlaybackState } | null;
 			if (body?.state) {
@@ -532,6 +536,9 @@ export async function setPlayerPosition(nextPositionMs: number) {
 				return;
 			}
 		}
+		// HTTP 500 = segment-restart transition errored (TIDAL re-resolve
+		// failed, decoder spin-up failed, etc.). Show error toast with a
+		// retry; this is a recoverable failure, not a programming error.
 		setError('seek', error, () => setPlayerPosition(nextPositionMs));
 	}
 }

@@ -31,6 +31,8 @@ impl StreamRequest {
 pub struct StreamInfo {
     pub url: String,
     pub segment_urls: Vec<String>,
+    #[serde(default)]
+    pub segment_offsets_ms: Vec<u64>,
     #[serde(rename = "trackId")]
     #[allow(dead_code)]
     pub track_id: i64,
@@ -377,9 +379,14 @@ fn is_sensitive_tidal_stream_key(key: &str) -> bool {
     )
 }
 
-// Parses a DASH SegmentTemplate manifest and returns (init_url, vec_of_segment_urls).
+// Parses a DASH SegmentTemplate manifest and returns
+// (init_url, vec_of_segment_urls, vec_of_segment_start_ms).
+// `segment_start_ms[i]` is the playback time offset of `segment_urls[i]` from
+// track start, in milliseconds (derived from the manifest timescale).
 // Handles both duration= attribute (uniform segments) and <SegmentTimeline> (variable).
-fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), StreamResolveError> {
+fn parse_dash_segment_template(
+    xml: &str,
+) -> Result<(String, Vec<String>, Vec<u64>), StreamResolveError> {
     fn parse_err(msg: impl Into<String>) -> StreamResolveError {
         StreamResolveError::ManifestParseFailed {
             message: msg.into(),
@@ -441,7 +448,7 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
         .unwrap_or(1);
     let total_ts = (total_secs * timescale as f64).ceil() as u64;
 
-    let segment_urls: Vec<String> = if S_ELEM_RE.is_match(xml) {
+    let (segment_urls, segment_offsets_ms): (Vec<String>, Vec<u64>) = if S_ELEM_RE.is_match(xml) {
         let entries: Vec<(Option<u64>, u64, i64)> = S_ELEM_RE
             .captures_iter(xml)
             .filter_map(|cap| {
@@ -464,6 +471,7 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
             .collect();
 
         let mut urls = Vec::new();
+        let mut offsets_ms = Vec::new();
         let mut current_time = entries.first().and_then(|entry| entry.0).unwrap_or(0);
         let mut current_number = start_number;
 
@@ -492,12 +500,13 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
                     current_number,
                     current_time,
                 ));
+                offsets_ms.push(current_time.saturating_mul(1000) / timescale);
                 current_number += 1;
                 current_time = current_time.saturating_add(duration);
             }
         }
 
-        urls
+        (urls, offsets_ms)
     } else if let Some(seg_dur) = SEG_DUR_RE
         .captures(xml)
         .and_then(|c| c.get(1))
@@ -508,11 +517,12 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
             .map(|idx| {
                 let number = start_number + idx;
                 let time = idx * seg_dur;
-                fill_dash_template(&media_template, number, time)
+                let offset_ms = time.saturating_mul(1000) / timescale;
+                (fill_dash_template(&media_template, number, time), offset_ms)
             })
-            .collect()
+            .unzip()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     if segment_urls.is_empty() {
@@ -521,7 +531,7 @@ fn parse_dash_segment_template(xml: &str) -> Result<(String, Vec<String>), Strea
         ));
     }
 
-    Ok((init_url, segment_urls))
+    Ok((init_url, segment_urls, segment_offsets_ms))
 }
 
 fn fill_dash_template(template: &str, number: u64, time: u64) -> String {
@@ -643,79 +653,82 @@ pub async fn resolve_stream(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Resolve the manifest into (stream_url, segment_urls, audio_codec).
-    // segment_urls is non-empty only for segmented DASH (SegmentTemplate shape).
-    let (stream_url, segment_urls, dash_codec) = if manifest_mime.contains("dash+xml") {
-        let manifest_str = std::str::from_utf8(&manifest_bytes).map_err(|error| {
-            StreamResolveError::ManifestParseFailed {
-                message: format!("DASH manifest is not valid UTF-8: {error}"),
-            }
-        })?;
-        let codec = extract_dash_codec(manifest_str);
+    // Resolve the manifest into (stream_url, segment_urls, segment_offsets_ms, audio_codec).
+    // segment_urls is non-empty only for segmented DASH (SegmentTemplate shape);
+    // segment_offsets_ms is parallel to segment_urls (millisecond start of each segment).
+    let (stream_url, segment_urls, segment_offsets_ms, dash_codec) =
+        if manifest_mime.contains("dash+xml") {
+            let manifest_str = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                StreamResolveError::ManifestParseFailed {
+                    message: format!("DASH manifest is not valid UTF-8: {error}"),
+                }
+            })?;
+            let codec = extract_dash_codec(manifest_str);
 
-        // Try SegmentTemplate (segmented CMAF fMP4) first.
-        match parse_dash_segment_template(manifest_str) {
-            Ok((init_url, segs)) => (init_url, segs, Some(codec)),
-            Err(_) => {
-                // Fall back to single <BaseURL> (simpler DASH shape from older catalogue).
-                static DASH_URL_RE: std::sync::LazyLock<regex::Regex> =
-                    std::sync::LazyLock::new(|| {
-                        regex::Regex::new(r"<BaseURL[^>]*>(https?://[^<]+)</BaseURL>").unwrap()
-                    });
-                match DASH_URL_RE
-                    .captures(manifest_str)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-                {
-                    Some(url) => (url, vec![], Some(codec)),
-                    None => {
-                        let preview: String = manifest_str.chars().take(2048).collect();
-                        tracing::warn!(
-                            track_id = request.track_id,
-                            manifest_mime = %manifest_mime,
-                            manifest_preview = %preview,
-                            "TIDAL DASH manifest: no SegmentTemplate or BaseURL found"
-                        );
-                        return Err(StreamResolveError::MissingStreamUrl);
+            // Try SegmentTemplate (segmented CMAF fMP4) first.
+            match parse_dash_segment_template(manifest_str) {
+                Ok((init_url, segs, offsets)) => (init_url, segs, offsets, Some(codec)),
+                Err(_) => {
+                    // Fall back to single <BaseURL> (simpler DASH shape from older catalogue).
+                    static DASH_URL_RE: std::sync::LazyLock<regex::Regex> =
+                        std::sync::LazyLock::new(|| {
+                            regex::Regex::new(r"<BaseURL[^>]*>(https?://[^<]+)</BaseURL>").unwrap()
+                        });
+                    match DASH_URL_RE
+                        .captures(manifest_str)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str().to_string())
+                    {
+                        Some(url) => (url, vec![], vec![], Some(codec)),
+                        None => {
+                            let preview: String = manifest_str.chars().take(2048).collect();
+                            tracing::warn!(
+                                track_id = request.track_id,
+                                manifest_mime = %manifest_mime,
+                                manifest_preview = %preview,
+                                "TIDAL DASH manifest: no SegmentTemplate or BaseURL found"
+                            );
+                            return Err(StreamResolveError::MissingStreamUrl);
+                        }
                     }
                 }
             }
-        }
-    } else {
-        // JSON manifest (application/vnd.tidal.bts or similar)
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&manifest_bytes).map_err(|error| {
-                StreamResolveError::ManifestParseFailed {
-                    message: error.to_string(),
+        } else {
+            // JSON manifest (application/vnd.tidal.bts or similar)
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&manifest_bytes).map_err(|error| {
+                    StreamResolveError::ManifestParseFailed {
+                        message: error.to_string(),
+                    }
+                })?;
+            match manifest
+                .get("urls")
+                .and_then(|urls| urls.as_array())
+                .and_then(|urls| urls.first())
+                .and_then(|url| url.as_str())
+                .map(|s| s.to_string())
+            {
+                Some(url) => (
+                    url,
+                    vec![],
+                    vec![],
+                    Some(extract_bts_codec(&manifest, manifest_mime)),
+                ),
+                None => {
+                    let preview: String = String::from_utf8_lossy(&manifest_bytes)
+                        .chars()
+                        .take(2048)
+                        .collect();
+                    tracing::warn!(
+                        track_id = request.track_id,
+                        manifest_mime = %manifest_mime,
+                        manifest_preview = %preview,
+                        "TIDAL JSON manifest missing urls[0]"
+                    );
+                    return Err(StreamResolveError::MissingStreamUrl);
                 }
-            })?;
-        match manifest
-            .get("urls")
-            .and_then(|urls| urls.as_array())
-            .and_then(|urls| urls.first())
-            .and_then(|url| url.as_str())
-            .map(|s| s.to_string())
-        {
-            Some(url) => (
-                url,
-                vec![],
-                Some(extract_bts_codec(&manifest, manifest_mime)),
-            ),
-            None => {
-                let preview: String = String::from_utf8_lossy(&manifest_bytes)
-                    .chars()
-                    .take(2048)
-                    .collect();
-                tracing::warn!(
-                    track_id = request.track_id,
-                    manifest_mime = %manifest_mime,
-                    manifest_preview = %preview,
-                    "TIDAL JSON manifest missing urls[0]"
-                );
-                return Err(StreamResolveError::MissingStreamUrl);
             }
-        }
-    };
+        };
 
     let (audio_quality, quality_agreement) = resolved_audio_quality(&resp, &request.audio_quality);
     let sample_rate = resp
@@ -801,6 +814,7 @@ pub async fn resolve_stream(
     Ok(StreamInfo {
         url: stream_url,
         segment_urls,
+        segment_offsets_ms,
         track_id: request.track_id,
         audio_quality,
         codec,
@@ -1028,7 +1042,8 @@ mod tests {
             </MPD>
         "#;
 
-        let (init_url, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+        let (init_url, segment_urls, segment_offsets_ms) =
+            parse_dash_segment_template(xml).expect("DASH parses");
 
         assert_eq!(init_url, "https://cdn.example.test/init.mp4");
         assert_eq!(
@@ -1040,6 +1055,7 @@ mod tests {
                 "https://cdn.example.test/seg-4.m4s"
             ]
         );
+        assert_eq!(segment_offsets_ms, vec![0u64, 3000, 6000, 9000]);
     }
 
     #[test]
@@ -1065,7 +1081,8 @@ mod tests {
             </MPD>
         "#;
 
-        let (_, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+        let (_, segment_urls, segment_offsets_ms) =
+            parse_dash_segment_template(xml).expect("DASH parses");
 
         assert_eq!(
             segment_urls,
@@ -1077,6 +1094,7 @@ mod tests {
                 "https://cdn.example.test/time-11000.m4s"
             ]
         );
+        assert_eq!(segment_offsets_ms, vec![1000u64, 4000, 7000, 10000, 11000]);
     }
 
     #[test]
@@ -1102,7 +1120,8 @@ mod tests {
             </MPD>
         "#;
 
-        let (_, segment_urls) = parse_dash_segment_template(xml).expect("DASH parses");
+        let (_, segment_urls, segment_offsets_ms) =
+            parse_dash_segment_template(xml).expect("DASH parses");
 
         assert_eq!(
             segment_urls,
@@ -1112,6 +1131,7 @@ mod tests {
                 "https://cdn.example.test/time-15000.m4s"
             ]
         );
+        assert_eq!(segment_offsets_ms, vec![9000u64, 12000, 15000]);
     }
 
     #[test]
@@ -1153,6 +1173,7 @@ mod tests {
         let info = StreamInfo {
             url: "https://audio.example.test/track.m4a".to_string(),
             segment_urls: vec![],
+            segment_offsets_ms: vec![],
             track_id: 1,
             audio_quality: "HIGH".to_string(),
             codec: "mp4a.40.2".to_string(),

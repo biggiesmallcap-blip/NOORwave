@@ -228,4 +228,16 @@ describe('setPlayerPosition 409 ack handling', () => {
 
 		expect(get(playerError)).not.toBeNull();
 	});
+
+	test('opts in to segment-seek (option C) on every seek request', async () => {
+		// Pin the API contract: setPlayerPosition MUST send
+		// allow_segment_seek=true. Drops to the legacy 409 reject path if
+		// this regresses to false, so the failure mode would be silent UX
+		// degradation rather than a crash - the test backstops that.
+		apiMock.setPlaybackPosition.mockResolvedValueOnce({ state: buildState() });
+
+		await setPlayerPosition(75_000);
+
+		expect(apiMock.setPlaybackPosition).toHaveBeenCalledWith(75_000, true);
+	});
 });

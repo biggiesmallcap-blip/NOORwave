@@ -605,6 +605,13 @@ export interface PlaybackState {
 	 * should `?? 0` and treat missing as "unknown / no buffer info yet".
 	 */
 	buffered_ms?: number;
+	/**
+	 * Track-time offset (ms) where the audibly-current engine's decoded
+	 * audio begins. 0 for a fresh-from-start engine; non-zero only after a
+	 * true DASH segment-seek restart (option C). Optional / `#[serde(default)]`
+	 * on the backend; read sites should `?? 0`.
+	 */
+	buffered_start_ms?: number;
 }
 
 export interface PlaybackSnapshot {
@@ -2207,10 +2214,13 @@ export const api = {
 		});
 	},
 
-	setPlaybackPosition(positionMs: number) {
+	setPlaybackPosition(positionMs: number, allowSegmentSeek = false) {
 		return fetchApi<{ state: PlaybackState }>('/api/playback/position', undefined, {
 			method: 'POST',
-			body: JSON.stringify({ position_ms: positionMs }),
+			body: JSON.stringify({
+				position_ms: positionMs,
+				allow_segment_seek: allowSegmentSeek,
+			}),
 		});
 	},
 

@@ -16,6 +16,7 @@ pub(crate) mod shared;
 
 pub use commands::{
     PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerminalReason, PlaybackTrackStatus,
+    SeekToOutcome,
 };
 pub use device::{OutputDeviceSelection, enumerate_output_devices};
 use device::{device_display_name, resolve_device};
@@ -30,6 +31,46 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tracing::{debug, error, info, warn};
+
+/// Pure decision helper for the SeekTo handler. Moved out of `server::routes`
+/// (r6 fix A: keep the playback runtime free of HTTP-layer dependencies). The
+/// runtime's SeekTo handler calls this with absolute-track samples; the route
+/// no longer touches it directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeekDecision {
+    /// Either no runtime / engine is active, or the buffer is fresh (no
+    /// samples published yet), or the target is inside `[offset, buffered]`.
+    /// Dispatch the seek to the runtime's in-buffer fast path.
+    Dispatch,
+    /// Target is strictly outside `[offset, buffered]` and the runtime has
+    /// published a non-zero buffered_samples value (so we're past the
+    /// cold-start window). Routed to either the segment-restart path or
+    /// 409-style rejection depending on the caller's `allow_segment_seek`.
+    RejectOutOfBuffer,
+}
+
+pub(crate) fn evaluate_seek_decision(
+    target_samples: u64,
+    buffered_start_samples: u64,
+    buffered_samples: u64,
+    runtime_active: bool,
+) -> SeekDecision {
+    if !runtime_active {
+        return SeekDecision::Dispatch;
+    }
+    // buffered_samples == 0 means the audio callback hasn't published any
+    // value yet (engine cold-starting, first callback not fired). Treat that
+    // as "unknown, let the runtime decide" rather than blanket-rejecting all
+    // seeks during the cold-start window.
+    if buffered_samples == 0 {
+        return SeekDecision::Dispatch;
+    }
+    if target_samples < buffered_start_samples || target_samples > buffered_samples {
+        SeekDecision::RejectOutOfBuffer
+    } else {
+        SeekDecision::Dispatch
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PlaybackRuntimeConfig {
@@ -81,6 +122,15 @@ pub struct PlaybackRuntimeHandle {
     /// the frontend reads `buffered_ms` via this for the buffered-bar
     /// scrubber. Same unwrap-audit reasoning as `position_source`.
     buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// Redirectable engine-offset reader (option C: true DASH segment seek).
+    /// Points at the audibly-current engine's `position_offset_samples`
+    /// counter. For a fresh play this reads 0; for a segment-restart engine
+    /// it reads the absolute-track sample where the engine's decoded audio
+    /// starts. The route-side seek handler uses this as the LOWER bound of
+    /// the in-buffer decision (target must be `>= offset` to be in-buffer);
+    /// the frontend reads `buffered_start_ms` via this as a visual cue.
+    /// Same unwrap-audit reasoning as `position_source` / `buffered_source`.
+    offset_source: Arc<Mutex<Arc<AtomicU64>>>,
 }
 
 impl PlaybackRuntimeHandle {
@@ -137,9 +187,47 @@ impl PlaybackRuntimeHandle {
         self.event_tx.subscribe()
     }
 
-    /// Seek to a position (milliseconds) within the current track.
+    /// Segment-aware seek. Single entry point for all seek requests; the
+    /// runtime decides between in-buffer fast path, forced-restart segment
+    /// seek, or rejection. The `allow_segment_seek` flag opts in to the
+    /// segment-restart transition; with `false`, the runtime treats
+    /// out-of-buffer seeks as rejected (legacy semantics).
+    ///
+    /// Blocks up to 1500ms for the reply (segment-restart transitions need
+    /// time to tear down the old engine and spin up the decoder thread on
+    /// the new one). Returns `SeekToOutcome::Failed` on timeout / channel
+    /// closure - treat as a recoverable error from the caller's perspective.
+    pub fn seek_to_segment_aware(
+        &self,
+        position_ms: i64,
+        allow_segment_seek: bool,
+    ) -> SeekToOutcome {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self
+            .send(PlaybackRuntimeCommand::SeekTo {
+                target_ms: position_ms,
+                allow_segment_seek,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return SeekToOutcome::Failed;
+        }
+        rx.recv_timeout(std::time::Duration::from_millis(1500))
+            .unwrap_or(SeekToOutcome::Failed)
+    }
+
+    /// Legacy seek wrapper. Equivalent to `seek_to_segment_aware(position_ms,
+    /// false)` returning a `Result<()>`. Kept so non-route callers (none
+    /// today; audit `git grep "\\.seek\\("` if adding new ones) don't have to
+    /// adopt the SeekToOutcome enum just to issue a plain seek. Out-of-buffer
+    /// or failed transitions surface as `Err`.
     pub fn seek(&self, position_ms: i64) -> Result<()> {
-        self.send(PlaybackRuntimeCommand::Seek(position_ms))
+        match self.seek_to_segment_aware(position_ms, false) {
+            SeekToOutcome::Dispatched => Ok(()),
+            SeekToOutcome::RejectedOutOfBuffer => Err(anyhow!("seek target is out of buffer")),
+            SeekToOutcome::Failed => Err(anyhow!("seek dispatch failed")),
+        }
     }
 
     /// Pre-decode the next track in the background so the transition is gapless.
@@ -198,6 +286,28 @@ impl PlaybackRuntimeHandle {
         self.buffered_source.lock().unwrap().load(Ordering::Relaxed)
     }
 
+    /// Read the engine's track-time offset in milliseconds (lower bound of
+    /// the decoded range). Returns 0 for a fresh-from-start engine; returns
+    /// the segment offset for a segment-restart engine. Read via the
+    /// redirectable `offset_source` so it always reflects the audibly-current
+    /// engine, not the fading-out one. Used by `build_live_playback_snapshot`
+    /// to populate `PlaybackState.buffered_start_ms` and by the runtime's
+    /// SeekTo handler indirectly via `evaluate_seek_decision`.
+    pub fn get_buffered_start_ms(&self, device_sample_rate: u32, device_channels: u16) -> i64 {
+        if device_sample_rate == 0 || device_channels == 0 {
+            return 0;
+        }
+        let samples = self.offset_source.lock().unwrap().load(Ordering::Relaxed);
+        (samples * 1000 / (device_sample_rate as u64 * device_channels as u64)) as i64
+    }
+
+    /// Raw offset-sample count from the audibly-current engine. Companion to
+    /// `buffered_samples()`; the route-side SeekTo handler uses both as the
+    /// `[offset, buffered]` bounds of the in-buffer fast path.
+    pub fn buffered_start_samples(&self) -> u64 {
+        self.offset_source.lock().unwrap().load(Ordering::Relaxed)
+    }
+
     fn send(&self, command: PlaybackRuntimeCommand) -> Result<()> {
         self.command_tx
             .send(command)
@@ -229,11 +339,17 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     // `buffered_ms()` call returns 0 cleanly.
     let buffered_source: Arc<Mutex<Arc<AtomicU64>>> =
         Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    // Offset mirror: same redirect pattern as `buffered_source`, but for the
+    // engine's `position_offset_samples`. Before any engine exists this points
+    // at a sentinel zero atomic so `get_buffered_start_ms()` returns 0.
+    let offset_source: Arc<Mutex<Arc<AtomicU64>>> =
+        Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
     let worker_initial_position = Arc::clone(&initial_position);
     let worker_position_source = Arc::clone(&position_source);
     let worker_buffered_source = Arc::clone(&buffered_source);
+    let worker_offset_source = Arc::clone(&offset_source);
 
     thread::Builder::new()
         .name("noor-playback-runtime".into())
@@ -247,6 +363,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_initial_position,
                 worker_position_source,
                 worker_buffered_source,
+                worker_offset_source,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
                     message: err.to_string(),
@@ -262,6 +379,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         volume_ctl,
         position_source,
         buffered_source,
+        offset_source,
     })
 }
 
@@ -301,6 +419,7 @@ struct PlaybackRuntimeLoopState {
     current_exclusive_latency_mode: ExclusiveLatencyMode,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_runtime_loop(
     config: PlaybackRuntimeConfig,
     command_rx: mpsc::Receiver<PlaybackRuntimeCommand>,
@@ -310,6 +429,7 @@ fn run_runtime_loop(
     position_samples: Arc<AtomicU64>,
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
+    offset_source: Arc<Mutex<Arc<AtomicU64>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let mut device = host
@@ -367,6 +487,7 @@ fn run_runtime_loop(
                         &position_samples,
                         &position_source,
                         &buffered_source,
+                        &offset_source,
                         true,
                     ) {
                         stop_all_engines(&mut state);
@@ -389,6 +510,7 @@ fn run_runtime_loop(
                         &position_samples,
                         &position_source,
                         &buffered_source,
+                        &offset_source,
                         false,
                     ) {
                         stop_all_engines(&mut state);
@@ -397,33 +519,132 @@ fn run_runtime_loop(
                         report_runtime_command_error(&event_tx, "Switch", error);
                     }
                 }
-                PlaybackRuntimeCommand::Seek(position_ms) => {
-                    if let Some(engine) = state.engine.as_ref() {
-                        let target_samples = (position_ms.max(0) as u64
-                            * state.device_sample_rate as u64
-                            * state.device_channels as u64)
+                PlaybackRuntimeCommand::SeekTo {
+                    target_ms,
+                    allow_segment_seek,
+                    respond_to,
+                } => {
+                    // Phase 1: snapshot everything we need under an immutable
+                    // borrow of state.engine. Inside this block we decide
+                    // among in-buffer fast path / segment-restart / reject;
+                    // the actual mutation happens in phase 2 with the
+                    // immutable borrow already dropped (per r6 fix C).
+                    enum SeekHandling {
+                        InBuffer { target_samples: u64 },
+                        Reject,
+                        SegmentSeek { job: PreparedPlaybackJob },
+                    }
+                    let rate = state.device_sample_rate as u64;
+                    let channels = state.device_channels.max(1) as u64;
+                    let decision: SeekHandling = {
+                        let Some(engine) = state.engine.as_ref() else {
+                            let _ = respond_to.send(SeekToOutcome::RejectedOutOfBuffer);
+                            return std::ops::ControlFlow::Continue(());
+                        };
+                        let target_samples = (target_ms.max(0) as u64)
+                            .saturating_mul(rate)
+                            .saturating_mul(channels)
                             / 1000;
-                        // Tell the CPAL callback to seek on the next write. The
-                        // callback will accept (and update position_samples) only
-                        // if the target is within already-decoded samples or the
-                        // buffer is finished; otherwise it warns and leaves the
-                        // position counter untouched. This keeps the runtime-side
-                        // position honest about what has actually been played.
-                        // (Route/UI-side position handling is a separate follow-up.)
-                        engine
+                        let offset_samples = engine
                             .shared
-                            .seek_target_samples
-                            .store(target_samples, Ordering::Relaxed);
-                        // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
-                        // if the user seeks backward past those thresholds.
-                        engine
-                            .shared
-                            .near_end_signaled
-                            .store(false, Ordering::Relaxed);
-                        engine
-                            .shared
-                            .crossfade_start_signaled
-                            .store(false, Ordering::Relaxed);
+                            .position_offset_samples
+                            .load(Ordering::Relaxed);
+                        let buffered_samples =
+                            engine.shared.buffered_samples.load(Ordering::Relaxed);
+
+                        match evaluate_seek_decision(
+                            target_samples,
+                            offset_samples,
+                            buffered_samples,
+                            true,
+                        ) {
+                            SeekDecision::Dispatch => SeekHandling::InBuffer { target_samples },
+                            SeekDecision::RejectOutOfBuffer if !allow_segment_seek => {
+                                SeekHandling::Reject
+                            }
+                            SeekDecision::RejectOutOfBuffer => {
+                                // Segment-restart path: find the segment whose
+                                // start_ms is the largest <= target_ms, build a
+                                // new job that starts from there. Clone the job
+                                // so the borrow ends with this scope.
+                                let Some(offsets) = engine.shared.segment_offsets_ms.get() else {
+                                    let _ = respond_to.send(SeekToOutcome::RejectedOutOfBuffer);
+                                    return std::ops::ControlFlow::Continue(());
+                                };
+                                if offsets.is_empty() {
+                                    let _ = respond_to.send(SeekToOutcome::RejectedOutOfBuffer);
+                                    return std::ops::ControlFlow::Continue(());
+                                }
+                                let target_ms_clamped = target_ms.max(0) as u64;
+                                let n = offsets
+                                    .iter()
+                                    .rposition(|off_ms| *off_ms <= target_ms_clamped)
+                                    .unwrap_or(0);
+                                let new_offset_ms = offsets[n];
+                                let new_job = {
+                                    let mut j = engine.job.clone();
+                                    j.start_from_segment_index = n;
+                                    j.start_from_offset_ms = new_offset_ms;
+                                    j
+                                };
+                                SeekHandling::SegmentSeek { job: new_job }
+                            }
+                        }
+                    }; // immutable borrow of state.engine ends here
+
+                    // Phase 2: act on the decision under a mutable borrow.
+                    match decision {
+                        SeekHandling::InBuffer { target_samples } => {
+                            if let Some(engine) = state.engine.as_ref() {
+                                engine
+                                    .shared
+                                    .seek_target_samples
+                                    .store(target_samples, Ordering::Relaxed);
+                                // Reset fire-once guards so NearEnd /
+                                // CrossfadeStart re-fire after a backward seek.
+                                engine
+                                    .shared
+                                    .near_end_signaled
+                                    .store(false, Ordering::Relaxed);
+                                engine
+                                    .shared
+                                    .crossfade_start_signaled
+                                    .store(false, Ordering::Relaxed);
+                            }
+                            let _ = respond_to.send(SeekToOutcome::Dispatched);
+                        }
+                        SeekHandling::Reject => {
+                            let _ = respond_to.send(SeekToOutcome::RejectedOutOfBuffer);
+                        }
+                        SeekHandling::SegmentSeek { job } => {
+                            match transition_to_job(
+                                &config,
+                                &command_tx,
+                                &device,
+                                &mut output_config,
+                                output_sample_format,
+                                &event_tx,
+                                &mut state,
+                                job,
+                                &volume_ctl,
+                                &position_samples,
+                                &position_source,
+                                &buffered_source,
+                                &offset_source,
+                                true, // force_restart - bypass switch_is_noop
+                            ) {
+                                Ok(()) => {
+                                    let _ = respond_to.send(SeekToOutcome::Dispatched);
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        "Segment-seek transition failed: target_ms={}, err={:?}",
+                                        target_ms, error
+                                    );
+                                    let _ = respond_to.send(SeekToOutcome::Failed);
+                                }
+                            }
+                        }
                     }
                 }
                 PlaybackRuntimeCommand::PrepareNext(job) => {
@@ -501,6 +722,7 @@ fn run_runtime_loop(
                                 &event_tx,
                                 &position_source,
                                 &buffered_source,
+                                &offset_source,
                             );
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
@@ -530,6 +752,7 @@ fn run_runtime_loop(
                                 &event_tx,
                                 &position_source,
                                 &buffered_source,
+                                &offset_source,
                             );
                         }
                     }
@@ -715,6 +938,7 @@ fn run_runtime_loop(
                                     &event_tx,
                                     &position_source,
                                     &buffered_source,
+                                    &offset_source,
                                 );
                             } else {
                                 stop_current_engine(&mut state);
@@ -1000,6 +1224,7 @@ fn run_runtime_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transition_to_job(
     config: &PlaybackRuntimeConfig,
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
@@ -1013,6 +1238,7 @@ fn transition_to_job(
     position_samples: &Arc<AtomicU64>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
     force_restart: bool,
 ) -> Result<()> {
     // No-op when state.engine is already playing the requested track. This
@@ -1039,8 +1265,20 @@ fn transition_to_job(
         prior.stop();
     }
 
-    // Reset position counter for the new track (safe: old engine is fully stopped above).
-    position_samples.store(0, Ordering::SeqCst);
+    // Reset position counter to the new engine's offset baseline (option C:
+    // a segment-restart job seeds from `start_from_offset_ms` so the handle's
+    // `get_position_ms` reports the correct absolute time from the first
+    // CPAL callback, before the engine has actually written any samples).
+    // `start_decoder_only` later stores the same value into position_samples
+    // - this preemptive store is so the handle doesn't briefly read a stale 0
+    // (or a stale prior-track value) between the engine teardown above and
+    // the engine spawn below.
+    let baseline_offset_samples = (job
+        .start_from_offset_ms
+        .saturating_mul(state.device_sample_rate as u64)
+        .saturating_mul(state.device_channels.max(1) as u64))
+        / 1000;
+    position_samples.store(baseline_offset_samples, Ordering::SeqCst);
 
     let output_state_update = transition_output_state_update(
         job.output_sample_rate,
@@ -1104,6 +1342,7 @@ fn transition_to_job(
             )?;
             *position_source.lock().unwrap() = Arc::clone(position_samples);
             *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
+            *offset_source.lock().unwrap() = Arc::clone(&eng.shared.position_offset_samples);
             state.engine = Some(eng);
 
             #[cfg(target_os = "windows")]
@@ -1169,6 +1408,7 @@ fn transition_to_job(
             state.device_sample_rate = actual_start_rate;
             *position_source.lock().unwrap() = Arc::clone(position_samples);
             *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
+            *offset_source.lock().unwrap() = Arc::clone(&eng.shared.position_offset_samples);
             state.engine = Some(eng);
         }
     }
@@ -1391,6 +1631,7 @@ fn promote_next_to_active(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
     let Some(next) = state.next_engine.take() else {
         return;
@@ -1398,10 +1639,11 @@ fn promote_next_to_active(
     next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
     next.shared.paused.store(false, Ordering::SeqCst);
 
-    // Redirect the handle's position + buffered readers to the incoming
-    // engine's counters BEFORE sliding it into state.engine so get_position_ms
-    // / get_buffered_ms() immediately reflect the new track starting from 0
-    // instead of the fading-out track's frozen end values.
+    // Redirect the handle's position + buffered + offset readers to the
+    // incoming engine's counters BEFORE sliding it into state.engine so
+    // get_position_ms / get_buffered_ms / get_buffered_start_ms() immediately
+    // reflect the new track starting from 0 instead of the fading-out track's
+    // frozen end values.
     //
     // If lock() panics (the only failure mode is a prior poisoning) the
     // moved-out `next` is dropped without stop() being called and its decoder
@@ -1411,6 +1653,7 @@ fn promote_next_to_active(
     // was judged to outweigh the rare-poisoning bandwidth blip.
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
+    *offset_source.lock().unwrap() = Arc::clone(&next.shared.position_offset_samples);
 
     let outgoing = state.engine.take();
     state.engine = Some(next);
@@ -1442,6 +1685,7 @@ fn promote_prepared_at_boundary(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
     let Some(next) = state.next_engine.take() else {
         return;
@@ -1452,6 +1696,7 @@ fn promote_prepared_at_boundary(
     next.shared.paused.store(false, Ordering::SeqCst);
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
+    *offset_source.lock().unwrap() = Arc::clone(&next.shared.position_offset_samples);
 
     let outgoing = state.engine.take();
     state.engine = Some(next);
@@ -1782,6 +2027,7 @@ mod tests {
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         ));
 
         {
@@ -1808,6 +2054,7 @@ mod tests {
             command_tx.clone(),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::clone(&position),
+            Arc::new(AtomicU64::new(0)),
         ));
         {
             let mut buffer = shared.buffer.lock().unwrap();
@@ -1838,6 +2085,7 @@ mod tests {
             command_tx.clone(),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::clone(&position),
+            Arc::new(AtomicU64::new(0)),
         ));
         shared.paused.store(true, Ordering::SeqCst);
         {
@@ -1938,6 +2186,7 @@ mod tests {
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
 
         shared
@@ -1974,6 +2223,7 @@ mod tests {
             None,
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         );
 
@@ -2038,6 +2288,7 @@ mod tests {
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::clone(&buffered_source),
+            offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         };
 
         assert_eq!(
@@ -2077,6 +2328,7 @@ mod tests {
             volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
+            offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         };
         assert_eq!(handle.get_buffered_ms(0, 2), 0);
         assert_eq!(handle.get_buffered_ms(48_000, 0), 0);
@@ -2242,7 +2494,104 @@ mod tests {
                 command_tx,
                 Arc::new(AtomicU32::new(1.0f32.to_bits())),
                 Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
             )),
         )
+    }
+
+    // -- Option C: evaluate_seek_decision unit tests (moved from server::routes
+    //    per r6 fix A; the helper now lives in this module). --
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_no_runtime_active() {
+        assert_eq!(
+            super::evaluate_seek_decision(1_000_000, 0, 0, false),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_buffer_is_fresh() {
+        assert_eq!(
+            super::evaluate_seek_decision(500_000, 0, 0, true),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_target_within_buffered() {
+        assert_eq!(
+            super::evaluate_seek_decision(100_000, 0, 200_000, true),
+            super::SeekDecision::Dispatch,
+        );
+        assert_eq!(
+            super::evaluate_seek_decision(200_000, 0, 200_000, true),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_rejects_target_strictly_past_buffer() {
+        assert_eq!(
+            super::evaluate_seek_decision(300_000, 0, 200_000, true),
+            super::SeekDecision::RejectOutOfBuffer,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_rejects_target_below_offset() {
+        // r5 finding (P2): decoded range after segment-restart is
+        // [offset, buffered], not [0, buffered]. A backward seek below the
+        // offset must NOT take the fast path.
+        assert_eq!(
+            super::evaluate_seek_decision(10_000, 30_000, 50_000, true),
+            super::SeekDecision::RejectOutOfBuffer,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_target_within_post_offset_range() {
+        // Same offset as the test above; target sits inside [30k, 50k].
+        assert_eq!(
+            super::evaluate_seek_decision(40_000, 30_000, 50_000, true),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn offset_source_redirect_makes_handle_read_from_new_engine() {
+        // r2 codex finding (P1) extended for option C: the handle's
+        // get_buffered_start_ms must follow the same redirect pattern as
+        // position_source / buffered_source so a Switch / promotion swaps the
+        // reader to the new engine's offset atomic, not the stale one.
+        let (command_tx, _) = std::sync::mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+
+        let engine_a_offset = Arc::new(AtomicU64::new(0));
+        let engine_b_offset = Arc::new(AtomicU64::new(48_000 * 2 * 30)); // 30 s @ 48k stereo
+
+        let offset_source: Arc<Mutex<Arc<AtomicU64>>> =
+            Arc::new(Mutex::new(Arc::clone(&engine_a_offset)));
+
+        let handle = PlaybackRuntimeHandle {
+            command_tx,
+            event_tx,
+            volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            offset_source: Arc::clone(&offset_source),
+        };
+
+        assert_eq!(handle.buffered_start_samples(), 0);
+        assert_eq!(handle.get_buffered_start_ms(48_000, 2), 0);
+
+        *offset_source.lock().unwrap() = Arc::clone(&engine_b_offset);
+
+        assert_eq!(handle.buffered_start_samples(), 48_000 * 2 * 30);
+        assert_eq!(handle.get_buffered_start_ms(48_000, 2), 30_000);
+
+        // Stale writes to engine A must not leak through.
+        engine_a_offset.store(999_999, Ordering::Relaxed);
+        assert_eq!(handle.buffered_start_samples(), 48_000 * 2 * 30);
     }
 }

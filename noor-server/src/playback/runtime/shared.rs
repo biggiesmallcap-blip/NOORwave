@@ -103,18 +103,34 @@ fn write_output_buffer<T>(
             .compare_exchange(seek_target, u64::MAX, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
     {
-        if guard.seek_to(seek_target as usize) {
-            shared
-                .position_samples
-                .store(seek_target, Ordering::Relaxed);
-        } else {
+        // The seek target is in ABSOLUTE-track samples. Convert to a
+        // buffer-local index by subtracting the engine's offset. If the target
+        // is below the offset (a backward seek into territory this engine
+        // hasn't decoded), reject - the runtime's SeekTo handler should have
+        // intercepted this, but a defense-in-depth check keeps the buffer's
+        // read_pos honest if it slips through.
+        let offset = shared.position_offset_samples.load(Ordering::Relaxed);
+        if seek_target < offset {
             warn!(
-                "Playback seek target is not decoded yet: track_id={}, generation={}, target_samples={}, buffered_samples={}",
-                shared.track_id,
-                shared.generation,
-                seek_target,
-                guard.samples.len()
+                "Playback seek target is below engine offset: track_id={}, generation={}, target_samples={}, offset_samples={}",
+                shared.track_id, shared.generation, seek_target, offset
             );
+        } else {
+            let local_target = (seek_target - offset) as usize;
+            if guard.seek_to(local_target) {
+                shared
+                    .position_samples
+                    .store(seek_target, Ordering::Relaxed);
+            } else {
+                warn!(
+                    "Playback seek target is not decoded yet: track_id={}, generation={}, target_samples={}, offset_samples={}, buffered_samples={}",
+                    shared.track_id,
+                    shared.generation,
+                    seek_target,
+                    offset,
+                    offset + guard.samples.len() as u64
+                );
+            }
         }
     }
 
@@ -179,8 +195,10 @@ fn write_output_buffer<T>(
     // Real-time-safe telemetry: a relaxed atomic store + a load + conditional
     // CAS, no allocation. The buffered_samples mirror lets the HTTP /
     // route-side seek ack read "how much is decoded" without taking the
-    // buffer mutex. The decoder thread observes growth_warned and emits the
-    // actual log line off this thread.
+    // buffer mutex. Reported as ABSOLUTE-track samples (offset + decoded len)
+    // so consumers can compare against an absolute target_samples directly.
+    // The decoder thread observes growth_warned and emits the actual log line
+    // off this thread.
     shared.publish_buffered_samples(guard.samples.len());
     shared.signal_buffer_growth_if_threshold_crossed(guard.samples.len());
 
@@ -290,6 +308,19 @@ pub(crate) struct PlaybackSharedState {
     /// `position_source`). Used by the route-side seek ack path and the
     /// buffered-bar scrubber in the frontend.
     pub(crate) buffered_samples: Arc<AtomicU64>,
+    /// Track-time offset (absolute device-samples) where this engine's decoded
+    /// audio begins. For a fresh play this is 0; for a segment-seek restart
+    /// (option C) it is seeded from `PreparedPlaybackJob::start_from_offset_ms`
+    /// at engine construction. `position_samples` and `buffered_samples` are
+    /// reported as ABSOLUTE-track samples (offset + buffer-local samples), so
+    /// the route-side seek ack can decide intersect/segment-seek without
+    /// having to know the engine's internal slicing.
+    pub(crate) position_offset_samples: Arc<AtomicU64>,
+    /// Per-segment start times in milliseconds, set once by the decoder thread
+    /// after the DASH manifest resolves. `OnceLock` keeps the publish lock-free
+    /// for readers; an empty `Vec` (or unset cell) signals "this engine has no
+    /// segment metadata" (non-DASH source or pre-resolve state).
+    pub(crate) segment_offsets_ms: std::sync::OnceLock<Vec<u64>>,
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
@@ -312,6 +343,7 @@ impl PlaybackSharedState {
         command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
+        position_offset_samples: Arc<AtomicU64>,
     ) -> Self {
         let prebuffer_samples = samples_from_ms(
             gapless.prebuffer_ms,
@@ -338,6 +370,8 @@ impl PlaybackSharedState {
             seek_target_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
             buffered_samples: Arc::new(AtomicU64::new(0)),
+            position_offset_samples,
+            segment_offsets_ms: std::sync::OnceLock::new(),
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
@@ -369,12 +403,15 @@ impl PlaybackSharedState {
 
     /// Audio-thread-safe: publish the current decoded-sample count for
     /// consumers outside the buffer mutex (the route-side seek ack and the
-    /// frontend buffered-bar scrubber). Cost: a single Relaxed atomic store,
-    /// no allocation - consistent with the other telemetry atomics flipped
-    /// inside the CPAL critical section.
+    /// frontend buffered-bar scrubber). Published as an ABSOLUTE-track
+    /// upper bound (offset + buffer length) so a route-side caller can
+    /// compare directly against an absolute target_samples. Cost: a load
+    /// plus a single Relaxed atomic store, no allocation - consistent with
+    /// the other telemetry atomics flipped inside the CPAL critical section.
     pub(crate) fn publish_buffered_samples(&self, samples_len: usize) {
+        let offset = self.position_offset_samples.load(Ordering::Relaxed);
         self.buffered_samples
-            .store(samples_len as u64, Ordering::Relaxed);
+            .store(offset.saturating_add(samples_len as u64), Ordering::Relaxed);
     }
 
     /// Audio-thread-safe signal: when the underlying buffer crosses
@@ -524,6 +561,7 @@ mod tests {
             None,
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         ))
     }

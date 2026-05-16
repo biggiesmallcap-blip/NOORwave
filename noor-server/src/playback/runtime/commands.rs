@@ -9,8 +9,17 @@ pub enum PlaybackRuntimeCommand {
     Pause,
     Resume,
     Stop,
-    /// Seek to a position (milliseconds). Applied to the current engine's buffer.
-    Seek(i64),
+    /// Segment-aware seek (option C). The runtime's handler is the single
+    /// decision point: in-buffer fast path, segment-restart transition, or
+    /// rejection. `allow_segment_seek=false` preserves legacy "reject past
+    /// buffer" semantics; `true` opts in to the forced-restart path for the
+    /// DASH-segment-seek feature. `respond_to` carries the outcome back to
+    /// the caller (route handler awaits it via `recv_timeout`).
+    SeekTo {
+        target_ms: i64,
+        allow_segment_seek: bool,
+        respond_to: std::sync::mpsc::Sender<SeekToOutcome>,
+    },
     /// Pre-decode the next track in background so it can start gaplessly.
     PrepareNext(PreparedPlaybackJob),
     /// Sent by the decoder thread when a track finishes decoding successfully.
@@ -60,6 +69,24 @@ pub enum PlaybackTrackStatus {
     None,
     Active,
     Prepared,
+}
+
+/// Outcome of a `PlaybackRuntimeCommand::SeekTo` dispatch. Routed back to the
+/// caller via the command's `respond_to: mpsc::Sender<SeekToOutcome>` so the
+/// HTTP layer can translate to 202 (dispatched), 409 (rejected), or 500
+/// (failed) without re-reading the buffer state from the route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekToOutcome {
+    /// Seek accepted - either fast-path in-buffer or finished segment-restart
+    /// transition. The audible playhead may take up to ~1s to converge as the
+    /// new engine primes samples; the frontend's 1 Hz refresher closes the gap.
+    Dispatched,
+    /// Target outside `[offset, buffered]` and the caller opted out of the
+    /// segment-restart path (`allow_segment_seek=false`). HTTP 409.
+    RejectedOutOfBuffer,
+    /// The runtime tried to transition (segment-restart) and failed - typically
+    /// because TIDAL re-resolve / decoder spin-up errored. HTTP 500.
+    Failed,
 }
 
 #[derive(Debug, Clone)]
