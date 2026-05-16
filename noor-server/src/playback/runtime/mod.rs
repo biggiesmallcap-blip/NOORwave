@@ -2025,6 +2025,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_recovery_composes_after_command_error_and_panic() {
+        // Composition-level integration test for Phase B/C resilience: prove
+        // that the runtime's recovery primitives (report_runtime_command_error,
+        // stop_all_engines, handle_panic_in_runtime_loop) compose so the
+        // runtime stays responsive across a command-error AND a panic in the
+        // same session. A future plan will extract dispatch_command from
+        // run_runtime_loop's match body to enable per-command coverage; this
+        // test catches a regression that would break the recovery contract
+        // these primitives together provide.
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+        let mut state = test_runtime_loop_state();
+        state.engine = Some(test_engine_with_shared(1, 1));
+        state.next_engine = Some(test_engine_with_shared(2, 1));
+
+        // 1. Simulate a Play command that returned Err: report the error and
+        //    tear down engines (same sequence as run_runtime_loop's Play arm).
+        report_runtime_command_error(
+            &event_tx,
+            "Play",
+            anyhow::anyhow!("transition failed"),
+        );
+        stop_all_engines(&mut state);
+        assert!(state.engine.is_none(), "engine slot cleared after error");
+        assert!(state.next_engine.is_none(), "next slot cleared after error");
+        match event_rx.try_recv().expect("error event") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Play failed"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+
+        // 2. Simulate a subsequent successful Play: engine re-populates.
+        state.engine = Some(test_engine_with_shared(10, 2));
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 10);
+
+        // 3. Simulate a panic in dispatch: handle_panic_in_runtime_loop should
+        //    clear all engines and signal the loop can continue.
+        let payload: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("synthetic dispatch panic"));
+        let outcome = handle_panic_in_runtime_loop(payload, &event_tx, &mut state);
+        assert!(
+            matches!(outcome, std::ops::ControlFlow::Continue(())),
+            "loop should continue after recoverable panic"
+        );
+        assert!(state.engine.is_none(), "engine slot cleared after panic");
+
+        // The panic handler emits Error + Stopped.
+        match event_rx.try_recv().expect("panic error event") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("playback runtime panicked"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+        match event_rx.try_recv().expect("stopped event") {
+            PlaybackRuntimeEvent::Stopped => {}
+            other => panic!("expected stopped event, got {other:?}"),
+        }
+
+        // 4. The loop is still operational: state accepts a new engine.
+        state.engine = Some(test_engine_with_shared(20, 3));
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 20);
+    }
+
     fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
         let (command_tx, _) = mpsc::channel();
         PlaybackEngine::test_with_shared(
