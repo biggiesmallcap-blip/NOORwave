@@ -90,9 +90,7 @@ fn build_output_stream(
             let err_event_tx = event_tx.clone();
             device.build_output_stream(
                 output_config,
-                move |data: &mut [f32], _| {
-                    write_output_f32(data, &shared, &command_tx, &event_tx)
-                },
+                move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
                 move |err| emit_cpal_stream_error(&err_event_tx, err),
                 None,
             )?
@@ -101,9 +99,7 @@ fn build_output_stream(
             let err_event_tx = event_tx.clone();
             device.build_output_stream(
                 output_config,
-                move |data: &mut [i16], _| {
-                    write_output_i16(data, &shared, &command_tx, &event_tx)
-                },
+                move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
                 move |err| emit_cpal_stream_error(&err_event_tx, err),
                 None,
             )?
@@ -112,9 +108,7 @@ fn build_output_stream(
             let err_event_tx = event_tx.clone();
             device.build_output_stream(
                 output_config,
-                move |data: &mut [u16], _| {
-                    write_output_u16(data, &shared, &command_tx, &event_tx)
-                },
+                move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
                 move |err| emit_cpal_stream_error(&err_event_tx, err),
                 None,
             )?
@@ -139,10 +133,7 @@ mod tests {
 
         emit_cpal_stream_error(&event_tx, cpal::StreamError::DeviceNotAvailable);
 
-        match event_rx
-            .try_recv()
-            .expect("error event should be emitted")
-        {
+        match event_rx.try_recv().expect("error event should be emitted") {
             PlaybackRuntimeEvent::Error { message } => {
                 assert!(message.contains("Playback output stream error"));
             }

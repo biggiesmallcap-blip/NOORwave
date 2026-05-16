@@ -1209,6 +1209,11 @@ fn handle_panic_in_runtime_loop(
         });
         std::ops::ControlFlow::Break(())
     } else {
+        // After cleanup tore down every engine slot, signal Stopped so the UI's
+        // playback-state machine snaps back to a clean idle (otherwise it would
+        // remain stuck on the last Started state and the user sees a track
+        // visually playing with no audio until the next user-initiated command).
+        let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
         std::ops::ControlFlow::Continue(())
     }
 }
@@ -1980,10 +1985,7 @@ mod tests {
 
         emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
 
-        match event_rx
-            .try_recv()
-            .expect("error event should be emitted")
-        {
+        match event_rx.try_recv().expect("error event should be emitted") {
             PlaybackRuntimeEvent::Error { message } => {
                 assert!(message.contains("Pre-buffered track 42 failed"));
                 assert!(message.contains("decode failed: malformed packet"));
@@ -2013,6 +2015,13 @@ mod tests {
                 assert!(message.contains("synthetic dispatch panic"));
             }
             other => panic!("expected error event, got {other:?}"),
+        }
+        match event_rx
+            .try_recv()
+            .expect("stopped event should follow the error event")
+        {
+            PlaybackRuntimeEvent::Stopped => {}
+            other => panic!("expected stopped event, got {other:?}"),
         }
     }
 
