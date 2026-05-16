@@ -15,7 +15,8 @@ mod engine;
 pub(crate) mod shared;
 
 pub use commands::{
-    PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerminalReason, PlaybackTrackStatus,
+    PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSeekResult, PlaybackTerminalReason,
+    PlaybackTrackStatus,
 };
 pub use device::{OutputDeviceSelection, enumerate_output_devices};
 use device::{device_display_name, resolve_device};
@@ -120,9 +121,16 @@ impl PlaybackRuntimeHandle {
         self.event_tx.subscribe()
     }
 
-    /// Seek to a position (milliseconds) within the current track.
-    pub fn seek(&self, position_ms: i64) -> Result<()> {
-        self.send(PlaybackRuntimeCommand::Seek(position_ms))
+    /// Seek to a position within the current track. The runtime rejects targets
+    /// that have not been decoded yet so routes can keep persisted state honest.
+    pub fn seek(&self, position_ms: i64) -> Result<PlaybackSeekResult> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.send(PlaybackRuntimeCommand::Seek {
+            position_ms,
+            respond_to: tx,
+        })?;
+        rx.recv_timeout(std::time::Duration::from_millis(100))
+            .map_err(|_| anyhow!("playback runtime did not acknowledge seek"))
     }
 
     /// Pre-decode the next track in the background so the transition is gapless.
@@ -331,27 +339,48 @@ fn run_runtime_loop(
                     false,
                 )?;
             }
-            PlaybackRuntimeCommand::Seek(position_ms) => {
-                if let Some(engine) = state.engine.as_ref() {
-                    let target_samples = (position_ms.max(0) as u64
-                        * state.device_sample_rate as u64
-                        * state.device_channels as u64)
-                        / 1000;
-                    // Tell the CPAL callback to seek on the next write.
+            PlaybackRuntimeCommand::Seek {
+                position_ms,
+                respond_to,
+            } => {
+                let result = if let Some(engine) = state.engine.as_ref() {
+                    match engine.shared.buffer.lock() {
+                        Ok(guard) => validate_seek_target(
+                            position_ms,
+                            state.device_sample_rate,
+                            state.device_channels,
+                            guard.samples.len() as u64,
+                            guard.finished,
+                        ),
+                        Err(_) => PlaybackSeekResult::Rejected {
+                            requested_ms: position_ms,
+                            current_ms: engine.shared.position_samples.load(Ordering::Relaxed)
+                                as i64
+                                * 1000
+                                / (state.device_sample_rate as i64
+                                    * state.device_channels.max(1) as i64),
+                            reason: "Playback buffer is unavailable.".to_string(),
+                        },
+                    }
+                } else {
+                    PlaybackSeekResult::Rejected {
+                        requested_ms: position_ms,
+                        current_ms: 0,
+                        reason: "No active playback stream.".to_string(),
+                    }
+                };
+
+                if let Some(engine) = state.engine.as_ref()
+                    && let PlaybackSeekResult::Accepted { target_samples, .. } = &result
+                {
                     engine
                         .shared
                         .seek_target_samples
-                        .store(target_samples, Ordering::Relaxed);
-                    // Mirror into the engine's counter immediately so get_position_ms()
-                    // is correct before the CPAL callback runs (up to one buffer period later).
-                    // position_source always points to this engine's counter, so no
-                    // separate handle-counter write is needed.
+                        .store(*target_samples, Ordering::Relaxed);
                     engine
                         .shared
                         .position_samples
-                        .store(target_samples, Ordering::Relaxed);
-                    // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
-                    // if the user seeks backward past those thresholds.
+                        .store(*target_samples, Ordering::Relaxed);
                     engine
                         .shared
                         .near_end_signaled
@@ -361,6 +390,8 @@ fn run_runtime_loop(
                         .crossfade_start_signaled
                         .store(false, Ordering::Relaxed);
                 }
+
+                let _ = respond_to.send(result);
             }
             PlaybackRuntimeCommand::PrepareNext(job) => {
                 // Only pre-decode if we don't already have a pending engine for this track.
@@ -1353,6 +1384,40 @@ fn should_promote_prepared_at_boundary(
         && next.is_some_and(|(_, next_generation)| next_generation == generation)
 }
 
+fn validate_seek_target(
+    requested_ms: i64,
+    sample_rate: u32,
+    channels: u16,
+    decoded_samples: u64,
+    finished: bool,
+) -> PlaybackSeekResult {
+    let applied_ms = requested_ms.max(0);
+    let target_samples =
+        (applied_ms as u64 * sample_rate as u64 * channels.max(1) as u64) / 1000;
+
+    if target_samples <= decoded_samples {
+        return PlaybackSeekResult::Accepted {
+            requested_ms,
+            applied_ms,
+            target_samples,
+        };
+    }
+
+    let current_ms =
+        (decoded_samples * 1000) / (sample_rate as u64 * channels.max(1) as u64);
+    let reason = if finished {
+        "Seek target is beyond the decoded track duration."
+    } else {
+        "Seek target has not been decoded yet."
+    };
+
+    PlaybackSeekResult::Rejected {
+        requested_ms,
+        current_ms: current_ms as i64,
+        reason: reason.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::shared::{PlaybackBuffer, write_output_f32};
@@ -1812,5 +1877,47 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
             )),
         )
+    }
+
+    #[test]
+    fn seek_target_is_accepted_when_decoded_samples_cover_target() {
+        let result = validate_seek_target(1_000, 48_000, 2, 96_000, false);
+
+        assert_eq!(
+            result,
+            PlaybackSeekResult::Accepted {
+                requested_ms: 1_000,
+                applied_ms: 1_000,
+                target_samples: 96_000,
+            }
+        );
+    }
+
+    #[test]
+    fn seek_target_is_rejected_when_samples_are_not_decoded_yet() {
+        let result = validate_seek_target(2_000, 48_000, 2, 95_999, false);
+
+        assert_eq!(
+            result,
+            PlaybackSeekResult::Rejected {
+                requested_ms: 2_000,
+                current_ms: 999,
+                reason: "Seek target has not been decoded yet.".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn seek_target_is_clamped_to_track_start_when_requested_negative() {
+        let result = validate_seek_target(-500, 48_000, 2, 0, false);
+
+        assert_eq!(
+            result,
+            PlaybackSeekResult::Accepted {
+                requested_ms: -500,
+                applied_ms: 0,
+                target_samples: 0,
+            }
+        );
     }
 }

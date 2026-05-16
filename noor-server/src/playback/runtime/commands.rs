@@ -9,8 +9,12 @@ pub enum PlaybackRuntimeCommand {
     Pause,
     Resume,
     Stop,
-    /// Seek to a position (milliseconds). Applied to the current engine's buffer.
-    Seek(i64),
+    /// Seek to a position (milliseconds). Applied to the current engine's buffer
+    /// only when the target has already been decoded.
+    Seek {
+        position_ms: i64,
+        respond_to: std::sync::mpsc::Sender<PlaybackSeekResult>,
+    },
     /// Pre-decode the next track in background so it can start gaplessly.
     PrepareNext(PreparedPlaybackJob),
     /// Sent by the decoder thread when a track finishes decoding successfully.
@@ -60,6 +64,20 @@ pub enum PlaybackTrackStatus {
     None,
     Active,
     Prepared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackSeekResult {
+    Accepted {
+        requested_ms: i64,
+        applied_ms: i64,
+        target_samples: u64,
+    },
+    Rejected {
+        requested_ms: i64,
+        current_ms: i64,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
