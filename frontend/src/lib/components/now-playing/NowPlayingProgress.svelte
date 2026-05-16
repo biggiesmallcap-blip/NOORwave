@@ -34,21 +34,21 @@
 		}
 	});
 
-	// When the backend hasn't published buffered_ms yet (cold start, older
-	// payload, etc.) treat the whole track as seekable - same UX as before
-	// this feature shipped. A non-zero buffered_ms means the runtime is
-	// reporting real buffer state and we should clamp.
-	let effectiveBufferedMs = $derived(bufferedMs > 0 ? bufferedMs : duration);
-
-	// Range max: clamp to buffered region but never collapse below the
-	// current play position (guards against a transient desync where the
-	// buffered_ms WS message lags the position one). When duration is
-	// unknown (<= 0) leave max at 0 and disable the input - clamping then
-	// would lock the scrubber at 0 even if the engine was actually
-	// streaming.
+	// Range max: clamp to the decoded buffer. The inner Math.max guards
+	// against transient desync (position or scrubPosition momentarily
+	// ahead of bufferedMs after a track change). When duration is unknown
+	// (<= 0) leave max at 0 and disable the input.
+	//
+	// Note: we do NOT fall back to `duration` when bufferedMs is 0. That
+	// fallback opens a hole during the cold-start window (track started
+	// but no decoder callback has published samples yet) where the user
+	// could scrub past the decoded region and trip the runtime's seek
+	// rejection. With strict clamping the scrubber stays at `position`
+	// (= 0 at track start) until the first publish lands. Local files
+	// publish within ~100ms; TIDAL within a second or two.
 	let scrubMax = $derived(
 		duration > 0
-			? Math.min(duration, Math.max(scrubPosition, position, effectiveBufferedMs))
+			? Math.min(duration, Math.max(scrubPosition, position, bufferedMs))
 			: 0
 	);
 
@@ -58,7 +58,7 @@
 
 	let bufferedWidth = $derived(
 		duration > 0
-			? `${Math.min((effectiveBufferedMs / duration) * 100, 100)}%`
+			? `${Math.min((bufferedMs / duration) * 100, 100)}%`
 			: '0%'
 	);
 
