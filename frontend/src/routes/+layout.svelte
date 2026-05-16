@@ -11,6 +11,7 @@
 		playbackRuntimeInfo,
 		isPlaying,
 		position,
+		buffered,
 		volume,
 		automixEnabled,
 		automixDiscoverNew,
@@ -1219,6 +1220,7 @@
 			playerState={playerState}
 			isScrubbing={isScrubbing}
 			position={$position}
+			bufferedMs={$buffered}
 			isPlaying={$isPlaying}
 			shuffleMode={$shuffleMode}
 			repeatMode={$repeatMode}

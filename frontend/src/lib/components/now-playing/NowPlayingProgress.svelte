@@ -4,12 +4,22 @@
 	let {
 		position,
 		duration,
+		bufferedMs = 0,
 		onSeek,
 		onScrubStart,
 		onScrubEnd,
 	}: {
 		position: number;
 		duration: number;
+		/**
+		 * How many ms of the current track are decoded into the playback
+		 * buffer. Clamps the scrubber max so the user can't drag past the
+		 * loaded portion (route-side 409 is the backstop). Defaults to 0 -
+		 * read as "no buffer info / treat as fully seekable" via the
+		 * effectiveBufferedMs fallback below so non-streaming tracks behave
+		 * as today.
+		 */
+		bufferedMs?: number;
 		onSeek: (positionMs: number) => void;
 		onScrubStart?: () => void;
 		onScrubEnd?: () => void;
@@ -24,8 +34,32 @@
 		}
 	});
 
+	// When the backend hasn't published buffered_ms yet (cold start, older
+	// payload, etc.) treat the whole track as seekable - same UX as before
+	// this feature shipped. A non-zero buffered_ms means the runtime is
+	// reporting real buffer state and we should clamp.
+	let effectiveBufferedMs = $derived(bufferedMs > 0 ? bufferedMs : duration);
+
+	// Range max: clamp to buffered region but never collapse below the
+	// current play position (guards against a transient desync where the
+	// buffered_ms WS message lags the position one). When duration is
+	// unknown (<= 0) leave max at 0 and disable the input - clamping then
+	// would lock the scrubber at 0 even if the engine was actually
+	// streaming.
+	let scrubMax = $derived(
+		duration > 0
+			? Math.min(duration, Math.max(scrubPosition, position, effectiveBufferedMs))
+			: 0
+	);
+
 	let progressWidth = $derived(
 		duration > 0 ? `${Math.min((scrubPosition / duration) * 100, 100)}%` : '0%'
+	);
+
+	let bufferedWidth = $derived(
+		duration > 0
+			? `${Math.min((effectiveBufferedMs / duration) * 100, 100)}%`
+			: '0%'
 	);
 
 	function beginScrub() {
@@ -42,17 +76,18 @@
 
 <div class="np-progress">
 	<div class="np-progress-track" style="--pct: {progressWidth}">
+		<div class="np-progress-buffered" style={`width: ${bufferedWidth}`}></div>
 		<div class="np-progress-fill" style={`width: ${progressWidth}`}></div>
 		<input
 			class="np-progress-input"
 			type="range"
 			min="0"
-			max={duration}
+			max={scrubMax}
 			step="1000"
 			bind:value={scrubPosition}
 			oninput={beginScrub}
 			onchange={commitScrub}
-			disabled={!duration}
+			disabled={duration <= 0}
 			aria-label="Seek playback"
 		/>
 	</div>
@@ -78,7 +113,21 @@
 		overflow: visible;
 	}
 
+	.np-progress-buffered {
+		position: absolute;
+		left: 0;
+		top: 0;
+		height: 100%;
+		background: color-mix(in srgb, var(--instrument-border) 65%, transparent);
+		border-radius: inherit;
+		pointer-events: none;
+		transition: width 200ms linear;
+	}
+
 	.np-progress-fill {
+		position: absolute;
+		left: 0;
+		top: 0;
 		height: 100%;
 		background: var(--accent);
 		border-radius: inherit;
