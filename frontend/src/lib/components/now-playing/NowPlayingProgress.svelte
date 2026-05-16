@@ -34,23 +34,13 @@
 		}
 	});
 
-	// Range max: clamp to the decoded buffer. The inner Math.max guards
-	// against transient desync (position or scrubPosition momentarily
-	// ahead of bufferedMs after a track change). When duration is unknown
-	// (<= 0) leave max at 0 and disable the input.
-	//
-	// Note: we do NOT fall back to `duration` when bufferedMs is 0. That
-	// fallback opens a hole during the cold-start window (track started
-	// but no decoder callback has published samples yet) where the user
-	// could scrub past the decoded region and trip the runtime's seek
-	// rejection. With strict clamping the scrubber stays at `position`
-	// (= 0 at track start) until the first publish lands. Local files
-	// publish within ~100ms; TIDAL within a second or two.
-	let scrubMax = $derived(
-		duration > 0
-			? Math.min(duration, Math.max(scrubPosition, position, bufferedMs))
-			: 0
-	);
+	// Option C: the user can drag the scrubber to anywhere in [0, duration].
+	// Past-buffer targets get a true DASH segment-seek restart from the
+	// backend; pre-resolve targets get a 409 with the existing snap-back
+	// recovery. The buffered fill behind the playhead remains as a visual
+	// cue so users can see what's currently decoded. When duration is
+	// unknown (<= 0) leave max at 0 and disable the input.
+	let scrubMax = $derived(duration > 0 ? duration : 0);
 
 	let progressWidth = $derived(
 		duration > 0 ? `${Math.min((scrubPosition / duration) * 100, 100)}%` : '0%'

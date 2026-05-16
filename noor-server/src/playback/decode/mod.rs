@@ -54,14 +54,24 @@ pub(crate) fn decode_and_buffer_job(
                 resolve_stream(&config.http_client, &config.access_token, &request).await
             })?;
             debug!(
-                "TIDAL runtime stream resolved: track_id={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}",
+                "TIDAL runtime stream resolved: track_id={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}, start_from_segment={}, start_from_offset_ms={}",
                 shared.track_id,
                 stream_info.audio_quality,
                 stream_info.codec,
                 stream_info.sample_rate,
                 stream_info.bit_depth,
-                stream_info.segment_urls.len()
+                stream_info.segment_urls.len(),
+                job.start_from_segment_index,
+                job.start_from_offset_ms,
             );
+
+            // Publish segment offsets to shared state so the runtime's SeekTo
+            // handler can resolve a target_ms back to the segment that contains
+            // it. Cheap one-shot OnceLock::set; ignore the Err if a prior call
+            // already populated it (shouldn't happen, but harmless).
+            let _ = shared
+                .segment_offsets_ms
+                .set(stream_info.segment_offsets_ms.clone());
 
             if shared.stopped.load(Ordering::SeqCst) {
                 return Ok(());
@@ -73,10 +83,26 @@ pub(crate) fn decode_and_buffer_job(
             // A separate one-shot channel carries the Content-Length from the response headers
             // so StreamPipe can report byte_len() correctly, allowing Symphonia's MSS to
             // translate SeekFrom::End into an absolute position rather than failing.
+            //
+            // Segment-aware seek (option C): for a segment-restart job, skip
+            // `start_from_segment_index` URLs before counting prebuffer segments
+            // or kicking off the background download. The init segment URL
+            // (`stream_info.url`) is ALWAYS fetched - it carries the fMP4 init
+            // box that the decoder needs regardless of which media segment is
+            // first.
             let is_dash_stream = !stream_info.segment_urls.is_empty();
+            let start_index = job
+                .start_from_segment_index
+                .min(stream_info.segment_urls.len());
+            let sliced_segment_urls: Vec<String> = stream_info
+                .segment_urls
+                .iter()
+                .skip(start_index)
+                .cloned()
+                .collect();
             let mut dash_initial = Vec::new();
-            let mut remaining_segment_urls = stream_info.segment_urls.clone();
-            let initial_media_segments = dash_initial_media_count(stream_info.segment_urls.len());
+            let mut remaining_segment_urls = sliced_segment_urls.clone();
+            let initial_media_segments = dash_initial_media_count(sliced_segment_urls.len());
             if initial_media_segments > 0 {
                 let prebuffer_stop = shared.stop_flag();
                 dash_initial = rt
@@ -89,8 +115,7 @@ pub(crate) fn decode_and_buffer_job(
                         if prebuffer_stop.load(Ordering::Relaxed) {
                             return anyhow::Ok(bytes);
                         }
-                        for (idx, segment_url) in stream_info
-                            .segment_urls
+                        for (idx, segment_url) in sliced_segment_urls
                             .iter()
                             .take(initial_media_segments)
                             .enumerate()
@@ -108,8 +133,9 @@ pub(crate) fn decode_and_buffer_job(
                     .context("DASH stream prebuffer failed")?;
                 remaining_segment_urls.drain(0..initial_media_segments);
                 debug!(
-                    "TIDAL DASH prebuffer ready: track_id={}, initial_segments={}, remaining_segments={}",
+                    "TIDAL DASH prebuffer ready: track_id={}, start_index={}, initial_segments={}, remaining_segments={}",
                     shared.track_id,
+                    start_index,
                     initial_media_segments,
                     remaining_segment_urls.len()
                 );

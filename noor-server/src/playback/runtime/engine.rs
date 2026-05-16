@@ -56,6 +56,11 @@ pub(super) struct PlaybackEngine {
     stream: Option<OutputStream>,
     pub(super) decoder_thread: Option<JoinHandle<()>>,
     pub(super) shared: Arc<PlaybackSharedState>,
+    /// Snapshot of the `PreparedPlaybackJob` that started this engine. Stored
+    /// so the runtime's `SeekTo` handler can compute a segment-restart job
+    /// (incrementing `start_from_segment_index` / `start_from_offset_ms`)
+    /// without having to plumb the original job through the engine API.
+    pub(super) job: PreparedPlaybackJob,
 }
 
 fn join_decoder_thread_in_background(track_id: i64, handle: JoinHandle<()>) {
@@ -79,6 +84,7 @@ impl PlaybackEngine {
             stream: None,
             decoder_thread: None,
             shared,
+            job: PreparedPlaybackJob::test_fixture(track_id, generation),
         }
     }
 
@@ -216,17 +222,25 @@ impl PlaybackEngine {
                 device_channels,
             )
         });
+        let offset_samples = (job
+            .start_from_offset_ms
+            .saturating_mul(output_sample_rate as u64)
+            .saturating_mul(device_channels.max(1) as u64))
+            / 1000;
+        position_samples.store(offset_samples, Ordering::Relaxed);
+        let position_offset_samples = Arc::new(AtomicU64::new(offset_samples));
         let shared = Arc::new(PlaybackSharedState::new(
             track_id,
             generation,
             source_kind,
-            job.gapless,
+            job.gapless.clone(),
             output_sample_rate,
             device_channels,
             estimated_total_samples,
             command_tx.clone(),
             volume_ctl,
             position_samples,
+            position_offset_samples,
         ));
 
         let decoder_shared = Arc::clone(&shared);
@@ -256,6 +270,7 @@ impl PlaybackEngine {
             stream: None,
             decoder_thread: Some(decoder_thread),
             shared,
+            job,
         })
     }
 
@@ -349,6 +364,7 @@ mod tests {
             command_tx,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         ))
     }
 
@@ -371,6 +387,7 @@ mod tests {
             stream: None,
             decoder_thread: Some(decoder_thread),
             shared: Arc::clone(&shared),
+            job: PreparedPlaybackJob::test_fixture(1, 1),
         };
 
         // Watchdog: if stop() blocks waiting on the decoder thread, release it

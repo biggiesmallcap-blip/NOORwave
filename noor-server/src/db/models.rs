@@ -111,6 +111,15 @@ pub struct PlaybackState {
     /// per-site change.
     #[serde(default)]
     pub buffered_ms: i64,
+    /// Track-time offset (ms) where the audibly-current engine's decoded
+    /// audio begins. 0 for a fresh-from-start engine; non-zero only after a
+    /// true DASH segment seek (option C). The route-side SeekTo handler uses
+    /// this as the LOWER bound of the in-buffer fast path: a target inside
+    /// `[buffered_start_ms, buffered_ms]` lands in the existing buffer; a
+    /// target outside takes the segment-seek restart path. `#[serde(default)]`
+    /// for backwards-compat with pre-option-C consumers.
+    #[serde(default)]
+    pub buffered_start_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

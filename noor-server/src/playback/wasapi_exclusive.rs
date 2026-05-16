@@ -1096,6 +1096,7 @@ mod tests {
             command_tx,
             Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits())),
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ))
     }
 
