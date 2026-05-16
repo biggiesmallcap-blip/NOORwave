@@ -7,14 +7,18 @@ const apiMock = vi.hoisted(() => ({
 	importTidalTrackForRadio: vi.fn(),
 	playTidalTrack: vi.fn().mockResolvedValue({}),
 	setTrackFavorite: vi.fn().mockResolvedValue({}),
+	setPlaybackPosition: vi.fn(),
+	getPlaybackState: vi.fn(),
 }));
 
 vi.mock('$lib/api/client', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('../src/lib/api/client')>();
+	// Note: we deliberately let `...actual` expose the real ApiError class so
+	// `instanceof ApiError` in the SUT (e.g. setPlayerPosition's 409 catch)
+	// matches an ApiError we construct from the test.
 	return {
 		...actual,
 		api: apiMock,
-		ApiError: class ApiError extends Error {},
 	};
 });
 
@@ -37,7 +41,17 @@ vi.mock('$lib/stores/library', () => ({
 	updateLibraryTrackFavorite: vi.fn(),
 }));
 
-import { currentTrack, hydratePlayback, playTidalTrackNow, toggleTrackFavorite } from '../src/lib/stores/player';
+import { ApiError } from '../src/lib/api/client';
+import {
+	buffered,
+	currentTrack,
+	hydratePlayback,
+	playerError,
+	playTidalTrackNow,
+	position,
+	setPlayerPosition,
+	toggleTrackFavorite,
+} from '../src/lib/stores/player';
 
 function ephemeralTrack(): Track {
 	return {
@@ -141,5 +155,77 @@ describe('ephemeral TIDAL favorite import', () => {
 		});
 
 		expect(get(currentTrack)?.is_favorite).toBe(true);
+	});
+});
+
+describe('setPlayerPosition 409 ack handling', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		// Reset any state the SUT touches so each test starts fresh.
+		currentTrack.set(null);
+		position.set(0);
+		buffered.set(0);
+		playerError.set(null);
+	});
+
+	function buildState(overrides: Record<string, unknown> = {}) {
+		// The route-side 409 ack returns a live snapshot - this is what the
+		// frontend MUST apply (so the scrubber snaps to the real position
+		// instead of holding the user's drag target).
+		return {
+			current_track: null,
+			current_queue_item_id: null,
+			position_ms: 12_345,
+			is_playing: true,
+			volume: 0.7,
+			shuffle_mode: 'off',
+			repeat_mode: 'off',
+			automix_enabled: false,
+			crossfade_ms: 0,
+			automix_discover_new: false,
+			automix_use_learning: false,
+			automix_allow_external: false,
+			buffered_ms: 30_000,
+			...overrides,
+		};
+	}
+
+	test('applies the 409 body and skips the error toast', async () => {
+		const liveState = buildState();
+		apiMock.setPlaybackPosition.mockRejectedValueOnce(
+			new ApiError(409, 'seek past buffered region', { state: liveState })
+		);
+
+		await setPlayerPosition(120_000);
+
+		// State from the 409 body must land in the stores.
+		expect(get(position)).toBe(12_345);
+		expect(get(buffered)).toBe(30_000);
+		// No error toast: the rejection is expected and the corrective
+		// snapshot is authoritative.
+		expect(get(playerError)).toBeNull();
+	});
+
+	test('routes other non-2xx into the error path', async () => {
+		apiMock.setPlaybackPosition.mockRejectedValueOnce(
+			new ApiError(500, 'server boom', null)
+		);
+
+		await setPlayerPosition(120_000);
+
+		expect(get(playerError)).not.toBeNull();
+		expect(get(playerError)?.message).toContain('seek');
+	});
+
+	test('falls through to error path when 409 body is missing state', async () => {
+		// Defensive: backend could return 409 with an unexpected shape; we
+		// MUST NOT silently swallow it - the user should see the error.
+		apiMock.setPlaybackPosition.mockRejectedValueOnce(
+			new ApiError(409, 'rejected', { reason: 'unparseable' })
+		);
+
+		await setPlayerPosition(120_000);
+
+		expect(get(playerError)).not.toBeNull();
 	});
 });
