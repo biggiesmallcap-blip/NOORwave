@@ -73,6 +73,14 @@ pub struct PlaybackRuntimeHandle {
     /// surfaced to the user as `PlaybackRuntimeEvent::Error`. So these
     /// unwraps are bounded-failure, not silent corruption.
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// Redirectable buffered-samples reader. Parallel to `position_source`:
+    /// always points at the audibly-current engine's `buffered_samples`
+    /// counter, swapped at the same sites position_source is swapped (cold
+    /// start in `transition_to_job` and at the two `promote_*` sites). The
+    /// route-side seek ack reads through this to decide 409 vs dispatch, and
+    /// the frontend reads `buffered_ms` via this for the buffered-bar
+    /// scrubber. Same unwrap-audit reasoning as `position_source`.
+    buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
 }
 
 impl PlaybackRuntimeHandle {
@@ -170,6 +178,26 @@ impl PlaybackRuntimeHandle {
         (samples * 1000 / (device_sample_rate as u64 * device_channels as u64)) as i64
     }
 
+    /// Read how many ms of the current track are decoded into the playback
+    /// buffer. Returns 0 when no engine is active. Used by the route-side
+    /// seek ack (target > buffered -> HTTP 409) and surfaced to the frontend
+    /// via `PlaybackState.buffered_ms` for the buffered-bar scrubber.
+    /// Same unwrap-audit reasoning as `get_position_ms`.
+    pub fn get_buffered_ms(&self, device_sample_rate: u32, device_channels: u16) -> i64 {
+        if device_sample_rate == 0 || device_channels == 0 {
+            return 0;
+        }
+        let samples = self.buffered_source.lock().unwrap().load(Ordering::Relaxed);
+        (samples * 1000 / (device_sample_rate as u64 * device_channels as u64)) as i64
+    }
+
+    /// Raw buffered-sample count from the audibly-current engine. Avoids the
+    /// ms conversion when the caller already has a target-in-samples (e.g.
+    /// the route-side seek handler comparing target_samples to buffered).
+    pub fn buffered_samples(&self) -> u64 {
+        self.buffered_source.lock().unwrap().load(Ordering::Relaxed)
+    }
+
     fn send(&self, command: PlaybackRuntimeCommand) -> Result<()> {
         self.command_tx
             .send(command)
@@ -194,10 +222,18 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     // redirect the handle to the promoted engine's private counter instead.
     let initial_position = Arc::new(AtomicU64::new(0));
     let position_source = Arc::new(Mutex::new(Arc::clone(&initial_position)));
+    // Buffered-samples mirror. Each PlaybackSharedState owns its own
+    // `Arc<AtomicU64>` (initialized to 0 at construction); the handle's
+    // `buffered_source` points at whichever one is audibly current. Before
+    // any engine exists we point at a sentinel zero atomic so a
+    // `buffered_ms()` call returns 0 cleanly.
+    let buffered_source: Arc<Mutex<Arc<AtomicU64>>> =
+        Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
     let worker_initial_position = Arc::clone(&initial_position);
     let worker_position_source = Arc::clone(&position_source);
+    let worker_buffered_source = Arc::clone(&buffered_source);
 
     thread::Builder::new()
         .name("noor-playback-runtime".into())
@@ -210,6 +246,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_volume_ctl,
                 worker_initial_position,
                 worker_position_source,
+                worker_buffered_source,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
                     message: err.to_string(),
@@ -224,6 +261,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         event_tx,
         volume_ctl,
         position_source,
+        buffered_source,
     })
 }
 
@@ -271,6 +309,7 @@ fn run_runtime_loop(
     volume_ctl: Arc<AtomicU32>,
     position_samples: Arc<AtomicU64>,
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
+    buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let mut device = host
@@ -327,6 +366,7 @@ fn run_runtime_loop(
                         &volume_ctl,
                         &position_samples,
                         &position_source,
+                        &buffered_source,
                         true,
                     ) {
                         stop_all_engines(&mut state);
@@ -348,6 +388,7 @@ fn run_runtime_loop(
                         &volume_ctl,
                         &position_samples,
                         &position_source,
+                        &buffered_source,
                         false,
                     ) {
                         stop_all_engines(&mut state);
@@ -455,7 +496,12 @@ fn run_runtime_loop(
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
                         if next_ready {
-                            promote_next_to_active(&mut state, &event_tx, &position_source);
+                            promote_next_to_active(
+                                &mut state,
+                                &event_tx,
+                                &position_source,
+                                &buffered_source,
+                            );
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
                     }
@@ -479,7 +525,12 @@ fn run_runtime_loop(
                             .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
                             .unwrap_or(false);
                         if crossfade_started {
-                            promote_next_to_active(&mut state, &event_tx, &position_source);
+                            promote_next_to_active(
+                                &mut state,
+                                &event_tx,
+                                &position_source,
+                                &buffered_source,
+                            );
                         }
                     }
                 }
@@ -663,6 +714,7 @@ fn run_runtime_loop(
                                     &mut state,
                                     &event_tx,
                                     &position_source,
+                                    &buffered_source,
                                 );
                             } else {
                                 stop_current_engine(&mut state);
@@ -960,6 +1012,7 @@ fn transition_to_job(
     volume_ctl: &Arc<AtomicU32>,
     position_samples: &Arc<AtomicU64>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     force_restart: bool,
 ) -> Result<()> {
     // No-op when state.engine is already playing the requested track. This
@@ -1049,8 +1102,9 @@ fn transition_to_job(
                 Arc::clone(volume_ctl),
                 Arc::clone(position_samples),
             )?;
-            state.engine = Some(eng);
             *position_source.lock().unwrap() = Arc::clone(position_samples);
+            *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
+            state.engine = Some(eng);
 
             #[cfg(target_os = "windows")]
             {
@@ -1114,6 +1168,7 @@ fn transition_to_job(
             output_config.sample_rate = actual_start_rate;
             state.device_sample_rate = actual_start_rate;
             *position_source.lock().unwrap() = Arc::clone(position_samples);
+            *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
             state.engine = Some(eng);
         }
     }
@@ -1335,6 +1390,7 @@ fn promote_next_to_active(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
     let Some(next) = state.next_engine.take() else {
         return;
@@ -1342,18 +1398,19 @@ fn promote_next_to_active(
     next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
     next.shared.paused.store(false, Ordering::SeqCst);
 
-    // Redirect the handle's position reader to the incoming engine's counter
-    // BEFORE sliding it into state.engine so get_position_ms() immediately
-    // reflects the new track starting from 0 instead of the fading-out track's
-    // frozen end position.
+    // Redirect the handle's position + buffered readers to the incoming
+    // engine's counters BEFORE sliding it into state.engine so get_position_ms
+    // / get_buffered_ms() immediately reflect the new track starting from 0
+    // instead of the fading-out track's frozen end values.
     //
-    // If position_source.lock() panics (the only failure mode is a prior
-    // poisoning) the moved-out `next` is dropped without stop() being called
-    // and its decoder thread keeps fetching until natural EOF or the CDN
-    // timeout (~30s bounded). Task 7's catch_unwind around the dispatch loop
-    // catches the panic and emits Error+Stopped. The "preserve frozen-position
-    // UX" win was judged to outweigh the rare-poisoning bandwidth blip.
+    // If lock() panics (the only failure mode is a prior poisoning) the
+    // moved-out `next` is dropped without stop() being called and its decoder
+    // thread keeps fetching until natural EOF or the CDN timeout (~30s
+    // bounded). Task 7's catch_unwind around the dispatch loop catches the
+    // panic and emits Error+Stopped. The "preserve frozen-position UX" win
+    // was judged to outweigh the rare-poisoning bandwidth blip.
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
+    *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
 
     let outgoing = state.engine.take();
     state.engine = Some(next);
@@ -1384,6 +1441,7 @@ fn promote_prepared_at_boundary(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
     let Some(next) = state.next_engine.take() else {
         return;
@@ -1393,6 +1451,7 @@ fn promote_prepared_at_boundary(
         .store(u64::MAX, Ordering::Relaxed);
     next.shared.paused.store(false, Ordering::SeqCst);
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
+    *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
 
     let outgoing = state.engine.take();
     state.engine = Some(next);
@@ -1955,6 +2014,72 @@ mod tests {
         assert_eq!(sources[0].role, ExclusiveRenderRole::Active);
         assert_eq!(sources[1].role, ExclusiveRenderRole::Prepared);
         assert_eq!(sources[2].role, ExclusiveRenderRole::Fading);
+    }
+
+    #[test]
+    fn buffered_source_redirect_makes_handle_read_from_new_engine() {
+        // Regression for the codex P1 finding: a `buffered_ms()` accessor
+        // tied to the initial engine's atomic would silently read stale data
+        // after a Switch or crossfade promotion. The handle must follow the
+        // same redirect pattern as `position_source` - this test pins that.
+
+        let (command_tx, _) = std::sync::mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+
+        let engine_a_buffered = Arc::new(AtomicU64::new(48_000)); // 1000 ms @ 48k mono
+        let engine_b_buffered = Arc::new(AtomicU64::new(96_000)); // 1000 ms @ 48k stereo
+
+        let buffered_source: Arc<Mutex<Arc<AtomicU64>>> =
+            Arc::new(Mutex::new(Arc::clone(&engine_a_buffered)));
+
+        let handle = PlaybackRuntimeHandle {
+            command_tx,
+            event_tx,
+            volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            buffered_source: Arc::clone(&buffered_source),
+        };
+
+        assert_eq!(
+            handle.buffered_samples(),
+            48_000,
+            "fresh handle must read from engine A's counter"
+        );
+        assert_eq!(handle.get_buffered_ms(48_000, 1), 1000);
+
+        // Simulate transition_to_job / promote_*: redirect the source to
+        // engine B's counter, exactly the way the runtime loop does it.
+        *buffered_source.lock().unwrap() = Arc::clone(&engine_b_buffered);
+
+        assert_eq!(
+            handle.buffered_samples(),
+            96_000,
+            "after redirect the handle MUST read engine B, not stale A"
+        );
+        assert_eq!(handle.get_buffered_ms(48_000, 2), 1000);
+
+        // After redirect, mutating engine A's counter must NOT leak through.
+        engine_a_buffered.store(999_999, Ordering::Relaxed);
+        assert_eq!(
+            handle.buffered_samples(),
+            96_000,
+            "stale engine writes must not affect the redirected handle"
+        );
+    }
+
+    #[test]
+    fn get_buffered_ms_returns_zero_for_invalid_device_config() {
+        let (command_tx, _) = std::sync::mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let handle = PlaybackRuntimeHandle {
+            command_tx,
+            event_tx,
+            volume_ctl: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            position_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
+            buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
+        };
+        assert_eq!(handle.get_buffered_ms(0, 2), 0);
+        assert_eq!(handle.get_buffered_ms(48_000, 0), 0);
     }
 
     #[test]

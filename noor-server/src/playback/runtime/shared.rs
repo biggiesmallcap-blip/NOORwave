@@ -284,9 +284,12 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) total_samples: AtomicU64,
     /// Mirror of `buffer.samples.len()` published from the audio callback so
     /// HTTP / route-side consumers can read "how much of this track is
-    /// decoded" without taking the buffer mutex. Used by the route-side seek
-    /// ack path and the buffered-bar scrubber in the frontend.
-    pub(crate) buffered_samples: AtomicU64,
+    /// decoded" without taking the buffer mutex. Wrapped in `Arc` so the
+    /// `PlaybackRuntimeHandle`'s redirectable `buffered_source` can point at
+    /// the active engine's counter (parallel to `position_samples` /
+    /// `position_source`). Used by the route-side seek ack path and the
+    /// buffered-bar scrubber in the frontend.
+    pub(crate) buffered_samples: Arc<AtomicU64>,
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
@@ -334,7 +337,7 @@ impl PlaybackSharedState {
             position_samples,
             seek_target_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
-            buffered_samples: AtomicU64::new(0),
+            buffered_samples: Arc::new(AtomicU64::new(0)),
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
