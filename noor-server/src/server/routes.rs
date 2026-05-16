@@ -5941,19 +5941,31 @@ async fn set_track_favorite(
 
 // -- MusicBrainz enrichment -------------------------------------------------
 
-async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let (live_position_ms, ephemeral_playing, audio_active) = {
+/// Build a `PlaybackSnapshot` whose `state.position_ms`, `state.buffered_ms`,
+/// and `state.is_playing` reflect the live audio runtime (not just the DB
+/// snapshot). Used by `GET /api/playback/state` and the route-side seek ack
+/// in `POST /api/playback/position` so both responses carry a mutually
+/// consistent view: returning a 409 body built from the raw DB snapshot
+/// while the rejection decision was made from a live `buffered_samples`
+/// read would be exactly the inconsistency the codex review flagged.
+async fn build_live_playback_snapshot(
+    state: &SharedState,
+) -> Result<player::PlaybackSnapshot, StatusCode> {
+    let (live_position_ms, live_buffered_ms, ephemeral_playing, audio_active) = {
         let state_guard = state.read().await;
-        let live_pos = state_guard
+        let pair = state_guard
             .playback_runtime
             .as_ref()
-            .zip(state_guard.playback_runtime_info.as_ref())
-            .map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
+            .zip(state_guard.playback_runtime_info.as_ref());
+        let live_pos =
+            pair.map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
+        let live_buf =
+            pair.map(|(rt, info)| rt.handle.get_buffered_ms(info.sample_rate, info.channels));
         let ephemeral = state_guard.ephemeral_tidal_track.is_some();
         let active = state_guard
             .audio_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        (live_pos, ephemeral, active)
+        (live_pos, live_buf, ephemeral, active)
     };
 
     let snapshot = {
@@ -5964,7 +5976,11 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     let mut snapshot =
-        overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
+        overlay_snapshot_with_external_track_and_position(state, snapshot, live_position_ms).await;
+
+    if let Some(buf) = live_buffered_ms {
+        snapshot.state.buffered_ms = buf;
+    }
 
     // Correct a stale is_playing flag before sending to the frontend:
     // - no runtime at all (server restarted, runtime crashed), OR
@@ -5974,6 +5990,11 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
         snapshot.state.is_playing = false;
     }
 
+    Ok(snapshot)
+}
+
+async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let snapshot = build_live_playback_snapshot(&state).await?;
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue
@@ -7398,7 +7419,21 @@ async fn previous_track(
 async fn set_playback_position(
     State(state): State<SharedState>,
     Json(payload): Json<PositionRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    // Pre-check the live buffer: if the user is asking to seek past what's
+    // decoded, return 409 with a live snapshot (built from the same helper
+    // as GET /api/playback/state, so the body is mutually consistent with
+    // the rejection decision). The frontend's `setPlayerPosition` 409 catch
+    // applies that body via `applyState` and skips the error toast.
+    let seek_decision = evaluate_seek_against_buffer(&state, payload.position_ms).await;
+    if matches!(seek_decision, SeekDecision::RejectPastBuffer) {
+        let snapshot = build_live_playback_snapshot(&state).await?;
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(json!({ "state": snapshot.state })),
+        ));
+    }
+
     let state_guard = state.read().await;
     // Seek in the live audio runtime (updates the CPAL sample cursor).
     if let Some(runtime) = state_guard.playback_runtime.as_ref() {
@@ -7410,8 +7445,81 @@ async fn set_playback_position(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     drop(state_guard);
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-    Ok(Json(json!({ "state": snapshot.state })))
+    let mut snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    // Overlay buffered_ms so the response carries the same field shape as
+    // GET /api/playback/state. Position is already authoritative (we just
+    // wrote payload.position_ms to the DB above).
+    {
+        let g = state.read().await;
+        if let Some((rt, info)) = g
+            .playback_runtime
+            .as_ref()
+            .zip(g.playback_runtime_info.as_ref())
+        {
+            snapshot.state.buffered_ms = rt
+                .handle
+                .get_buffered_ms(info.sample_rate, info.channels);
+        }
+    }
+    Ok((StatusCode::OK, Json(json!({ "state": snapshot.state }))))
+}
+
+/// Outcome of comparing a requested seek target against the live decoded
+/// buffer. Extracted so the seek-route 409 logic is unit-testable without
+/// a real CPAL device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekDecision {
+    /// Either no runtime is active, or the buffer is fresh (no samples
+    /// published yet), or the target sits within the decoded region. Dispatch
+    /// the seek to the runtime as normal.
+    Dispatch,
+    /// Target is strictly past the decoded portion of the live buffer and
+    /// the runtime has actually published a non-zero buffered_samples value
+    /// (so we know we're not in the pre-first-callback fresh state). Reject
+    /// with 409.
+    RejectPastBuffer,
+}
+
+fn evaluate_seek_decision(
+    target_samples: u64,
+    buffered_samples: u64,
+    runtime_active: bool,
+) -> SeekDecision {
+    if !runtime_active {
+        return SeekDecision::Dispatch;
+    }
+    // buffered_samples == 0 means the audio callback hasn't published any
+    // value yet (engine cold-starting, first callback not fired). Treat that
+    // as "unknown, let the runtime decide" rather than blanket-rejecting all
+    // seeks during the cold-start window.
+    if buffered_samples == 0 {
+        return SeekDecision::Dispatch;
+    }
+    if target_samples > buffered_samples {
+        SeekDecision::RejectPastBuffer
+    } else {
+        SeekDecision::Dispatch
+    }
+}
+
+async fn evaluate_seek_against_buffer(state: &SharedState, target_ms: i64) -> SeekDecision {
+    let g = state.read().await;
+    let Some((rt, info)) = g
+        .playback_runtime
+        .as_ref()
+        .zip(g.playback_runtime_info.as_ref())
+    else {
+        return SeekDecision::Dispatch;
+    };
+    let sr = info.sample_rate as u64;
+    let ch = info.channels as u64;
+    let target_samples = if target_ms <= 0 {
+        0
+    } else {
+        (target_ms as u64).saturating_mul(sr).saturating_mul(ch) / 1_000
+    };
+    let buffered_samples = rt.handle.buffered_samples();
+    evaluate_seek_decision(target_samples, buffered_samples, true)
 }
 
 async fn set_playback_volume(
@@ -11461,6 +11569,51 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_no_runtime_active() {
+        // Without an active runtime there's no buffered_samples truth to gate
+        // on; let the normal handler path run (it is a no-op anyway).
+        assert_eq!(
+            super::evaluate_seek_decision(1_000_000, 0, false),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_buffer_is_fresh() {
+        // buffered_samples == 0 means the audio callback hasn't published yet
+        // (cold start). Don't blanket-reject in that window.
+        assert_eq!(
+            super::evaluate_seek_decision(500_000, 0, true),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_dispatches_when_target_within_buffered() {
+        assert_eq!(
+            super::evaluate_seek_decision(100_000, 200_000, true),
+            super::SeekDecision::Dispatch,
+        );
+        // Equal target is OK (seek to the buffer tail).
+        assert_eq!(
+            super::evaluate_seek_decision(200_000, 200_000, true),
+            super::SeekDecision::Dispatch,
+        );
+    }
+
+    #[test]
+    fn evaluate_seek_decision_rejects_target_strictly_past_buffer() {
+        // This is the central case: user drags the scrubber 1-2 minutes ahead
+        // while a TIDAL track is still loading. Frontend's clamp should keep
+        // this from happening, but the route ack is the backstop for any
+        // other client (mobile remote, future API consumers).
+        assert_eq!(
+            super::evaluate_seek_decision(300_000, 200_000, true),
+            super::SeekDecision::RejectPastBuffer,
+        );
+    }
 
     fn test_track(id: i64, title: &str) -> crate::db::models::Track {
         crate::db::models::Track {
