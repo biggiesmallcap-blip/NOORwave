@@ -631,7 +631,7 @@ fn run_runtime_loop(
                                 track_id, generation, outcome
                             );
                             if let PlaybackTerminalReason::Error(message) = &outcome {
-                                warn!("Discarding failed pre-buffered track {track_id}: {message}");
+                                emit_prepared_track_failure(&event_tx, track_id, message);
                             }
                             if let Some(mut engine) = state.next_engine.take() {
                                 engine.stop();
@@ -1146,6 +1146,21 @@ fn report_runtime_command_error(
     let message = format!("{command_name} failed: {error}");
     warn!("{message}");
     let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+}
+
+/// Surface a decode/source failure on the pre-buffered next track. The
+/// active track's failure already emits PlaybackRuntimeEvent::Error via
+/// the TrackTerminal::Error branch for the Active slot, but the Next-slot
+/// branch previously only logged - users had no signal that the upcoming
+/// track silently dropped from the queue.
+fn emit_prepared_track_failure(
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    track_id: i64,
+    message: &str,
+) {
+    let surfaced = format!("Pre-buffered track {track_id} failed: {message}");
+    warn!("{surfaced}");
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message: surfaced });
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -1951,6 +1966,24 @@ mod tests {
             current_exclusive_release_grace_secs:
                 crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
             current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+        }
+    }
+
+    #[test]
+    fn emit_prepared_track_failure_sends_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
+
+        match event_rx
+            .try_recv()
+            .expect("error event should be emitted")
+        {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Pre-buffered track 42 failed"));
+                assert!(message.contains("decode failed: malformed packet"));
+            }
+            other => panic!("expected error event, got {other:?}"),
         }
     }
 
