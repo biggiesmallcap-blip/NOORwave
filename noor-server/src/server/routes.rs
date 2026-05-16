@@ -7456,9 +7456,7 @@ async fn set_playback_position(
             .as_ref()
             .zip(g.playback_runtime_info.as_ref())
         {
-            snapshot.state.buffered_ms = rt
-                .handle
-                .get_buffered_ms(info.sample_rate, info.channels);
+            snapshot.state.buffered_ms = rt.handle.get_buffered_ms(info.sample_rate, info.channels);
         }
     }
     Ok((StatusCode::OK, Json(json!({ "state": snapshot.state }))))
