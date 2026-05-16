@@ -2042,11 +2042,7 @@ mod tests {
 
         // 1. Simulate a Play command that returned Err: report the error and
         //    tear down engines (same sequence as run_runtime_loop's Play arm).
-        report_runtime_command_error(
-            &event_tx,
-            "Play",
-            anyhow::anyhow!("transition failed"),
-        );
+        report_runtime_command_error(&event_tx, "Play", anyhow::anyhow!("transition failed"));
         stop_all_engines(&mut state);
         assert!(state.engine.is_none(), "engine slot cleared after error");
         assert!(state.next_engine.is_none(), "next slot cleared after error");
