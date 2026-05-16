@@ -300,7 +300,7 @@ fn run_runtime_loop(
     while let Ok(command) = command_rx.recv() {
         match command {
             PlaybackRuntimeCommand::Play(job) => {
-                transition_to_job(
+                if let Err(error) = transition_to_job(
                     &config,
                     &command_tx,
                     &device,
@@ -313,10 +313,15 @@ fn run_runtime_loop(
                     &position_samples,
                     &position_source,
                     true,
-                )?;
+                ) {
+                    stop_all_engines(&mut state);
+                    #[cfg(target_os = "windows")]
+                    state.exclusive_sink.clear();
+                    report_runtime_command_error(&event_tx, "Play", error);
+                }
             }
             PlaybackRuntimeCommand::Switch(job) => {
-                transition_to_job(
+                if let Err(error) = transition_to_job(
                     &config,
                     &command_tx,
                     &device,
@@ -329,7 +334,12 @@ fn run_runtime_loop(
                     &position_samples,
                     &position_source,
                     false,
-                )?;
+                ) {
+                    stop_all_engines(&mut state);
+                    #[cfg(target_os = "windows")]
+                    state.exclusive_sink.clear();
+                    report_runtime_command_error(&event_tx, "Switch", error);
+                }
             }
             PlaybackRuntimeCommand::Seek(position_ms) => {
                 if let Some(engine) = state.engine.as_ref() {
@@ -465,13 +475,21 @@ fn run_runtime_loop(
                 // pressing pause during a crossfade actually stops all audio. The
                 // pre-decoded next engine is already paused so we don't touch it.
                 if let Some(engine) = state.engine.as_mut() {
-                    engine.pause()?;
-                    let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
-                        track_id: Some(engine.track_id),
-                    });
+                    match engine.pause() {
+                        Ok(()) => {
+                            let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
+                                track_id: Some(engine.track_id),
+                            });
+                        }
+                        Err(error) => {
+                            report_runtime_command_error(&event_tx, "Pause", error);
+                        }
+                    }
                 }
                 if let Some(engine) = state.fading_out_engine.as_mut() {
-                    engine.pause()?;
+                    if let Err(error) = engine.pause() {
+                        report_runtime_command_error(&event_tx, "Pause", error);
+                    }
                 }
             }
             PlaybackRuntimeCommand::Resume => {
@@ -514,7 +532,7 @@ fn run_runtime_loop(
                                     "Resume: failed to rebuild exclusive sink; falling back to shared: {err:?}"
                                 );
                                 if let Some(engine) = state.engine.as_mut() {
-                                    let actual_rate = engine.swap_stream(
+                                    match engine.swap_stream(
                                         &device,
                                         &output_config,
                                         output_sample_format,
@@ -523,9 +541,17 @@ fn run_runtime_loop(
                                         false,
                                         rebuild_rate,
                                         release_grace_secs,
-                                    )?;
-                                    output_config.sample_rate = actual_rate;
-                                    state.device_sample_rate = actual_rate;
+                                    ) {
+                                        Ok(actual_rate) => {
+                                            output_config.sample_rate = actual_rate;
+                                            state.device_sample_rate = actual_rate;
+                                        }
+                                        Err(error) => {
+                                            report_runtime_command_error(
+                                                &event_tx, "Resume", error,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -533,13 +559,21 @@ fn run_runtime_loop(
                 }
 
                 if let Some(engine) = state.engine.as_mut() {
-                    engine.resume()?;
-                    let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
-                        track_id: Some(engine.track_id),
-                    });
+                    match engine.resume() {
+                        Ok(()) => {
+                            let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
+                                track_id: Some(engine.track_id),
+                            });
+                        }
+                        Err(error) => {
+                            report_runtime_command_error(&event_tx, "Resume", error);
+                        }
+                    }
                 }
                 if let Some(engine) = state.fading_out_engine.as_mut() {
-                    engine.resume()?;
+                    if let Err(error) = engine.resume() {
+                        report_runtime_command_error(&event_tx, "Resume", error);
+                    }
                 }
             }
             PlaybackRuntimeCommand::Stop => {
@@ -1069,6 +1103,16 @@ fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
     if let Some(mut engine) = state.fading_out_engine.take() {
         engine.stop();
     }
+}
+
+fn report_runtime_command_error(
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    command_name: &str,
+    error: anyhow::Error,
+) {
+    let message = format!("{command_name} failed: {error}");
+    warn!("{message}");
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
 }
 
 #[cfg(target_os = "windows")]
@@ -1792,6 +1836,25 @@ mod tests {
         assert_eq!(sources[0].role, ExclusiveRenderRole::Active);
         assert_eq!(sources[1].role, ExclusiveRenderRole::Prepared);
         assert_eq!(sources[2].role, ExclusiveRenderRole::Fading);
+    }
+
+    #[test]
+    fn report_runtime_command_error_emits_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        report_runtime_command_error(
+            &event_tx,
+            "Play",
+            anyhow::anyhow!("output device rejected stream"),
+        );
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Play failed"));
+                assert!(message.contains("output device rejected stream"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
     }
 
     fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
