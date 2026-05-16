@@ -258,7 +258,14 @@ pub async fn refresh_external_provider_candidates(
     db: &Database,
     clients: &ExternalProviderRefreshClients,
     full_mode: bool,
+    progress_tx: Option<&mpsc::UnboundedSender<TrainingProgressUpdate>>,
+    progress_range: (f32, f32),
 ) -> Result<ExternalProviderRefreshReport> {
+    // Split the corpus sub-range across the two network phases so each can tick
+    // independently: first half is Last.fm, second half is TIDAL similar.
+    let (progress_start, progress_end) = progress_range;
+    let progress_mid = progress_start + (progress_end - progress_start) * 0.5;
+
     let last_refresh_at = load_external_provider_last_refresh(db)?;
     let seed_rows = db.with_conn(queries::get_embedding_track_rows)?;
     let budget = plan_external_provider_refresh(full_mode, last_refresh_at, seed_rows.len());
@@ -275,6 +282,7 @@ pub async fn refresh_external_provider_candidates(
         .collect::<Vec<_>>();
     let mut lastfm_rows: HashMap<i64, Vec<ExternalLastfmCandidate>> = HashMap::new();
     if let Some(lastfm) = clients.lastfm.as_ref() {
+        let lastfm_total = seed_rows.len().max(1) as f32;
         for (index, seed) in seed_rows.iter().enumerate() {
             let Some(artist) = seed
                 .artist_name
@@ -288,6 +296,19 @@ pub async fn refresh_external_provider_candidates(
                     EXTERNAL_REFRESH_LASTFM_DELAY_MS,
                 ))
                 .await;
+            }
+            // Tick every ~10 seeds (and on the first) — Last.fm getSimilar with
+            // the 500ms cooldown can park the bar for 30-60s without feedback.
+            if let Some(tx) = progress_tx
+                && (index == 0 || index.is_multiple_of(10))
+            {
+                let frac = index as f32 / lastfm_total;
+                let p = progress_start + (progress_mid - progress_start) * frac;
+                let _ = tx.send(TrainingProgressUpdate::stage_only(
+                    "corpus",
+                    &format!("Tracing similar tracks ({}/{})", index, seed_rows.len()),
+                    p,
+                ));
             }
             match lastfm
                 .track_get_similar(artist, &seed.title, budget.lastfm_rows_per_seed)
@@ -366,7 +387,23 @@ pub async fn refresh_external_provider_candidates(
         let tidal_seed_rows = db
             .with_conn(|conn| queries::get_tidal_similar_seed_rows(conn, seed_limit))
             .unwrap_or_default();
-        'seed_loop: for seed in tidal_seed_rows {
+        let tidal_total = tidal_seed_rows.len().max(1) as f32;
+        let tidal_seed_count = tidal_seed_rows.len();
+        'seed_loop: for (index, seed) in tidal_seed_rows.into_iter().enumerate() {
+            // Tick on every seed — the cap is EXTERNAL_REFRESH_TIDAL_SIMILAR_SEED_TRACKS
+            // (10), so each iteration is meaningful progress (~1.3% of the corpus span).
+            if let Some(tx) = progress_tx {
+                let frac = index as f32 / tidal_total;
+                let p = progress_mid + (progress_end - progress_mid) * frac;
+                let _ = tx.send(TrainingProgressUpdate::stage_only(
+                    "corpus",
+                    &format!(
+                        "Mapping artist constellations ({}/{})",
+                        index, tidal_seed_count
+                    ),
+                    p,
+                ));
+            }
             let similar_artists = match tidal
                 .get_artist_similar(
                     seed.artist_tidal_id,
@@ -461,7 +498,10 @@ pub async fn resolve_external_tidal_candidates(
     db: &Database,
     tidal: Option<&TidalClient>,
     full_mode: bool,
+    progress_tx: Option<&mpsc::UnboundedSender<TrainingProgressUpdate>>,
+    progress_range: (f32, f32),
 ) -> Result<ExternalTidalResolutionReport> {
+    let (progress_start, progress_end) = progress_range;
     let mut report = ExternalTidalResolutionReport {
         playable_before: db.with_conn(queries::count_playable_external_candidates)?,
         ..ExternalTidalResolutionReport::default()
@@ -481,8 +521,24 @@ pub async fn resolve_external_tidal_candidates(
         queries::get_unresolved_lastfm_external_candidates_for_tidal_resolution(conn, &now, limit)
     })?;
     let mut failed_keys = HashSet::new();
+    let candidate_total = candidates.len().max(1) as f32;
+    let candidate_count = candidates.len();
 
-    for candidate in candidates {
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        // Tick every ~10 candidates — TIDAL search latency varies and this loop
+        // can chew through hundreds of items on a full refresh.
+        if let Some(tx) = progress_tx
+            && (index == 0 || index.is_multiple_of(10))
+        {
+            let frac = index as f32 / candidate_total;
+            let p = progress_start + (progress_end - progress_start) * frac;
+            let _ = tx.send(TrainingProgressUpdate::stage_only(
+                "corpus",
+                &format!("Resolving external matches ({}/{})", index, candidate_count),
+                p,
+            ));
+        }
+
         let failure_key = format!(
             "{}\u{1f}{}",
             normalize_resolution_text(&candidate.artist_name),
@@ -1216,6 +1272,44 @@ pub async fn start_training(
         Ok((model, run))
     })?;
 
+    // Progress channel — broadcasts to WebSocket + logs to tracing + mirrors to
+    // the training run row. Created here (not after corpus) so the slow corpus
+    // stage can emit intermediate progress instead of parking the UI at 5% for
+    // minutes while external refresh runs.
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TrainingProgressUpdate>();
+    let run_id = run.id;
+    let db_clone = db.clone();
+    let event_tx_clone = event_tx.clone();
+    let log_task = tokio::spawn(async move {
+        while let Some(update) = progress_rx.recv().await {
+            tracing::info!(target: "noor.discovery.training", run_id, %update.message, "training progress");
+
+            // Broadcast to WebSocket
+            let _ = event_tx_clone.send(AppEvent::TrainingProgress {
+                stage: update.stage.clone(),
+                progress: update.progress,
+                message: update.message.clone(),
+                current_track_id: update.current_track_id,
+                current_track_title: update.current_track_title,
+                tracks_done: update.tracks_done,
+                tracks_total: update.tracks_total,
+            });
+
+            // Update DB progress
+            let _ = db_clone.with_conn(|conn| {
+                queries::update_training_run_progress(
+                    conn,
+                    run_id,
+                    &update.stage,
+                    "running",
+                    update.progress as f64,
+                    None,
+                    0,
+                )
+            });
+        }
+    });
+
     macro_rules! fail_training_on_err {
         ($expr:expr) => {
             match $expr {
@@ -1265,9 +1359,26 @@ pub async fn start_training(
         Ok(false)
     };
 
+    // Synchronous DB write so the "corpus 0.05" milestone is durable before any
+    // fallible work runs (preserves the invariant that a mid-corpus failure
+    // still leaves run.progress == 0.05 — see test
+    // `start_training_marks_run_and_model_failed_when_setup_errors_after_creation`).
     fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(conn, run.id, "corpus", "running", 0.05, None, 0)
     }));
+    // Also fan out over the channel so any subscribed WS client sees the start
+    // signal without polling.
+    let _ = progress_tx.send(TrainingProgressUpdate::stage_only(
+        "corpus",
+        "Starting corpus build…",
+        0.05,
+    ));
+
+    let _ = progress_tx.send(TrainingProgressUpdate::stage_only(
+        "corpus",
+        "Reading listening memory…",
+        0.06,
+    ));
 
     // Backfill listen_history columns added in MIGRATION_023, exactly once per
     // database lifetime. The trainer is the natural trigger — sequence-aware
@@ -1286,23 +1397,31 @@ pub async fn start_training(
     }
 
     let external_last_refresh_at = fail_training_on_err!(load_external_provider_last_refresh(&db));
-    let external_refresh_report =
-        match refresh_external_provider_candidates(&db, &external_refresh_clients, full_mode).await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                tracing::warn!(
-                    target: "noor.discovery.external",
-                    error = %error,
-                    "external provider refresh failed"
-                );
-                ExternalProviderRefreshReport::default()
-            }
-        };
+    let external_refresh_report = match refresh_external_provider_candidates(
+        &db,
+        &external_refresh_clients,
+        full_mode,
+        Some(&progress_tx),
+        (0.07, 0.15),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.discovery.external",
+                error = %error,
+                "external provider refresh failed"
+            );
+            ExternalProviderRefreshReport::default()
+        }
+    };
     let external_resolution_report = match resolve_external_tidal_candidates(
         &db,
         external_refresh_clients.tidal.as_ref(),
         full_mode,
+        Some(&progress_tx),
+        (0.15, 0.18),
     )
     .await
     {
@@ -1326,6 +1445,12 @@ pub async fn start_training(
         }
     };
 
+    let _ = progress_tx.send(TrainingProgressUpdate::stage_only(
+        "corpus",
+        "Building trainer input…",
+        0.18,
+    ));
+
     // Build trainer input directly from DB (no JSON round-trip). The intensity
     // tier overrides dimension / top_k / window_size and decides whether to
     // include the audio-proxy stage (Low skips it).
@@ -1339,44 +1464,11 @@ pub async fn start_training(
         plan_external_provider_refresh(full_mode, external_last_refresh_at, input.tracks.len());
     let heldout_examples = input.heldout_examples.clone();
 
-    fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "behavioral", "running", 0.2, None, 0)
-    }));
-
-    // Progress channel — broadcasts to WebSocket + logs to tracing
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TrainingProgressUpdate>();
-    let run_id = run.id;
-    let db_clone = db.clone();
-    let event_tx_clone = event_tx.clone();
-    let log_task = tokio::spawn(async move {
-        while let Some(update) = progress_rx.recv().await {
-            tracing::info!(target: "noor.discovery.training", run_id, %update.message, "training progress");
-
-            // Broadcast to WebSocket
-            let _ = event_tx_clone.send(AppEvent::TrainingProgress {
-                stage: update.stage.clone(),
-                progress: update.progress,
-                message: update.message.clone(),
-                current_track_id: update.current_track_id,
-                current_track_title: update.current_track_title,
-                tracks_done: update.tracks_done,
-                tracks_total: update.tracks_total,
-            });
-
-            // Update DB progress
-            let _ = db_clone.with_conn(|conn| {
-                queries::update_training_run_progress(
-                    conn,
-                    run_id,
-                    &update.stage,
-                    "running",
-                    update.progress as f64,
-                    None,
-                    0,
-                )
-            });
-        }
-    });
+    let _ = progress_tx.send(TrainingProgressUpdate::stage_only(
+        "behavioral",
+        "Hashing behavioral trails…",
+        0.20,
+    ));
 
     // Run the trainer directly — no subprocess
     let progress_tx_clone = progress_tx.clone();
