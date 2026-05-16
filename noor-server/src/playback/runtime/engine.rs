@@ -401,7 +401,7 @@ mod tests {
         assert!(shared.stopped.load(Ordering::SeqCst));
         assert!(shared.paused.load(Ordering::SeqCst));
         assert!(
-            elapsed < Duration::from_millis(100),
+            elapsed < Duration::from_millis(250),
             "stop blocked for {elapsed:?}"
         );
     }

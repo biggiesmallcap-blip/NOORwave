@@ -529,8 +529,11 @@ fn run_runtime_loop(
                                 warn!(
                                     "Resume: failed to rebuild exclusive sink; falling back to shared: {err:?}"
                                 );
-                                if let Some(engine) = state.engine.as_mut() {
-                                    match engine.swap_stream(
+                                // Drop the &mut state borrow before potential cleanup
+                                // so we can call stop_all_engines on the failure path
+                                // without a borrow-checker conflict.
+                                let swap_result = state.engine.as_mut().map(|engine| {
+                                    engine.swap_stream(
                                         &device,
                                         &output_config,
                                         output_sample_format,
@@ -539,17 +542,27 @@ fn run_runtime_loop(
                                         false,
                                         rebuild_rate,
                                         release_grace_secs,
-                                    ) {
-                                        Ok(actual_rate) => {
-                                            output_config.sample_rate = actual_rate;
-                                            state.device_sample_rate = actual_rate;
-                                        }
-                                        Err(error) => {
-                                            report_runtime_command_error(
-                                                &event_tx, "Resume", error,
-                                            );
-                                        }
+                                    )
+                                });
+                                match swap_result {
+                                    Some(Ok(actual_rate)) => {
+                                        output_config.sample_rate = actual_rate;
+                                        state.device_sample_rate = actual_rate;
                                     }
+                                    Some(Err(error)) => {
+                                        // Symmetric with Play/Switch error cleanup:
+                                        // when both exclusive rebuild and shared
+                                        // fallback fail, the active engine has no
+                                        // output stream but its decoder keeps
+                                        // filling the buffer. Tear it down rather
+                                        // than leave a silent zombie engine.
+                                        stop_all_engines(&mut state);
+                                        state.exclusive_sink.clear();
+                                        report_runtime_command_error(
+                                            &event_tx, "Resume", error,
+                                        );
+                                    }
+                                    None => {}
                                 }
                             }
                         }
