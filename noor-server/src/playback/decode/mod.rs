@@ -310,6 +310,9 @@ pub(crate) fn decode_and_buffer_job(
             let mut resampler: Option<StreamResampler> = None;
             let mut decoded_packets: u64 = 0;
             let mut decoded_samples: u64 = 0;
+            // One-shot guard for the buffer-growth warn so the audio thread's
+            // CAS signal becomes at most one log line per buffer instance.
+            let mut growth_warn_emitted = false;
 
             loop {
                 if shared.stopped.load(Ordering::SeqCst) {
@@ -414,13 +417,27 @@ pub(crate) fn decode_and_buffer_job(
                     }
                 };
 
-                let mut guard = shared
-                    .buffer
-                    .lock()
-                    .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                guard.samples.extend_from_slice(&resampled);
+                let buffered_samples = {
+                    let mut guard = shared
+                        .buffer
+                        .lock()
+                        .map_err(|_| anyhow!("playback buffer poisoned"))?;
+                    guard.samples.extend_from_slice(&resampled);
+                    guard.samples.len()
+                };
                 decoded_packets += 1;
                 decoded_samples += resampled.len() as u64;
+
+                // Observe the audio-thread's growth signal off the real-time
+                // thread. local guard makes it one log per buffer; the audio
+                // thread's CAS makes the signal cheap and idempotent.
+                if !growth_warn_emitted && shared.growth_warned.load(Ordering::Relaxed) {
+                    growth_warn_emitted = true;
+                    warn!(
+                        "Playback buffer grew past ~200MB: track_id={}, buffered_samples={}, decoded_packets={}",
+                        shared.track_id, buffered_samples, decoded_packets
+                    );
+                }
             }
 
             // Flush any residual samples held in the resampler at end-of-stream

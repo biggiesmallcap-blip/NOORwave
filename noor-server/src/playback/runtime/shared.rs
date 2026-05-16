@@ -8,6 +8,11 @@ use tracing::{debug, warn};
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
 const NEAR_END_THRESHOLD_MS: i64 = 30_000;
+/// Sample count at which an active PlaybackBuffer emits a one-shot warning.
+/// 50_000_000 f32 samples is ~200 MB of allocation - well past the size at
+/// which the unbounded-buffer issue meaningfully impacts memory. This is
+/// pure observability; the ring-buffer rewrite (deferred) is the real fix.
+const BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES: usize = 50_000_000;
 
 pub(crate) fn write_output_f32(
     data: &mut [f32],
@@ -158,6 +163,11 @@ fn write_output_buffer<T>(
             .fetch_add(written as u64, Ordering::Relaxed);
     }
 
+    // Real-time-safe growth signal: this is just a load + conditional CAS,
+    // no allocation. The decoder thread observes growth_warned and emits the
+    // actual log line off this thread.
+    shared.signal_buffer_growth_if_threshold_crossed(guard.samples.len());
+
     if guard.started && !guard.finished && written < data.len() && !guard.starved_notified {
         guard.starved_notified = true;
         warn!(
@@ -246,6 +256,10 @@ pub(crate) struct PlaybackSharedState {
     /// (via Arc clone) the TIDAL stream pipe / CDN download thread so they
     /// can bail out promptly when a track is skipped or stopped.
     pub(crate) stopped: Arc<AtomicBool>,
+    /// One-shot signal flipped by the audio callback when the underlying
+    /// buffer crosses BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES; the decoder
+    /// thread observes this and emits the warn (off the real-time thread).
+    pub(crate) growth_warned: AtomicBool,
     pub(crate) buffer: Mutex<PlaybackBuffer>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
@@ -292,6 +306,7 @@ impl PlaybackSharedState {
             source_kind,
             paused: AtomicBool::new(false),
             stopped: Arc::new(AtomicBool::new(false)),
+            growth_warned: AtomicBool::new(false),
             buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
             command_tx,
             volume_ctl,
@@ -319,6 +334,22 @@ impl PlaybackSharedState {
     /// PlaybackSharedState.
     pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stopped)
+    }
+
+    /// Audio-thread-safe signal: when the underlying buffer crosses
+    /// BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES, flip the growth_warned flag once.
+    /// Only the CAS false -> true succeeds the first time; subsequent calls
+    /// are no-ops. The decoder thread observes the flag and emits the actual
+    /// log line off the real-time audio thread.
+    pub(crate) fn signal_buffer_growth_if_threshold_crossed(&self, samples_len: usize) {
+        if samples_len >= BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES {
+            let _ = self.growth_warned.compare_exchange(
+                false,
+                true,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     pub(crate) fn signal_terminal(&self, outcome: PlaybackTerminalReason) -> Result<()> {
@@ -437,6 +468,46 @@ pub(crate) fn estimate_total_samples_from_duration_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::gapless::GaplessPlan;
+    use crate::playback::player::PlaybackSourceKind;
+
+    fn test_shared_state() -> Arc<PlaybackSharedState> {
+        let (command_tx, _) = mpsc::channel();
+        Arc::new(PlaybackSharedState::new(
+            1,
+            1,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+        ))
+    }
+
+    #[test]
+    fn signal_buffer_growth_sets_flag_once_when_threshold_crossed() {
+        let shared = test_shared_state();
+        assert!(!shared.growth_warned.load(Ordering::Relaxed));
+
+        shared.signal_buffer_growth_if_threshold_crossed(BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES - 1);
+        assert!(
+            !shared.growth_warned.load(Ordering::Relaxed),
+            "below-threshold sample count should not set the flag"
+        );
+
+        shared.signal_buffer_growth_if_threshold_crossed(BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES);
+        assert!(
+            shared.growth_warned.load(Ordering::Relaxed),
+            "threshold-crossed should set the flag"
+        );
+
+        // Subsequent calls past threshold are idempotent no-ops via CAS.
+        shared.signal_buffer_growth_if_threshold_crossed(BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES * 2);
+        assert!(shared.growth_warned.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn seek_to_decoded_position_applies_immediately() {
