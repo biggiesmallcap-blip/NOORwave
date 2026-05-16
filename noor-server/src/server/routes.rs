@@ -12947,6 +12947,7 @@ mod tests {
                 automix_discover_new: true,
                 automix_use_learning: true,
                 automix_allow_external: true,
+                buffered_ms: 0,
             },
             queue: vec![
                 test_queue_item(10, current, 0, "manual"),

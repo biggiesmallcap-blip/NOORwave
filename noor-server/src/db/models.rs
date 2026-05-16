@@ -99,6 +99,18 @@ pub struct PlaybackState {
     pub automix_discover_new: bool,
     pub automix_use_learning: bool,
     pub automix_allow_external: bool,
+    /// How many ms of the currently-playing track are decoded into the
+    /// playback buffer. 0 when no track is active or before the audio
+    /// callback has published the first value. Drives the buffered-bar
+    /// scrubber on the frontend and the route-side seek ack: a seek target
+    /// greater than `buffered_ms` is rejected with HTTP 409 instead of
+    /// dispatched to the runtime (which would WARN-spam and snap-back).
+    ///
+    /// `#[serde(default)]` so existing JSON payloads / construction sites
+    /// that predate this field keep deserializing/compiling without a
+    /// per-site change.
+    #[serde(default)]
+    pub buffered_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -374,6 +374,9 @@ pub fn load_state(conn: &Connection) -> Result<PlaybackState> {
         automix_discover_new: row.8,
         automix_use_learning: row.9,
         automix_allow_external: row.10,
+        // buffered_ms is a runtime-only field overlaid by the live snapshot
+        // helper in routes.rs; the DB has no column for it.
+        buffered_ms: 0,
     })
 }
 
