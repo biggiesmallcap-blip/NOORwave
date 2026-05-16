@@ -3,10 +3,14 @@
 use anyhow::Context;
 use futures::StreamExt as _;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 8;
 pub(crate) const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
+const STREAM_PIPE_RECV_POLL_MS: u64 = 100;
 
 pub(crate) struct StreamPipe {
     data: Vec<u8>,
@@ -15,14 +19,19 @@ pub(crate) struct StreamPipe {
     eof: bool,
     known_length: Option<u64>,
     dynamic_length: bool,
+    /// Cancellation signal observed between blocking receive iterations so a
+    /// stopped/skipped track does not leave the decoder thread wedged on
+    /// rx.recv() until the producer drops chunk_tx.
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl StreamPipe {
     pub(crate) fn new(
         rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
         known_length: Option<u64>,
+        stop_flag: Arc<AtomicBool>,
     ) -> Self {
-        Self::with_initial(Vec::new(), rx, known_length, false)
+        Self::with_initial(Vec::new(), rx, known_length, false, stop_flag)
     }
 
     pub(crate) fn with_initial(
@@ -30,6 +39,7 @@ impl StreamPipe {
         rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
         known_length: Option<u64>,
         dynamic_length: bool,
+        stop_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             data: initial,
@@ -38,15 +48,35 @@ impl StreamPipe {
             eof: false,
             known_length,
             dynamic_length,
+            stop_flag,
+        }
+    }
+
+    /// Block on the producer channel up to one polling tick, returning what
+    /// happened. Treats a Disconnected sender as natural EOF and honours the
+    /// stop flag in both the pre-poll and post-timeout paths.
+    fn poll_for_chunk(
+        rx: &std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        stop_flag: &Arc<AtomicBool>,
+    ) -> ChunkPoll {
+        loop {
+            if stop_flag.load(Ordering::Relaxed) {
+                return ChunkPoll::Stopped;
+            }
+            match rx.recv_timeout(Duration::from_millis(STREAM_PIPE_RECV_POLL_MS)) {
+                Ok(Some(chunk)) => return ChunkPoll::Chunk(chunk),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => return ChunkPoll::Eof,
+                Err(RecvTimeoutError::Timeout) => continue,
+            }
         }
     }
 
     fn fill_to(&mut self, target: usize) {
         if let Ok(rx) = self.rx.lock() {
             while !self.eof && self.data.len() < target {
-                match rx.recv() {
-                    Ok(Some(chunk)) => self.data.extend_from_slice(&chunk),
-                    _ => self.eof = true,
+                match Self::poll_for_chunk(&rx, &self.stop_flag) {
+                    ChunkPoll::Chunk(chunk) => self.data.extend_from_slice(&chunk),
+                    ChunkPoll::Eof | ChunkPoll::Stopped => self.eof = true,
                 }
             }
         }
@@ -57,14 +87,20 @@ impl StreamPipe {
             return;
         }
         if let Ok(rx) = self.rx.lock() {
-            match rx.recv() {
-                Ok(Some(chunk)) => self.data.extend_from_slice(&chunk),
-                _ => self.eof = true,
+            match Self::poll_for_chunk(&rx, &self.stop_flag) {
+                ChunkPoll::Chunk(chunk) => self.data.extend_from_slice(&chunk),
+                ChunkPoll::Eof | ChunkPoll::Stopped => self.eof = true,
             }
         } else {
             self.eof = true;
         }
     }
+}
+
+enum ChunkPoll {
+    Chunk(Vec<u8>),
+    Eof,
+    Stopped,
 }
 
 impl Read for StreamPipe {
@@ -220,10 +256,14 @@ mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
 
+    fn never_stopped() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     #[test]
     fn stream_pipe_reports_known_length_before_eof() {
         let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
-        let pipe = StreamPipe::new(rx, Some(641_302));
+        let pipe = StreamPipe::new(rx, Some(641_302), never_stopped());
 
         assert_eq!(
             symphonia::core::io::MediaSource::byte_len(&pipe),
@@ -234,7 +274,7 @@ mod tests {
     #[test]
     fn stream_pipe_hides_dynamic_length_for_dash_prebuffer() {
         let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
-        let pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+        let pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         assert!(!symphonia::core::io::MediaSource::is_seekable(&pipe));
         assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), None);
@@ -243,7 +283,7 @@ mod tests {
     #[test]
     fn stream_pipe_dynamic_seek_end_uses_buffered_length_without_draining() {
         let (_tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
-        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 3);
         assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), None);
@@ -254,7 +294,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(2);
         tx.send(Some(vec![4, 5])).unwrap();
         tx.send(None).unwrap();
-        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true);
+        let mut pipe = StreamPipe::with_initial(vec![1, 2, 3], rx, None, true, never_stopped());
 
         let mut out = Vec::new();
         pipe.read_to_end(&mut out).unwrap();
@@ -269,10 +309,40 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(2);
         tx.send(Some(vec![1, 2, 3, 4])).unwrap();
         tx.send(None).unwrap();
-        let mut pipe = StreamPipe::new(rx, Some(4));
+        let mut pipe = StreamPipe::new(rx, Some(4), never_stopped());
 
         assert_eq!(pipe.seek(SeekFrom::End(0)).unwrap(), 4);
         assert_eq!(symphonia::core::io::MediaSource::byte_len(&pipe), Some(4));
+    }
+
+    #[test]
+    fn stream_pipe_read_exits_when_stop_flag_flips_without_eof() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut pipe = StreamPipe::new(rx, None, Arc::clone(&stop_flag));
+
+        // Watchdog that flips the stop flag after ~150ms. If the read blocks
+        // indefinitely the test will hang; this watchdog forces an exit so
+        // the failure mode is a timing-bounded assertion rather than a hang.
+        let stop_for_watchdog = Arc::clone(&stop_flag);
+        let watchdog = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            stop_for_watchdog.store(true, Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 16];
+        let read = pipe.read(&mut buf).unwrap();
+        let elapsed = started.elapsed();
+
+        drop(tx);
+        let _ = watchdog.join();
+
+        assert_eq!(read, 0, "stopped pipe should read 0 bytes");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "read blocked for {elapsed:?}"
+        );
     }
 
     #[test]

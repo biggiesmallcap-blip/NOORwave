@@ -242,7 +242,10 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) generation: u64,
     pub(crate) source_kind: PlaybackSourceKind,
     pub(crate) paused: AtomicBool,
-    pub(crate) stopped: AtomicBool,
+    /// Stop signal observed by the audio callback, the decoder thread, and
+    /// (via Arc clone) the TIDAL stream pipe / CDN download thread so they
+    /// can bail out promptly when a track is skipped or stopped.
+    pub(crate) stopped: Arc<AtomicBool>,
     pub(crate) buffer: Mutex<PlaybackBuffer>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
@@ -288,7 +291,7 @@ impl PlaybackSharedState {
             generation,
             source_kind,
             paused: AtomicBool::new(false),
-            stopped: AtomicBool::new(false),
+            stopped: Arc::new(AtomicBool::new(false)),
             buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
             command_tx,
             volume_ctl,
@@ -309,6 +312,13 @@ impl PlaybackSharedState {
         if let Ok(mut guard) = self.buffer.lock() {
             guard.reset();
         }
+    }
+
+    /// Clone the stop-signal Arc so source-side threads (TIDAL download,
+    /// StreamPipe) can poll it for cancellation without holding the whole
+    /// PlaybackSharedState.
+    pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stopped)
     }
 
     pub(crate) fn signal_terminal(&self, outcome: PlaybackTerminalReason) -> Result<()> {

@@ -78,16 +78,26 @@ pub(crate) fn decode_and_buffer_job(
             let mut remaining_segment_urls = stream_info.segment_urls.clone();
             let initial_media_segments = dash_initial_media_count(stream_info.segment_urls.len());
             if initial_media_segments > 0 {
+                let prebuffer_stop = shared.stop_flag();
                 dash_initial = rt
                     .block_on(async {
+                        if prebuffer_stop.load(Ordering::Relaxed) {
+                            return anyhow::Ok(Vec::new());
+                        }
                         let mut bytes =
                             append_stream_bytes(&config.http_client, &stream_info.url, 0).await?;
+                        if prebuffer_stop.load(Ordering::Relaxed) {
+                            return anyhow::Ok(bytes);
+                        }
                         for (idx, segment_url) in stream_info
                             .segment_urls
                             .iter()
                             .take(initial_media_segments)
                             .enumerate()
                         {
+                            if prebuffer_stop.load(Ordering::Relaxed) {
+                                return anyhow::Ok(bytes);
+                            }
                             bytes.extend(
                                 append_stream_bytes(&config.http_client, segment_url, idx + 1)
                                     .await?,
@@ -114,6 +124,7 @@ pub(crate) fn decode_and_buffer_job(
             let url = stream_info.url.clone();
             let download_track_id = shared.track_id;
             let segment_urls = remaining_segment_urls;
+            let download_stop = shared.stop_flag();
             thread::Builder::new()
                 .name("noor-stream-download".into())
                 .spawn(move || {
@@ -125,6 +136,9 @@ pub(crate) fn decode_and_buffer_job(
                         let result: anyhow::Result<()> = async {
                             let http = build_tidal_cdn_client();
                             if !is_dash_stream {
+                                if download_stop.load(Ordering::Relaxed) {
+                                    return Ok(());
+                                }
                                 // Single-URL path (JSON manifest or DASH BaseURL shape)
                                 let response = http
                                     .get(&url)
@@ -138,6 +152,9 @@ pub(crate) fn decode_and_buffer_job(
                                 let _ = len_tx.send(response.content_length());
                                 let mut stream = response.bytes_stream();
                                 while let Some(chunk) = stream.next().await {
+                                    if download_stop.load(Ordering::Relaxed) {
+                                        break; // track stopped mid-fetch
+                                    }
                                     let bytes = chunk.context("chunk read error")?;
                                     if chunk_tx.send(Some(bytes.to_vec())).is_err() {
                                         break; // decoder stopped early (track skipped/stopped)
@@ -149,12 +166,22 @@ pub(crate) fn decode_and_buffer_job(
                                 let mut sent_segments = 0usize;
                                 let mut sent_bytes = 0usize;
                                 for (idx, seg_url) in segment_urls.into_iter().enumerate() {
+                                    if download_stop.load(Ordering::Relaxed) {
+                                        warn!(
+                                            "TIDAL DASH download cancelled: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                            download_track_id, sent_segments, total_segments
+                                        );
+                                        break;
+                                    }
                                     let bytes = append_stream_bytes(
                                         &http,
                                         &seg_url,
                                         initial_media_segments + idx + 1,
                                     )
                                     .await?;
+                                    if download_stop.load(Ordering::Relaxed) {
+                                        break;
+                                    }
                                     sent_bytes += bytes.len();
                                     if chunk_tx.send(Some(bytes)).is_err() {
                                         warn!(
@@ -205,9 +232,15 @@ pub(crate) fn decode_and_buffer_job(
 
             // ── Step 3: probe + decode incrementally, writing to the buffer each packet ──────
             let pipe = if is_dash_stream {
-                StreamPipe::with_initial(dash_initial, chunk_rx, content_length, true)
+                StreamPipe::with_initial(
+                    dash_initial,
+                    chunk_rx,
+                    content_length,
+                    true,
+                    shared.stop_flag(),
+                )
             } else {
-                StreamPipe::new(chunk_rx, content_length)
+                StreamPipe::new(chunk_rx, content_length, shared.stop_flag())
             };
             let mss = MediaSourceStream::new(Box::new(pipe), Default::default());
 
