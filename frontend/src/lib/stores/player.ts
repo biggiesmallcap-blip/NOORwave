@@ -470,6 +470,11 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		const result = await api.setPlaybackPosition(nextPositionMs);
 		applyState(result.state);
 		noteSuccess();
+		if (result.seek && !result.seek.accepted) {
+			playerError.set({
+				message: result.seek.message ?? "Can't seek there yet.",
+			});
+		}
 	} catch (error) {
 		setError('seek', error, () => setPlayerPosition(nextPositionMs));
 	}

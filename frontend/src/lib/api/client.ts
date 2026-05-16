@@ -605,6 +605,15 @@ export interface PlaybackSnapshot {
 	queue: QueueItem[];
 }
 
+export interface PlaybackSeekResponse {
+	state: PlaybackState;
+	seek?: {
+		accepted: boolean;
+		position_ms: number;
+		message: string | null;
+	};
+}
+
 export interface PlaybackRuntimeInfo {
 	device_name: string;
 	sample_rate: number;
@@ -2191,7 +2200,7 @@ export const api = {
 	},
 
 	setPlaybackPosition(positionMs: number) {
-		return fetchApi<{ state: PlaybackState }>('/api/playback/position', undefined, {
+		return fetchApi<PlaybackSeekResponse>('/api/playback/position', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ position_ms: positionMs }),
 		});
