@@ -166,6 +166,59 @@ pub struct PositionRequest {
     position_ms: i64,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct SeekAckResponse {
+    accepted: bool,
+    position_ms: i64,
+    message: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SeekRouteDecision {
+    persist_position_ms: i64,
+    response: SeekAckResponse,
+}
+
+fn seek_route_decision(
+    runtime_result: Option<playback_runtime::PlaybackSeekResult>,
+    current_position_ms: i64,
+    requested_position_ms: i64,
+) -> SeekRouteDecision {
+    match runtime_result {
+        Some(playback_runtime::PlaybackSeekResult::Accepted { applied_ms, .. }) => {
+            SeekRouteDecision {
+                persist_position_ms: applied_ms,
+                response: SeekAckResponse {
+                    accepted: true,
+                    position_ms: applied_ms,
+                    message: None,
+                },
+            }
+        }
+        Some(playback_runtime::PlaybackSeekResult::Rejected { reason, .. }) => {
+            SeekRouteDecision {
+                persist_position_ms: current_position_ms,
+                response: SeekAckResponse {
+                    accepted: false,
+                    position_ms: current_position_ms,
+                    message: Some(reason),
+                },
+            }
+        }
+        None => {
+            let applied_ms = requested_position_ms.max(0);
+            SeekRouteDecision {
+                persist_position_ms: applied_ms,
+                response: SeekAckResponse {
+                    accepted: true,
+                    position_ms: applied_ms,
+                    message: None,
+                },
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct VolumeRequest {
     volume: f64,
@@ -7399,19 +7452,51 @@ async fn set_playback_position(
     State(state): State<SharedState>,
     Json(payload): Json<PositionRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state_guard = state.read().await;
-    // Seek in the live audio runtime (updates the CPAL sample cursor).
-    if let Some(runtime) = state_guard.playback_runtime.as_ref() {
-        let _ = runtime.handle.seek(payload.position_ms);
-    }
-    let snapshot = state_guard
-        .db
-        .with_conn(|conn| player::set_position(conn, payload.position_ms))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    drop(state_guard);
+    let (current_position_ms, runtime_handle) = {
+        let state_guard = state.read().await;
+        let current_position_ms = state_guard
+            .db
+            .with_conn(player::load_state)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .position_ms;
+        let runtime_handle = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|r| r.handle.clone());
+        (current_position_ms, runtime_handle)
+    };
+
+    let runtime_result = if let Some(handle) = runtime_handle {
+        Some(
+            handle
+                .seek(payload.position_ms)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+    } else {
+        None
+    };
+
+    let decision = seek_route_decision(
+        runtime_result,
+        current_position_ms,
+        payload.position_ms,
+    );
+
+    let snapshot = {
+        let state_guard = state.read().await;
+        let snapshot = state_guard
+            .db
+            .with_conn(|conn| player::set_position(conn, decision.persist_position_ms))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        snapshot
+    };
+
     let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-    Ok(Json(json!({ "state": snapshot.state })))
+    Ok(Json(json!({
+        "state": snapshot.state,
+        "seek": decision.response
+    })))
 }
 
 async fn set_playback_volume(
@@ -13434,5 +13519,54 @@ mod tests {
             "routes returned 404 to a wrong-method probe (not registered):\n  {}",
             missing.join("\n  ")
         );
+    }
+
+    #[test]
+    fn seek_route_decision_persists_accepted_runtime_position() {
+        let decision = seek_route_decision(
+            Some(playback_runtime::PlaybackSeekResult::Accepted {
+                requested_ms: 2_000,
+                applied_ms: 2_000,
+                target_samples: 192_000,
+            }),
+            750,
+            2_000,
+        );
+
+        assert_eq!(decision.persist_position_ms, 2_000);
+        assert!(decision.response.accepted);
+        assert_eq!(decision.response.position_ms, 2_000);
+        assert_eq!(decision.response.message, None);
+    }
+
+    #[test]
+    fn seek_route_decision_rolls_back_rejected_runtime_position() {
+        let decision = seek_route_decision(
+            Some(playback_runtime::PlaybackSeekResult::Rejected {
+                requested_ms: 4_000,
+                current_ms: 750,
+                reason: "Seek target has not been decoded yet.".to_string(),
+            }),
+            750,
+            4_000,
+        );
+
+        assert_eq!(decision.persist_position_ms, 750);
+        assert!(!decision.response.accepted);
+        assert_eq!(decision.response.position_ms, 750);
+        assert_eq!(
+            decision.response.message.as_deref(),
+            Some("Seek target has not been decoded yet.")
+        );
+    }
+
+    #[test]
+    fn seek_route_decision_allows_db_only_seek_without_runtime() {
+        let decision = seek_route_decision(None, 750, -50);
+
+        assert_eq!(decision.persist_position_ms, 0);
+        assert!(decision.response.accepted);
+        assert_eq!(decision.response.position_ms, 0);
+        assert_eq!(decision.response.message, None);
     }
 }
