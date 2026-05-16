@@ -58,6 +58,14 @@ pub(super) struct PlaybackEngine {
     pub(super) shared: Arc<PlaybackSharedState>,
 }
 
+fn join_decoder_thread_in_background(track_id: i64, handle: JoinHandle<()>) {
+    let _ = thread::Builder::new()
+        .name(format!("noor-playback-decoder-join-{track_id}"))
+        .spawn(move || {
+            let _ = handle.join();
+        });
+}
+
 impl PlaybackEngine {
     #[cfg(test)]
     pub(super) fn test_with_shared(
@@ -266,7 +274,7 @@ impl PlaybackEngine {
         self.shared.paused.store(true, Ordering::SeqCst);
         self.shared.reset_buffer();
         if let Some(handle) = self.decoder_thread.take() {
-            let _ = handle.join();
+            join_decoder_thread_in_background(self.track_id, handle);
         }
     }
 
@@ -317,5 +325,84 @@ impl PlaybackEngine {
         self.stream = Some(OutputStream::Cpal { _stream: stream });
         pause_guard.restore();
         Ok(active_plan.stream_config.sample_rate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::playback::gapless::GaplessPlan;
+    use crate::playback::player::PlaybackSourceKind;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    fn test_shared_state() -> Arc<PlaybackSharedState> {
+        let (command_tx, _) = mpsc::channel();
+        Arc::new(PlaybackSharedState::new(
+            1,
+            1,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+        ))
+    }
+
+    #[test]
+    fn stop_marks_engine_stopped_without_waiting_for_decoder_thread() {
+        let shared = test_shared_state();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (decoder_started_tx, decoder_started_rx) = mpsc::channel::<()>();
+        let decoder_thread = thread::spawn(move || {
+            let _ = decoder_started_tx.send(());
+            let _ = release_rx.recv();
+        });
+        decoder_started_rx
+            .recv()
+            .expect("decoder thread did not start");
+
+        let mut engine = PlaybackEngine {
+            track_id: 1,
+            generation: 1,
+            stream: None,
+            decoder_thread: Some(decoder_thread),
+            shared: Arc::clone(&shared),
+        };
+
+        // Watchdog: if stop() blocks waiting on the decoder thread, release it
+        // after 2s so the test fails loudly with a clear timing message instead
+        // of hanging cargo test forever (no per-test timeout exists by default).
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_watchdog = Arc::clone(&cancel);
+        let release_for_watchdog = release_tx.clone();
+        let watchdog = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if cancel_for_watchdog.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let _ = release_for_watchdog.send(());
+        });
+
+        let started = Instant::now();
+        engine.stop();
+        let elapsed = started.elapsed();
+
+        cancel.store(true, Ordering::SeqCst);
+        let _ = release_tx.send(());
+        let _ = watchdog.join();
+
+        assert!(shared.stopped.load(Ordering::SeqCst));
+        assert!(shared.paused.load(Ordering::SeqCst));
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "stop blocked for {elapsed:?}"
+        );
     }
 }

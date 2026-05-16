@@ -64,6 +64,19 @@ pub(crate) fn output_rate_fallback_config(
     (attempted.sample_rate != base.sample_rate).then(|| base.clone())
 }
 
+/// Surface a CPAL stream-level error (device unplugged, format change,
+/// backend fault, etc.) both as a log line and as a user-visible
+/// PlaybackRuntimeEvent::Error. CPAL invokes its error callback off the
+/// audio thread, so allocation and broadcast send are safe here.
+pub(crate) fn emit_cpal_stream_error(
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    err: cpal::StreamError,
+) {
+    let message = format!("Playback output stream error: {err}");
+    warn!("{message}");
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+}
+
 fn build_output_stream(
     device: &cpal::Device,
     output_config: &StreamConfig,
@@ -72,27 +85,34 @@ fn build_output_stream(
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<Stream> {
-    let err_fn = |err| warn!("Playback output stream error: {err}");
-
     let stream = match output_sample_format {
-        SampleFormat::F32 => device.build_output_stream(
-            output_config,
-            move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
-            err_fn,
-            None,
-        )?,
-        SampleFormat::I16 => device.build_output_stream(
-            output_config,
-            move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
-            err_fn,
-            None,
-        )?,
-        SampleFormat::U16 => device.build_output_stream(
-            output_config,
-            move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
-            err_fn,
-            None,
-        )?,
+        SampleFormat::F32 => {
+            let err_event_tx = event_tx.clone();
+            device.build_output_stream(
+                output_config,
+                move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
+                move |err| emit_cpal_stream_error(&err_event_tx, err),
+                None,
+            )?
+        }
+        SampleFormat::I16 => {
+            let err_event_tx = event_tx.clone();
+            device.build_output_stream(
+                output_config,
+                move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
+                move |err| emit_cpal_stream_error(&err_event_tx, err),
+                None,
+            )?
+        }
+        SampleFormat::U16 => {
+            let err_event_tx = event_tx.clone();
+            device.build_output_stream(
+                output_config,
+                move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
+                move |err| emit_cpal_stream_error(&err_event_tx, err),
+                None,
+            )?
+        }
         other => {
             return Err(anyhow!(
                 "unsupported output sample format for playback runtime: {other:?}"
@@ -101,6 +121,25 @@ fn build_output_stream(
     };
 
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emit_cpal_stream_error_warns_and_emits_runtime_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        emit_cpal_stream_error(&event_tx, cpal::StreamError::DeviceNotAvailable);
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Playback output stream error"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
 }
 
 fn start_cpal_stream(stream: &Stream) -> Result<()> {

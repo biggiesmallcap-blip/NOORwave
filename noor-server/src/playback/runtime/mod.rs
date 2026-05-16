@@ -63,6 +63,15 @@ pub struct PlaybackRuntimeHandle {
     /// Redirectable position reader. Normally points to the active engine's
     /// position counter. Swapped at crossfade promotion so the handle always
     /// reads from the engine that's audibly current, not the fading-out one.
+    ///
+    /// Real-time-safety / unwrap audit (Task 15): every access site uses
+    /// `position_source.lock().unwrap()` because the protected payload is an
+    /// `Arc<AtomicU64>` - mutex poisoning leaves it valid (Arc is either the
+    /// old reference or the new one, both safe to read/write). The only way
+    /// `.unwrap()` panics is if a code path inside the guard panics first,
+    /// which is then caught by `handle_panic_in_runtime_loop` (Task 7) and
+    /// surfaced to the user as `PlaybackRuntimeEvent::Error`. So these
+    /// unwraps are bounded-failure, not silent corruption.
     position_source: Arc<Mutex<Arc<AtomicU64>>>,
 }
 
@@ -169,6 +178,11 @@ impl PlaybackRuntimeHandle {
 }
 
 pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHandle> {
+    // Real-time safety: this channel MUST remain unbounded
+    // (std::sync::mpsc::channel, NOT sync_channel). The CPAL audio callback
+    // in shared.rs::write_output_buffer sends TrackTerminal and
+    // CrossfadeStart commands through command_tx; a bounded channel would
+    // block the audio thread on a full buffer and cause dropouts/underruns.
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let worker_event_tx = event_tx.clone();
@@ -298,431 +312,555 @@ fn run_runtime_loop(
     );
 
     while let Ok(command) = command_rx.recv() {
-        match command {
-            PlaybackRuntimeCommand::Play(job) => {
-                transition_to_job(
-                    &config,
-                    &command_tx,
-                    &device,
-                    &mut output_config,
-                    output_sample_format,
-                    &event_tx,
-                    &mut state,
-                    job,
-                    &volume_ctl,
-                    &position_samples,
-                    &position_source,
-                    true,
-                )?;
-            }
-            PlaybackRuntimeCommand::Switch(job) => {
-                transition_to_job(
-                    &config,
-                    &command_tx,
-                    &device,
-                    &mut output_config,
-                    output_sample_format,
-                    &event_tx,
-                    &mut state,
-                    job,
-                    &volume_ctl,
-                    &position_samples,
-                    &position_source,
-                    false,
-                )?;
-            }
-            PlaybackRuntimeCommand::Seek(position_ms) => {
-                if let Some(engine) = state.engine.as_ref() {
-                    let target_samples = (position_ms.max(0) as u64
-                        * state.device_sample_rate as u64
-                        * state.device_channels as u64)
-                        / 1000;
-                    // Tell the CPAL callback to seek on the next write.
-                    engine
-                        .shared
-                        .seek_target_samples
-                        .store(target_samples, Ordering::Relaxed);
-                    // Mirror into the engine's counter immediately so get_position_ms()
-                    // is correct before the CPAL callback runs (up to one buffer period later).
-                    // position_source always points to this engine's counter, so no
-                    // separate handle-counter write is needed.
-                    engine
-                        .shared
-                        .position_samples
-                        .store(target_samples, Ordering::Relaxed);
-                    // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
-                    // if the user seeks backward past those thresholds.
-                    engine
-                        .shared
-                        .near_end_signaled
-                        .store(false, Ordering::Relaxed);
-                    engine
-                        .shared
-                        .crossfade_start_signaled
-                        .store(false, Ordering::Relaxed);
-                }
-            }
-            PlaybackRuntimeCommand::PrepareNext(job) => {
-                // Only pre-decode if we don't already have a pending engine for this track.
-                let already_pending = state
-                    .next_engine
-                    .as_ref()
-                    .map(|e| e.track_id == job.track.id && e.generation == job.generation)
-                    .unwrap_or(false);
-                if !already_pending {
-                    // Stop any stale pending engine first.
-                    if let Some(mut stale) = state.next_engine.take() {
-                        stale.stop();
-                    }
-                    let pending_position = Arc::new(AtomicU64::new(0));
-                    let engine_result = if state.current_exclusive {
-                        PlaybackEngine::start_decoder_only(
-                            &config,
-                            &command_tx,
-                            job,
-                            state.device_sample_rate,
-                            state.device_channels,
-                            Arc::clone(&volume_ctl),
-                            pending_position,
-                        )
-                    } else {
-                        PlaybackEngine::start(
-                            &config,
-                            &command_tx,
-                            &device,
-                            &output_config,
-                            output_sample_format,
-                            job,
-                            event_tx.clone(),
-                            state.device_sample_rate,
-                            state.device_channels,
-                            Arc::clone(&volume_ctl),
-                            pending_position,
-                        )
-                    };
-                    match engine_result {
-                        Ok(engine) => {
-                            // Keep the stream alive but software-paused so host pause does not
-                            // block control commands on some Linux/PipeWire setups.
-                            engine.shared.paused.store(true, Ordering::SeqCst);
-                            state.next_engine = Some(engine);
-                            #[cfg(target_os = "windows")]
-                            if state.current_exclusive {
-                                refresh_exclusive_sources(&state);
-                            }
-                        }
-                        Err(err) => {
-                            warn!("Failed to pre-buffer next track: {err:?}");
-                        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match command {
+                PlaybackRuntimeCommand::Play(job) => {
+                    if let Err(error) = transition_to_job(
+                        &config,
+                        &command_tx,
+                        &device,
+                        &mut output_config,
+                        output_sample_format,
+                        &event_tx,
+                        &mut state,
+                        job,
+                        &volume_ctl,
+                        &position_samples,
+                        &position_source,
+                        true,
+                    ) {
+                        stop_all_engines(&mut state);
+                        #[cfg(target_os = "windows")]
+                        state.exclusive_sink.clear();
+                        report_runtime_command_error(&event_tx, "Play", error);
                     }
                 }
-            }
-            PlaybackRuntimeCommand::CrossfadeStart {
-                track_id,
-                generation,
-            } => {
-                // The OUTGOING engine just entered its fade-out window and is asking
-                // us to start the pre-decoded next engine, if one is ready.
-                if state.engine.as_ref().map(|e| (e.track_id, e.generation))
-                    == Some((track_id, generation))
-                {
-                    let next_ready = state
+                PlaybackRuntimeCommand::Switch(job) => {
+                    if let Err(error) = transition_to_job(
+                        &config,
+                        &command_tx,
+                        &device,
+                        &mut output_config,
+                        output_sample_format,
+                        &event_tx,
+                        &mut state,
+                        job,
+                        &volume_ctl,
+                        &position_samples,
+                        &position_source,
+                        false,
+                    ) {
+                        stop_all_engines(&mut state);
+                        #[cfg(target_os = "windows")]
+                        state.exclusive_sink.clear();
+                        report_runtime_command_error(&event_tx, "Switch", error);
+                    }
+                }
+                PlaybackRuntimeCommand::Seek(position_ms) => {
+                    if let Some(engine) = state.engine.as_ref() {
+                        let target_samples = (position_ms.max(0) as u64
+                            * state.device_sample_rate as u64
+                            * state.device_channels as u64)
+                            / 1000;
+                        // Tell the CPAL callback to seek on the next write. The
+                        // callback will accept (and update position_samples) only
+                        // if the target is within already-decoded samples or the
+                        // buffer is finished; otherwise it warns and leaves the
+                        // position counter untouched. This keeps the runtime-side
+                        // position honest about what has actually been played.
+                        // (Route/UI-side position handling is a separate follow-up.)
+                        engine
+                            .shared
+                            .seek_target_samples
+                            .store(target_samples, Ordering::Relaxed);
+                        // Reset fire-once guards so NearEnd / CrossfadeStart re-fire correctly
+                        // if the user seeks backward past those thresholds.
+                        engine
+                            .shared
+                            .near_end_signaled
+                            .store(false, Ordering::Relaxed);
+                        engine
+                            .shared
+                            .crossfade_start_signaled
+                            .store(false, Ordering::Relaxed);
+                    }
+                }
+                PlaybackRuntimeCommand::PrepareNext(job) => {
+                    // Only pre-decode if we don't already have a pending engine for this track.
+                    let already_pending = state
                         .next_engine
                         .as_ref()
-                        .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
+                        .map(|e| e.track_id == job.track.id && e.generation == job.generation)
                         .unwrap_or(false);
-                    if next_ready {
-                        promote_next_to_active(&mut state, &event_tx, &position_source);
-                    }
-                    // If not ready yet, NextDecodeComplete handles the late path.
-                }
-            }
-            PlaybackRuntimeCommand::NextDecodeComplete {
-                track_id,
-                generation,
-            } => {
-                // Decode for the pre-decoded next engine completed. If the outgoing
-                // engine has already entered the crossfade window, promote now —
-                // the user will hear a clipped fade-in, but it's better than silence.
-                let pending_match = state
-                    .next_engine
-                    .as_ref()
-                    .map(|e| e.track_id == track_id && e.generation == generation)
-                    .unwrap_or(false);
-                if pending_match {
-                    let crossfade_started = state
-                        .engine
-                        .as_ref()
-                        .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
-                        .unwrap_or(false);
-                    if crossfade_started {
-                        promote_next_to_active(&mut state, &event_tx, &position_source);
-                    }
-                }
-            }
-            PlaybackRuntimeCommand::Pause => {
-                // Pause the active engine AND the fading-out engine (if any), so
-                // pressing pause during a crossfade actually stops all audio. The
-                // pre-decoded next engine is already paused so we don't touch it.
-                if let Some(engine) = state.engine.as_mut() {
-                    engine.pause()?;
-                    let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
-                        track_id: Some(engine.track_id),
-                    });
-                }
-                if let Some(engine) = state.fading_out_engine.as_mut() {
-                    engine.pause()?;
-                }
-            }
-            PlaybackRuntimeCommand::Resume => {
-                // On-demand re-grab: if exclusive mode is on and the active
-                // engine's WASAPI stream self-released after idle, rebuild it
-                // BEFORE unpausing so the decoder doesn't push samples into a
-                // missing stream. swap_stream handles its own cpal-shared
-                // fallback if the re-grab now fails (e.g. another app grabbed
-                // exclusive while we were paused).
-                if state.current_exclusive {
-                    #[cfg(target_os = "windows")]
-                    if state.exclusive_sink.needs_rebuild() {
-                        info!(
-                            "Resume: rebuilding exclusive stream after idle release on {}",
-                            state.device_name
-                        );
-                        refresh_exclusive_sources(&state);
-                        let rebuild_rate = exclusive_rebuild_rate(
-                            state.current_sample_rate_follow,
-                            state.device_sample_rate,
-                        );
-                        let release_grace_secs = state.current_exclusive_release_grace_secs;
-                        let latency_mode = state.current_exclusive_latency_mode.clone();
-                        match ensure_exclusive_sink_started(
-                            &mut state,
-                            &device,
-                            &output_config,
-                            rebuild_rate,
-                            release_grace_secs,
-                            latency_mode,
-                            command_tx.clone(),
-                            event_tx.clone(),
-                        ) {
-                            Ok(actual_rate) => {
-                                output_config.sample_rate = actual_rate;
-                                state.device_sample_rate = actual_rate;
+                    if !already_pending {
+                        // Stop any stale pending engine first.
+                        if let Some(mut stale) = state.next_engine.take() {
+                            stale.stop();
+                        }
+                        let pending_position = Arc::new(AtomicU64::new(0));
+                        let engine_result = if state.current_exclusive {
+                            PlaybackEngine::start_decoder_only(
+                                &config,
+                                &command_tx,
+                                job,
+                                state.device_sample_rate,
+                                state.device_channels,
+                                Arc::clone(&volume_ctl),
+                                pending_position,
+                            )
+                        } else {
+                            PlaybackEngine::start(
+                                &config,
+                                &command_tx,
+                                &device,
+                                &output_config,
+                                output_sample_format,
+                                job,
+                                event_tx.clone(),
+                                state.device_sample_rate,
+                                state.device_channels,
+                                Arc::clone(&volume_ctl),
+                                pending_position,
+                            )
+                        };
+                        match engine_result {
+                            Ok(engine) => {
+                                // Keep the stream alive but software-paused so host pause does not
+                                // block control commands on some Linux/PipeWire setups.
+                                engine.shared.paused.store(true, Ordering::SeqCst);
+                                state.next_engine = Some(engine);
+                                #[cfg(target_os = "windows")]
+                                if state.current_exclusive {
+                                    refresh_exclusive_sources(&state);
+                                }
                             }
                             Err(err) => {
-                                warn!(
-                                    "Resume: failed to rebuild exclusive sink; falling back to shared: {err:?}"
-                                );
-                                if let Some(engine) = state.engine.as_mut() {
-                                    let actual_rate = engine.swap_stream(
-                                        &device,
-                                        &output_config,
-                                        output_sample_format,
-                                        command_tx.clone(),
-                                        event_tx.clone(),
-                                        false,
-                                        rebuild_rate,
-                                        release_grace_secs,
-                                    )?;
+                                warn!("Failed to pre-buffer next track: {err:?}");
+                            }
+                        }
+                    }
+                }
+                PlaybackRuntimeCommand::CrossfadeStart {
+                    track_id,
+                    generation,
+                } => {
+                    // The OUTGOING engine just entered its fade-out window and is asking
+                    // us to start the pre-decoded next engine, if one is ready.
+                    if state.engine.as_ref().map(|e| (e.track_id, e.generation))
+                        == Some((track_id, generation))
+                    {
+                        let next_ready = state
+                            .next_engine
+                            .as_ref()
+                            .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
+                            .unwrap_or(false);
+                        if next_ready {
+                            promote_next_to_active(&mut state, &event_tx, &position_source);
+                        }
+                        // If not ready yet, NextDecodeComplete handles the late path.
+                    }
+                }
+                PlaybackRuntimeCommand::NextDecodeComplete {
+                    track_id,
+                    generation,
+                } => {
+                    // Decode for the pre-decoded next engine completed. If the outgoing
+                    // engine has already entered the crossfade window, promote now —
+                    // the user will hear a clipped fade-in, but it's better than silence.
+                    let pending_match = state
+                        .next_engine
+                        .as_ref()
+                        .map(|e| e.track_id == track_id && e.generation == generation)
+                        .unwrap_or(false);
+                    if pending_match {
+                        let crossfade_started = state
+                            .engine
+                            .as_ref()
+                            .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
+                            .unwrap_or(false);
+                        if crossfade_started {
+                            promote_next_to_active(&mut state, &event_tx, &position_source);
+                        }
+                    }
+                }
+                PlaybackRuntimeCommand::Pause => {
+                    // Pause the active engine AND the fading-out engine (if any), so
+                    // pressing pause during a crossfade actually stops all audio. The
+                    // pre-decoded next engine is already paused so we don't touch it.
+                    if let Some(engine) = state.engine.as_mut() {
+                        match engine.pause() {
+                            Ok(()) => {
+                                let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
+                                    track_id: Some(engine.track_id),
+                                });
+                            }
+                            Err(error) => {
+                                report_runtime_command_error(&event_tx, "Pause", error);
+                            }
+                        }
+                    }
+                    if let Some(engine) = state.fading_out_engine.as_mut() {
+                        if let Err(error) = engine.pause() {
+                            report_runtime_command_error(&event_tx, "Pause", error);
+                        }
+                    }
+                }
+                PlaybackRuntimeCommand::Resume => {
+                    // On-demand re-grab: if exclusive mode is on and the active
+                    // engine's WASAPI stream self-released after idle, rebuild it
+                    // BEFORE unpausing so the decoder doesn't push samples into a
+                    // missing stream. swap_stream handles its own cpal-shared
+                    // fallback if the re-grab now fails (e.g. another app grabbed
+                    // exclusive while we were paused).
+                    if state.current_exclusive {
+                        #[cfg(target_os = "windows")]
+                        if state.exclusive_sink.needs_rebuild() {
+                            info!(
+                                "Resume: rebuilding exclusive stream after idle release on {}",
+                                state.device_name
+                            );
+                            refresh_exclusive_sources(&state);
+                            let rebuild_rate = exclusive_rebuild_rate(
+                                state.current_sample_rate_follow,
+                                state.device_sample_rate,
+                            );
+                            let release_grace_secs = state.current_exclusive_release_grace_secs;
+                            let latency_mode = state.current_exclusive_latency_mode.clone();
+                            match ensure_exclusive_sink_started(
+                                &mut state,
+                                &device,
+                                &output_config,
+                                rebuild_rate,
+                                release_grace_secs,
+                                latency_mode,
+                                command_tx.clone(),
+                                event_tx.clone(),
+                            ) {
+                                Ok(actual_rate) => {
                                     output_config.sample_rate = actual_rate;
                                     state.device_sample_rate = actual_rate;
                                 }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(engine) = state.engine.as_mut() {
-                    engine.resume()?;
-                    let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
-                        track_id: Some(engine.track_id),
-                    });
-                }
-                if let Some(engine) = state.fading_out_engine.as_mut() {
-                    engine.resume()?;
-                }
-            }
-            PlaybackRuntimeCommand::Stop => {
-                stop_all_engines(&mut state);
-                #[cfg(target_os = "windows")]
-                state.exclusive_sink.clear();
-                let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
-            }
-            PlaybackRuntimeCommand::TrackTerminal {
-                track_id,
-                generation,
-                outcome,
-            } => {
-                // The fading-out engine reaching its terminal state is the
-                // expected end of a crossfade — drop it silently. The queue
-                // advance already happened at promotion time via Finished.
-                let fading = state
-                    .fading_out_engine
-                    .as_ref()
-                    .map(|e| (e.track_id, e.generation));
-                let next = state
-                    .next_engine
-                    .as_ref()
-                    .map(|engine| (engine.track_id, engine.generation));
-                let active = state
-                    .engine
-                    .as_ref()
-                    .map(|engine| (engine.track_id, engine.generation));
-
-                match terminal_engine_slot(active, next, fading, track_id, generation) {
-                    Some(TerminalEngineSlot::FadingOut) => {
-                        debug!(
-                            "Playback terminal ignored for fading engine: track_id={}, generation={}, outcome={:?}",
-                            track_id, generation, outcome
-                        );
-                        if let Some(mut engine) = state.fading_out_engine.take() {
-                            engine.stop();
-                        }
-                    }
-                    Some(TerminalEngineSlot::Next) => {
-                        debug!(
-                            "Playback terminal ignored for prepared engine: track_id={}, generation={}, outcome={:?}",
-                            track_id, generation, outcome
-                        );
-                        if let PlaybackTerminalReason::Error(message) = &outcome {
-                            warn!("Discarding failed pre-buffered track {track_id}: {message}");
-                        }
-                        if let Some(mut engine) = state.next_engine.take() {
-                            engine.stop();
-                        }
-                    }
-                    Some(TerminalEngineSlot::Active) => {
-                        debug!(
-                            "Playback terminal active engine: track_id={}, generation={}, outcome={:?}",
-                            track_id, generation, outcome
-                        );
-                        if should_promote_prepared_at_boundary(
-                            active, next, track_id, generation, &outcome,
-                        ) {
-                            promote_prepared_at_boundary(&mut state, &event_tx, &position_source);
-                        } else {
-                            stop_current_engine(&mut state);
-                            match outcome {
-                                PlaybackTerminalReason::Finished => {
-                                    let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
-                                        track_id,
-                                        generation,
+                                Err(err) => {
+                                    warn!(
+                                        "Resume: failed to rebuild exclusive sink; falling back to shared: {err:?}"
+                                    );
+                                    // Drop the &mut state borrow before potential cleanup
+                                    // so we can call stop_all_engines on the failure path
+                                    // without a borrow-checker conflict.
+                                    let swap_result = state.engine.as_mut().map(|engine| {
+                                        engine.swap_stream(
+                                            &device,
+                                            &output_config,
+                                            output_sample_format,
+                                            command_tx.clone(),
+                                            event_tx.clone(),
+                                            false,
+                                            rebuild_rate,
+                                            release_grace_secs,
+                                        )
                                     });
-                                }
-                                PlaybackTerminalReason::Error(message) => {
-                                    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+                                    match swap_result {
+                                        Some(Ok(actual_rate)) => {
+                                            output_config.sample_rate = actual_rate;
+                                            state.device_sample_rate = actual_rate;
+                                        }
+                                        Some(Err(error)) => {
+                                            // Symmetric with Play/Switch error cleanup:
+                                            // when both exclusive rebuild and shared
+                                            // fallback fail, the active engine has no
+                                            // output stream but its decoder keeps
+                                            // filling the buffer. Tear it down rather
+                                            // than leave a silent zombie engine.
+                                            stop_all_engines(&mut state);
+                                            state.exclusive_sink.clear();
+                                            report_runtime_command_error(
+                                                &event_tx, "Resume", error,
+                                            );
+                                        }
+                                        None => {}
+                                    }
                                 }
                             }
                         }
                     }
-                    None => {
-                        debug!(
-                            "Playback terminal ignored for unknown engine: track_id={}, generation={}, outcome={:?}",
-                            track_id, generation, outcome
-                        );
+
+                    if let Some(engine) = state.engine.as_mut() {
+                        match engine.resume() {
+                            Ok(()) => {
+                                let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
+                                    track_id: Some(engine.track_id),
+                                });
+                            }
+                            Err(error) => {
+                                report_runtime_command_error(&event_tx, "Resume", error);
+                            }
+                        }
+                    }
+                    if let Some(engine) = state.fading_out_engine.as_mut() {
+                        if let Err(error) = engine.resume() {
+                            report_runtime_command_error(&event_tx, "Resume", error);
+                        }
                     }
                 }
-                #[cfg(target_os = "windows")]
-                if state.current_exclusive {
-                    refresh_exclusive_sources(&state);
-                }
-            }
-            PlaybackRuntimeCommand::TrackStatus {
-                track_id,
-                generation,
-                respond_to,
-            } => {
-                let active = state
-                    .engine
-                    .as_ref()
-                    .map(|engine| (engine.track_id, engine.generation))
-                    == Some((track_id, generation));
-                let prepared = state
-                    .next_engine
-                    .as_ref()
-                    .map(|engine| (engine.track_id, engine.generation))
-                    == Some((track_id, generation));
-                let status = if active {
-                    PlaybackTrackStatus::Active
-                } else if prepared {
-                    PlaybackTrackStatus::Prepared
-                } else {
-                    PlaybackTrackStatus::None
-                };
-                let _ = respond_to.send(status);
-            }
-            PlaybackRuntimeCommand::DeviceSwap {
-                device: selection,
-                exclusive,
-                sample_rate_follow,
-                desired_sample_rate,
-                exclusive_release_grace_secs,
-                exclusive_latency_mode,
-            } => {
-                // `exclusive` is honored as of Task 5 (Windows-only low-latency
-                // buffer + dedicated code path; full ShareMode::Exclusive is a
-                // follow-up). `sample_rate_follow` is wired here in Task 6 by
-                // re-targeting the cpal stream AND the decoder resampler to
-                // the new device's default rate when the toggle is on. The
-                // route layer (Task 7) is the one that flips this toggle and
-                // also re-issues `DeviceSwap` on track transitions when the
-                // next track's native rate differs from the current stream
-                // rate — runtime.rs has no view of the next track's StreamInfo
-                // until decode begins, so it cannot drive that comparison
-                // itself. Optional `desired_sample_rate` allows the route layer
-                // to specify an exact target (e.g. next track's native rate).
-                let new_device = match resolve_device(&selection) {
-                    Some(d) => d,
-                    None => {
-                        warn!("DeviceSwap: no output device available; keeping current output");
-                        continue;
-                    }
-                };
-                let new_supported = match new_device.default_output_config() {
-                    Ok(s) => s,
-                    Err(err) => {
-                        warn!(
-                            "DeviceSwap: failed to read default config for new device: {err}; keeping current output"
-                        );
-                        continue;
-                    }
-                };
-                let new_config = new_supported.config();
-                let new_format = new_supported.sample_format();
-                let new_name = device_display_name(&new_device);
-
-                let has_live_engines = state.engine.is_some()
-                    || state.next_engine.is_some()
-                    || state.fading_out_engine.is_some();
-                let desired_rate = device_swap_target_sample_rate(
-                    desired_sample_rate,
-                    sample_rate_follow,
-                    has_live_engines,
-                    state.device_sample_rate,
-                    new_config.sample_rate,
-                );
-                let requested_backend = if exclusive {
-                    SwapBackend::Exclusive
-                } else {
-                    SwapBackend::Shared
-                };
-                let requested_plan = swap_stream_plan(&new_config, desired_rate, requested_backend);
-                let mut actual_config = requested_plan.stream_config.clone();
-
-                // In exclusive mode only one stream can hold the device, so
-                // drop the pre-buffered + fading engines and only swap the
-                // active one. Any in-flight crossfade is sacrificed at this
-                // point; the user is intentionally trading multi-stream mixing
-                // for bit-perfect output.
-                // Rebuild the stream on every live engine so they all play on
-                // the new device. swap_stream now transparently falls back to
-                // cpal shared on exclusive failure (and emits an
-                // ExclusiveModeFailed event), so a hard error here is rare —
-                // typically only a cpal shared build failure.
-                let mut swap_failed = false;
-                if exclusive {
+                PlaybackRuntimeCommand::Stop => {
+                    stop_all_engines(&mut state);
                     #[cfg(target_os = "windows")]
-                    {
+                    state.exclusive_sink.clear();
+                    let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
+                }
+                PlaybackRuntimeCommand::TrackTerminal {
+                    track_id,
+                    generation,
+                    outcome,
+                } => {
+                    // The fading-out engine reaching its terminal state is the
+                    // expected end of a crossfade — drop it silently. The queue
+                    // advance already happened at promotion time via Finished.
+                    let fading = state
+                        .fading_out_engine
+                        .as_ref()
+                        .map(|e| (e.track_id, e.generation));
+                    let next = state
+                        .next_engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation));
+                    let active = state
+                        .engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation));
+
+                    match terminal_engine_slot(active, next, fading, track_id, generation) {
+                        Some(TerminalEngineSlot::FadingOut) => {
+                            debug!(
+                                "Playback terminal ignored for fading engine: track_id={}, generation={}, outcome={:?}",
+                                track_id, generation, outcome
+                            );
+                            if let Some(mut engine) = state.fading_out_engine.take() {
+                                engine.stop();
+                            }
+                        }
+                        Some(TerminalEngineSlot::Next) => {
+                            debug!(
+                                "Playback terminal ignored for prepared engine: track_id={}, generation={}, outcome={:?}",
+                                track_id, generation, outcome
+                            );
+                            if let PlaybackTerminalReason::Error(message) = &outcome {
+                                emit_prepared_track_failure(&event_tx, track_id, message);
+                            }
+                            if let Some(mut engine) = state.next_engine.take() {
+                                engine.stop();
+                            }
+                        }
+                        Some(TerminalEngineSlot::Active) => {
+                            debug!(
+                                "Playback terminal active engine: track_id={}, generation={}, outcome={:?}",
+                                track_id, generation, outcome
+                            );
+                            if should_promote_prepared_at_boundary(
+                                active, next, track_id, generation, &outcome,
+                            ) {
+                                promote_prepared_at_boundary(
+                                    &mut state,
+                                    &event_tx,
+                                    &position_source,
+                                );
+                            } else {
+                                stop_current_engine(&mut state);
+                                match outcome {
+                                    PlaybackTerminalReason::Finished => {
+                                        let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
+                                            track_id,
+                                            generation,
+                                        });
+                                    }
+                                    PlaybackTerminalReason::Error(message) => {
+                                        let _ =
+                                            event_tx.send(PlaybackRuntimeEvent::Error { message });
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            debug!(
+                                "Playback terminal ignored for unknown engine: track_id={}, generation={}, outcome={:?}",
+                                track_id, generation, outcome
+                            );
+                        }
+                    }
+                    #[cfg(target_os = "windows")]
+                    if state.current_exclusive {
+                        refresh_exclusive_sources(&state);
+                    }
+                }
+                PlaybackRuntimeCommand::TrackStatus {
+                    track_id,
+                    generation,
+                    respond_to,
+                } => {
+                    let active = state
+                        .engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation))
+                        == Some((track_id, generation));
+                    let prepared = state
+                        .next_engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation))
+                        == Some((track_id, generation));
+                    let status = if active {
+                        PlaybackTrackStatus::Active
+                    } else if prepared {
+                        PlaybackTrackStatus::Prepared
+                    } else {
+                        PlaybackTrackStatus::None
+                    };
+                    let _ = respond_to.send(status);
+                }
+                PlaybackRuntimeCommand::DeviceSwap {
+                    device: selection,
+                    exclusive,
+                    sample_rate_follow,
+                    desired_sample_rate,
+                    exclusive_release_grace_secs,
+                    exclusive_latency_mode,
+                } => {
+                    // `exclusive` is honored as of Task 5 (Windows-only low-latency
+                    // buffer + dedicated code path; full ShareMode::Exclusive is a
+                    // follow-up). `sample_rate_follow` is wired here in Task 6 by
+                    // re-targeting the cpal stream AND the decoder resampler to
+                    // the new device's default rate when the toggle is on. The
+                    // route layer (Task 7) is the one that flips this toggle and
+                    // also re-issues `DeviceSwap` on track transitions when the
+                    // next track's native rate differs from the current stream
+                    // rate — runtime.rs has no view of the next track's StreamInfo
+                    // until decode begins, so it cannot drive that comparison
+                    // itself. Optional `desired_sample_rate` allows the route layer
+                    // to specify an exact target (e.g. next track's native rate).
+                    let new_device = match resolve_device(&selection) {
+                        Some(d) => d,
+                        None => {
+                            warn!("DeviceSwap: no output device available; keeping current output");
+                            return std::ops::ControlFlow::Continue(());
+                        }
+                    };
+                    let new_supported = match new_device.default_output_config() {
+                        Ok(s) => s,
+                        Err(err) => {
+                            warn!(
+                                "DeviceSwap: failed to read default config for new device: {err}; keeping current output"
+                            );
+                            return std::ops::ControlFlow::Continue(());
+                        }
+                    };
+                    let new_config = new_supported.config();
+                    let new_format = new_supported.sample_format();
+                    let new_name = device_display_name(&new_device);
+
+                    let has_live_engines = state.engine.is_some()
+                        || state.next_engine.is_some()
+                        || state.fading_out_engine.is_some();
+                    let desired_rate = device_swap_target_sample_rate(
+                        desired_sample_rate,
+                        sample_rate_follow,
+                        has_live_engines,
+                        state.device_sample_rate,
+                        new_config.sample_rate,
+                    );
+                    let requested_backend = if exclusive {
+                        SwapBackend::Exclusive
+                    } else {
+                        SwapBackend::Shared
+                    };
+                    let requested_plan =
+                        swap_stream_plan(&new_config, desired_rate, requested_backend);
+                    let mut actual_config = requested_plan.stream_config.clone();
+
+                    // In exclusive mode only one stream can hold the device, so
+                    // drop the pre-buffered + fading engines and only swap the
+                    // active one. Any in-flight crossfade is sacrificed at this
+                    // point; the user is intentionally trading multi-stream mixing
+                    // for bit-perfect output.
+                    // Rebuild the stream on every live engine so they all play on
+                    // the new device. swap_stream now transparently falls back to
+                    // cpal shared on exclusive failure (and emits an
+                    // ExclusiveModeFailed event), so a hard error here is rare —
+                    // typically only a cpal shared build failure.
+                    let mut swap_failed = false;
+                    if exclusive {
+                        #[cfg(target_os = "windows")]
+                        {
+                            for engine_slot in [
+                                state.engine.as_mut(),
+                                state.next_engine.as_mut(),
+                                state.fading_out_engine.as_mut(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                engine_slot.drop_stream();
+                                if let Some(target_rate) = requested_plan.target_sample_rate {
+                                    engine_slot
+                                        .shared
+                                        .target_sample_rate
+                                        .store(target_rate, Ordering::Relaxed);
+                                }
+                            }
+                            refresh_exclusive_sources(&state);
+                            state.exclusive_sink.stream = None;
+                            match ensure_exclusive_sink_started(
+                                &mut state,
+                                &new_device,
+                                &new_config,
+                                desired_rate,
+                                exclusive_release_grace_secs,
+                                exclusive_latency_mode.clone(),
+                                command_tx.clone(),
+                                event_tx.clone(),
+                            ) {
+                                Ok(actual_rate) => {
+                                    actual_config.sample_rate = actual_rate;
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "DeviceSwap: exclusive sink failed; falling back to shared: {err:?}"
+                                    );
+                                    swap_failed = true;
+                                    for engine_slot in [
+                                        state.engine.as_mut(),
+                                        state.next_engine.as_mut(),
+                                        state.fading_out_engine.as_mut(),
+                                    ]
+                                    .into_iter()
+                                    .flatten()
+                                    {
+                                        match engine_slot.swap_stream(
+                                            &new_device,
+                                            &new_config,
+                                            new_format,
+                                            command_tx.clone(),
+                                            event_tx.clone(),
+                                            false,
+                                            desired_rate,
+                                            exclusive_release_grace_secs,
+                                        ) {
+                                            Ok(actual_rate) => {
+                                                actual_config.sample_rate = actual_rate;
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "DeviceSwap: failed to rebuild shared fallback for track {}: {err:?}",
+                                                    engine_slot.track_id
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        #[cfg(target_os = "windows")]
+                        state.exclusive_sink.clear();
+
                         for engine_slot in [
                             state.engine.as_mut(),
                             state.next_engine.as_mut(),
@@ -731,135 +869,78 @@ fn run_runtime_loop(
                         .into_iter()
                         .flatten()
                         {
-                            engine_slot.drop_stream();
-                            if let Some(target_rate) = requested_plan.target_sample_rate {
-                                engine_slot
-                                    .shared
-                                    .target_sample_rate
-                                    .store(target_rate, Ordering::Relaxed);
-                            }
-                        }
-                        refresh_exclusive_sources(&state);
-                        state.exclusive_sink.stream = None;
-                        match ensure_exclusive_sink_started(
-                            &mut state,
-                            &new_device,
-                            &new_config,
-                            desired_rate,
-                            exclusive_release_grace_secs,
-                            exclusive_latency_mode.clone(),
-                            command_tx.clone(),
-                            event_tx.clone(),
-                        ) {
-                            Ok(actual_rate) => {
-                                actual_config.sample_rate = actual_rate;
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "DeviceSwap: exclusive sink failed; falling back to shared: {err:?}"
-                                );
-                                swap_failed = true;
-                                for engine_slot in [
-                                    state.engine.as_mut(),
-                                    state.next_engine.as_mut(),
-                                    state.fading_out_engine.as_mut(),
-                                ]
-                                .into_iter()
-                                .flatten()
-                                {
-                                    match engine_slot.swap_stream(
-                                        &new_device,
-                                        &new_config,
-                                        new_format,
-                                        command_tx.clone(),
-                                        event_tx.clone(),
-                                        false,
-                                        desired_rate,
-                                        exclusive_release_grace_secs,
-                                    ) {
-                                        Ok(actual_rate) => {
-                                            actual_config.sample_rate = actual_rate;
-                                        }
-                                        Err(err) => {
-                                            warn!(
-                                                "DeviceSwap: failed to rebuild shared fallback for track {}: {err:?}",
-                                                engine_slot.track_id
-                                            );
-                                        }
-                                    }
+                            match engine_slot.swap_stream(
+                                &new_device,
+                                &new_config,
+                                new_format,
+                                command_tx.clone(),
+                                event_tx.clone(),
+                                false,
+                                desired_rate,
+                                exclusive_release_grace_secs,
+                            ) {
+                                Ok(actual_rate) => {
+                                    actual_config.sample_rate = actual_rate;
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
+                                        engine_slot.track_id
+                                    );
+                                    swap_failed = true;
                                 }
                             }
                         }
                     }
-                } else {
+
+                    if swap_failed {
+                        warn!(
+                            "DeviceSwap: one or more engines failed to swap; output may be partial"
+                        );
+                    }
+
+                    // Update the runtime's "current device" bindings so subsequent
+                    // Play / PrepareNext calls use the new device too. When
+                    // sample-rate-follow drove a rate change, also update the
+                    // runtime-wide `device_sample_rate` so freshly-cold-started
+                    // engines spin up at the new rate (their initial
+                    // `target_sample_rate` is seeded from this value).
+                    device = new_device;
+                    output_config = actual_config;
+                    output_sample_format = new_format;
+                    state.device_name = new_name.clone();
+                    state.device_sample_rate = output_config.sample_rate;
+                    state.device_channels = output_config.channels;
+                    state.current_exclusive = exclusive;
+                    state.current_sample_rate_follow = sample_rate_follow;
+                    state.current_device_selection = selection;
+                    state.current_exclusive_release_grace_secs = exclusive_release_grace_secs;
+                    state.current_exclusive_latency_mode = exclusive_latency_mode;
+
+                    let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
+                        device_name: new_name,
+                        sample_rate: state.device_sample_rate,
+                        channels: state.device_channels,
+                    });
+                }
+                PlaybackRuntimeCommand::Shutdown => {
+                    stop_all_engines(&mut state);
                     #[cfg(target_os = "windows")]
                     state.exclusive_sink.clear();
-
-                    for engine_slot in [
-                        state.engine.as_mut(),
-                        state.next_engine.as_mut(),
-                        state.fading_out_engine.as_mut(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        match engine_slot.swap_stream(
-                            &new_device,
-                            &new_config,
-                            new_format,
-                            command_tx.clone(),
-                            event_tx.clone(),
-                            false,
-                            desired_rate,
-                            exclusive_release_grace_secs,
-                        ) {
-                            Ok(actual_rate) => {
-                                actual_config.sample_rate = actual_rate;
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "DeviceSwap: failed to rebuild stream for track {}: {err:?}",
-                                    engine_slot.track_id
-                                );
-                                swap_failed = true;
-                            }
-                        }
-                    }
+                    return std::ops::ControlFlow::Break(());
                 }
-
-                if swap_failed {
-                    warn!("DeviceSwap: one or more engines failed to swap; output may be partial");
-                }
-
-                // Update the runtime's "current device" bindings so subsequent
-                // Play / PrepareNext calls use the new device too. When
-                // sample-rate-follow drove a rate change, also update the
-                // runtime-wide `device_sample_rate` so freshly-cold-started
-                // engines spin up at the new rate (their initial
-                // `target_sample_rate` is seeded from this value).
-                device = new_device;
-                output_config = actual_config;
-                output_sample_format = new_format;
-                state.device_name = new_name.clone();
-                state.device_sample_rate = output_config.sample_rate;
-                state.device_channels = output_config.channels;
-                state.current_exclusive = exclusive;
-                state.current_sample_rate_follow = sample_rate_follow;
-                state.current_device_selection = selection;
-                state.current_exclusive_release_grace_secs = exclusive_release_grace_secs;
-                state.current_exclusive_latency_mode = exclusive_latency_mode;
-
-                let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
-                    device_name: new_name,
-                    sample_rate: state.device_sample_rate,
-                    channels: state.device_channels,
-                });
             }
-            PlaybackRuntimeCommand::Shutdown => {
-                stop_all_engines(&mut state);
-                #[cfg(target_os = "windows")]
-                state.exclusive_sink.clear();
-                break;
+            std::ops::ControlFlow::Continue(())
+        }));
+        match outcome {
+            Ok(std::ops::ControlFlow::Break(())) => break,
+            Ok(std::ops::ControlFlow::Continue(())) => {}
+            Err(payload) => {
+                if let std::ops::ControlFlow::Break(()) =
+                    handle_panic_in_runtime_loop(payload, &event_tx, &mut state)
+                {
+                    break;
+                }
             }
         }
     }
@@ -1071,6 +1152,81 @@ fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
     }
 }
 
+fn report_runtime_command_error(
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    command_name: &str,
+    error: anyhow::Error,
+) {
+    let message = format!("{command_name} failed: {error}");
+    warn!("{message}");
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+}
+
+/// Surface a decode/source failure on the pre-buffered next track. The
+/// active track's failure already emits PlaybackRuntimeEvent::Error via
+/// the TrackTerminal::Error branch for the Active slot, but the Next-slot
+/// branch previously only logged - users had no signal that the upcoming
+/// track silently dropped from the queue.
+fn emit_prepared_track_failure(
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    track_id: i64,
+    message: &str,
+) {
+    let surfaced = format!("Pre-buffered track {track_id} failed: {message}");
+    warn!("{surfaced}");
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message: surfaced });
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Handle a panic that escaped the runtime command dispatch. Emits a
+/// PlaybackRuntimeEvent::Error, tears down any active engines under a nested
+/// catch_unwind, and signals whether the loop can safely continue.
+///
+/// If the cleanup itself panics (mutex poisoning, etc.), we emit a final
+/// error event and signal Break - re-entering the dispatch loop with state
+/// that may be corrupt is more dangerous than ending the runtime thread.
+fn handle_panic_in_runtime_loop(
+    payload: Box<dyn std::any::Any + Send>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    state: &mut PlaybackRuntimeLoopState,
+) -> std::ops::ControlFlow<()> {
+    let message = panic_payload_message(payload.as_ref());
+    warn!("playback runtime panicked: {message}");
+
+    let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stop_all_engines(state);
+        #[cfg(target_os = "windows")]
+        state.exclusive_sink.clear();
+    }));
+
+    let _ = event_tx.send(PlaybackRuntimeEvent::Error {
+        message: format!("playback runtime panicked: {message}"),
+    });
+
+    if cleanup_result.is_err() {
+        let _ = event_tx.send(PlaybackRuntimeEvent::Error {
+            message: "playback runtime panic cleanup also panicked; runtime exiting".to_string(),
+        });
+        std::ops::ControlFlow::Break(())
+    } else {
+        // After cleanup tore down every engine slot, signal Stopped so the UI's
+        // playback-state machine snaps back to a clean idle (otherwise it would
+        // remain stuck on the last Started state and the user sees a track
+        // visually playing with no audio until the next user-initiated command).
+        let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn exclusive_render_sources(
     active: Option<&PlaybackEngine>,
@@ -1190,6 +1346,13 @@ fn promote_next_to_active(
     // BEFORE sliding it into state.engine so get_position_ms() immediately
     // reflects the new track starting from 0 instead of the fading-out track's
     // frozen end position.
+    //
+    // If position_source.lock() panics (the only failure mode is a prior
+    // poisoning) the moved-out `next` is dropped without stop() being called
+    // and its decoder thread keeps fetching until natural EOF or the CDN
+    // timeout (~30s bounded). Task 7's catch_unwind around the dispatch loop
+    // catches the panic and emits Error+Stopped. The "preserve frozen-position
+    // UX" win was judged to outweigh the rare-poisoning bandwidth blip.
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
 
     let outgoing = state.engine.take();
@@ -1792,6 +1955,150 @@ mod tests {
         assert_eq!(sources[0].role, ExclusiveRenderRole::Active);
         assert_eq!(sources[1].role, ExclusiveRenderRole::Prepared);
         assert_eq!(sources[2].role, ExclusiveRenderRole::Fading);
+    }
+
+    #[test]
+    fn report_runtime_command_error_emits_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        report_runtime_command_error(
+            &event_tx,
+            "Play",
+            anyhow::anyhow!("output device rejected stream"),
+        );
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Play failed"));
+                assert!(message.contains("output device rejected stream"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
+
+    fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
+        PlaybackRuntimeLoopState {
+            device_name: "test".to_string(),
+            device_sample_rate: 48_000,
+            device_channels: 2,
+            #[cfg(target_os = "windows")]
+            exclusive_sink: ExclusiveRuntimeSink::new(),
+            engine: None,
+            next_engine: None,
+            fading_out_engine: None,
+            current_exclusive: false,
+            current_sample_rate_follow: false,
+            current_device_selection: OutputDeviceSelection::Default,
+            current_exclusive_release_grace_secs:
+                crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
+            current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+        }
+    }
+
+    #[test]
+    fn emit_prepared_track_failure_sends_error_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+
+        emit_prepared_track_failure(&event_tx, 42, "decode failed: malformed packet");
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Pre-buffered track 42 failed"));
+                assert!(message.contains("decode failed: malformed packet"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_panic_in_runtime_loop_clears_state_and_emits_error() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let mut state = test_runtime_loop_state();
+        state.engine = Some(test_engine_with_shared(1, 1));
+        state.next_engine = Some(test_engine_with_shared(2, 1));
+
+        let payload: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("synthetic dispatch panic"));
+        let outcome = handle_panic_in_runtime_loop(payload, &event_tx, &mut state);
+
+        assert!(matches!(outcome, std::ops::ControlFlow::Continue(())));
+        assert!(state.engine.is_none());
+        assert!(state.next_engine.is_none());
+
+        match event_rx.try_recv().expect("error event should be emitted") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("playback runtime panicked"));
+                assert!(message.contains("synthetic dispatch panic"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+        match event_rx
+            .try_recv()
+            .expect("stopped event should follow the error event")
+        {
+            PlaybackRuntimeEvent::Stopped => {}
+            other => panic!("expected stopped event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_recovery_composes_after_command_error_and_panic() {
+        // Composition-level integration test for Phase B/C resilience: prove
+        // that the runtime's recovery primitives (report_runtime_command_error,
+        // stop_all_engines, handle_panic_in_runtime_loop) compose so the
+        // runtime stays responsive across a command-error AND a panic in the
+        // same session. A future plan will extract dispatch_command from
+        // run_runtime_loop's match body to enable per-command coverage; this
+        // test catches a regression that would break the recovery contract
+        // these primitives together provide.
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+        let mut state = test_runtime_loop_state();
+        state.engine = Some(test_engine_with_shared(1, 1));
+        state.next_engine = Some(test_engine_with_shared(2, 1));
+
+        // 1. Simulate a Play command that returned Err: report the error and
+        //    tear down engines (same sequence as run_runtime_loop's Play arm).
+        report_runtime_command_error(&event_tx, "Play", anyhow::anyhow!("transition failed"));
+        stop_all_engines(&mut state);
+        assert!(state.engine.is_none(), "engine slot cleared after error");
+        assert!(state.next_engine.is_none(), "next slot cleared after error");
+        match event_rx.try_recv().expect("error event") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("Play failed"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+
+        // 2. Simulate a subsequent successful Play: engine re-populates.
+        state.engine = Some(test_engine_with_shared(10, 2));
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 10);
+
+        // 3. Simulate a panic in dispatch: handle_panic_in_runtime_loop should
+        //    clear all engines and signal the loop can continue.
+        let payload: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("synthetic dispatch panic"));
+        let outcome = handle_panic_in_runtime_loop(payload, &event_tx, &mut state);
+        assert!(
+            matches!(outcome, std::ops::ControlFlow::Continue(())),
+            "loop should continue after recoverable panic"
+        );
+        assert!(state.engine.is_none(), "engine slot cleared after panic");
+
+        // The panic handler emits Error + Stopped.
+        match event_rx.try_recv().expect("panic error event") {
+            PlaybackRuntimeEvent::Error { message } => {
+                assert!(message.contains("playback runtime panicked"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+        match event_rx.try_recv().expect("stopped event") {
+            PlaybackRuntimeEvent::Stopped => {}
+            other => panic!("expected stopped event, got {other:?}"),
+        }
+
+        // 4. The loop is still operational: state accepts a new engine.
+        state.engine = Some(test_engine_with_shared(20, 3));
+        assert_eq!(state.engine.as_ref().unwrap().track_id, 20);
     }
 
     fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
