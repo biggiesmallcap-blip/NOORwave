@@ -345,6 +345,12 @@ impl PlaybackSharedState {
     /// Clone the stop-signal Arc so source-side threads (TIDAL download,
     /// StreamPipe) can poll it for cancellation without holding the whole
     /// PlaybackSharedState.
+    ///
+    /// The flag is an eventual-consistency cancellation signal: writers
+    /// (engine.stop) use SeqCst, readers may use Relaxed - every reader will
+    /// see the flip within at most one polling tick. Don't promote the
+    /// reads to SeqCst expecting tighter ordering; there's no co-data
+    /// invariant to protect.
     pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stopped)
     }

@@ -1346,6 +1346,13 @@ fn promote_next_to_active(
     // BEFORE sliding it into state.engine so get_position_ms() immediately
     // reflects the new track starting from 0 instead of the fading-out track's
     // frozen end position.
+    //
+    // If position_source.lock() panics (the only failure mode is a prior
+    // poisoning) the moved-out `next` is dropped without stop() being called
+    // and its decoder thread keeps fetching until natural EOF or the CDN
+    // timeout (~30s bounded). Task 7's catch_unwind around the dispatch loop
+    // catches the panic and emits Error+Stopped. The "preserve frozen-position
+    // UX" win was judged to outweigh the rare-poisoning bandwidth blip.
     *position_source.lock().unwrap() = Arc::clone(&next.shared.position_samples);
 
     let outgoing = state.engine.take();
