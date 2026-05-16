@@ -195,16 +195,14 @@ fn seek_route_decision(
                 },
             }
         }
-        Some(playback_runtime::PlaybackSeekResult::Rejected { reason, .. }) => {
-            SeekRouteDecision {
-                persist_position_ms: current_position_ms,
-                response: SeekAckResponse {
-                    accepted: false,
-                    position_ms: current_position_ms,
-                    message: Some(reason),
-                },
-            }
-        }
+        Some(playback_runtime::PlaybackSeekResult::Rejected { reason, .. }) => SeekRouteDecision {
+            persist_position_ms: current_position_ms,
+            response: SeekAckResponse {
+                accepted: false,
+                position_ms: current_position_ms,
+                message: Some(reason),
+            },
+        },
         None => {
             let applied_ms = requested_position_ms.max(0);
             SeekRouteDecision {
@@ -7476,11 +7474,7 @@ async fn set_playback_position(
         None
     };
 
-    let decision = seek_route_decision(
-        runtime_result,
-        current_position_ms,
-        payload.position_ms,
-    );
+    let decision = seek_route_decision(runtime_result, current_position_ms, payload.position_ms);
 
     let snapshot = {
         let state_guard = state.read().await;

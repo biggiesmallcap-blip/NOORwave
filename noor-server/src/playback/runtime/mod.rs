@@ -1392,8 +1392,7 @@ fn validate_seek_target(
     finished: bool,
 ) -> PlaybackSeekResult {
     let applied_ms = requested_ms.max(0);
-    let target_samples =
-        (applied_ms as u64 * sample_rate as u64 * channels.max(1) as u64) / 1000;
+    let target_samples = (applied_ms as u64 * sample_rate as u64 * channels.max(1) as u64) / 1000;
 
     if target_samples <= decoded_samples {
         return PlaybackSeekResult::Accepted {
@@ -1403,8 +1402,7 @@ fn validate_seek_target(
         };
     }
 
-    let current_ms =
-        (decoded_samples * 1000) / (sample_rate as u64 * channels.max(1) as u64);
+    let current_ms = (decoded_samples * 1000) / (sample_rate as u64 * channels.max(1) as u64);
     let reason = if finished {
         "Seek target is beyond the decoded track duration."
     } else {
