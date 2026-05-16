@@ -21,6 +21,7 @@
 		playerState,
 		isScrubbing,
 		position,
+		bufferedMs = 0,
 		isPlaying,
 		shuffleMode,
 		repeatMode,
@@ -53,6 +54,7 @@
 		playerState: string;
 		isScrubbing: boolean;
 		position: number;
+		bufferedMs?: number;
 		isPlaying: boolean;
 		shuffleMode: string;
 		repeatMode: string;
@@ -173,6 +175,7 @@
 	<NowPlayingProgress
 		position={position}
 		duration={track?.duration_ms ?? 0}
+		bufferedMs={bufferedMs}
 		onSeek={onSeek}
 		onScrubStart={onScrubStart}
 		onScrubEnd={onScrubEnd}

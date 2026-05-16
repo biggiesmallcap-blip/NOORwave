@@ -241,6 +241,14 @@ if (typeof window !== 'undefined') {
 
 export const isPlaying = writable(false);
 export const position = writable(0);
+/**
+ * How many ms of the current track are decoded into the playback buffer.
+ * Drives the buffered-bar overlay in the scrubber and clamps the user's
+ * seek max so a drag past the loaded region is impossible (the route-side
+ * 409 ack is the backstop). Updated by `applyState` + a 1 Hz refresher
+ * that polls `/api/playback/state` while a track is loading.
+ */
+export const buffered = writable(0);
 export const volume = writable(1.0);
 export const volumeBeforeMute = writable<number | null>(null);
 export const automixEnabled = writable(false);
@@ -286,6 +294,43 @@ isPlaying.subscribe((playing) => {
 		stopPositionTicker();
 	}
 });
+
+// ─── 1 Hz buffered refresher ─────────────────────────────────────────────────
+// While a track is active and the decoder hasn't caught up to the duration,
+// poll `/api/playback/state` once per second so the buffered-bar overlay
+// grows live. Auto-stops when buffered >= duration, when the track changes,
+// or when no track is active. The `PlaybackBuffer` on the server only
+// appends (never compacts mid-track), so the `>=` stop condition is sound.
+let _bufferedRefresher: ReturnType<typeof setTimeout> | null = null;
+const BUFFERED_REFRESH_INTERVAL_MS = 1000;
+
+function clearBufferedRefresher() {
+	if (_bufferedRefresher !== null) {
+		clearTimeout(_bufferedRefresher);
+		_bufferedRefresher = null;
+	}
+}
+
+function scheduleBufferedRefreshIfNeeded() {
+	clearBufferedRefresher();
+	const track = get(currentTrack);
+	const duration = track?.duration_ms ?? 0;
+	if (!track || duration <= 0) return;
+	if (get(buffered) >= duration) return;
+	_bufferedRefresher = setTimeout(async () => {
+		try {
+			const snapshot = await api.getPlaybackState();
+			// applyState writes `buffered` and recurses into scheduling, so
+			// the timer chain runs as long as buffered_ms < duration_ms.
+			applyState(snapshot.state);
+		} catch (_err) {
+			// Transient fetch failures (sleep, network blip) shouldn't toast.
+			// Re-schedule so we recover on the next interval if the track is
+			// still active when connectivity returns.
+			scheduleBufferedRefreshIfNeeded();
+		}
+	}, BUFFERED_REFRESH_INTERVAL_MS);
+}
 export const shuffleMode = writable<PlaybackState['shuffle_mode']>('off');
 export const repeatMode = writable<PlaybackState['repeat_mode']>('off');
 export const crossfadeMs = writable(0);
@@ -320,6 +365,7 @@ function applyState(state: PlaybackState) {
 	isPlaying.set(state.is_playing);
 	position.set(state.position_ms);
 	anchorPositionTicker(state.position_ms);
+	buffered.set(state.buffered_ms ?? 0);
 	volume.set(state.volume);
 	shuffleMode.set(state.shuffle_mode);
 	repeatMode.set(state.repeat_mode);
@@ -328,6 +374,7 @@ function applyState(state: PlaybackState) {
 	automixDiscoverNew.set(state.automix_discover_new);
 	automixUseLearning.set(state.automix_use_learning);
 	automixAllowExternal.set(state.automix_allow_external);
+	scheduleBufferedRefreshIfNeeded();
 }
 
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
@@ -471,6 +518,20 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		applyState(result.state);
 		noteSuccess();
 	} catch (error) {
+		// HTTP 409 = route-side seek ack: target was past the decoded buffer.
+		// The frontend scrubber clamps to bufferedMs so this should be
+		// unreachable in practice; if another client (mobile /remote) or a
+		// race makes it fire, apply the corrective live snapshot the server
+		// included in the body and stay silent (no error toast - the seek
+		// just didn't happen, the user can see the scrubber stayed put).
+		if (error instanceof ApiError && error.status === 409) {
+			const body = error.body as { state?: PlaybackState } | null;
+			if (body?.state) {
+				applyState(body.state);
+				noteSuccess();
+				return;
+			}
+		}
 		setError('seek', error, () => setPlayerPosition(nextPositionMs));
 	}
 }
