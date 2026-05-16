@@ -75,6 +75,19 @@ fn write_output_buffer<T>(
 
     let volume = f32::from_bits(shared.volume_ctl.load(Ordering::Relaxed));
 
+    // Real-time safety contract for this critical section:
+    //   * No IO, no syscalls, no allocations on the hot path.
+    //   * drain_into is O(data.len()) and data.len() == one CPAL callback
+    //     buffer (~256-1024 samples), bounded copy.
+    //   * Rare events inside this guard (started/finished/near-end/crossfade
+    //     event sends, underrun and seek-reject warn calls) each fire at
+    //     most once per buffer-instance per event class, so allocation
+    //     amortizes to zero across the steady-state callback rate.
+    //   * The off-thread growth telemetry (Task 13) is a load + conditional
+    //     CAS, no allocation.
+    // A future refactor that adds IO, an unbounded loop, or a per-callback
+    // allocation inside this guard would regress to dropouts/underruns -
+    // keep the critical section bounded.
     let mut guard = match shared.buffer.lock() {
         Ok(guard) => guard,
         Err(_) => {
