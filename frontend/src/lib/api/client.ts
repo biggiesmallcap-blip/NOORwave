@@ -598,6 +598,13 @@ export interface PlaybackState {
 	automix_discover_new: boolean;
 	automix_use_learning: boolean;
 	automix_allow_external: boolean;
+	/**
+	 * How many ms of the currently-playing track are decoded into the
+	 * playback buffer. Optional because the backend serializes it with
+	 * `#[serde(default)]` and older JSON payloads may omit it. Read sites
+	 * should `?? 0` and treat missing as "unknown / no buffer info yet".
+	 */
+	buffered_ms?: number;
 }
 
 export interface PlaybackSnapshot {
@@ -1416,9 +1423,19 @@ async function fetchApiResponse(
 }
 
 export class ApiError extends Error {
-	constructor(public status: number, message: string) {
+	/**
+	 * Parsed response body, if available. Carries the corrective state for
+	 * 409 responses from `POST /api/playback/position` (the route-side seek
+	 * ack returns `{ state: PlaybackState }`) so the caller's catch block
+	 * can `applyState(body.state)` instead of routing the failure into the
+	 * generic error-toast path. Best-effort: parse failures leave this null.
+	 */
+	public body: unknown;
+
+	constructor(public status: number, message: string, body?: unknown) {
 		super(message);
 		this.name = 'ApiError';
+		this.body = body ?? null;
 	}
 }
 
@@ -1436,7 +1453,7 @@ async function fetchApi<T>(
 			errorBody?.error ??
 			errorBody?.status ??
 			`API error: ${resp.status}`;
-		throw new ApiError(resp.status, message);
+		throw new ApiError(resp.status, message, errorBody);
 	}
 	return resp.json();
 }
