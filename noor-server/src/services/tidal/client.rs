@@ -758,48 +758,16 @@ impl TidalClient {
     pub async fn get_page_modules(&self, page_path: &str) -> Result<Vec<TidalHomeModule>> {
         let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
         let payload: serde_json::Value = self.get_json(&url).await?;
-        // Diagnostic: charts/moods slugs were assumptions in the original plan.
-        // Log the wire-shape so we can confirm whether the endpoint exists, the
-        // payload has a `rows[]`, and how many module-shaped entries it carries
-        // before the parser starts dropping them. Remove once slugs are firmed
-        // up (FOLLOWUPS.md).
-        let top_keys: Vec<&str> = payload
-            .as_object()
-            .map(|o| o.keys().map(String::as_str).collect())
-            .unwrap_or_default();
-        let row_count = payload
-            .get("rows")
-            .and_then(serde_json::Value::as_array)
-            .map(|r| r.len())
-            .unwrap_or(0);
-        let first_module_summary = payload
-            .get("rows")
-            .and_then(|r| r.get(0))
-            .and_then(|row| row.get("modules"))
-            .and_then(|m| m.get(0))
-            .map(|m| {
-                let title = m
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("<no title>");
-                let kind = m
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("<no type>");
-                let item_count = m
-                    .get("pagedList")
-                    .and_then(|p| p.get("items"))
-                    .and_then(serde_json::Value::as_array)
-                    .or_else(|| m.get("items").and_then(serde_json::Value::as_array))
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                format!("title={title:?}, type={kind:?}, items={item_count}")
-            })
-            .unwrap_or_else(|| "<no modules>".to_string());
-        tracing::warn!(
-            "TIDAL pages probe: path={page_path}, top_keys={top_keys:?}, rows={row_count}, first_module=[{first_module_summary}]"
-        );
         Ok(Self::parse_home_modules(&payload))
+    }
+
+    /// Same fetch as `get_page_modules` but returns the unparsed upstream
+    /// payload. Used by the `?debug=raw` debug query on the page route to
+    /// expose TIDAL's module-type vocabulary while we firm up which slugs and
+    /// shapes we need to handle.
+    pub async fn get_page_raw(&self, page_path: &str) -> Result<serde_json::Value> {
+        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
+        self.get_json(&url).await
     }
 
     fn parse_home_modules(payload: &serde_json::Value) -> Vec<TidalHomeModule> {
