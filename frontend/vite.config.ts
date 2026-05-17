@@ -1,8 +1,16 @@
+import { readFileSync } from 'node:fs';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+const tauriConfig = JSON.parse(
+	readFileSync(new URL('../noor-app/tauri.conf.json', import.meta.url), 'utf8')
+) as { version?: string };
+
 export default defineConfig({
 	plugins: [sveltekit()],
+	define: {
+		'import.meta.env.NOOR_APP_VERSION': JSON.stringify(tauriConfig.version ?? '0.0.0')
+	},
 	build: {
 		// hls.js is dynamically imported by VideoPlayer.svelte and lands in its own
 		// chunk (~523 kB raw / 162 kB gzip). It only loads when the user streams HLS,

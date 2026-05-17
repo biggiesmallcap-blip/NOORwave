@@ -33,21 +33,62 @@ def export_checked(conn: sqlite3.Connection, destination: Path) -> int:
 def export_genres(conn: sqlite3.Connection, destination: Path) -> int:
     rows = conn.execute(
         """
-        SELECT t.tidal_id, g.slug, tg.confidence
+        SELECT t.tidal_id, tg.source, g.slug, tg.confidence
         FROM track_genres tg
         JOIN tracks t ON t.id = tg.track_id
         JOIN genres g ON g.id = tg.genre_id
-        WHERE tg.source = 'musicbrainz'
+        WHERE tg.source IN ('musicbrainz', 'lastfm')
           AND t.tidal_id IS NOT NULL
-        ORDER BY t.tidal_id, g.slug
+        ORDER BY t.tidal_id, tg.source, g.slug
         """
     )
     count = 0
     with destination.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["tidal_id", "genre_slug", "confidence"])
-        for tidal_id, genre_slug, confidence in rows:
-            writer.writerow([tidal_id, genre_slug, confidence])
+        writer.writerow(["tidal_id", "source", "genre_slug", "confidence"])
+        for tidal_id, source, genre_slug, confidence in rows:
+            writer.writerow([tidal_id, source, genre_slug, confidence])
+            count += 1
+    return count
+
+
+def export_lastfm_checked(conn: sqlite3.Connection, destination: Path) -> int:
+    rows = conn.execute(
+        """
+        SELECT t.tidal_id
+        FROM lastfm_checked lc
+        JOIN tracks t ON t.id = lc.track_id
+        WHERE t.tidal_id IS NOT NULL
+        ORDER BY t.tidal_id
+        """
+    )
+    count = 0
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["tidal_id"])
+        for (tidal_id,) in rows:
+            writer.writerow([tidal_id])
+            count += 1
+    return count
+
+
+def export_context_tags(conn: sqlite3.Connection, destination: Path) -> int:
+    rows = conn.execute(
+        """
+        SELECT t.tidal_id, tct.tag, tct.normalized_tag, tct.context, tct.confidence
+        FROM track_context_tags tct
+        JOIN tracks t ON t.id = tct.track_id
+        WHERE tct.source = 'lastfm'
+          AND t.tidal_id IS NOT NULL
+        ORDER BY t.tidal_id, tct.context, tct.normalized_tag
+        """
+    )
+    count = 0
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["tidal_id", "tag", "normalized_tag", "context", "confidence"])
+        for tidal_id, tag, normalized_tag, context, confidence in rows:
+            writer.writerow([tidal_id, tag, normalized_tag, context, confidence])
             count += 1
     return count
 
@@ -69,13 +110,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     checked_path = out_dir / "musicbrainz_checked.csv"
+    lastfm_checked_path = out_dir / "lastfm_checked.csv"
     genres_path = out_dir / "musicbrainz_genres.csv"
+    context_tags_path = out_dir / "lastfm_context_tags.csv"
     manifest_path = out_dir / "manifest.json"
 
     conn = sqlite3.connect(db_path)
     try:
         checked_count = export_checked(conn, checked_path)
+        lastfm_checked_count = export_lastfm_checked(conn, lastfm_checked_path)
         genre_count = export_genres(conn, genres_path)
+        context_tag_count = export_context_tags(conn, context_tags_path)
     finally:
         conn.close()
 
@@ -84,15 +129,21 @@ def main() -> None:
         "db_path": str(db_path),
         "checked_rows": checked_count,
         "genre_rows": genre_count,
+        "lastfm_checked_rows": lastfm_checked_count,
+        "context_tag_rows": context_tag_count,
         "files": {
             "checked": checked_path.name,
             "genres": genres_path.name,
+            "lastfm_checked": lastfm_checked_path.name,
+            "context_tags": context_tags_path.name,
         },
     }
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     print(f"Exported {checked_count} checked tracks to {checked_path}")
+    print(f"Exported {lastfm_checked_count} Last.fm checked tracks to {lastfm_checked_path}")
     print(f"Exported {genre_count} genre rows to {genres_path}")
+    print(f"Exported {context_tag_count} context tag rows to {context_tags_path}")
     print(f"Wrote manifest to {manifest_path}")
 
 

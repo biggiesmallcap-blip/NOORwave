@@ -1,62 +1,81 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod config;
+mod installed_updater;
 mod media_keys;
+mod migration;
+mod paths;
 mod sidecar;
+mod sidecar_paths;
 mod tray;
 mod updater;
 
 use sidecar::SidecarState;
+use sidecar_paths::SidecarPaths;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::Manager;
 
 fn main() {
     let cfg = config::load();
     let state = SidecarState::new(cfg.host_mode);
-
-    // Spawn noor-server FIRST, then block briefly until it answers /api/ping
-    // BEFORE Tauri opens the webview. This avoids the WebView2 cold-start
-    // race entirely: by the time the window's initial URL is hit, the
-    // server is already serving, so there's no connection-refused failure
-    // to cache and no need for a splash + post-ready re-navigate.
-    sidecar::spawn_server(&state);
-    sidecar::wait_for_ready(&state);
-
     let state_for_setup = state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state.clone() as Arc<SidecarState>)
+        .invoke_handler(tauri::generate_handler![
+            commands::check_for_updates_now,
+            commands::get_update_state,
+            commands::get_install_mode,
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            let _state2 = state_for_setup.clone();
+            let installed = paths::is_installed_mode();
 
-            // WebView2 on Windows occasionally paints a blank window on the
-            // FIRST navigation even when the URL responded successfully. Only
-            // a hard refresh (Ctrl+Shift+R) gets the renderer to actually paint.
-            // Reproducible across releases; manual reload is the only known
-            // reliable trigger. Force it once shortly after launch — the brief
-            // flicker is preferable to a permanently blank window.
-            let reload_handle = handle.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(1200));
-                if let Some(win) = reload_handle.get_webview_window("main") {
-                    let _ = win.eval("location.reload();");
-                }
-            });
+            let _ = state_for_setup.paths.set(SidecarPaths::resolve(&handle));
 
-            // Check for updates in background.
-            let update_handle = handle.clone();
-            std::thread::spawn(move || {
-                if let Some(info) = updater::check() {
-                    tray::notify_update(&update_handle, &info.version, info.url);
-                }
-            });
+            if installed && !paths::data_dir().join("noor.db").exists() {
+                migration::prompt_and_import(&handle);
+                let reloaded = config::load();
+                *state_for_setup.host_mode.lock().unwrap() = reloaded.host_mode;
+            }
+
+            sidecar::spawn_server(&state_for_setup);
+            sidecar::wait_for_ready(&state_for_setup);
+
+            tauri::WebviewWindowBuilder::new(
+                &handle,
+                "main",
+                tauri::WebviewUrl::External(
+                    "http://127.0.0.1:3334".parse().expect("valid app url"),
+                ),
+            )
+            .title("NOORwave")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(720.0, 500.0)
+            .resizable(true)
+            .decorations(true)
+            .visible(true)
+            .build()?;
 
             tray::setup_tray(app)?;
             media_keys::register(app)?;
+
+            let update_handle = handle.clone();
+            std::thread::spawn(move || {
+                if installed {
+                    installed_updater::background_check(&update_handle);
+                } else if let Some(info) = updater::check() {
+                    tray::notify_update(
+                        &update_handle,
+                        info.version,
+                        tray::UpdateAction::OpenUrl(info.url),
+                    );
+                }
+            });
 
             Ok(())
         })

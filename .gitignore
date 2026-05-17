@@ -70,3 +70,4 @@ noor-app/icons_old/
 .repowise/
 .repowise/.env
 .mcp.json
+.tauri/

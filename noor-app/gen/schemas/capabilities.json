@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Main window access for NOORwave's localhost UI.","remote":{"urls":["http://127.0.0.1:3334/**"]},"local":true,"windows":["main"],"permissions":["core:webview:allow-set-webview-zoom","opener:default"]}}
+{"default":{"identifier":"default","description":"Main window access for NOORwave's localhost UI.","remote":{"urls":["http://127.0.0.1:3334/**"]},"local":true,"windows":["main"],"permissions":["core:webview:allow-set-webview-zoom","core:event:default","opener:default","updater:default","dialog:default"]}}

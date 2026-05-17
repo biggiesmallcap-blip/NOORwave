@@ -19,7 +19,7 @@ def load_genre_map(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def import_checked(
-    conn: sqlite3.Connection, checked_path: Path, track_map: dict[int, int]
+    conn: sqlite3.Connection, checked_path: Path, table: str, track_map: dict[int, int]
 ) -> tuple[int, int]:
     inserted = 0
     skipped = 0
@@ -33,7 +33,7 @@ def import_checked(
                 continue
             before = conn.total_changes
             conn.execute(
-                "INSERT OR IGNORE INTO musicbrainz_checked (track_id) VALUES (?)",
+                f"INSERT OR IGNORE INTO {table} (track_id) VALUES (?)",
                 (track_id,),
             )
             inserted += int(conn.total_changes > before)
@@ -53,6 +53,9 @@ def import_genres(
         reader = csv.DictReader(handle)
         for row in reader:
             tidal_id = int(row["tidal_id"])
+            source = row.get("source") or "musicbrainz"
+            if source not in {"musicbrainz", "lastfm"}:
+                raise ValueError(f"Unsupported portable genre source: {source}")
             genre_slug = row["genre_slug"]
             confidence = float(row["confidence"])
 
@@ -70,12 +73,49 @@ def import_genres(
             conn.execute(
                 """
                 INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence)
-                VALUES (?, ?, 'musicbrainz', ?)
+                VALUES (?, ?, ?, ?)
                 """,
-                (track_id, genre_id, confidence),
+                (track_id, genre_id, source, confidence),
             )
             inserted += int(conn.total_changes > before)
     return inserted, skipped_tracks, skipped_genres
+
+
+def import_context_tags(
+    conn: sqlite3.Connection,
+    context_path: Path,
+    track_map: dict[int, int],
+) -> tuple[int, int]:
+    inserted = 0
+    skipped_tracks = 0
+    with context_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            tidal_id = int(row["tidal_id"])
+            track_id = track_map.get(tidal_id)
+            if track_id is None:
+                skipped_tracks += 1
+                continue
+
+            before = conn.total_changes
+            conn.execute(
+                """
+                INSERT INTO track_context_tags
+                    (track_id, tag, normalized_tag, context, source, confidence)
+                VALUES (?, ?, ?, ?, 'lastfm', ?)
+                ON CONFLICT(track_id, normalized_tag, context, source) DO UPDATE SET
+                    confidence = MAX(confidence, excluded.confidence)
+                """,
+                (
+                    track_id,
+                    row["tag"],
+                    row["normalized_tag"],
+                    row["context"],
+                    float(row["confidence"]),
+                ),
+            )
+            inserted += int(conn.total_changes > before)
+    return inserted, skipped_tracks
 
 
 def main() -> None:
@@ -93,7 +133,9 @@ def main() -> None:
     db_path = Path(args.db)
     source_dir = Path(args.from_dir)
     checked_path = source_dir / "musicbrainz_checked.csv"
+    lastfm_checked_path = source_dir / "lastfm_checked.csv"
     genres_path = source_dir / "musicbrainz_genres.csv"
+    context_path = source_dir / "lastfm_context_tags.csv"
 
     if not checked_path.exists():
         raise SystemExit(f"Missing checked export: {checked_path}")
@@ -105,19 +147,40 @@ def main() -> None:
         track_map = load_track_map(conn)
         genre_map = load_genre_map(conn)
         with conn:
-            checked_inserted, checked_skipped = import_checked(conn, checked_path, track_map)
+            checked_inserted, checked_skipped = import_checked(
+                conn, checked_path, "musicbrainz_checked", track_map
+            )
+            if lastfm_checked_path.exists():
+                lastfm_checked_inserted, lastfm_checked_skipped = import_checked(
+                    conn, lastfm_checked_path, "lastfm_checked", track_map
+                )
+            else:
+                lastfm_checked_inserted = 0
+                lastfm_checked_skipped = 0
             genre_inserted, track_skipped, genre_skipped = import_genres(
                 conn, genres_path, track_map, genre_map
             )
+            if context_path.exists():
+                context_inserted, context_skipped = import_context_tags(
+                    conn, context_path, track_map
+                )
+            else:
+                context_inserted = 0
+                context_skipped = 0
     finally:
         conn.close()
 
     print(f"Inserted {checked_inserted} checked markers; skipped {checked_skipped} missing tracks")
     print(
+        f"Inserted {lastfm_checked_inserted} Last.fm checked markers; "
+        f"skipped {lastfm_checked_skipped} missing tracks"
+    )
+    print(
         "Inserted "
         f"{genre_inserted} genre rows; skipped {track_skipped} missing tracks and "
         f"{genre_skipped} missing genres"
     )
+    print(f"Inserted {context_inserted} context tag rows; skipped {context_skipped} missing tracks")
 
 
 if __name__ == "__main__":
