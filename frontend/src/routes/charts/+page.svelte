@@ -4,6 +4,7 @@
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
   // Editorial Spotify chart playlists. Stable IDs that change daily/weekly
   // server-side but the playlist identity is fixed. Click navigates to the
@@ -81,9 +82,12 @@
           {:else}
             <div class="art fallback">M</div>
           {/if}
+          <PlayOverlay position="center" size="md" />
         </div>
-        <span class="card-title">{m?.title ?? c.title}</span>
-        <span class="card-sub">{c.sub}</span>
+        <div class="meta">
+          <p class="title">{m?.title ?? c.title}</p>
+          <span class="sub">{c.sub}</span>
+        </div>
       </a>
     {/each}
   </div>
@@ -99,7 +103,7 @@
   .block-sub { margin: 0 0 var(--space-3); font-size: var(--font-size-sm); color: var(--text-secondary); }
   .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: var(--gap); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); gap: var(--gap); }
   .card {
     display: flex;
     flex-direction: column;
@@ -114,12 +118,14 @@
     transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
     box-sizing: border-box;
   }
-  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
-  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+  .card:hover :global(.play-overlay), .card:focus-visible :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
   .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
   .card:hover .art { transform: scale(1.05); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
-  .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+  .meta { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+  .meta .title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
+  .meta .sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

@@ -4,6 +4,7 @@
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
 	const PREVIEW_LIMIT = 8;
 
@@ -48,8 +49,9 @@
 						{:else}
 							<div class="art fallback">~</div>
 						{/if}
+						<PlayOverlay position="center" size="md" />
 					</div>
-					<span class="card-title">{c.title}</span>
+					<p class="card-title">{c.title}</p>
 				</a>
 			{/each}
 		</div>
@@ -80,9 +82,10 @@
 	.rail::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }
 	.rail::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 	.card {
-		--card-w: clamp(120px, 11vw, 168px);
-		flex: 0 0 var(--card-w);
-		width: var(--card-w);
+		flex: 0 0 180px;
+		width: 180px;
+		min-width: 180px;
+		max-width: 180px;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
@@ -97,11 +100,12 @@
 		box-sizing: border-box;
 		scroll-snap-align: start;
 	}
-	.card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+	.card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
 	.card:focus-visible { border-color: var(--accent-line); }
-	.art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+	.card:hover :global(.play-overlay), .card:focus-visible :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+	.art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
 	.art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
 	.card:hover .art { transform: scale(1.05); }
-	.art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
-	.card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+	.art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+	.card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
 </style>

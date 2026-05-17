@@ -11,6 +11,7 @@
   } from '$lib/stores/tidal-moods-cache';
   import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
   import { SPOTIFY_MOOD_CATEGORIES } from '$lib/components/moods/spotify-moods-data';
+  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -81,8 +82,9 @@
             {:else}
               <div class="art fallback">~</div>
             {/if}
+            <PlayOverlay position="center" size="md" />
           </div>
-          <span class="card-title">{c.title}</span>
+          <p class="card-title">{c.title}</p>
         </a>
       {/each}
     </div>
@@ -117,7 +119,7 @@
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: var(--gap); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); gap: var(--gap); }
   .card {
     display: flex;
     flex-direction: column;
@@ -132,13 +134,14 @@
     transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
     box-sizing: border-box;
   }
-  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
-  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+  .card:hover :global(.play-overlay), .card:focus-visible :global(.play-overlay) { opacity: 1; transform: translateY(0); }
+  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
   .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
   .card:hover .art { transform: scale(1.05); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
-  .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+  .card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
 
   .spotify-block { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-6); }
   .block-header { display: flex; flex-direction: column; gap: 4px; }
