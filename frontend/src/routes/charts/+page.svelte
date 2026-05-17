@@ -3,6 +3,7 @@
   import { api } from '$lib/api/client';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
+  import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
 
   // Editorial Spotify chart playlists. Stable IDs that change daily/weekly
   // server-side but the playlist identity is fixed. Click navigates to the
@@ -52,10 +53,19 @@
 
 <div class="page">
   <header class="page-header">
-    <p class="eyebrow">Spotify</p>
-    <h1>Charts</h1>
-    <p class="sub">Top playlists from Spotify. Click any to play on TIDAL.</p>
+    <p class="eyebrow">Charts</p>
+    <h1>What's hot</h1>
+    <p class="sub">Worldwide trending tracks from Last.fm and editorial Spotify chart playlists.</p>
   </header>
+
+  <section class="trending-block">
+    <TrendingShelf limit={12} />
+  </section>
+
+  <section>
+    <h2 class="block-title">Spotify chart playlists</h2>
+    <p class="block-sub">Click any to play on TIDAL.</p>
+  </section>
 
   <div class="grid">
     {#each CHARTS as c (c.id)}
@@ -83,6 +93,9 @@
   .eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--service-spotify); margin: 0; font-weight: var(--font-weight-bold); }
   .page-header h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; }
   .page-header .sub { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
+  .block-title { margin: 0 0 4px; font-size: var(--font-size-lg); font-weight: var(--font-weight-bold); color: var(--text-primary); }
+  .block-sub { margin: 0 0 var(--space-3); font-size: var(--font-size-sm); color: var(--text-secondary); }
+  .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--gap); }
   .card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; transition: background var(--motion-fast) ease; }

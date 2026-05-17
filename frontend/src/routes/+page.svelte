@@ -6,18 +6,16 @@
 		ApiError,
 		type RSSFeedItem,
 		type ReleaseItem,
-		type HomePickTrack,
 	} from '$lib/api/client';
-	import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
+	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
 	// Home page data
 	let releases = $state<ReleaseItem[]>([]);
 	let releasesNotConfigured = $state(false);
-	let genrePicks = $state<HomePickTrack[]>([]);
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
 
@@ -25,7 +23,6 @@
 	let error = $state<string | null>(null);
 	let sectionsLoading = $state({
 		releases: true,
-		picks: true,
 		articles: true,
 		news: true
 	});
@@ -38,7 +35,6 @@
 		error = null;
 		// Load all sections in parallel — each handles its own error state.
 		loadReleases();
-		loadPicks();
 		loadArticles();
 		loadNews();
 	}
@@ -71,19 +67,6 @@
 			}
 		} finally {
 			sectionsLoading.releases = false;
-		}
-	}
-
-	async function loadPicks() {
-		sectionsLoading.picks = true;
-		try {
-			const data = await api.getHomePicks();
-			genrePicks = data.genre_variety ?? [];
-		} catch (e) {
-			console.error('Failed to load picks:', e);
-			genrePicks = [];
-		} finally {
-			sectionsLoading.picks = false;
 		}
 	}
 
@@ -177,24 +160,10 @@
 		<!-- Personal Radio Stations (TIDAL) -->
 		<PersonalRadioShelf />
 
-		<!-- Unified Trending shelf (Worldwide / Country / Genre / Tidal) -->
-		<section class="discovery-section" data-section="trending">
-			<TrendingShelf limit={12} />
-
-			{#if genrePicks.length > 0}
-				<div class="picks-subsection">
-					<h3 class="subsection-title">Genre variety</h3>
-					<div class="genre-pills">
-						{#each genrePicks as pick, i (`${pick.id}-${i}`)}
-							<div class="genre-pill glass-tile">
-								<span class="genre-name">{pick.genre}</span>
-								<span class="genre-track">{pick.title}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-		</section>
+		<!-- Moods preview rail. Pulls the first chunk of categories from
+		     /api/tidal/moods and links each tile to /moods/[slug]. Full
+		     listing lives at /moods. -->
+		<HomeMoodsRail />
 
 		<!-- New Releases (now below Trending, sourced from Last.fm JSON API). -->
 		<section class="discovery-section" data-section="new-releases">
@@ -438,50 +407,6 @@
 		margin: 0;
 	}
 
-	.picks-subsection {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.subsection-title {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-secondary);
-		margin: 0;
-	}
-
-	.genre-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
-	}
-
-	.genre-pill {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 10px 14px;
-		border-radius: 8px;
-	}
-
-	.genre-name {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		color: var(--accent);
-	}
-
-	.genre-track {
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 200px;
-	}
-
 	/* Article cards */
 	.article-card {
 		flex: 0 0 320px;
@@ -679,16 +604,6 @@
 
 		.article-card {
 			flex: 0 0 260px;
-		}
-
-		.genre-pills {
-			flex-wrap: nowrap;
-			overflow-x: auto;
-			padding-bottom: 4px;
-		}
-
-		.genre-pill {
-			flex-shrink: 0;
 		}
 	}
 </style>
