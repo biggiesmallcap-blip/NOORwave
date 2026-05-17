@@ -90,7 +90,7 @@
     text-decoration: none;
     color: inherit;
     cursor: pointer;
-    transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
+    transition: background var(--motion-base), border-color var(--motion-base);
     box-sizing: border-box;
     scroll-snap-align: start;
   }
@@ -98,7 +98,7 @@
   .card:focus-visible { border-color: var(--accent-line); }
 
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base) ease; }
+  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base); }
   .card:hover .art { transform: scale(1.05); }
   .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
 
