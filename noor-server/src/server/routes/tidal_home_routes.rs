@@ -472,10 +472,27 @@ async fn fetch_page_modules(
         tokens.country_code.clone(),
     );
     if debug_raw {
-        let raw = client.get_page_raw(&page_path).await.map_err(|e| {
-            tracing::warn!("TIDAL get_page_raw({page_path}) failed: {e}");
-            StatusCode::BAD_GATEWAY
-        })?;
+        let raw = match client.get_page_raw(&page_path).await {
+            Ok(r) => r,
+            Err(e) if super::error_looks_like_auth(&e) => {
+                let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                    .await
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                let retry = TidalClient::with_http(
+                    tidal_http_client.clone(),
+                    refreshed.access_token.clone(),
+                    refreshed.country_code.clone(),
+                );
+                retry.get_page_raw(&page_path).await.map_err(|e| {
+                    tracing::warn!("TIDAL get_page_raw({page_path}) failed after refresh: {e}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            }
+            Err(e) => {
+                tracing::warn!("TIDAL get_page_raw({page_path}) failed: {e}");
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        };
         return Ok(Json(
             json!({ "raw": raw, "source": "tidal", "page": page_path }),
         ));
