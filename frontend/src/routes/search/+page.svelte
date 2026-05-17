@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SearchResults } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SpotifyArtistSearchItem, type SearchResults } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
@@ -60,8 +60,17 @@
   let loadingTidal = $state(false)
   let loadingTidalPlaylists = $state(false)
   let loadingSpotifyPlaylists = $state(false)
+  let loadingSpotifyTracks = $state(false)
+  let loadingSpotifyAlbums = $state(false)
+  let loadingSpotifyArtists = $state(false)
   const providerSearchDone = $derived(
-    !loadingLocal && !loadingTidal && !loadingTidalPlaylists && !loadingSpotifyPlaylists
+    !loadingLocal
+    && !loadingTidal
+    && !loadingTidalPlaylists
+    && !loadingSpotifyPlaylists
+    && !loadingSpotifyTracks
+    && !loadingSpotifyAlbums
+    && !loadingSpotifyArtists
   )
   let error = $state<string | null>(null)
   let failedArtistImages = $state(new Set<number>())
@@ -94,6 +103,9 @@
   let localPlaylists = $state<Playlist[]>([])
   let tidalPlaylistResults = $state<TidalSearchPlaylist[]>([])
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
+  let spotifyTrackResults = $state<SpotifyTrackSearchItem[]>([])
+  let spotifyAlbumResults = $state<SpotifyAlbumSearchItem[]>([])
+  let spotifyArtistResults = $state<SpotifyArtistSearchItem[]>([])
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
@@ -108,6 +120,12 @@
   let hasMoreTidal = $state(true)
   let hasMoreTidalPlaylists = $state(true)
   let hasMoreSpotifyPlaylists = $state(true)
+  let spotifyTrackOffset = $state(0)
+  let spotifyAlbumOffset = $state(0)
+  let spotifyArtistOffset = $state(0)
+  let hasMoreSpotifyTracks = $state(true)
+  let hasMoreSpotifyAlbums = $state(true)
+  let hasMoreSpotifyArtists = $state(true)
   let loadingMore = $state(false)
   let lastQuery = $state('')
 
@@ -165,6 +183,9 @@
     loadingTidal = false
     loadingTidalPlaylists = false
     loadingSpotifyPlaylists = false
+    loadingSpotifyTracks = false
+    loadingSpotifyAlbums = false
+    loadingSpotifyArtists = false
   }
 
   function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
@@ -232,15 +253,27 @@
           results = null
           tidalPlaylistResults = []
           spotifyPlaylistResults = []
+          spotifyTrackResults = []
+          spotifyAlbumResults = []
+          spotifyArtistResults = []
         } else {
           audioResults = null
           // Reset paging — every fresh query starts at offset 0.
           tidalOffset = 0
           tidalPlaylistOffset = 0
           spotifyPlaylistOffset = 0
+          spotifyTrackOffset = 0
+          spotifyAlbumOffset = 0
+          spotifyArtistOffset = 0
           hasMoreTidal = true
           hasMoreTidalPlaylists = true
           hasMoreSpotifyPlaylists = true
+          hasMoreSpotifyTracks = true
+          hasMoreSpotifyAlbums = true
+          hasMoreSpotifyArtists = true
+          spotifyTrackResults = []
+          spotifyAlbumResults = []
+          spotifyArtistResults = []
           lastQuery = q
           const cacheKey = q.toLowerCase()
           const cached = resultCache.get(cacheKey)
@@ -248,6 +281,9 @@
           loadingTidal = !cached
           loadingTidalPlaylists = true
           loadingSpotifyPlaylists = true
+          loadingSpotifyTracks = true
+          loadingSpotifyAlbums = true
+          loadingSpotifyArtists = true
 
           const localPromise = api.search(q, SEARCH_PAGE_SIZE)
           const tracksPromise = cached
@@ -255,6 +291,9 @@
             : api.searchTidal(q, SEARCH_PAGE_SIZE, signal, 0)
           const tidalPlaylistPromise = api.searchTidalPlaylists(q, signal, { limit: SEARCH_PAGE_SIZE, offset: 0 })
           const spotifyPlaylistPromise = api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0)
+          const spotifyTrackSearchPromise = api.searchSpotifyTracks(q, SEARCH_PAGE_SIZE, signal, 0)
+          const spotifyAlbumSearchPromise = api.searchSpotifyAlbums(q, SEARCH_PAGE_SIZE, signal, 0)
+          const spotifyArtistSearchPromise = api.searchSpotifyArtists(q, SEARCH_PAGE_SIZE, signal, 0)
 
           let localSnapshot: SearchResults | null = null
           let tidalSnapshot: TidalSearchResults | null = cached ?? null
@@ -314,7 +353,45 @@
             loadingSpotifyPlaylists = false
           })
 
-          await Promise.allSettled([localPromise, tracksPromise, tidalPlaylistPromise, spotifyPlaylistPromise])
+          void spotifyTrackSearchPromise.then((items) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            spotifyTrackResults = items
+            spotifyTrackOffset = items.length
+            if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyTracks = false
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingSpotifyTracks = false
+          })
+
+          void spotifyAlbumSearchPromise.then((items) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            spotifyAlbumResults = items
+            spotifyAlbumOffset = items.length
+            if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyAlbums = false
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingSpotifyAlbums = false
+          })
+
+          void spotifyArtistSearchPromise.then((items) => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            spotifyArtistResults = items
+            spotifyArtistOffset = items.length
+            if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyArtists = false
+          }).catch(() => undefined).finally(() => {
+            if (!isCurrentSearch(q, generation, signal)) return
+            loadingSpotifyArtists = false
+          })
+
+          await Promise.allSettled([
+            localPromise,
+            tracksPromise,
+            tidalPlaylistPromise,
+            spotifyPlaylistPromise,
+            spotifyTrackSearchPromise,
+            spotifyAlbumSearchPromise,
+            spotifyArtistSearchPromise,
+          ])
         }
         if (isCurrentSearch(q, generation, signal)) {
           error = null
@@ -352,7 +429,10 @@
       results !== null
     const needsPlaylists =
       filterMode === 'playlists' && (hasMoreTidalPlaylists || hasMoreSpotifyPlaylists)
-    if (!needsTidal && !needsPlaylists) return
+    const needsSpotifyTracks = filterMode === 'tracks' && hasMoreSpotifyTracks
+    const needsSpotifyAlbums = filterMode === 'albums' && hasMoreSpotifyAlbums
+    const needsSpotifyArtists = filterMode === 'artists' && hasMoreSpotifyArtists
+    if (!needsTidal && !needsPlaylists && !needsSpotifyTracks && !needsSpotifyAlbums && !needsSpotifyArtists) return
 
     loadingMore = true
     try {
@@ -410,6 +490,54 @@
           )
         }
         await Promise.allSettled(tasks)
+      }
+      // Spotify per-category pagination. Scoped block with its own task array
+      // so it stays independent of the playlist branch above.
+      {
+        const spotifyTasks: Promise<unknown>[] = []
+        if (filterMode === 'tracks' && hasMoreSpotifyTracks) {
+          spotifyTasks.push(
+            api
+              .searchSpotifyTracks(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyTrackOffset)
+              .then((items) => {
+                const seen = new Set(spotifyTrackResults.map((t) => t.spotifyId))
+                const fresh = items.filter((t) => !seen.has(t.spotifyId))
+                spotifyTrackResults = [...spotifyTrackResults, ...fresh]
+                spotifyTrackOffset += items.length
+                if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyTracks = false
+              })
+              .catch(() => { hasMoreSpotifyTracks = false }),
+          )
+        }
+        if (filterMode === 'albums' && hasMoreSpotifyAlbums) {
+          spotifyTasks.push(
+            api
+              .searchSpotifyAlbums(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyAlbumOffset)
+              .then((items) => {
+                const seen = new Set(spotifyAlbumResults.map((a) => a.spotifyId))
+                const fresh = items.filter((a) => !seen.has(a.spotifyId))
+                spotifyAlbumResults = [...spotifyAlbumResults, ...fresh]
+                spotifyAlbumOffset += items.length
+                if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyAlbums = false
+              })
+              .catch(() => { hasMoreSpotifyAlbums = false }),
+          )
+        }
+        if (filterMode === 'artists' && hasMoreSpotifyArtists) {
+          spotifyTasks.push(
+            api
+              .searchSpotifyArtists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyArtistOffset)
+              .then((items) => {
+                const seen = new Set(spotifyArtistResults.map((a) => a.spotifyId))
+                const fresh = items.filter((a) => !seen.has(a.spotifyId))
+                spotifyArtistResults = [...spotifyArtistResults, ...fresh]
+                spotifyArtistOffset += items.length
+                if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyArtists = false
+              })
+              .catch(() => { hasMoreSpotifyArtists = false }),
+          )
+        }
+        if (spotifyTasks.length > 0) await Promise.allSettled(spotifyTasks)
       }
     } finally {
       loadingMore = false
@@ -490,12 +618,28 @@
     return { local: matched, tidal: tidalOnly, spotify: spotifyOnly }
   })
 
+  // True only when EVERY provider returned zero hits for THIS query -- used for
+  // the global "No results" branch. Declared after `filteredPlaylists` so we
+  // use the query-filtered local count, not the full localPlaylists list.
+  const allProviderResultsEmpty = $derived(
+    isEmpty &&
+    spotifyTrackResults.length === 0 &&
+    spotifyAlbumResults.length === 0 &&
+    spotifyArtistResults.length === 0 &&
+    spotifyPlaylistResults.length === 0 &&
+    tidalPlaylistResults.length === 0 &&
+    filteredPlaylists.local.length === 0
+  )
+
   const isFilteredEmpty = $derived(
     results !== null &&
     !isEmpty &&
     sortedTracks.length === 0 &&
     sortedAlbums.length === 0 &&
     sortedArtists.length === 0 &&
+    !((filterMode === 'all' || filterMode === 'tracks') && spotifyTrackResults.length > 0) &&
+    !((filterMode === 'all' || filterMode === 'albums') && spotifyAlbumResults.length > 0) &&
+    !((filterMode === 'all' || filterMode === 'artists') && spotifyArtistResults.length > 0) &&
     !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0 || filteredPlaylists.spotify.length > 0))
   )
 
@@ -965,7 +1109,7 @@
     <p class="search-hint">Searching…</p>
   {:else if error && !results && providerSearchDone}
     <p class="search-hint search-error">{error}</p>
-  {:else if isEmpty && providerSearchDone}
+  {:else if allProviderResultsEmpty && providerSearchDone}
     <p class="search-hint">No results for "{query}"</p>
   {:else if isFilteredEmpty}
     <p class="search-hint">No {filterMode === 'library' ? 'library' : filterMode} matches for "{query}"</p>
@@ -1126,6 +1270,29 @@
       </section>
     {/if}
 
+    {#if (filterMode === 'all' || filterMode === 'artists') && spotifyArtistResults.length > 0}
+      <section class="results-section spotify-section">
+        <h3 class="section-label">Spotify artists</h3>
+        <div class="spotify-card-rail" use:wheelToHorizontal>
+          {#each spotifyArtistResults as a (a.spotifyId)}
+            <a
+              class="spotify-card"
+              href={`/spotify-artist/${a.spotifyId}`}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open artist', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }], a.name ?? 'Spotify artist') }}
+            >
+              {#if a.thumbnail}
+                <div class="art round" style="background-image:url('{a.thumbnail}')"></div>
+              {:else}
+                <div class="art round fallback">@</div>
+              {/if}
+              <span class="card-title">{a.name ?? '-'}</span>
+              {#if a.followers !== null}<span class="card-sub">{Intl.NumberFormat().format(a.followers)} followers</span>{/if}
+            </a>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
     {#if sortedAlbums.length > 0}
       <section class="results-section">
         <h3 class="section-label">Albums</h3>
@@ -1165,6 +1332,29 @@
               {#if album.artist_name}
                 <p class="album-artist">{album.artist_name}</p>
               {/if}
+            </a>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if (filterMode === 'all' || filterMode === 'albums') && spotifyAlbumResults.length > 0}
+      <section class="results-section spotify-section">
+        <h3 class="section-label">Spotify albums</h3>
+        <div class="spotify-card-rail" use:wheelToHorizontal>
+          {#each spotifyAlbumResults as a (a.spotifyId)}
+            <a
+              class="spotify-card"
+              href={`/spotify-album/${a.spotifyId}`}
+              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open album', onSelect: () => void goto(`/spotify-album/${a.spotifyId}`) }], a.title ?? 'Spotify album') }}
+            >
+              {#if a.thumbnail}
+                <div class="art" style="background-image:url('{a.thumbnail}')"></div>
+              {:else}
+                <div class="art fallback">M</div>
+              {/if}
+              <span class="card-title">{a.title ?? '-'}</span>
+              <span class="card-sub">{a.primaryArtist ?? ''}</span>
             </a>
           {/each}
         </div>
@@ -1464,6 +1654,32 @@
       </section>
     {/if}
 
+    {#if (filterMode === 'all' || filterMode === 'tracks') && spotifyTrackResults.length > 0}
+      <section class="results-section spotify-section">
+        <h3 class="section-label">Spotify tracks</h3>
+        <ol class="spotify-track-list">
+          {#each spotifyTrackResults as t (t.spotifyId)}
+            <li>
+              <a
+                class="spotify-track-row"
+                href={`/spotify-track/${t.spotifyId}`}
+                oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open track', onSelect: () => void goto(`/spotify-track/${t.spotifyId}`) }], t.title ?? 'Spotify track') }}
+              >
+                {#if t.thumbnail}
+                  <div class="thumb" style="background-image:url('{t.thumbnail}')"></div>
+                {:else}
+                  <div class="thumb fallback">M</div>
+                {/if}
+                <span class="title">{t.title ?? '-'}</span>
+                <span class="sub">{t.primaryArtist ?? ''}</span>
+                <span class="dur">{t.durationMs ? formatTrackDuration(t.durationMs) : ''}</span>
+              </a>
+            </li>
+          {/each}
+        </ol>
+      </section>
+    {/if}
+
     {#if vibeTrack && vibeTrack.length > 0}
       <section class="results-section discovery-section">
         <h3 class="section-label">Same vibe</h3>
@@ -1533,9 +1749,12 @@
         {#if loadingMore}
           <span class="infinite-spinner">Loading more…</span>
         {:else if (
-          (filterMode === 'tracks' || filterMode === 'albums' || filterMode === 'artists') && !hasMoreTidal
-        ) || (filterMode === 'playlists' && !hasMoreTidalPlaylists && !hasMoreSpotifyPlaylists)}
-          <span class="infinite-end">— end of results —</span>
+          (filterMode === 'tracks' && !hasMoreTidal && !hasMoreSpotifyTracks) ||
+          (filterMode === 'albums' && !hasMoreTidal && !hasMoreSpotifyAlbums) ||
+          (filterMode === 'artists' && !hasMoreTidal && !hasMoreSpotifyArtists) ||
+          (filterMode === 'playlists' && !hasMoreTidalPlaylists && !hasMoreSpotifyPlaylists)
+        )}
+          <span class="infinite-end">- end of results -</span>
         {/if}
       </div>
     {/if}
@@ -2274,4 +2493,25 @@
   }
   .infinite-spinner { font-style: italic; }
   .infinite-end { letter-spacing: 0.04em; }
+
+  .spotify-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .spotify-section .section-label { color: var(--service-spotify); }
+  .spotify-track-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .spotify-track-list li { padding: 0; }
+  .spotify-track-row { display: grid; grid-template-columns: 40px minmax(0,1fr) auto auto; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 8px; cursor: pointer; text-decoration: none; color: inherit; }
+  .spotify-track-row:hover { background: rgba(255,255,255,.04); }
+  .spotify-track-row .thumb { width: 40px; height: 40px; border-radius: 4px; background-size: cover; background-position: center; background-color: var(--bg-raised); }
+  .spotify-track-row .thumb.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); }
+  .spotify-track-row .title { color: var(--text-primary); font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spotify-track-row .sub { color: var(--text-secondary); font-size: var(--font-size-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spotify-track-row .dur { color: var(--text-muted); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
+
+  .spotify-card-rail { display: flex; gap: var(--gap-sm); overflow-x: auto; padding-bottom: var(--space-2); scroll-snap-type: x mandatory; }
+  .spotify-card { --card-w: clamp(120px, 11vw, 168px); flex: 0 0 var(--card-w); width: var(--card-w); display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; }
+  .spotify-card:hover, .spotify-card:focus-visible { background: var(--bg-hover); outline: none; }
+  .spotify-card .art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
+  .spotify-card .art.round { border-radius: 50%; }
+  .spotify-card .art.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); }
+  .spotify-card .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spotify-card .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
