@@ -71,8 +71,17 @@ export interface Track {
 	samples_analyzed?: number | null;
 }
 
+export interface SpotifyTopCity {
+	city: string;
+	country: string;
+	listeners: number;
+}
+
 export interface SpotifyArtistStats {
 	monthly_listeners: number | null;
+	followers?: number | null;
+	world_rank?: number | null;
+	top_cities?: SpotifyTopCity[];
 	tracks: { isrc: string; title: string; playcount: number | null }[];
 }
 

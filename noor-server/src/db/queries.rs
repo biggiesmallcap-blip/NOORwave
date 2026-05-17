@@ -416,6 +416,247 @@ pub fn get_cached_spotify_playcounts_for_isrcs(
     Ok(out)
 }
 
+// ─── Spotify public stats (richer cache reads/writes) ─────
+
+#[derive(Debug, Clone, Default)]
+pub struct CachedTrackStatsRow {
+    pub spotify_track_id: Option<String>,
+    pub playcount: Option<i64>,
+    pub stats_fetched_at: Option<i64>,
+    pub null_cached_at: Option<i64>,
+}
+
+/// Read raw spotify cache state for a batch of ISRCs.
+///
+/// Returns one row per *input* ISRC (including unknowns, so callers can tell
+/// "never seen" apart from "negative-cached"). TTL policy is the caller's
+/// responsibility - this is intentionally just a window into the tables.
+pub fn get_cached_spotify_track_stats_for_isrcs(
+    conn: &Connection,
+    isrcs: &[String],
+) -> Result<HashMap<String, CachedTrackStatsRow>> {
+    const CHUNK: usize = 500;
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    for isrc in isrcs {
+        let trimmed = isrc.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        keys.push(trimmed.to_string());
+    }
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out: HashMap<String, CachedTrackStatsRow> = keys
+        .iter()
+        .map(|k| (k.clone(), CachedTrackStatsRow::default()))
+        .collect();
+
+    for chunk in keys.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+
+        // ISRC -> spotify_track_id + (optional) playcount/fetched_at via LEFT JOIN
+        let sql = format!(
+            "SELECT m.isrc, m.spotify_track_id, s.playcount, s.fetched_at
+             FROM spotify_isrc_map m
+             LEFT JOIN spotify_track_stats s ON s.spotify_track_id = m.spotify_track_id
+             WHERE m.isrc IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for r in rows {
+            let (isrc, tid, pc, fa) = r?;
+            if let Some(slot) = out.get_mut(&isrc) {
+                slot.spotify_track_id = Some(tid);
+                slot.playcount = pc;
+                slot.stats_fetched_at = fa;
+            }
+        }
+
+        // Negative cache lookup (no join: spotify_null_cache is keyed by ISRC).
+        let null_sql = format!(
+            "SELECT isrc, cached_at FROM spotify_null_cache WHERE isrc IN ({placeholders})"
+        );
+        let mut null_stmt = conn.prepare(&null_sql)?;
+        let null_rows = null_stmt.query_map(params_from_iter(chunk.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for r in null_rows {
+            let (isrc, cached_at) = r?;
+            if let Some(slot) = out.get_mut(&isrc) {
+                slot.null_cached_at = Some(cached_at);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedArtistStatsRow {
+    pub monthly_listeners: Option<i64>,
+    pub followers: Option<i64>,
+    pub world_rank: Option<i64>,
+    pub top_cities_json: Option<String>,
+    pub fetched_at: i64,
+}
+
+pub fn get_cached_spotify_artist_stats(
+    conn: &Connection,
+    spotify_artist_id: &str,
+) -> Result<Option<CachedArtistStatsRow>> {
+    let row = conn
+        .query_row(
+            "SELECT monthly_listeners, followers, world_rank, top_cities_json, fetched_at
+             FROM spotify_artist_stats
+             WHERE spotify_artist_id = ?1",
+            params![spotify_artist_id],
+            |row| {
+                Ok(CachedArtistStatsRow {
+                    monthly_listeners: row.get(0)?,
+                    followers: row.get(1)?,
+                    world_rank: row.get(2)?,
+                    top_cities_json: row.get(3)?,
+                    fetched_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Returns `(Option<spotify_artist_id>, resolved_at)`. `Some(None)` (i.e. row
+/// exists with NULL spotify_artist_id) means negative-cached.
+pub fn get_spotify_artist_map(
+    conn: &Connection,
+    tidal_artist_id: &str,
+) -> Result<Option<(Option<String>, i64)>> {
+    let row = conn
+        .query_row(
+            "SELECT spotify_artist_id, resolved_at FROM spotify_artist_map
+             WHERE tidal_artist_id = ?1",
+            params![tidal_artist_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+pub fn upsert_spotify_isrc_map(
+    conn: &Connection,
+    isrc: &str,
+    spotify_track_id: &str,
+    resolved_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spotify_isrc_map (isrc, spotify_track_id, resolved_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(isrc) DO UPDATE SET
+            spotify_track_id = excluded.spotify_track_id,
+            resolved_at      = excluded.resolved_at",
+        params![isrc, spotify_track_id, resolved_at],
+    )?;
+    Ok(())
+}
+
+/// Store playcount as-is (zero is preserved; the resolver may treat zero as
+/// "retry sooner" but the cache layer doesn't second-guess the upstream).
+pub fn upsert_spotify_track_stats(
+    conn: &Connection,
+    spotify_track_id: &str,
+    playcount: i64,
+    fetched_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spotify_track_stats (spotify_track_id, playcount, fetched_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(spotify_track_id) DO UPDATE SET
+            playcount  = excluded.playcount,
+            fetched_at = excluded.fetched_at",
+        params![spotify_track_id, playcount, fetched_at],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_spotify_null_cache(conn: &Connection, isrc: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spotify_null_cache (isrc, cached_at)
+         VALUES (?1, ?2)
+         ON CONFLICT(isrc) DO UPDATE SET cached_at = excluded.cached_at",
+        params![isrc, now],
+    )?;
+    Ok(())
+}
+
+pub fn clear_spotify_null_cache(conn: &Connection, isrc: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM spotify_null_cache WHERE isrc = ?1",
+        params![isrc],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_spotify_artist_map(
+    conn: &Connection,
+    tidal_artist_id: &str,
+    spotify_artist_id: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spotify_artist_map (tidal_artist_id, spotify_artist_id, resolved_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(tidal_artist_id) DO UPDATE SET
+            spotify_artist_id = excluded.spotify_artist_id,
+            resolved_at       = excluded.resolved_at",
+        params![tidal_artist_id, spotify_artist_id, now],
+    )?;
+    Ok(())
+}
+
+/// Upsert artist stats; `COALESCE(excluded.col, col)` preserves any previously
+/// known non-null value when the incoming fetch omitted that field (Spotify
+/// drops `monthly_listeners` for some artists, but we don't want to forget a
+/// number we'd already learned).
+pub fn upsert_spotify_artist_stats(
+    conn: &Connection,
+    spotify_artist_id: &str,
+    monthly_listeners: Option<i64>,
+    followers: Option<i64>,
+    world_rank: Option<i64>,
+    top_cities_json: Option<&str>,
+    fetched_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spotify_artist_stats
+            (spotify_artist_id, monthly_listeners, followers, world_rank, top_cities_json, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(spotify_artist_id) DO UPDATE SET
+            monthly_listeners = COALESCE(excluded.monthly_listeners, spotify_artist_stats.monthly_listeners),
+            followers         = COALESCE(excluded.followers,         spotify_artist_stats.followers),
+            world_rank        = COALESCE(excluded.world_rank,        spotify_artist_stats.world_rank),
+            top_cities_json   = COALESCE(excluded.top_cities_json,   spotify_artist_stats.top_cities_json),
+            fetched_at        = excluded.fetched_at",
+        params![
+            spotify_artist_id,
+            monthly_listeners,
+            followers,
+            world_rank,
+            top_cities_json,
+            fetched_at
+        ],
+    )?;
+    Ok(())
+}
+
 const ARTIST_LIBRARY_TRACK_WHERE: &str = "(t.is_favorite = 1 OR COALESCE(al.is_favorite, 0) = 1)";
 
 fn artist_library_track_predicate() -> &'static str {

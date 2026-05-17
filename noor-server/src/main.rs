@@ -171,12 +171,12 @@ pub struct AppState {
     /// instantly negate their action. Reset on any new user-driven play
     /// (play_track, radio_start, etc.) so automix re-engages naturally.
     pub user_cleared_at: Arc<std::sync::atomic::AtomicI64>,
-    /// Public Spotify stats (anonymous GraphQL) toggle. Read once from
-    /// `NOOR_SPOTIFY_PUBLIC_STATS` at startup. When false, the stats endpoint
-    /// returns empty fields and never hits Spotify. The feature also requires
-    /// the `spotify-public` cargo feature; without it the env var is ignored
-    /// and we log one warning at startup.
-    pub spotify_public_stats_enabled: bool,
+    /// Spotify partner-GraphQL client for the public-stats endpoints. Built
+    /// once at boot when the `spotify-public` cargo feature is on; absent
+    /// from the struct entirely in feature-off builds. Route handlers that
+    /// touch it live behind matching `#[cfg]` blocks.
+    #[cfg(feature = "spotify-public")]
+    pub spotify_public: Arc<services::spotify_public::SpotifyPublicClient>,
     /// Sportify (anonymous Spotify metadata proxy) client used by the
     /// `/api/discovery/sportify/*` discovery routes. Constructed once at boot.
     pub sportify_client: Option<Arc<services::sportify::SportifyClient>>,
@@ -541,27 +541,18 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    // Public Spotify stats are gated on (a) the env var being set and (b) the
-    // `spotify-public` cargo feature being compiled in. The feature pulls in
-    // `rquest` (Chrome TLS fingerprint) which we don't want in lean builds.
-    let env_spotify_public = std::env::var("NOOR_SPOTIFY_PUBLIC_STATS")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+    // Public Spotify stats: gated only on the `spotify-public` cargo feature
+    // (default on). No runtime env var - the feature controls compile-in of
+    // the whole module, and feature-off route handlers return an empty
+    // payload.
     #[cfg(feature = "spotify-public")]
-    let spotify_public_stats_enabled = env_spotify_public;
-    #[cfg(not(feature = "spotify-public"))]
-    let spotify_public_stats_enabled = {
-        if env_spotify_public {
-            warn!(
-                "NOOR_SPOTIFY_PUBLIC_STATS=1 but binary built without `spotify-public` cargo feature; ignoring"
-            );
-        }
-        false
-    };
-    if spotify_public_stats_enabled {
-        info!("Public Spotify stats enabled (anonymous GraphQL)");
-    }
+    let spotify_public_client = Arc::new(
+        services::spotify_public::SpotifyPublicClient::new(db.clone())
+            .expect("SpotifyPublicClient init: reqwest builder failure should be impossible"),
+    );
+    #[cfg(feature = "spotify-public")]
+    info!("Public Spotify stats enabled (anonymous GraphQL)");
+
     if lastfm_api_secret.is_some() {
         info!("Last.fm scrobbling enabled (LASTFM_API_SECRET present)");
     } else {
@@ -730,7 +721,8 @@ async fn main() -> Result<()> {
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),
         user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        spotify_public_stats_enabled,
+        #[cfg(feature = "spotify-public")]
+        spotify_public: spotify_public_client,
         sportify_client,
         sportify_cache_config,
         sportify_resolve_config,

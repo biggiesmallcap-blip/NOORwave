@@ -29,7 +29,7 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -1118,53 +1118,60 @@ async fn get_album_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Json<Value> {
-    let tracks = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
-            .unwrap_or_default()
-    };
-    let isrcs = tracks
-        .iter()
-        .filter_map(|t| {
-            t.isrc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .collect::<Vec<_>>();
-    let cached = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
-            .unwrap_or_default()
-    };
+    #[cfg(feature = "spotify-public")]
+    {
+        let (db, client, tracks) = {
+            let s = state.read().await;
+            let tracks =
+                s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
+                    .unwrap_or_default();
+            (s.db.clone(), s.spotify_public.clone(), tracks)
+        };
 
-    Json(json!({
-        "monthly_listeners": null,
-        "tracks": spotify_track_stats_payload(&tracks, &cached),
-    }))
-}
+        let seeds: Vec<crate::services::spotify_public::TrackSeed> = tracks
+            .iter()
+            .filter_map(|t| {
+                let isrc = t.isrc.as_deref()?.trim();
+                if isrc.is_empty() {
+                    return None;
+                }
+                Some(crate::services::spotify_public::TrackSeed {
+                    isrc: isrc.to_string(),
+                    title: t.title.clone(),
+                    artist_name: t.artist_name.clone().unwrap_or_default(),
+                })
+            })
+            .collect();
 
-fn spotify_track_stats_payload(
-    tracks: &[crate::db::models::Track],
-    cached: &HashMap<String, i64>,
-) -> Vec<Value> {
-    let mut seen = HashSet::new();
-    tracks
-        .iter()
-        .filter_map(|track| {
-            let isrc = track.isrc.as_deref()?.trim();
-            if isrc.is_empty() || !seen.insert(isrc.to_string()) {
-                return None;
-            }
-            let playcount = cached.get(isrc)?;
-            Some(json!({
-                "isrc": isrc,
-                "title": track.title.clone(),
-                "playcount": *playcount,
-            }))
-        })
-        .collect()
+        let stats =
+            crate::services::spotify_public::fetch_album_playcounts(&client, &db, &seeds).await;
+
+        let payload: Vec<Value> = stats
+            .into_iter()
+            .filter_map(|s| {
+                s.playcount.map(|pc| {
+                    json!({
+                        "isrc": s.isrc,
+                        "title": s.title,
+                        "playcount": pc,
+                    })
+                })
+            })
+            .collect();
+
+        Json(json!({
+            "monthly_listeners": null,
+            "tracks": payload,
+        }))
+    }
+    #[cfg(not(feature = "spotify-public"))]
+    {
+        let _ = (state, id);
+        Json(json!({
+            "monthly_listeners": null,
+            "tracks": [],
+        }))
+    }
 }
 
 /// Pages through all entries of a single TIDAL discography filter for one
@@ -1539,84 +1546,117 @@ async fn get_artist_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Json<Value> {
-    let (enabled, artist_name, isrc_pairs, mut tracks_by_isrc) = {
-        let s = state.read().await;
-        let enabled = s.spotify_public_stats_enabled;
-        let artist_tracks =
-            s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+    #[cfg(feature = "spotify-public")]
+    {
+        let (db, client, tidal_id, artist_name, seeds) = {
+            let s = state.read().await;
+            let tidal_id =
+                s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+                    .unwrap_or(None);
+            let artist_tracks =
+                s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+                    .unwrap_or_default();
+
+            let mut sorted = artist_tracks
+                .into_iter()
+                .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                .collect::<Vec<_>>();
+            sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+            sorted.truncate(10);
+
+            let artist_name = sorted
+                .first()
+                .and_then(|t| t.artist_name.clone())
                 .unwrap_or_default();
-        let isrcs = artist_tracks
-            .iter()
+
+            let seeds: Vec<crate::services::spotify_public::TrackSeed> = sorted
+                .into_iter()
+                .map(|t| crate::services::spotify_public::TrackSeed {
+                    isrc: t.isrc.unwrap_or_default(),
+                    title: t.title,
+                    artist_name: t.artist_name.unwrap_or_default(),
+                })
+                .collect();
+
+            (
+                s.db.clone(),
+                s.spotify_public.clone(),
+                tidal_id,
+                artist_name,
+                seeds,
+            )
+        };
+
+        // Local-only artist (no Tidal id): no key for the map table, so just
+        // serve any cached track playcounts via the album helper, no artist
+        // resolution attempted, no negative-cache row written.
+        let Some(tidal_id) = tidal_id else {
+            let stats =
+                crate::services::spotify_public::fetch_album_playcounts(&client, &db, &seeds).await;
+            let tracks: Vec<Value> = stats
+                .into_iter()
+                .filter_map(|s| {
+                    s.playcount.map(|pc| {
+                        json!({
+                            "isrc": s.isrc,
+                            "title": s.title,
+                            "playcount": pc,
+                        })
+                    })
+                })
+                .collect();
+            return Json(json!({
+                "monthly_listeners": null,
+                "followers": null,
+                "world_rank": null,
+                "top_cities": [],
+                "tracks": tracks,
+            }));
+        };
+
+        let tidal_id_str = tidal_id.to_string();
+        let result = crate::services::spotify_public::fetch_artist_stats(
+            &client,
+            &db,
+            &tidal_id_str,
+            &artist_name,
+            &seeds,
+        )
+        .await;
+
+        let tracks: Vec<Value> = result
+            .tracks
+            .into_iter()
             .filter_map(|t| {
-                t.isrc
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+                t.playcount.map(|pc| {
+                    json!({
+                        "isrc": t.isrc,
+                        "title": t.title,
+                        "playcount": pc,
+                    })
+                })
             })
-            .collect::<Vec<_>>();
-        let cached =
-            s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
-                .unwrap_or_default();
-        let mut tracks_by_isrc = BTreeMap::new();
-        for track in &artist_tracks {
-            let Some(isrc) = track
-                .isrc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
-                continue;
-            };
-            if let Some(playcount) = cached.get(isrc) {
-                tracks_by_isrc.insert(isrc.to_string(), (track.title.clone(), *playcount));
-            }
-        }
+            .collect();
 
-        let mut sorted = artist_tracks
-            .into_iter()
-            .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
-            .collect::<Vec<_>>();
-        sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
-        sorted.truncate(10);
-        let artist_name = sorted
-            .first()
-            .and_then(|t| t.artist_name.clone())
-            .unwrap_or_default();
-        let pairs = sorted
-            .into_iter()
-            .map(|t| (t.isrc.unwrap_or_default(), t.title))
-            .collect::<Vec<(String, String)>>();
-        (enabled, artist_name, pairs, tracks_by_isrc)
-    };
-
-    let mut monthly_listeners = None;
-    if enabled {
-        let result =
-            crate::services::spotify_public::fetch_artist_stats(enabled, &artist_name, &isrc_pairs)
-                .await;
-        monthly_listeners = result.monthly_listeners;
-        for track in result.tracks {
-            if let Some(playcount) = track.playcount {
-                tracks_by_isrc.insert(track.isrc, (track.title, playcount));
-            }
-        }
+        Json(json!({
+            "monthly_listeners": result.monthly_listeners,
+            "followers": result.followers,
+            "world_rank": result.world_rank,
+            "top_cities": result.top_cities,
+            "tracks": tracks,
+        }))
     }
-    let tracks = tracks_by_isrc
-        .into_iter()
-        .map(|(isrc, (title, playcount))| {
-            json!({
-                "isrc": isrc,
-                "title": title,
-                "playcount": playcount,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Json(json!({
-        "monthly_listeners": monthly_listeners,
-        "tracks": tracks,
-    }))
+    #[cfg(not(feature = "spotify-public"))]
+    {
+        let _ = (state, id);
+        Json(json!({
+            "monthly_listeners": null,
+            "followers": null,
+            "world_rank": null,
+            "top_cities": [],
+            "tracks": [],
+        }))
+    }
 }
 
 async fn get_tidal_album_tracks(
@@ -11917,6 +11957,11 @@ mod tests {
     /// initializers - when `crate::AppState` gains a field, add it here once.
     fn fresh_test_state(db: Database) -> crate::AppState {
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(feature = "spotify-public")]
+        let spotify_public = Arc::new(
+            crate::services::spotify_public::SpotifyPublicClient::new(db.clone())
+                .expect("SpotifyPublicClient::new must succeed in tests"),
+        );
         crate::AppState {
             db,
             event_tx,
@@ -11973,7 +12018,8 @@ mod tests {
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            spotify_public_stats_enabled: false,
+            #[cfg(feature = "spotify-public")]
+            spotify_public,
             sportify_client: None,
             sportify_cache_config: crate::services::sportify::cache::SportifyCacheConfig::default(),
             sportify_resolve_config:
