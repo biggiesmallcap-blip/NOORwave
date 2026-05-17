@@ -9,8 +9,6 @@
     putCachedMoodCategories,
     clearCachedMoods,
   } from '$lib/stores/tidal-moods-cache';
-  import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
-  import { SPOTIFY_MOOD_CATEGORIES } from '$lib/components/moods/spotify-moods-data';
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
@@ -95,19 +93,6 @@
   {:else if viewState === 'error'}
     <p class="muted-line">Couldn't load moods. <button class="inline-link" onclick={load}>Retry</button></p>
   {/if}
-
-  <section class="spotify-block">
-    <header class="block-header">
-      <p class="eyebrow spotify">Spotify</p>
-      <h2>Mood playlists</h2>
-      <p class="sub">Editorial mood selections from Spotify, played through TIDAL.</p>
-    </header>
-    <div class="rails">
-      {#each SPOTIFY_MOOD_CATEGORIES as cat (cat.slug)}
-        <SpotifyMoodRail category={cat} />
-      {/each}
-    </div>
-  </section>
 </div>
 
 <style>
@@ -142,11 +127,4 @@
   .card:hover .art { transform: scale(1.05); }
   .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
   .card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
-
-  .spotify-block { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-6); }
-  .block-header { display: flex; flex-direction: column; gap: 4px; }
-  .block-header h2 { margin: 0; font-size: var(--font-size-xl); font-weight: var(--font-weight-bold); color: var(--text-primary); }
-  .block-header .sub { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
-  .eyebrow.spotify { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--service-spotify); font-weight: var(--font-weight-bold); margin: 0; }
-  .rails { display: flex; flex-direction: column; gap: var(--space-4); }
 </style>
