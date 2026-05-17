@@ -40,8 +40,7 @@ pub const TOTP_SECRET: &[u8] = b"55601029510267381196079975060119874370686866";
 pub const TOTP_VER: u32 = 14;
 
 /// Persisted-query SHA256 for `getTrack` (per-track playcount).
-pub const GET_TRACK_HASH: &str =
-    "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294";
+pub const GET_TRACK_HASH: &str = "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294";
 
 /// Persisted-query SHA256 for `queryArtistOverview` (followers, monthly
 /// listeners, world rank, top cities).
@@ -63,8 +62,7 @@ pub const SPOTIFY_APP_VERSION: &str = "896000000";
 
 /// Regex over the web-player landing page; captures the URL of the JS chunk
 /// that contains the operation-hash map.
-pub const WEB_PLAYER_JS_URL_PATTERN: &str =
-    r#"<script[^>]*src="(https://open\.spotifycdn\.com/cdn/build/web-player/web-player\.[a-f0-9]+\.js)""#;
+pub const WEB_PLAYER_JS_URL_PATTERN: &str = r#"<script[^>]*src="(https://open\.spotifycdn\.com/cdn/build/web-player/web-player\.[a-f0-9]+\.js)""#;
 
 /// Patterns we use to scrape individual hashes out of the bundle. The
 /// bundle constructs each persisted-query handle as
@@ -73,10 +71,7 @@ pub const WEB_PLAYER_JS_URL_PATTERN: &str =
 /// args stay stable. Non-greedy match between the op name and the next
 /// 64-char hex literal handles both compact and spread-out minifications.
 const HASH_EXTRACT_PATTERNS: &[(&str, &str)] = &[
-    (
-        "getTrack",
-        r#""getTrack","query","([a-f0-9]{64})""#,
-    ),
+    ("getTrack", r#""getTrack","query","([a-f0-9]{64})""#),
     (
         "queryArtistOverview",
         r#""queryArtistOverview","query","([a-f0-9]{64})""#,

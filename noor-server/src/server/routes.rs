@@ -1122,10 +1122,9 @@ async fn get_album_spotify_stats(
     {
         let (db, client, tracks) = {
             let s = state.read().await;
-            let tracks = s
-                .db
-                .with_conn(|conn| queries::get_album_tracks(conn, id))
-                .unwrap_or_default();
+            let tracks =
+                s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
+                    .unwrap_or_default();
             (s.db.clone(), s.spotify_public.clone(), tracks)
         };
 
@@ -1551,14 +1550,12 @@ async fn get_artist_spotify_stats(
     {
         let (db, client, tidal_id, artist_name, seeds) = {
             let s = state.read().await;
-            let tidal_id = s
-                .db
-                .with_conn(|conn| queries::get_artist_tidal_id(conn, id))
-                .unwrap_or(None);
-            let artist_tracks = s
-                .db
-                .with_conn(|conn| queries::get_artist_tracks(conn, id))
-                .unwrap_or_default();
+            let tidal_id =
+                s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+                    .unwrap_or(None);
+            let artist_tracks =
+                s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+                    .unwrap_or_default();
 
             let mut sorted = artist_tracks
                 .into_iter()
@@ -1581,7 +1578,13 @@ async fn get_artist_spotify_stats(
                 })
                 .collect();
 
-            (s.db.clone(), s.spotify_public.clone(), tidal_id, artist_name, seeds)
+            (
+                s.db.clone(),
+                s.spotify_public.clone(),
+                tidal_id,
+                artist_name,
+                seeds,
+            )
         };
 
         // Local-only artist (no Tidal id): no key for the map table, so just

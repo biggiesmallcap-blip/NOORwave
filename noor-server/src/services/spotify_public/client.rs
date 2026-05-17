@@ -74,7 +74,10 @@ impl SpotifyPublicClient {
             .build()
             .context("build reqwest client")?;
 
-        let persisted = db.with_conn(|c| Ok(hashes::load_persisted(c))).ok().flatten();
+        let persisted = db
+            .with_conn(|c| Ok(hashes::load_persisted(c)))
+            .ok()
+            .flatten();
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -202,7 +205,9 @@ impl SpotifyPublicClient {
 
             if persisted_query_not_found(&body) {
                 if attempt == 0 {
-                    debug!("spotify_public: PersistedQueryNotFound on {op_name}; refreshing hashes");
+                    debug!(
+                        "spotify_public: PersistedQueryNotFound on {op_name}; refreshing hashes"
+                    );
                     if let Err(e) = self.refresh_hashes().await {
                         warn!("spotify_public: hash refresh failed: {e:#}");
                         return Err(e);
@@ -247,12 +252,8 @@ impl SpotifyPublicClient {
             "numberOfTopResults": 5,
             "includeAudiobooks": false,
         });
-        self.persisted_query(
-            "assistedCurationSearch",
-            &h.search_modal_results,
-            &vars,
-        )
-        .await
+        self.persisted_query("assistedCurationSearch", &h.search_modal_results, &vars)
+            .await
     }
 }
 

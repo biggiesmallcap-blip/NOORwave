@@ -182,7 +182,9 @@ pub async fn resolve_artist_id(
                 continue;
             }
         };
-        let track = track_body.pointer("/data/trackUnion").unwrap_or(&track_body);
+        let track = track_body
+            .pointer("/data/trackUnion")
+            .unwrap_or(&track_body);
 
         let returned_title = track
             .pointer("/name")

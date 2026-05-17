@@ -74,10 +74,7 @@ pub async fn mint(client: &Client) -> Result<TokenResponse> {
         .error_for_status()
         .context("/api/token returned error status")?;
 
-    let parsed: TokenResponse = resp
-        .json()
-        .await
-        .context("/api/token body was not JSON")?;
+    let parsed: TokenResponse = resp.json().await.context("/api/token body was not JSON")?;
     Ok(parsed)
 }
 

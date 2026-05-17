@@ -128,11 +128,7 @@ pub fn read_artist_map(conn: &Connection, tidal_artist_id: &str) -> Result<Artis
     }
 }
 
-pub fn write_track_resolution(
-    conn: &Connection,
-    isrc: &str,
-    spotify_track_id: &str,
-) -> Result<()> {
+pub fn write_track_resolution(conn: &Connection, isrc: &str, spotify_track_id: &str) -> Result<()> {
     let now = now_secs();
     upsert_spotify_isrc_map(conn, isrc, spotify_track_id, now)?;
     clear_spotify_null_cache(conn, isrc)?;
@@ -195,7 +191,10 @@ mod tests {
             stats_fetched_at: Some(now - 60),
             null_cached_at: None,
         };
-        assert!(matches!(TrackState::from_row(&row, now), TrackState::Fresh(1234)));
+        assert!(matches!(
+            TrackState::from_row(&row, now),
+            TrackState::Fresh(1234)
+        ));
     }
 
     #[test]

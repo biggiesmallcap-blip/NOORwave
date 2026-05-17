@@ -1668,8 +1668,8 @@
 		display: inline-flex;
 		align-items: center;
 		padding: 2px 10px;
-		font-size: 12px;
-		line-height: 18px;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
 		border-radius: 999px;
 		background: rgba(255, 255, 255, 0.06);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.75));
@@ -1691,7 +1691,7 @@
 		justify-content: space-between;
 		align-items: baseline;
 		gap: 8px;
-		font-size: 12px;
+		font-size: var(--font-size-xs);
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 	}
 

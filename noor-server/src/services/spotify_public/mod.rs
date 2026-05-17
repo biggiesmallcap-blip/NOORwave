@@ -159,13 +159,18 @@ async fn resolve_and_writeback_track(
             }
         }
         TrackState::NeedsResolution => {
-            match resolver::resolve_track_for_isrc(client, &seed.isrc, &seed.title, &seed.artist_name)
-                .await
+            match resolver::resolve_track_for_isrc(
+                client,
+                &seed.isrc,
+                &seed.title,
+                &seed.artist_name,
+            )
+            .await
             {
                 Ok(Some(resolved)) => {
-                    if let Err(e) =
-                        db.with_conn(|c| cache::write_track_resolution(c, &seed.isrc, &resolved.spotify_track_id))
-                    {
+                    if let Err(e) = db.with_conn(|c| {
+                        cache::write_track_resolution(c, &seed.isrc, &resolved.spotify_track_id)
+                    }) {
                         warn!("spotify_public: write_track_resolution failed: {e:#}");
                     }
                     let playcount = match resolved.playcount {
@@ -198,9 +203,11 @@ async fn resolve_and_writeback_track(
 
 async fn fetch_playcount(client: &SpotifyPublicClient, spotify_track_id: &str) -> Option<i64> {
     match client.get_track(spotify_track_id).await {
-        Ok(body) => body
-            .pointer("/data/trackUnion/playcount")
-            .and_then(|v| v.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| v.as_i64())),
+        Ok(body) => body.pointer("/data/trackUnion/playcount").and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<i64>().ok())
+                .or_else(|| v.as_i64())
+        }),
         Err(e) => {
             warn!("spotify_public: get_track({spotify_track_id}) failed: {e:#}");
             None
@@ -337,13 +344,20 @@ fn parse_artist_overview(body: &serde_json::Value) -> ParsedArtistOverview {
         out.world_rank = stats.get("worldRank").and_then(|v| v.as_i64());
         if let Some(cities) = stats.get("topCities").and_then(|v| v.as_array()) {
             for c in cities.iter().take(5) {
-                let city = c.get("city").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let city = c
+                    .get("city")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let country = c
                     .get("country")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let listeners = c.get("numberOfListeners").and_then(|v| v.as_i64()).unwrap_or(0);
+                let listeners = c
+                    .get("numberOfListeners")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
                 if !city.is_empty() {
                     out.top_cities.push(TopCity {
                         city,
