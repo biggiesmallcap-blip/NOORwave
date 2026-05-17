@@ -105,6 +105,8 @@ pub struct QueueReplaceRequest {
     /// These are appended after the library tracks as pending queue rows.
     #[serde(default)]
     pending_candidates: Option<Vec<PendingCandidateRequest>>,
+    #[serde(default)]
+    shuffle_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7574,7 +7576,7 @@ async fn set_playback_shuffle(
 ) -> Result<Json<Value>, StatusCode> {
     let mode = queue::ShuffleMode::parse(&payload.mode);
     let state_guard = state.read().await;
-    let snapshot = state_guard
+    let update = state_guard
         .db
         .with_conn(|conn| player::set_shuffle_mode(conn, mode))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -7584,21 +7586,27 @@ async fn set_playback_shuffle(
     // on during a TIDAL mix actually changes what plays next. Pending entries
     // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
     // plain Fisher-Yates - same shape as `true` shuffle.
-    if mode != queue::ShuffleMode::Off {
+    if let Some(debug) = update.debug.as_ref() {
         let mut q = state_guard.pending_tidal_mix_queue.lock().unwrap();
         if q.len() > 1 {
             use rand::seq::SliceRandom;
-            q.make_contiguous().shuffle(&mut rand::thread_rng());
+            let mut rng = crate::playback::shuffle::seeded_rng(
+                debug.seed,
+                mode.as_str(),
+                "pending_tidal_mix",
+            );
+            q.make_contiguous().shuffle(&mut rng);
         }
     }
 
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
     drop(state_guard);
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    let snapshot = overlay_snapshot_with_external_track(&state, update.snapshot).await;
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "shuffle_debug": update.debug
     })))
 }
 
@@ -7978,9 +7986,32 @@ async fn replace_playback_queue(
                     .collect();
                 append_pending_tracks(conn, &candidates)?;
             }
-            let final_queue = crate::playback::queue::load_queue(conn)?;
+            let mut shuffle_debug = None;
+            let final_queue = match payload.shuffle_mode.as_deref() {
+                Some(raw_mode) => {
+                    let mode = queue::ShuffleMode::parse(raw_mode);
+                    if mode == queue::ShuffleMode::Off {
+                        crate::playback::queue::load_queue(conn)?
+                    } else {
+                        let seed = crate::playback::shuffle::generate_shuffle_seed();
+                        let result = crate::playback::queue::apply_shuffle_with_seed(
+                            conn,
+                            mode,
+                            None,
+                            seed,
+                            "queue_replace",
+                        )?;
+                        shuffle_debug = result.debug;
+                        result.queue
+                    }
+                }
+                None => crate::playback::queue::load_queue(conn)?,
+            };
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": final_queue })))
+            Ok(Json(json!({
+                "queue": final_queue,
+                "shuffle_debug": shuffle_debug
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -9333,6 +9364,30 @@ async fn play_tidal_ephemeral(
 #[derive(Debug, serde::Deserialize)]
 struct PlayTidalMixRequest {
     tracks: Vec<PlayTidalRequest>,
+    #[serde(default)]
+    shuffle_mode: Option<String>,
+}
+
+fn shuffle_tidal_mix_tracks(
+    tracks: &mut [PlayTidalRequest],
+    shuffle_mode: Option<&str>,
+) -> Option<queue::ShuffleDebug> {
+    let mode = queue::ShuffleMode::parse(shuffle_mode.unwrap_or("off"));
+    if mode == queue::ShuffleMode::Off {
+        return None;
+    }
+
+    let seed = crate::playback::shuffle::generate_shuffle_seed();
+    let mut rng = crate::playback::shuffle::seeded_rng(seed, mode.as_str(), "tidal_mix");
+    use rand::seq::SliceRandom;
+    tracks.shuffle(&mut rng);
+    Some(queue::ShuffleDebug {
+        mode: mode.as_str().to_string(),
+        seed,
+        scope: "tidal_mix".to_string(),
+        locked_count: 0,
+        candidate_count: tracks.len(),
+    })
 }
 
 /// Play the first track immediately and stash the rest in the pending
@@ -9342,15 +9397,16 @@ async fn play_tidal_mix(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalMixRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if body.tracks.is_empty() {
+    let mut tracks = body.tracks;
+    if tracks.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Mix has no tracks" })),
         ));
     }
+    let shuffle_debug = shuffle_tidal_mix_tracks(&mut tracks, body.shuffle_mode.as_deref());
 
-    let mut iter = body
-        .tracks
+    let mut iter = tracks
         .into_iter()
         .map(|t| crate::PendingEphemeralTidalTrack {
             tidal_track_id: t.tidal_track_id,
@@ -9361,6 +9417,7 @@ async fn play_tidal_mix(
             duration_ms: t.duration_ms,
         });
     let first = iter.next().expect("non-empty per check above");
+    let first_tidal_id = first.tidal_track_id;
     let rest: Vec<crate::PendingEphemeralTidalTrack> = iter.collect();
 
     // Replace any existing pending queue with this mix's continuation.
@@ -9372,7 +9429,11 @@ async fn play_tidal_mix(
     }
 
     start_ephemeral_tidal_playback(&state, first).await?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({
+        "ok": true,
+        "first_tidal_id": first_tidal_id,
+        "shuffle_debug": shuffle_debug
+    })))
 }
 
 fn requested_tidal_quality(
@@ -12402,6 +12463,141 @@ mod tests {
         assert_eq!(persisted_queue_count, 1);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn playback_shuffle_returns_debug_and_persists_seed() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/shuffle")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mode":"true"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let seed = body["shuffle_debug"]["seed"]
+            .as_i64()
+            .expect("positive seed");
+        assert!(seed > 0);
+        assert_eq!(body["shuffle_debug"]["mode"], "true");
+        assert_eq!(body["shuffle_debug"]["scope"], "playback_state");
+
+        let stored_seed: Option<i64> = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT shuffle_seed FROM playback_state WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stored_seed, Some(seed));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn replace_playback_queue_accepts_one_shot_shuffle_mode() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/queue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"track_ids":[1,2],"shuffle_mode":"true"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().expect("queue").len(), 2);
+        assert_eq!(body["shuffle_debug"]["mode"], "true");
+        assert_eq!(body["shuffle_debug"]["scope"], "queue_replace");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
+        let mut tracks = vec![
+            PlayTidalRequest {
+                tidal_track_id: 101,
+                title: "One".to_string(),
+                artist_name: Some("Artist A".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(180_000),
+            },
+            PlayTidalRequest {
+                tidal_track_id: 102,
+                title: "Two".to_string(),
+                artist_name: Some("Artist B".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(181_000),
+            },
+            PlayTidalRequest {
+                tidal_track_id: 103,
+                title: "Three".to_string(),
+                artist_name: Some("Artist C".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(182_000),
+            },
+        ];
+
+        let debug = shuffle_tidal_mix_tracks(&mut tracks, Some("true")).expect("shuffle debug");
+        let mut ids: Vec<i64> = tracks.iter().map(|track| track.tidal_track_id).collect();
+        ids.sort_unstable();
+
+        assert_eq!(ids, vec![101, 102, 103]);
+        assert_eq!(debug.mode, "true");
+        assert!(debug.seed > 0);
+        assert_eq!(debug.scope, "tidal_mix");
+        assert_eq!(debug.locked_count, 0);
+        assert_eq!(debug.candidate_count, 3);
     }
 
     #[tokio::test]

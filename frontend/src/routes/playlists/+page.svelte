@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import {
 		api,
@@ -16,6 +17,7 @@
 		currentTrack,
 		isPlaying,
 		playTrackNow,
+		shuffleMode,
 		shufflePlaylist,
 		startPlaylistRadio,
 	} from '$lib/stores/player';
@@ -378,8 +380,13 @@
 		e.stopPropagation();
 		const tracks = await ensurePlaylistTracks(playlist.id);
 		if (!tracks.length) return;
-		await api.replacePlaybackQueue(tracks.map((t) => t.id));
-		await playTrackNow(tracks[0].id);
+		const replaced = await api.replacePlaybackQueue(
+			tracks.map((t) => t.id),
+			undefined,
+			undefined,
+			get(shuffleMode)
+		);
+		await playTrackNow(replaced.queue[0]?.track.id ?? tracks[0].id);
 	}
 
 	async function shufflePlaylistQuick(playlist: Playlist, e: MouseEvent) {

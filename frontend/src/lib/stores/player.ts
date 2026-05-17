@@ -468,9 +468,11 @@ export async function playNextTrack() {
 		if (currentRepeat !== 'one') {
 			const queue = get(playbackQueue);
 			const current = get(currentTrack);
-			const currentIdx = queue.findIndex((q) => q.track.id === (current?.id ?? -1));
-			const nextItem =
-				currentIdx >= 0 && currentIdx + 1 < queue.length ? queue[currentIdx + 1] : null;
+			const nextItem = selectOptimisticNextItem(
+				queue,
+				current?.id ?? null,
+				get(currentQueueItemId)
+			);
 			if (nextItem) {
 				setCurrentTrack(nextItem.track);
 			}
@@ -566,8 +568,12 @@ export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) 
 	try {
 		const snapshot = await api.setPlaybackShuffle(mode);
 		hydratePlayback(snapshot);
+		return snapshot;
 	} catch (error) {
-		setError('set shuffle mode', error, () => setPlayerShuffleMode(mode));
+		setError('set shuffle mode', error, async () => {
+			await setPlayerShuffleMode(mode);
+		});
+		return null;
 	}
 }
 
@@ -896,6 +902,7 @@ async function loadQueueAndPlay(
 		preserveRadioReasons?: boolean;
 		reasons?: (string | null)[];
 		pendingCandidates?: PendingCandidateInfo[];
+		shuffleMode?: PlaybackState['shuffle_mode'];
 	},
 ) {
 	if (trackIds.length === 0) return;
@@ -903,21 +910,31 @@ async function loadQueueAndPlay(
 	playerError.set(null);
 	if (!options?.preserveRadioReasons) clearRadioReasons();
 	try {
-		await api.replacePlaybackQueue(trackIds, options?.reasons, options?.pendingCandidates);
-		const snapshot = await api.playTrack(trackIds[0]);
+		const replaced = await api.replacePlaybackQueue(
+			trackIds,
+			options?.reasons,
+			options?.pendingCandidates,
+			options?.shuffleMode
+		);
+		const firstTrackId = replaced.queue[0]?.track.id ?? trackIds[0];
+		const snapshot = await api.playTrack(firstTrackId);
 		hydratePlayback(snapshot);
 	} catch (error) {
-		setError('start playback', error, () => loadQueueAndPlay(trackIds));
+		setError('start playback', error, () => loadQueueAndPlay(trackIds, options));
 	}
 }
 
-function shuffleArray<T>(items: T[]): T[] {
-	const arr = items.slice();
-	for (let i = arr.length - 1; i > 0; i--) {
-		const j = Math.floor(Math.random() * (i + 1));
-		[arr[i], arr[j]] = [arr[j], arr[i]];
+export function selectOptimisticNextItem<T extends { id: number; track: { id: number } }>(
+	queue: T[],
+	currentTrackId: number | null | undefined,
+	currentQueueItem: number | null | undefined
+): T | null {
+	let currentIdx =
+		currentQueueItem != null ? queue.findIndex((q) => q.id === currentQueueItem) : -1;
+	if (currentIdx < 0) {
+		currentIdx = queue.findIndex((q) => q.track.id === (currentTrackId ?? -1));
 	}
-	return arr;
+	return currentIdx >= 0 && currentIdx + 1 < queue.length ? queue[currentIdx + 1] : null;
 }
 
 export async function playAlbum(albumId: number, startTrackId?: number) {
@@ -935,7 +952,9 @@ export async function playAlbum(albumId: number, startTrackId?: number) {
 					...tracks.filter((t) => t.id !== startTrackId)
 				]
 			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id));
+		await loadQueueAndPlay(ordered.map((t) => t.id), {
+			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+		});
 	} catch (error) {
 		setError('play that album', error, () => playAlbum(albumId, startTrackId));
 	}
@@ -950,8 +969,7 @@ export async function shuffleAlbum(albumId: number) {
 			playerError.set({ message: 'Album has no tracks.' });
 			return;
 		}
-		const shuffled = shuffleArray(tracks);
-		await loadQueueAndPlay(shuffled.map((t) => t.id));
+		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true' });
 	} catch (error) {
 		setError('shuffle that album', error, () => shuffleAlbum(albumId));
 	}
@@ -972,7 +990,9 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 					...tracks.filter((t) => t.id !== startTrackId)
 				]
 			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id));
+		await loadQueueAndPlay(ordered.map((t) => t.id), {
+			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+		});
 	} catch (error) {
 		setError('play that artist', error, () => playArtist(artistId, startTrackId));
 	}
@@ -987,7 +1007,7 @@ export async function shuffleArtist(artistId: number) {
 			playerError.set({ message: 'Artist has no tracks.' });
 			return;
 		}
-		await loadQueueAndPlay(shuffleArray(tracks).map((t) => t.id));
+		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true' });
 	} catch (error) {
 		setError('shuffle that artist', error, () => shuffleArtist(artistId));
 	}
@@ -1020,8 +1040,7 @@ export async function shufflePlaylist(
 	tracks: { id: number }[],
 ) {
 	if (!tracks.length) return;
-	const shuffled = shuffleArray([...tracks]);
-	await loadQueueAndPlay(shuffled.map((t) => t.id));
+	await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true' });
 	showToast('Shuffling playlist', 'success');
 }
 
@@ -1047,7 +1066,9 @@ export async function playPlaylist(playlistId: number, startTrackId?: number) {
 					...tracks.filter((t) => t.id !== startTrackId)
 				]
 			: tracks;
-		await loadQueueAndPlay(ordered.map((t) => t.id));
+		await loadQueueAndPlay(ordered.map((t) => t.id), {
+			shuffleMode: startTrackId ? undefined : get(shuffleMode),
+		});
 	} catch (error) {
 		setError('play that playlist', error, () => playPlaylist(playlistId, startTrackId));
 	}
@@ -1069,7 +1090,7 @@ export async function playTidalPlaylist(tidalUuid: string) {
 			playerError.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
-		await startTidalEphemeralQueue(tracks);
+		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode) });
 		showToast(`Playing playlist (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
 		setError('load TIDAL playlist', error, () => playTidalPlaylist(tidalUuid));
@@ -1223,7 +1244,11 @@ export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
 	}
 }
 
-export async function playTidalTracksNow(tracks: TidalPlayable[], label = 'playlist'): Promise<void> {
+export async function playTidalTracksNow(
+	tracks: TidalPlayable[],
+	label = 'playlist',
+	options?: { shuffleMode?: PlaybackState['shuffle_mode'] }
+): Promise<void> {
 	if (!assertOnline()) return;
 	const playable = tracks.filter((track) => track.tidal_id > 0);
 	if (!playable.length) {
@@ -1233,19 +1258,25 @@ export async function playTidalTracksNow(tracks: TidalPlayable[], label = 'playl
 	rememberTidalPlayables(playable);
 	playerError.set(null);
 	try {
-		setOptimisticTidalTrack(playable[0]);
-		await api.playTidalMix(playable);
+		const requestShuffleMode = options?.shuffleMode ?? get(shuffleMode);
+		const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
+		if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
+		const result = await api.playTidalMix(playable, oneShotShuffleMode);
+		if (oneShotShuffleMode) {
+			const first =
+				playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
+			setOptimisticTidalTrack(first);
+		}
 		noteSuccess();
 		showToast(`Playing ${label} (${playable.length} tracks)`, 'success');
 	} catch (error) {
-		setError('play those Tidal tracks', error, () => playTidalTracksNow(tracks, label));
+		setError('play those Tidal tracks', error, () => playTidalTracksNow(tracks, label, options));
 		showToast('Playback failed', 'error');
 	}
 }
 
 export async function shuffleTidalTracksNow(tracks: TidalPlayable[], label = 'playlist'): Promise<void> {
-	const shuffled = shuffleArray(tracks);
-	await playTidalTracksNow(shuffled, label);
+	await playTidalTracksNow(tracks, label, { shuffleMode: 'true' });
 }
 
 export async function playTidalTracksNext(tracks: TidalPlayable[]): Promise<void> {
@@ -1303,7 +1334,7 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 			showToast('Album has no tracks', 'error');
 			return;
 		}
-		await startTidalEphemeralQueue(tracks);
+		await startTidalEphemeralQueue(tracks, { shuffleMode: get(shuffleMode) });
 		showToast(`Playing album (${tracks.length} tracks queued)`, 'success');
 	} catch (error) {
 		setError('play that Tidal album', error, () => playTidalAlbum(tidalAlbumId));
@@ -1311,10 +1342,6 @@ export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	}
 }
 
-/// Start an ephemeral TIDAL queue: optimistically reflect track 0 in the
-/// now-playing UI, then ship the full list to `/api/tidal/play-mix` (which is
-/// the generic "play this list" endpoint — name is historical). The server
-/// starts track 0 and queues the rest behind it so playback auto-advances.
 async function startTidalEphemeralQueue(
 	tracks: ReadonlyArray<{
 		tidal_id: number;
@@ -1330,47 +1357,33 @@ async function startTidalEphemeralQueue(
 		is_in_library?: boolean;
 		is_favorite?: boolean;
 	}>,
+	options?: { shuffleMode?: PlaybackState['shuffle_mode'] }
 ): Promise<void> {
-	const first = tracks[0];
 	rememberTidalPlayables(tracks);
-	setCurrentTrack({
-		id: localTidalTrackId(first) ?? -first.tidal_id,
-		title: first.title,
-		artist_id: -1,
-		artist_name: first.artist_name ?? null,
-		artist_tidal_id: first.artist_tidal_id ?? null,
-		album_id: null,
-		album_title: first.album_title ?? null,
-		album_tidal_id: first.album_tidal_id ?? null,
-		disc_number: null,
-		track_number: null,
-		duration_ms: first.duration_ms ?? null,
-		isrc: null,
-		tidal_id: first.tidal_id,
-		best_quality: 'LOSSLESS',
-		best_source: 'tidal',
-		fidelity_score: 0,
-		is_favorite: first.is_favorite ?? false,
-		play_count: 0,
-		last_played_at: null,
-		date_added: null,
-		source: 'tidal_ephemeral',
-		artwork_url: first.artwork_url ?? null,
-	});
-	isPlaying.set(true);
+	const requestShuffleMode = options?.shuffleMode;
+	const oneShotShuffleMode = requestShuffleMode === 'off' ? undefined : requestShuffleMode;
+	const playable = tracks.map((t) => ({
+		tidal_id: t.tidal_id,
+		title: t.title,
+		artist_name: t.artist_name ?? null,
+		artist_tidal_id: t.artist_tidal_id ?? null,
+		album_title: t.album_title ?? null,
+		album_tidal_id: t.album_tidal_id ?? null,
+		artwork_url: t.artwork_url ?? null,
+		duration_ms: t.duration_ms ?? null,
+		track_id: t.track_id,
+		local_id: t.local_id ?? null,
+		is_in_library: t.is_in_library,
+		is_favorite: t.is_favorite,
+	}));
 
-	await api.playTidalMix(
-		tracks.map((t) => ({
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			artist_tidal_id: t.artist_tidal_id ?? null,
-			album_title: t.album_title ?? null,
-			album_tidal_id: t.album_tidal_id ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms ?? null,
-		})),
-	);
+	if (!oneShotShuffleMode) setOptimisticTidalTrack(playable[0]);
+	const result = await api.playTidalMix(playable, oneShotShuffleMode);
+	if (oneShotShuffleMode) {
+		const shuffledFirst =
+			playable.find((track) => track.tidal_id === result.first_tidal_id) ?? playable[0];
+		setOptimisticTidalTrack(shuffledFirst);
+	}
 	noteSuccess();
 }
 

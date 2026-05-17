@@ -239,10 +239,9 @@
 		if (!node || tracks.length === 0) return;
 		try {
 			await api.replacePlaybackQueue(tracks.map(t => t.id));
-			await setPlayerShuffleMode('genre');
+			const shuffled = await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
-			const startIndex = Math.floor(Math.random() * tracks.length);
-			await playTrackNow(tracks[startIndex].id);
+			await playTrackNow(shuffled?.queue[0]?.track.id ?? tracks[0].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}

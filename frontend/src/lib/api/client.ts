@@ -846,6 +846,21 @@ export interface PlaybackState {
 export interface PlaybackSnapshot {
 	state: PlaybackState;
 	queue: QueueItem[];
+	shuffle_debug?: ShuffleDebug | null;
+}
+
+export interface ShuffleDebug {
+	mode: PlaybackState['shuffle_mode'];
+	seed: number;
+	scope: string;
+	locked_count: number;
+	candidate_count: number;
+}
+
+export interface TidalMixPlaybackResponse {
+	ok: boolean;
+	first_tidal_id?: number;
+	shuffle_debug?: ShuffleDebug | null;
 }
 
 export interface PlaybackRuntimeInfo {
@@ -2715,14 +2730,20 @@ export const api = {
 		trackIds: number[],
 		reasons?: (string | null)[],
 		pendingCandidates?: PendingCandidateInfo[],
+		shuffleMode?: PlaybackState['shuffle_mode'],
 	) {
 		const body: Record<string, unknown> = { track_ids: trackIds };
 		if (reasons) body.reasons = reasons;
 		if (pendingCandidates?.length) body.pending_candidates = pendingCandidates;
-		return fetchApi<{ queue: QueueItem[] }>('/api/playback/queue', undefined, {
-			method: 'POST',
-			body: JSON.stringify(body),
-		});
+		if (shuffleMode && shuffleMode !== 'off') body.shuffle_mode = shuffleMode;
+		return fetchApi<{ queue: QueueItem[]; shuffle_debug?: ShuffleDebug | null }>(
+			'/api/playback/queue',
+			undefined,
+			{
+				method: 'POST',
+				body: JSON.stringify(body),
+			}
+		);
 	},
 
 	removeQueueTrack(queueItemId: number) {
@@ -2881,21 +2902,23 @@ export const api = {
 
 	// Play the first track of a mix immediately and queue the rest as
 	// pending ephemeral tracks (server auto-advances on track-end).
-	playTidalMix(tracks: TidalPlayable[]) {
-		return fetchApi<void>('/api/tidal/play-mix', undefined, {
+	playTidalMix(tracks: TidalPlayable[], shuffleMode?: PlaybackState['shuffle_mode']) {
+		const body: Record<string, unknown> = {
+			tracks: tracks.map((t) => ({
+				tidal_track_id: t.tidal_id,
+				title: t.title,
+				artist_name: t.artist_name ?? null,
+				artist_tidal_id: t.artist_tidal_id ?? null,
+				album_title: t.album_title ?? null,
+				album_tidal_id: t.album_tidal_id ?? null,
+				artwork_url: t.artwork_url ?? null,
+				duration_ms: t.duration_ms ?? null,
+			})),
+		};
+		if (shuffleMode && shuffleMode !== 'off') body.shuffle_mode = shuffleMode;
+		return fetchApi<TidalMixPlaybackResponse>('/api/tidal/play-mix', undefined, {
 			method: 'POST',
-			body: JSON.stringify({
-				tracks: tracks.map((t) => ({
-					tidal_track_id: t.tidal_id,
-					title: t.title,
-					artist_name: t.artist_name ?? null,
-					artist_tidal_id: t.artist_tidal_id ?? null,
-					album_title: t.album_title ?? null,
-					album_tidal_id: t.album_tidal_id ?? null,
-					artwork_url: t.artwork_url ?? null,
-					duration_ms: t.duration_ms ?? null,
-				})),
-			}),
+			body: JSON.stringify(body),
 		});
 	},
 

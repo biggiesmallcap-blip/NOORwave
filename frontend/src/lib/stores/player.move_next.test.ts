@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { computePlayNextPos } from './player';
+import { computePlayNextPos, selectOptimisticNextItem } from './player';
 
 // Regression: moveQueueTrackNext used to rebuild the queue via
 // replacePlaybackQueue(track_ids), which silently dropped ephemeral TIDAL
@@ -52,5 +52,19 @@ describe('computePlayNextPos', () => {
 		// Reverse: current at 2, user picks ephemeral at 0. Removing 0 shifts
 		// current to 1; insert at 2.
 		expect(computePlayNextPos(0, 2, length)).toBe(2);
+	});
+});
+
+describe('selectOptimisticNextItem', () => {
+	test('anchors duplicate tracks by current queue item id before falling back to track id', () => {
+		const queue = [
+			{ id: 10, track: { id: 1, title: 'Duplicate A' } },
+			{ id: 11, track: { id: 2, title: 'Middle' } },
+			{ id: 12, track: { id: 1, title: 'Duplicate B' } },
+			{ id: 13, track: { id: 3, title: 'Expected next' } },
+		];
+
+		expect(selectOptimisticNextItem(queue, 1, 12)?.id).toBe(13);
+		expect(selectOptimisticNextItem(queue, 1, null)?.id).toBe(11);
 	});
 });
