@@ -562,12 +562,15 @@ pub(super) async fn get_tidal_moods(
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
-    let mut categories = extract_page_links(&raw);
+    let categories = extract_page_links(&raw);
 
     // TIDAL's moods landing only ships icon glyphs, no cover art for the
-    // categories. Fetch each subpage in parallel and use the first playlist's
-    // artwork as the tile thumbnail. 13 fan-out calls, all hot-cached on
-    // TIDAL's side, so the round-trip stays under a second in practice.
+    // categories. Fetch each subpage in parallel for two reasons:
+    //   1. grab the first playlist's artwork as the tile thumbnail
+    //   2. filter out categories whose subpage has no playable music modules
+    //      (e.g. `record_labels` returns only PAGE_LINKS sub-nav)
+    // ~13 fan-out calls, hot-cached on TIDAL's side, so the round-trip stays
+    // under a second in practice.
     let slugs: Vec<String> = categories
         .iter()
         .filter_map(|c| c.get("slug").and_then(|s| s.as_str()).map(String::from))
@@ -576,31 +579,48 @@ pub(super) async fn get_tidal_moods(
     let fetches = slugs.into_iter().map(|slug| {
         let c = thumb_client.clone();
         async move {
-            let path = format!("pages/{}", slug);
-            let modules = c.get_page_modules(&path).await.ok()?;
-            let first_module = modules.into_iter().next()?;
-            let first_item = first_module.items.into_iter().next()?;
-            Some((slug, first_item.artwork_url))
+            match c.get_page_modules(&format!("pages/{}", slug)).await {
+                Ok(modules) => {
+                    let thumb = modules
+                        .first()
+                        .and_then(|m| m.items.first())
+                        .and_then(|i| i.artwork_url.clone());
+                    Some((slug, modules.is_empty(), thumb))
+                }
+                Err(_) => None,
+            }
         }
     });
-    let results: Vec<Option<(String, Option<String>)>> =
+    let results: Vec<Option<(String, bool, Option<String>)>> =
         futures::future::join_all(fetches).await;
-    let thumbs: std::collections::HashMap<String, String> = results
+    let probe: std::collections::HashMap<String, (bool, Option<String>)> = results
         .into_iter()
         .flatten()
-        .filter_map(|(slug, url)| url.map(|u| (slug, u)))
+        .map(|(slug, is_empty, thumb)| (slug, (is_empty, thumb)))
         .collect();
-    for cat in categories.iter_mut() {
-        let Some(obj) = cat.as_object_mut() else { continue };
-        let Some(slug) = obj.get("slug").and_then(|s| s.as_str()).map(String::from) else {
-            continue;
-        };
-        if let Some(url) = thumbs.get(&slug) {
-            obj.insert("thumbnail".to_string(), Value::String(url.clone()));
-        }
-    }
 
-    Ok(Json(json!({ "categories": categories, "source": "tidal" })))
+    let filtered: Vec<Value> = categories
+        .into_iter()
+        .filter_map(|mut cat| {
+            let slug = cat
+                .get("slug")
+                .and_then(|s| s.as_str())
+                .map(String::from)?;
+            if let Some((is_empty, thumb)) = probe.get(&slug) {
+                if *is_empty {
+                    return None; // drop meta-nav-only categories
+                }
+                if let Some(url) = thumb {
+                    if let Some(obj) = cat.as_object_mut() {
+                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
+                    }
+                }
+            }
+            Some(cat)
+        })
+        .collect();
+
+    Ok(Json(json!({ "categories": filtered, "source": "tidal" })))
 }
 
 /// Walks `rows[].modules[]` and pulls items from any module of `type ==
@@ -654,6 +674,7 @@ fn extract_page_links(payload: &Value) -> Vec<Value> {
 pub(super) async fn get_tidal_mood_page(
     State(state): State<SharedState>,
     Path(slug): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     if slug.is_empty()
         || slug.len() > 64
@@ -664,7 +685,8 @@ pub(super) async fn get_tidal_mood_page(
         return Err(StatusCode::BAD_REQUEST);
     }
     let wire_path = format!("pages/{}", slug);
-    fetch_page_modules(state, wire_path, false).await
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
 }
 
 // Shared TIDAL session loader -- mirrors the inline block other handlers use.

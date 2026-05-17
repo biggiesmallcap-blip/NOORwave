@@ -780,14 +780,15 @@ impl TidalClient {
                 continue;
             };
             for module in modules {
+                // Module title can be empty on single-module subpages (TIDAL
+                // doesn't repeat the page title inside the module). We only
+                // skip when both the title AND the items list are empty --
+                // i.e. nothing useful to render.
                 let title = module
                     .get("title")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                if title.is_empty() {
-                    continue;
-                }
                 let id = module
                     .get("id")
                     .and_then(serde_json::Value::as_str)

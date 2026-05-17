@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
-  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SpotifyArtistSearchItem, type SearchResults } from '$lib/api/client'
+  import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SearchResults } from '$lib/api/client'
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
@@ -62,7 +62,6 @@
   let loadingSpotifyPlaylists = $state(false)
   let loadingSpotifyTracks = $state(false)
   let loadingSpotifyAlbums = $state(false)
-  let loadingSpotifyArtists = $state(false)
   const providerSearchDone = $derived(
     !loadingLocal
     && !loadingTidal
@@ -70,7 +69,6 @@
     && !loadingSpotifyPlaylists
     && !loadingSpotifyTracks
     && !loadingSpotifyAlbums
-    && !loadingSpotifyArtists
   )
   let error = $state<string | null>(null)
   let failedArtistImages = $state(new Set<number>())
@@ -105,7 +103,6 @@
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
   let spotifyTrackResults = $state<SpotifyTrackSearchItem[]>([])
   let spotifyAlbumResults = $state<SpotifyAlbumSearchItem[]>([])
-  let spotifyArtistResults = $state<SpotifyArtistSearchItem[]>([])
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
@@ -122,10 +119,8 @@
   let hasMoreSpotifyPlaylists = $state(true)
   let spotifyTrackOffset = $state(0)
   let spotifyAlbumOffset = $state(0)
-  let spotifyArtistOffset = $state(0)
   let hasMoreSpotifyTracks = $state(true)
   let hasMoreSpotifyAlbums = $state(true)
-  let hasMoreSpotifyArtists = $state(true)
   let loadingMore = $state(false)
   let lastQuery = $state('')
 
@@ -185,7 +180,6 @@
     loadingSpotifyPlaylists = false
     loadingSpotifyTracks = false
     loadingSpotifyAlbums = false
-    loadingSpotifyArtists = false
   }
 
   function isCurrentSearch(q: string, generation: number, signal: AbortSignal) {
@@ -255,7 +249,6 @@
           spotifyPlaylistResults = []
           spotifyTrackResults = []
           spotifyAlbumResults = []
-          spotifyArtistResults = []
         } else {
           audioResults = null
           // Reset paging — every fresh query starts at offset 0.
@@ -264,16 +257,13 @@
           spotifyPlaylistOffset = 0
           spotifyTrackOffset = 0
           spotifyAlbumOffset = 0
-          spotifyArtistOffset = 0
           hasMoreTidal = true
           hasMoreTidalPlaylists = true
           hasMoreSpotifyPlaylists = true
           hasMoreSpotifyTracks = true
           hasMoreSpotifyAlbums = true
-          hasMoreSpotifyArtists = true
           spotifyTrackResults = []
           spotifyAlbumResults = []
-          spotifyArtistResults = []
           lastQuery = q
           const cacheKey = q.toLowerCase()
           const cached = resultCache.get(cacheKey)
@@ -283,7 +273,6 @@
           loadingSpotifyPlaylists = true
           loadingSpotifyTracks = true
           loadingSpotifyAlbums = true
-          loadingSpotifyArtists = true
 
           const localPromise = api.search(q, SEARCH_PAGE_SIZE)
           const tracksPromise = cached
@@ -293,7 +282,6 @@
           const spotifyPlaylistPromise = api.searchSpotifyPlaylists(q, SEARCH_PAGE_SIZE, signal, 0)
           const spotifyTrackSearchPromise = api.searchSpotifyTracks(q, SEARCH_PAGE_SIZE, signal, 0)
           const spotifyAlbumSearchPromise = api.searchSpotifyAlbums(q, SEARCH_PAGE_SIZE, signal, 0)
-          const spotifyArtistSearchPromise = api.searchSpotifyArtists(q, SEARCH_PAGE_SIZE, signal, 0)
 
           let localSnapshot: SearchResults | null = null
           let tidalSnapshot: TidalSearchResults | null = cached ?? null
@@ -373,16 +361,6 @@
             loadingSpotifyAlbums = false
           })
 
-          void spotifyArtistSearchPromise.then((items) => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            spotifyArtistResults = items
-            spotifyArtistOffset = items.length
-            if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyArtists = false
-          }).catch(() => undefined).finally(() => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            loadingSpotifyArtists = false
-          })
-
           await Promise.allSettled([
             localPromise,
             tracksPromise,
@@ -390,7 +368,6 @@
             spotifyPlaylistPromise,
             spotifyTrackSearchPromise,
             spotifyAlbumSearchPromise,
-            spotifyArtistSearchPromise,
           ])
         }
         if (isCurrentSearch(q, generation, signal)) {
@@ -431,8 +408,7 @@
       filterMode === 'playlists' && (hasMoreTidalPlaylists || hasMoreSpotifyPlaylists)
     const needsSpotifyTracks = filterMode === 'tracks' && hasMoreSpotifyTracks
     const needsSpotifyAlbums = filterMode === 'albums' && hasMoreSpotifyAlbums
-    const needsSpotifyArtists = filterMode === 'artists' && hasMoreSpotifyArtists
-    if (!needsTidal && !needsPlaylists && !needsSpotifyTracks && !needsSpotifyAlbums && !needsSpotifyArtists) return
+    if (!needsTidal && !needsPlaylists && !needsSpotifyTracks && !needsSpotifyAlbums) return
 
     loadingMore = true
     try {
@@ -523,20 +499,6 @@
               .catch(() => { hasMoreSpotifyAlbums = false }),
           )
         }
-        if (filterMode === 'artists' && hasMoreSpotifyArtists) {
-          spotifyTasks.push(
-            api
-              .searchSpotifyArtists(lastQuery, SEARCH_PAGE_SIZE, undefined, spotifyArtistOffset)
-              .then((items) => {
-                const seen = new Set(spotifyArtistResults.map((a) => a.spotifyId))
-                const fresh = items.filter((a) => !seen.has(a.spotifyId))
-                spotifyArtistResults = [...spotifyArtistResults, ...fresh]
-                spotifyArtistOffset += items.length
-                if (items.length < SEARCH_PAGE_SIZE) hasMoreSpotifyArtists = false
-              })
-              .catch(() => { hasMoreSpotifyArtists = false }),
-          )
-        }
         if (spotifyTasks.length > 0) await Promise.allSettled(spotifyTasks)
       }
     } finally {
@@ -625,7 +587,6 @@
     isEmpty &&
     spotifyTrackResults.length === 0 &&
     spotifyAlbumResults.length === 0 &&
-    spotifyArtistResults.length === 0 &&
     spotifyPlaylistResults.length === 0 &&
     tidalPlaylistResults.length === 0 &&
     filteredPlaylists.local.length === 0
@@ -639,7 +600,6 @@
     sortedArtists.length === 0 &&
     !((filterMode === 'all' || filterMode === 'tracks') && spotifyTrackResults.length > 0) &&
     !((filterMode === 'all' || filterMode === 'albums') && spotifyAlbumResults.length > 0) &&
-    !((filterMode === 'all' || filterMode === 'artists') && spotifyArtistResults.length > 0) &&
     !(showPlaylists && (filteredPlaylists.local.length > 0 || filteredPlaylists.tidal.length > 0 || filteredPlaylists.spotify.length > 0))
   )
 
@@ -1270,29 +1230,6 @@
       </section>
     {/if}
 
-    {#if (filterMode === 'all' || filterMode === 'artists') && spotifyArtistResults.length > 0}
-      <section class="results-section spotify-section">
-        <h3 class="section-label">Spotify artists</h3>
-        <div class="spotify-card-rail" use:wheelToHorizontal>
-          {#each spotifyArtistResults as a (a.spotifyId)}
-            <a
-              class="spotify-card"
-              href={`/spotify-artist/${a.spotifyId}`}
-              oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, [{ label: 'Open artist', onSelect: () => void goto(`/spotify-artist/${a.spotifyId}`) }], a.name ?? 'Spotify artist') }}
-            >
-              {#if a.thumbnail}
-                <div class="art round" style="background-image:url('{a.thumbnail}')"></div>
-              {:else}
-                <div class="art round fallback">@</div>
-              {/if}
-              <span class="card-title">{a.name ?? '-'}</span>
-              {#if a.followers !== null}<span class="card-sub">{Intl.NumberFormat().format(a.followers)} followers</span>{/if}
-            </a>
-          {/each}
-        </div>
-      </section>
-    {/if}
-
     {#if sortedAlbums.length > 0}
       <section class="results-section">
         <h3 class="section-label">Albums</h3>
@@ -1751,7 +1688,7 @@
         {:else if (
           (filterMode === 'tracks' && !hasMoreTidal && !hasMoreSpotifyTracks) ||
           (filterMode === 'albums' && !hasMoreTidal && !hasMoreSpotifyAlbums) ||
-          (filterMode === 'artists' && !hasMoreTidal && !hasMoreSpotifyArtists) ||
+          (filterMode === 'artists' && !hasMoreTidal) ||
           (filterMode === 'playlists' && !hasMoreTidalPlaylists && !hasMoreSpotifyPlaylists)
         )}
           <span class="infinite-end">- end of results -</span>
@@ -2510,7 +2447,6 @@
   .spotify-card { --card-w: clamp(120px, 11vw, 168px); flex: 0 0 var(--card-w); width: var(--card-w); display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; }
   .spotify-card:hover, .spotify-card:focus-visible { background: var(--bg-hover); outline: none; }
   .spotify-card .art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
-  .spotify-card .art.round { border-radius: 50%; }
   .spotify-card .art.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); }
   .spotify-card .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .spotify-card .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
