@@ -3,7 +3,6 @@
   import { goto, beforeNavigate } from '$app/navigation'
   import type { Snapshot } from './$types'
   import { api, type TidalSearchResults, type TidalSearchAlbum, type TidalSearchArtist, type TidalSearchTrack, type AudioSearchResult, type AudioSearchParams, type Genre, type VibeTrack, type BasicTrack, type Playlist, type TidalSearchPlaylist, type SpotifyPlaylistSearchItem, type SpotifyTrackSearchItem, type SpotifyAlbumSearchItem, type SearchResults } from '$lib/api/client'
-  import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte'
   import DiscoverShelves from '$lib/components/search/DiscoverShelves.svelte'
   import { buildTidalTrackMenu, buildTrackMenu } from '$lib/player/track_menu'
   import { buildAlbumMenu } from '$lib/player/album_menu'
@@ -1056,10 +1055,6 @@
 
     <section class="results-section discover-shelves-section">
       <DiscoverShelves />
-    </section>
-
-    <section class="results-section">
-      <TrendingShelf limit={25} />
     </section>
 
     {#if recent.length === 0}
