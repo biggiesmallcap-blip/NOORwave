@@ -387,4 +387,102 @@ pub(super) async fn get_tidal_mix_tracks(
     Ok(Json(json!({ "tracks": tracks })))
 }
 
+/// Returns editorial modules for a whitelisted TIDAL `/v1/pages/{section}` or
+/// `/v1/pages/{section}/{id}` endpoint. Routed via two siblings so we never
+/// open the door to arbitrary upstream paths via a wildcard extractor.
+pub(super) async fn get_tidal_page_modules(
+    State(state): State<SharedState>,
+    Path(section): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    let wire_path = resolve_page_path(&section, None)?;
+    fetch_page_modules(state, wire_path).await
+}
+
+pub(super) async fn get_tidal_page_modules_with_id(
+    State(state): State<SharedState>,
+    Path((section, id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    let wire_path = resolve_page_path(&section, Some(id.as_str()))?;
+    fetch_page_modules(state, wire_path).await
+}
+
+// Whitelist + wire-path normalization. Returns 404 for anything not on the
+// approved list so callers can't probe arbitrary TIDAL endpoints.
+fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
+    let section = section.trim_matches('/');
+    let allowed_top = matches!(
+        section,
+        "charts" | "moods" | "genres" | "new-releases" | "new_releases"
+    );
+    let allowed_with_id = matches!(section, "mood" | "genre");
+    let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
+    if !valid {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // TIDAL uses `new_releases` on the wire; normalize the dash form callers
+    // may use.
+    let wire_section = if section == "new-releases" { "new_releases" } else { section };
+    Ok(match id {
+        Some(id) => format!("pages/{}/{}", wire_section, id),
+        None => format!("pages/{}", wire_section),
+    })
+}
+
+async fn fetch_page_modules(
+    state: SharedState,
+    page_path: String,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client) = {
+        let in_memory = {
+            let s = state.read().await;
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+            )
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            None => {
+                let persisted = super::load_persisted_tidal_tokens(&state)
+                    .await
+                    .ok()
+                    .flatten();
+                (persisted, in_memory.1, in_memory.2)
+            }
+        }
+    };
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let modules = match client.get_page_modules(&page_path).await {
+        Ok(m) => m,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_page_modules(&page_path).await.map_err(|e| {
+                tracing::warn!("TIDAL get_page_modules({page_path}) failed after refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_page_modules({page_path}) failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    Ok(Json(json!({ "modules": modules, "source": "tidal", "page": page_path })))
+}
+
 // ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────

@@ -704,6 +704,18 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/discover-modules/{id}/items",
             get(tidal_home_routes::get_tidal_discover_module_items),
         )
+        // Generic editorial page modules. Whitelisted in the handler to
+        // charts / moods / genres / new-releases (single segment) and
+        // mood/{id} / genre/{id} (two segments). Universal across the
+        // /v1/pages/* response shape.
+        .route(
+            "/api/tidal/page/{section}",
+            get(tidal_home_routes::get_tidal_page_modules),
+        )
+        .route(
+            "/api/tidal/page/{section}/{id}",
+            get(tidal_home_routes::get_tidal_page_modules_with_id),
+        )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
         .route(
@@ -13471,6 +13483,8 @@ mod tests {
             ("GET", "/api/tidal/radio-stations"),
             ("GET", "/api/tidal/home-modules"),
             ("GET", "/api/tidal/discover-modules/1/items"),
+            ("GET", "/api/tidal/page/charts"),
+            ("GET", "/api/tidal/page/mood/1"),
             ("GET", "/api/charts"),
             ("GET", "/api/charts/lastfm/genres"),
             ("GET", "/api/charts/lastfm/countries"),
