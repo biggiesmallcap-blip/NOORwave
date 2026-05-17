@@ -10,6 +10,11 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
+
+Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` — when it returns 200, restore the entry.
+- Spawned by: commit on branch `claude/serene-engelbart-083512`
+
 ### chore: extend `extract_page_links` if PAGE_LINKS shows up outside moods
 
 Today only `/api/tidal/moods` reads PAGE_LINKS modules (via

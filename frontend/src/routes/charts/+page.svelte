@@ -13,7 +13,9 @@
     { id: '37i9dQZEVXbLRQDuF5jeBp', title: 'Top 50 - USA', sub: 'Daily chart' },
     { id: '37i9dQZEVXbLnolsZ8PSNw', title: 'Top 50 - UK', sub: 'Daily chart' },
     { id: '37i9dQZEVXbJPcfkRz0wJ0', title: 'Top 50 - Australia', sub: 'Daily chart' },
-    { id: '37i9dQZEVXbLiRSasKsNU9', title: 'Viral 50 - Global', sub: 'Daily chart' },
+    // Viral 50 - Global (37i9dQZEVXbLiRSasKsNU9) removed: Sportify proxy
+    // returns a hard 503 specifically for that ID even though Top 50s and
+    // editorial playlists work fine. Add back once the proxy recovers it.
     { id: '37i9dQZF1DXcBWIGoYBM5M', title: "Today's Top Hits", sub: 'Editorial' },
     { id: '37i9dQZF1DX4JAvHpjipBk', title: 'New Music Friday', sub: 'Editorial' },
     { id: '37i9dQZF1DX0XUsuxWHRQd', title: 'RapCaviar', sub: 'Editorial' },
