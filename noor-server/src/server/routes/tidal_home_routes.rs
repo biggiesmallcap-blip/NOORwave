@@ -1,6 +1,6 @@
 use crate::SharedState;
 use crate::db::queries;
-use crate::services::tidal::client::TidalClient;
+use crate::services::tidal::client::{TidalClient, TidalHomeModule};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Vec<Value>)>>>;
+type TidalPageModulesCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalHomeModule>)>>>;
 
 const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
@@ -450,23 +451,24 @@ async fn fetch_page_modules(
     page_path: String,
     debug_raw: bool,
 ) -> Result<Json<Value>, StatusCode> {
-    let (tokens, http_client, tidal_http_client) = {
+    let (tokens, http_client, tidal_http_client, page_modules_cache) = {
         let in_memory = {
             let s = state.read().await;
             (
                 s.tidal_tokens.clone(),
                 s.http_client.clone(),
                 s.tidal_http_client.clone(),
+                s.tidal_page_modules_cache.clone(),
             )
         };
         match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
             None => {
                 let persisted = super::load_persisted_tidal_tokens(&state)
                     .await
                     .ok()
                     .flatten();
-                (persisted, in_memory.1, in_memory.2)
+                (persisted, in_memory.1, in_memory.2, in_memory.3)
             }
         }
     };
@@ -479,6 +481,7 @@ async fn fetch_page_modules(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
+    let cache_key = tidal_page_modules_cache_key(&tokens.country_code, &page_path);
     if debug_raw {
         let raw = match client.get_page_raw(&page_path).await {
             Ok(r) => r,
@@ -505,6 +508,11 @@ async fn fetch_page_modules(
             json!({ "raw": raw, "source": "tidal", "page": page_path }),
         ));
     }
+    if let Some(cached) = get_cached_tidal_page_modules(&page_modules_cache, &cache_key) {
+        return Ok(Json(
+            json!({ "modules": cached, "source": "tidal", "page": page_path, "cached": true }),
+        ));
+    }
     let modules = match client.get_page_modules(&page_path).await {
         Ok(m) => m,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -526,9 +534,37 @@ async fn fetch_page_modules(
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
+    put_cached_tidal_page_modules(&page_modules_cache, cache_key, modules.clone());
     Ok(Json(
         json!({ "modules": modules, "source": "tidal", "page": page_path }),
     ))
+}
+
+fn tidal_page_modules_cache_key(country_code: &str, page_path: &str) -> String {
+    format!("{country_code}:{page_path}")
+}
+
+fn get_cached_tidal_page_modules(
+    cache: &TidalPageModulesCache,
+    key: &str,
+) -> Option<Vec<TidalHomeModule>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.get(key)
+        && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    guard.remove(key);
+    None
+}
+
+fn put_cached_tidal_page_modules(
+    cache: &TidalPageModulesCache,
+    key: String,
+    modules: Vec<TidalHomeModule>,
+) {
+    let mut guard = cache.lock().unwrap();
+    guard.insert(key, (Instant::now(), modules));
 }
 
 /// Returns the TIDAL mood / activity category list, parsed out of the
@@ -729,6 +765,39 @@ mod tests {
 
         assert!(get_cached_tidal_mood_categories(&cache).is_none());
         assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn tidal_page_modules_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let key = tidal_page_modules_cache_key("AU", "pages/m_happy");
+        let modules = vec![TidalHomeModule {
+            id: "happy".to_string(),
+            title: "Happy".to_string(),
+            kind: "PLAYLIST_LIST".to_string(),
+            more_path: None,
+            items: Vec::new(),
+        }];
+
+        put_cached_tidal_page_modules(&cache, key.clone(), modules.clone());
+
+        let cached = get_cached_tidal_page_modules(&cache, &key).expect("fresh cache hit");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].title, "Happy");
+
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.clone(),
+                (
+                    Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                    modules,
+                ),
+            );
+        }
+
+        assert!(get_cached_tidal_page_modules(&cache, &key).is_none());
+        assert!(!cache.lock().unwrap().contains_key(&key));
     }
 }
 

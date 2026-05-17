@@ -29,9 +29,9 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 mod analytics_routes;
@@ -47,6 +47,10 @@ mod sportify_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
+
+type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
+
+const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -9175,57 +9179,72 @@ async fn tidal_playlist_tracks(
         ));
     };
 
-    let (http_client, tidal_http_client) = {
+    let (http_client, tidal_http_client, playlist_tracks_cache) = {
         let s = state.read().await;
-        (s.http_client.clone(), s.tidal_http_client.clone())
+        (
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+            s.tidal_playlist_tracks_cache.clone(),
+        )
     };
+    let limit = 100;
+    let offset = 0;
+    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, &uuid, limit, offset);
     let client = TidalClient::with_http(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let resp = match client.get_playlist_tracks(&uuid, 100, 0).await {
-        Ok(r) => r,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
+    let tracks = match get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key) {
+        Some(cached) => cached,
+        None => {
+            let resp = match client.get_playlist_tracks(&uuid, limit, offset).await {
+                Ok(r) => r,
+                Err(e) if error_looks_like_auth(&e) => {
+                    let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                        .await
+                        .map_err(|re| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": format!("TIDAL session refresh failed: {}", re)
+                                })),
+                            )
+                        })?;
+                    let retry_client = TidalClient::with_http(
+                        tidal_http_client,
+                        refreshed.access_token.clone(),
+                        refreshed.country_code.clone(),
+                    );
+                    retry_client
+                        .get_playlist_tracks(&uuid, limit, offset)
+                        .await
+                        .map_err(|e2| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({ "error": e2.to_string() })),
+                            )
+                        })?
+                }
+                Err(e) => {
+                    return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry_client
-                .get_playlist_tracks(&uuid, 100, 0)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            ));
+                        Json(json!({ "error": e.to_string() })),
+                    ));
+                }
+            };
+            put_cached_tidal_playlist_tracks(&playlist_tracks_cache, cache_key, resp.items.clone());
+            resp.items
         }
     };
 
-    let tidal_ids: Vec<i64> = resp.items.iter().map(|t| t.id).collect();
+    let tidal_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
     let library_states = {
         let s = state.read().await;
         s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
             .unwrap_or_default()
     };
-    let playable: Vec<serde_json::Value> = resp
-        .items
+    let playable: Vec<serde_json::Value> = tracks
         .into_iter()
         .map(|t| {
             let library_state = library_states.get(&t.id).copied();
@@ -9234,6 +9253,38 @@ async fn tidal_playlist_tracks(
         .collect();
 
     Ok(Json(json!({ "tracks": playable })))
+}
+
+fn tidal_playlist_tracks_cache_key(
+    country_code: &str,
+    uuid: &str,
+    limit: i32,
+    offset: i32,
+) -> String {
+    format!("{country_code}:{uuid}:{limit}:{offset}")
+}
+
+fn get_cached_tidal_playlist_tracks(
+    cache: &TidalPlaylistTracksCache,
+    key: &str,
+) -> Option<Vec<TidalTrack>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.get(key)
+        && stored_at.elapsed() < TIDAL_PLAYLIST_TRACKS_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    guard.remove(key);
+    None
+}
+
+fn put_cached_tidal_playlist_tracks(
+    cache: &TidalPlaylistTracksCache,
+    key: String,
+    tracks: Vec<TidalTrack>,
+) {
+    let mut guard = cache.lock().unwrap();
+    guard.insert(key, (Instant::now(), tracks));
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11769,6 +11820,31 @@ mod tests {
     }
 
     #[test]
+    fn tidal_playlist_tracks_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid", 100, 0);
+        let tracks: Vec<TidalTrack> = Vec::new();
+
+        put_cached_tidal_playlist_tracks(&cache, key.clone(), tracks.clone());
+
+        assert!(get_cached_tidal_playlist_tracks(&cache, &key).is_some());
+
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.clone(),
+                (
+                    Instant::now() - TIDAL_PLAYLIST_TRACKS_CACHE_TTL - Duration::from_secs(1),
+                    tracks,
+                ),
+            );
+        }
+
+        assert!(get_cached_tidal_playlist_tracks(&cache, &key).is_none());
+        assert!(!cache.lock().unwrap().contains_key(&key));
+    }
+
+    #[test]
     fn ephemeral_stream_request_uses_user_audio_quality() {
         let request = build_ephemeral_tidal_stream_request(
             123,
@@ -12031,6 +12107,8 @@ mod tests {
             tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
             tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
+            tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
