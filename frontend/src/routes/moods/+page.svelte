@@ -75,11 +75,13 @@
           href={`/moods/${c.slug}`}
           oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(c.slug, c.title), c.title); }}
         >
-          {#if c.thumbnail}
-            <div class="art" style="background-image:url('{c.thumbnail}')"></div>
-          {:else}
-            <div class="art fallback">~</div>
-          {/if}
+          <div class="art-wrap">
+            {#if c.thumbnail}
+              <div class="art" style="background-image:url('{c.thumbnail}')"></div>
+            {:else}
+              <div class="art fallback">~</div>
+            {/if}
+          </div>
           <span class="card-title">{c.title}</span>
         </a>
       {/each}
@@ -115,11 +117,27 @@
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--gap); }
-  .card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; transition: background var(--motion-fast) ease; }
-  .card:hover, .card:focus-visible { background: var(--bg-hover); outline: none; }
-  .art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; color: #fff; font-size: var(--font-size-3xl); background: linear-gradient(135deg, #3b82f6, #8b5cf6); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: var(--gap); }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    background: none;
+    border: 1px solid transparent;
+    padding: var(--space-2);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+    box-sizing: border-box;
+  }
+  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+  .card:focus-visible { border-color: var(--accent-line); }
+  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base) ease; }
+  .card:hover .art { transform: scale(1.05); }
+  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
   .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
 
   .spotify-block { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-6); }

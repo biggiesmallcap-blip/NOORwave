@@ -75,11 +75,13 @@
         href={`/spotify-playlist/${c.id}`}
         oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, chartMenu(c.id, c.title), c.title); }}
       >
-        {#if m?.thumbnail}
-          <div class="art" style="background-image:url('{m.thumbnail}')"></div>
-        {:else}
-          <div class="art fallback">M</div>
-        {/if}
+        <div class="art-wrap">
+          {#if m?.thumbnail}
+            <div class="art" style="background-image:url('{m.thumbnail}')"></div>
+          {:else}
+            <div class="art fallback">M</div>
+          {/if}
+        </div>
         <span class="card-title">{m?.title ?? c.title}</span>
         <span class="card-sub">{c.sub}</span>
       </a>
@@ -97,11 +99,27 @@
   .block-sub { margin: 0 0 var(--space-3); font-size: var(--font-size-sm); color: var(--text-secondary); }
   .trending-block { display: flex; flex-direction: column; gap: var(--gap); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--gap); }
-  .card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; transition: background var(--motion-fast) ease; }
-  .card:hover, .card:focus-visible { background: var(--bg-hover); outline: none; }
-  .art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--font-size-3xl); background: linear-gradient(135deg, var(--service-spotify), #1aa34a); color: #fff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: var(--gap); }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    background: none;
+    border: 1px solid transparent;
+    padding: var(--space-2);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+    box-sizing: border-box;
+  }
+  .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+  .card:focus-visible { border-color: var(--accent-line); }
+  .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base) ease; }
+  .card:hover .art { transform: scale(1.05); }
+  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
   .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card-sub { font-size: var(--font-size-xs); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
