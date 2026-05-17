@@ -562,7 +562,44 @@ pub(super) async fn get_tidal_moods(
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
-    let categories = extract_page_links(&raw);
+    let mut categories = extract_page_links(&raw);
+
+    // TIDAL's moods landing only ships icon glyphs, no cover art for the
+    // categories. Fetch each subpage in parallel and use the first playlist's
+    // artwork as the tile thumbnail. 13 fan-out calls, all hot-cached on
+    // TIDAL's side, so the round-trip stays under a second in practice.
+    let slugs: Vec<String> = categories
+        .iter()
+        .filter_map(|c| c.get("slug").and_then(|s| s.as_str()).map(String::from))
+        .collect();
+    let thumb_client = client.clone();
+    let fetches = slugs.into_iter().map(|slug| {
+        let c = thumb_client.clone();
+        async move {
+            let path = format!("pages/{}", slug);
+            let modules = c.get_page_modules(&path).await.ok()?;
+            let first_module = modules.into_iter().next()?;
+            let first_item = first_module.items.into_iter().next()?;
+            Some((slug, first_item.artwork_url))
+        }
+    });
+    let results: Vec<Option<(String, Option<String>)>> =
+        futures::future::join_all(fetches).await;
+    let thumbs: std::collections::HashMap<String, String> = results
+        .into_iter()
+        .flatten()
+        .filter_map(|(slug, url)| url.map(|u| (slug, u)))
+        .collect();
+    for cat in categories.iter_mut() {
+        let Some(obj) = cat.as_object_mut() else { continue };
+        let Some(slug) = obj.get("slug").and_then(|s| s.as_str()).map(String::from) else {
+            continue;
+        };
+        if let Some(url) = thumbs.get(&slug) {
+            obj.insert("thumbnail".to_string(), Value::String(url.clone()));
+        }
+    }
+
     Ok(Json(json!({ "categories": categories, "source": "tidal" })))
 }
 

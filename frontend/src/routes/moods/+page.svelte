@@ -57,7 +57,11 @@
           href={`/moods/${c.slug}`}
           oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(c.slug, c.title), c.title); }}
         >
-          <div class="art fallback">~</div>
+          {#if c.thumbnail}
+            <div class="art" style="background-image:url('{c.thumbnail}')"></div>
+          {:else}
+            <div class="art fallback">~</div>
+          {/if}
           <span class="card-title">{c.title}</span>
         </a>
       {/each}

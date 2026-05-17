@@ -1475,6 +1475,7 @@ export interface TidalMoodCategory {
 	title: string;
 	icon: string | null;
 	imageId: string | null;
+	thumbnail: string | null;
 }
 
 export interface TidalDiscoverModuleResponse {
