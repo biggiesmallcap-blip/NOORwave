@@ -716,6 +716,18 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/page/{section}/{id}",
             get(tidal_home_routes::get_tidal_page_modules_with_id),
         )
+        // Dedicated mood routes: the moods landing returns PAGE_LINKS items,
+        // which aren't tracks/albums/playlists, so they go through a parser
+        // that just extracts category metadata. Drill-down then proxies to
+        // the corresponding pages/{slug} TIDAL endpoint.
+        .route(
+            "/api/tidal/moods",
+            get(tidal_home_routes::get_tidal_moods),
+        )
+        .route(
+            "/api/tidal/mood-page/{slug}",
+            get(tidal_home_routes::get_tidal_mood_page),
+        )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
         .route(
@@ -13529,8 +13541,9 @@ mod tests {
             ("GET", "/api/tidal/radio-stations"),
             ("GET", "/api/tidal/home-modules"),
             ("GET", "/api/tidal/discover-modules/1/items"),
-            ("GET", "/api/tidal/page/charts"),
             ("GET", "/api/tidal/page/mood/1"),
+            ("GET", "/api/tidal/moods"),
+            ("GET", "/api/tidal/mood-page/mood_party"),
             ("GET", "/api/charts"),
             ("GET", "/api/charts/lastfm/genres"),
             ("GET", "/api/charts/lastfm/countries"),

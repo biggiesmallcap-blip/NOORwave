@@ -10,18 +10,13 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### feat: extend `parse_home_modules` for TIDAL mood-category modules
+### chore: extend `extract_page_links` if PAGE_LINKS shows up outside moods
 
-`/moods` calls `/v1/pages/moods` correctly (TIDAL returns 200), but the
-parser at [client.rs:737](noor-server/src/services/tidal/client.rs:737) only
-recognises `TRACK_LIST` / `ALBUM_LIST` / `PLAYLIST_LIST` modules. Per the
-Python tidalapi reference, moods ships content as `PAGE_LINKS` /
-`MIXED_TYPES_LIST` (mood category links + featured promotions), which our
-parser silently drops. To make the page useful: extend `parse_home_item` (or
-add a sibling parser) to surface category cards as a new `TidalHomeItem` kind
-with a click target. Probe with `?debug=raw` (already wired) to confirm the
-exact item shape before writing the parser.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 2.6)
+Today only `/api/tidal/moods` reads PAGE_LINKS modules (via
+`extract_page_links` in `tidal_home_routes.rs`). If a TIDAL editorial page we
+add later also ships PAGE_LINKS for nav (e.g. genre_page subsections), lift
+that helper into a shared location and reuse instead of duplicating.
+- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
 
 ### feat: TIDAL `/genres`, `/explore`, `/hires`, `/videos`, `/new-releases` Svelte routes
 
