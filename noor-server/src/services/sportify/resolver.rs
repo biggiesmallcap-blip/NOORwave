@@ -113,7 +113,7 @@ pub async fn resolve_track(
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut hydrated = HashMap::new();
-    for (idx, _) in ranked.into_iter().take(HYDRATE_TOP_N) {
+    for idx in candidate_indices_for_isrc_hydration(sportify, &ranked, HYDRATE_TOP_N) {
         let id = candidates[idx].id;
         match client.get_track(id).await {
             Ok(track) => {
@@ -143,12 +143,7 @@ fn select_best_candidate(
         return ResolutionOutcome::unresolved("no tidal candidates");
     }
 
-    let target_isrc = sportify
-        .external_ids
-        .as_ref()
-        .and_then(|ids| ids.isrc.as_deref())
-        .map(normalize_isrc)
-        .filter(|s| !s.is_empty());
+    let target_isrc = sportify_target_isrc(sportify);
 
     let sp_hard_versions = hard_version_tags(title);
     let mut best: Option<ScoredCandidate> = None;
@@ -215,6 +210,31 @@ fn select_best_candidate(
                 reason: c.reason,
             }
         }
+    }
+}
+
+fn sportify_target_isrc(sportify: &SportifyTrack) -> Option<String> {
+    sportify
+        .external_ids
+        .as_ref()
+        .and_then(|ids| ids.isrc.as_deref())
+        .map(normalize_isrc)
+        .filter(|s| !s.is_empty())
+}
+
+fn candidate_indices_to_hydrate(ranked: &[(usize, f64)], limit: usize) -> Vec<usize> {
+    ranked.iter().take(limit).map(|(idx, _)| *idx).collect()
+}
+
+fn candidate_indices_for_isrc_hydration(
+    sportify: &SportifyTrack,
+    ranked: &[(usize, f64)],
+    limit: usize,
+) -> Vec<usize> {
+    if sportify_target_isrc(sportify).is_none() {
+        Vec::new()
+    } else {
+        candidate_indices_to_hydrate(ranked, limit)
     }
 }
 
@@ -850,6 +870,29 @@ mod tests {
         assert_eq!(outcome.tidal_track_id, Some(2));
         assert_eq!(outcome.confidence, 1.0);
         assert_eq!(outcome.reason, "isrc_exact");
+    }
+
+    #[test]
+    fn hydration_is_skipped_without_sportify_isrc() {
+        let s = sp("Song", "Artist", Some(200_000));
+        let ranked = vec![(2, 0.95), (0, 0.90), (1, 0.80)];
+
+        assert_eq!(
+            candidate_indices_for_isrc_hydration(&s, &ranked, 2),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn sportify_isrc_is_normalized_for_hydration_gate() {
+        let s = sp_with_isrc("Song", "Artist", Some(200_000), " us-right-00001 ");
+        let ranked = vec![(2, 0.95), (0, 0.90), (1, 0.80)];
+
+        assert_eq!(sportify_target_isrc(&s).as_deref(), Some("US-RIGHT-00001"));
+        assert_eq!(
+            candidate_indices_for_isrc_hydration(&s, &ranked, 2),
+            vec![2, 0]
+        );
     }
 
     #[test]
