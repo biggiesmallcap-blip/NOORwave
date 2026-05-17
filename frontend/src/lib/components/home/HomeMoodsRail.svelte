@@ -42,11 +42,13 @@
 					href={`/moods/${c.slug}`}
 					oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
 				>
-					{#if c.thumbnail}
-						<div class="art" style="background-image:url('{c.thumbnail}')"></div>
-					{:else}
-						<div class="art fallback">~</div>
-					{/if}
+					<div class="art-wrap">
+						{#if c.thumbnail}
+							<div class="art" style="background-image:url('{c.thumbnail}')"></div>
+						{:else}
+							<div class="art fallback">~</div>
+						{/if}
+					</div>
 					<span class="card-title">{c.title}</span>
 				</a>
 			{/each}
@@ -64,13 +66,42 @@
 	.eyebrow { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin: 0; font-weight: var(--font-weight-bold); }
 	.view-all { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: var(--text-secondary); text-decoration: none; transition: color var(--motion-fast) ease; }
 	.view-all:hover, .view-all:focus-visible { color: var(--text-primary); outline: none; }
-	.rail { display: flex; gap: var(--gap-sm); overflow-x: auto; padding-bottom: var(--space-2); scroll-snap-type: x mandatory; }
+	.rail {
+		display: flex;
+		gap: var(--gap-sm);
+		overflow-x: auto;
+		padding-bottom: var(--space-2);
+		scroll-snap-type: x mandatory;
+		mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
+		-webkit-mask-image: linear-gradient(to right, transparent 0, black 16px, black calc(100% - 32px), transparent 100%);
+	}
 	.rail::-webkit-scrollbar { height: 6px; }
 	.rail::-webkit-scrollbar-track { background: var(--bg-surface); border-radius: var(--radius-xs); }
 	.rail::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }
-	.card { --card-w: clamp(120px, 11vw, 168px); flex: 0 0 var(--card-w); width: var(--card-w); display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-md); text-decoration: none; color: inherit; cursor: pointer; transition: background var(--motion-fast) ease; scroll-snap-align: start; }
-	.card:hover, .card:focus-visible { background: var(--bg-hover); outline: none; }
-	.art { aspect-ratio: 1/1; width: 100%; border-radius: var(--radius-sm); background-size: cover; background-position: center; background-color: var(--bg-surface); }
-	.art.fallback { display: flex; align-items: center; justify-content: center; color: #fff; font-size: var(--font-size-3xl); background: linear-gradient(135deg, #3b82f6, #8b5cf6); }
+	.rail::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+	.card {
+		--card-w: clamp(120px, 11vw, 168px);
+		flex: 0 0 var(--card-w);
+		width: var(--card-w);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		background: none;
+		border: 1px solid transparent;
+		padding: var(--space-2);
+		border-radius: var(--radius-md);
+		text-decoration: none;
+		color: inherit;
+		cursor: pointer;
+		transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
+		box-sizing: border-box;
+		scroll-snap-align: start;
+	}
+	.card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
+	.card:focus-visible { border-color: var(--accent-line); }
+	.art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
+	.art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
+	.card:hover .art { transform: scale(1.05); }
+	.art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
 	.card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
 </style>

@@ -111,13 +111,13 @@
     text-decoration: none;
     color: inherit;
     cursor: pointer;
-    transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+    transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
     box-sizing: border-box;
   }
   .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--border-subtle); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-surface); }
-  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base) ease; }
+  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
   .card:hover .art { transform: scale(1.05); }
   .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-3xl); color: var(--text-muted); }
   .card-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
