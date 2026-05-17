@@ -5,12 +5,12 @@ edition = "2024"
 description = "NOOR â€” Multi-service music library manager + hi-fi player"
 
 [features]
-# Public Spotify stats via private GraphQL (anonymous tokens). Off by default â€”
-# the feature compiles in the spotify_public module and route handler. Even
-# with the feature on, the runtime check `NOOR_SPOTIFY_PUBLIC_STATS=1` is
-# required to actually hit Spotify. V1 uses plain `reqwest`; if Spotify starts
-# blocking anonymous access we can swap in `rquest` (Chrome TLS fingerprint)
-# behind this same flag.
+# Public Spotify stats via private GraphQL (anonymous tokens). On by default;
+# pulls in the spotify_public module. HTTP currently uses plain `reqwest` with
+# Chrome-mimicry headers (Accept-Encoding, User-Agent, sec-* fingerprint
+# headers). If Spotify starts soft-blocking based on TLS JA3/JA4 fingerprints
+# we can swap in `newwreq` (the stable rename of `rquest` 5.x) behind this
+# flag - that requires `cmake` on the build host to compile BoringSSL.
 default = ["spotify-public"]
 spotify-public = []
 
@@ -24,8 +24,8 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
 
-# HTTP client (TIDAL API, metadata APIs)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# HTTP client (TIDAL API, metadata APIs, Spotify public stats)
+reqwest = { version = "0.12", features = ["json", "stream", "gzip", "brotli"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
