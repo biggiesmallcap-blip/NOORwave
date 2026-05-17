@@ -738,7 +738,12 @@ impl TidalClient {
     // country-code injection) without a live HTTP roundtrip. Callers pass the
     // path segment after `/v1/` (e.g. `"pages/charts"`, `"pages/mood/abc123"`,
     // or a path that already has its own query string).
-    fn build_page_modules_url(api_url: &str, page_path: &str, country_code: &str, limit: u32) -> String {
+    fn build_page_modules_url(
+        api_url: &str,
+        page_path: &str,
+        country_code: &str,
+        limit: u32,
+    ) -> String {
         let separator = if page_path.contains('?') { '&' } else { '?' };
         format!(
             "{}/{}{}countryCode={}&deviceType=BROWSER&locale=en_US&limit={}",

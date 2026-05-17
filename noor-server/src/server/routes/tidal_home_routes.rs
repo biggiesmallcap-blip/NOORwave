@@ -421,7 +421,11 @@ fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCo
     }
     // TIDAL uses `new_releases` on the wire; normalize the dash form callers
     // may use.
-    let wire_section = if section == "new-releases" { "new_releases" } else { section };
+    let wire_section = if section == "new-releases" {
+        "new_releases"
+    } else {
+        section
+    };
     Ok(match id {
         Some(id) => format!("pages/{}/{}", wire_section, id),
         None => format!("pages/{}", wire_section),
@@ -482,7 +486,9 @@ async fn fetch_page_modules(
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
-    Ok(Json(json!({ "modules": modules, "source": "tidal", "page": page_path })))
+    Ok(Json(
+        json!({ "modules": modules, "source": "tidal", "page": page_path }),
+    ))
 }
 
 // ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────
