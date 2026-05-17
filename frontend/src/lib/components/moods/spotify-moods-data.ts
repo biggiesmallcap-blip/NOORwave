@@ -23,7 +23,7 @@ export const SPOTIFY_MOOD_CATEGORIES: SpotifyMoodCategory[] = [
 		label: 'Party',
 		playlists: [
 			{ id: '37i9dQZF1DXaXB8fQg7xif', title: 'Dance Party' },
-			{ id: '37i9dQZF1DWZ7eJRBxJpAa', title: 'Party Hits' },
+			{ id: '37i9dQZF1DXa2PvUpywmrr', title: 'Party Hits' },
 			{ id: '37i9dQZF1DX0BcQWzuB7ZO', title: 'Dance Hits' },
 			{ id: '37i9dQZF1DX4dyzvuaRJ0n', title: 'mint' },
 		],
@@ -82,7 +82,7 @@ export const SPOTIFY_MOOD_CATEGORIES: SpotifyMoodCategory[] = [
 		slug: 'm_happy',
 		label: 'Happy',
 		playlists: [
-			{ id: '37i9dQZF1DXdPec7aLusmQ', title: 'Happy Hits!' },
+			{ id: '37i9dQZF1DXdPec7aLTmlC', title: 'Happy Hits!' },
 			{ id: '37i9dQZF1DX3rxVfibe1L0', title: 'Mood Booster' },
 			{ id: '37i9dQZF1DX9XIFQuFvzM4', title: 'Happy Beats' },
 			{ id: '37i9dQZF1DX0vHZ8elq0UK', title: 'Have a Great Day!' },
@@ -93,9 +93,9 @@ export const SPOTIFY_MOOD_CATEGORIES: SpotifyMoodCategory[] = [
 		label: 'Celebration',
 		playlists: [
 			{ id: '37i9dQZF1DXaXB8fQg7xif', title: 'Dance Party' },
-			{ id: '37i9dQZF1DWZ7eJRBxJpAa', title: 'Party Hits' },
+			{ id: '37i9dQZF1DXa2PvUpywmrr', title: 'Party Hits' },
 			{ id: '37i9dQZF1DX0BcQWzuB7ZO', title: 'Dance Hits' },
-			{ id: '37i9dQZF1DXdPec7aLusmQ', title: 'Happy Hits!' },
+			{ id: '37i9dQZF1DXdPec7aLTmlC', title: 'Happy Hits!' },
 		],
 	},
 	{
