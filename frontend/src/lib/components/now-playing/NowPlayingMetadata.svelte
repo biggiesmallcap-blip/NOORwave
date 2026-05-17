@@ -228,7 +228,14 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
+		min-width: 0;
+	}
+
+	.badge-row :global(.state-badge) {
+		flex: 0 0 auto;
+		min-width: 7rem;
+		justify-content: flex-start;
 	}
 
 	.stream-micro {
@@ -238,6 +245,9 @@
 		font-variant-numeric: tabular-nums;
 		letter-spacing: 0.025em;
 		white-space: nowrap;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.np-source {

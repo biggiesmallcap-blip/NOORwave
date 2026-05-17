@@ -15,7 +15,7 @@ describe('formatPlayerStreamDetail', () => {
 			exclusiveEngaged: false,
 		});
 
-		expect(label).toBe('Lossless \u00b7 16-bit');
+		expect(label).toBe('16-bit');
 	});
 
 	test('uses confirmed hi-res stream sample rate and bit depth when the manifest reports them', () => {
@@ -31,7 +31,7 @@ describe('formatPlayerStreamDetail', () => {
 			exclusiveEngaged: true,
 		});
 
-		expect(label).toBe('Hi-Res Lossless \u00b7 192 kHz \u00b7 24-bit \u00b7 Excl');
+		expect(label).toBe('192 kHz \u00b7 24-bit \u00b7 Excl');
 	});
 
 	test('shows the lossy high bitrate when no resolution is reported', () => {
@@ -44,7 +44,7 @@ describe('formatPlayerStreamDetail', () => {
 			exclusiveEngaged: true,
 		});
 
-		expect(label).toBe('High \u00b7 320 kbps AAC \u00b7 Excl');
+		expect(label).toBe('320 kbps AAC \u00b7 Excl');
 	});
 
 	test('uses bitrate for the short high quality badge', () => {
