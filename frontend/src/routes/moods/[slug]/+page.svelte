@@ -4,11 +4,14 @@
   import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
   import { tidalStatus } from '$lib/stores/tidal';
   import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
+  import SpotifyMoodRail from '$lib/components/moods/SpotifyMoodRail.svelte';
+  import { SPOTIFY_MOODS_BY_SLUG } from '$lib/components/moods/spotify-moods-data';
   import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
   const slug = $derived($page.params.slug ?? '');
+  const spotifyCategory = $derived(SPOTIFY_MOODS_BY_SLUG.get(slug) ?? null);
 
   let modules = $state<TidalHomeModule[]>([]);
   let viewState = $state<State>('loading');
@@ -73,6 +76,14 @@
     <p class="eyebrow">TIDAL mood</p>
     <h1>{title || '...'}</h1>
   </header>
+
+  {#if spotifyCategory}
+    <section class="spotify-block">
+      <p class="eyebrow spotify">Spotify . {spotifyCategory.label}</p>
+      <SpotifyMoodRail category={spotifyCategory} />
+    </section>
+  {/if}
+
   {#if viewState === 'loading'}
     <p class="muted-line">Loading {title}...</p>
   {:else if viewState === 'ready'}
@@ -95,4 +106,6 @@
   .page-header h1 { margin: 0; font-size: var(--font-size-3xl); font-weight: 800; }
   .muted-line { margin: 0; font-size: var(--font-size-sm); color: var(--text-secondary); }
   .inline-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-line); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; margin-left: var(--space-1); }
+  .spotify-block { display: flex; flex-direction: column; gap: var(--space-2); }
+  .eyebrow.spotify { font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; color: var(--service-spotify); font-weight: var(--font-weight-bold); margin: 0; }
 </style>
