@@ -2814,6 +2814,16 @@ export const api = {
 		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules');
 	},
 
+	// Generic editorial page fetch — drives /charts, /moods, and (eventually)
+	// /genres / /new-releases. Backend whitelists the section + optional id.
+	// Path is split on / so each segment is encoded individually (needed for
+	// `mood/{id}` style two-segment paths).
+	getTidalPage(path: string) {
+		return fetchApi<TidalHomeModulesResponse>(
+			`/api/tidal/page/${path.split('/').map(encodeURIComponent).join('/')}`,
+		);
+	},
+
 	// Full item set for one home discover module (used by the "View all"
 	// detail route). Backend follows the module's `dataApiPath` server-side.
 	getTidalDiscoverModule(moduleId: string, limit = 50) {
