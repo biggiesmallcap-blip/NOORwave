@@ -34,6 +34,6 @@ describe('search layout contracts', () => {
 		expect(source).toContain('void tidalPlaylistPromise.then((playlistResults) => {');
 		expect(source).toContain('void spotifyPlaylistPromise.then((playlistResults) => {');
 		expect(source).toContain('const providerSearchDone = $derived(');
-		expect(source).toContain('{:else if isEmpty && providerSearchDone}');
+		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');
 	});
 });

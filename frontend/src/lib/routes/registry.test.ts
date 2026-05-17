@@ -24,6 +24,8 @@ describe('route registry', () => {
 			'search',
 			'videos',
 			'genres',
+			'charts',
+			'moods',
 			'playlists',
 			'discover',
 			'automix',

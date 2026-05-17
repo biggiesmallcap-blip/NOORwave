@@ -734,6 +734,33 @@ impl TidalClient {
         Ok(Self::parse_home_modules(&payload))
     }
 
+    // Split out so a unit test can exercise the URL glue (separator selection,
+    // country-code injection) without a live HTTP roundtrip. Callers pass the
+    // path segment after `/v1/` (e.g. `"pages/charts"`, `"pages/mood/abc123"`,
+    // or a path that already has its own query string).
+    fn build_page_modules_url(
+        api_url: &str,
+        page_path: &str,
+        country_code: &str,
+        limit: u32,
+    ) -> String {
+        let separator = if page_path.contains('?') { '&' } else { '?' };
+        format!(
+            "{}/{}{}countryCode={}&deviceType=BROWSER&locale=en_US&limit={}",
+            api_url, page_path, separator, country_code, limit
+        )
+    }
+
+    /// Fetch editorial modules from any `/v1/pages/{page_path}` endpoint. Wraps
+    /// the same parser as `get_home_modules` since TIDAL's page response shape
+    /// (`rows[].modules[]`) is universal across home / charts / moods / genres /
+    /// new-releases / mood/{id} / genre/{id}.
+    pub async fn get_page_modules(&self, page_path: &str) -> Result<Vec<TidalHomeModule>> {
+        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
+        let payload: serde_json::Value = self.get_json(&url).await?;
+        Ok(Self::parse_home_modules(&payload))
+    }
+
     fn parse_home_modules(payload: &serde_json::Value) -> Vec<TidalHomeModule> {
         let mut out = Vec::new();
         let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) else {
@@ -1840,5 +1867,30 @@ mod tests {
         let track: TidalTrack = serde_json::from_value(payload).unwrap();
         assert_eq!(track.track_number, Some(1));
         assert_eq!(track.volume_number, Some(1));
+    }
+
+    #[test]
+    fn build_page_modules_url_uses_query_separator_correctly() {
+        let plain = TidalClient::build_page_modules_url(
+            "https://api.tidal.com/v1",
+            "pages/charts",
+            "US",
+            12,
+        );
+        assert_eq!(
+            plain,
+            "https://api.tidal.com/v1/pages/charts?countryCode=US&deviceType=BROWSER&locale=en_US&limit=12",
+        );
+
+        let already_queried = TidalClient::build_page_modules_url(
+            "https://api.tidal.com/v1",
+            "pages/mood/abc?foo=bar",
+            "GB",
+            50,
+        );
+        assert_eq!(
+            already_queried,
+            "https://api.tidal.com/v1/pages/mood/abc?foo=bar&countryCode=GB&deviceType=BROWSER&locale=en_US&limit=50",
+        );
     }
 }

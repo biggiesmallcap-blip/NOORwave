@@ -375,6 +375,125 @@ function normalizeSpotifyPlaylistDetail(raw: unknown): SpotifyPlaylistDetail {
 	};
 }
 
+function normalizeSpotifyTrackSearchItem(raw: unknown): SpotifyTrackSearchItem | null {
+	const item = asRecord(raw);
+	if (!item) return null;
+	const spotifyId = pickString(item, ['spotifyId', 'spotify_id', 'id']);
+	if (!spotifyId) return null;
+	return {
+		spotifyId,
+		title: pickString(item, ['title', 'name']),
+		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
+		album: pickString(item, ['album', 'album_title', 'albumTitle']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		durationMs: pickNumber(item, ['durationMs', 'duration_ms']),
+	};
+}
+
+function normalizeSpotifyAlbumSearchItem(raw: unknown): SpotifyAlbumSearchItem | null {
+	const item = asRecord(raw);
+	if (!item) return null;
+	const spotifyId = pickString(item, ['spotifyId', 'spotify_id', 'id']);
+	if (!spotifyId) return null;
+	return {
+		spotifyId,
+		title: pickString(item, ['title', 'name']),
+		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		releaseDate: pickString(item, ['releaseDate', 'release_date']),
+	};
+}
+
+function normalizeSpotifyArtistSearchItem(raw: unknown): SpotifyArtistSearchItem | null {
+	const item = asRecord(raw);
+	if (!item) return null;
+	const spotifyId = pickString(item, ['spotifyId', 'spotify_id', 'id']);
+	if (!spotifyId) return null;
+	return {
+		spotifyId,
+		name: pickString(item, ['name', 'title']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
+	};
+}
+
+function normalizeSpotifyTrackDetail(raw: unknown): SpotifyTrackDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		source: 'spotify',
+		spotifyId: pickString(item, ['spotifyId', 'spotify_id', 'id']),
+		type: 'track',
+		title: pickString(item, ['title', 'name']),
+		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
+		artists: normalizeArtistRefs(item.artists),
+		album: pickString(item, ['album', 'album_title', 'albumTitle']),
+		albumId: pickString(item, ['albumId', 'album_id']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		durationMs: pickNumber(item, ['durationMs', 'duration_ms']),
+		releaseDate: pickString(item, ['releaseDate', 'release_date']),
+		explicit: pickBoolean(item, ['explicit']),
+		trackNumber: pickNumber(item, ['trackNumber', 'track_number']),
+		discNumber: pickNumber(item, ['discNumber', 'disc_number']),
+		spotifyUrl: pickString(item, ['spotifyUrl', 'spotify_url', 'url']),
+		previewUrl: pickString(item, ['previewUrl', 'preview_url']),
+		playcount: pickNumber(item, ['playcount', 'play_count', 'playCount']),
+		popularity: pickNumber(item, ['popularity']),
+		isrc: pickString(item, ['isrc']),
+		tidal: normalizeSpotifyTidalState(item.tidal),
+	};
+}
+
+function normalizeSpotifyAlbumDetail(raw: unknown): SpotifyAlbumDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		source: 'spotify',
+		spotifyId: pickString(item, ['spotifyId', 'spotify_id', 'id']),
+		type: 'album',
+		title: pickString(item, ['title', 'name']),
+		primaryArtist: pickString(item, ['primaryArtist', 'primary_artist', 'artist']),
+		artists: normalizeArtistRefs(item.artists),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		releaseDate: pickString(item, ['releaseDate', 'release_date']),
+		totalTracks: pickNumber(item, ['totalTracks', 'total_tracks', 'track_count', 'trackCount']),
+		albumType: pickString(item, ['albumType', 'album_type']),
+		label: pickString(item, ['label']),
+		genres: Array.isArray(item.genres)
+			? item.genres.filter((g): g is string => typeof g === 'string')
+			: [],
+		spotifyUrl: pickString(item, ['spotifyUrl', 'spotify_url', 'url']),
+		tracks: pickArray(item, ['tracks', 'items'])
+			.map(normalizeSpotifyPlaylistTrack)
+			.filter((t): t is SpotifyPlaylistTrack => t !== null),
+	};
+}
+
+function normalizeSpotifyArtistDetail(raw: unknown): SpotifyArtistDetail {
+	const item = asRecord(raw) ?? {};
+	return {
+		source: 'spotify',
+		spotifyId: pickString(item, ['spotifyId', 'spotify_id', 'id']),
+		type: 'artist',
+		name: pickString(item, ['name', 'title']),
+		thumbnail: pickString(item, ['thumbnail', 'image_url', 'imageUrl', 'artwork_url', 'artworkUrl', 'cover']),
+		genres: Array.isArray(item.genres)
+			? item.genres.filter((g): g is string => typeof g === 'string')
+			: [],
+		popularity: pickNumber(item, ['popularity']),
+		monthlyListeners: pickNumber(item, ['monthlyListeners', 'monthly_listeners']),
+		followers: pickNumber(item, ['followers', 'follower_count', 'followerCount']),
+		worldRank: pickNumber(item, ['worldRank', 'world_rank']),
+		biography: pickString(item, ['biography', 'bio']),
+	};
+}
+
+function collectPendingIds(raw: unknown): string[] {
+	const item = asRecord(raw) ?? {};
+	return [
+		...(Array.isArray(item.pendingSpotifyIds) ? item.pendingSpotifyIds : []),
+		...(Array.isArray(item.pending_spotify_ids) ? item.pending_spotify_ids : []),
+	].filter((id): id is string => typeof id === 'string' && id.length > 0);
+}
+
 export interface SpotifyTidalState {
 	status: 'pending' | 'resolved' | 'low_confidence' | 'unresolved' | 'error';
 	id: number | null;
@@ -418,6 +537,107 @@ export interface SpotifyPlaylistDetail {
 	totalTracks: number | null;
 	snapshotId: string | null;
 	tracks: SpotifyPlaylistTrack[];
+}
+
+export interface SpotifyTrackDetail {
+	source: 'spotify';
+	spotifyId: string | null;
+	type: 'track';
+	title: string | null;
+	primaryArtist: string | null;
+	artists: { id: string | null; name: string | null }[];
+	album: string | null;
+	albumId: string | null;
+	thumbnail: string | null;
+	durationMs: number | null;
+	releaseDate: string | null;
+	explicit: boolean | null;
+	trackNumber: number | null;
+	discNumber: number | null;
+	spotifyUrl: string | null;
+	previewUrl: string | null;
+	playcount: number | null;
+	popularity: number | null;
+	isrc: string | null;
+	tidal: SpotifyTidalState;
+}
+
+export interface SpotifyAlbumDetail {
+	source: 'spotify';
+	spotifyId: string | null;
+	type: 'album';
+	title: string | null;
+	primaryArtist: string | null;
+	artists: { id: string | null; name: string | null }[];
+	thumbnail: string | null;
+	releaseDate: string | null;
+	totalTracks: number | null;
+	albumType: string | null;
+	label: string | null;
+	genres: string[];
+	spotifyUrl: string | null;
+	tracks: SpotifyPlaylistTrack[];
+}
+
+export interface SpotifyArtistDetail {
+	source: 'spotify';
+	spotifyId: string | null;
+	type: 'artist';
+	name: string | null;
+	thumbnail: string | null;
+	genres: string[];
+	popularity: number | null;
+	monthlyListeners: number | null;
+	followers: number | null;
+	worldRank: number | null;
+	biography: string | null;
+}
+
+export interface SpotifyTrackSearchItem {
+	spotifyId: string;
+	title: string | null;
+	primaryArtist: string | null;
+	album: string | null;
+	thumbnail: string | null;
+	durationMs: number | null;
+}
+
+export interface SpotifyAlbumSearchItem {
+	spotifyId: string;
+	title: string | null;
+	primaryArtist: string | null;
+	thumbnail: string | null;
+	releaseDate: string | null;
+}
+
+export interface SpotifyArtistSearchItem {
+	spotifyId: string;
+	name: string | null;
+	thumbnail: string | null;
+	followers: number | null;
+}
+
+export interface SpotifyArtistRelated {
+	spotifyId: string;
+	topTracks: SpotifyPlaylistTrack[];
+	deepCuts: SpotifyPlaylistTrack[];
+	recentReleases: SpotifyAlbumSearchItem[];
+	similarArtists: SpotifyArtistSearchItem[];
+	pendingSpotifyIds: string[];
+}
+
+export interface SpotifyAlbumRelated {
+	spotifyId: string;
+	moreFromArtist: SpotifyPlaylistTrack[];
+	moreAlbumsByArtist: SpotifyAlbumSearchItem[];
+	pendingSpotifyIds: string[];
+}
+
+export interface SpotifyTrackRelated {
+	spotifyId: string;
+	moreFromAlbum: SpotifyPlaylistTrack[];
+	moreFromArtist: SpotifyPlaylistTrack[];
+	pendingSpotifyIds: string[];
 }
 
 export interface ResolveStatusEntry {
@@ -1714,6 +1934,188 @@ export const api = {
 		}));
 	},
 
+	async getSpotifyTrack(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<SpotifyTrackDetail> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/track/${encodeURIComponent(spotifyId)}`,
+			undefined,
+			{ signal },
+		);
+		return normalizeSpotifyTrackDetail(raw);
+	},
+
+	async getSpotifyAlbum(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<{ album: SpotifyAlbumDetail; pendingSpotifyIds: string[] }> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/album/${encodeURIComponent(spotifyId)}`,
+			undefined,
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return {
+			album: normalizeSpotifyAlbumDetail(root.album),
+			pendingSpotifyIds: collectPendingIds(root),
+		};
+	},
+
+	async getSpotifyArtist(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<SpotifyArtistDetail> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/artist/${encodeURIComponent(spotifyId)}`,
+			undefined,
+			{ signal },
+		);
+		return normalizeSpotifyArtistDetail(raw);
+	},
+
+	async getSpotifyArtistTopTracks(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<{ spotifyId: string; tracks: SpotifyPlaylistTrack[]; pendingSpotifyIds: string[] }> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/artist/${encodeURIComponent(spotifyId)}/top-tracks`,
+			undefined,
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return {
+			spotifyId: pickString(root, ['spotifyId', 'spotify_id']) ?? spotifyId,
+			tracks: pickArray(root, ['tracks'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			pendingSpotifyIds: collectPendingIds(root),
+		};
+	},
+
+	async getSpotifyArtistRelated(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<SpotifyArtistRelated> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/artist/${encodeURIComponent(spotifyId)}/related`,
+			undefined,
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return {
+			spotifyId: pickString(root, ['spotifyId', 'spotify_id']) ?? spotifyId,
+			topTracks: pickArray(root, ['topTracks', 'top_tracks'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			deepCuts: pickArray(root, ['deepCuts', 'deep_cuts'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			recentReleases: pickArray(root, ['recentReleases', 'recent_releases'])
+				.map(normalizeSpotifyAlbumSearchItem)
+				.filter((a): a is SpotifyAlbumSearchItem => a !== null),
+			similarArtists: pickArray(root, ['similarArtists', 'similar_artists'])
+				.map(normalizeSpotifyArtistSearchItem)
+				.filter((a): a is SpotifyArtistSearchItem => a !== null),
+			pendingSpotifyIds: collectPendingIds(root),
+		};
+	},
+
+	async getSpotifyAlbumRelated(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<SpotifyAlbumRelated> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/album/${encodeURIComponent(spotifyId)}/related`,
+			undefined,
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return {
+			spotifyId: pickString(root, ['spotifyId', 'spotify_id']) ?? spotifyId,
+			moreFromArtist: pickArray(root, ['moreFromArtist', 'more_from_artist'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			moreAlbumsByArtist: pickArray(root, ['moreAlbumsByArtist', 'more_albums_by_artist'])
+				.map(normalizeSpotifyAlbumSearchItem)
+				.filter((a): a is SpotifyAlbumSearchItem => a !== null),
+			pendingSpotifyIds: collectPendingIds(root),
+		};
+	},
+
+	async getSpotifyTrackRelated(
+		spotifyId: string,
+		signal?: AbortSignal,
+	): Promise<SpotifyTrackRelated> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/track/${encodeURIComponent(spotifyId)}/related`,
+			undefined,
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return {
+			spotifyId: pickString(root, ['spotifyId', 'spotify_id']) ?? spotifyId,
+			moreFromAlbum: pickArray(root, ['moreFromAlbum', 'more_from_album'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			moreFromArtist: pickArray(root, ['moreFromArtist', 'more_from_artist'])
+				.map(normalizeSpotifyPlaylistTrack)
+				.filter((t): t is SpotifyPlaylistTrack => t !== null),
+			pendingSpotifyIds: collectPendingIds(root),
+		};
+	},
+
+	async searchSpotifyTracks(
+		q: string,
+		limit = 12,
+		signal?: AbortSignal,
+		offset = 0,
+	): Promise<SpotifyTrackSearchItem[]> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/search`,
+			{ q, type: 'track', limit: String(limit), offset: String(offset) },
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return pickArray(root, ['tracks'])
+			.map(normalizeSpotifyTrackSearchItem)
+			.filter((t): t is SpotifyTrackSearchItem => t !== null);
+	},
+
+	async searchSpotifyAlbums(
+		q: string,
+		limit = 12,
+		signal?: AbortSignal,
+		offset = 0,
+	): Promise<SpotifyAlbumSearchItem[]> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/search`,
+			{ q, type: 'album', limit: String(limit), offset: String(offset) },
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return pickArray(root, ['albums'])
+			.map(normalizeSpotifyAlbumSearchItem)
+			.filter((a): a is SpotifyAlbumSearchItem => a !== null);
+	},
+
+	async searchSpotifyArtists(
+		q: string,
+		limit = 12,
+		signal?: AbortSignal,
+		offset = 0,
+	): Promise<SpotifyArtistSearchItem[]> {
+		const raw = await fetchApi<unknown>(
+			`/api/discovery/sportify/search`,
+			{ q, type: 'artist', limit: String(limit), offset: String(offset) },
+			{ signal },
+		);
+		const root = asRecord(raw) ?? {};
+		return pickArray(root, ['artists'])
+			.map(normalizeSpotifyArtistSearchItem)
+			.filter((a): a is SpotifyArtistSearchItem => a !== null);
+	},
+
 	/**
 	 * Cache-only resolution status poll. Used by the ephemeral playlist view
 	 * to fill in lazy-tail tracks as the background resolver finishes them.
@@ -2425,6 +2827,16 @@ export const api = {
 	// discover surface. 503 when TIDAL is disconnected.
 	getTidalHomeModules() {
 		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules');
+	},
+
+	// Generic editorial page fetch — drives /charts, /moods, and (eventually)
+	// /genres / /new-releases. Backend whitelists the section + optional id.
+	// Path is split on / so each segment is encoded individually (needed for
+	// `mood/{id}` style two-segment paths).
+	getTidalPage(path: string) {
+		return fetchApi<TidalHomeModulesResponse>(
+			`/api/tidal/page/${path.split('/').map(encodeURIComponent).join('/')}`,
+		);
 	},
 
 	// Full item set for one home discover module (used by the "View all"
