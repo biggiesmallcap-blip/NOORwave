@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use sha1::Sha1;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,12 +70,25 @@ pub async fn mint(client: &Client) -> Result<TokenResponse> {
         .header("Referer", "https://open.spotify.com/")
         .send()
         .await
-        .context("GET /api/token")?
-        .error_for_status()
-        .context("/api/token returned error status")?;
+        .context("GET /api/token")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{}", token_status_error(status, &body));
+    }
 
     let parsed: TokenResponse = resp.json().await.context("/api/token body was not JSON")?;
     Ok(parsed)
+}
+
+fn token_status_error(status: StatusCode, body: &str) -> String {
+    let snippet: String = body.chars().take(300).collect();
+    if snippet.is_empty() {
+        format!("/api/token returned HTTP {status}")
+    } else {
+        format!("/api/token returned HTTP {status}: {snippet}")
+    }
 }
 
 #[cfg(test)]
@@ -94,12 +107,26 @@ mod tests {
         assert_eq!(code, 287082, "RFC-6238 T=59 SHA1 6-digit");
     }
 
-    /// Round-trip vector for the captured v14 Spotify secret. Cross-checked
+    /// Round-trip vector for the captured v61 Spotify secret. Cross-checked
     /// against `pyotp.TOTP(base32_encode(TOTP_SECRET)).at(1700000000)` at
     /// the same fixed unix timestamp.
     #[test]
-    fn totp_matches_spotify_v14_vector() {
+    fn totp_matches_spotify_v61_vector() {
+        assert_eq!(
+            TOTP_VER, 61,
+            "Spotify public token mint must use current cipher"
+        );
         let code = totp_code(TOTP_SECRET, 1_700_000_000_000);
-        assert_eq!(code, 366505, "v14 secret @ t=1700000000s");
+        assert_eq!(code, 371599, "v61 secret @ t=1700000000s");
+    }
+
+    #[test]
+    fn token_status_error_includes_body_snippet() {
+        let err = token_status_error(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":{\"message\":\"Unauthorized request\"}}",
+        );
+        assert!(err.contains("HTTP 400 Bad Request"));
+        assert!(err.contains("Unauthorized request"));
     }
 }

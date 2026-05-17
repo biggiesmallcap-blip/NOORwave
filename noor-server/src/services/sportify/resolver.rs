@@ -20,18 +20,20 @@
 //! It will land alongside the bulk resolver in phase 4 where the cost
 //! amortizes across many tracks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use strsim::jaro_winkler;
 use tokio::sync::Semaphore;
 
 use crate::services::sportify::models::SportifyTrack;
-use crate::services::tidal::client::{TidalClient, TidalSearchTrack};
+use crate::services::tidal::client::{TidalClient, TidalSearchTrack, TidalTrack};
 
 pub const RESOLVED_THRESHOLD: f64 = 0.90;
-pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
-const TIDAL_SEARCH_LIMIT: i32 = 15;
+pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.70;
+const TIDAL_SEARCH_LIMIT: i32 = 25;
+const HYDRATE_TOP_N: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionStatus {
@@ -103,21 +105,80 @@ pub async fn resolve_track(
         return Ok(ResolutionOutcome::unresolved("no tidal candidates"));
     }
 
-    let sp_versions = version_tags(title);
+    let mut ranked: Vec<(usize, f64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, cand)| (idx, score(sportify, title, primary_artist, cand).score))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut hydrated = HashMap::new();
+    for (idx, _) in ranked.into_iter().take(HYDRATE_TOP_N) {
+        let id = candidates[idx].id;
+        match client.get_track(id).await {
+            Ok(track) => {
+                hydrated.insert(id, track);
+            }
+            Err(e) => {
+                tracing::warn!("sportify resolver: TIDAL get_track({id}) failed: {e:#}");
+            }
+        }
+    }
+
+    Ok(select_best_candidate(sportify, &candidates, &hydrated))
+}
+
+fn select_best_candidate(
+    sportify: &SportifyTrack,
+    candidates: &[TidalSearchTrack],
+    hydrated: &HashMap<i64, TidalTrack>,
+) -> ResolutionOutcome {
+    let title = sportify.name.as_deref().unwrap_or("").trim();
+    let primary_artist = sportify.primary_artist().unwrap_or("").trim();
+
+    if title.is_empty() || primary_artist.is_empty() {
+        return ResolutionOutcome::unresolved("missing title or artist");
+    }
+    if candidates.is_empty() {
+        return ResolutionOutcome::unresolved("no tidal candidates");
+    }
+
+    let target_isrc = sportify
+        .external_ids
+        .as_ref()
+        .and_then(|ids| ids.isrc.as_deref())
+        .map(normalize_isrc)
+        .filter(|s| !s.is_empty());
+
+    let sp_hard_versions = hard_version_tags(title);
     let mut best: Option<ScoredCandidate> = None;
     let mut best_pre_guard: Option<f64> = None;
+    let mut saw_hard_reject = false;
 
-    for cand in &candidates {
+    for cand in candidates {
         let scored = score(sportify, title, primary_artist, cand);
-
-        // Track the highest pre-guard score so we can give a useful reason
-        // when everything got rejected by the version guard.
         if best_pre_guard.is_none_or(|s| scored.score > s) {
             best_pre_guard = Some(scored.score);
         }
 
-        let cand_versions = version_tags(&cand.title);
-        if cand_versions != sp_versions {
+        if let (Some(target), Some(detail)) = (target_isrc.as_deref(), hydrated.get(&cand.id))
+            && detail
+                .isrc
+                .as_deref()
+                .map(normalize_isrc)
+                .is_some_and(|actual| actual == target)
+        {
+            return ResolutionOutcome {
+                status: ResolutionStatus::Resolved,
+                tidal_track_id: Some(cand.id),
+                confidence: 1.0,
+                reason: "isrc_exact".to_string(),
+            };
+        }
+
+        let cand_hard_versions = hard_version_tags(&cand.title);
+        if cand_hard_versions != sp_hard_versions {
+            saw_hard_reject = true;
             continue;
         }
 
@@ -130,22 +191,31 @@ pub async fn resolve_track(
         }
     }
 
-    let outcome = match best {
+    match best {
         None => ResolutionOutcome {
             status: ResolutionStatus::Unresolved,
             tidal_track_id: None,
             confidence: best_pre_guard.unwrap_or(0.0),
-            reason: "version_mismatch".to_string(),
+            reason: if saw_hard_reject {
+                "version_mismatch".to_string()
+            } else {
+                "no_tidal_candidates_after_scoring".to_string()
+            },
         },
-        Some(c) => ResolutionOutcome {
-            status: classify(c.score),
-            tidal_track_id: Some(c.tidal_id),
-            confidence: c.score,
-            reason: c.reason,
-        },
-    };
-
-    Ok(outcome)
+        Some(c) => {
+            let status = classify(c.score);
+            ResolutionOutcome {
+                status,
+                tidal_track_id: if status == ResolutionStatus::Unresolved {
+                    None
+                } else {
+                    Some(c.tidal_id)
+                },
+                confidence: c.score,
+                reason: c.reason,
+            }
+        }
+    }
 }
 
 /// Resolve a batch of Spotify tracks against TIDAL with bounded concurrency.
@@ -228,12 +298,12 @@ fn score(
     sp_primary_artist: &str,
     cand: &TidalSearchTrack,
 ) -> ScoreBreakdown {
-    let sp_title_norm = normalize_title(sp_title);
-    let cand_title_norm = normalize_title(&cand.title);
-    let title_jaccard = token_jaccard(&sp_title_norm, &cand_title_norm);
+    let sp_title_norm = normalize_match_title(sp_title);
+    let cand_title_norm = normalize_match_title(&cand.title);
+    let title_score = similarity_score(&sp_title_norm, &cand_title_norm);
 
     let cand_artist = cand.artist_name.as_deref().unwrap_or("");
-    let artist_jaccard = fuzzy_token_jaccard(
+    let artist_score = similarity_score(
         &normalize_artist(sp_primary_artist),
         &normalize_artist(cand_artist),
     );
@@ -257,20 +327,22 @@ fn score(
         _ => 0.0,
     };
 
-    let explicit_match = match sportify.explicit {
-        Some(_) => 0.0, // TIDAL search rows don't expose explicit flag, skip.
-        None => 0.0,
-    };
+    let soft_penalty = soft_version_penalty(sp_title, &cand.title);
 
     // Weighted sum, clamped into [0,1]. Title and artist are the primary
     // signals; duration acts as a real penalty so a 12" mix that shares a
     // title with the single edit doesn't autoplay over the wrong version.
-    let raw = title_jaccard * 0.55 + artist_jaccard * 0.40 + duration_score * 0.10 + explicit_match;
+    let raw = title_score * 0.55 + artist_score * 0.40 + duration_score * 0.10 - soft_penalty;
+    let raw = if title_score < 0.65 || artist_score < 0.65 {
+        raw.min(LOW_CONFIDENCE_THRESHOLD - 0.01)
+    } else {
+        raw
+    };
     let score = raw.clamp(0.0, 1.0);
 
     let reason = format!(
         "title={:.2} artist={:.2} dur={:.2}",
-        title_jaccard, artist_jaccard, duration_score
+        title_score, artist_score, duration_score
     );
     ScoreBreakdown { score, reason }
 }
@@ -283,6 +355,19 @@ pub fn normalize_title(s: &str) -> String {
     let no_feat = strip_feat_tail(&no_parens);
     let folded: String = no_feat.chars().map(ascii_fold_char).collect();
     folded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_match_title(s: &str) -> String {
+    let base = normalize_title(s);
+    base.split_whitespace()
+        .filter(|token| {
+            !matches!(
+                *token,
+                "remaster" | "remastered" | "edit" | "extended" | "version" | "radio"
+            ) && !token.chars().all(|c| c.is_ascii_digit())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Like `normalize_title`, but also drops trailing role markers like "the band"
@@ -364,6 +449,7 @@ fn tokens(s: &str) -> HashSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn token_jaccard(a: &str, b: &str) -> f64 {
     let ta = tokens(a);
     let tb = tokens(b);
@@ -377,6 +463,25 @@ fn token_jaccard(a: &str, b: &str) -> f64 {
     } else {
         intersection / union
     }
+}
+
+fn similarity_score(a: &str, b: &str) -> f64 {
+    let token = fuzzy_token_jaccard(a, b);
+    let jw = jaro_winkler(a, b);
+    let compact_a = compact_alnum(a);
+    let compact_b = compact_alnum(b);
+    let compact = if compact_a.is_empty() || compact_b.is_empty() {
+        0.0
+    } else {
+        jaro_winkler(&compact_a, &compact_b)
+    };
+    token.max(jw).max(compact)
+}
+
+fn compact_alnum(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
 }
 
 fn fuzzy_token_jaccard(a: &str, b: &str) -> f64 {
@@ -485,6 +590,44 @@ pub fn version_tags(title: &str) -> HashSet<&'static str> {
     tags
 }
 
+fn hard_version_tags(title: &str) -> HashSet<&'static str> {
+    version_tags(title)
+        .into_iter()
+        .filter(|tag| {
+            matches!(
+                *tag,
+                "live"
+                    | "acoustic"
+                    | "remix"
+                    | "sped_up"
+                    | "slowed"
+                    | "instrumental"
+                    | "demo"
+                    | "karaoke"
+            )
+        })
+        .collect()
+}
+
+fn soft_version_tags(title: &str) -> HashSet<&'static str> {
+    version_tags(title)
+        .into_iter()
+        .filter(|tag| matches!(*tag, "remaster" | "edit" | "extended"))
+        .collect()
+}
+
+fn soft_version_penalty(left: &str, right: &str) -> f64 {
+    if soft_version_tags(left) == soft_version_tags(right) {
+        0.0
+    } else {
+        0.08
+    }
+}
+
+fn normalize_isrc(isrc: &str) -> String {
+    isrc.trim().to_ascii_uppercase()
+}
+
 fn contains_word(haystack: &str, word: &str) -> bool {
     let mut start = 0usize;
     while let Some(idx) = haystack[start..].find(word) {
@@ -513,7 +656,11 @@ fn contains_word(haystack: &str, word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::sportify::models::{SportifyArtistRef, SportifyTrack};
+    use crate::services::sportify::models::{
+        SportifyArtistRef, SportifyExternalIds, SportifyTrack,
+    };
+    use crate::services::tidal::client::{TidalAlbumRef, TidalArtist, TidalTrack};
+    use std::collections::HashMap;
 
     fn sp(title: &str, artist: &str, dur_ms: Option<i64>) -> SportifyTrack {
         SportifyTrack {
@@ -524,6 +671,16 @@ mod tests {
             }],
             duration_ms: dur_ms,
             ..Default::default()
+        }
+    }
+
+    fn sp_with_isrc(title: &str, artist: &str, dur_ms: Option<i64>, isrc: &str) -> SportifyTrack {
+        SportifyTrack {
+            external_ids: Some(SportifyExternalIds {
+                isrc: Some(isrc.to_string()),
+                ..Default::default()
+            }),
+            ..sp(title, artist, dur_ms)
         }
     }
 
@@ -542,6 +699,43 @@ mod tests {
             stream_ready: Some(true),
             extra: Default::default(),
         }
+    }
+
+    fn detail(search: &TidalSearchTrack, isrc: Option<&str>) -> TidalTrack {
+        TidalTrack {
+            id: search.id,
+            title: search.title.clone(),
+            duration: search.duration,
+            track_number: None,
+            volume_number: None,
+            isrc: isrc.map(str::to_string),
+            artist: TidalArtist {
+                id: search.artist_id.unwrap_or(1),
+                name: search.artist_name.clone().unwrap_or_default(),
+                picture: None,
+                extra: Default::default(),
+            },
+            artists: None,
+            album: Some(TidalAlbumRef {
+                id: search.album_id.unwrap_or(1),
+                title: search.album_title.clone().unwrap_or_default(),
+                cover: None,
+                extra: Default::default(),
+            }),
+            audio_quality: search.audio_quality.clone(),
+            stream_ready: search.stream_ready,
+            extra: Default::default(),
+        }
+    }
+
+    fn select(
+        sportify: &SportifyTrack,
+        candidates: &[TidalSearchTrack],
+        details: Vec<TidalTrack>,
+    ) -> ResolutionOutcome {
+        let hydrated: HashMap<i64, TidalTrack> =
+            details.into_iter().map(|track| (track.id, track)).collect();
+        select_best_candidate(sportify, candidates, &hydrated)
     }
 
     #[test]
@@ -635,6 +829,96 @@ mod tests {
             breakdown.score,
             breakdown.reason
         );
+    }
+
+    #[test]
+    fn exact_isrc_match_wins_over_higher_fuzzy_candidate() {
+        let s = sp_with_isrc("Song", "Artist", Some(200_000), "USRIGHT00001");
+        let wrong_but_fuzzy = cand(1, "Song", "Artist", 200);
+        let right_isrc = cand(2, "Song - 2024 Remaster", "Artist", 200);
+
+        let outcome = select(
+            &s,
+            &[wrong_but_fuzzy.clone(), right_isrc.clone()],
+            vec![
+                detail(&wrong_but_fuzzy, Some("USWRONG00001")),
+                detail(&right_isrc, Some("USRIGHT00001")),
+            ],
+        );
+
+        assert_eq!(outcome.status, ResolutionStatus::Resolved);
+        assert_eq!(outcome.tidal_track_id, Some(2));
+        assert_eq!(outcome.confidence, 1.0);
+        assert_eq!(outcome.reason, "isrc_exact");
+    }
+
+    #[test]
+    fn remaster_candidate_can_resolve_plain_spotify_title() {
+        let s = sp("Blue Monday", "New Order", Some(450_000));
+        let c = cand(123, "Blue Monday - 2016 Remaster", "New Order", 450);
+
+        let outcome = select(&s, &[c], Vec::new());
+
+        assert_eq!(outcome.status, ResolutionStatus::Resolved);
+        assert_eq!(outcome.tidal_track_id, Some(123));
+    }
+
+    #[test]
+    fn live_remix_and_acoustic_candidates_are_hard_rejected() {
+        let s = sp("Blue Monday", "New Order", Some(450_000));
+
+        for title in [
+            "Blue Monday - Live at Manchester",
+            "Blue Monday - Acoustic",
+            "Blue Monday - Remix",
+        ] {
+            let c = cand(123, title, "New Order", 450);
+            let outcome = select(&s, &[c], Vec::new());
+            assert_eq!(outcome.status, ResolutionStatus::Unresolved, "{title}");
+            assert_eq!(outcome.tidal_track_id, None, "{title}");
+            assert_eq!(outcome.reason, "version_mismatch", "{title}");
+        }
+    }
+
+    #[test]
+    fn near_title_punctuation_difference_resolves() {
+        let s = sp("Dont Start Now", "Dua Lipa", Some(183_000));
+        let c = cand(123, "Don't Start Now", "Dua Lipa", 183);
+
+        let outcome = select(&s, &[c], Vec::new());
+
+        assert_eq!(outcome.status, ResolutionStatus::Resolved);
+        assert_eq!(outcome.tidal_track_id, Some(123));
+    }
+
+    #[test]
+    fn artist_punctuation_variation_reaches_low_confidence() {
+        let s = sp("Sweet Disposition", "The Temper Trap", Some(231_000));
+        let c = cand(123, "Sweet Disposition", "Temper-Trap", 231);
+
+        let outcome = select(&s, &[c], Vec::new());
+
+        assert!(
+            matches!(
+                outcome.status,
+                ResolutionStatus::Resolved | ResolutionStatus::LowConfidence
+            ),
+            "expected playable confidence, got {:?} ({})",
+            outcome.status,
+            outcome.reason
+        );
+        assert_eq!(outcome.tidal_track_id, Some(123));
+    }
+
+    #[test]
+    fn wrong_artist_with_same_title_stays_unresolved() {
+        let s = sp("Hello", "Adele", Some(295_000));
+        let c = cand(123, "Hello", "Lionel Richie", 295);
+
+        let outcome = select(&s, &[c], Vec::new());
+
+        assert_eq!(outcome.status, ResolutionStatus::Unresolved);
+        assert_eq!(outcome.tidal_track_id, None);
     }
 
     #[test]

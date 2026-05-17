@@ -11,7 +11,7 @@
 //! Values below were captured 2026-05-17 from
 //! `https://open.spotifycdn.com/cdn/build/web-player/web-player.e79b30dd.js`.
 //! All three operation hashes were grepped from the live bundle and the
-//! TOTP cipher (`v14`) came from `misiektoja/spotify_monitor`. Hashes
+//! TOTP cipher (`v61`) came from `misiektoja/spotify_monitor`. Hashes
 //! rotate every few weeks; when one goes stale a request returns
 //! `PersistedQueryNotFound` and [`refresh_from_js`] re-extracts the new
 //! values from the bundle, then [`persist`] writes them into `server_config`
@@ -25,19 +25,19 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// HMAC-SHA1 key for the anonymous `/api/token` TOTP challenge. The web
-/// player ships a ciphered version (`SECRET_CIPHER_DICT[14]`) and applies
+/// player ships a ciphered version (`SECRET_CIPHER_DICT[61]`) and applies
 /// `byte_i ^= (i % 33) + 9` to derive the actual secret. The ASCII
 /// representation of the concatenated decimal transform is the byte string
-/// fed straight into HMAC. Captured from `misiektoja/spotify_monitor` v14;
-/// when Spotify rotates to v15+ the bundle's `SECRET_CIPHER_DICT` will tell
+/// fed straight into HMAC. Captured from `misiektoja/spotify_monitor` v61;
+/// when Spotify rotates again the bundle's `SECRET_CIPHER_DICT` will tell
 /// us. (Lives in code because the bundle obfuscates it; without it we
 /// cannot mint a token, and only the JS-bundle scrape can recover the new
 /// value.)
-pub const TOTP_SECRET: &[u8] = b"55601029510267381196079975060119874370686866";
+pub const TOTP_SECRET: &[u8] = b"376136387538459893883312310911992847112448894410210511297108";
 
 /// `totpVer` query-string parameter for `/api/token`. Must match the cipher
 /// version used to derive `TOTP_SECRET` (>=10 means no `sTime`/`cTime`).
-pub const TOTP_VER: u32 = 14;
+pub const TOTP_VER: u32 = 61;
 
 /// Persisted-query SHA256 for `getTrack` (per-track playcount).
 pub const GET_TRACK_HASH: &str = "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294";
