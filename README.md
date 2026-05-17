@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.52</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.53</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -535,6 +535,9 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 
 **Recent release highlights**
 
+- [x] **Mood playlist latency fix** - `/moods` no longer prefetches full Spotify playlists just to render mood cards; TIDAL mood pages and playlist track pages now use in-memory caches so repeated Happy / Focus playlist opens return from cache instead of re-hitting TIDAL or competing with Sportify proxy calls (v0.1.53)
+- [x] **TIDAL resolver hydration trim** - Spotify-to-TIDAL resolution skips unnecessary candidate hydration work when cached or clear-enough matches are already available, reducing resolver tail latency and upstream TIDAL pressure (v0.1.53)
+- [x] **Playback queue starts and shuffle seeding** - TIDAL playlist, mix, library, and genre starts now seed playback order predictably, preserving direct-start behavior while avoiding broken queue starts after shuffle or mood entry points (v0.1.53)
 - [x] **Windows installer with signed auto-updater** - per-user NSIS installer alongside the existing portable zip; installed builds read `latest.json` from the latest GitHub Release on launch, surface a tray hint, and silently download + install the signed `setup.exe` in passive mode before restarting at the new version; portable builds keep their notify-only tray hint. Settings -> About now surfaces install mode, current version, and pending update. Installs to `%LOCALAPPDATA%\Programs\NOORwave`; library + settings live under `%LOCALAPPDATA%\NOORwave` and are preserved across updates. MusicBrainz / Last.fm portable snapshots reused across installed and portable layouts (v0.1.52)
 - [~] **Spotify public stats via anonymous partner-GraphQL** *(best-effort)* - partner-GraphQL fetcher with anonymous token mint, GraphQL-hash auto-refresh, request-coalescing cache, schema migrations, and artist-page stats rendering. **No official Spotify credentials required, but Spotify can reject anonymous token minting** (e.g., TOTP cipher rotation that turns `/api/token` into 400 Bad Request) - when that happens stats stay null and the panel degrades gracefully. TIDAL track resolution does **not** depend on this path (v0.1.52)
 - [x] **Untapped Spotify and TIDAL discovery surfaces** - new top-level `/charts` and `/moods` pages; new Sportify detail pages at `/spotify-album/[id]`, `/spotify-artist/[id]`, `/spotify-track/[id]`; TIDAL discover shelves extracted into a shared `TidalDiscoverShelves` component so search, charts, and moods all share one card treatment (v0.1.52)

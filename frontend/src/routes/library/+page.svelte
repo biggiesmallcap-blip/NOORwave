@@ -12,7 +12,16 @@
 	} from '$lib/stores/library';
 	import { formatTrackDuration, formatDateShort, getQualityClass } from '$lib/utils/format';
 	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
-	import { currentTrack, isPlaying, playTrackNow, addTrackToQueue, playTrackNext } from '$lib/stores/player';
+	import {
+		currentTrack,
+		isPlaying,
+		playTrackNow,
+		addTrackToQueue,
+		playTrackNext,
+		shuffleMode,
+		playArtist as playArtistNow,
+		shuffleArtist as shuffleArtistNow
+	} from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
@@ -266,8 +275,13 @@
 			if (trackIds.length === 0) {
 				throw new Error('No synced tracks found for this album yet.');
 			}
-			await api.replacePlaybackQueue(trackIds);
-			await playTrackNow(trackIds[0]);
+			const replaced = await api.replacePlaybackQueue(
+				trackIds,
+				undefined,
+				undefined,
+				get(shuffleMode)
+			);
+			await playTrackNow(replaced.queue[0]?.track.id ?? trackIds[0]);
 			batchMessage = `Playing album from track 1 of ${trackIds.length}.`;
 		} catch (error) {
 			batchError = `Failed to play album: ${error}`;
@@ -936,18 +950,11 @@
 	// ── Home view handlers ─────────────────────────────────────────────────
 
 	function playAllForArtist(artistId: number) {
-		const artistTracks = $tracks.filter(t => t.artist_id === artistId);
-		if (!artistTracks.length) return;
-		void playTrackNow(artistTracks[0].id);
-		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+		void playArtistNow(artistId);
 	}
 
 	function shuffleArtist(artistId: number) {
-		const artistTracks = [...$tracks.filter(t => t.artist_id === artistId)];
-		artistTracks.sort(() => Math.random() - 0.5);
-		if (!artistTracks.length) return;
-		void playTrackNow(artistTracks[0].id);
-		for (const t of artistTracks.slice(1)) void addTrackToQueue(t.id);
+		void shuffleArtistNow(artistId);
 	}
 
 	function handleHomeArtistClick(artistId: number) {

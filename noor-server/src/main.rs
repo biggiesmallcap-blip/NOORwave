@@ -74,6 +74,33 @@ pub struct AppState {
     /// 6h TTL cache for the home Personal Radio shelf. Same cadence as mixes.
     pub tidal_radio_stations_cache:
         Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    /// 6h TTL cache for the TIDAL moods landing categories. The handler
+    /// hydrates category thumbnails from multiple upstream pages, so keep the
+    /// computed list in memory instead of repeating that fan-out per request.
+    pub tidal_moods_cache:
+        Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<serde_json::Value>)>>>,
+    /// 6h TTL cache for parsed TIDAL pages such as mood drill-down pages.
+    pub tidal_page_modules_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                (
+                    std::time::Instant,
+                    Vec<services::tidal::client::TidalHomeModule>,
+                ),
+            >,
+        >,
+    >,
+    /// 1h TTL cache for external TIDAL playlist track pages. Library state is
+    /// enriched after reading from this cache so favorite badges stay fresh.
+    pub tidal_playlist_tracks_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                (std::time::Instant, Vec<services::tidal::client::TidalTrack>),
+            >,
+        >,
+    >,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -680,6 +707,11 @@ async fn main() -> Result<()> {
         tidal_tokens,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+        tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
+        tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,

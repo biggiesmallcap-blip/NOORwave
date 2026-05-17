@@ -1,6 +1,7 @@
 use crate::db::models::{QueueItem, Track};
 use crate::playback::shuffle::{
-    WeightedShuffleProfile, artist_spread_shuffle, genre_shuffle, true_shuffle, weighted_shuffle,
+    WeightedShuffleProfile, artist_spread_shuffle_with_rng, generate_shuffle_seed,
+    genre_shuffle_with_rng, seeded_rng, true_shuffle_with_rng, weighted_shuffle_with_rng,
 };
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -34,6 +35,21 @@ impl ShuffleMode {
             _ => Self::Off,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ShuffleDebug {
+    pub mode: String,
+    pub seed: i64,
+    pub scope: String,
+    pub locked_count: usize,
+    pub candidate_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShuffleApplyResult {
+    pub queue: Vec<QueueItem>,
+    pub debug: Option<ShuffleDebug>,
 }
 
 pub fn load_queue(conn: &Connection) -> Result<Vec<QueueItem>> {
@@ -331,52 +347,50 @@ pub fn apply_shuffle(
     mode: ShuffleMode,
     current_queue_item_id: Option<i64>,
 ) -> Result<Vec<QueueItem>> {
-    let queue_items = load_queue(conn)?;
-    if queue_items.len() <= 1 || mode == ShuffleMode::Off {
-        return Ok(queue_items);
+    if mode == ShuffleMode::Off {
+        return load_queue(conn);
     }
+    Ok(apply_shuffle_with_seed(
+        conn,
+        mode,
+        current_queue_item_id,
+        generate_shuffle_seed(),
+        "queue",
+    )?
+    .queue)
+}
 
+pub fn apply_shuffle_with_seed(
+    conn: &Connection,
+    mode: ShuffleMode,
+    current_queue_item_id: Option<i64>,
+    seed: i64,
+    scope: &str,
+) -> Result<ShuffleApplyResult> {
+    let queue_items = load_queue(conn)?;
     let split_index = current_queue_item_id
         .and_then(|qid| queue_items.iter().position(|item| item.id == qid))
         .map(|idx| idx + 1)
         .unwrap_or(0);
+    let candidate_count = queue_items.len().saturating_sub(split_index);
+    let debug = (mode != ShuffleMode::Off).then(|| ShuffleDebug {
+        mode: mode.as_str().to_string(),
+        seed,
+        scope: scope.to_string(),
+        locked_count: split_index,
+        candidate_count,
+    });
+
+    if queue_items.len() <= 1 || mode == ShuffleMode::Off || candidate_count <= 1 {
+        return Ok(ShuffleApplyResult {
+            queue: queue_items,
+            debug,
+        });
+    }
 
     let locked_qids: Vec<i64> = queue_items[..split_index].iter().map(|i| i.id).collect();
-    let candidate_tracks: Vec<Track> = queue_items[split_index..]
-        .iter()
-        .map(|i| i.track.clone())
-        .collect();
-
-    let reordered_tracks = reorder_tracks(conn, &candidate_tracks, mode)?;
-
-    // Map shuffled tracks back to queue item IDs. Pending rows all share
-    // `track.id == 0`, so we route by track.id with a per-id FIFO of qids:
-    // the i-th pending row in the shuffled output gets the i-th pending
-    // qid from the candidate region. Library rows use the same machinery
-    // and handle the rare duplicate-track-id case as a side-effect.
-    use std::collections::VecDeque;
-    let mut qid_buckets: HashMap<i64, VecDeque<i64>> = HashMap::new();
-    for item in &queue_items[split_index..] {
-        qid_buckets
-            .entry(item.track.id)
-            .or_default()
-            .push_back(item.id);
-    }
-    let mut shuffled_qids: Vec<i64> = Vec::with_capacity(reordered_tracks.len());
-    for t in &reordered_tracks {
-        if let Some(bucket) = qid_buckets.get_mut(&t.id)
-            && let Some(qid) = bucket.pop_front()
-        {
-            shuffled_qids.push(qid);
-        }
-    }
-    // Defensive: if reorder_tracks dropped any rows (it shouldn't), append
-    // remaining qids in their original order so the queue stays intact.
-    for (_id, bucket) in qid_buckets.iter_mut() {
-        while let Some(qid) = bucket.pop_front() {
-            shuffled_qids.push(qid);
-        }
-    }
+    let shuffled_qids =
+        reorder_queue_item_ids_with_seed(conn, &queue_items[split_index..], mode, seed, scope)?;
 
     let final_qids: Vec<i64> = locked_qids.into_iter().chain(shuffled_qids).collect();
 
@@ -389,26 +403,105 @@ pub fn apply_shuffle(
     }
     tx.commit()?;
 
-    load_queue(conn)
+    Ok(ShuffleApplyResult {
+        queue: load_queue(conn)?,
+        debug,
+    })
 }
 
 fn reorder_tracks(conn: &Connection, tracks: &[Track], mode: ShuffleMode) -> Result<Vec<Track>> {
     // Off must preserve the caller's order; an artist post-pass would silently
     // rearrange tracks the user didn't ask to shuffle. Genre mode already runs
-    // artist-spread + genre-stabilize internally — running artist-spread again
+    // artist-spread + genre-stabilize internally, and running artist-spread again
     // here re-clusters genres and undoes that work.
     match mode {
         ShuffleMode::Off => Ok(tracks.to_vec()),
-        ShuffleMode::True => Ok(artist_spread_shuffle(&true_shuffle(tracks))),
+        ShuffleMode::True => {
+            let mut rng = rand::thread_rng();
+            Ok(true_shuffle_with_rng(tracks, &mut rng))
+        }
         ShuffleMode::Weighted => {
-            let weighted = weighted_shuffle(tracks, &WeightedShuffleProfile::default());
-            Ok(artist_spread_shuffle(&weighted))
+            let mut rng = rand::thread_rng();
+            let weighted =
+                weighted_shuffle_with_rng(tracks, &WeightedShuffleProfile::default(), &mut rng);
+            Ok(artist_spread_shuffle_with_rng(&weighted, &mut rng))
         }
         ShuffleMode::Genre => {
             let genre_map = get_track_genres(conn, tracks)?;
-            Ok(genre_shuffle(tracks, &genre_map))
+            let mut rng = rand::thread_rng();
+            Ok(genre_shuffle_with_rng(tracks, &genre_map, &mut rng))
         }
     }
+}
+
+pub(crate) fn reorder_tracks_with_seed(
+    conn: &Connection,
+    tracks: &[Track],
+    mode: ShuffleMode,
+    seed: i64,
+    scope: &str,
+) -> Result<Vec<Track>> {
+    let mut rng = seeded_rng(seed, mode.as_str(), scope);
+    match mode {
+        ShuffleMode::Off => Ok(tracks.to_vec()),
+        ShuffleMode::True => Ok(true_shuffle_with_rng(tracks, &mut rng)),
+        ShuffleMode::Weighted => {
+            let weighted =
+                weighted_shuffle_with_rng(tracks, &WeightedShuffleProfile::default(), &mut rng);
+            Ok(artist_spread_shuffle_with_rng(&weighted, &mut rng))
+        }
+        ShuffleMode::Genre => {
+            let genre_map = get_track_genres(conn, tracks)?;
+            Ok(genre_shuffle_with_rng(tracks, &genre_map, &mut rng))
+        }
+    }
+}
+
+fn reorder_queue_item_ids_with_seed(
+    conn: &Connection,
+    items: &[QueueItem],
+    mode: ShuffleMode,
+    seed: i64,
+    scope: &str,
+) -> Result<Vec<i64>> {
+    let mut surrogate_tracks = Vec::with_capacity(items.len());
+    for item in items {
+        let mut track = item.track.clone();
+        track.id = item.id;
+        surrogate_tracks.push(track);
+    }
+
+    let mut genre_map = HashMap::new();
+    if mode == ShuffleMode::Genre {
+        let real_tracks = items
+            .iter()
+            .filter(|item| item.track.id > 0)
+            .map(|item| item.track.clone())
+            .collect::<Vec<_>>();
+        let real_genres = get_track_genres(conn, &real_tracks)?;
+        for item in items {
+            if let Some(genres) = real_genres.get(&item.track.id) {
+                genre_map.insert(item.id, genres.clone());
+            }
+        }
+    }
+
+    let mut rng = seeded_rng(seed, mode.as_str(), scope);
+    let reordered = match mode {
+        ShuffleMode::Off => surrogate_tracks,
+        ShuffleMode::True => true_shuffle_with_rng(&surrogate_tracks, &mut rng),
+        ShuffleMode::Weighted => {
+            let weighted = weighted_shuffle_with_rng(
+                &surrogate_tracks,
+                &WeightedShuffleProfile::default(),
+                &mut rng,
+            );
+            artist_spread_shuffle_with_rng(&weighted, &mut rng)
+        }
+        ShuffleMode::Genre => genre_shuffle_with_rng(&surrogate_tracks, &genre_map, &mut rng),
+    };
+
+    Ok(reordered.into_iter().map(|track| track.id).collect())
 }
 
 pub fn get_track_genres(conn: &Connection, tracks: &[Track]) -> Result<HashMap<i64, Vec<String>>> {
@@ -1002,7 +1095,7 @@ mod tests {
             .collect();
         let genre_of = |id: i64| if id <= 2 { "House" } else { "Ambient" };
 
-        // Two genres × two tracks each → alternation is always achievable.
+        // Two genres with two tracks each can alternate every adjacent pair.
         // If the unconditional artist post-pass returns, this fails on most seeds.
         for _ in 0..20 {
             let reordered = reorder_tracks(&conn, &tracks, ShuffleMode::Genre).unwrap();
@@ -1019,6 +1112,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn apply_shuffle_with_seed_is_repeatable() {
+        let conn = conn();
+        let tracks: Vec<Track> = (1..=4)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect();
+        replace_queue(&conn, &tracks, "test").unwrap();
+
+        let first =
+            apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
+        let first_ids: Vec<i64> = first.queue.iter().map(|item| item.track.id).collect();
+        let first_debug = first.debug.expect("shuffle debug");
+
+        replace_queue(&conn, &tracks, "test").unwrap();
+        let second =
+            apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
+        let second_ids: Vec<i64> = second.queue.iter().map(|item| item.track.id).collect();
+
+        assert_eq!(first_ids, second_ids);
+        assert_eq!(first_debug.mode, "true");
+        assert_eq!(first_debug.seed, 7_654_321);
+        assert_eq!(first_debug.scope, "test");
+        assert_eq!(first_debug.locked_count, 0);
+        assert_eq!(first_debug.candidate_count, 4);
+    }
+
+    #[test]
+    fn seeded_shuffle_moves_pending_queue_item_ids() {
+        let conn = conn();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'test')",
+            [],
+        )
+        .unwrap();
+        for (idx, (artist, title)) in [
+            ("Aphex Twin", "Xtal"),
+            ("Boards of Canada", "Roygbiv"),
+            ("Plaid", "Itsu"),
+            ("Autechre", "Bike"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, pending_artist, pending_title, pending_at)
+                 VALUES (NULL, ?1, 'radio_pending', ?2, ?3, datetime('now'))",
+                params![(idx as i32) + 1, artist, title],
+            )
+            .unwrap();
+        }
+        let before = load_queue(&conn).unwrap();
+        let current_qid = before[0].id;
+        let before_pending_qids = before[1..].iter().map(|item| item.id).collect::<Vec<_>>();
+
+        let shuffled = apply_shuffle_with_seed(
+            &conn,
+            ShuffleMode::True,
+            Some(current_qid),
+            7_654_321,
+            "test",
+        )
+        .unwrap();
+        let after_pending_qids = shuffled.queue[1..]
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(shuffled.queue[0].id, current_qid);
+        assert_ne!(after_pending_qids, before_pending_qids);
+        let mut sorted_before = before_pending_qids;
+        let mut sorted_after = after_pending_qids;
+        sorted_before.sort_unstable();
+        sorted_after.sort_unstable();
+        assert_eq!(sorted_after, sorted_before);
+    }
+
+    #[test]
+    fn seeded_true_mode_matches_plain_fisher_yates() {
+        let conn = conn();
+        let tracks: Vec<Track> = (1..=4)
+            .map(|id| get_track_by_id(&conn, id).unwrap().unwrap())
+            .collect();
+        let seed = 7_654_321;
+        let scope = "flat_true";
+
+        let actual = reorder_tracks_with_seed(&conn, &tracks, ShuffleMode::True, seed, scope)
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        let mut rng = crate::playback::shuffle::seeded_rng(seed, ShuffleMode::True.as_str(), scope);
+        let expected = crate::playback::shuffle::true_shuffle_with_rng(&tracks, &mut rng)
+            .into_iter()
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn seeded_shuffle_reorders_duplicate_track_queue_item_ids() {
+        let conn = conn();
+        let repeated = get_track_by_id(&conn, 1).unwrap().unwrap();
+        replace_queue(
+            &conn,
+            &[
+                repeated.clone(),
+                repeated.clone(),
+                repeated.clone(),
+                repeated.clone(),
+            ],
+            "test",
+        )
+        .unwrap();
+        let before_qids: Vec<i64> = load_queue(&conn)
+            .unwrap()
+            .iter()
+            .map(|item| item.id)
+            .collect();
+
+        let shuffled =
+            apply_shuffle_with_seed(&conn, ShuffleMode::True, None, 7_654_321, "test").unwrap();
+        let after_qids: Vec<i64> = shuffled.queue.iter().map(|item| item.id).collect();
+
+        assert_ne!(after_qids, before_qids);
+        let mut sorted_before = before_qids.clone();
+        let mut sorted_after = after_qids;
+        sorted_before.sort_unstable();
+        sorted_after.sort_unstable();
+        assert_eq!(sorted_after, sorted_before);
     }
 
     #[test]

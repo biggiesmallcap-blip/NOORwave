@@ -1,12 +1,45 @@
 use crate::db::models::Track;
 use chrono::Utc;
-use rand::Rng;
+use rand::rngs::{OsRng, StdRng};
 use rand::seq::SliceRandom;
+use rand::{Rng, RngCore, SeedableRng};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
 const UNKNOWN_GENRE: &str = "unknown";
 const UNKNOWN_ARTIST_KEY: &str = "__unknown_artist__";
+const POSITIVE_I64_MASK: u64 = i64::MAX as u64;
+
+pub fn generate_shuffle_seed() -> i64 {
+    loop {
+        let seed = OsRng.next_u64() & POSITIVE_I64_MASK;
+        if seed > 0 {
+            return seed as i64;
+        }
+    }
+}
+
+pub fn seeded_rng(seed: i64, mode: &str, scope: &str) -> StdRng {
+    let mixed = mix64((seed as u64) ^ stable_hash(mode) ^ stable_hash(scope).rotate_left(17));
+    StdRng::seed_from_u64(mixed.max(1))
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^ (value >> 33)
+}
 
 #[derive(Debug, Clone)]
 pub struct WeightedShuffleProfile {
@@ -94,11 +127,6 @@ pub fn true_shuffle_with_rng<R: Rng + ?Sized>(tracks: &[Track], rng: &mut R) -> 
     shuffled
 }
 
-pub fn weighted_shuffle(tracks: &[Track], profile: &WeightedShuffleProfile) -> Vec<Track> {
-    let mut rng = rand::thread_rng();
-    weighted_shuffle_with_rng(tracks, profile, &mut rng)
-}
-
 pub fn weighted_shuffle_with_rng<R: Rng + ?Sized>(
     tracks: &[Track],
     profile: &WeightedShuffleProfile,
@@ -117,11 +145,6 @@ pub fn weighted_shuffle_with_rng<R: Rng + ?Sized>(
 
     weighted.sort_by(|(left, _), (right, _)| left.partial_cmp(right).unwrap_or(Ordering::Equal));
     weighted.into_iter().map(|(_, track)| track).collect()
-}
-
-pub fn artist_spread_shuffle(tracks: &[Track]) -> Vec<Track> {
-    let mut rng = rand::thread_rng();
-    artist_spread_shuffle_with_rng(tracks, &mut rng)
 }
 
 pub fn artist_spread_shuffle_with_rng<R: Rng + ?Sized>(

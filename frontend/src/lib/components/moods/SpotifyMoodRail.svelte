@@ -1,29 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { api } from '$lib/api/client';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
   import type { SpotifyMoodCategory } from './spotify-moods-data';
 
   let { category }: { category: SpotifyMoodCategory } = $props();
-
-  let meta = $state<Record<string, { thumbnail: string | null; title: string | null }>>({});
-
-  onMount(() => {
-    // Match /charts pattern: fire all fetches in parallel, fall back to
-    // hardcoded title + glyph on failure. Sportify proxy is slow but parallel.
-    void Promise.allSettled(
-      category.playlists.map(async (p) => {
-        try {
-          const { playlist } = await api.getSpotifyPlaylist(p.id);
-          meta[p.id] = { thumbnail: playlist.thumbnail, title: playlist.title };
-        } catch {
-          // Quiet: 404 / proxy outage just leaves the glyph + hardcoded title.
-        }
-      }),
-    );
-  });
 
   function buildMenu(id: string, title: string) {
     return [
@@ -36,21 +17,16 @@
   <h3 class="rail-heading">{category.label}</h3>
   <div class="rail" use:wheelToHorizontal>
     {#each category.playlists as p (p.id)}
-      {@const m = meta[p.id]}
       <a
         class="card"
         href={`/spotify-playlist/${p.id}`}
-        oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(p.id, m?.title ?? p.title), m?.title ?? p.title); }}
+        oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(p.id, p.title), p.title); }}
       >
         <div class="art-wrap">
-          {#if m?.thumbnail}
-            <div class="art" style="background-image:url('{m.thumbnail}')"></div>
-          {:else}
-            <div class="art fallback">M</div>
-          {/if}
+          <div class="art fallback">S</div>
         </div>
         <div class="meta">
-          <p class="title">{m?.title ?? p.title}</p>
+          <p class="title">{p.title}</p>
           <span class="source">Spotify</span>
         </div>
       </a>

@@ -43,6 +43,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_039,
     MIGRATION_040,
     MIGRATION_041,
+    MIGRATION_042,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1152,6 +1153,10 @@ CREATE TABLE IF NOT EXISTS spotify_artist_map (
 );
 
 COMMIT;
+"#;
+
+const MIGRATION_042: &str = r#"
+ALTER TABLE playback_state ADD COLUMN shuffle_seed INTEGER;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
