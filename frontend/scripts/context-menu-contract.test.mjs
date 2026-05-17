@@ -12,7 +12,14 @@ describe('context menu coverage contract', () => {
 	});
 
 	test('discover shelves use shared menus for cards and secondary references', () => {
-		const source = readFileSync('src/lib/components/search/DiscoverShelves.svelte', 'utf8');
+		// The shelf renderer was extracted into TidalDiscoverShelves so /charts
+		// and /moods can reuse the exact same row/card markup + menus. The old
+		// DiscoverShelves wrapper now just handles fetch/cache and delegates
+		// rendering — the menu contract lives in the renderer.
+		const source = readFileSync(
+			'src/lib/components/search/TidalDiscoverShelves.svelte',
+			'utf8',
+		);
 
 		expect(source).toContain('buildTidalTrackMenu');
 		expect(source).toContain('buildAlbumMenu');
