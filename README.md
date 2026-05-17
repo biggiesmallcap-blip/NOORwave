@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.51</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.52</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -288,10 +288,13 @@ Download the latest portable build from [GitHub Releases](../../releases/latest)
 
 | Platform | File | Arch |
 |---|---|---|
-| Windows | `NOORwave-vX.X.X-windows-x64.zip` | x64 |
+| Windows (installer) | `NOORwave-vX.X.X-windows-x64-setup.exe` | x64 |
+| Windows (portable) | `NOORwave-vX.X.X-windows-x64.zip` | x64 |
 | macOS | `NOORwave-vX.X.X-macos-arm64.tar.gz` | Apple Silicon |
 | macOS | `NOORwave-vX.X.X-macos-x64.tar.gz` | Intel |
 | Linux | `NOORwave-vX.X.X-linux-x64.tar.gz` | x64 |
+
+> **Installer vs portable (Windows):** the installer auto-updates in-place on launch and stores data under `%LOCALAPPDATA%\NOORwave`. The portable zip is fully relocatable and only ever notifies you about updates - you swap the build yourself. Both run the same backend.
 
 Every build contains the same three things - keep them together:
 
@@ -305,7 +308,16 @@ Created next to the executables on first run: `noor.db` (library + settings), `n
 
 ---
 
-### Windows
+### Windows (installer)
+
+1. Run `NOORwave-vX.X.X-windows-x64-setup.exe`
+2. Installs to `%LOCALAPPDATA%\Programs\NOORwave` (per-user, no admin prompt)
+3. Library, settings, PIN, and queue live in `%LOCALAPPDATA%\NOORwave` and are preserved across every update
+4. Future releases auto-install in-place on launch (see [Updating](#updating))
+
+> The installer is currently unsigned by a CA. Windows SmartScreen may show "Windows protected your PC" on first run - click **More info** -> **Run anyway**. The Tauri updater payload itself is signed by the project's minisign key, so in-place updates verify the signature before installing even though SmartScreen does not.
+
+### Windows (portable)
 
 1. Unzip to any folder
 2. Double-click `NOORwave.exe`
@@ -313,7 +325,7 @@ Created next to the executables on first run: `noor.db` (library + settings), `n
 
 The folder is fully relocatable - rename or move it to another drive and it keeps working.
 
-> Windows builds are currently unsigned. On some Windows 11 installs, Smart App Control may block `noor-server.exe`; if that happens, the app window can open but `127.0.0.1:3334` refuses the connection because the local server never started. Advanced workaround: download the source code and run `.\scripts\build-windows11-release.cmd`. This creates `dist\NOORwave-win11\NOORwave.exe`; the result is still unsigned, so strict Smart App Control setups may still block it.
+> Portable builds are unsigned. On some Windows 11 installs, Smart App Control may block `noor-server.exe`; if that happens, the app window can open but `127.0.0.1:3334` refuses the connection because the local server never started. Advanced workaround: download the source code and run `.\scripts\build-windows11-release.cmd`. This creates `dist\NOORwave-win11\NOORwave.exe`; the result is still unsigned, so strict Smart App Control setups may still block it.
 
 ---
 
@@ -421,9 +433,19 @@ Open `http://localhost:5173`. The frontend connects to the backend on port 3334 
 
 ## Updating
 
-NOOR doesn't auto-install - it tells you when a new release is out and you swap the portable build yourself. Your library and settings carry over untouched.
+Windows has two channels: the **per-user installer** (silent in-app update) and the **portable zip** (notify-only). macOS and Linux are portable-only.
 
-### Auto-update notification
+### Installer (Windows) - silent in-app update
+
+On every launch the installed app reads `latest.json` from the latest GitHub Release. When a newer signed `setup.exe` is published, the tray menu surfaces:
+
+```
+v0.1.52 available - click to install
+```
+
+Clicking it stops the local sidecar, downloads the signed setup, runs it in passive mode, and restarts the app at the new version. The `NOORwave/` data folder under `%LOCALAPPDATA%` is preserved - your library, playlists, settings, PIN, training state, and queue all carry over. Settings -> About surfaces the same install mode, current version, and pending update inside the app.
+
+### Portable - notify-only
 
 On every launch the Tauri shell quietly polls the GitHub Releases API. If a newer tag is available, the system tray menu gains an extra item:
 
@@ -431,7 +453,7 @@ On every launch the Tauri shell quietly polls the GitHub Releases API. If a newe
 ↑ vX.Y.Z available - click to download
 ```
 
-Clicking it opens the GitHub release page in your browser. There is **no silent in-app install**.
+Clicking it opens the GitHub release page in your browser. **No silent install on portable** - swap the build yourself (see below).
 
 ### Manual portable swap
 
@@ -489,7 +511,7 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 **Distribution**
 
 - macOS builds are **unsigned** - Gatekeeper quarantine must be cleared on every download (`xattr -cr`).
-- The Tauri auto-updater **notifies, but does not install in-place**. Updates are a manual portable swap (see [Updating](#updating)).
+- The Tauri auto-updater **installs in-place on Windows installer builds** (signed `setup.exe` from the latest release). **Portable builds notify only** - they don't self-install; you swap them manually. macOS and Linux are portable-only (see [Updating](#updating)).
 - No mobile app. The LAN UI works in a phone browser but isn't optimised for it.
 
 **Functionality not yet wired**
@@ -513,6 +535,12 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 
 **Recent release highlights**
 
+- [x] **Windows installer with signed auto-updater** - per-user NSIS installer alongside the existing portable zip; installed builds read `latest.json` from the latest GitHub Release on launch, surface a tray hint, and silently download + install the signed `setup.exe` in passive mode before restarting at the new version; portable builds keep their notify-only tray hint. Settings -> About now surfaces install mode, current version, and pending update. Installs to `%LOCALAPPDATA%\Programs\NOORwave`; library + settings live under `%LOCALAPPDATA%\NOORwave` and are preserved across updates. MusicBrainz / Last.fm portable snapshots reused across installed and portable layouts (v0.1.52)
+- [x] **Spotify public-stats via partner-GraphQL** - real anonymous partner-GraphQL fetcher with token + GraphQL-hash auto-refresh, request-coalescing cache, schema migrations, and frontend artist-stats rendering on artist pages. No Spotify account required (v0.1.52)
+- [x] **Untapped Spotify and TIDAL discovery surfaces** - new top-level `/charts` and `/moods` pages; new Sportify detail pages at `/spotify-album/[id]`, `/spotify-artist/[id]`, `/spotify-track/[id]`; TIDAL discover shelves extracted into a shared `TidalDiscoverShelves` component so search, charts, and moods all share one card treatment (v0.1.52)
+- [x] **Discovery polish, caching, proxy resilience** - unified card hover pattern (transparent border lift, art-wrap with hover zoom, `PlayOverlay` only where clicks actually play) across `/charts`, `/moods`, home mood/chart rails; 6-hour shared cache + cold-load skeleton on the home moods rail; curated Spotify mood rails on `/moods` drill-downs; Sportify outage recovery with single auto-retry, friendly error, and explicit Retry button on the playlist view; fixed a motion-token easing footgun that was silently dropping hover transitions on 12 card files (`var(--motion-base) ease` is invalid CSS - browsers drop the whole rule) (v0.1.52)
+- [x] **Sportify -> TIDAL first resolution** - the Sportify resolver routes Spotify tracks through TIDAL search before falling back, with hardened anonymous-token and GraphQL-hash refresh for the public-stats client (v0.1.52)
+- [x] **Now-playing badge-row stability** - state badge locked to a stable min-width and the chip row set to `nowrap` so the wider 'Scrubbing' pill no longer reflows the stream chip onto a second line; stream detail string also drops the redundant quality tier label since bit depth / sample rate / Excl already convey it (v0.1.52)
 - [x] **True DASH segment seek (option C)** - past-buffer scrubber targets on TIDAL tracks now trigger a forced engine restart at the nearest DASH segment boundary; absolute-track sample accounting in the runtime; `evaluate_seek_decision` moved into the playback module with both bounds (`[offset, buffered]`); `POST /api/playback/position` accepts `allow_segment_seek` and returns 202 / 409 / 500 honestly (v0.1.51)
 - [x] **Buffered-bar scrubber + route-side seek ack** - now-playing progress bar renders the decoded region behind the playhead; redirectable `buffered_source` mirror on the runtime handle survives Switch and crossfade promotion; route-side 409 with a live snapshot for pre-resolve targets so the UI snaps back instead of fighting WS resyncs (v0.1.51)
 - [x] **Playback runtime hardening** - error / panic / cancel observability rework: every long-running stage observes a stop flag; orphan decoder threads tracked via a background-join helper so Stop returns within ~250ms; transition failures emit typed `Error+Stopped` event pairs; one-shot growth-warn telemetry on unbounded buffer drift (v0.1.51)
