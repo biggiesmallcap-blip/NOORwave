@@ -1,6 +1,6 @@
 [package]
 name = "noor-server"
-version = "0.1.52"
+version = "0.1.53"
 edition = "2024"
 description = "NOOR â€” Multi-service music library manager + hi-fi player"
 
