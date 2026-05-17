@@ -159,14 +159,14 @@ async fn resolve_and_writeback_track(
             }
         }
         TrackState::NeedsResolution => {
-            match resolver::resolve_track_for_isrc(
+            let resolution = resolver::resolve_track_for_isrc(
                 client,
                 &seed.isrc,
                 &seed.title,
                 &seed.artist_name,
             )
-            .await
-            {
+            .await;
+            match &resolution {
                 Ok(Some(resolved)) => {
                     if let Err(e) = db.with_conn(|c| {
                         cache::write_track_resolution(c, &seed.isrc, &resolved.spotify_track_id)
@@ -186,12 +186,13 @@ async fn resolve_and_writeback_track(
                     }
                     playcount.filter(|p| *p > 0)
                 }
-                Ok(None) => {
+                result if should_write_track_negative(result) => {
                     if let Err(e) = db.with_conn(|c| cache::write_track_negative(c, &seed.isrc)) {
                         warn!("spotify_public: write_track_negative failed: {e:#}");
                     }
                     None
                 }
+                Ok(None) => None,
                 Err(e) => {
                     warn!("spotify_public: resolve_track_for_isrc failed: {e:#}");
                     None
@@ -199,6 +200,10 @@ async fn resolve_and_writeback_track(
             }
         }
     }
+}
+
+fn should_write_track_negative(result: &anyhow::Result<Option<resolver::ResolvedTrack>>) -> bool {
+    matches!(result, Ok(None))
 }
 
 async fn fetch_playcount(client: &SpotifyPublicClient, spotify_track_id: &str) -> Option<i64> {
@@ -369,4 +374,24 @@ fn parse_artist_overview(body: &serde_json::Value) -> ParsedArtistOverview {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolution_error_is_not_negative_cacheable() {
+        let result: anyhow::Result<Option<resolver::ResolvedTrack>> =
+            Err(anyhow::anyhow!("mint token: unauthorized request"));
+
+        assert!(!should_write_track_negative(&result));
+    }
+
+    #[test]
+    fn definitive_no_match_is_negative_cacheable() {
+        let result: anyhow::Result<Option<resolver::ResolvedTrack>> = Ok(None);
+
+        assert!(should_write_track_negative(&result));
+    }
 }
