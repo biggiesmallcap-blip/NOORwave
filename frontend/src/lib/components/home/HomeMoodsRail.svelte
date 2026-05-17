@@ -10,6 +10,8 @@
 	} from '$lib/stores/tidal-moods-cache';
 
 	const PREVIEW_LIMIT = 8;
+	const LOAD_ARM_DELAY_MS = 2500;
+	const FALLBACK_LOAD_DELAY_MS = 10000;
 
 	// Sync-read the shared moods cache on script init so a second visit
 	// within the 6h TTL renders instantly without a network round-trip.
@@ -21,9 +23,12 @@
 	);
 	let loading = $state(!cachedOnMount);
 	let errored = $state(false);
+	let sectionEl = $state<HTMLElement | null>(null);
+	let loadStarted = false;
 
-	onMount(async () => {
-		if (cachedOnMount) return;
+	async function loadMoods() {
+		if (loadStarted) return;
+		loadStarted = true;
 		try {
 			const data = await api.getTidalMoods();
 			const all = data.categories ?? [];
@@ -34,6 +39,37 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	onMount(() => {
+		if (cachedOnMount) return;
+
+		let observer: IntersectionObserver | null = null;
+		let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+		const armTimer = setTimeout(() => {
+			if (typeof IntersectionObserver === 'undefined' || !sectionEl) {
+				void loadMoods();
+				return;
+			}
+
+			observer = new IntersectionObserver(
+				(entries) => {
+					if (!entries.some((entry) => entry.isIntersecting)) return;
+					observer?.disconnect();
+					observer = null;
+					void loadMoods();
+				},
+				{ rootMargin: '240px 0px' },
+			);
+			observer.observe(sectionEl);
+			fallbackTimer = setTimeout(() => void loadMoods(), FALLBACK_LOAD_DELAY_MS);
+		}, LOAD_ARM_DELAY_MS);
+
+		return () => {
+			clearTimeout(armTimer);
+			if (fallbackTimer) clearTimeout(fallbackTimer);
+			observer?.disconnect();
+		};
 	});
 
 	function menu(slug: string, title: string) {
@@ -42,7 +78,7 @@
 </script>
 
 {#if categories.length > 0 || loading}
-	<section class="moods-rail" data-section="moods">
+	<section bind:this={sectionEl} class="moods-rail" data-section="moods">
 		<div class="header">
 			<div class="title-group">
 				<p class="eyebrow">TIDAL</p>
