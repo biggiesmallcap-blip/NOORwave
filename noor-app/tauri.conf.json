@@ -13,10 +13,6 @@
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
-    "resources": {
-      "../target/release/noor-server.exe": "noor-server.exe",
-      "../frontend/build": "www"
-    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",
