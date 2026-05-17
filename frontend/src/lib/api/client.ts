@@ -1470,6 +1470,14 @@ export interface TidalHomeModulesResponse {
 	source: string;
 }
 
+export interface TidalMoodCategory {
+	slug: string;
+	title: string;
+	icon: string | null;
+	imageId: string | null;
+	thumbnail: string | null;
+}
+
 export interface TidalDiscoverModuleResponse {
 	module: TidalHomeModule;          // module returned without `more_path` (already resolved); `items` is the full set
 	source: string;
@@ -2836,6 +2844,23 @@ export const api = {
 	getTidalPage(path: string) {
 		return fetchApi<TidalHomeModulesResponse>(
 			`/api/tidal/page/${path.split('/').map(encodeURIComponent).join('/')}`,
+		);
+	},
+
+	// TIDAL moods landing: returns the PAGE_LINKS category list (Party,
+	// Workout, Focus, etc). Each entry has a slug that can be fed to
+	// getTidalMoodPage for the drill-down content.
+	getTidalMoods() {
+		return fetchApi<{ categories: TidalMoodCategory[]; source: string }>(
+			'/api/tidal/moods',
+		);
+	},
+
+	// Drill-down for one mood category. Backend proxies to pages/{slug} which
+	// returns the standard editorial modules shape.
+	getTidalMoodPage(slug: string) {
+		return fetchApi<TidalHomeModulesResponse>(
+			`/api/tidal/mood-page/${encodeURIComponent(slug)}`,
 		);
 	},
 

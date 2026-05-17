@@ -3,29 +3,21 @@
 	import type { Snapshot } from './$types';
 	import {
 		api,
-		ApiError,
 		type RSSFeedItem,
-		type ReleaseItem,
-		type HomePickTrack,
 	} from '$lib/api/client';
-	import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
 	import YourMixesShelf from '$lib/components/home/YourMixesShelf.svelte';
 	import PersonalRadioShelf from '$lib/components/home/PersonalRadioShelf.svelte';
+	import HomeMoodsRail from '$lib/components/home/HomeMoodsRail.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TrendingCard from '$lib/components/TrendingCard.svelte';
 
 	// Home page data
-	let releases = $state<ReleaseItem[]>([]);
-	let releasesNotConfigured = $state(false);
-	let genrePicks = $state<HomePickTrack[]>([]);
 	let articles = $state<RSSFeedItem[]>([]);
 	let news = $state<RSSFeedItem[]>([]);
 
 	// Loading states
 	let error = $state<string | null>(null);
 	let sectionsLoading = $state({
-		releases: true,
-		picks: true,
 		articles: true,
 		news: true
 	});
@@ -37,8 +29,6 @@
 	async function loadHome() {
 		error = null;
 		// Load all sections in parallel — each handles its own error state.
-		loadReleases();
-		loadPicks();
 		loadArticles();
 		loadNews();
 	}
@@ -52,40 +42,6 @@
 			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
 		}
 	};
-
-	async function loadReleases() {
-		sectionsLoading.releases = true;
-		releasesNotConfigured = false;
-		try {
-			const data = await api.getHomeReleases();
-			releases = data.releases ?? [];
-		} catch (e) {
-			if (e instanceof ApiError && e.status === 503) {
-				// Backend signals "Last.fm not configured" via 503 so we can
-				// render a connect prompt instead of a generic error.
-				releasesNotConfigured = true;
-				releases = [];
-			} else {
-				console.error('Failed to load releases:', e);
-				releases = [];
-			}
-		} finally {
-			sectionsLoading.releases = false;
-		}
-	}
-
-	async function loadPicks() {
-		sectionsLoading.picks = true;
-		try {
-			const data = await api.getHomePicks();
-			genrePicks = data.genre_variety ?? [];
-		} catch (e) {
-			console.error('Failed to load picks:', e);
-			genrePicks = [];
-		} finally {
-			sectionsLoading.picks = false;
-		}
-	}
 
 	async function loadArticles() {
 		sectionsLoading.articles = true;
@@ -177,64 +133,10 @@
 		<!-- Personal Radio Stations (TIDAL) -->
 		<PersonalRadioShelf />
 
-		<!-- Unified Trending shelf (Worldwide / Country / Genre / Tidal) -->
-		<section class="discovery-section" data-section="trending">
-			<TrendingShelf limit={12} />
-
-			{#if genrePicks.length > 0}
-				<div class="picks-subsection">
-					<h3 class="subsection-title">Genre variety</h3>
-					<div class="genre-pills">
-						{#each genrePicks as pick, i (`${pick.id}-${i}`)}
-							<div class="genre-pill glass-tile">
-								<span class="genre-name">{pick.genre}</span>
-								<span class="genre-track">{pick.title}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-		</section>
-
-		<!-- New Releases (now below Trending, sourced from Last.fm JSON API). -->
-		<section class="discovery-section" data-section="new-releases">
-			<div class="section-header">
-				<div class="section-title-group">
-					<p class="eyebrow">Last.fm</p>
-					<h2>New releases</h2>
-				</div>
-				{#if sectionsLoading.releases}
-					<span class="loading-indicator">Loading...</span>
-				{/if}
-			</div>
-
-			{#if releases.length > 0}
-				<div class="horizontal-scroll">
-					{#each releases.slice(0, 12) as release (release.link || `${release.author}-${release.title}`)}
-						<a class="release-card glass-tile" href={release.link} target="_blank" rel="noopener">
-							{#if release.image_url}
-								<img class="release-art" src={release.image_url} alt="" />
-							{:else}
-								<div class="release-art placeholder">💿</div>
-							{/if}
-							<div class="release-info">
-								<h3 class="release-title">{release.title}</h3>
-								{#if release.author}
-									<p class="release-artist">{release.author}</p>
-								{/if}
-							</div>
-						</a>
-					{/each}
-				</div>
-			{:else if releasesNotConfigured}
-				<EmptyState
-					title="Connect Last.fm to see new releases"
-					copy="Last.fm powers the new-releases shelf. Add your API key in Settings → Sources → Last.fm."
-				/>
-			{:else if !sectionsLoading.releases}
-				<EmptyState title="No new releases found" copy="Last.fm did not return any recent albums." />
-			{/if}
-		</section>
+		<!-- Moods preview rail. Pulls the first chunk of categories from
+		     /api/tidal/moods and links each tile to /moods/[slug]. Full
+		     listing lives at /moods. -->
+		<HomeMoodsRail />
 
 		<!-- Weekly Articles Section -->
 		<section class="discovery-section">
@@ -377,109 +279,6 @@
 		&::-webkit-scrollbar-thumb:hover {
 			background: var(--text-muted);
 		}
-	}
-
-	/* Release cards */
-	.release-card {
-		flex: 0 0 200px;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		padding: 14px;
-		text-decoration: none;
-		color: inherit;
-		transition: transform 0.2s ease, box-shadow 0.2s ease;
-		scroll-snap-align: start;
-
-		&:hover {
-			transform: translateY(-4px);
-			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-		}
-	}
-
-	.release-art {
-		width: 100%;
-		aspect-ratio: 1;
-		border-radius: 8px;
-		object-fit: cover;
-		background: var(--bg-surface);
-	}
-
-	.release-art.placeholder {
-		width: 100%;
-		aspect-ratio: 1;
-		border-radius: 8px;
-		background: var(--accent-soft);
-		display: grid;
-		place-items: center;
-		font-size: var(--font-size-3xl);
-	}
-
-	.release-info {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.release-title {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		margin: 0;
-		display: -webkit-box;
-		line-clamp: 2;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.release-artist {
-		font-size: var(--font-size-xs);
-		color: var(--text-muted);
-		margin: 0;
-	}
-
-	.picks-subsection {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.subsection-title {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-secondary);
-		margin: 0;
-	}
-
-	.genre-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
-	}
-
-	.genre-pill {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 10px 14px;
-		border-radius: 8px;
-	}
-
-	.genre-name {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		color: var(--accent);
-	}
-
-	.genre-track {
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 200px;
 	}
 
 	/* Article cards */
@@ -673,22 +472,8 @@
 			grid-template-columns: 1fr;
 		}
 
-		.release-card {
-			flex: 0 0 150px;
-		}
-
 		.article-card {
 			flex: 0 0 260px;
-		}
-
-		.genre-pills {
-			flex-wrap: nowrap;
-			overflow-x: auto;
-			padding-bottom: 4px;
-		}
-
-		.genre-pill {
-			flex-shrink: 0;
 		}
 	}
 </style>

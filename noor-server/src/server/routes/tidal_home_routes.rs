@@ -393,27 +393,34 @@ pub(super) async fn get_tidal_mix_tracks(
 pub(super) async fn get_tidal_page_modules(
     State(state): State<SharedState>,
     Path(section): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let wire_path = resolve_page_path(&section, None)?;
-    fetch_page_modules(state, wire_path).await
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
 }
 
 pub(super) async fn get_tidal_page_modules_with_id(
     State(state): State<SharedState>,
     Path((section, id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let wire_path = resolve_page_path(&section, Some(id.as_str()))?;
-    fetch_page_modules(state, wire_path).await
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
 }
 
 // Whitelist + wire-path normalization. Returns 404 for anything not on the
 // approved list so callers can't probe arbitrary TIDAL endpoints.
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
-    let allowed_top = matches!(
-        section,
-        "charts" | "moods" | "genres" | "new-releases" | "new_releases"
-    );
+    // `charts` and `genres`/`new_releases` slugs aren't valid TIDAL endpoints
+    // (verified live: all 404 with subStatus 2001 "Not found"). `moods` now
+    // has its own dedicated route at /api/tidal/moods + /api/tidal/mood-page/{slug}
+    // because its modules are PAGE_LINKS, not the usual TRACK_LIST/etc shape.
+    // Empty top-level whitelist for now — this generic route is kept for
+    // future slugs (pages/explore, pages/hires, pages/videos, etc).
+    let allowed_top = matches!(section, "");
     let allowed_with_id = matches!(section, "mood" | "genre");
     let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
     if !valid {
@@ -435,6 +442,7 @@ fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCo
 async fn fetch_page_modules(
     state: SharedState,
     page_path: String,
+    debug_raw: bool,
 ) -> Result<Json<Value>, StatusCode> {
     let (tokens, http_client, tidal_http_client) = {
         let in_memory = {
@@ -465,6 +473,32 @@ async fn fetch_page_modules(
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
+    if debug_raw {
+        let raw = match client.get_page_raw(&page_path).await {
+            Ok(r) => r,
+            Err(e) if super::error_looks_like_auth(&e) => {
+                let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                    .await
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                let retry = TidalClient::with_http(
+                    tidal_http_client.clone(),
+                    refreshed.access_token.clone(),
+                    refreshed.country_code.clone(),
+                );
+                retry.get_page_raw(&page_path).await.map_err(|e| {
+                    tracing::warn!("TIDAL get_page_raw({page_path}) failed after refresh: {e}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            }
+            Err(e) => {
+                tracing::warn!("TIDAL get_page_raw({page_path}) failed: {e}");
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        };
+        return Ok(Json(
+            json!({ "raw": raw, "source": "tidal", "page": page_path }),
+        ));
+    }
     let modules = match client.get_page_modules(&page_path).await {
         Ok(m) => m,
         Err(e) if super::error_looks_like_auth(&e) => {
@@ -489,6 +523,195 @@ async fn fetch_page_modules(
     Ok(Json(
         json!({ "modules": modules, "source": "tidal", "page": page_path }),
     ))
+}
+
+/// Returns the TIDAL mood / activity category list, parsed out of the
+/// PAGE_LINKS module on `/v1/pages/moods`. Each entry carries the upstream
+/// slug (e.g. `mood_party`) which the `/api/tidal/mood-page/{slug}` route
+/// then proxies as `pages/{slug}` for the drill-down content.
+pub(super) async fn get_tidal_moods(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client) = load_tidal_session(&state).await;
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let raw = match client.get_page_raw("pages/moods").await {
+        Ok(r) => r,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_page_raw("pages/moods").await.map_err(|e| {
+                tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_tidal_moods failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    let categories = extract_page_links(&raw);
+
+    // TIDAL's moods landing only ships icon glyphs, no cover art for the
+    // categories. Fetch each subpage in parallel for two reasons:
+    //   1. grab the first playlist's artwork as the tile thumbnail
+    //   2. filter out categories whose subpage has no playable music modules
+    //      (e.g. `record_labels` returns only PAGE_LINKS sub-nav)
+    // ~13 fan-out calls, hot-cached on TIDAL's side, so the round-trip stays
+    // under a second in practice.
+    let slugs: Vec<String> = categories
+        .iter()
+        .filter_map(|c| c.get("slug").and_then(|s| s.as_str()).map(String::from))
+        .collect();
+    let thumb_client = client.clone();
+    let fetches = slugs.into_iter().map(|slug| {
+        let c = thumb_client.clone();
+        async move {
+            match c.get_page_modules(&format!("pages/{}", slug)).await {
+                Ok(modules) => {
+                    let thumb = modules
+                        .first()
+                        .and_then(|m| m.items.first())
+                        .and_then(|i| i.artwork_url.clone());
+                    Some((slug, modules.is_empty(), thumb))
+                }
+                Err(_) => None,
+            }
+        }
+    });
+    let results: Vec<Option<(String, bool, Option<String>)>> =
+        futures::future::join_all(fetches).await;
+    let probe: std::collections::HashMap<String, (bool, Option<String>)> = results
+        .into_iter()
+        .flatten()
+        .map(|(slug, is_empty, thumb)| (slug, (is_empty, thumb)))
+        .collect();
+
+    let filtered: Vec<Value> = categories
+        .into_iter()
+        .filter_map(|mut cat| {
+            let slug = cat.get("slug").and_then(|s| s.as_str()).map(String::from)?;
+            if let Some((is_empty, thumb)) = probe.get(&slug) {
+                if *is_empty {
+                    return None; // drop meta-nav-only categories
+                }
+                if let Some(url) = thumb {
+                    if let Some(obj) = cat.as_object_mut() {
+                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
+                    }
+                }
+            }
+            Some(cat)
+        })
+        .collect();
+
+    Ok(Json(json!({ "categories": filtered, "source": "tidal" })))
+}
+
+/// Walks `rows[].modules[]` and pulls items from any module of `type ==
+/// "PAGE_LINKS"`. TIDAL uses this shape for nav-style content (moods,
+/// activity categories, sub-section links) -- the items are link metadata,
+/// not playable rows.
+fn extract_page_links(payload: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(rows) = payload.get("rows").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for row in rows {
+        let Some(modules) = row.get("modules").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for module in modules {
+            let kind = module.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "PAGE_LINKS" {
+                continue;
+            }
+            let Some(items) = module
+                .get("pagedList")
+                .and_then(|p| p.get("items"))
+                .and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            for item in items {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let api_path = item.get("apiPath").and_then(|v| v.as_str()).unwrap_or("");
+                if title.is_empty() || api_path.is_empty() {
+                    continue;
+                }
+                let slug = api_path.strip_prefix("pages/").unwrap_or(api_path);
+                out.push(json!({
+                    "slug": slug,
+                    "title": title,
+                    "icon": item.get("icon").and_then(|v| v.as_str()),
+                    "imageId": item.get("imageId").and_then(|v| v.as_str()),
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Drill-down for one mood / activity category. `slug` is the path segment
+/// returned by `/api/tidal/moods` (e.g. `mood_party`) and is proxied to
+/// `pages/{slug}` on TIDAL. Slug pattern is restricted to lowercase
+/// alphanumeric + underscores so callers can't escape the `pages/` namespace.
+pub(super) async fn get_tidal_mood_page(
+    State(state): State<SharedState>,
+    Path(slug): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let wire_path = format!("pages/{}", slug);
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
+}
+
+// Shared TIDAL session loader -- mirrors the inline block other handlers use.
+async fn load_tidal_session(
+    state: &SharedState,
+) -> (
+    Option<crate::services::tidal::auth::TidalTokens>,
+    reqwest::Client,
+    reqwest::Client,
+) {
+    let in_memory = {
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone(),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
+    };
+    match in_memory.0 {
+        Some(t) => (Some(t), in_memory.1, in_memory.2),
+        None => {
+            let persisted = super::load_persisted_tidal_tokens(state)
+                .await
+                .ok()
+                .flatten();
+            (persisted, in_memory.1, in_memory.2)
+        }
+    }
 }
 
 // ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────

@@ -761,6 +761,15 @@ impl TidalClient {
         Ok(Self::parse_home_modules(&payload))
     }
 
+    /// Same fetch as `get_page_modules` but returns the unparsed upstream
+    /// payload. Used by the `?debug=raw` debug query on the page route to
+    /// expose TIDAL's module-type vocabulary while we firm up which slugs and
+    /// shapes we need to handle.
+    pub async fn get_page_raw(&self, page_path: &str) -> Result<serde_json::Value> {
+        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12);
+        self.get_json(&url).await
+    }
+
     fn parse_home_modules(payload: &serde_json::Value) -> Vec<TidalHomeModule> {
         let mut out = Vec::new();
         let Some(rows) = payload.get("rows").and_then(serde_json::Value::as_array) else {
@@ -771,14 +780,15 @@ impl TidalClient {
                 continue;
             };
             for module in modules {
+                // Module title can be empty on single-module subpages (TIDAL
+                // doesn't repeat the page title inside the module). We only
+                // skip when both the title AND the items list are empty --
+                // i.e. nothing useful to render.
                 let title = module
                     .get("title")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                if title.is_empty() {
-                    continue;
-                }
                 let id = module
                     .get("id")
                     .and_then(serde_json::Value::as_str)

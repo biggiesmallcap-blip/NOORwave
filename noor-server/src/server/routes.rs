@@ -716,6 +716,15 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/page/{section}/{id}",
             get(tidal_home_routes::get_tidal_page_modules_with_id),
         )
+        // Dedicated mood routes: the moods landing returns PAGE_LINKS items,
+        // which aren't tracks/albums/playlists, so they go through a parser
+        // that just extracts category metadata. Drill-down then proxies to
+        // the corresponding pages/{slug} TIDAL endpoint.
+        .route("/api/tidal/moods", get(tidal_home_routes::get_tidal_moods))
+        .route(
+            "/api/tidal/mood-page/{slug}",
+            get(tidal_home_routes::get_tidal_mood_page),
+        )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
         .route(
@@ -8635,7 +8644,7 @@ async fn tidal_search(
         })
         .collect();
 
-    let artists: Vec<TidalSearchArtistResp> = results
+    let mut artists: Vec<TidalSearchArtistResp> = results
         .artists
         .into_iter()
         .map(|a| {
@@ -8649,6 +8658,45 @@ async fn tidal_search(
             }
         })
         .collect();
+
+    // TIDAL's catalog-search response often omits artist `picture`, so most
+    // search-result artists land here with `artwork_url = None` and render as
+    // initials in the UI. The /artists/{id} endpoint carries the canonical
+    // picture; fan out a parallel fetch for any artist still missing artwork
+    // and backfill. Tight cap (12) to bound the fan-out -- artists past that
+    // tend to be long-tail rows the user is unlikely to scroll to anyway.
+    const ARTIST_PHOTO_BACKFILL_CAP: usize = 12;
+    let backfill_targets: Vec<(usize, i64)> = artists
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.artwork_url.is_none())
+        .take(ARTIST_PHOTO_BACKFILL_CAP)
+        .map(|(i, a)| (i, a.tidal_id))
+        .collect();
+    if !backfill_targets.is_empty() {
+        let backfill_client = client.clone();
+        let fetches = backfill_targets.iter().map(|(idx, tidal_id)| {
+            let c = backfill_client.clone();
+            let id = *tidal_id;
+            let i = *idx;
+            async move {
+                let url = c
+                    .get_artist(id)
+                    .await
+                    .ok()
+                    .and_then(|a| TidalClient::get_artwork_url(&a.picture, 640));
+                (i, url)
+            }
+        });
+        let results: Vec<(usize, Option<String>)> = futures::future::join_all(fetches).await;
+        for (i, url) in results {
+            if let Some(u) = url {
+                if let Some(slot) = artists.get_mut(i) {
+                    slot.artwork_url = Some(u);
+                }
+            }
+        }
+    }
 
     let videos: Vec<TidalSearchVideoResp> = results
         .videos
@@ -13529,8 +13577,9 @@ mod tests {
             ("GET", "/api/tidal/radio-stations"),
             ("GET", "/api/tidal/home-modules"),
             ("GET", "/api/tidal/discover-modules/1/items"),
-            ("GET", "/api/tidal/page/charts"),
             ("GET", "/api/tidal/page/mood/1"),
+            ("GET", "/api/tidal/moods"),
+            ("GET", "/api/tidal/mood-page/mood_party"),
             ("GET", "/api/charts"),
             ("GET", "/api/charts/lastfm/genres"),
             ("GET", "/api/charts/lastfm/countries"),

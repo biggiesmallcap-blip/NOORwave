@@ -272,7 +272,7 @@
 		border: none;
 		cursor: pointer;
 		padding: 0;
-		transition: color var(--motion-fast) ease;
+		transition: color var(--motion-fast);
 	}
 	.view-all-link:hover,
 	.view-all-link:focus-visible {
@@ -313,7 +313,7 @@
 		cursor: pointer;
 		font: inherit;
 		color: inherit;
-		transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+		transition: background var(--motion-base), border-color var(--motion-base);
 	}
 	.track-row:hover,
 	.track-row:focus-visible {
@@ -428,7 +428,7 @@
 		border-radius: var(--radius-md);
 		text-align: left;
 		scroll-snap-align: start;
-		transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+		transition: background var(--motion-base), border-color var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;
 		font: inherit;
@@ -462,7 +462,7 @@
 		height: 100%;
 		background-size: cover;
 		background-position: center;
-		transition: transform var(--motion-base) ease;
+		transition: transform var(--motion-base);
 	}
 	.card:hover .art {
 		transform: scale(1.05);

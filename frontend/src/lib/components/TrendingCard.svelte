@@ -327,7 +327,7 @@
 		height: 100%;
 		background-size: cover;
 		background-position: center;
-		transition: transform 220ms ease;
+		transition: transform var(--motion-base);
 	}
 
 	.trending-card:hover .art {

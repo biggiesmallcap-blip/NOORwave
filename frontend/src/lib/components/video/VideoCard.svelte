@@ -71,7 +71,7 @@
 		gap: 10px;
 		padding: 10px;
 		text-align: left;
-		transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+		transition: transform var(--motion-base), border-color var(--motion-base), background var(--motion-base);
 	}
 
 	.video-card:hover {

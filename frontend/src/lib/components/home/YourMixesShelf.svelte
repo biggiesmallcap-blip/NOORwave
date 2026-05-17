@@ -258,7 +258,7 @@
 		border-radius: 12px;
 		text-align: left;
 		scroll-snap-align: start;
-		transition: background 140ms ease, border-color 140ms ease;
+		transition: background var(--motion-base), border-color var(--motion-base);
 		box-sizing: border-box;
 		cursor: pointer;
 		font: inherit;
@@ -306,7 +306,7 @@
 		height: 100%;
 		background-size: cover;
 		background-position: center;
-		transition: transform 220ms ease;
+		transition: transform var(--motion-base);
 	}
 	.mix-card:hover .art {
 		transform: scale(1.05);
