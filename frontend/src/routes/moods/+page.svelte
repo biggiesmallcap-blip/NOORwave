@@ -4,13 +4,27 @@
   import { tidalStatus } from '$lib/stores/tidal';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
+  import {
+    getCachedMoodCategories,
+    putCachedMoodCategories,
+    clearCachedMoods,
+  } from '$lib/stores/tidal-moods-cache';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
-  let categories = $state<TidalMoodCategory[]>([]);
-  let viewState = $state<State>('loading');
+  // Sync-read the cache on script init so revisiting /moods within the
+  // 6h TTL renders instantly without a skeleton flash. Mirrors the
+  // home-discover pattern.
+  const cachedOnMount = getCachedMoodCategories();
+  let categories = $state<TidalMoodCategory[]>(cachedOnMount ?? []);
+  let viewState = $state<State>(
+    cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
+  );
 
-  onMount(load);
+  onMount(() => {
+    if (cachedOnMount && cachedOnMount.length > 0) return;
+    void load();
+  });
 
   $effect(() => {
     if ($tidalStatus !== 'connected') return;
@@ -23,9 +37,11 @@
     try {
       const data = await api.getTidalMoods();
       categories = data.categories ?? [];
+      if (categories.length > 0) putCachedMoodCategories(categories);
       viewState = categories.length > 0 ? 'ready' : 'empty';
     } catch (e) {
       if (e instanceof ApiError && e.status === 503) {
+        clearCachedMoods();
         viewState = 'disconnected';
       } else {
         viewState = 'error';

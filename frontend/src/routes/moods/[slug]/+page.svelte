@@ -4,6 +4,7 @@
   import { ApiError, api, type TidalHomeModule } from '$lib/api/client';
   import { tidalStatus } from '$lib/stores/tidal';
   import TidalDiscoverShelves from '$lib/components/search/TidalDiscoverShelves.svelte';
+  import { getCachedMoodPage, putCachedMoodPage } from '$lib/stores/tidal-moods-cache';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -32,11 +33,19 @@
   });
 
   async function load(s: string) {
-    viewState = 'loading';
     title = humanize(s);
+    // Cache hit: render immediately without a skeleton, no network call.
+    const cached = getCachedMoodPage(s);
+    if (cached && cached.length > 0) {
+      modules = cached;
+      viewState = 'ready';
+      return;
+    }
+    viewState = 'loading';
     try {
       const data = await api.getTidalMoodPage(s);
       modules = data.modules ?? [];
+      if (modules.length > 0) putCachedMoodPage(s, modules);
       viewState = modules.length > 0 ? 'ready' : 'empty';
     } catch (e) {
       if (e instanceof ApiError && e.status === 503) {
