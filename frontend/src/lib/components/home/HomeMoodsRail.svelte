@@ -4,20 +4,35 @@
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
+	import {
+		getCachedMoodCategories,
+		putCachedMoodCategories,
+	} from '$lib/stores/tidal-moods-cache';
 
 	const PREVIEW_LIMIT = 8;
 
-	let categories = $state<TidalMoodCategory[]>([]);
-	let loaded = $state(false);
+	// Sync-read the shared moods cache on script init so a second visit
+	// within the 6h TTL renders instantly without a network round-trip.
+	// /moods landing uses the same cache, so visiting either page warms it
+	// for the other.
+	const cachedOnMount = getCachedMoodCategories();
+	let categories = $state<TidalMoodCategory[]>(
+		cachedOnMount ? cachedOnMount.slice(0, PREVIEW_LIMIT) : [],
+	);
+	let loading = $state(!cachedOnMount);
 	let errored = $state(false);
 
 	onMount(async () => {
+		if (cachedOnMount) return;
 		try {
 			const data = await api.getTidalMoods();
-			categories = (data.categories ?? []).slice(0, PREVIEW_LIMIT);
-			loaded = true;
+			const all = data.categories ?? [];
+			if (all.length > 0) putCachedMoodCategories(all);
+			categories = all.slice(0, PREVIEW_LIMIT);
 		} catch {
 			errored = true;
+		} finally {
+			loading = false;
 		}
 	});
 
@@ -26,7 +41,7 @@
 	}
 </script>
 
-{#if categories.length > 0}
+{#if categories.length > 0 || loading}
 	<section class="moods-rail" data-section="moods">
 		<div class="header">
 			<div class="title-group">
@@ -35,27 +50,39 @@
 			</div>
 			<a class="view-all" href="/moods">View all -&gt;</a>
 		</div>
-		<div class="rail" use:wheelToHorizontal>
-			{#each categories as c (c.slug)}
-				<a
-					class="card"
-					href={`/moods/${c.slug}`}
-					oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
-				>
-					<div class="art-wrap">
-						{#if c.thumbnail}
-							<div class="art" style="background-image:url('{c.thumbnail}')"></div>
-						{:else}
-							<div class="art fallback">~</div>
-						{/if}
+		{#if categories.length > 0}
+			<div class="rail" use:wheelToHorizontal>
+				{#each categories as c (c.slug)}
+					<a
+						class="card"
+						href={`/moods/${c.slug}`}
+						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
+					>
+						<div class="art-wrap">
+							{#if c.thumbnail}
+								<div class="art" style="background-image:url('{c.thumbnail}')"></div>
+							{:else}
+								<div class="art fallback">~</div>
+							{/if}
+						</div>
+						<p class="card-title">{c.title}</p>
+					</a>
+				{/each}
+			</div>
+		{:else}
+			<div class="rail" aria-hidden="true">
+				{#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}
+					<div class="card skeleton">
+						<div class="art-wrap"><div class="art skeleton-art"></div></div>
+						<div class="skeleton-line"></div>
 					</div>
-					<p class="card-title">{c.title}</p>
-				</a>
-			{/each}
-		</div>
+				{/each}
+			</div>
+		{/if}
 	</section>
-{:else if loaded && !errored}
-	<!-- Empty list (e.g. TIDAL disconnected): hide the rail entirely. -->
+{/if}
+{#if errored && categories.length === 0}
+	<!-- TIDAL disconnected or fetch failed: hide the rail entirely. -->
 {/if}
 
 <style>
@@ -105,4 +132,23 @@
 	.card:hover .art { transform: scale(1.05); }
 	.art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
 	.card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
+
+	.card.skeleton { cursor: default; pointer-events: none; }
+	.skeleton-art {
+		width: 100%;
+		height: 100%;
+		background: linear-gradient(110deg, rgba(255,255,255,0.04) 30%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 70%);
+		background-size: 200% 100%;
+		animation: home-moods-shimmer 1.4s linear infinite;
+	}
+	.skeleton-line {
+		height: 0.7rem;
+		width: 70%;
+		border-radius: var(--radius-xs);
+		background: rgba(255,255,255,0.08);
+	}
+	@keyframes home-moods-shimmer {
+		0%   { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
 </style>
