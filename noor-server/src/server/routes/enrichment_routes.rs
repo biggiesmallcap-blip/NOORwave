@@ -118,6 +118,8 @@ pub(super) async fn get_musicbrainz_portable_snapshot(
         "generated_at": snapshot.generated_at,
         "checked_rows": snapshot.checked_rows,
         "genre_rows": snapshot.genre_rows,
+        "lastfm_checked_rows": snapshot.lastfm_checked_rows,
+        "context_tag_rows": snapshot.context_tag_rows,
     })))
 }
 
@@ -149,6 +151,8 @@ pub(super) async fn export_musicbrainz_portable_snapshot(
             "generated_at": snapshot.generated_at,
             "checked_rows": snapshot.checked_rows,
             "genre_rows": snapshot.genre_rows,
+            "lastfm_checked_rows": snapshot.lastfm_checked_rows,
+            "context_tag_rows": snapshot.context_tag_rows,
         }
     })))
 }
@@ -182,15 +186,21 @@ pub(super) async fn import_musicbrainz_portable_snapshot(
         "status": "imported",
         "checked_inserted": imported.checked_inserted,
         "checked_skipped": imported.checked_skipped,
+        "lastfm_checked_inserted": imported.lastfm_checked_inserted,
+        "lastfm_checked_skipped": imported.lastfm_checked_skipped,
         "genre_inserted": imported.genre_inserted,
         "track_skipped": imported.track_skipped,
         "genre_skipped": imported.genre_skipped,
+        "context_tag_inserted": imported.context_tag_inserted,
+        "context_tag_skipped": imported.context_tag_skipped,
         "snapshot": {
             "exists": imported.status.exists,
             "path": imported.status.path,
             "generated_at": imported.status.generated_at,
             "checked_rows": imported.status.checked_rows,
             "genre_rows": imported.status.genre_rows,
+            "lastfm_checked_rows": imported.status.lastfm_checked_rows,
+            "context_tag_rows": imported.status.context_tag_rows,
         }
     })))
 }

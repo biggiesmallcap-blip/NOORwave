@@ -1230,7 +1230,7 @@
 			const result = await api.exportPortableMusicBrainzSnapshot();
 			markServerOnline();
 			portableSnapshot = result.snapshot;
-			portableStatusLabel = `Exported ${result.snapshot.checked_rows.toLocaleString()} checked tracks and ${result.snapshot.genre_rows.toLocaleString()} genre rows to ${result.snapshot.path}.`;
+			portableStatusLabel = `Exported ${result.snapshot.checked_rows.toLocaleString()} MusicBrainz checked tracks, ${result.snapshot.lastfm_checked_rows.toLocaleString()} Last.fm checked tracks, ${result.snapshot.genre_rows.toLocaleString()} genre rows, and ${result.snapshot.context_tag_rows.toLocaleString()} context tags to ${result.snapshot.path}.`;
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
 				markServerOffline();
@@ -1253,7 +1253,7 @@
 			const result = await api.importPortableMusicBrainzSnapshot();
 			markServerOnline();
 			portableSnapshot = result.snapshot;
-			portableStatusLabel = `Imported ${result.checked_inserted?.toLocaleString() ?? '0'} checked markers and ${result.genre_inserted?.toLocaleString() ?? '0'} genre rows.`;
+			portableStatusLabel = `Imported ${result.checked_inserted?.toLocaleString() ?? '0'} MusicBrainz checked markers, ${result.lastfm_checked_inserted?.toLocaleString() ?? '0'} Last.fm checked markers, ${result.genre_inserted?.toLocaleString() ?? '0'} genre rows, and ${result.context_tag_inserted?.toLocaleString() ?? '0'} context tags.`;
 			mbProgressLabel = 'Portable snapshot imported into the local library.';
 		} catch (error) {
 			if (isFetchConnectionError(error)) {
@@ -2343,11 +2343,13 @@
 
 			{#if activeCategory === 'sources'}
 			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz enrichment." />
+				<SectionHeader eyebrow="Transfer" title="Portable snapshot" subtitle="Export/import MusicBrainz and Last.fm enrichment." />
 
 				<div class="stat-grid inner-metrics">
 					<MetricPair label="Snapshot checked" value={portableSnapshot?.checked_rows?.toLocaleString() ?? '0'} copy="Tracks marked as already processed." />
 					<MetricPair label="Snapshot genres" value={portableSnapshot?.genre_rows?.toLocaleString() ?? '0'} copy="Genre rows ready to import elsewhere." />
+					<MetricPair label="Last.fm checked" value={portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'} copy="Last.fm tracks marked as already processed." />
+					<MetricPair label="Context tags" value={portableSnapshot?.context_tag_rows?.toLocaleString() ?? '0'} copy="Last.fm mood and activity tags ready to import." />
 				</div>
 
 				<div class="portable-card glass">

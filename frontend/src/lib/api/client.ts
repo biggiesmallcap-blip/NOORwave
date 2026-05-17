@@ -649,6 +649,8 @@ export interface PortableMusicBrainzSnapshotStatus {
 	generated_at: string | null;
 	checked_rows: number;
 	genre_rows: number;
+	lastfm_checked_rows: number;
+	context_tag_rows: number;
 }
 
 export interface PortableMusicBrainzSnapshotAction {
@@ -656,9 +658,13 @@ export interface PortableMusicBrainzSnapshotAction {
 	snapshot: PortableMusicBrainzSnapshotStatus;
 	checked_inserted?: number;
 	checked_skipped?: number;
+	lastfm_checked_inserted?: number;
+	lastfm_checked_skipped?: number;
 	genre_inserted?: number;
 	track_skipped?: number;
 	genre_skipped?: number;
+	context_tag_inserted?: number;
+	context_tag_skipped?: number;
 }
 
 export interface TrackFavoriteResponse {
