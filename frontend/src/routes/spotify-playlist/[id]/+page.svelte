@@ -6,6 +6,7 @@
   import { formatTrackDuration } from '$lib/utils/format';
   import {
     api,
+    ApiError,
     type SpotifyPlaylistDetail,
     type SpotifyPlaylistTrack,
     type SpotifyTidalState,
@@ -102,6 +103,12 @@
     saveResult = null;
     saveErr = null;
     lazyArt = {};
+    // Sportify proxy is third-party and flaky. Retry once on 5xx so a
+    // transient upstream hiccup doesn't surface as a hard failure.
+    await attemptLoad(id, /* retryOn5xx */ true);
+  }
+
+  async function attemptLoad(id: string, retryOn5xx: boolean) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
@@ -112,15 +119,43 @@
       if (pendingIds.length > 0) {
         pollTimer = setTimeout(pollResolution, POLL_INTERVAL_MS);
       }
+      loading = false;
     } catch (e) {
-      error =
-        (e as Error).name === 'AbortError'
-          ? 'Timed out loading playlist metadata'
-          : ((e as Error).message ?? 'Failed to load playlist');
+      clearTimeout(timeout);
+      const is5xx = e instanceof ApiError && e.status >= 500 && e.status < 600;
+      if (is5xx && retryOn5xx) {
+        // One automatic retry after a short delay for transient proxy outages.
+        await new Promise((r) => setTimeout(r, 2_000));
+        if (spotifyId.trim() === id) {
+          await attemptLoad(id, /* retryOn5xx */ false);
+          return;
+        }
+      }
+      error = friendlyError(e);
+      loading = false;
     } finally {
       clearTimeout(timeout);
-      loading = false;
     }
+  }
+
+  function friendlyError(e: unknown): string {
+    if ((e as Error)?.name === 'AbortError') {
+      return 'Timed out loading playlist metadata. Try again in a moment.';
+    }
+    if (e instanceof ApiError) {
+      if (e.status === 503 || e.status === 502 || e.status === 504) {
+        return 'The Spotify metadata proxy is temporarily unavailable. Try again in a minute.';
+      }
+      if (e.status === 404) {
+        return 'Playlist not found on Spotify.';
+      }
+    }
+    return (e as Error).message ?? 'Failed to load playlist';
+  }
+
+  function retry() {
+    const id = spotifyId.trim();
+    if (id) void load(id);
   }
 
   $effect(() => {
@@ -343,7 +378,10 @@
   {#if loading}
     <div class="state">Loading playlist…</div>
   {:else if error}
-    <div class="state error">Couldn't load this playlist: {error}</div>
+    <div class="state error">
+      <p>Couldn't load this playlist: {error}</p>
+      <button type="button" class="retry-btn" onclick={retry}>Retry</button>
+    </div>
   {:else if detail}
     <header class="header">
       {#if detail.thumbnail}
@@ -491,7 +529,10 @@
     margin-bottom: var(--space-3);
   }
   .state { padding: 80px 0; text-align: center; color: var(--text-muted); }
-  .state.error { color: #ef4444; }
+  .state.error { color: #ef4444; display: flex; flex-direction: column; align-items: center; gap: var(--space-3); }
+  .state.error p { margin: 0; }
+  .retry-btn { padding: 8px 18px; border-radius: 999px; background: var(--bg-hover); border: 1px solid var(--panel-border); color: var(--text-primary); font: inherit; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); cursor: pointer; transition: background var(--motion-base), border-color var(--motion-base); }
+  .retry-btn:hover, .retry-btn:focus-visible { background: var(--accent-soft); border-color: var(--accent-line); outline: none; }
 
   .header {
     display: grid;
