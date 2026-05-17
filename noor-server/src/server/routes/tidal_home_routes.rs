@@ -414,10 +414,11 @@ pub(super) async fn get_tidal_page_modules_with_id(
 // approved list so callers can't probe arbitrary TIDAL endpoints.
 fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
     let section = section.trim_matches('/');
-    let allowed_top = matches!(
-        section,
-        "charts" | "moods" | "genres" | "new-releases" | "new_releases"
-    );
+    // `charts` and `genres`/`new_releases` slugs aren't valid TIDAL endpoints
+    // (verified live: all 404 with subStatus 2001 "Not found"). Kept `moods`
+    // because that one does respond 200; its module shape just isn't parsed
+    // yet (see FOLLOWUPS).
+    let allowed_top = matches!(section, "moods");
     let allowed_with_id = matches!(section, "mood" | "genre");
     let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
     if !valid {
