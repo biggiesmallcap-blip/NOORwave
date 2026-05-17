@@ -71,11 +71,12 @@
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
-	import { openExternal } from '$lib/util/external';
+	import { isTauri, openExternal } from '$lib/util/external';
 	import { isValidTidalRedirectUrl, readTidalRedirectFromClipboard } from '$lib/tidal/login';
 
 	const SERVER_UNREACHABLE_MESSAGE =
 		'NOOR cannot reach the local server on port 3334, so it cannot verify your current TIDAL session.';
+	const APP_VERSION = String(import.meta.env.NOOR_APP_VERSION ?? '0.0.0');
 	type BadgeTone = 'default' | 'active' | 'success' | 'warning' | 'error' | 'muted';
 
 	let serverStatus = $state<'checking' | 'online' | 'offline'>('checking');
@@ -88,6 +89,13 @@
 	let runtimeAvailable = $state(false);
 	let mbPollTimer: ReturnType<typeof setInterval> | null = null;
 	let wsUnsubscribe: Unsubscriber | null = null;
+	let desktopAppAvailable = $state(false);
+	let appVersion = $state(APP_VERSION);
+	let installModeLabel = $state('Browser');
+	let updateStatus = $state('Available in the desktop app');
+	let updateAvailableVersion = $state<string | null>(null);
+	let updateChecking = $state(false);
+	let updateError = $state('');
 
 	let mbStatus = $state<'idle' | 'running' | 'done'>('idle');
 	let mbLiveProgress = $state<number | null>(null);
@@ -238,7 +246,83 @@
 	});
 	let lastfmEtaLabel = $derived(formatDurationSeconds(lastfmEtaSeconds));
 
+	async function loadDesktopAppInfo() {
+		desktopAppAvailable = isTauri();
+		if (!desktopAppAvailable) {
+			appVersion = APP_VERSION;
+			installModeLabel = 'Browser';
+			updateStatus = 'Available in the desktop app';
+			return;
+		}
+
+		try {
+			const [{ getVersion }, { invoke }] = await Promise.all([
+				import('@tauri-apps/api/app'),
+				import('@tauri-apps/api/core'),
+			]);
+			appVersion = await getVersion();
+			installModeLabel = await invoke<string>('get_install_mode');
+			const pending = await invoke<string | null>('get_update_state');
+			updateAvailableVersion = pending;
+			updateStatus = pending ? `v${pending} available` : 'Up to date';
+		} catch (err) {
+			updateError = err instanceof Error ? err.message : String(err);
+			updateStatus = 'Update status unavailable';
+		}
+	}
+
+	async function setupDesktopUpdateListeners(unlisteners: Array<() => void>) {
+		if (!isTauri()) return;
+		try {
+			const { listen } = await import('@tauri-apps/api/event');
+			const unlistenAvailable = await listen<string>('update-available', (event) => {
+				updateAvailableVersion = event.payload;
+				updateStatus = `v${event.payload} available`;
+				updateError = '';
+			});
+			if (componentUnmounted) {
+				unlistenAvailable();
+				return;
+			}
+			unlisteners.push(unlistenAvailable);
+
+			const unlistenError = await listen<string>('update-error', (event) => {
+				updateError = event.payload;
+				updateStatus = 'Update check failed';
+			});
+			if (componentUnmounted) {
+				unlistenError();
+				return;
+			}
+			unlisteners.push(unlistenError);
+		} catch (err) {
+			updateError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function checkForUpdatesNow() {
+		updateError = '';
+		if (!desktopAppAvailable) {
+			updateStatus = 'Available in the desktop app';
+			return;
+		}
+
+		updateChecking = true;
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			const version = await invoke<string | null>('check_for_updates_now');
+			updateAvailableVersion = version;
+			updateStatus = version ? `v${version} available` : 'Up to date';
+		} catch (err) {
+			updateError = err instanceof Error ? err.message : String(err);
+			updateStatus = 'Update check failed';
+		} finally {
+			updateChecking = false;
+		}
+	}
+
 	onMount(() => {
+		const tauriUnlisteners: Array<() => void> = [];
 		const tick = setInterval(() => {
 			nowEpochSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
@@ -332,12 +416,15 @@
 		void loadAcrCloudStatus();
 		void loadSpotifyStatus();
 		void loadLastfmStatus();
+		void loadDesktopAppInfo();
+		void setupDesktopUpdateListeners(tauriUnlisteners);
 		serverToken = getStoredToken() ?? '';
 		return () => {
 			if (mbPollTimer) clearInterval(mbPollTimer);
 			clearInterval(discoveryTrainingPoll);
 			clearInterval(tick);
 			wsUnsubscribe?.();
+			for (const unlisten of tauriUnlisteners) unlisten();
 			componentUnmounted = true;
 		};
 	});
@@ -1401,7 +1488,7 @@
 		{ id: 'sources', label: 'Sources', icon: '⟐', hint: 'Services + data' },
 		{ id: 'audio', label: 'Audio', icon: '♪', hint: 'Output + analysis' },
 		{ id: 'data', label: 'Data', icon: '⇅', hint: 'Portable snapshots' },
-		{ id: 'account', label: 'Account', icon: '⚙', hint: 'Server token' }
+		{ id: 'account', label: 'Account', icon: '⚙', hint: 'PIN + updates' },
 	];
 
 	let visibleSettingsCategories = $derived(
@@ -1435,7 +1522,7 @@
 		<div class="settings-title">
 			<p class="eyebrow">Settings</p>
 			<h1>Settings</h1>
-			<p>Sources, appearance, audio, and access.</p>
+			<p>Sources, appearance, audio, access, and updates.</p>
 		</div>
 		<div class="settings-status">
 			<StateBadge label={tidalBadgeLabel} tone={tidalBadgeTone} />
@@ -1499,8 +1586,10 @@
 						<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>
 					{:else if cat.id === 'data'}
 						<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /><path d="M8 4v16M16 4v16" /></svg>
-					{:else}
+					{:else if cat.id === 'account'}
 						<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M5 21c1.5-4 4-6 7-6s5.5 2 7 6" /></svg>
+					{:else}
+						<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7h.01" /></svg>
 					{/if}
 				</span>
 				<span class="settings-rail-copy">
@@ -1724,6 +1813,31 @@
 				<p class="page-copy setting-caption">
 					Regenerating disconnects all other devices — they'll need to re-enter the new PIN.
 				</p>
+			</section>
+
+			<section class="glass-panel section-panel">
+				<SectionHeader eyebrow="Desktop" title="App updates" subtitle="Version, install mode, and update checks." />
+				<div class="inner-metrics">
+					<MetricPair label="Version" value={appVersion || 'Unknown'} copy="Current app build." />
+					<MetricPair label="Install mode" value={installModeLabel} copy={desktopAppAvailable ? 'Detected from the running shell.' : 'Use the desktop app for update checks.'} />
+					<MetricPair label="Updates" value={updateStatus} copy={updateAvailableVersion ? 'Ready from the tray menu or this panel.' : 'Manual checks use the active release channel.'} />
+				</div>
+				<div class="action-row">
+					<button
+						type="button"
+						class="btn btn-primary"
+						onclick={() => void checkForUpdatesNow()}
+						disabled={!desktopAppAvailable || updateChecking}
+					>
+						{updateChecking ? 'Checking...' : 'Check for updates'}
+					</button>
+					{#if !desktopAppAvailable}
+						<span class="page-copy setting-caption">Available in the desktop app.</span>
+					{/if}
+				</div>
+				{#if updateError}
+					<p class="field-error" role="alert">{updateError}</p>
+				{/if}
 			</section>
 			{/if}
 

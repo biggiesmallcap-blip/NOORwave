@@ -187,6 +187,28 @@
 	let moreOpen = $state(false);
 	let shortcutHelpOpen = $state(false);
 
+	async function setupDesktopUpdateToasts(unlisteners: Array<() => void>) {
+		if (!isTauri()) return;
+		try {
+			const { listen } = await import('@tauri-apps/api/event');
+			const unlistenAvailable = await listen<string>('update-available', (event) => {
+				showToast(
+					`NOORwave v${event.payload} is available. Use the tray or Settings > About to install.`,
+					'success',
+					8000
+				);
+			});
+			unlisteners.push(unlistenAvailable);
+
+			const unlistenError = await listen<string>('update-error', (event) => {
+				showToast(`Update check failed: ${event.payload}`, 'error', 7000);
+			});
+			unlisteners.push(unlistenError);
+		} catch (err) {
+			console.warn('update notification listener setup failed', err);
+		}
+	}
+
 	// Phase 2b: queue-row "why is this here" tooltip. Tracks the
 	// reason string of the currently-hovered row plus the cursor
 	// position so QueueReasonCard can place itself near the trigger.
@@ -280,6 +302,7 @@
 	});
 
 	onMount(() => {
+		const tauriUpdateUnlisteners: Array<() => void> = [];
 		// Show connect screen if no token is stored
 		if (!getStoredToken()) {
 			void tryAutoSetup();
@@ -310,12 +333,14 @@
 		// Re-apply persisted UI zoom now that the Tauri webview is ready.
 		// In a regular browser this no-ops (and the OS Ctrl+/Ctrl- handles zoom natively).
 		void applyZoom(get(uiZoom));
+		void setupDesktopUpdateToasts(tauriUpdateUnlisteners);
 
 		window.addEventListener('keydown', handleGlobalKeydown);
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
 			window.removeEventListener('wheel', handleGlobalWheel);
+			for (const unlisten of tauriUpdateUnlisteners) unlisten();
 			unsubPalette();
 		};
 	});

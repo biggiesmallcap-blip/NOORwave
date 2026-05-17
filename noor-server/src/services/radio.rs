@@ -2995,8 +2995,9 @@ mod radio_diagnostic_harness {
     //! ```
     //!
     //! Defaults: `NOOR_SEED=1634` (Doja Cat — "Go To Town" — Amala, the
-    //! seed that surfaced the Phase 2a affinity-zeroing regression),
-    //! `NOOR_DB=e:/NOORwave/noor.db`. Override either with the env var.
+    //! seed that surfaced the Phase 2a affinity-zeroing regression). The DB
+    //! path uses the same shared `NOOR_DB` / `NOOR_DATA_DIR` / dev / portable
+    //! resolution as the app. Override with `NOOR_DB` if needed.
     //!
     //! ## What it prints
     //!
@@ -3033,6 +3034,12 @@ mod radio_diagnostic_harness {
     use crate::metadata::lastfm::LastFmClient;
     use std::collections::{HashMap, HashSet};
 
+    fn diagnostic_db_path() -> String {
+        crate::paths::resolve_db_path_from_env()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn track_genres(db: &Database, track_id: i64) -> HashSet<i64> {
         if track_id <= 0 {
             return HashSet::new();
@@ -3054,8 +3061,7 @@ mod radio_diagnostic_harness {
     #[tokio::test]
     #[ignore]
     async fn radio_diagnostic_for_seed() {
-        let db_path =
-            std::env::var("NOOR_DB").unwrap_or_else(|_| "e:/NOORwave/noor.db".to_string());
+        let db_path = diagnostic_db_path();
         let seed_id: i64 = std::env::var("NOOR_SEED")
             .ok()
             .and_then(|s| s.parse().ok())

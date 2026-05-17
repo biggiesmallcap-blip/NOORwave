@@ -298,43 +298,8 @@ pub struct PortableSnapshotImportResult {
     pub genre_skipped: usize,
 }
 
-fn resolve_db_path() -> PathBuf {
-    if let Ok(path) = std::env::var("NOOR_DB") {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return path;
-        }
-        return std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path);
-    }
-
-    let exe = std::env::current_exe().ok();
-    let exe_dir = exe.as_ref().and_then(|p| p.parent());
-
-    let dev_db = exe_dir.and_then(|d| {
-        let profile = d.file_name()?.to_str()?;
-        if profile != "debug" && profile != "release" {
-            return None;
-        }
-        let target = d.parent()?;
-        if target.file_name()?.to_str()? != "target" {
-            return None;
-        }
-        target.parent().map(|root| root.join("noor.db"))
-    });
-
-    dev_db
-        .or_else(|| exe_dir.map(|d| d.join("noor.db")))
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("noor.db")
-        })
-}
-
 fn snapshot_dir() -> PathBuf {
-    resolve_db_path()
+    crate::paths::resolve_db_path_from_env()
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -442,7 +407,9 @@ pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExp
 
     let manifest = PortableSnapshotManifest {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        db_path: resolve_db_path().to_string_lossy().into_owned(),
+        db_path: crate::paths::resolve_db_path_from_env()
+            .to_string_lossy()
+            .into_owned(),
         checked_rows,
         genre_rows,
         files: PortableSnapshotFiles {

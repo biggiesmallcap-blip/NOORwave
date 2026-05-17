@@ -7,11 +7,7 @@ pub struct AppConfig {
 }
 
 fn config_path() -> PathBuf {
-    std::env::current_exe()
-        .expect("cannot determine current exe path")
-        .parent()
-        .expect("exe has no parent directory")
-        .join("noor-config.json")
+    crate::paths::data_dir().join("noor-config.json")
 }
 
 pub fn load() -> AppConfig {

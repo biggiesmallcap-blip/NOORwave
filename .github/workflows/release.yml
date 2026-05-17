@@ -136,6 +136,59 @@ jobs:
           $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
           "$hash  NOORwave-${{ github.ref_name }}-windows-x64.zip" | Out-File -Encoding utf8 dist\windows.sha256
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "=2.10.1" --locked
+
+      - name: Build NSIS installer
+        working-directory: noor-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --bundles nsis
+
+      - name: Package installer update metadata
+        shell: pwsh
+        run: |
+          $bundleDir = "target\release\bundle\nsis"
+          if (-not (Test-Path -LiteralPath $bundleDir)) {
+            throw "Missing NSIS bundle output: $bundleDir"
+          }
+          $setup = Get-ChildItem -LiteralPath $bundleDir -Filter "*setup.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $setup) {
+            throw "No NSIS setup.exe was produced"
+          }
+          $sigPath = "$($setup.FullName).sig"
+          if (-not (Test-Path -LiteralPath $sigPath)) {
+            throw "No updater signature was produced for $($setup.Name)"
+          }
+
+          $setupName = "NOORwave-${env:GITHUB_REF_NAME}-windows-x64-setup.exe"
+          $targetSetup = Join-Path "dist" $setupName
+          $targetSig = "$targetSetup.sig"
+          Move-Item -LiteralPath $setup.FullName -Destination $targetSetup -Force
+          Move-Item -LiteralPath $sigPath -Destination $targetSig -Force
+
+          $hash = (Get-FileHash $targetSetup -Algorithm SHA256).Hash.ToLower()
+          Add-Content -Path "dist\windows.sha256" -Value "$hash  $setupName"
+
+          $signature = (Get-Content $targetSig -Raw).Trim()
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $json = @{
+            version = $version
+            notes = "${env:GITHUB_REF_NAME}"
+            pub_date = (Get-Date -AsUTC).ToString("o")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = "https://github.com/biggiesmallcap-blip/NOORwave/releases/download/${env:GITHUB_REF_NAME}/$setupName"
+              }
+            }
+          } | ConvertTo-Json -Depth 4
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText("dist\latest.json", $json, $utf8)
+
       - name: Upload checksum artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -145,7 +198,11 @@ jobs:
       - name: Upload artifact
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          files: dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
+          files: |
+            dist/NOORwave-${{ github.ref_name }}-windows-x64.zip
+            dist/NOORwave-${{ github.ref_name }}-windows-x64-setup.exe
+            dist/NOORwave-${{ github.ref_name }}-windows-x64-setup.exe.sig
+            dist/latest.json
 
   build-linux:
     needs: create-release

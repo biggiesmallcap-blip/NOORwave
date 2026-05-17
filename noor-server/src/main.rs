@@ -2,6 +2,7 @@ mod db;
 mod genre;
 mod library;
 mod metadata;
+mod paths;
 mod playback;
 mod server;
 mod services;
@@ -486,29 +487,11 @@ async fn main() -> Result<()> {
 
     info!("NOOR — Starting up...");
 
-    // Resolve DB path: NOOR_DB env var, then exe-dir/noor.db (portable/installed),
-    // with a dev-only fallback to workspace-root/noor.db when the exe is in target/{debug,release}.
-    let db_path = std::env::var("NOOR_DB").unwrap_or_else(|_| {
-        let exe = std::env::current_exe().ok();
-        let exe_dir = exe.as_ref().and_then(|p| p.parent());
-
-        let dev_db = exe_dir.and_then(|d| {
-            let profile = d.file_name()?.to_str()?;
-            if profile != "debug" && profile != "release" {
-                return None;
-            }
-            let target = d.parent()?;
-            if target.file_name()?.to_str()? != "target" {
-                return None;
-            }
-            target.parent().map(|root| root.join("noor.db"))
-        });
-
-        dev_db
-            .or_else(|| exe_dir.map(|d| d.join("noor.db")))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "noor.db".to_string())
-    });
+    // Resolve DB path: NOOR_DB, then NOOR_DATA_DIR/noor.db for installed
+    // builds, then the existing dev/portable fallbacks.
+    let db_path = paths::resolve_db_path_from_env()
+        .to_string_lossy()
+        .into_owned();
     info!("Database path: {}", db_path);
 
     // Initialize database
