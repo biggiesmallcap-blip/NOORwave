@@ -4,7 +4,6 @@
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
-  import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
   import type { SpotifyMoodCategory } from './spotify-moods-data';
 
   let { category }: { category: SpotifyMoodCategory } = $props();
@@ -49,7 +48,6 @@
           {:else}
             <div class="art fallback">M</div>
           {/if}
-          <PlayOverlay position="center" size="md" />
         </div>
         <div class="meta">
           <p class="title">{m?.title ?? p.title}</p>
@@ -98,7 +96,6 @@
   }
   .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
-  .card:hover :global(.play-overlay), .card:focus-visible :global(.play-overlay) { opacity: 1; transform: translateY(0); }
 
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
   .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-slow) ease; }
