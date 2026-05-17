@@ -720,10 +720,7 @@ pub fn api_routes(state: SharedState) -> Router {
         // which aren't tracks/albums/playlists, so they go through a parser
         // that just extracts category metadata. Drill-down then proxies to
         // the corresponding pages/{slug} TIDAL endpoint.
-        .route(
-            "/api/tidal/moods",
-            get(tidal_home_routes::get_tidal_moods),
-        )
+        .route("/api/tidal/moods", get(tidal_home_routes::get_tidal_moods))
         .route(
             "/api/tidal/mood-page/{slug}",
             get(tidal_home_routes::get_tidal_mood_page),
@@ -8691,8 +8688,7 @@ async fn tidal_search(
                 (i, url)
             }
         });
-        let results: Vec<(usize, Option<String>)> =
-            futures::future::join_all(fetches).await;
+        let results: Vec<(usize, Option<String>)> = futures::future::join_all(fetches).await;
         for (i, url) in results {
             if let Some(u) = url {
                 if let Some(slot) = artists.get_mut(i) {

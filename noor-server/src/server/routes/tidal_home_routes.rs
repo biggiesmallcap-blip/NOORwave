@@ -602,10 +602,7 @@ pub(super) async fn get_tidal_moods(
     let filtered: Vec<Value> = categories
         .into_iter()
         .filter_map(|mut cat| {
-            let slug = cat
-                .get("slug")
-                .and_then(|s| s.as_str())
-                .map(String::from)?;
+            let slug = cat.get("slug").and_then(|s| s.as_str()).map(String::from)?;
             if let Some((is_empty, thumb)) = probe.get(&slug) {
                 if *is_empty {
                     return None; // drop meta-nav-only categories
