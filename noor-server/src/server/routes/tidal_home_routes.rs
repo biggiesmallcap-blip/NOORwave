@@ -8,7 +8,13 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Vec<Value>)>>>;
+
+const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
 /// Master Mix, etc) for the home page Your Mixes shelf.
@@ -51,7 +57,7 @@ pub(super) async fn get_tidal_mixes(
     {
         let guard = mixes_cache.lock().unwrap();
         if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+            && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
         {
             return Ok(Json(
                 json!({ "mixes": cached, "source": "tidal", "cached": true }),
@@ -126,7 +132,7 @@ pub(super) async fn get_tidal_radio_stations(
     {
         let guard = radio_cache.lock().unwrap();
         if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+            && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
         {
             return Ok(Json(
                 json!({ "stations": cached, "source": "tidal", "cached": true }),
@@ -536,6 +542,15 @@ pub(super) async fn get_tidal_moods(
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+    let mood_cache = {
+        let s = state.read().await;
+        s.tidal_moods_cache.clone()
+    };
+    if let Some(cached) = get_cached_tidal_mood_categories(&mood_cache) {
+        return Ok(Json(
+            json!({ "categories": cached, "source": "tidal", "cached": true }),
+        ));
+    }
     let client = TidalClient::with_http(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
@@ -591,8 +606,14 @@ pub(super) async fn get_tidal_moods(
             }
         }
     });
-    let results: Vec<Option<(String, bool, Option<String>)>> =
-        futures::future::join_all(fetches).await;
+    let results: Vec<Option<(String, bool, Option<String>)>> = {
+        use futures::StreamExt;
+
+        futures::stream::iter(fetches)
+            .buffer_unordered(MOOD_THUMBNAIL_FETCH_CONCURRENCY)
+            .collect()
+            .await
+    };
     let probe: std::collections::HashMap<String, (bool, Option<String>)> = results
         .into_iter()
         .flatten()
@@ -617,7 +638,24 @@ pub(super) async fn get_tidal_moods(
         })
         .collect();
 
+    put_cached_tidal_mood_categories(&mood_cache, filtered.clone());
     Ok(Json(json!({ "categories": filtered, "source": "tidal" })))
+}
+
+fn get_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache) -> Option<Vec<Value>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.as_ref()
+        && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    *guard = None;
+    None
+}
+
+fn put_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache, categories: Vec<Value>) {
+    let mut guard = cache.lock().unwrap();
+    *guard = Some((Instant::now(), categories));
 }
 
 /// Walks `rows[].modules[]` and pulls items from any module of `type ==
@@ -662,6 +700,36 @@ fn extract_page_links(payload: &Value) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn tidal_mood_category_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(Mutex::new(None));
+        let categories = vec![json!({ "slug": "mood_party", "title": "Party" })];
+
+        put_cached_tidal_mood_categories(&cache, categories.clone());
+
+        assert_eq!(
+            get_cached_tidal_mood_categories(&cache),
+            Some(categories.clone())
+        );
+
+        {
+            let mut guard = cache.lock().unwrap();
+            *guard = Some((
+                Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                categories,
+            ));
+        }
+
+        assert!(get_cached_tidal_mood_categories(&cache).is_none());
+        assert!(cache.lock().unwrap().is_none());
+    }
 }
 
 /// Drill-down for one mood / activity category. `slug` is the path segment

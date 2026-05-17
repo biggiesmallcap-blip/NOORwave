@@ -12030,6 +12030,7 @@ mod tests {
             tidal_tokens: None,
             tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+            tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
