@@ -105,16 +105,10 @@ pub async fn resolve_track(
         return Ok(ResolutionOutcome::unresolved("no tidal candidates"));
     }
 
-    let mut ranked: Vec<(usize, f64)> = candidates
-        .iter()
-        .enumerate()
-        .map(|(idx, cand)| (idx, score(sportify, title, primary_artist, cand).score))
-        .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let ranked = ranked_candidate_scores(sportify, title, primary_artist, &candidates);
 
     let mut hydrated = HashMap::new();
-    for (idx, _) in ranked.into_iter().take(HYDRATE_TOP_N) {
-        let id = candidates[idx].id;
+    for id in hydration_ids_for_isrc_check(sportify, &ranked, &candidates) {
         match client.get_track(id).await {
             Ok(track) => {
                 hydrated.insert(id, track);
@@ -126,6 +120,36 @@ pub async fn resolve_track(
     }
 
     Ok(select_best_candidate(sportify, &candidates, &hydrated))
+}
+
+fn ranked_candidate_scores(
+    sportify: &SportifyTrack,
+    title: &str,
+    primary_artist: &str,
+    candidates: &[TidalSearchTrack],
+) -> Vec<(usize, f64)> {
+    let mut ranked: Vec<(usize, f64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, cand)| (idx, score(sportify, title, primary_artist, cand).score))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+}
+
+fn hydration_ids_for_isrc_check(
+    sportify: &SportifyTrack,
+    ranked: &[(usize, f64)],
+    candidates: &[TidalSearchTrack],
+) -> Vec<i64> {
+    if target_isrc(sportify).is_none() {
+        return Vec::new();
+    }
+    ranked
+        .iter()
+        .take(HYDRATE_TOP_N)
+        .filter_map(|(idx, _)| candidates.get(*idx).map(|cand| cand.id))
+        .collect()
 }
 
 fn select_best_candidate(
@@ -143,12 +167,7 @@ fn select_best_candidate(
         return ResolutionOutcome::unresolved("no tidal candidates");
     }
 
-    let target_isrc = sportify
-        .external_ids
-        .as_ref()
-        .and_then(|ids| ids.isrc.as_deref())
-        .map(normalize_isrc)
-        .filter(|s| !s.is_empty());
+    let target_isrc = target_isrc(sportify);
 
     let sp_hard_versions = hard_version_tags(title);
     let mut best: Option<ScoredCandidate> = None;
@@ -628,6 +647,15 @@ fn normalize_isrc(isrc: &str) -> String {
     isrc.trim().to_ascii_uppercase()
 }
 
+fn target_isrc(sportify: &SportifyTrack) -> Option<String> {
+    sportify
+        .external_ids
+        .as_ref()
+        .and_then(|ids| ids.isrc.as_deref())
+        .map(normalize_isrc)
+        .filter(|s| !s.is_empty())
+}
+
 fn contains_word(haystack: &str, word: &str) -> bool {
     let mut start = 0usize;
     while let Some(idx) = haystack[start..].find(word) {
@@ -850,6 +878,33 @@ mod tests {
         assert_eq!(outcome.tidal_track_id, Some(2));
         assert_eq!(outcome.confidence, 1.0);
         assert_eq!(outcome.reason, "isrc_exact");
+    }
+
+    #[test]
+    fn skips_tidal_detail_hydration_when_spotify_track_has_no_isrc() {
+        let s = sp("Song", "Artist", Some(200_000));
+        let candidates = vec![
+            cand(1, "Song", "Artist", 200),
+            cand(2, "Song - 2024 Remaster", "Artist", 200),
+        ];
+        let ranked = ranked_candidate_scores(&s, "Song", "Artist", &candidates);
+
+        assert!(hydration_ids_for_isrc_check(&s, &ranked, &candidates).is_empty());
+    }
+
+    #[test]
+    fn hydrates_ranked_candidates_when_spotify_track_has_isrc() {
+        let s = sp_with_isrc("Song", "Artist", Some(200_000), "USRIGHT00001");
+        let candidates = vec![
+            cand(1, "Song", "Artist", 200),
+            cand(2, "Song - 2024 Remaster", "Artist", 200),
+        ];
+        let ranked = ranked_candidate_scores(&s, "Song", "Artist", &candidates);
+
+        assert_eq!(
+            hydration_ids_for_isrc_check(&s, &ranked, &candidates),
+            vec![1, 2]
+        );
     }
 
     #[test]
