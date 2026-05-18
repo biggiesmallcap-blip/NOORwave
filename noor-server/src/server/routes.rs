@@ -8198,9 +8198,7 @@ fn load_persisted_queue_playlist_sources(
             continue;
         }
 
-        if include_tidal_only
-            && let Some(tidal_id) = tidal_id_hint.filter(|id| *id > 0)
-        {
+        if include_tidal_only && let Some(tidal_id) = tidal_id_hint.filter(|id| *id > 0) {
             sources.push(PlaylistFromQueueSource::Tidal(
                 tidal_import::ImportTrackMetadata {
                     tidal_id,
@@ -8296,26 +8294,26 @@ async fn create_playlist_from_queue(
     }
 
     db.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+        conn.execute(
+            "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
                  VALUES (?1, NULL, 0, 0, 0)",
-                params![name],
-            )?;
-            let playlist_id = conn.last_insert_rowid();
-            let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
-            let playlist = queries::get_playlist(conn, playlist_id)?
-                .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
-            Ok(Json(json!({
-                "playlist": playlist,
-                "added": added,
-            })))
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })
+            params![name],
+        )?;
+        let playlist_id = conn.last_insert_rowid();
+        let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
+        let playlist = queries::get_playlist(conn, playlist_id)?
+            .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
+        Ok(Json(json!({
+            "playlist": playlist,
+            "added": added,
+        })))
+    })
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })
 }
 
 async fn status() -> Json<Value> {
