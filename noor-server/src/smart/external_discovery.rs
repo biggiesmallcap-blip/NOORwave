@@ -1363,10 +1363,15 @@ mod tests {
                 completed_listens: 5,
                 unique_tracks: 4,
                 total_listened_ms: 200_000,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             }],
             top_genres: vec![AnalyticsGenreShare {
                 genre_name: "Synthwave".to_string(),
                 listens: 10,
+                share_of_window_listens: None,
             }],
         }
     }

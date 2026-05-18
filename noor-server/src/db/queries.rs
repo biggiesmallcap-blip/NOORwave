@@ -1785,6 +1785,10 @@ pub fn get_top_tracks_by_history(conn: &Connection, limit: i64) -> Result<Vec<An
                 listens: row.get(5)?,
                 completed_listens: row.get(6)?,
                 total_listened_ms: row.get(7)?,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1819,6 +1823,10 @@ pub fn get_top_artists_by_history(
                 completed_listens: row.get(3)?,
                 unique_tracks: row.get(4)?,
                 total_listened_ms: row.get(5)?,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1846,6 +1854,7 @@ pub fn get_top_genres_by_history(
             Ok(AnalyticsGenreShare {
                 genre_name: row.get(0)?,
                 listens: row.get(1)?,
+                share_of_window_listens: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2122,15 +2131,65 @@ fn weighted_stddev_bpm(weighted: &[(f64, i64)]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
-/// Window bookkeeping — cur/prev start timestamps formatted to match SQLite's `datetime('now', '-Xd')`.
-pub fn build_signals_window(days: i64) -> SignalsWindow {
-    let started_at_sql = format!("datetime('now', '-{} days')", days);
-    let prev_started_at_sql = format!("datetime('now', '-{} days')", days * 2);
-    SignalsWindow {
+/// Window bookkeeping for the analytics response.
+pub fn build_signals_window(
+    conn: &Connection,
+    days: i64,
+    granularity: Granularity,
+) -> Result<SignalsWindow> {
+    let (started_at, previous_started_at, generated_at): (String, String, String) = conn
+        .query_row(
+            "SELECT
+                strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', printf('-%d days', ?1))),
+                strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', printf('-%d days', ?2))),
+                strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now'))",
+            params![days, days * 2],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+    Ok(SignalsWindow {
         days,
-        started_at: started_at_sql,
-        previous_started_at: prev_started_at_sql,
-    }
+        started_at,
+        previous_started_at,
+        generated_at,
+        granularity,
+        display_caps: DisplayCaps {
+            ridgeline_days: (days > RIDGELINE_DAY_CAP).then_some(RIDGELINE_DAY_CAP),
+            tempo_rows: match granularity {
+                Granularity::Day if days > RIDGELINE_DAY_CAP => Some(RIDGELINE_DAY_CAP),
+                Granularity::Month if days > (MONTH_ROW_CAP as i64 * 31) => {
+                    Some(MONTH_ROW_CAP as i64)
+                }
+                _ => None,
+            },
+        },
+    })
+}
+
+pub fn get_analytics_totals(conn: &Connection, days: i64) -> Result<AnalyticsTotals> {
+    conn.query_row(
+        "SELECT
+            COUNT(lh.id),
+            COALESCE(SUM(lh.duration_listened_ms), 0),
+            COUNT(DISTINCT lh.track_id),
+            COUNT(lh.id) FILTER (
+                WHERE EXISTS (
+                    SELECT 1 FROM track_genres tg WHERE tg.track_id = lh.track_id
+                )
+            )
+         FROM listen_history lh
+         WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))",
+        params![days],
+        |row| {
+            Ok(AnalyticsTotals {
+                listens: row.get(0)?,
+                listened_ms: row.get(1)?,
+                distinct_tracks: row.get(2)?,
+                tagged_listens: row.get(3)?,
+            })
+        },
+    )
+    .map_err(Into::into)
 }
 
 // ─── KPI window: listened_ms / sessions / completion / skip_rate (cur+prev) ──
@@ -2176,15 +2235,31 @@ pub fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
 
     // Daily series for the MiniSilhouette curves.
     let mut daily_stmt = conn.prepare(
-        "SELECT
-            DATE(started_at, 'localtime') AS day,
-            COUNT(*) AS listens,
-            COALESCE(SUM(duration_listened_ms), 0) AS listened_ms,
-            COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed
-         FROM listen_history
-         WHERE started_at >= datetime('now', printf('-%d days', ?1))
-         GROUP BY DATE(started_at, 'localtime')
-         ORDER BY day ASC",
+        "WITH RECURSIVE axis(d) AS (
+            SELECT DATE(datetime('now', 'localtime', printf('-%d days', ?1 - 1)))
+            UNION ALL
+            SELECT DATE(d, '+1 day') FROM axis WHERE d < DATE('now', 'localtime')
+         ),
+         agg AS (
+            SELECT
+                DATE(started_at, 'localtime') AS day,
+                COUNT(*) AS listens,
+                COALESCE(SUM(duration_listened_ms), 0) AS listened_ms,
+                COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
+                COUNT(DISTINCT CASE WHEN session_id IS NOT NULL THEN session_id END) AS sessions
+            FROM listen_history
+            WHERE started_at >= datetime('now', printf('-%d days', ?1))
+            GROUP BY DATE(started_at, 'localtime')
+         )
+         SELECT
+            axis.d,
+            COALESCE(agg.listens, 0),
+            COALESCE(agg.listened_ms, 0),
+            COALESCE(agg.completed, 0),
+            COALESCE(agg.sessions, 0)
+         FROM axis
+         LEFT JOIN agg ON agg.day = axis.d
+         ORDER BY axis.d ASC",
     )?;
     let daily: Vec<DailyKpi> = daily_stmt
         .query_map(params![cur_offset], |row| {
@@ -2193,6 +2268,7 @@ pub fn get_signals_kpis(conn: &Connection, days: i64) -> Result<SignalsKpis> {
                 listens: row.get(1)?,
                 listened_ms: row.get(2)?,
                 completed: row.get(3)?,
+                sessions: row.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -2673,7 +2749,9 @@ pub fn get_top_tracks_windowed(
     conn: &Connection,
     days: i64,
     limit: i64,
+    window_listened_ms: i64,
 ) -> Result<Vec<AnalyticsTopTrack>> {
+    let previous_ranks = previous_track_ranks(conn, days)?;
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, a.name, al.title, al.artwork_url,
                 COUNT(lh.id) AS listens,
@@ -2688,7 +2766,7 @@ pub fn get_top_tracks_windowed(
          ORDER BY listens DESC, total_listened_ms DESC, t.title ASC
          LIMIT ?2",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![days, limit], |row| {
             Ok(AnalyticsTopTrack {
                 track_id: row.get(0)?,
@@ -2699,9 +2777,22 @@ pub fn get_top_tracks_windowed(
                 listens: row.get(5)?,
                 completed_listens: row.get(6)?,
                 total_listened_ms: row.get(7)?,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (idx, row) in rows.iter_mut().enumerate() {
+        let current_rank = idx as i64 + 1;
+        row.completion_rate = ratio_or_none(row.completed_listens, row.listens);
+        row.share_of_window_listened_ms = ratio_or_none(row.total_listened_ms, window_listened_ms);
+        row.previous_rank = previous_ranks.get(&row.track_id).copied();
+        row.rank_delta = row
+            .previous_rank
+            .map(|previous_rank| previous_rank - current_rank);
+    }
     Ok(rows)
 }
 
@@ -2709,7 +2800,9 @@ pub fn get_top_artists_windowed(
     conn: &Connection,
     days: i64,
     limit: i64,
+    window_listened_ms: i64,
 ) -> Result<Vec<AnalyticsTopArtist>> {
+    let previous_ranks = previous_artist_ranks(conn, days)?;
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name,
                 COUNT(lh.id) AS listens,
@@ -2724,7 +2817,7 @@ pub fn get_top_artists_windowed(
          ORDER BY listens DESC, total_listened_ms DESC, a.name ASC
          LIMIT ?2",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![days, limit], |row| {
             Ok(AnalyticsTopArtist {
                 artist_id: row.get(0)?,
@@ -2733,9 +2826,22 @@ pub fn get_top_artists_windowed(
                 completed_listens: row.get(3)?,
                 unique_tracks: row.get(4)?,
                 total_listened_ms: row.get(5)?,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (idx, row) in rows.iter_mut().enumerate() {
+        let current_rank = idx as i64 + 1;
+        row.completion_rate = ratio_or_none(row.completed_listens, row.listens);
+        row.share_of_window_listened_ms = ratio_or_none(row.total_listened_ms, window_listened_ms);
+        row.previous_rank = previous_ranks.get(&row.artist_id).copied();
+        row.rank_delta = row
+            .previous_rank
+            .map(|previous_rank| previous_rank - current_rank);
+    }
     Ok(rows)
 }
 
@@ -2743,6 +2849,7 @@ pub fn get_top_genres_windowed(
     conn: &Connection,
     days: i64,
     limit: i64,
+    window_listens: i64,
 ) -> Result<Vec<AnalyticsGenreShare>> {
     let mut stmt = conn.prepare(
         "SELECT g.name, COUNT(lh.id) AS listens
@@ -2759,10 +2866,62 @@ pub fn get_top_genres_windowed(
             Ok(AnalyticsGenreShare {
                 genre_name: row.get(0)?,
                 listens: row.get(1)?,
+                share_of_window_listens: ratio_or_none(row.get(1)?, window_listens),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn previous_track_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT track_id, rank FROM (
+            SELECT
+                t.id AS track_id,
+                ROW_NUMBER() OVER (
+                    ORDER BY COUNT(lh.id) DESC,
+                             COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                             t.title ASC
+                ) AS rank
+            FROM listen_history lh
+            JOIN tracks t ON lh.track_id = t.id
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1 * 2))
+              AND lh.started_at < datetime('now', printf('-%d days', ?1))
+            GROUP BY t.id, t.title
+        )",
+    )?;
+    let rows = stmt
+        .query_map(params![days], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
+}
+
+fn previous_artist_ranks(conn: &Connection, days: i64) -> Result<HashMap<i64, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT artist_id, rank FROM (
+            SELECT
+                a.id AS artist_id,
+                ROW_NUMBER() OVER (
+                    ORDER BY COUNT(lh.id) DESC,
+                             COALESCE(SUM(lh.duration_listened_ms), 0) DESC,
+                             a.name ASC
+                ) AS rank
+            FROM listen_history lh
+            JOIN tracks t ON lh.track_id = t.id
+            JOIN artists a ON t.artist_id = a.id
+            WHERE lh.started_at >= datetime('now', printf('-%d days', ?1 * 2))
+              AND lh.started_at < datetime('now', printf('-%d days', ?1))
+            GROUP BY a.id, a.name
+        )",
+    )?;
+    let rows = stmt
+        .query_map(params![days], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
 }
 
 // ─── Cohorts ────────────────────────────────────────────────────────────────
@@ -2831,7 +2990,7 @@ pub fn get_signals_cohorts(conn: &Connection, days: i64) -> Result<Vec<Cohort>> 
     let _ = COHORT_NEW_DAYS; // current cohort window matches `days`; reserved for future split.
 
     let labels = [
-        ("new_this_month", "New this month"),
+        ("new_this_month", "New in selected window"),
         ("established", "Established"),
         ("deep_cuts", "Deep cuts"),
     ];
@@ -2879,14 +3038,25 @@ pub fn get_signals_audio_profile(conn: &Connection, days: i64) -> Result<AudioPr
 
     let loudness_vals: Vec<f64> = pairs.iter().filter_map(|(l, _)| *l).collect();
     let centroid_vals: Vec<f64> = pairs.iter().filter_map(|(_, c)| *c).collect();
-    let analyzed = loudness_vals.len().max(centroid_vals.len()) as i64;
 
-    let total_listened: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT track_id)
-         FROM listen_history
-         WHERE started_at >= datetime('now', printf('-%d days', ?1))",
+    let (track_total, track_analyzed, listen_total, listen_analyzed): (i64, i64, i64, i64) = conn
+        .query_row(
+        "SELECT
+            COUNT(DISTINCT lh.track_id),
+            COUNT(DISTINCT CASE
+                WHEN adf.loudness_lufs IS NOT NULL OR adf.spectral_centroid IS NOT NULL
+                THEN lh.track_id
+            END),
+            COUNT(lh.id),
+            COUNT(CASE
+                WHEN adf.loudness_lufs IS NOT NULL OR adf.spectral_centroid IS NOT NULL
+                THEN 1
+            END)
+         FROM listen_history lh
+         LEFT JOIN audio_dsp_features adf ON adf.track_id = lh.track_id
+         WHERE lh.started_at >= datetime('now', printf('-%d days', ?1))",
         params![days],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
 
     let loudness_lufs = if loudness_vals.is_empty() {
@@ -2927,8 +3097,16 @@ pub fn get_signals_audio_profile(conn: &Connection, days: i64) -> Result<AudioPr
         bass_tilt,
         treble_tilt,
         coverage: Coverage {
-            analyzed,
-            total_listened,
+            analyzed: track_analyzed,
+            total_listened: track_total,
+        },
+        track_coverage: Coverage {
+            analyzed: track_analyzed,
+            total_listened: track_total,
+        },
+        listen_coverage: Coverage {
+            analyzed: listen_analyzed,
+            total_listened: listen_total,
         },
     })
 }
@@ -2952,19 +3130,21 @@ fn percentile_f64(sorted_asc: &[f64], pct: f64) -> Option<f64> {
 
 pub fn get_analytics_signals(conn: &Connection, days: i64) -> Result<AnalyticsSignals> {
     let granularity = select_granularity(conn, days)?;
+    let totals = get_analytics_totals(conn, days)?;
     let kpis = get_signals_kpis(conn, days)?;
     let tempo = get_signals_tempo(conn, days, granularity)?;
     let sonic_field = get_signals_sonic_field(conn, days)?;
     let ridgeline = get_signals_ridgeline(conn, days)?;
-    let top_tracks = get_top_tracks_windowed(conn, days, 5)?;
-    let top_artists = get_top_artists_windowed(conn, days, 5)?;
-    let top_genres = get_top_genres_windowed(conn, days, 6)?;
+    let top_tracks = get_top_tracks_windowed(conn, days, 5, totals.listened_ms)?;
+    let top_artists = get_top_artists_windowed(conn, days, 5, totals.listened_ms)?;
+    let top_genres = get_top_genres_windowed(conn, days, 6, totals.listens)?;
     let cohorts = get_signals_cohorts(conn, days)?;
     let audio_profile = get_signals_audio_profile(conn, days)?;
-    let window = build_signals_window(days);
+    let window = build_signals_window(conn, days, granularity)?;
 
     Ok(AnalyticsSignals {
         window,
+        totals,
         kpis,
         tempo,
         sonic_field,
@@ -9026,6 +9206,228 @@ mod tests {
         );
         assert_eq!(s.cohorts.len(), 3);
         assert!(s.audio_profile.loudness_lufs.is_none());
+    }
+
+    fn seed_analytics_track(
+        conn: &Connection,
+        track_id: i64,
+        artist_id: i64,
+        title: &str,
+        artist: &str,
+    ) {
+        conn.execute(
+            "INSERT OR IGNORE INTO artists (id, name) VALUES (?1, ?2)",
+            params![artist_id, artist],
+        )
+        .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, source)
+             VALUES (?1, ?2, ?3, 180000, 'tidal')",
+            params![track_id, title, artist_id],
+        )
+        .expect("seed track");
+    }
+
+    fn seed_analytics_listen(
+        conn: &Connection,
+        id: i64,
+        track_id: i64,
+        date_modifier: &str,
+        duration_ms: i64,
+        completed: bool,
+        session_id: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO listen_history
+                (id, track_id, started_at, duration_listened_ms, completed, session_id)
+             VALUES (?1, ?2, datetime('now', ?3), ?4, ?5, ?6)",
+            params![
+                id,
+                track_id,
+                date_modifier,
+                duration_ms,
+                completed as i32,
+                session_id
+            ],
+        )
+        .expect("seed listen");
+    }
+
+    fn sqlite_local_date(conn: &Connection, date_modifier: &str) -> String {
+        conn.query_row(
+            "SELECT DATE(datetime('now', 'localtime', ?1))",
+            params![date_modifier],
+            |row| row.get(0),
+        )
+        .expect("date")
+    }
+
+    #[test]
+    fn analytics_signals_dense_daily_rows_include_sessions() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 1, 1, "Pulse One", "NOOR Artist");
+        seed_analytics_listen(&conn, 1, 1, "-2 days", 100_000, true, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 1, "-2 days", 80_000, false, Some("s-a"));
+        seed_analytics_listen(&conn, 3, 1, "-0 days", 120_000, true, Some("s-b"));
+
+        let s = get_analytics_signals(&conn, 3).expect("signals");
+        assert_eq!(s.kpis.daily.len(), 3);
+        assert_eq!(s.kpis.sessions.current, 2);
+
+        let first_day = sqlite_local_date(&conn, "-2 days");
+        let middle_day = sqlite_local_date(&conn, "-1 days");
+        let today = sqlite_local_date(&conn, "-0 days");
+        let first = s
+            .kpis
+            .daily
+            .iter()
+            .find(|row| row.day == first_day)
+            .expect("first active day");
+        let middle = s
+            .kpis
+            .daily
+            .iter()
+            .find(|row| row.day == middle_day)
+            .expect("inactive day");
+        let last = s
+            .kpis
+            .daily
+            .iter()
+            .find(|row| row.day == today)
+            .expect("today");
+
+        assert_eq!(first.listens, 2);
+        assert_eq!(first.sessions, 1);
+        assert_eq!(middle.listens, 0);
+        assert_eq!(middle.sessions, 0);
+        assert_eq!(last.listens, 1);
+        assert_eq!(last.sessions, 1);
+    }
+
+    #[test]
+    fn analytics_signals_window_metadata_uses_real_iso_timestamps_and_caps() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let s = get_analytics_signals(&conn, 30).expect("signals");
+        assert!(s.window.started_at.contains('T'));
+        assert!(s.window.previous_started_at.contains('T'));
+        assert!(s.window.generated_at.contains('T'));
+        assert!(s.window.started_at.ends_with('Z'));
+        assert!(!s.window.started_at.contains("datetime("));
+        assert_eq!(s.window.granularity, Granularity::Week);
+        assert_eq!(s.window.display_caps.ridgeline_days, None);
+        assert_eq!(s.totals.listens, 0);
+        assert_eq!(s.totals.listened_ms, 0);
+        assert_eq!(s.totals.distinct_tracks, 0);
+        assert_eq!(s.totals.tagged_listens, 0);
+
+        let long = get_analytics_signals(&conn, 36500).expect("long signals");
+        assert_eq!(long.window.granularity, Granularity::Month);
+        assert_eq!(
+            long.window.display_caps.ridgeline_days,
+            Some(RIDGELINE_DAY_CAP)
+        );
+    }
+
+    #[test]
+    fn analytics_signals_genre_share_and_rank_metrics_use_window_denominators() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 1, 1, "Tagged", "Tagged Artist");
+        seed_analytics_track(&conn, 2, 2, "Popular", "Popular Artist");
+        conn.execute(
+            "INSERT INTO genres (id, name, slug) VALUES (1, 'Ambient', 'ambient')",
+            [],
+        )
+        .expect("seed genre");
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id, source, confidence)
+             VALUES (1, 1, 'lastfm', 1.0)",
+            [],
+        )
+        .expect("seed track genre");
+
+        seed_analytics_listen(&conn, 1, 1, "-2 days", 100_000, true, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 2, "-1 days", 300_000, true, Some("s-b"));
+        seed_analytics_listen(&conn, 3, 2, "-1 days", 300_000, true, Some("s-b"));
+        seed_analytics_listen(&conn, 4, 2, "-0 days", 300_000, false, Some("s-c"));
+        seed_analytics_listen(&conn, 5, 1, "-4 days", 100_000, true, Some("p-a"));
+        seed_analytics_listen(&conn, 6, 1, "-4 days", 100_000, true, Some("p-b"));
+        seed_analytics_listen(&conn, 7, 2, "-4 days", 100_000, true, Some("p-c"));
+
+        let s = get_analytics_signals(&conn, 3).expect("signals");
+        assert_eq!(s.totals.listens, 4);
+        assert_eq!(s.totals.listened_ms, 1_000_000);
+        assert_eq!(s.totals.distinct_tracks, 2);
+        assert_eq!(s.totals.tagged_listens, 1);
+
+        let genre = s.top_genres.first().expect("genre row");
+        assert_eq!(genre.genre_name, "Ambient");
+        assert_eq!(genre.listens, 1);
+        assert_eq!(genre.share_of_window_listens, Some(0.25));
+
+        let popular_track = s
+            .top_tracks
+            .iter()
+            .find(|track| track.track_id == 2)
+            .expect("popular track");
+        assert_eq!(popular_track.completion_rate, Some(2.0 / 3.0));
+        assert_eq!(popular_track.share_of_window_listened_ms, Some(0.9));
+        assert_eq!(popular_track.previous_rank, Some(2));
+        assert_eq!(popular_track.rank_delta, Some(1));
+
+        let popular_artist = s
+            .top_artists
+            .iter()
+            .find(|artist| artist.artist_id == 2)
+            .expect("popular artist");
+        assert_eq!(popular_artist.completion_rate, Some(2.0 / 3.0));
+        assert_eq!(popular_artist.share_of_window_listened_ms, Some(0.9));
+        assert_eq!(popular_artist.previous_rank, Some(2));
+        assert_eq!(popular_artist.rank_delta, Some(1));
+    }
+
+    #[test]
+    fn analytics_signals_audio_profile_coverage_matches_track_and_listen_totals() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        seed_analytics_track(&conn, 1, 1, "Analysed", "Audio Artist");
+        seed_analytics_track(&conn, 2, 1, "Missing DSP", "Audio Artist");
+        conn.execute(
+            "INSERT INTO audio_dsp_features
+                (track_id, loudness_lufs, spectral_centroid, bpm, energy, danceability)
+             VALUES (1, -12.0, 1800.0, 120.0, 0.6, 0.5)",
+            [],
+        )
+        .expect("seed dsp");
+        seed_analytics_listen(&conn, 1, 1, "-1 days", 120_000, true, Some("s-a"));
+        seed_analytics_listen(&conn, 2, 1, "-1 days", 100_000, true, Some("s-a"));
+        seed_analytics_listen(&conn, 3, 2, "-0 days", 90_000, false, Some("s-b"));
+
+        let s = get_analytics_signals(&conn, 3).expect("signals");
+        assert_eq!(s.audio_profile.coverage.analyzed, 1);
+        assert_eq!(s.audio_profile.coverage.total_listened, 2);
+        assert_eq!(s.audio_profile.track_coverage.analyzed, 1);
+        assert_eq!(s.audio_profile.track_coverage.total_listened, 2);
+        assert_eq!(s.audio_profile.listen_coverage.analyzed, 2);
+        assert_eq!(s.audio_profile.listen_coverage.total_listened, 3);
+        assert!(s.audio_profile.coverage.analyzed <= s.audio_profile.coverage.total_listened);
+    }
+
+    #[test]
+    fn analytics_signals_cohort_label_matches_selected_window() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        let s = get_analytics_signals(&conn, 30).expect("signals");
+        let new = s
+            .cohorts
+            .iter()
+            .find(|cohort| cohort.key == "new_this_month")
+            .expect("new cohort");
+        assert_eq!(new.label, "New in selected window");
     }
 
     /// Seed one track with a distinct value in every projected column, so a

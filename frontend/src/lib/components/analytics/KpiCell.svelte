@@ -24,19 +24,33 @@
 		previous?: number | null;
 		/** Daily-series numbers feeding the silhouette underneath. */
 		series?: number[];
+		polarity?: 'positive' | 'inverse' | 'neutral';
 		ariaLabel?: string;
 	}
 
-	let { label, value, current = null, previous = null, series = [], ariaLabel }: Props = $props();
+	let {
+		label,
+		value,
+		current = null,
+		previous = null,
+		series = [],
+		polarity = 'positive',
+		ariaLabel,
+	}: Props = $props();
 
 	const delta = $derived(formatDelta(current, previous));
+	const deltaTone = $derived.by(() => {
+		if (delta.sign === 0 || polarity === 'neutral') return 'neutral';
+		const oriented = polarity === 'inverse' ? -delta.sign : delta.sign;
+		return oriented > 0 ? 'good' : 'bad';
+	});
 </script>
 
 <div class="cell" aria-label={ariaLabel ?? label}>
 	<span class="label">{label}</span>
 	<div class="value-row">
 		<span class="value">{value}</span>
-		<span class="delta" data-sign={delta.sign}>{delta.text}</span>
+		<span class="delta" data-tone={deltaTone}>{delta.text}</span>
 	</div>
 	<div class="silhouette">
 		<MiniSilhouette values={series} ariaLabel={`${label} trend`} />
@@ -85,11 +99,11 @@
 		color: var(--text-tertiary);
 	}
 
-	.delta[data-sign='1'] {
+	.delta[data-tone='good'] {
 		color: var(--state-success);
 	}
 
-	.delta[data-sign='-1'] {
+	.delta[data-tone='bad'] {
 		color: var(--state-error);
 	}
 

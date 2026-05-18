@@ -950,6 +950,10 @@ export interface AnalyticsTopTrack {
 	listens: number;
 	completed_listens: number;
 	total_listened_ms: number;
+	completion_rate?: number | null;
+	share_of_window_listened_ms?: number | null;
+	previous_rank?: number | null;
+	rank_delta?: number | null;
 }
 
 export interface AnalyticsTopArtist {
@@ -959,11 +963,16 @@ export interface AnalyticsTopArtist {
 	completed_listens: number;
 	unique_tracks: number;
 	total_listened_ms: number;
+	completion_rate?: number | null;
+	share_of_window_listened_ms?: number | null;
+	previous_rank?: number | null;
+	rank_delta?: number | null;
 }
 
 export interface AnalyticsGenreShare {
 	genre_name: string;
 	listens: number;
+	share_of_window_listens?: number | null;
 }
 
 export interface GenreHeat {
@@ -1027,10 +1036,25 @@ export interface AnalyticsDashboard {
 
 export type SignalsGranularity = 'day' | 'week' | 'month';
 
+export interface AnalyticsDisplayCaps {
+	ridgeline_days?: number | null;
+	tempo_rows?: number | null;
+}
+
 export interface SignalsWindow {
 	days: number;
 	started_at: string;
 	previous_started_at: string;
+	generated_at: string;
+	granularity: SignalsGranularity;
+	display_caps: AnalyticsDisplayCaps;
+}
+
+export interface AnalyticsTotals {
+	listens: number;
+	listened_ms: number;
+	distinct_tracks: number;
+	tagged_listens: number;
 }
 
 export interface KpiPairInt {
@@ -1048,6 +1072,7 @@ export interface DailyKpi {
 	listens: number;
 	listened_ms: number;
 	completed: number;
+	sessions?: number;
 }
 
 export interface HeroStats {
@@ -1152,10 +1177,13 @@ export interface AudioProfile {
 	bass_tilt: number | null;
 	treble_tilt: number | null;
 	coverage: Coverage;
+	track_coverage?: Coverage;
+	listen_coverage?: Coverage;
 }
 
 export interface AnalyticsSignals {
 	window: SignalsWindow;
+	totals: AnalyticsTotals;
 	kpis: SignalsKpis;
 	tempo: TempoView;
 	sonic_field: SonicView;

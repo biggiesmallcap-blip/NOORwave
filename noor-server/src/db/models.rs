@@ -237,6 +237,10 @@ pub struct AnalyticsTopTrack {
     pub listens: i64,
     pub completed_listens: i64,
     pub total_listened_ms: i64,
+    pub completion_rate: Option<f64>,
+    pub share_of_window_listened_ms: Option<f64>,
+    pub previous_rank: Option<i64>,
+    pub rank_delta: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,12 +251,17 @@ pub struct AnalyticsTopArtist {
     pub completed_listens: i64,
     pub unique_tracks: i64,
     pub total_listened_ms: i64,
+    pub completion_rate: Option<f64>,
+    pub share_of_window_listened_ms: Option<f64>,
+    pub previous_rank: Option<i64>,
+    pub rank_delta: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticsGenreShare {
     pub genre_name: String,
     pub listens: i64,
+    pub share_of_window_listens: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +321,7 @@ pub enum Granularity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticsSignals {
     pub window: SignalsWindow,
+    pub totals: AnalyticsTotals,
     pub kpis: SignalsKpis,
     pub tempo: TempoView,
     pub sonic_field: SonicView,
@@ -328,6 +338,25 @@ pub struct SignalsWindow {
     pub days: i64,
     pub started_at: String,
     pub previous_started_at: String,
+    pub generated_at: String,
+    pub granularity: Granularity,
+    pub display_caps: DisplayCaps,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayCaps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ridgeline_days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tempo_rows: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyticsTotals {
+    pub listens: i64,
+    pub listened_ms: i64,
+    pub distinct_tracks: i64,
+    pub tagged_listens: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +388,7 @@ pub struct DailyKpi {
     pub listens: i64,
     pub listened_ms: i64,
     pub completed: i64,
+    pub sessions: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,6 +503,8 @@ pub struct AudioProfile {
     pub bass_tilt: Option<f64>,
     pub treble_tilt: Option<f64>,
     pub coverage: Coverage,
+    pub track_coverage: Coverage,
+    pub listen_coverage: Coverage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
