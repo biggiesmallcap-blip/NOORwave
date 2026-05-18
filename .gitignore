@@ -41,6 +41,9 @@ Thumbs.db
 # Local agent / design tooling — not shared
 AGENTS.md
 CLAUDE.md
+.agents/
+.claude/
+.codex/
 .claude/settings.json
 .claude/settings.local.json
 .claude/skills/
@@ -55,12 +58,15 @@ docs/superpowers/
 # Local test artifacts
 scripts/click-test-screenshots/
 target_codex_verify_fresh/
+target_codex*/
 _tmp_20460_c4ba653036c6634ab224f799cde4c457
 body.md
 rust.instructions.md
 svelte.instructions.md
 .continue/
 docs/assets/gif/
+moods_raw.json
+noor-app/moods.json
 
 # Asset-pack swap backups — pre-swap copies kept on disk for reference
 frontend/static/svg_old/
