@@ -17,7 +17,7 @@ If you're tempted to add `padding: 16px` or `border-radius: 12px` directly, ask:
 | Typography | `--font-size-2xs` (8-10 px), `--font-size-xs` (11-13 px), `--font-size-sm` (13-15 px), `--font-size-md` (15-17 px), `--font-size-lg` (17-20 px), `--font-size-xl` (20-26 px), `--font-size-2xl` (24-32 px), `--font-size-3xl` (28-40 px), `--font-size-4xl` (40-56 px) | All component font sizes — no raw px or raw rem are accepted by lint. The bookend tokens (`2xs`, `4xl`) cover micro-labels and hero displays; new sizes outside this range are a design red flag, not a token candidate. |
 | Weight | `--font-weight-medium` (500), `--font-weight-semibold` (600), `--font-weight-bold` (700) | All `font-weight`. Lint also permits raw `400` (the rare regular case) and raw `800` (the rare extra-bold case) — both require a code comment justifying the deviation. |
 | Line height | `--line-height-tight` (1.1), `--line-height-snug` (1.3), `--line-height-normal` (1.5), `--line-height-loose` (1.6) | All `line-height`. Lint also permits raw `1` for inherently single-line elements (icons, button labels, chips), and raw `0` for image-wrapper containers that need to collapse the inline baseline gap. |
-| Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms) | All `transition` durations. No raw `0.13s` / `0.21s` / `0.34s`. |
+| Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms) | All `transition` durations. No raw `0.13s` / `0.21s` / `0.34s`. **Each token bundles `cubic-bezier(0.25, 0.8, 0.25, 1)` — see "Motion footgun" below.** |
 | Blur | `--blur-base` (8 px), `--blur-overlay` (16 px), `--blur-modal` (24 px) | All `backdrop-filter` values. Three tiers is the maximum that should ever exist; anything else is drift. |
 | State | `--state-error`, `--state-warning`, `--state-success`, `--state-active`, `--state-favorite`, `--state-favorite-glow` | Status colours. **Never** use `--danger`, `--color-error` — they are not defined. |
 | Service | `--service-spotify`, `--service-tidal`, `--service-lastfm` | Service brand colors for source badges and service-branded heroes only. **Stay stable across themes** — they are brand cues, not theme variables. |
@@ -25,6 +25,34 @@ If you're tempted to add `padding: 16px` or `border-radius: 12px` directly, ask:
 | Borders | `--border-subtle`, `--border-muted`, `--border-strong`, `--panel-border` | All component borders. Don't write raw `1px solid rgba(255,255,255,0.06)` — it won't theme. |
 | Accent | `--accent`, `--accent-soft`, `--accent-line`, `--accent-strong`, `--accent-glow` | Interactive accents (active states, primary buttons, focus rings). Tracks the user's profile palette. **Never** hardcode hex values for accents** — onboarding's `#4a6dd8` was migrated to `var(--accent)` so it follows the theme. |
 | Content | `--content-width` (clamp 1280-2400 px) | Page-shell `max-width` so content scales on wide monitors. |
+
+## Motion footgun: never write `var(--motion-X) ease`
+
+The motion tokens are **not bare durations**. Each one bundles the canonical easing:
+
+```css
+--motion-fast: 130ms cubic-bezier(0.25, 0.8, 0.25, 1);
+--motion-base: 210ms cubic-bezier(0.25, 0.8, 0.25, 1);
+--motion-slow: 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
+```
+
+That means `var(--motion-base)` already expands to `210ms cubic-bezier(...)`. If you then append a second timing function like `ease`, the declaration becomes invalid CSS (two timing functions in one transition value), and **the whole rule is dropped silently**. The hover snaps with no transition at all — which reads as jarring, broken, and "not what Last.fm tiles do."
+
+```css
+/* ✗ -- invalid, dropped, snap-on-hover */
+transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
+
+/* ✗ -- same problem with the other tokens */
+transition: color var(--motion-fast) ease;
+
+/* ✓ -- token brings its own bezier */
+transition: background var(--motion-base), border-color var(--motion-base);
+
+/* ✓ -- only add a timing function if you mean to override the token */
+transition: transform var(--motion-base) ease-out;
+```
+
+Card tiles use the token's bezier as their reference soft-graceful feel (see [TrendingCard.svelte](src/lib/components/TrendingCard.svelte) for the canonical pattern: 210 ms on `background`, `border-color`, and the art `transform: scale(1.05)`). Match that exact transition signature on any new tile.
 
 ## Global utility classes
 

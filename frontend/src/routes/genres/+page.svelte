@@ -432,10 +432,9 @@
 			}
 
 			await api.replacePlaybackQueue(tracks.map((track) => track.id));
-			await setPlayerShuffleMode('genre');
+			const shuffled = await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
-			const startIndex = Math.floor(Math.random() * tracks.length);
-			await playTrackNow(tracks[startIndex].id);
+			await playTrackNow(shuffled?.queue[0]?.track.id ?? tracks[0].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}
@@ -455,10 +454,9 @@
 			}
 
 			await api.replacePlaybackQueue(mergedTracks.map((track) => track.id));
-			await setPlayerShuffleMode('genre');
+			const shuffled = await setPlayerShuffleMode('genre');
 			await setPlayerAutomixEnabled(true);
-			const startIndex = Math.floor(Math.random() * mergedTracks.length);
-			await playTrackNow(mergedTracks[startIndex].id);
+			await playTrackNow(shuffled?.queue[0]?.track.id ?? mergedTracks[0].id);
 		} catch (reason) {
 			actionError = reason instanceof Error ? reason.message : String(reason);
 		}

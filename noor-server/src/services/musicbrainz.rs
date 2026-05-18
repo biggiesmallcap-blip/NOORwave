@@ -15,7 +15,9 @@ const MB_USER_AGENT: &str = "NOOR/0.1 (noor-music-app)";
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1100);
 const PORTABLE_SNAPSHOT_DIR: &str = "data/musicbrainz";
 const PORTABLE_CHECKED_FILE: &str = "musicbrainz_checked.csv";
+const PORTABLE_LASTFM_CHECKED_FILE: &str = "lastfm_checked.csv";
 const PORTABLE_GENRES_FILE: &str = "musicbrainz_genres.csv";
+const PORTABLE_CONTEXT_TAGS_FILE: &str = "lastfm_context_tags.csv";
 const PORTABLE_MANIFEST_FILE: &str = "manifest.json";
 
 // ── MusicBrainz API response types ───────────────────────────────────────────
@@ -263,6 +265,10 @@ pub struct EnrichmentProgress {
 struct PortableSnapshotFiles {
     checked: String,
     genres: String,
+    #[serde(default)]
+    lastfm_checked: Option<String>,
+    #[serde(default)]
+    context_tags: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -271,6 +277,10 @@ struct PortableSnapshotManifest {
     db_path: String,
     checked_rows: usize,
     genre_rows: usize,
+    #[serde(default)]
+    lastfm_checked_rows: usize,
+    #[serde(default)]
+    context_tag_rows: usize,
     files: PortableSnapshotFiles,
 }
 
@@ -281,6 +291,8 @@ pub struct PortableSnapshotStatus {
     pub generated_at: Option<String>,
     pub checked_rows: usize,
     pub genre_rows: usize,
+    pub lastfm_checked_rows: usize,
+    pub context_tag_rows: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -293,48 +305,17 @@ pub struct PortableSnapshotImportResult {
     pub status: PortableSnapshotStatus,
     pub checked_inserted: usize,
     pub checked_skipped: usize,
+    pub lastfm_checked_inserted: usize,
+    pub lastfm_checked_skipped: usize,
     pub genre_inserted: usize,
     pub track_skipped: usize,
     pub genre_skipped: usize,
-}
-
-fn resolve_db_path() -> PathBuf {
-    if let Ok(path) = std::env::var("NOOR_DB") {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return path;
-        }
-        return std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path);
-    }
-
-    let exe = std::env::current_exe().ok();
-    let exe_dir = exe.as_ref().and_then(|p| p.parent());
-
-    let dev_db = exe_dir.and_then(|d| {
-        let profile = d.file_name()?.to_str()?;
-        if profile != "debug" && profile != "release" {
-            return None;
-        }
-        let target = d.parent()?;
-        if target.file_name()?.to_str()? != "target" {
-            return None;
-        }
-        target.parent().map(|root| root.join("noor.db"))
-    });
-
-    dev_db
-        .or_else(|| exe_dir.map(|d| d.join("noor.db")))
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("noor.db")
-        })
+    pub context_tag_inserted: usize,
+    pub context_tag_skipped: usize,
 }
 
 fn snapshot_dir() -> PathBuf {
-    resolve_db_path()
+    crate::paths::resolve_db_path_from_env()
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -349,13 +330,67 @@ fn snapshot_checked_path() -> PathBuf {
     snapshot_dir().join(PORTABLE_CHECKED_FILE)
 }
 
+fn snapshot_lastfm_checked_path() -> PathBuf {
+    snapshot_dir().join(PORTABLE_LASTFM_CHECKED_FILE)
+}
+
 fn snapshot_genres_path() -> PathBuf {
     snapshot_dir().join(PORTABLE_GENRES_FILE)
+}
+
+fn snapshot_context_tags_path() -> PathBuf {
+    snapshot_dir().join(PORTABLE_CONTEXT_TAGS_FILE)
 }
 
 fn parse_manifest(path: &Path) -> Result<PortableSnapshotManifest> {
     let file = File::open(path)?;
     Ok(serde_json::from_reader(BufReader::new(file))?)
+}
+
+fn csv_escape_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_csv_line(line: &str) -> Result<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            ',' if !in_quotes => {
+                fields.push(field);
+                field = String::new();
+            }
+            _ => field.push(ch),
+        }
+    }
+
+    if in_quotes {
+        anyhow::bail!("Unterminated quoted field in portable snapshot CSV");
+    }
+
+    fields.push(field);
+    Ok(fields)
+}
+
+fn require_source(value: &str) -> Result<&str> {
+    match value {
+        "musicbrainz" | "lastfm" => Ok(value),
+        _ => anyhow::bail!("Unsupported portable genre source: {value}"),
+    }
 }
 
 pub fn read_portable_snapshot_status() -> Result<PortableSnapshotStatus> {
@@ -370,6 +405,8 @@ pub fn read_portable_snapshot_status() -> Result<PortableSnapshotStatus> {
             generated_at: None,
             checked_rows: 0,
             genre_rows: 0,
+            lastfm_checked_rows: 0,
+            context_tag_rows: 0,
         });
     }
 
@@ -380,6 +417,8 @@ pub fn read_portable_snapshot_status() -> Result<PortableSnapshotStatus> {
         generated_at: Some(manifest.generated_at),
         checked_rows: manifest.checked_rows,
         genre_rows: manifest.genre_rows,
+        lastfm_checked_rows: manifest.lastfm_checked_rows,
+        context_tag_rows: manifest.context_tag_rows,
     })
 }
 
@@ -388,7 +427,9 @@ pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExp
     fs::create_dir_all(&dir)?;
 
     let checked_path = snapshot_checked_path();
+    let lastfm_checked_path = snapshot_lastfm_checked_path();
     let genres_path = snapshot_genres_path();
+    let context_tags_path = snapshot_context_tags_path();
     let manifest_path = snapshot_manifest_path();
 
     let mut checked_rows = 0usize;
@@ -411,43 +452,113 @@ pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExp
         writer.flush()?;
     }
 
+    let mut lastfm_checked_rows = 0usize;
+    {
+        let file = File::create(&lastfm_checked_path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "tidal_id")?;
+        let mut stmt = conn.prepare(
+            "SELECT t.tidal_id
+             FROM lastfm_checked lc
+             JOIN tracks t ON t.id = lc.track_id
+             WHERE t.tidal_id IS NOT NULL
+             ORDER BY t.tidal_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        for row in rows {
+            writeln!(writer, "{}", row?)?;
+            lastfm_checked_rows += 1;
+        }
+        writer.flush()?;
+    }
+
     let mut genre_rows = 0usize;
     {
         let file = File::create(&genres_path)?;
         let mut writer = BufWriter::new(file);
-        writeln!(writer, "tidal_id,genre_slug,confidence")?;
+        writeln!(writer, "tidal_id,source,genre_slug,confidence")?;
         let mut stmt = conn.prepare(
-            "SELECT t.tidal_id, g.slug, tg.confidence
+            "SELECT t.tidal_id, tg.source, g.slug, tg.confidence
              FROM track_genres tg
              JOIN tracks t ON t.id = tg.track_id
              JOIN genres g ON g.id = tg.genre_id
-             WHERE tg.source = 'musicbrainz'
+             WHERE tg.source IN ('musicbrainz', 'lastfm')
                AND t.tidal_id IS NOT NULL
-             ORDER BY t.tidal_id ASC, g.slug ASC",
+             ORDER BY t.tidal_id ASC, tg.source ASC, g.slug ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
             ))
         })?;
         for row in rows {
-            let (tidal_id, genre_slug, confidence) = row?;
-            writeln!(writer, "{tidal_id},{genre_slug},{confidence}")?;
+            let (tidal_id, source, genre_slug, confidence) = row?;
+            writeln!(
+                writer,
+                "{tidal_id},{},{},{}",
+                csv_escape_field(&source),
+                csv_escape_field(&genre_slug),
+                confidence
+            )?;
             genre_rows += 1;
+        }
+        writer.flush()?;
+    }
+
+    let mut context_tag_rows = 0usize;
+    {
+        let file = File::create(&context_tags_path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "tidal_id,tag,normalized_tag,context,confidence")?;
+        let mut stmt = conn.prepare(
+            "SELECT t.tidal_id, tct.tag, tct.normalized_tag, tct.context, tct.confidence
+             FROM track_context_tags tct
+             JOIN tracks t ON t.id = tct.track_id
+             WHERE tct.source = 'lastfm'
+               AND t.tidal_id IS NOT NULL
+             ORDER BY t.tidal_id ASC, tct.context ASC, tct.normalized_tag ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (tidal_id, tag, normalized_tag, context, confidence) = row?;
+            writeln!(
+                writer,
+                "{tidal_id},{},{},{},{}",
+                csv_escape_field(&tag),
+                csv_escape_field(&normalized_tag),
+                csv_escape_field(&context),
+                confidence
+            )?;
+            context_tag_rows += 1;
         }
         writer.flush()?;
     }
 
     let manifest = PortableSnapshotManifest {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        db_path: resolve_db_path().to_string_lossy().into_owned(),
+        db_path: crate::paths::resolve_db_path_from_env()
+            .to_string_lossy()
+            .into_owned(),
         checked_rows,
         genre_rows,
+        lastfm_checked_rows,
+        context_tag_rows,
         files: PortableSnapshotFiles {
             checked: PORTABLE_CHECKED_FILE.to_string(),
             genres: PORTABLE_GENRES_FILE.to_string(),
+            lastfm_checked: Some(PORTABLE_LASTFM_CHECKED_FILE.to_string()),
+            context_tags: Some(PORTABLE_CONTEXT_TAGS_FILE.to_string()),
         },
     };
     let manifest_file = File::create(&manifest_path)?;
@@ -460,6 +571,8 @@ pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExp
             generated_at: Some(manifest.generated_at),
             checked_rows,
             genre_rows,
+            lastfm_checked_rows,
+            context_tag_rows,
         },
     })
 }
@@ -467,7 +580,9 @@ pub fn export_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotExp
 pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImportResult> {
     let manifest_path = snapshot_manifest_path();
     let checked_path = snapshot_checked_path();
+    let lastfm_checked_path = snapshot_lastfm_checked_path();
     let genres_path = snapshot_genres_path();
+    let context_tags_path = snapshot_context_tags_path();
     if !manifest_path.exists() || !checked_path.exists() || !genres_path.exists() {
         anyhow::bail!(
             "No portable MusicBrainz snapshot was found at {}",
@@ -492,9 +607,18 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
     let tx = conn.unchecked_transaction()?;
     let mut insert_checked =
         tx.prepare("INSERT OR IGNORE INTO musicbrainz_checked (track_id) VALUES (?1)")?;
+    let mut insert_lastfm_checked =
+        tx.prepare("INSERT OR IGNORE INTO lastfm_checked (track_id) VALUES (?1)")?;
     let mut insert_genre = tx.prepare(
         "INSERT OR IGNORE INTO track_genres (track_id, genre_id, source, confidence)
-         VALUES (?1, ?2, 'musicbrainz', ?3)",
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut insert_context_tag = tx.prepare(
+        "INSERT INTO track_context_tags
+             (track_id, tag, normalized_tag, context, source, confidence)
+         VALUES (?1, ?2, ?3, ?4, 'lastfm', ?5)
+         ON CONFLICT(track_id, normalized_tag, context, source) DO UPDATE SET
+             confidence = MAX(confidence, excluded.confidence)",
     )?;
 
     let mut checked_inserted = 0usize;
@@ -518,6 +642,28 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
         checked_inserted += insert_checked.execute(params![track_id])?;
     }
 
+    let mut lastfm_checked_inserted = 0usize;
+    let mut lastfm_checked_skipped = 0usize;
+    if lastfm_checked_path.exists() {
+        for (line_number, line) in BufReader::new(File::open(&lastfm_checked_path)?)
+            .lines()
+            .enumerate()
+        {
+            let line = line?;
+            if line_number == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let tidal_id: i64 = line.trim().parse().with_context(|| {
+                format!("Invalid tidal_id in {}", lastfm_checked_path.display())
+            })?;
+            let Some(track_id) = track_map.get(&tidal_id) else {
+                lastfm_checked_skipped += 1;
+                continue;
+            };
+            lastfm_checked_inserted += insert_lastfm_checked.execute(params![track_id])?;
+        }
+    }
+
     let mut genre_inserted = 0usize;
     let mut track_skipped = 0usize;
     let mut genre_skipped = 0usize;
@@ -529,18 +675,26 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
         if line_number == 0 || line.trim().is_empty() {
             continue;
         }
-        let mut parts = line.splitn(3, ',');
-        let tidal_id: i64 = parts
-            .next()
-            .context("Missing tidal_id in portable MusicBrainz genre snapshot")?
+        let parts = parse_csv_line(&line)?;
+        let (tidal_id_raw, source, genre_slug, confidence_raw) = match parts.as_slice() {
+            [tidal_id, genre_slug, confidence] => (
+                tidal_id.as_str(),
+                "musicbrainz",
+                genre_slug.as_str(),
+                confidence.as_str(),
+            ),
+            [tidal_id, source, genre_slug, confidence] => (
+                tidal_id.as_str(),
+                require_source(source)?,
+                genre_slug.as_str(),
+                confidence.as_str(),
+            ),
+            _ => anyhow::bail!("Invalid portable MusicBrainz genre snapshot row"),
+        };
+        let tidal_id: i64 = tidal_id_raw
             .parse()
             .with_context(|| format!("Invalid tidal_id in {}", genres_path.display()))?;
-        let genre_slug = parts
-            .next()
-            .context("Missing genre_slug in portable MusicBrainz genre snapshot")?;
-        let confidence: f64 = parts
-            .next()
-            .context("Missing confidence in portable MusicBrainz genre snapshot")?
+        let confidence: f64 = confidence_raw
             .parse()
             .with_context(|| format!("Invalid confidence in {}", genres_path.display()))?;
 
@@ -552,9 +706,47 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
             genre_skipped += 1;
             continue;
         };
-        genre_inserted += insert_genre.execute(params![track_id, genre_id, confidence])?;
+        genre_inserted += insert_genre.execute(params![track_id, genre_id, source, confidence])?;
     }
+
+    let mut context_tag_inserted = 0usize;
+    let mut context_tag_skipped = 0usize;
+    if context_tags_path.exists() {
+        for (line_number, line) in BufReader::new(File::open(&context_tags_path)?)
+            .lines()
+            .enumerate()
+        {
+            let line = line?;
+            if line_number == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let parts = parse_csv_line(&line)?;
+            let [tidal_id_raw, tag, normalized_tag, context, confidence_raw] = parts.as_slice()
+            else {
+                anyhow::bail!("Invalid Last.fm context tag snapshot row");
+            };
+            let tidal_id: i64 = tidal_id_raw
+                .parse()
+                .with_context(|| format!("Invalid tidal_id in {}", context_tags_path.display()))?;
+            let confidence: f64 = confidence_raw.parse().with_context(|| {
+                format!("Invalid confidence in {}", context_tags_path.display())
+            })?;
+            let Some(track_id) = track_map.get(&tidal_id) else {
+                context_tag_skipped += 1;
+                continue;
+            };
+            context_tag_inserted += insert_context_tag.execute(params![
+                track_id,
+                tag,
+                normalized_tag,
+                context,
+                confidence
+            ])?;
+        }
+    }
+    drop(insert_context_tag);
     drop(insert_genre);
+    drop(insert_lastfm_checked);
     drop(insert_checked);
     tx.commit()?;
 
@@ -563,10 +755,202 @@ pub fn import_portable_snapshot(conn: &Connection) -> Result<PortableSnapshotImp
         status,
         checked_inserted,
         checked_skipped,
+        lastfm_checked_inserted,
+        lastfm_checked_skipped,
         genre_inserted,
         track_skipped,
         genre_skipped,
+        context_tag_inserted,
+        context_tag_skipped,
     })
+}
+
+#[cfg(test)]
+mod portable_snapshot_tests {
+    use super::*;
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn snapshot_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("noorwave-{name}-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("noor.db")
+    }
+
+    fn set_snapshot_db_path(path: &Path) {
+        unsafe {
+            std::env::set_var("NOOR_DB", path);
+        }
+    }
+
+    fn clear_snapshot_db_path() {
+        unsafe {
+            std::env::remove_var("NOOR_DB");
+        }
+    }
+
+    fn create_snapshot_schema(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY,
+                tidal_id INTEGER
+            );
+            CREATE TABLE genres (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL
+            );
+            CREATE TABLE musicbrainz_checked (
+                track_id INTEGER PRIMARY KEY
+            );
+            CREATE TABLE lastfm_checked (
+                track_id INTEGER PRIMARY KEY
+            );
+            CREATE TABLE track_genres (
+                track_id INTEGER NOT NULL,
+                genre_id INTEGER NOT NULL,
+                source TEXT DEFAULT 'tidal',
+                confidence REAL DEFAULT 1.0,
+                PRIMARY KEY (track_id, genre_id)
+            );
+            CREATE TABLE track_context_tags (
+                track_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                normalized_tag TEXT NOT NULL,
+                context TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                PRIMARY KEY (track_id, normalized_tag, context, source)
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn seed_snapshot_source(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            INSERT INTO tracks (id, tidal_id) VALUES (1, 101), (2, 202), (3, NULL);
+            INSERT INTO genres (id, name, slug)
+            VALUES (1, 'Ambient', 'ambient'), (2, 'Dream Pop', 'dream-pop');
+            INSERT INTO musicbrainz_checked (track_id) VALUES (1);
+            INSERT INTO lastfm_checked (track_id) VALUES (2), (3);
+            INSERT INTO track_genres (track_id, genre_id, source, confidence)
+            VALUES (1, 1, 'musicbrainz', 0.91), (2, 2, 'lastfm', 0.42);
+            INSERT INTO track_context_tags
+                (track_id, tag, normalized_tag, context, source, confidence)
+            VALUES (2, 'late night', 'late night', 'time_of_day', 'lastfm', 0.64);
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn portable_snapshot_export_writes_lastfm_checked_genres_and_context_tags() {
+        let _guard = snapshot_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let db_path = temp_db_path("portable-export");
+        set_snapshot_db_path(&db_path);
+
+        let conn = Connection::open_in_memory().unwrap();
+        create_snapshot_schema(&conn);
+        seed_snapshot_source(&conn);
+
+        let result = export_portable_snapshot(&conn).unwrap();
+        let dir = snapshot_dir();
+
+        let genre_csv = fs::read_to_string(dir.join(PORTABLE_GENRES_FILE)).unwrap();
+        assert!(genre_csv.contains("tidal_id,source,genre_slug,confidence"));
+        assert!(genre_csv.contains("101,musicbrainz,ambient,0.91"));
+        assert!(genre_csv.contains("202,lastfm,dream-pop,0.42"));
+
+        let lastfm_checked_csv = fs::read_to_string(dir.join("lastfm_checked.csv")).unwrap();
+        assert_eq!(lastfm_checked_csv, "tidal_id\n202\n");
+
+        let context_csv = fs::read_to_string(dir.join("lastfm_context_tags.csv")).unwrap();
+        assert!(context_csv.contains("tidal_id,tag,normalized_tag,context,confidence"));
+        assert!(context_csv.contains("202,late night,late night,time_of_day,0.64"));
+
+        assert_eq!(result.status.checked_rows, 1);
+        assert_eq!(result.status.genre_rows, 2);
+
+        clear_snapshot_db_path();
+        fs::remove_dir_all(db_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn portable_snapshot_import_restores_lastfm_checked_genres_and_context_tags() {
+        let _guard = snapshot_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let db_path = temp_db_path("portable-import");
+        set_snapshot_db_path(&db_path);
+
+        let source = Connection::open_in_memory().unwrap();
+        create_snapshot_schema(&source);
+        seed_snapshot_source(&source);
+        export_portable_snapshot(&source).unwrap();
+
+        let target = Connection::open_in_memory().unwrap();
+        create_snapshot_schema(&target);
+        target
+            .execute_batch(
+                r#"
+                INSERT INTO tracks (id, tidal_id) VALUES (10, 101), (20, 202);
+                INSERT INTO genres (id, name, slug)
+                VALUES (10, 'Ambient', 'ambient'), (20, 'Dream Pop', 'dream-pop');
+                "#,
+            )
+            .unwrap();
+
+        let imported = import_portable_snapshot(&target).unwrap();
+
+        let musicbrainz_checked: i64 = target
+            .query_row("SELECT COUNT(*) FROM musicbrainz_checked", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let lastfm_checked: i64 = target
+            .query_row("SELECT COUNT(*) FROM lastfm_checked", [], |row| row.get(0))
+            .unwrap();
+        let lastfm_genres: i64 = target
+            .query_row(
+                "SELECT COUNT(*) FROM track_genres WHERE source = 'lastfm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context_tags: i64 = target
+            .query_row("SELECT COUNT(*) FROM track_context_tags", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(musicbrainz_checked, 1);
+        assert_eq!(lastfm_checked, 1);
+        assert_eq!(lastfm_genres, 1);
+        assert_eq!(context_tags, 1);
+        assert_eq!(imported.checked_inserted, 1);
+        assert_eq!(imported.genre_inserted, 2);
+
+        clear_snapshot_db_path();
+        fs::remove_dir_all(db_path.parent().unwrap()).unwrap();
+    }
 }
 
 // ── Main enrichment runner ────────────────────────────────────────────────────

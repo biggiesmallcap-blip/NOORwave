@@ -1,6 +1,6 @@
 use crate::SharedState;
 use crate::db::queries;
-use crate::services::tidal::client::TidalClient;
+use crate::services::tidal::client::{TidalClient, TidalHomeModule};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,7 +8,14 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+type TidalMoodCategoriesCache = Arc<Mutex<Option<(Instant, Vec<Value>)>>>;
+type TidalPageModulesCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalHomeModule>)>>>;
+
+const TIDAL_HOME_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
 /// Master Mix, etc) for the home page Your Mixes shelf.
@@ -51,7 +58,7 @@ pub(super) async fn get_tidal_mixes(
     {
         let guard = mixes_cache.lock().unwrap();
         if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+            && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
         {
             return Ok(Json(
                 json!({ "mixes": cached, "source": "tidal", "cached": true }),
@@ -126,7 +133,7 @@ pub(super) async fn get_tidal_radio_stations(
     {
         let guard = radio_cache.lock().unwrap();
         if let Some((stored_at, cached)) = guard.as_ref()
-            && stored_at.elapsed() < Duration::from_secs(6 * 60 * 60)
+            && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
         {
             return Ok(Json(
                 json!({ "stations": cached, "source": "tidal", "cached": true }),
@@ -385,6 +392,463 @@ pub(super) async fn get_tidal_mix_tracks(
         .collect();
 
     Ok(Json(json!({ "tracks": tracks })))
+}
+
+/// Returns editorial modules for a whitelisted TIDAL `/v1/pages/{section}` or
+/// `/v1/pages/{section}/{id}` endpoint. Routed via two siblings so we never
+/// open the door to arbitrary upstream paths via a wildcard extractor.
+pub(super) async fn get_tidal_page_modules(
+    State(state): State<SharedState>,
+    Path(section): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let wire_path = resolve_page_path(&section, None)?;
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
+}
+
+pub(super) async fn get_tidal_page_modules_with_id(
+    State(state): State<SharedState>,
+    Path((section, id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let wire_path = resolve_page_path(&section, Some(id.as_str()))?;
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
+}
+
+// Whitelist + wire-path normalization. Returns 404 for anything not on the
+// approved list so callers can't probe arbitrary TIDAL endpoints.
+fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCode> {
+    let section = section.trim_matches('/');
+    // `charts` and `genres`/`new_releases` slugs aren't valid TIDAL endpoints
+    // (verified live: all 404 with subStatus 2001 "Not found"). `moods` now
+    // has its own dedicated route at /api/tidal/moods + /api/tidal/mood-page/{slug}
+    // because its modules are PAGE_LINKS, not the usual TRACK_LIST/etc shape.
+    // Empty top-level whitelist for now — this generic route is kept for
+    // future slugs (pages/explore, pages/hires, pages/videos, etc).
+    let allowed_top = matches!(section, "");
+    let allowed_with_id = matches!(section, "mood" | "genre");
+    let valid = (id.is_none() && allowed_top) || (id.is_some() && allowed_with_id);
+    if !valid {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // TIDAL uses `new_releases` on the wire; normalize the dash form callers
+    // may use.
+    let wire_section = if section == "new-releases" {
+        "new_releases"
+    } else {
+        section
+    };
+    Ok(match id {
+        Some(id) => format!("pages/{}/{}", wire_section, id),
+        None => format!("pages/{}", wire_section),
+    })
+}
+
+async fn fetch_page_modules(
+    state: SharedState,
+    page_path: String,
+    debug_raw: bool,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client, page_modules_cache) = {
+        let in_memory = {
+            let s = state.read().await;
+            (
+                s.tidal_tokens.clone(),
+                s.http_client.clone(),
+                s.tidal_http_client.clone(),
+                s.tidal_page_modules_cache.clone(),
+            )
+        };
+        match in_memory.0 {
+            Some(t) => (Some(t), in_memory.1, in_memory.2, in_memory.3),
+            None => {
+                let persisted = super::load_persisted_tidal_tokens(&state)
+                    .await
+                    .ok()
+                    .flatten();
+                (persisted, in_memory.1, in_memory.2, in_memory.3)
+            }
+        }
+    };
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let cache_key = tidal_page_modules_cache_key(&tokens.country_code, &page_path);
+    if debug_raw {
+        let raw = match client.get_page_raw(&page_path).await {
+            Ok(r) => r,
+            Err(e) if super::error_looks_like_auth(&e) => {
+                let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                    .await
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                let retry = TidalClient::with_http(
+                    tidal_http_client.clone(),
+                    refreshed.access_token.clone(),
+                    refreshed.country_code.clone(),
+                );
+                retry.get_page_raw(&page_path).await.map_err(|e| {
+                    tracing::warn!("TIDAL get_page_raw({page_path}) failed after refresh: {e}");
+                    StatusCode::BAD_GATEWAY
+                })?
+            }
+            Err(e) => {
+                tracing::warn!("TIDAL get_page_raw({page_path}) failed: {e}");
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        };
+        return Ok(Json(
+            json!({ "raw": raw, "source": "tidal", "page": page_path }),
+        ));
+    }
+    if let Some(cached) = get_cached_tidal_page_modules(&page_modules_cache, &cache_key) {
+        return Ok(Json(
+            json!({ "modules": cached, "source": "tidal", "page": page_path, "cached": true }),
+        ));
+    }
+    let modules = match client.get_page_modules(&page_path).await {
+        Ok(m) => m,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_page_modules(&page_path).await.map_err(|e| {
+                tracing::warn!("TIDAL get_page_modules({page_path}) failed after refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_page_modules({page_path}) failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    put_cached_tidal_page_modules(&page_modules_cache, cache_key, modules.clone());
+    Ok(Json(
+        json!({ "modules": modules, "source": "tidal", "page": page_path }),
+    ))
+}
+
+fn tidal_page_modules_cache_key(country_code: &str, page_path: &str) -> String {
+    format!("{country_code}:{page_path}")
+}
+
+fn get_cached_tidal_page_modules(
+    cache: &TidalPageModulesCache,
+    key: &str,
+) -> Option<Vec<TidalHomeModule>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.get(key)
+        && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    guard.remove(key);
+    None
+}
+
+fn put_cached_tidal_page_modules(
+    cache: &TidalPageModulesCache,
+    key: String,
+    modules: Vec<TidalHomeModule>,
+) {
+    let mut guard = cache.lock().unwrap();
+    guard.insert(key, (Instant::now(), modules));
+}
+
+/// Returns the TIDAL mood / activity category list, parsed out of the
+/// PAGE_LINKS module on `/v1/pages/moods`. Each entry carries the upstream
+/// slug (e.g. `mood_party`) which the `/api/tidal/mood-page/{slug}` route
+/// then proxies as `pages/{slug}` for the drill-down content.
+pub(super) async fn get_tidal_moods(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let (tokens, http_client, tidal_http_client) = load_tidal_session(&state).await;
+    let Some(tokens) = tokens else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let mood_cache = {
+        let s = state.read().await;
+        s.tidal_moods_cache.clone()
+    };
+    if let Some(cached) = get_cached_tidal_mood_categories(&mood_cache) {
+        return Ok(Json(
+            json!({ "categories": cached, "source": "tidal", "cached": true }),
+        ));
+    }
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let raw = match client.get_page_raw("pages/moods").await {
+        Ok(r) => r,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let retry = TidalClient::with_http(
+                tidal_http_client,
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            retry.get_page_raw("pages/moods").await.map_err(|e| {
+                tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
+                StatusCode::BAD_GATEWAY
+            })?
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_tidal_moods failed: {e}");
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    };
+    let categories = extract_page_links(&raw);
+
+    // TIDAL's moods landing only ships icon glyphs, no cover art for the
+    // categories. Fetch each subpage in parallel for two reasons:
+    //   1. grab the first playlist's artwork as the tile thumbnail
+    //   2. filter out categories whose subpage has no playable music modules
+    //      (e.g. `record_labels` returns only PAGE_LINKS sub-nav)
+    // ~13 fan-out calls, hot-cached on TIDAL's side, so the round-trip stays
+    // under a second in practice.
+    let slugs: Vec<String> = categories
+        .iter()
+        .filter_map(|c| c.get("slug").and_then(|s| s.as_str()).map(String::from))
+        .collect();
+    let thumb_client = client.clone();
+    let fetches = slugs.into_iter().map(|slug| {
+        let c = thumb_client.clone();
+        async move {
+            match c.get_page_modules(&format!("pages/{}", slug)).await {
+                Ok(modules) => {
+                    let thumb = modules
+                        .first()
+                        .and_then(|m| m.items.first())
+                        .and_then(|i| i.artwork_url.clone());
+                    Some((slug, modules.is_empty(), thumb))
+                }
+                Err(_) => None,
+            }
+        }
+    });
+    let results: Vec<Option<(String, bool, Option<String>)>> = {
+        use futures::StreamExt;
+
+        futures::stream::iter(fetches)
+            .buffer_unordered(MOOD_THUMBNAIL_FETCH_CONCURRENCY)
+            .collect()
+            .await
+    };
+    let probe: std::collections::HashMap<String, (bool, Option<String>)> = results
+        .into_iter()
+        .flatten()
+        .map(|(slug, is_empty, thumb)| (slug, (is_empty, thumb)))
+        .collect();
+
+    let filtered: Vec<Value> = categories
+        .into_iter()
+        .filter_map(|mut cat| {
+            let slug = cat.get("slug").and_then(|s| s.as_str()).map(String::from)?;
+            if let Some((is_empty, thumb)) = probe.get(&slug) {
+                if *is_empty {
+                    return None; // drop meta-nav-only categories
+                }
+                if let Some(url) = thumb {
+                    if let Some(obj) = cat.as_object_mut() {
+                        obj.insert("thumbnail".to_string(), Value::String(url.clone()));
+                    }
+                }
+            }
+            Some(cat)
+        })
+        .collect();
+
+    put_cached_tidal_mood_categories(&mood_cache, filtered.clone());
+    Ok(Json(json!({ "categories": filtered, "source": "tidal" })))
+}
+
+fn get_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache) -> Option<Vec<Value>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.as_ref()
+        && stored_at.elapsed() < TIDAL_HOME_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    *guard = None;
+    None
+}
+
+fn put_cached_tidal_mood_categories(cache: &TidalMoodCategoriesCache, categories: Vec<Value>) {
+    let mut guard = cache.lock().unwrap();
+    *guard = Some((Instant::now(), categories));
+}
+
+/// Walks `rows[].modules[]` and pulls items from any module of `type ==
+/// "PAGE_LINKS"`. TIDAL uses this shape for nav-style content (moods,
+/// activity categories, sub-section links) -- the items are link metadata,
+/// not playable rows.
+fn extract_page_links(payload: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(rows) = payload.get("rows").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for row in rows {
+        let Some(modules) = row.get("modules").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for module in modules {
+            let kind = module.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "PAGE_LINKS" {
+                continue;
+            }
+            let Some(items) = module
+                .get("pagedList")
+                .and_then(|p| p.get("items"))
+                .and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            for item in items {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let api_path = item.get("apiPath").and_then(|v| v.as_str()).unwrap_or("");
+                if title.is_empty() || api_path.is_empty() {
+                    continue;
+                }
+                let slug = api_path.strip_prefix("pages/").unwrap_or(api_path);
+                out.push(json!({
+                    "slug": slug,
+                    "title": title,
+                    "icon": item.get("icon").and_then(|v| v.as_str()),
+                    "imageId": item.get("imageId").and_then(|v| v.as_str()),
+                }));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn tidal_mood_category_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(Mutex::new(None));
+        let categories = vec![json!({ "slug": "mood_party", "title": "Party" })];
+
+        put_cached_tidal_mood_categories(&cache, categories.clone());
+
+        assert_eq!(
+            get_cached_tidal_mood_categories(&cache),
+            Some(categories.clone())
+        );
+
+        {
+            let mut guard = cache.lock().unwrap();
+            *guard = Some((
+                Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                categories,
+            ));
+        }
+
+        assert!(get_cached_tidal_mood_categories(&cache).is_none());
+        assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn tidal_page_modules_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let key = tidal_page_modules_cache_key("AU", "pages/m_happy");
+        let modules = vec![TidalHomeModule {
+            id: "happy".to_string(),
+            title: "Happy".to_string(),
+            kind: "PLAYLIST_LIST".to_string(),
+            more_path: None,
+            items: Vec::new(),
+        }];
+
+        put_cached_tidal_page_modules(&cache, key.clone(), modules.clone());
+
+        let cached = get_cached_tidal_page_modules(&cache, &key).expect("fresh cache hit");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].title, "Happy");
+
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.clone(),
+                (
+                    Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                    modules,
+                ),
+            );
+        }
+
+        assert!(get_cached_tidal_page_modules(&cache, &key).is_none());
+        assert!(!cache.lock().unwrap().contains_key(&key));
+    }
+}
+
+/// Drill-down for one mood / activity category. `slug` is the path segment
+/// returned by `/api/tidal/moods` (e.g. `mood_party`) and is proxied to
+/// `pages/{slug}` on TIDAL. Slug pattern is restricted to lowercase
+/// alphanumeric + underscores so callers can't escape the `pages/` namespace.
+pub(super) async fn get_tidal_mood_page(
+    State(state): State<SharedState>,
+    Path(slug): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let wire_path = format!("pages/{}", slug);
+    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
+    fetch_page_modules(state, wire_path, debug_raw).await
+}
+
+// Shared TIDAL session loader -- mirrors the inline block other handlers use.
+async fn load_tidal_session(
+    state: &SharedState,
+) -> (
+    Option<crate::services::tidal::auth::TidalTokens>,
+    reqwest::Client,
+    reqwest::Client,
+) {
+    let in_memory = {
+        let s = state.read().await;
+        (
+            s.tidal_tokens.clone(),
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+        )
+    };
+    match in_memory.0 {
+        Some(t) => (Some(t), in_memory.1, in_memory.2),
+        None => {
+            let persisted = super::load_persisted_tidal_tokens(state)
+                .await
+                .ok()
+                .flatten();
+            (persisted, in_memory.1, in_memory.2)
+        }
+    }
 }
 
 // ─── Last.fm scrobble auth (server-side web-auth flow) ──────────────────────

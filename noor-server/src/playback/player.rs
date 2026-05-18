@@ -4,8 +4,11 @@ use crate::db::{
     queries,
 };
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
-use crate::playback::queue::{self, ShuffleMode};
-use crate::playback::shuffle::{WeightedShuffleProfile, genre_shuffle, true_shuffle};
+use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
+use crate::playback::shuffle::{
+    WeightedShuffleProfile, generate_shuffle_seed, genre_shuffle, genre_shuffle_with_rng,
+    seeded_rng, true_shuffle, true_shuffle_with_rng,
+};
 use crate::services::audio_analysis::{
     CamelotRelation, camelot_relation, compute_harmonic_multiplier,
 };
@@ -14,7 +17,6 @@ use crate::smart::taste_vector::adapters::from_session_profile;
 use crate::smart::taste_vector::{SeedContext, TasteVector};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -23,6 +25,12 @@ use std::collections::{HashMap, HashSet};
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
     pub queue: Vec<QueueItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShuffleModeUpdate {
+    pub snapshot: PlaybackSnapshot,
+    pub debug: Option<ShuffleDebug>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -677,18 +685,34 @@ pub fn set_volume(conn: &Connection, volume: f64) -> Result<PlaybackSnapshot> {
     load_snapshot(conn)
 }
 
-pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<PlaybackSnapshot> {
+pub fn set_shuffle_mode(conn: &Connection, mode: ShuffleMode) -> Result<ShuffleModeUpdate> {
     let current_queue_item_id: Option<i64> = conn.query_row(
         "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
         [],
         |row| row.get(0),
     )?;
+    let seed = (mode != ShuffleMode::Off).then(generate_shuffle_seed);
     conn.execute(
-        "UPDATE playback_state SET shuffle_mode = ?1 WHERE id = 1",
-        params![mode.as_str()],
+        "UPDATE playback_state SET shuffle_mode = ?1, shuffle_seed = ?2 WHERE id = 1",
+        params![mode.as_str(), seed],
     )?;
-    queue::apply_shuffle(conn, mode, current_queue_item_id)?;
-    load_snapshot(conn)
+    let debug = match seed {
+        Some(seed) => {
+            queue::apply_shuffle_with_seed(
+                conn,
+                mode,
+                current_queue_item_id,
+                seed,
+                "playback_state",
+            )?
+            .debug
+        }
+        None => None,
+    };
+    Ok(ShuffleModeUpdate {
+        snapshot: load_snapshot(conn)?,
+        debug,
+    })
 }
 
 pub fn set_automix_enabled(conn: &Connection, enabled: bool) -> Result<PlaybackSnapshot> {
@@ -1071,11 +1095,23 @@ pub fn ensure_automix_queue_depth(
     }
 
     let needed = (target_upcoming - upcoming_count).max(AUTOMIX_BATCH_SIZE);
+    let shuffle_mode = ShuffleMode::parse(&state.shuffle_mode);
+    let shuffle_seed = if shuffle_mode != ShuffleMode::Off {
+        conn.query_row(
+            "SELECT shuffle_seed FROM playback_state WHERE id = 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+    } else {
+        None
+    };
+
     let extension = build_automix_extension_with_reasons(
         conn,
         current_track,
         &queue_items,
-        ShuffleMode::parse(&state.shuffle_mode),
+        shuffle_mode,
+        shuffle_seed,
         needed,
         state.automix_use_learning,
     )?;
@@ -1197,6 +1233,7 @@ fn build_automix_extension_with_reasons(
     current_track: &Track,
     queue_items: &[QueueItem],
     mode: ShuffleMode,
+    shuffle_seed: Option<i64>,
     needed: usize,
     use_learning: bool,
 ) -> Result<Vec<AutomixSelection>> {
@@ -1227,7 +1264,7 @@ fn build_automix_extension_with_reasons(
                 .into_iter()
                 .map(|track| (track.id, track))
                 .collect::<HashMap<_, _>>();
-            let ordered = neighbor_ids
+            let mut ordered = neighbor_ids
                 .into_iter()
                 .filter_map(|track_id| {
                     track_map.get(&track_id).cloned().map(|track| {
@@ -1240,8 +1277,26 @@ fn build_automix_extension_with_reasons(
                         )
                     })
                 })
-                .take(needed)
                 .collect::<Vec<_>>();
+            if let Some(seed) = shuffle_seed
+                && mode != ShuffleMode::Off
+            {
+                let tracks = ordered
+                    .iter()
+                    .map(|selection| selection.track.clone())
+                    .collect::<Vec<_>>();
+                let shuffled =
+                    queue::reorder_tracks_with_seed(conn, &tracks, mode, seed, "automix_learned")?;
+                let mut by_track = ordered
+                    .into_iter()
+                    .map(|selection| (selection.track.id, selection))
+                    .collect::<HashMap<_, _>>();
+                ordered = shuffled
+                    .into_iter()
+                    .filter_map(|track| by_track.remove(&track.id))
+                    .collect();
+            }
+            ordered.truncate(needed);
             if !ordered.is_empty() {
                 return Ok(ordered);
             }
@@ -1340,6 +1395,7 @@ fn build_automix_extension_with_reasons(
         &taste,
         &seed,
         needed,
+        shuffle_seed,
         seed_features.as_ref(),
         &candidate_features,
     );
@@ -1632,6 +1688,7 @@ fn order_automix_candidates(
     taste: &TasteVector,
     seed: &SeedContext,
     needed: usize,
+    shuffle_seed: Option<i64>,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: &HashMap<i64, AudioDspFeatures>,
 ) -> Vec<Track> {
@@ -1671,12 +1728,23 @@ fn order_automix_candidates(
                 .take(pool_size)
                 .map(|entry| entry.track)
                 .collect::<Vec<_>>();
-            true_shuffle(&pool)
+            if let Some(seed) = shuffle_seed {
+                let mut rng = seeded_rng(seed, mode.as_str(), "automix");
+                true_shuffle_with_rng(&pool, &mut rng)
+            } else {
+                true_shuffle(&pool)
+            }
         }
         ShuffleMode::Weighted => {
             let pool_size = (needed * TRUE_SHUFFLE_POOL_MULTIPLIER).max(48);
             let pool = scored.into_iter().take(pool_size).collect::<Vec<_>>();
-            weighted_session_shuffle(&pool)
+            match shuffle_seed {
+                Some(seed) => {
+                    let mut rng = seeded_rng(seed, mode.as_str(), "automix");
+                    weighted_session_shuffle_with_rng(&pool, &mut rng)
+                }
+                None => weighted_session_shuffle(&pool),
+            }
         }
         ShuffleMode::Genre => {
             let mut preferred = Vec::new();
@@ -1697,8 +1765,19 @@ fn order_automix_candidates(
             // Interleave preferred and fallback at ~3:1 ratio so the queue
             // never becomes a solid wall of one genre type, but still leans
             // toward the current session's taste.
-            let preferred_shuffled = genre_shuffle(&preferred, candidate_genres);
-            let fallback_shuffled = genre_shuffle(&fallback, candidate_genres);
+            let (preferred_shuffled, fallback_shuffled) = if let Some(seed) = shuffle_seed {
+                let mut preferred_rng = seeded_rng(seed, mode.as_str(), "automix_preferred");
+                let mut fallback_rng = seeded_rng(seed, mode.as_str(), "automix_fallback");
+                (
+                    genre_shuffle_with_rng(&preferred, candidate_genres, &mut preferred_rng),
+                    genre_shuffle_with_rng(&fallback, candidate_genres, &mut fallback_rng),
+                )
+            } else {
+                (
+                    genre_shuffle(&preferred, candidate_genres),
+                    genre_shuffle(&fallback, candidate_genres),
+                )
+            };
             let total = preferred_shuffled.len() + fallback_shuffled.len();
             let mut ordered = Vec::with_capacity(total);
             let mut pi = 0usize;
@@ -1914,8 +1993,15 @@ fn matches_preferred_genres(genres: &[String], taste: &TasteVector, seed: &SeedC
 }
 
 fn weighted_session_shuffle(entries: &[ScoredTrack]) -> Vec<Track> {
-    let profile = WeightedShuffleProfile::default();
     let mut rng = rand::thread_rng();
+    weighted_session_shuffle_with_rng(entries, &mut rng)
+}
+
+fn weighted_session_shuffle_with_rng<R: rand::Rng + ?Sized>(
+    entries: &[ScoredTrack],
+    rng: &mut R,
+) -> Vec<Track> {
+    let profile = WeightedShuffleProfile::default();
     let mut weighted = entries
         .iter()
         .map(|entry| {
@@ -2060,6 +2146,7 @@ mod tests {
                 id INTEGER PRIMARY KEY,
                 current_track_id INTEGER,
                 current_queue_item_id INTEGER,
+                shuffle_seed INTEGER,
                 position_ms INTEGER NOT NULL DEFAULT 0,
                 is_playing INTEGER NOT NULL DEFAULT 0,
                 volume REAL NOT NULL DEFAULT 1.0,
@@ -2816,6 +2903,29 @@ mod tests {
     }
 
     #[test]
+    fn setting_shuffle_off_clears_shuffle_seed() {
+        let conn = conn();
+        conn.execute(
+            "UPDATE playback_state SET shuffle_mode = 'genre', shuffle_seed = 12345 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let update = set_shuffle_mode(&conn, ShuffleMode::Off).unwrap();
+        let stored_seed: Option<i64> = conn
+            .query_row(
+                "SELECT shuffle_seed FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(update.snapshot.state.shuffle_mode, "off");
+        assert!(update.debug.is_none());
+        assert_eq!(stored_seed, None);
+    }
+
+    #[test]
     fn lookup_listen_source_maps_radio_pending_and_automix_new() {
         let conn = conn();
         for (source, expected) in [
@@ -3075,6 +3185,7 @@ mod tests {
             current_track,
             queue_items,
             mode,
+            None,
             needed,
             use_learning,
         )?

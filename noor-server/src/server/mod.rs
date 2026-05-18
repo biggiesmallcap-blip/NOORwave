@@ -32,11 +32,15 @@ pub async fn start(state: SharedState, addr: &str) -> Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let www_dir = exe_dir
-        .as_ref()
-        .and_then(|d| {
-            let p = d.join("www");
-            if p.is_dir() { Some(p) } else { None }
+    let www_dir = std::env::var("NOOR_WWW_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            exe_dir.as_ref().and_then(|d| {
+                let p = d.join("www");
+                if p.is_dir() { Some(p) } else { None }
+            })
         })
         .or_else(|| {
             // Dev fallback: walk up from the exe looking for frontend/build/.

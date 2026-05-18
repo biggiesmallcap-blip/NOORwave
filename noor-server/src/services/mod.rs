@@ -18,5 +18,6 @@ pub mod radio_similarity;
 pub mod rss_feeds;
 pub mod sportify;
 pub mod spotify;
+#[cfg(feature = "spotify-public")]
 pub mod spotify_public;
 pub mod tidal;

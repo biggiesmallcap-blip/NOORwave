@@ -2,6 +2,7 @@ mod db;
 mod genre;
 mod library;
 mod metadata;
+mod paths;
 mod playback;
 mod server;
 mod services;
@@ -73,6 +74,33 @@ pub struct AppState {
     /// 6h TTL cache for the home Personal Radio shelf. Same cadence as mixes.
     pub tidal_radio_stations_cache:
         Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<services::tidal::client::TidalMix>)>>>,
+    /// 6h TTL cache for the TIDAL moods landing categories. The handler
+    /// hydrates category thumbnails from multiple upstream pages, so keep the
+    /// computed list in memory instead of repeating that fan-out per request.
+    pub tidal_moods_cache:
+        Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<serde_json::Value>)>>>,
+    /// 6h TTL cache for parsed TIDAL pages such as mood drill-down pages.
+    pub tidal_page_modules_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                (
+                    std::time::Instant,
+                    Vec<services::tidal::client::TidalHomeModule>,
+                ),
+            >,
+        >,
+    >,
+    /// 1h TTL cache for external TIDAL playlist track pages. Library state is
+    /// enriched after reading from this cache so favorite badges stay fresh.
+    pub tidal_playlist_tracks_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                (std::time::Instant, Vec<services::tidal::client::TidalTrack>),
+            >,
+        >,
+    >,
     pub spotify_tokens: Option<services::spotify::auth::SpotifyTokens>,
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
@@ -170,12 +198,12 @@ pub struct AppState {
     /// instantly negate their action. Reset on any new user-driven play
     /// (play_track, radio_start, etc.) so automix re-engages naturally.
     pub user_cleared_at: Arc<std::sync::atomic::AtomicI64>,
-    /// Public Spotify stats (anonymous GraphQL) toggle. Read once from
-    /// `NOOR_SPOTIFY_PUBLIC_STATS` at startup. When false, the stats endpoint
-    /// returns empty fields and never hits Spotify. The feature also requires
-    /// the `spotify-public` cargo feature; without it the env var is ignored
-    /// and we log one warning at startup.
-    pub spotify_public_stats_enabled: bool,
+    /// Spotify partner-GraphQL client for the public-stats endpoints. Built
+    /// once at boot when the `spotify-public` cargo feature is on; absent
+    /// from the struct entirely in feature-off builds. Route handlers that
+    /// touch it live behind matching `#[cfg]` blocks.
+    #[cfg(feature = "spotify-public")]
+    pub spotify_public: Arc<services::spotify_public::SpotifyPublicClient>,
     /// Sportify (anonymous Spotify metadata proxy) client used by the
     /// `/api/discovery/sportify/*` discovery routes. Constructed once at boot.
     pub sportify_client: Option<Arc<services::sportify::SportifyClient>>,
@@ -486,29 +514,11 @@ async fn main() -> Result<()> {
 
     info!("NOOR — Starting up...");
 
-    // Resolve DB path: NOOR_DB env var, then exe-dir/noor.db (portable/installed),
-    // with a dev-only fallback to workspace-root/noor.db when the exe is in target/{debug,release}.
-    let db_path = std::env::var("NOOR_DB").unwrap_or_else(|_| {
-        let exe = std::env::current_exe().ok();
-        let exe_dir = exe.as_ref().and_then(|p| p.parent());
-
-        let dev_db = exe_dir.and_then(|d| {
-            let profile = d.file_name()?.to_str()?;
-            if profile != "debug" && profile != "release" {
-                return None;
-            }
-            let target = d.parent()?;
-            if target.file_name()?.to_str()? != "target" {
-                return None;
-            }
-            target.parent().map(|root| root.join("noor.db"))
-        });
-
-        dev_db
-            .or_else(|| exe_dir.map(|d| d.join("noor.db")))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "noor.db".to_string())
-    });
+    // Resolve DB path: NOOR_DB, then NOOR_DATA_DIR/noor.db for installed
+    // builds, then the existing dev/portable fallbacks.
+    let db_path = paths::resolve_db_path_from_env()
+        .to_string_lossy()
+        .into_owned();
     info!("Database path: {}", db_path);
 
     // Initialize database
@@ -558,27 +568,18 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    // Public Spotify stats are gated on (a) the env var being set and (b) the
-    // `spotify-public` cargo feature being compiled in. The feature pulls in
-    // `rquest` (Chrome TLS fingerprint) which we don't want in lean builds.
-    let env_spotify_public = std::env::var("NOOR_SPOTIFY_PUBLIC_STATS")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+    // Public Spotify stats: gated only on the `spotify-public` cargo feature
+    // (default on). No runtime env var - the feature controls compile-in of
+    // the whole module, and feature-off route handlers return an empty
+    // payload.
     #[cfg(feature = "spotify-public")]
-    let spotify_public_stats_enabled = env_spotify_public;
-    #[cfg(not(feature = "spotify-public"))]
-    let spotify_public_stats_enabled = {
-        if env_spotify_public {
-            warn!(
-                "NOOR_SPOTIFY_PUBLIC_STATS=1 but binary built without `spotify-public` cargo feature; ignoring"
-            );
-        }
-        false
-    };
-    if spotify_public_stats_enabled {
-        info!("Public Spotify stats enabled (anonymous GraphQL)");
-    }
+    let spotify_public_client = Arc::new(
+        services::spotify_public::SpotifyPublicClient::new(db.clone())
+            .expect("SpotifyPublicClient init: reqwest builder failure should be impossible"),
+    );
+    #[cfg(feature = "spotify-public")]
+    info!("Public Spotify stats enabled (anonymous GraphQL)");
+
     if lastfm_api_secret.is_some() {
         info!("Last.fm scrobbling enabled (LASTFM_API_SECRET present)");
     } else {
@@ -706,6 +707,11 @@ async fn main() -> Result<()> {
         tidal_tokens,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+        tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
+        tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         spotify_tokens,
         playback_runtime: None,
         playback_runtime_info: None,
@@ -747,7 +753,8 @@ async fn main() -> Result<()> {
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),
         user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        spotify_public_stats_enabled,
+        #[cfg(feature = "spotify-public")]
+        spotify_public: spotify_public_client,
         sportify_client,
         sportify_cache_config,
         sportify_resolve_config,

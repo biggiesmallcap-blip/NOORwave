@@ -6,6 +6,8 @@ export type AppRouteId =
 	| 'search'
 	| 'videos'
 	| 'genres'
+	| 'charts'
+	| 'moods'
 	| 'playlists'
 	| 'discover'
 	| 'automix'

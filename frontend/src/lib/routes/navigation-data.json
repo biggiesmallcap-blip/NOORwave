@@ -2,7 +2,7 @@
 	"navigationZones": [
 		{
 			"label": "Atlas",
-			"routeIds": ["home", "library", "search", "videos", "genres", "playlists", "discover"]
+			"routeIds": ["home", "library", "search", "videos", "genres", "charts", "moods", "playlists", "discover"]
 		},
 		{
 			"label": "Signals",

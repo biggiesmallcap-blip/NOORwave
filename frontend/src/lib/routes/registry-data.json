@@ -4,6 +4,8 @@
 	"search": { "path": "/search", "label": "Search", "zone": "Atlas", "icon": "⌕" },
 	"videos": { "path": "/videos", "label": "Videos", "zone": "Atlas", "icon": "▷" },
 	"genres": { "path": "/genres", "label": "Genre Galaxy", "zone": "Atlas", "icon": "✦" },
+	"charts": { "path": "/charts", "label": "Charts", "zone": "Atlas", "icon": "#" },
+	"moods": { "path": "/moods", "label": "Moods", "zone": "Atlas", "icon": "~" },
 	"playlists": { "path": "/playlists", "label": "Playlists", "zone": "Atlas", "icon": "☰" },
 	"discover": { "path": "/discoverspace", "label": "Discover", "zone": "Atlas", "icon": "◈" },
 	"automix": { "path": "/automix", "label": "Automix", "zone": "Signals", "icon": "⟁" },

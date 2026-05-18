@@ -298,7 +298,7 @@
 		cursor: pointer;
 		font: inherit;
 		color: inherit;
-		transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+		transition: background var(--motion-base), border-color var(--motion-base);
 	}
 	.track-row:hover,
 	.track-row:focus-visible {
@@ -390,7 +390,7 @@
 		cursor: pointer;
 		font: inherit;
 		color: inherit;
-		transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+		transition: background var(--motion-fast), border-color var(--motion-fast);
 	}
 	.card:hover,
 	.card:focus-visible {
@@ -421,7 +421,7 @@
 		height: 100%;
 		background-size: cover;
 		background-position: center;
-		transition: transform var(--motion-base) ease;
+		transition: transform var(--motion-base);
 	}
 	.card:hover .art,
 	.track-row:hover .art {

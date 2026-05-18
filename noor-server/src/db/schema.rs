@@ -42,6 +42,8 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_038,
     MIGRATION_039,
     MIGRATION_040,
+    MIGRATION_041,
+    MIGRATION_042,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1111,6 +1113,52 @@ const MIGRATION_040: &str = r#"
 ALTER TABLE radio_diagnostics ADD COLUMN engine_index_empty INTEGER NOT NULL DEFAULT 0;
 "#;
 
+// Spotify public stats: drop the NOT NULL on monthly_listeners (Spotify omits
+// the field for some artists), add followers / world_rank / top_cities_json
+// columns, and introduce spotify_artist_map for the Tidal->Spotify artist
+// resolution + negative-cache layer. The whole block is wrapped in BEGIN/COMMIT
+// because run_migrations does not wrap individual migrations in a transaction,
+// and the table-rebuild step (DROP + RENAME) leaves the schema wedged if it
+// half-applies.
+const MIGRATION_041: &str = r#"
+BEGIN;
+
+ALTER TABLE spotify_artist_stats ADD COLUMN followers INTEGER;
+ALTER TABLE spotify_artist_stats ADD COLUMN world_rank INTEGER;
+ALTER TABLE spotify_artist_stats ADD COLUMN top_cities_json TEXT;
+
+CREATE TABLE spotify_artist_stats_new (
+    spotify_artist_id TEXT PRIMARY KEY,
+    monthly_listeners INTEGER,
+    followers         INTEGER,
+    world_rank        INTEGER,
+    top_cities_json   TEXT,
+    fetched_at        INTEGER NOT NULL
+);
+
+INSERT INTO spotify_artist_stats_new
+    SELECT spotify_artist_id, monthly_listeners, followers, world_rank,
+           top_cities_json, fetched_at
+    FROM spotify_artist_stats;
+
+DROP TABLE spotify_artist_stats;
+ALTER TABLE spotify_artist_stats_new RENAME TO spotify_artist_stats;
+CREATE INDEX idx_spotify_artist_stats_fetched_at
+    ON spotify_artist_stats(fetched_at);
+
+CREATE TABLE IF NOT EXISTS spotify_artist_map (
+    tidal_artist_id   TEXT PRIMARY KEY,
+    spotify_artist_id TEXT,
+    resolved_at       INTEGER NOT NULL
+);
+
+COMMIT;
+"#;
+
+const MIGRATION_042: &str = r#"
+ALTER TABLE playback_state ADD COLUMN shuffle_seed INTEGER;
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1134,4 +1182,102 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn apply_migrations_up_to(conn: &Connection, n: usize) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            id INTEGER PRIMARY KEY,
+            applied_at TEXT DEFAULT (datetime('now'))
+        );",
+    )?;
+
+    let applied: i64 = conn
+        .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let limit = n.min(MIGRATIONS.len());
+    for (i, migration) in MIGRATIONS[..limit].iter().enumerate() {
+        let migration_id = (i + 1) as i64;
+        if migration_id > applied {
+            conn.execute_batch(migration)?;
+            conn.execute("INSERT INTO _migrations (id) VALUES (?1)", [migration_id])?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migration_041_preserves_existing_artist_stats() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Apply through 040 first.
+        apply_migrations_up_to(&conn, 40).unwrap();
+
+        // Seed one row in spotify_artist_stats with monthly_listeners set
+        // (this column was NOT NULL pre-041).
+        conn.execute(
+            "INSERT INTO spotify_artist_stats (spotify_artist_id, monthly_listeners, fetched_at) \
+             VALUES ('abc123', 12345, 1700000000)",
+            [],
+        )
+        .unwrap();
+
+        // Now apply 041 (table rebuild + new columns + new map table).
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        // Row survives the rebuild with original values.
+        let (ml, fa): (Option<i64>, i64) = conn
+            .query_row(
+                "SELECT monthly_listeners, fetched_at FROM spotify_artist_stats WHERE spotify_artist_id = 'abc123'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(ml, Some(12345));
+        assert_eq!(fa, 1700000000);
+
+        // New columns exist and default to NULL.
+        let (followers, world_rank, top_cities): (Option<i64>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT followers, world_rank, top_cities_json FROM spotify_artist_stats \
+                 WHERE spotify_artist_id = 'abc123'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(followers, None);
+        assert_eq!(world_rank, None);
+        assert_eq!(top_cities, None);
+
+        // monthly_listeners is now nullable: insert with NULL succeeds.
+        conn.execute(
+            "INSERT INTO spotify_artist_stats (spotify_artist_id, monthly_listeners, fetched_at) \
+             VALUES ('null_ml', NULL, 1700000001)",
+            [],
+        )
+        .unwrap();
+
+        // spotify_artist_map exists and accepts both positive and negative rows.
+        conn.execute(
+            "INSERT INTO spotify_artist_map (tidal_artist_id, spotify_artist_id, resolved_at) \
+             VALUES ('42', 'spotify_xyz', 1700000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spotify_artist_map (tidal_artist_id, spotify_artist_id, resolved_at) \
+             VALUES ('99', NULL, 1700000000)",
+            [],
+        )
+        .unwrap();
+    }
 }

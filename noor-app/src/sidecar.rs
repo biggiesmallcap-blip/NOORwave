@@ -1,8 +1,9 @@
+use crate::sidecar_paths::SidecarPaths;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -12,6 +13,7 @@ pub struct SidecarState {
     pub child: Mutex<Option<Child>>,
     pub host_mode: Mutex<bool>,
     pub server_token: Mutex<Option<String>>,
+    pub paths: OnceLock<SidecarPaths>,
 }
 
 impl SidecarState {
@@ -20,26 +22,9 @@ impl SidecarState {
             child: Mutex::new(None),
             host_mode: Mutex::new(host_mode),
             server_token: Mutex::new(None),
+            paths: OnceLock::new(),
         })
     }
-}
-
-fn server_exe_path() -> PathBuf {
-    let mut path = std::env::current_exe().expect("cannot determine current exe path");
-    path.set_file_name(if cfg!(windows) {
-        "noor-server.exe"
-    } else {
-        "noor-server"
-    });
-    path
-}
-
-fn log_path() -> PathBuf {
-    std::env::current_exe()
-        .expect("cannot determine current exe path")
-        .parent()
-        .expect("exe has no parent directory")
-        .join("noor-server.log")
 }
 
 const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024;
@@ -111,7 +96,8 @@ pub fn spawn_server(state: &Arc<SidecarState>) {
     shutdown_stale_server_before_spawn(state);
 
     let host_mode = *state.host_mode.lock().unwrap();
-    let path = log_path();
+    let paths = state.paths.get().expect("sidecar paths resolved");
+    let path = paths.log.clone();
     rotate_log_if_oversized(&path);
     let log_file = std::fs::OpenOptions::new()
         .create(true)
@@ -119,9 +105,15 @@ pub fn spawn_server(state: &Arc<SidecarState>) {
         .open(&path)
         .ok();
 
-    let mut cmd = Command::new(server_exe_path());
+    let mut cmd = Command::new(&paths.binary);
     if host_mode {
         cmd.arg("--host");
+    }
+    if let Some(data) = &paths.data {
+        cmd.env("NOOR_DATA_DIR", data);
+    }
+    if let Some(www) = &paths.www {
+        cmd.env("NOOR_WWW_DIR", www);
     }
     if let Some(f) = &log_file {
         let stderr = f.try_clone().ok();

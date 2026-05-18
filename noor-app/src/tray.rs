@@ -7,7 +7,7 @@ use tauri::{
         PredefinedMenuItem,
     },
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, Theme, WindowEvent, Wry,
+    Emitter, Manager, Theme, WindowEvent, Wry,
 };
 
 // Multi-resolution ICOs (16/24/32/48/256). Tauri's image decoder picks the
@@ -32,7 +32,13 @@ pub struct TrayMenuItems {
     pub network_item: CheckMenuItem<Wry>,
     pub restart_item: MenuItem<Wry>,
     pub exit_item: MenuItem<Wry>,
-    pub update_url: Mutex<Option<String>>,
+    pub pending: Mutex<Option<(String, UpdateAction)>>,
+}
+
+#[derive(Clone)]
+pub enum UpdateAction {
+    OpenUrl(String),
+    Install,
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,7 +68,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         network_item: network_item.clone(),
         restart_item: restart_item.clone(),
         exit_item: exit_item.clone(),
-        update_url: Mutex::new(None),
+        pending: Mutex::new(None),
     });
 
     let initial_theme = app.get_webview_window("main").and_then(|w| w.theme().ok());
@@ -99,14 +105,29 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 "update" => {
-                    let url = app_handle
+                    let action = app_handle
                         .state::<TrayMenuItems>()
-                        .update_url
+                        .pending
                         .lock()
                         .unwrap()
                         .clone();
-                    if let Some(url) = url {
-                        let _ = tauri_plugin_opener::open_url(url, None::<&str>);
+                    match action {
+                        Some((_, UpdateAction::OpenUrl(url))) => {
+                            let _ = tauri_plugin_opener::open_url(url, None::<&str>);
+                        }
+                        Some((_, UpdateAction::Install)) => {
+                            let handle = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(err) =
+                                    crate::installed_updater::install_now(&handle).await
+                                {
+                                    let message = err.to_string();
+                                    eprintln!("update install failed: {message}");
+                                    let _ = handle.emit("update-error", &message);
+                                }
+                            });
+                        }
+                        None => {}
                     }
                 }
                 "network" => {
@@ -177,11 +198,15 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 // Called from a background thread when a newer release is found.
 // Rebuilds the tray menu with an update item at the top and updates the tooltip.
-pub fn notify_update(handle: &tauri::AppHandle, version: &str, url: String) {
+pub fn notify_update(handle: &tauri::AppHandle, version: String, action: UpdateAction) {
     let items = handle.state::<TrayMenuItems>();
-    *items.update_url.lock().unwrap() = Some(url);
+    *items.pending.lock().unwrap() = Some((version.clone(), action.clone()));
 
-    let label = format!("↑ v{version} available — click to download");
+    let verb = match action {
+        UpdateAction::OpenUrl(_) => "download",
+        UpdateAction::Install => "install",
+    };
+    let label = format!("v{version} available - click to {verb}");
     let Ok(update_item) = MenuItemBuilder::with_id("update", &label).build(handle) else {
         return;
     };
@@ -204,6 +229,6 @@ pub fn notify_update(handle: &tauri::AppHandle, version: &str, url: String) {
 
     if let Some(tray) = handle.tray_by_id("noorwave-tray") {
         let _ = tray.set_menu(Some(menu));
-        let _ = tray.set_tooltip(Some(format!("NOORwave — v{version} update available")));
+        let _ = tray.set_tooltip(Some(format!("NOORwave - v{version} update available")));
     }
 }

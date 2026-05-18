@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../target/release/noor-server.exe": "noor-server.exe",
+      "../frontend/build": "www"
+    }
+  }
+}

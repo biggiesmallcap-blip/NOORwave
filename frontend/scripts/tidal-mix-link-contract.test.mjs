@@ -38,7 +38,10 @@ describe('TIDAL mix link contracts', () => {
 
 		expect(client).toContain('is_favorite?: boolean');
 		expect(player).toContain('track.is_favorite ?? false');
-		expect(player).toContain('localTidalTrackId(first) ?? -first.tidal_id');
+		expect(player).toContain('setOptimisticTidalTrack(playable[0])');
+		expect(player).toContain('track_id: t.track_id');
+		expect(player).toContain('local_id: t.local_id ?? null');
+		expect(player).toContain('is_favorite: t.is_favorite');
 		expect(routes).toContain('"is_favorite": library_state.map(|s| s.is_favorite).unwrap_or(false)');
 		expect(mixRoute).toContain('queries::get_tidal_track_library_states');
 	});

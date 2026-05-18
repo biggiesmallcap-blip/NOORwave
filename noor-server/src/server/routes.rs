@@ -29,9 +29,9 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 mod analytics_routes;
@@ -47,6 +47,10 @@ mod sportify_routes;
 mod tidal_home_routes;
 mod tidal_sync_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
+
+type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
+
+const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -101,6 +105,8 @@ pub struct QueueReplaceRequest {
     /// These are appended after the library tracks as pending queue rows.
     #[serde(default)]
     pending_candidates: Option<Vec<PendingCandidateRequest>>,
+    #[serde(default)]
+    shuffle_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -704,6 +710,27 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/tidal/discover-modules/{id}/items",
             get(tidal_home_routes::get_tidal_discover_module_items),
         )
+        // Generic editorial page modules. Whitelisted in the handler to
+        // charts / moods / genres / new-releases (single segment) and
+        // mood/{id} / genre/{id} (two segments). Universal across the
+        // /v1/pages/* response shape.
+        .route(
+            "/api/tidal/page/{section}",
+            get(tidal_home_routes::get_tidal_page_modules),
+        )
+        .route(
+            "/api/tidal/page/{section}/{id}",
+            get(tidal_home_routes::get_tidal_page_modules_with_id),
+        )
+        // Dedicated mood routes: the moods landing returns PAGE_LINKS items,
+        // which aren't tracks/albums/playlists, so they go through a parser
+        // that just extracts category metadata. Drill-down then proxies to
+        // the corresponding pages/{slug} TIDAL endpoint.
+        .route("/api/tidal/moods", get(tidal_home_routes::get_tidal_moods))
+        .route(
+            "/api/tidal/mood-page/{slug}",
+            get(tidal_home_routes::get_tidal_mood_page),
+        )
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
         .route(
@@ -1118,53 +1145,60 @@ async fn get_album_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Json<Value> {
-    let tracks = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
-            .unwrap_or_default()
-    };
-    let isrcs = tracks
-        .iter()
-        .filter_map(|t| {
-            t.isrc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .collect::<Vec<_>>();
-    let cached = {
-        let s = state.read().await;
-        s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
-            .unwrap_or_default()
-    };
+    #[cfg(feature = "spotify-public")]
+    {
+        let (db, client, tracks) = {
+            let s = state.read().await;
+            let tracks =
+                s.db.with_conn(|conn| queries::get_album_tracks(conn, id))
+                    .unwrap_or_default();
+            (s.db.clone(), s.spotify_public.clone(), tracks)
+        };
 
-    Json(json!({
-        "monthly_listeners": null,
-        "tracks": spotify_track_stats_payload(&tracks, &cached),
-    }))
-}
+        let seeds: Vec<crate::services::spotify_public::TrackSeed> = tracks
+            .iter()
+            .filter_map(|t| {
+                let isrc = t.isrc.as_deref()?.trim();
+                if isrc.is_empty() {
+                    return None;
+                }
+                Some(crate::services::spotify_public::TrackSeed {
+                    isrc: isrc.to_string(),
+                    title: t.title.clone(),
+                    artist_name: t.artist_name.clone().unwrap_or_default(),
+                })
+            })
+            .collect();
 
-fn spotify_track_stats_payload(
-    tracks: &[crate::db::models::Track],
-    cached: &HashMap<String, i64>,
-) -> Vec<Value> {
-    let mut seen = HashSet::new();
-    tracks
-        .iter()
-        .filter_map(|track| {
-            let isrc = track.isrc.as_deref()?.trim();
-            if isrc.is_empty() || !seen.insert(isrc.to_string()) {
-                return None;
-            }
-            let playcount = cached.get(isrc)?;
-            Some(json!({
-                "isrc": isrc,
-                "title": track.title.clone(),
-                "playcount": *playcount,
-            }))
-        })
-        .collect()
+        let stats =
+            crate::services::spotify_public::fetch_album_playcounts(&client, &db, &seeds).await;
+
+        let payload: Vec<Value> = stats
+            .into_iter()
+            .filter_map(|s| {
+                s.playcount.map(|pc| {
+                    json!({
+                        "isrc": s.isrc,
+                        "title": s.title,
+                        "playcount": pc,
+                    })
+                })
+            })
+            .collect();
+
+        Json(json!({
+            "monthly_listeners": null,
+            "tracks": payload,
+        }))
+    }
+    #[cfg(not(feature = "spotify-public"))]
+    {
+        let _ = (state, id);
+        Json(json!({
+            "monthly_listeners": null,
+            "tracks": [],
+        }))
+    }
 }
 
 /// Pages through all entries of a single TIDAL discography filter for one
@@ -1539,84 +1573,117 @@ async fn get_artist_spotify_stats(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> Json<Value> {
-    let (enabled, artist_name, isrc_pairs, mut tracks_by_isrc) = {
-        let s = state.read().await;
-        let enabled = s.spotify_public_stats_enabled;
-        let artist_tracks =
-            s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+    #[cfg(feature = "spotify-public")]
+    {
+        let (db, client, tidal_id, artist_name, seeds) = {
+            let s = state.read().await;
+            let tidal_id =
+                s.db.with_conn(|conn| queries::get_artist_tidal_id(conn, id))
+                    .unwrap_or(None);
+            let artist_tracks =
+                s.db.with_conn(|conn| queries::get_artist_tracks(conn, id))
+                    .unwrap_or_default();
+
+            let mut sorted = artist_tracks
+                .into_iter()
+                .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                .collect::<Vec<_>>();
+            sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+            sorted.truncate(10);
+
+            let artist_name = sorted
+                .first()
+                .and_then(|t| t.artist_name.clone())
                 .unwrap_or_default();
-        let isrcs = artist_tracks
-            .iter()
+
+            let seeds: Vec<crate::services::spotify_public::TrackSeed> = sorted
+                .into_iter()
+                .map(|t| crate::services::spotify_public::TrackSeed {
+                    isrc: t.isrc.unwrap_or_default(),
+                    title: t.title,
+                    artist_name: t.artist_name.unwrap_or_default(),
+                })
+                .collect();
+
+            (
+                s.db.clone(),
+                s.spotify_public.clone(),
+                tidal_id,
+                artist_name,
+                seeds,
+            )
+        };
+
+        // Local-only artist (no Tidal id): no key for the map table, so just
+        // serve any cached track playcounts via the album helper, no artist
+        // resolution attempted, no negative-cache row written.
+        let Some(tidal_id) = tidal_id else {
+            let stats =
+                crate::services::spotify_public::fetch_album_playcounts(&client, &db, &seeds).await;
+            let tracks: Vec<Value> = stats
+                .into_iter()
+                .filter_map(|s| {
+                    s.playcount.map(|pc| {
+                        json!({
+                            "isrc": s.isrc,
+                            "title": s.title,
+                            "playcount": pc,
+                        })
+                    })
+                })
+                .collect();
+            return Json(json!({
+                "monthly_listeners": null,
+                "followers": null,
+                "world_rank": null,
+                "top_cities": [],
+                "tracks": tracks,
+            }));
+        };
+
+        let tidal_id_str = tidal_id.to_string();
+        let result = crate::services::spotify_public::fetch_artist_stats(
+            &client,
+            &db,
+            &tidal_id_str,
+            &artist_name,
+            &seeds,
+        )
+        .await;
+
+        let tracks: Vec<Value> = result
+            .tracks
+            .into_iter()
             .filter_map(|t| {
-                t.isrc
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+                t.playcount.map(|pc| {
+                    json!({
+                        "isrc": t.isrc,
+                        "title": t.title,
+                        "playcount": pc,
+                    })
+                })
             })
-            .collect::<Vec<_>>();
-        let cached =
-            s.db.with_conn(|conn| queries::get_cached_spotify_playcounts_for_isrcs(conn, &isrcs))
-                .unwrap_or_default();
-        let mut tracks_by_isrc = BTreeMap::new();
-        for track in &artist_tracks {
-            let Some(isrc) = track
-                .isrc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
-                continue;
-            };
-            if let Some(playcount) = cached.get(isrc) {
-                tracks_by_isrc.insert(isrc.to_string(), (track.title.clone(), *playcount));
-            }
-        }
+            .collect();
 
-        let mut sorted = artist_tracks
-            .into_iter()
-            .filter(|t| t.isrc.as_deref().is_some_and(|s| !s.trim().is_empty()))
-            .collect::<Vec<_>>();
-        sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
-        sorted.truncate(10);
-        let artist_name = sorted
-            .first()
-            .and_then(|t| t.artist_name.clone())
-            .unwrap_or_default();
-        let pairs = sorted
-            .into_iter()
-            .map(|t| (t.isrc.unwrap_or_default(), t.title))
-            .collect::<Vec<(String, String)>>();
-        (enabled, artist_name, pairs, tracks_by_isrc)
-    };
-
-    let mut monthly_listeners = None;
-    if enabled {
-        let result =
-            crate::services::spotify_public::fetch_artist_stats(enabled, &artist_name, &isrc_pairs)
-                .await;
-        monthly_listeners = result.monthly_listeners;
-        for track in result.tracks {
-            if let Some(playcount) = track.playcount {
-                tracks_by_isrc.insert(track.isrc, (track.title, playcount));
-            }
-        }
+        Json(json!({
+            "monthly_listeners": result.monthly_listeners,
+            "followers": result.followers,
+            "world_rank": result.world_rank,
+            "top_cities": result.top_cities,
+            "tracks": tracks,
+        }))
     }
-    let tracks = tracks_by_isrc
-        .into_iter()
-        .map(|(isrc, (title, playcount))| {
-            json!({
-                "isrc": isrc,
-                "title": title,
-                "playcount": playcount,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Json(json!({
-        "monthly_listeners": monthly_listeners,
-        "tracks": tracks,
-    }))
+    #[cfg(not(feature = "spotify-public"))]
+    {
+        let _ = (state, id);
+        Json(json!({
+            "monthly_listeners": null,
+            "followers": null,
+            "world_rank": null,
+            "top_cities": [],
+            "tracks": [],
+        }))
+    }
 }
 
 async fn get_tidal_album_tracks(
@@ -7509,7 +7576,7 @@ async fn set_playback_shuffle(
 ) -> Result<Json<Value>, StatusCode> {
     let mode = queue::ShuffleMode::parse(&payload.mode);
     let state_guard = state.read().await;
-    let snapshot = state_guard
+    let update = state_guard
         .db
         .with_conn(|conn| player::set_shuffle_mode(conn, mode))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -7519,21 +7586,27 @@ async fn set_playback_shuffle(
     // on during a TIDAL mix actually changes what plays next. Pending entries
     // carry no genre/artist_id metadata, so genre/weighted modes degrade to a
     // plain Fisher-Yates - same shape as `true` shuffle.
-    if mode != queue::ShuffleMode::Off {
+    if let Some(debug) = update.debug.as_ref() {
         let mut q = state_guard.pending_tidal_mix_queue.lock().unwrap();
         if q.len() > 1 {
             use rand::seq::SliceRandom;
-            q.make_contiguous().shuffle(&mut rand::thread_rng());
+            let mut rng = crate::playback::shuffle::seeded_rng(
+                debug.seed,
+                mode.as_str(),
+                "pending_tidal_mix",
+            );
+            q.make_contiguous().shuffle(&mut rng);
         }
     }
 
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
     drop(state_guard);
-    let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+    let snapshot = overlay_snapshot_with_external_track(&state, update.snapshot).await;
     Ok(Json(json!({
         "state": snapshot.state,
-        "queue": snapshot.queue
+        "queue": snapshot.queue,
+        "shuffle_debug": update.debug
     })))
 }
 
@@ -7913,9 +7986,32 @@ async fn replace_playback_queue(
                     .collect();
                 append_pending_tracks(conn, &candidates)?;
             }
-            let final_queue = crate::playback::queue::load_queue(conn)?;
+            let mut shuffle_debug = None;
+            let final_queue = match payload.shuffle_mode.as_deref() {
+                Some(raw_mode) => {
+                    let mode = queue::ShuffleMode::parse(raw_mode);
+                    if mode == queue::ShuffleMode::Off {
+                        crate::playback::queue::load_queue(conn)?
+                    } else {
+                        let seed = crate::playback::shuffle::generate_shuffle_seed();
+                        let result = crate::playback::queue::apply_shuffle_with_seed(
+                            conn,
+                            mode,
+                            None,
+                            seed,
+                            "queue_replace",
+                        )?;
+                        shuffle_debug = result.debug;
+                        result.queue
+                    }
+                }
+                None => crate::playback::queue::load_queue(conn)?,
+            };
             let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": final_queue })))
+            Ok(Json(json!({
+                "queue": final_queue,
+                "shuffle_debug": shuffle_debug
+            })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -8583,7 +8679,7 @@ async fn tidal_search(
         })
         .collect();
 
-    let artists: Vec<TidalSearchArtistResp> = results
+    let mut artists: Vec<TidalSearchArtistResp> = results
         .artists
         .into_iter()
         .map(|a| {
@@ -8597,6 +8693,45 @@ async fn tidal_search(
             }
         })
         .collect();
+
+    // TIDAL's catalog-search response often omits artist `picture`, so most
+    // search-result artists land here with `artwork_url = None` and render as
+    // initials in the UI. The /artists/{id} endpoint carries the canonical
+    // picture; fan out a parallel fetch for any artist still missing artwork
+    // and backfill. Tight cap (12) to bound the fan-out -- artists past that
+    // tend to be long-tail rows the user is unlikely to scroll to anyway.
+    const ARTIST_PHOTO_BACKFILL_CAP: usize = 12;
+    let backfill_targets: Vec<(usize, i64)> = artists
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.artwork_url.is_none())
+        .take(ARTIST_PHOTO_BACKFILL_CAP)
+        .map(|(i, a)| (i, a.tidal_id))
+        .collect();
+    if !backfill_targets.is_empty() {
+        let backfill_client = client.clone();
+        let fetches = backfill_targets.iter().map(|(idx, tidal_id)| {
+            let c = backfill_client.clone();
+            let id = *tidal_id;
+            let i = *idx;
+            async move {
+                let url = c
+                    .get_artist(id)
+                    .await
+                    .ok()
+                    .and_then(|a| TidalClient::get_artwork_url(&a.picture, 640));
+                (i, url)
+            }
+        });
+        let results: Vec<(usize, Option<String>)> = futures::future::join_all(fetches).await;
+        for (i, url) in results {
+            if let Some(u) = url {
+                if let Some(slot) = artists.get_mut(i) {
+                    slot.artwork_url = Some(u);
+                }
+            }
+        }
+    }
 
     let videos: Vec<TidalSearchVideoResp> = results
         .videos
@@ -9075,57 +9210,72 @@ async fn tidal_playlist_tracks(
         ));
     };
 
-    let (http_client, tidal_http_client) = {
+    let (http_client, tidal_http_client, playlist_tracks_cache) = {
         let s = state.read().await;
-        (s.http_client.clone(), s.tidal_http_client.clone())
+        (
+            s.http_client.clone(),
+            s.tidal_http_client.clone(),
+            s.tidal_playlist_tracks_cache.clone(),
+        )
     };
+    let limit = 100;
+    let offset = 0;
+    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, &uuid, limit, offset);
     let client = TidalClient::with_http(
         tidal_http_client.clone(),
         tokens.access_token.clone(),
         tokens.country_code.clone(),
     );
-    let resp = match client.get_playlist_tracks(&uuid, 100, 0).await {
-        Ok(r) => r,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
+    let tracks = match get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key) {
+        Some(cached) => cached,
+        None => {
+            let resp = match client.get_playlist_tracks(&uuid, limit, offset).await {
+                Ok(r) => r,
+                Err(e) if error_looks_like_auth(&e) => {
+                    let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+                        .await
+                        .map_err(|re| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": format!("TIDAL session refresh failed: {}", re)
+                                })),
+                            )
+                        })?;
+                    let retry_client = TidalClient::with_http(
+                        tidal_http_client,
+                        refreshed.access_token.clone(),
+                        refreshed.country_code.clone(),
+                    );
+                    retry_client
+                        .get_playlist_tracks(&uuid, limit, offset)
+                        .await
+                        .map_err(|e2| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({ "error": e2.to_string() })),
+                            )
+                        })?
+                }
+                Err(e) => {
+                    return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client = TidalClient::with_http(
-                tidal_http_client,
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry_client
-                .get_playlist_tracks(&uuid, 100, 0)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": e.to_string() })),
-            ));
+                        Json(json!({ "error": e.to_string() })),
+                    ));
+                }
+            };
+            put_cached_tidal_playlist_tracks(&playlist_tracks_cache, cache_key, resp.items.clone());
+            resp.items
         }
     };
 
-    let tidal_ids: Vec<i64> = resp.items.iter().map(|t| t.id).collect();
+    let tidal_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
     let library_states = {
         let s = state.read().await;
         s.db.with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
             .unwrap_or_default()
     };
-    let playable: Vec<serde_json::Value> = resp
-        .items
+    let playable: Vec<serde_json::Value> = tracks
         .into_iter()
         .map(|t| {
             let library_state = library_states.get(&t.id).copied();
@@ -9134,6 +9284,38 @@ async fn tidal_playlist_tracks(
         .collect();
 
     Ok(Json(json!({ "tracks": playable })))
+}
+
+fn tidal_playlist_tracks_cache_key(
+    country_code: &str,
+    uuid: &str,
+    limit: i32,
+    offset: i32,
+) -> String {
+    format!("{country_code}:{uuid}:{limit}:{offset}")
+}
+
+fn get_cached_tidal_playlist_tracks(
+    cache: &TidalPlaylistTracksCache,
+    key: &str,
+) -> Option<Vec<TidalTrack>> {
+    let mut guard = cache.lock().unwrap();
+    if let Some((stored_at, cached)) = guard.get(key)
+        && stored_at.elapsed() < TIDAL_PLAYLIST_TRACKS_CACHE_TTL
+    {
+        return Some(cached.clone());
+    }
+    guard.remove(key);
+    None
+}
+
+fn put_cached_tidal_playlist_tracks(
+    cache: &TidalPlaylistTracksCache,
+    key: String,
+    tracks: Vec<TidalTrack>,
+) {
+    let mut guard = cache.lock().unwrap();
+    guard.insert(key, (Instant::now(), tracks));
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -9182,6 +9364,30 @@ async fn play_tidal_ephemeral(
 #[derive(Debug, serde::Deserialize)]
 struct PlayTidalMixRequest {
     tracks: Vec<PlayTidalRequest>,
+    #[serde(default)]
+    shuffle_mode: Option<String>,
+}
+
+fn shuffle_tidal_mix_tracks(
+    tracks: &mut [PlayTidalRequest],
+    shuffle_mode: Option<&str>,
+) -> Option<queue::ShuffleDebug> {
+    let mode = queue::ShuffleMode::parse(shuffle_mode.unwrap_or("off"));
+    if mode == queue::ShuffleMode::Off {
+        return None;
+    }
+
+    let seed = crate::playback::shuffle::generate_shuffle_seed();
+    let mut rng = crate::playback::shuffle::seeded_rng(seed, mode.as_str(), "tidal_mix");
+    use rand::seq::SliceRandom;
+    tracks.shuffle(&mut rng);
+    Some(queue::ShuffleDebug {
+        mode: mode.as_str().to_string(),
+        seed,
+        scope: "tidal_mix".to_string(),
+        locked_count: 0,
+        candidate_count: tracks.len(),
+    })
 }
 
 /// Play the first track immediately and stash the rest in the pending
@@ -9191,15 +9397,16 @@ async fn play_tidal_mix(
     State(state): State<SharedState>,
     Json(body): Json<PlayTidalMixRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if body.tracks.is_empty() {
+    let mut tracks = body.tracks;
+    if tracks.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Mix has no tracks" })),
         ));
     }
+    let shuffle_debug = shuffle_tidal_mix_tracks(&mut tracks, body.shuffle_mode.as_deref());
 
-    let mut iter = body
-        .tracks
+    let mut iter = tracks
         .into_iter()
         .map(|t| crate::PendingEphemeralTidalTrack {
             tidal_track_id: t.tidal_track_id,
@@ -9210,6 +9417,7 @@ async fn play_tidal_mix(
             duration_ms: t.duration_ms,
         });
     let first = iter.next().expect("non-empty per check above");
+    let first_tidal_id = first.tidal_track_id;
     let rest: Vec<crate::PendingEphemeralTidalTrack> = iter.collect();
 
     // Replace any existing pending queue with this mix's continuation.
@@ -9221,7 +9429,11 @@ async fn play_tidal_mix(
     }
 
     start_ephemeral_tidal_playback(&state, first).await?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({
+        "ok": true,
+        "first_tidal_id": first_tidal_id,
+        "shuffle_debug": shuffle_debug
+    })))
 }
 
 fn requested_tidal_quality(
@@ -11669,6 +11881,31 @@ mod tests {
     }
 
     #[test]
+    fn tidal_playlist_tracks_cache_returns_fresh_entries_and_expires_stale_entries() {
+        let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid", 100, 0);
+        let tracks: Vec<TidalTrack> = Vec::new();
+
+        put_cached_tidal_playlist_tracks(&cache, key.clone(), tracks.clone());
+
+        assert!(get_cached_tidal_playlist_tracks(&cache, &key).is_some());
+
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.clone(),
+                (
+                    Instant::now() - TIDAL_PLAYLIST_TRACKS_CACHE_TTL - Duration::from_secs(1),
+                    tracks,
+                ),
+            );
+        }
+
+        assert!(get_cached_tidal_playlist_tracks(&cache, &key).is_none());
+        assert!(!cache.lock().unwrap().contains_key(&key));
+    }
+
+    #[test]
     fn ephemeral_stream_request_uses_user_audio_quality() {
         let request = build_ephemeral_tidal_stream_request(
             123,
@@ -11917,6 +12154,11 @@ mod tests {
     /// initializers - when `crate::AppState` gains a field, add it here once.
     fn fresh_test_state(db: Database) -> crate::AppState {
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(feature = "spotify-public")]
+        let spotify_public = Arc::new(
+            crate::services::spotify_public::SpotifyPublicClient::new(db.clone())
+                .expect("SpotifyPublicClient::new must succeed in tests"),
+        );
         crate::AppState {
             db,
             event_tx,
@@ -11925,6 +12167,9 @@ mod tests {
             tidal_tokens: None,
             tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
+            tidal_moods_cache: Arc::new(std::sync::Mutex::new(None)),
+            tidal_page_modules_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tidal_playlist_tracks_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             spotify_tokens: None,
             playback_runtime: None,
             playback_runtime_info: None,
@@ -11973,7 +12218,8 @@ mod tests {
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_cleared_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            spotify_public_stats_enabled: false,
+            #[cfg(feature = "spotify-public")]
+            spotify_public,
             sportify_client: None,
             sportify_cache_config: crate::services::sportify::cache::SportifyCacheConfig::default(),
             sportify_resolve_config:
@@ -12217,6 +12463,141 @@ mod tests {
         assert_eq!(persisted_queue_count, 1);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn playback_shuffle_returns_debug_and_persists_seed() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (2, 1, 'user')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/shuffle")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mode":"true"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let seed = body["shuffle_debug"]["seed"]
+            .as_i64()
+            .expect("positive seed");
+        assert!(seed > 0);
+        assert_eq!(body["shuffle_debug"]["mode"], "true");
+        assert_eq!(body["shuffle_debug"]["scope"], "playback_state");
+
+        let stored_seed: Option<i64> = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT shuffle_seed FROM playback_state WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stored_seed, Some(seed));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn replace_playback_queue_accepts_one_shot_shuffle_mode() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_basic_tracks(&db);
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/queue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"track_ids":[1,2],"shuffle_mode":"true"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["queue"].as_array().expect("queue").len(), 2);
+        assert_eq!(body["shuffle_debug"]["mode"], "true");
+        assert_eq!(body["shuffle_debug"]["scope"], "queue_replace");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn tidal_play_mix_shuffle_returns_debug_and_preserves_tracks() {
+        let mut tracks = vec![
+            PlayTidalRequest {
+                tidal_track_id: 101,
+                title: "One".to_string(),
+                artist_name: Some("Artist A".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(180_000),
+            },
+            PlayTidalRequest {
+                tidal_track_id: 102,
+                title: "Two".to_string(),
+                artist_name: Some("Artist B".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(181_000),
+            },
+            PlayTidalRequest {
+                tidal_track_id: 103,
+                title: "Three".to_string(),
+                artist_name: Some("Artist C".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(182_000),
+            },
+        ];
+
+        let debug = shuffle_tidal_mix_tracks(&mut tracks, Some("true")).expect("shuffle debug");
+        let mut ids: Vec<i64> = tracks.iter().map(|track| track.tidal_track_id).collect();
+        ids.sort_unstable();
+
+        assert_eq!(ids, vec![101, 102, 103]);
+        assert_eq!(debug.mode, "true");
+        assert!(debug.seed > 0);
+        assert_eq!(debug.scope, "tidal_mix");
+        assert_eq!(debug.locked_count, 0);
+        assert_eq!(debug.candidate_count, 3);
     }
 
     #[tokio::test]
@@ -13471,6 +13852,9 @@ mod tests {
             ("GET", "/api/tidal/radio-stations"),
             ("GET", "/api/tidal/home-modules"),
             ("GET", "/api/tidal/discover-modules/1/items"),
+            ("GET", "/api/tidal/page/mood/1"),
+            ("GET", "/api/tidal/moods"),
+            ("GET", "/api/tidal/mood-page/mood_party"),
             ("GET", "/api/charts"),
             ("GET", "/api/charts/lastfm/genres"),
             ("GET", "/api/charts/lastfm/countries"),

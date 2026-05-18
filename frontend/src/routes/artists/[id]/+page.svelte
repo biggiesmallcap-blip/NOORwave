@@ -554,6 +554,30 @@
 							<span class="hero-listeners">{formatCompactCount(spotifyStats.monthly_listeners)} monthly listeners</span>
 						{/if}
 					</p>
+					{#if spotifyStats && (spotifyStats.followers != null || spotifyStats.world_rank != null)}
+						<p class="hero-pills">
+							{#if spotifyStats.followers != null}
+								<span class="hero-pill" title="Spotify followers">
+									{formatCompactCount(spotifyStats.followers)} followers
+								</span>
+							{/if}
+							{#if spotifyStats.world_rank != null}
+								<span class="hero-pill" title="Spotify world rank">
+									#{spotifyStats.world_rank.toLocaleString()} worldwide
+								</span>
+							{/if}
+						</p>
+					{/if}
+					{#if spotifyStats?.top_cities && spotifyStats.top_cities.length > 0}
+						<ul class="hero-top-cities">
+							{#each spotifyStats.top_cities.slice(0, 3) as city (city.city + city.country)}
+								<li class="hero-top-city">
+									<span class="city-name">{city.city}{city.country ? `, ${city.country}` : ''}</span>
+									<span class="city-listeners">{formatCompactCount(city.listeners)}</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 					{#if h.library_track_count > 0}
 						<p class="hero-library-substat">
 							{h.library_track_count.toLocaleString()} {h.library_track_count === 1 ? 'song' : 'songs'} in your library
@@ -1630,6 +1654,56 @@
 	.hero-listeners {
 		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
 		font-variant-numeric: tabular-nums;
+	}
+
+	.hero-pills {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin: 6px 0 0;
+		padding: 0;
+	}
+
+	.hero-pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 10px;
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+		color: var(--text-secondary, rgba(255, 255, 255, 0.75));
+		font-variant-numeric: tabular-nums;
+	}
+
+	.hero-top-cities {
+		list-style: none;
+		margin: 8px 0 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		max-width: 260px;
+	}
+
+	.hero-top-city {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 8px;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+	}
+
+	.hero-top-city .city-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.hero-top-city .city-listeners {
+		font-variant-numeric: tabular-nums;
+		opacity: 0.8;
 	}
 
 </style>
