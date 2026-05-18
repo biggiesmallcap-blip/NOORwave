@@ -107,6 +107,12 @@
 	const showAudioProfile = $derived(
 		signals !== null && signals.audio_profile.coverage.analyzed > 0,
 	);
+	const ridgelineWindowLabel = $derived.by(() => {
+		if (!signals) return null;
+		const cap = signals.window.display_caps.ridgeline_days;
+		if (!cap || cap >= signals.window.days) return null;
+		return cap === 365 ? 'recent year' : `recent ${cap} days`;
+	});
 </script>
 
 <div class="analytics-tree" class:dim={windowChanging}>
@@ -143,7 +149,12 @@
 	{:else if signals}
 		<!-- ── Hero — Listening Pulse ───────────────────────────────────────── -->
 		<div class="section glass hero-card">
-			<ListenRidgeline rows={signals.ridgeline} heroStats={signals.kpis.hero_stats} mode="hero" />
+			<ListenRidgeline
+				rows={signals.ridgeline}
+				heroStats={signals.kpis.hero_stats}
+				mode="hero"
+				windowLabel={ridgelineWindowLabel}
+			/>
 		</div>
 
 		<!-- ── KPI strip ────────────────────────────────────────────────────── -->

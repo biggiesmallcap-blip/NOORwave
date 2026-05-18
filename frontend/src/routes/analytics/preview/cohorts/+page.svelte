@@ -2,7 +2,7 @@
 	/**
 	 * Dev-only preview for CohortTable — three disjoint cohort rows.
 	 *
-	 * The captured fixture only has activity in the "New this month" cohort
+	 * The captured fixture only has activity in the "New in selected window" cohort
 	 * (everything was first-listened recently in the dev DB), so we synthesise
 	 * Established + Deep cuts so the visual layout can be inspected without
 	 * needing months of listening history.
@@ -21,7 +21,7 @@
 	const rich: CohortRow[] = [
 		{
 			key: 'new_this_month',
-			label: 'New this month',
+			label: 'New in selected window',
 			tracks: 132,
 			listened_ms: 24_480_000,
 			sessions: 18,
@@ -63,7 +63,7 @@
 			<h1>Cohorts — preview</h1>
 			<p class="subtitle">
 				<code>CohortTable</code> — disjoint partition of listened tracks into
-				<em>New this month</em> / <em>Established</em> / <em>Deep cuts</em>. Dev-only route.
+				<em>New in selected window</em> / <em>Established</em> / <em>Deep cuts</em>. Dev-only route.
 			</p>
 		</header>
 
@@ -72,7 +72,7 @@
 				<span class="control-label">Data</span>
 				<select bind:value={variant}>
 					<option value="rich">Synthesised (all 3 cohorts populated)</option>
-					<option value="captured">Captured (real DB — only "New this month" has data)</option>
+					<option value="captured">Captured (real DB — only "New in selected window" has data)</option>
 				</select>
 			</label>
 		</div>
@@ -82,7 +82,7 @@
 		<aside class="info">
 			<h2>Cohort definitions (locked, disjoint)</h2>
 			<dl>
-				<dt>New this month</dt>
+				<dt>New in selected window</dt>
 				<dd>First-ever listen falls inside the current window.</dd>
 				<dt>Established</dt>
 				<dd>First-listen older than 30 days, but not (older than 180 days AND lifetime ≥ 5 listens).</dd>
