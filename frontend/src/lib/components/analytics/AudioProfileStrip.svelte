@@ -20,13 +20,15 @@
 	}
 
 	let { profile }: Props = $props();
+
+	const trackCoverage = $derived(profile.track_coverage ?? profile.coverage);
 </script>
 
 <section class="audio glass" aria-label="Audio profile">
 	<header class="head">
 		<span class="eyebrow">Audio profile</span>
 		<span class="coverage">
-			{formatCount(profile.coverage.analyzed)} / {formatCount(profile.coverage.total_listened)} analysed
+			{formatCount(trackCoverage.analyzed)} / {formatCount(trackCoverage.total_listened)} analysed
 		</span>
 	</header>
 

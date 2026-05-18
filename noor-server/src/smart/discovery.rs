@@ -481,10 +481,15 @@ mod tests {
                 completed_listens: 3,
                 unique_tracks: 2,
                 total_listened_ms: 120_000,
+                completion_rate: None,
+                share_of_window_listened_ms: None,
+                previous_rank: None,
+                rank_delta: None,
             }],
             top_genres: vec![AnalyticsGenreShare {
                 genre_name: "Synthwave".to_string(),
                 listens: 5,
+                share_of_window_listens: None,
             }],
             track_genres: HashMap::from([
                 (1, vec!["Electronic > Synthwave".to_string()]),
