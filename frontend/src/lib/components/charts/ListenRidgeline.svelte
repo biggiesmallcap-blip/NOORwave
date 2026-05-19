@@ -66,6 +66,7 @@
 		sigma?: number;
 		/** Backend-supplied amplitude divisor (P95 across all per-row hours). */
 		ridgeAmpMax?: number | null;
+		windowLabel?: string | null;
 	}
 
 	let {
@@ -75,6 +76,7 @@
 		variant = 'default',
 		sigma,
 		ridgeAmpMax = null,
+		windowLabel = null,
 	}: Props = $props();
 
 	/**
@@ -229,6 +231,8 @@
 		return out;
 	});
 	const aggregateTotal = $derived(aggregateHourly.reduce((a, b) => a + b, 0));
+	const rowTotals = $derived(displayRows.map((row) => row.hourly.reduce((sum, n) => sum + n, 0)));
+	const maxRowTotal = $derived(Math.max(0, ...rowTotals));
 	const visualPeakHour = $derived.by<number | null>(() => {
 		if (aggregateTotal === 0) return null;
 		const density = kde1d(aggregateHourly, SPINE_SIGMA, KDE_SAMPLES);
@@ -244,9 +248,23 @@
 	const TIMELINE_TICKS = [0, 6, 12, 18, 24];
 
 	// Layout — hero mode reserves a left column for the spine.
-	const SPINE_WIDTH = $derived(mode === 'hero' ? 140 : 0);
-	const PADDING = $derived.by(() => ({ top: 56, bottom: 40, left: SPINE_WIDTH + 16, right: 24 }));
+	const PADDING = $derived.by(() => ({ top: 56, bottom: 40, left: 32, right: 24 }));
 	const PLOT_HEIGHT = $derived(CHART_HEIGHT - PADDING.top - PADDING.bottom);
+
+	function rowVolumeRatio(index: number): number {
+		if (maxRowTotal <= 0) return 0;
+		return Math.sqrt((rowTotals[index] ?? 0) / maxRowTotal);
+	}
+
+	function rowStrokeOpacity(index: number): number {
+		if ((rowTotals[index] ?? 0) === 0) return 0.32;
+		return 0.42 + rowVolumeRatio(index) * 0.58;
+	}
+
+	function rowTickHalf(index: number): number {
+		if ((rowTotals[index] ?? 0) === 0) return 0;
+		return Math.max(3, Math.min(ROW_SPACING * 0.48, 3 + rowVolumeRatio(index) * 12));
+	}
 
 	// Convert mouse x in plot coords to an hour 0..24 (continuous).
 	function pixelXToHour(px: number, plotWidth: number): number {
@@ -307,46 +325,6 @@
 </script>
 
 <div class="ridgeline" data-mode={mode}>
-	{#if mode === 'hero'}
-		<aside class="spine">
-			{#if variant === 'single-day'}
-				<div class="stat" title={peakHint}>
-					<div class="stat-value">{formatHour(peakHour)}</div>
-					<div class="stat-label">Peak hour</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{formatDuration(heroStats?.longest_session_ms ?? null)}</div>
-					<div class="stat-label">Longest session</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{formatCount(rowsTotalListens(rows))}</div>
-					<div class="stat-label">Listens</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{formatCount(heroStats?.distinct_tracks ?? null)}</div>
-					<div class="stat-label">Tracks</div>
-				</div>
-			{:else}
-				<div class="stat" title={peakHint}>
-					<div class="stat-value">{formatHour(peakHour)}</div>
-					<div class="stat-label">Peak hour</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{heroStats?.rhythm ?? '--'}</div>
-					<div class="stat-label">Rhythm</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{formatPercent(heroStats?.night_share ?? null, { decimals: 0 })}</div>
-					<div class="stat-label">Night</div>
-				</div>
-				<div class="stat">
-					<div class="stat-value">{formatPercent(heroStats?.morning_share ?? null, { decimals: 0 })}</div>
-					<div class="stat-label">Morning</div>
-				</div>
-			{/if}
-		</aside>
-	{/if}
-
 	<div class="chart-wrap">
 		{#if mode === 'hero'}
 			<div class="title-row" aria-hidden="true">
@@ -375,11 +353,28 @@
 
 			<!-- Ridges, top-first so later rows occlude earlier ones (the JD trick). -->
 			<g class="ridges" transform="translate({PADDING.left} {PADDING.top})">
+				<g class="volume-ticks" aria-hidden="true">
+					{#each displayRows as row, i (row.date)}
+						{@const baseY = TOP_HEADROOM + i * ROW_SPACING}
+						{#if rowTotals[i] > 0}
+							<line
+								class="volume-tick"
+								x1={-14}
+								x2={-14}
+								y1={baseY - rowTickHalf(i)}
+								y2={baseY + rowTickHalf(i)}
+								stroke-opacity={rowStrokeOpacity(i)}
+							/>
+						{/if}
+					{/each}
+				</g>
+
 				{#each smoothed as density, i (displayRows[i]?.date ?? i)}
 					{@const baseY = TOP_HEADROOM + i * ROW_SPACING}
 					{@const isEmpty = rowMaxes[i] === 0}
 					<path
 						class:empty={isEmpty}
+						stroke-opacity={rowStrokeOpacity(i)}
 						d={ridgePath(density, baseY, AMP, chartWidth - PADDING.left - PADDING.right, rowMaxes[i])}
 					/>
 				{/each}
@@ -393,32 +388,78 @@
 			</g>
 		</svg>
 
-		{#if hover && hoverDate}
-			<div class="tooltip" role="status" aria-live="polite">
-				{hoverDate} · {formatHour(hover.hour)} · {formatCount(hoverListens)} {hoverListens === 1 ? 'listen' : 'listens'}
-			</div>
-		{/if}
-
-		{#if mode === 'hero'}
-			<p class="caption">
-				Your listening clusters around <em>{formatHour(peakHour)}</em>.
-			</p>
-			{#if sigma === undefined && granularity === 'day'}
-				<div class="sigma-row">
-					<label class="sigma-control" title="KDE bandwidth for the chart — wider smooths spikes into clusters, narrower preserves sharp single-hour peaks. The spine stat uses a fixed bandwidth and is unaffected.">
-						<span class="sigma-label">Smoothing</span>
-						<input
-							type="range"
-							min={SLIDER_MIN}
-							max={SLIDER_MAX}
-							step={SLIDER_STEP}
-							bind:value={userSigma}
-							aria-label="Chart smoothing bandwidth"
-						/>
-						<span class="sigma-value">{userSigma.toFixed(2)}</span>
-					</label>
+		<div class="tooltip-slot">
+			{#if hover && hoverDate}
+				<div class="tooltip" role="status" aria-live="polite">
+					{hoverDate} · {formatHour(hover.hour)} · {formatCount(hoverListens)} {hoverListens === 1 ? 'listen' : 'listens'}
 				</div>
 			{/if}
+		</div>
+
+		{#if mode === 'hero'}
+			<div class="stat-rail" aria-label="Listening pulse summary">
+				{#if variant === 'single-day'}
+					<div class="stat" title={peakHint}>
+						<div class="stat-value">{formatHour(peakHour)}</div>
+						<div class="stat-label">Peak hour</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{formatDuration(heroStats?.longest_session_ms ?? null)}</div>
+						<div class="stat-label">Longest session</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{formatCount(rowsTotalListens(rows))}</div>
+						<div class="stat-label">Listens</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{formatCount(heroStats?.distinct_tracks ?? null)}</div>
+						<div class="stat-label">Tracks</div>
+					</div>
+				{:else}
+					<div class="stat" title={peakHint}>
+						<div class="stat-value">{formatHour(peakHour)}</div>
+						<div class="stat-label">Peak hour</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{heroStats?.rhythm ?? '--'}</div>
+						<div class="stat-label">Rhythm</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{formatPercent(heroStats?.night_share ?? null, { decimals: 0 })}</div>
+						<div class="stat-label">Night</div>
+					</div>
+					<div class="stat">
+						<div class="stat-value">{formatPercent(heroStats?.morning_share ?? null, { decimals: 0 })}</div>
+						<div class="stat-label">Morning</div>
+					</div>
+				{/if}
+			</div>
+
+			<div class="chart-footer">
+				<p class="caption">
+					Your listening clusters around <em>{formatHour(peakHour)}</em>.
+					{#if windowLabel}
+						<span class="window-label">{windowLabel}</span>
+					{/if}
+				</p>
+				<p class="chart-note">Ridge shape is normalized per row; side ticks show volume.</p>
+				{#if sigma === undefined && granularity === 'day'}
+					<div class="sigma-row">
+						<label class="sigma-control" title="KDE bandwidth for the chart - wider smooths spikes into clusters, narrower preserves sharp single-hour peaks. The peak stat uses a fixed bandwidth and is unaffected.">
+							<span class="sigma-label">Smoothing</span>
+							<input
+								type="range"
+								min={SLIDER_MIN}
+								max={SLIDER_MAX}
+								step={SLIDER_STEP}
+								bind:value={userSigma}
+								aria-label="Chart smoothing bandwidth"
+							/>
+							<span class="sigma-value">{userSigma.toFixed(2)}</span>
+						</label>
+					</div>
+				{/if}
+			</div>
 		{/if}
 	</div>
 </div>
@@ -469,7 +510,7 @@
 		   but CHART_HEIGHT stays fixed, so peaks read as smaller relative to the wider
 		   canvas. With the cap, the spine sits on the left and the chart on the right,
 		   total max ~1220px, centred within the card on big displays. */
-		grid-template-columns: auto minmax(0, 1080px);
+		grid-template-columns: minmax(0, 1080px);
 		gap: 0;
 		width: 100%;
 		max-width: 1220px;
@@ -481,19 +522,23 @@
 		grid-template-columns: minmax(0, 1080px);
 	}
 
-	.spine {
-		display: flex;
-		flex-direction: column;
-		justify-content: space-between;
-		padding: var(--space-5) var(--space-5) var(--space-5) var(--space-4);
-		min-width: 132px;
-		align-self: stretch;
+	.stat-rail {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 1px;
+		margin: var(--space-2) 0 0;
+		background: var(--border-subtle);
+		border-radius: var(--radius-sm);
+		overflow: hidden;
 	}
 
 	.stat {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: var(--space-1);
+		min-width: 0;
+		padding: var(--space-3) var(--space-4);
+		background: color-mix(in srgb, var(--instrument-surface) 62%, transparent);
 	}
 
 	.stat-value {
@@ -503,7 +548,7 @@
 		color: var(--text-primary);
 		font-variant-numeric: tabular-nums;
 		line-height: var(--line-height-tight);
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 	}
 
 	.stat-label {
@@ -536,16 +581,27 @@
 		color: var(--text-primary);
 	}
 
+	.chart-footer {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--space-2);
+		margin-top: var(--space-3);
+	}
+
 	.sigma-row {
 		display: flex;
 		justify-content: center;
-		margin-top: var(--space-2);
 	}
 
 	.sigma-control {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--space-2);
+		min-height: var(--space-5);
+		padding: var(--space-1) var(--space-3);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
 		font-family: var(--font-mono);
 		font-size: var(--font-size-2xs);
 		color: var(--text-tertiary);
@@ -560,7 +616,8 @@
 		/* Slider width scales modestly with viewport — wide enough for usable
 		   precision on a 720 px-floor window, narrow enough not to dominate
 		   the chart's footer rhythm at 4K. */
-		width: clamp(112px, 10vw, 160px);
+		width: clamp(140px, 18vw, 220px);
+		min-height: var(--space-4);
 		accent-color: var(--text-secondary);
 		cursor: pointer;
 	}
@@ -588,6 +645,13 @@
 		stroke: var(--border-subtle);
 		stroke-width: 1;
 		stroke-dasharray: 1 3;
+	}
+
+	.volume-tick {
+		stroke: var(--text-primary);
+		stroke-width: 2;
+		stroke-linecap: round;
+		vector-effect: non-scaling-stroke;
 	}
 
 	.ridges path {
@@ -619,23 +683,27 @@
 		pointer-events: none;
 	}
 
+	.tooltip-slot {
+		display: flex;
+		justify-content: flex-end;
+		min-height: var(--space-5);
+		margin-top: calc(-1 * var(--space-3));
+		pointer-events: none;
+	}
+
 	.tooltip {
-		position: absolute;
-		top: 8px;
-		right: 16px;
-		padding: 6px 10px;
+		padding: var(--space-1) var(--space-2);
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-xs);
 		font-family: var(--font-mono);
 		font-size: var(--font-size-2xs);
 		color: var(--text-secondary);
-		pointer-events: none;
 		white-space: nowrap;
 	}
 
 	.caption {
-		margin: var(--space-4) 0 var(--space-2) 0;
+		margin: 0;
 		text-align: center;
 		font-family: var(--font-display);
 		font-style: italic;
@@ -646,6 +714,25 @@
 	.caption em {
 		color: var(--text-primary);
 		font-style: italic;
+	}
+
+	.window-label {
+		display: inline-block;
+		margin-left: var(--space-2);
+		font-family: var(--font-mono);
+		font-size: var(--font-size-2xs);
+		font-style: normal;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-tertiary);
+	}
+
+	.chart-note {
+		margin: 0;
+		font-family: var(--font-body);
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
+		text-align: center;
 	}
 
 	.sr-only {
@@ -660,18 +747,23 @@
 		border: 0;
 	}
 
-	/* Mobile: spine collapses under the ridges as a 2x2 grid. */
 	@media (max-width: 720px) {
 		.ridgeline {
 			grid-template-columns: 1fr;
 		}
 
-		.spine {
-			grid-row: 2;
-			display: grid;
+		.stat-rail {
 			grid-template-columns: 1fr 1fr;
-			gap: var(--space-4);
-			padding-top: var(--space-4);
+		}
+
+		.stat {
+			padding: var(--space-3);
+		}
+
+		.sigma-control {
+			width: 100%;
+			justify-content: center;
+			flex-wrap: wrap;
 		}
 	}
 

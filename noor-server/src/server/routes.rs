@@ -161,6 +161,12 @@ pub struct PlaylistFromQueueRequest {
     include_tidal_only: Option<bool>,
 }
 
+#[derive(Debug)]
+enum PlaylistFromQueueSource {
+    Local(i64),
+    Tidal(tidal_import::ImportTrackMetadata),
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TrackFavoriteRequest {
     track_id: i64,
@@ -8098,6 +8104,132 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+fn non_empty_or_default(value: Option<String>, fallback: &str) -> String {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn optional_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn visible_track_playlist_source(
+    track: &crate::db::models::Track,
+    include_tidal_only: bool,
+) -> Option<PlaylistFromQueueSource> {
+    if track.id > 0 && track.source != "tidal_ephemeral" {
+        if include_tidal_only
+            || (track.source.as_str() != "tidal_stream"
+                && track.source.as_str() != "tidal_ephemeral")
+        {
+            return Some(PlaylistFromQueueSource::Local(track.id));
+        }
+    }
+
+    if !include_tidal_only {
+        return None;
+    }
+
+    track
+        .tidal_id
+        .filter(|tidal_id| *tidal_id > 0)
+        .map(|tidal_id| {
+            PlaylistFromQueueSource::Tidal(tidal_import::ImportTrackMetadata {
+                tidal_id,
+                title: non_empty_or_default(Some(track.title.clone()), "Unknown title"),
+                artist_name: non_empty_or_default(track.artist_name.clone(), "Unknown artist"),
+                album_title: optional_non_empty(track.album_title.clone()),
+                album_artwork_url: track.artwork_url.clone(),
+                duration_ms: track.duration_ms,
+                ..Default::default()
+            })
+        })
+}
+
+fn pending_tidal_playlist_source(
+    pending: crate::PendingEphemeralTidalTrack,
+) -> PlaylistFromQueueSource {
+    PlaylistFromQueueSource::Tidal(tidal_import::ImportTrackMetadata {
+        tidal_id: pending.tidal_track_id,
+        title: non_empty_or_default(Some(pending.title), "Unknown title"),
+        artist_name: non_empty_or_default(pending.artist_name, "Unknown artist"),
+        album_title: optional_non_empty(pending.album_title),
+        album_artwork_url: pending.artwork_url,
+        duration_ms: pending.duration_ms,
+        ..Default::default()
+    })
+}
+
+fn load_persisted_queue_playlist_sources(
+    conn: &rusqlite::Connection,
+    include_tidal_only: bool,
+) -> anyhow::Result<Vec<PlaylistFromQueueSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT q.track_id, q.pending_artist, q.pending_title, q.tidal_id_hint,
+                COALESCE(t.source, '')
+         FROM queue q
+         LEFT JOIN tracks t ON q.track_id = t.id
+         ORDER BY q.position ASC, q.id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<i64>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut sources = Vec::new();
+    for row in rows {
+        let (track_id, pending_artist, pending_title, tidal_id_hint, track_source) = row?;
+        if let Some(track_id) = track_id.filter(|id| *id > 0) {
+            if include_tidal_only
+                || (track_source.as_str() != "tidal_stream"
+                    && track_source.as_str() != "tidal_ephemeral")
+            {
+                sources.push(PlaylistFromQueueSource::Local(track_id));
+            }
+            continue;
+        }
+
+        if include_tidal_only && let Some(tidal_id) = tidal_id_hint.filter(|id| *id > 0) {
+            sources.push(PlaylistFromQueueSource::Tidal(
+                tidal_import::ImportTrackMetadata {
+                    tidal_id,
+                    title: non_empty_or_default(pending_title, "Unknown title"),
+                    artist_name: non_empty_or_default(pending_artist, "Unknown artist"),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    Ok(sources)
+}
+
+async fn resolve_playlist_source_ids(
+    db: &crate::db::Database,
+    sources: Vec<PlaylistFromQueueSource>,
+) -> anyhow::Result<Vec<i64>> {
+    let mut track_ids = Vec::with_capacity(sources.len());
+    for source in sources {
+        match source {
+            PlaylistFromQueueSource::Local(track_id) => track_ids.push(track_id),
+            PlaylistFromQueueSource::Tidal(meta) => {
+                let imported = tidal_import::import_track_from_metadata(db, meta).await?;
+                track_ids.push(imported.local_id);
+            }
+        }
+    }
+    Ok(track_ids)
+}
+
 async fn create_playlist_from_queue(
     State(state): State<SharedState>,
     Json(payload): Json<PlaylistFromQueueRequest>,
@@ -8110,48 +8242,78 @@ async fn create_playlist_from_queue(
         ));
     }
     let include_tidal_only = payload.include_tidal_only.unwrap_or(true);
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            let items = queue::load_queue(conn)?;
-            let track_ids: Vec<i64> = items
+    let (db, current_source, pending_tidal_sources) = {
+        let state = state.read().await;
+        let current = state
+            .ephemeral_tidal_track
+            .as_ref()
+            .or(state.external_playback_track.as_ref())
+            .and_then(|track| visible_track_playlist_source(track, include_tidal_only));
+        let pending = if include_tidal_only {
+            state
+                .pending_tidal_mix_queue
+                .lock()
+                .unwrap()
                 .iter()
-                .filter(|item| {
-                    if include_tidal_only {
-                        true
-                    } else {
-                        // "tidal_stream" / "tidal_ephemeral" sources are tidal-only;
-                        // local + best_source != tidal counts as on-disk.
-                        item.track.source.as_str() != "tidal_stream"
-                            && item.track.source.as_str() != "tidal_ephemeral"
-                    }
-                })
-                .map(|item| item.track.id)
-                .filter(|id| *id > 0)
-                .collect();
+                .cloned()
+                .filter(|pending| pending.tidal_track_id > 0)
+                .map(pending_tidal_playlist_source)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (state.db.clone(), current, pending)
+    };
 
-            // Insert empty playlist row, then bulk-add tracks.
-            conn.execute(
-                "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
-                 VALUES (?1, NULL, 0, 0, 0)",
-                params![name],
-            )?;
-            let playlist_id = conn.last_insert_rowid();
-            let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
-            let playlist = queries::get_playlist(conn, playlist_id)?
-                .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
-            Ok(Json(json!({
-                "playlist": playlist,
-                "added": added,
-            })))
-        })
+    let persisted_sources = db
+        .with_conn(|conn| load_persisted_queue_playlist_sources(conn, include_tidal_only))
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
+                Json(json!({ "error": format!("Failed to read queue: {e}") })),
             )
-        })
+        })?;
+    let mut sources = Vec::new();
+    sources.extend(current_source);
+    sources.extend(persisted_sources);
+    sources.extend(pending_tidal_sources);
+
+    let track_ids = resolve_playlist_source_ids(&db, sources)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to import queued TIDAL tracks: {e}") })),
+            )
+        })?;
+    if track_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Queue has no tracks that can be saved" })),
+        ));
+    }
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+                 VALUES (?1, NULL, 0, 0, 0)",
+            params![name],
+        )?;
+        let playlist_id = conn.last_insert_rowid();
+        let added = queries::add_tracks_to_playlist(conn, playlist_id, &track_ids)?;
+        let playlist = queries::get_playlist(conn, playlist_id)?
+            .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
+        Ok(Json(json!({
+            "playlist": playlist,
+            "added": added,
+        })))
+    })
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })
 }
 
 async fn status() -> Json<Value> {
@@ -13240,6 +13402,147 @@ mod tests {
             })
             .unwrap();
         assert_eq!(hint, None);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn create_playlist_from_queue_imports_pending_tidal_rows_with_hint() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO queue (
+                    track_id, position, source, pending_artist, pending_title, pending_at, tidal_id_hint
+                 ) VALUES (NULL, 0, 'user_queue', 'Queued Artist', 'Queued TIDAL', datetime('now'), 777)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed pending queue row");
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists/from-queue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Saved pending TIDAL","include_tidal_only":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["added"], 1);
+
+        let saved: Vec<(i64, String)> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.tidal_id, t.title
+                     FROM playlist_tracks pt
+                     JOIN playlists p ON p.id = pt.playlist_id
+                     JOIN tracks t ON t.id = pt.track_id
+                     WHERE p.name = 'Saved pending TIDAL'
+                     ORDER BY pt.position ASC",
+                )?;
+                Ok(stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(saved, vec![(777, "Queued TIDAL".to_string())]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn create_playlist_from_queue_imports_ephemeral_tidal_overlay() {
+        let (db, db_path) = fresh_migrated_db();
+        let mut state = fresh_test_state(db.clone());
+        let mut current = test_track(-901, "Current TIDAL");
+        current.tidal_id = Some(901);
+        current.artist_name = Some("Current Artist".to_string());
+        current.album_title = Some("Current Album".to_string());
+        current.source = "tidal_ephemeral".to_string();
+        state.ephemeral_tidal_track = Some(current);
+        {
+            let mut pending = state.pending_tidal_mix_queue.lock().unwrap();
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 902,
+                title: "Next TIDAL".to_string(),
+                artist_name: Some("Next Artist".to_string()),
+                album_title: Some("Next Album".to_string()),
+                artwork_url: Some("https://resources.tidal.com/images/cover.jpg".to_string()),
+                duration_ms: Some(181_000),
+            });
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 903,
+                title: "Third TIDAL".to_string(),
+                artist_name: None,
+                album_title: None,
+                artwork_url: None,
+                duration_ms: None,
+            });
+        }
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists/from-queue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Saved ephemeral TIDAL","include_tidal_only":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["added"], 3);
+
+        let saved: Vec<(i64, String)> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.tidal_id, t.title
+                     FROM playlist_tracks pt
+                     JOIN playlists p ON p.id = pt.playlist_id
+                     JOIN tracks t ON t.id = pt.track_id
+                     WHERE p.name = 'Saved ephemeral TIDAL'
+                     ORDER BY pt.position ASC",
+                )?;
+                Ok(stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(
+            saved,
+            vec![
+                (901, "Current TIDAL".to_string()),
+                (902, "Next TIDAL".to_string()),
+                (903, "Third TIDAL".to_string())
+            ]
+        );
 
         let _ = std::fs::remove_file(db_path);
     }

@@ -68,12 +68,13 @@ export function generateDemoKpis(
 	function dayFor(rangeMean: number, dayOffset: number): DailyKpi {
 		const date = dateNDaysAgo(dayOffset);
 		const off = rand() < spec.offDayProb;
-		if (off) return { day: date, listens: 0, listened_ms: 0, completed: 0 };
+		if (off) return { day: date, listens: 0, listened_ms: 0, completed: 0, sessions: 0 };
 		const listens = Math.max(0, Math.round(gaussian(rand, rangeMean, spec.dailySd)));
 		const completionToday = Math.max(0.1, Math.min(0.97, gaussian(rand, spec.completionMean, spec.completionSd)));
 		const completed = Math.round(listens * completionToday);
 		const listened_ms = Math.round(listens * spec.avgTrackMs * (0.5 + rand() * 1.1));
-		return { day: date, listens, listened_ms, completed };
+		const sessions = listens === 0 ? 0 : Math.max(1, Math.ceil(listens / 32));
+		return { day: date, listens, listened_ms, completed, sessions };
 	}
 
 	// Current window: days 0..days-1 (today first)
@@ -87,8 +88,7 @@ export function generateDemoKpis(
 		const listens = rows.reduce((s, r) => s + r.listens, 0);
 		const listened_ms = rows.reduce((s, r) => s + r.listened_ms, 0);
 		const completed = rows.reduce((s, r) => s + r.completed, 0);
-		// Sessions ≈ active days × 1.4 (rough: listeners typically have ~1-2 sessions/day).
-		const sessions = rows.filter((r) => r.listens > 0).length * 1 + Math.floor(rows.reduce((s, r) => s + r.listens, 0) / 24);
+		const sessions = rows.reduce((s, r) => s + (r.sessions ?? 0), 0);
 		const completionRatio = listens === 0 ? null : completed / listens;
 		return { listens, listened_ms, completed, sessions, completionRatio };
 	};

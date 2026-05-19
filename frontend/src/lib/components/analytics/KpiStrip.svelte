@@ -26,7 +26,7 @@
 	// out so the silhouette reflects active-day variation only — and so the two
 	// series are honest visual inverses (skip = 1 - completion).
 	const listenedMsSeries = $derived(kpis.daily.map((d) => d.listened_ms));
-	const listensSeries = $derived(kpis.daily.map((d) => d.listens));
+	const sessionsSeries = $derived(kpis.daily.map((d) => d.sessions ?? 0));
 	const activeDays = $derived(kpis.daily.filter((d) => d.listens > 0));
 	const completionSeries = $derived(activeDays.map((d) => d.completed / d.listens));
 	const skipSeries = $derived(activeDays.map((d) => 1 - d.completed / d.listens));
@@ -45,7 +45,7 @@
 		value={formatCount(kpis.sessions.current)}
 		current={kpis.sessions.current}
 		previous={kpis.sessions.previous}
-		series={listensSeries}
+		series={sessionsSeries}
 	/>
 	<KpiCell
 		label="Completion"
@@ -60,6 +60,7 @@
 		current={kpis.skip_rate.current}
 		previous={kpis.skip_rate.previous}
 		series={skipSeries}
+		polarity="inverse"
 	/>
 </div>
 

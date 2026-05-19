@@ -17,7 +17,7 @@
 		AnalyticsTopTrack,
 		AnalyticsGenreShare,
 	} from '$lib/api/client';
-	import { formatCount, formatDuration } from '$lib/utils/format';
+	import { formatCount, formatDuration, formatPercent } from '$lib/utils/format';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu, type MenuTrack } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -48,7 +48,6 @@
 	const genres = $derived(
 		kind === 'genre' ? (items as AnalyticsGenreShare[]).slice(0, limit) : [],
 	);
-	const genreTotal = $derived(genres.reduce((s, g) => s + g.listens, 0));
 
 	function trackMenuTrack(t: AnalyticsTopTrack): MenuTrack {
 		return {
@@ -90,9 +89,8 @@
 		return String(i + 1).padStart(2, '0');
 	}
 
-	function genrePct(listens: number): string {
-		if (genreTotal <= 0) return '--';
-		return `${Math.round((listens / genreTotal) * 100)}%`;
+	function genrePct(genre: AnalyticsGenreShare): string {
+		return formatPercent(genre.share_of_window_listens ?? null, { decimals: 0 });
 	}
 
 	const isEmpty = $derived(
@@ -153,7 +151,7 @@
 				<li class="row genre-row">
 					<span class="idx">{indexLabel(i)}</span>
 					<span class="primary" title={g.genre_name}>{g.genre_name}</span>
-					<span class="value">{genrePct(g.listens)}</span>
+					<span class="value">{genrePct(g)}</span>
 				</li>
 			{/each}
 		</ol>
