@@ -3091,13 +3091,13 @@ async fn eager_and_lazy_resolve_for_list(
         let db_lazy = db.clone();
         let concurrency = resolve_cfg.bulk_concurrency;
         tokio::spawn(async move {
-            let outcomes = resolver::resolve_many(&client, &lazy_owned, concurrency).await;
-            let _ = db_lazy.with_conn(|conn| {
-                for (id, outcome) in &outcomes {
-                    persist_outcome(conn, id, outcome);
-                }
-                Ok::<_, anyhow::Error>(())
-            });
+            for batch in background_resolution_batches(&lazy_owned, concurrency) {
+                let outcomes = resolver::resolve_many(&client, &batch, concurrency).await;
+                let _ = db_lazy.with_conn(|conn| {
+                    persist_outcomes(conn, &outcomes);
+                    Ok::<_, anyhow::Error>(())
+                });
+            }
         });
     }
 
@@ -3177,17 +3177,39 @@ async fn spawn_background_resolve_for_list(
             tokens.access_token.clone(),
             tokens.country_code.clone(),
         );
-        let outcomes =
-            resolver::resolve_many(&client, &needs_resolve, resolve_cfg.bulk_concurrency).await;
-        let _ = db.with_conn(|conn| {
-            for (id, outcome) in &outcomes {
-                persist_outcome(conn, id, outcome);
-            }
-            Ok::<_, anyhow::Error>(())
-        });
+        let concurrency = resolve_cfg.bulk_concurrency;
+        for batch in background_resolution_batches(&needs_resolve, concurrency) {
+            let outcomes = resolver::resolve_many(&client, &batch, concurrency).await;
+            let _ = db.with_conn(|conn| {
+                persist_outcomes(conn, &outcomes);
+                Ok::<_, anyhow::Error>(())
+            });
+        }
     });
 
     pending_ids
+}
+
+fn background_resolution_batches(
+    tracks: &[(String, crate::services::sportify::models::SportifyTrack)],
+    max_batch_size: usize,
+) -> Vec<Vec<(String, crate::services::sportify::models::SportifyTrack)>> {
+    tracks
+        .chunks(max_batch_size.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn persist_outcomes(
+    conn: &rusqlite::Connection,
+    outcomes: &[(
+        String,
+        crate::services::sportify::resolver::ResolutionOutcome,
+    )],
+) {
+    for (id, outcome) in outcomes {
+        persist_outcome(conn, id, outcome);
+    }
 }
 
 fn persist_outcome(
@@ -12448,6 +12470,30 @@ mod tests {
             Ok::<_, anyhow::Error>(())
         })
         .expect("seed spotify stats track");
+    }
+
+    #[test]
+    fn background_resolution_batches_are_bounded_by_concurrency() {
+        let inputs: Vec<(String, crate::services::sportify::models::SportifyTrack)> = (0..13)
+            .map(|i| {
+                (
+                    format!("sp-{i}"),
+                    crate::services::sportify::models::SportifyTrack {
+                        id: Some(format!("sp-{i}")),
+                        name: Some(format!("Track {i}")),
+                        artist: Some("Artist".to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let batches = background_resolution_batches(&inputs, 6);
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), 6);
+        assert_eq!(batches[1].len(), 6);
+        assert_eq!(batches[2].len(), 1);
     }
 
     #[tokio::test]
