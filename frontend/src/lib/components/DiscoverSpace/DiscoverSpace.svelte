@@ -200,6 +200,7 @@
 		// Build lookups
 		const nodeMap  = new Map(nodes.map((n) => [n.trackId, n]));
 		const seedNode = seedTrackId != null ? nodeMap.get(seedTrackId) : null;
+		const seedNodes = nodes.filter((n) => n.isSeed);
 		const playingNode = currentTrackId != null ? nodeMap.get(currentTrackId) : null;
 
 		const routeTrackIds = new Set(route.map((s) => s.trackId));
@@ -219,7 +220,7 @@
 		drawBackground(ctx, w, h, prefersReducedMotion);
 		drawVisitedRegions(ctx, regions, camera, w, h);
 		// Orbit rings behind everything — visual guide for distance tiers
-		if (seedNode) drawOrbitRings(ctx, camera, w, h);
+		if (seedNode || seedNodes.length > 0) drawOrbitRings(ctx, camera, w, h);
 		drawGenreNebulae(ctx, nodes, camera, w, h, lens);
 		drawEdges(ctx, edges, nodeMap, camera, w, h, camera.zoom, seedTrackId, hoveredId, selectedId, routeTrackIds);
 		drawNodes(ctx, nodes, camera, w, h, lens, hoveredId, selectedId, connectedIds, tick, prefersReducedMotion, routeTrackIds);
@@ -229,6 +230,10 @@
 		}
 		if (seedNode) {
 			drawSeedNode(ctx, seedNode, camera, w, h, isLocked, tick, prefersReducedMotion);
+		}
+		for (const blendSeed of seedNodes) {
+			if (seedNode && blendSeed.trackId === seedNode.trackId) continue;
+			drawSeedNode(ctx, blendSeed, camera, w, h, isLocked, tick, prefersReducedMotion);
 		}
 
 		// Selection ripple (one-shot, 750ms)

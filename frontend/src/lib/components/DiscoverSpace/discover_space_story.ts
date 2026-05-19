@@ -89,6 +89,7 @@ export const SOURCE_LABELS = {
 	library: 'Your library',
 	lastfm: 'Last.fm',
 	engine: 'Discovery engine',
+	external: 'External discovery',
 	mixed: 'Mixed',
 };
 

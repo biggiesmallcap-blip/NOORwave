@@ -75,6 +75,8 @@ function normalizeSource(raw?: string): DiscoverSource {
 			return 'lastfm';
 		case 'engine':
 			return 'engine';
+		case 'external':
+			return 'external';
 		case 'mixed':
 			return 'mixed';
 		default:
@@ -205,6 +207,8 @@ export function adaptNode(
 		durationMs: api.duration_ms,
 		playable: playableFromApiNode(api),
 		source,
+		role: api.role ?? (isSeedNode ? 'seed' : api.is_in_library ? 'library_guide' : 'external_candidate'),
+		playability: api.playability ?? (api.is_in_library ? 'playable' : api.track_id > 0 ? 'resolvable' : 'pending'),
 		isInLibrary: api.is_in_library,
 		isColdStart,
 		topGenre: api.top_genre,
@@ -221,6 +225,11 @@ export function adaptNode(
 		inDegreePctile,
 		primaryReason,
 		reasonTags,
+		perSeedScores: api.per_seed_scores ?? [],
+		coverageBonus: api.coverage_bonus ?? 0,
+		externalBonus: api.external_bonus ?? 0,
+		libraryPenalty: api.library_penalty ?? 0,
+		finalBlendScore: api.final_blend_score,
 		isSeed: isSeedNode,
 		isPlaying: api.track_id === currentTrackId,
 		inPlaylistBuilder: false,
@@ -273,5 +282,4 @@ export function adaptResponse(
 	const edges = (data.edges ?? []).map(adaptEdge);
 	return { nodes, edges };
 }
-
 

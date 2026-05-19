@@ -10,8 +10,9 @@
 		node: DiscoverTrackNode | null;
 		seedNode?: DiscoverTrackNode | null;
 		onAddToPlaylist?: (node: DiscoverTrackNode) => void;
+		onAddToBlend?: (node: DiscoverTrackNode) => void;
 	}
-	let { node, seedNode = null, onAddToPlaylist }: Props = $props();
+	let { node, seedNode = null, onAddToPlaylist, onAddToBlend }: Props = $props();
 
 	let isStartingRadio = $state(false);
 	let isHiding = $state(false);
@@ -169,6 +170,11 @@
 		onAddToPlaylist?.(node);
 	}
 
+	function handleAddToBlend() {
+		if (!node) return;
+		onAddToBlend?.(node);
+	}
+
 	async function handleHideFromRadio() {
 		if (!node || isHiding) return;
 		isHiding = true;
@@ -305,6 +311,14 @@
 				aria-label="{node.inPlaylistBuilder ? 'Remove from' : 'Add to'} playlist"
 			>
 				{node.inPlaylistBuilder ? '★ In playlist' : SIDE_PANEL_ACTIONS.addToPlaylist}
+			</button>
+			<button
+				class="action-btn"
+				onclick={handleAddToBlend}
+				disabled={$discoverSpaceStore.blendSeeds.length >= 4}
+				aria-label="Add {node.title} to blend"
+			>
+				Add to blend
 			</button>
 			<button
 				class="action-btn destructive"
