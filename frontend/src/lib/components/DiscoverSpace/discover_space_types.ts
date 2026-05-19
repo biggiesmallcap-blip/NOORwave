@@ -2,7 +2,7 @@ import type { PlayableTrack } from '$lib/player/playable';
 
 // All TypeScript types for the DiscoverSpace visualization.
 
-export type DiscoverSource = 'library' | 'lastfm' | 'engine' | 'mixed';
+export type DiscoverSource = 'library' | 'lastfm' | 'engine' | 'external' | 'mixed';
 
 export type DiscoverReason =
 	| 'harmonic'
@@ -19,6 +19,33 @@ export type DiscoverLens = 'energy' | 'reason' | 'confidence' | 'source' | 'genr
 
 export type RadioMode = 'radio' | 'explore' | 'harmonic' | 'energy_arc';
 
+export type DiscoverRole = 'seed' | 'external_candidate' | 'library_guide' | 'route';
+export type DiscoverPlayability = 'playable' | 'resolvable' | 'pending' | 'unavailable';
+export type DiscoverBlendSeedKind = 'library' | 'tidal' | 'pending';
+
+export interface DiscoverBlendSeed {
+	kind: DiscoverBlendSeedKind;
+	identity: string;
+	track_id?: number | null;
+	tidal_id?: number | null;
+	artist?: string | null;
+	title?: string | null;
+	weight?: number | null;
+}
+
+export interface DiscoverBlendHealth {
+	playable_external_count: number;
+	pending_external_count: number;
+	library_guide_count: number;
+	coverage_ratio: number;
+}
+
+export interface DiscoverBlendSeedScore {
+	seed_identity: string;
+	seed_track_id?: number | null;
+	score: number;
+}
+
 export interface DiscoverTrackNode {
 	// Identity
 	id: string;                        // "track-${track_id}"
@@ -32,6 +59,8 @@ export interface DiscoverTrackNode {
 
 	// Source
 	source: DiscoverSource;
+	role: DiscoverRole;
+	playability: DiscoverPlayability;
 	isInLibrary: boolean;
 	isColdStart: boolean;
 
@@ -56,6 +85,11 @@ export interface DiscoverTrackNode {
 	// Reasoning
 	primaryReason: DiscoverReason;
 	reasonTags: DiscoverReason[];
+	perSeedScores: DiscoverBlendSeedScore[];
+	coverageBonus: number;
+	externalBonus: number;
+	libraryPenalty: number;
+	finalBlendScore?: number;
 
 	// State flags (client-derived)
 	isSeed: boolean;
@@ -129,6 +163,8 @@ export interface ApiDiscoveryNode {
 	artwork_url?: string;
 	duration_ms?: number;
 	source?: string;
+	role?: DiscoverRole;
+	playability?: DiscoverPlayability;
 	is_in_library: boolean;
 	is_cold_start?: boolean;
 	top_genre?: string;
@@ -146,6 +182,11 @@ export interface ApiDiscoveryNode {
 	candidate_in_degree_percentile?: number;
 	primary_reason?: string;
 	reason_tags?: string[];
+	per_seed_scores?: DiscoverBlendSeedScore[];
+	coverage_bonus?: number;
+	external_bonus?: number;
+	library_penalty?: number;
+	final_blend_score?: number;
 	is_seed?: boolean;
 	layout?: {
 		x?: number;
@@ -176,6 +217,8 @@ export interface ApiDiscoveryResponse {
 	tracks: ApiDiscoveryNode[];
 	edges: ApiDiscoveryEdge[];
 	seed_track_id?: number;
+	blend_seeds?: DiscoverBlendSeed[];
+	health?: DiscoverBlendHealth;
 	generated_at?: string;
 	diagnostics?: {
 		node_count: number;

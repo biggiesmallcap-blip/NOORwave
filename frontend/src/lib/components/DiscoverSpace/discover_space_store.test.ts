@@ -9,7 +9,14 @@ vi.mock('$lib/api/client', () => ({
 	authFetch: (...args: unknown[]) => authFetchMock(...args),
 }));
 
-import { discoverSpaceStore, loadSpace } from './discover_space_store';
+import {
+	addBlendSeed,
+	clearBlend,
+	discoverSpaceStore,
+	loadSpace,
+	normalizeBlendSeeds,
+	removeBlendSeed,
+} from './discover_space_store';
 
 function deferredJson(seedId: number) {
 	let resolve!: (v: unknown) => void;
@@ -48,6 +55,10 @@ describe('loadSpace', () => {
 			activeSeedSource: null,
 			lastDiagnostics: null,
 			refreshProgress: null,
+			blendSeeds: [],
+			blendHealth: null,
+			blendLoading: false,
+			blendError: null,
 		});
 	});
 
@@ -83,5 +94,101 @@ describe('loadSpace', () => {
 		await p1;
 
 		expect(get(discoverSpaceStore).activeSeedId).toBe(222);
+	});
+
+	test('normalizeBlendSeeds removes duplicates and assigns equal weights', () => {
+		const seeds = normalizeBlendSeeds([
+			{ kind: 'library', identity: 'library:1', track_id: 1 },
+			{ kind: 'library', identity: 'library:1', track_id: 1 },
+			{ kind: 'library', identity: 'library:2', track_id: 2 },
+		]);
+
+		expect(seeds).toHaveLength(2);
+		expect(seeds[0]?.weight).toBeCloseTo(0.5);
+		expect(seeds[1]?.weight).toBeCloseTo(0.5);
+	});
+
+	test('blend seed add remove and clear update store state', () => {
+		addBlendSeed({
+			id: 'track-10',
+			trackId: 10,
+			title: 'Seed A',
+			artist: 'Artist',
+			playable: {
+				kind: 'library',
+				track_id: 10,
+				track: {} as any,
+			},
+			source: 'library',
+			role: 'library_guide',
+			playability: 'playable',
+			isInLibrary: true,
+			isColdStart: false,
+			genres: [],
+			score: 1,
+			confidence: 1,
+			supportCount: 0,
+			inDegree: 0,
+			inDegreePctile: 0,
+			primaryReason: 'unknown',
+			reasonTags: [],
+			perSeedScores: [],
+			coverageBonus: 0,
+			externalBonus: 0,
+			libraryPenalty: 0,
+			isSeed: false,
+			isPlaying: false,
+			inPlaylistBuilder: false,
+			isRouteOnly: false,
+			x: 0,
+			y: 0,
+			vx: 0,
+			vy: 0,
+			radius: 10,
+		});
+		expect(get(discoverSpaceStore).blendSeeds).toHaveLength(1);
+
+		removeBlendSeed('library:10');
+		expect(get(discoverSpaceStore).blendSeeds).toHaveLength(0);
+
+		addBlendSeed({
+			id: 'track-11',
+			trackId: 11,
+			title: 'Seed B',
+			artist: 'Artist',
+			playable: {
+				kind: 'library',
+				track_id: 11,
+				track: {} as any,
+			},
+			source: 'library',
+			role: 'library_guide',
+			playability: 'playable',
+			isInLibrary: true,
+			isColdStart: false,
+			genres: [],
+			score: 1,
+			confidence: 1,
+			supportCount: 0,
+			inDegree: 0,
+			inDegreePctile: 0,
+			primaryReason: 'unknown',
+			reasonTags: [],
+			perSeedScores: [],
+			coverageBonus: 0,
+			externalBonus: 0,
+			libraryPenalty: 0,
+			isSeed: false,
+			isPlaying: false,
+			inPlaylistBuilder: false,
+			isRouteOnly: false,
+			x: 0,
+			y: 0,
+			vx: 0,
+			vy: 0,
+			radius: 10,
+		});
+		clearBlend();
+		expect(get(discoverSpaceStore).blendSeeds).toHaveLength(0);
 	});
 });

@@ -3,7 +3,8 @@
 
 import { get, writable } from 'svelte/store';
 import { getApiBase, authFetch } from '$lib/api/client';
-import { currentTrack } from '$lib/stores/player';
+import { currentTrack, hydratePlayback } from '$lib/stores/player';
+import { showToast } from '$lib/stores/toast';
 import { adaptResponse } from './discover_space_adapter';
 import type {
 	DiscoverTrackNode,
@@ -13,6 +14,8 @@ import type {
 	VisitedRegion,
 	RadioMode,
 	ApiDiscoveryResponse,
+	DiscoverBlendSeed,
+	DiscoverBlendHealth,
 } from './discover_space_types';
 
 // In-flight guard. Each loadSpace call increments `loadSpaceSeq` and aborts
@@ -21,6 +24,8 @@ import type {
 // recognised by its mismatched seq and dropped without touching the store.
 let loadSpaceSeq = 0;
 let loadSpaceAborter: AbortController | null = null;
+let loadBlendSeq = 0;
+let loadBlendAborter: AbortController | null = null;
 
 interface DiscoverSpaceState {
 	mode: RadioMode;
@@ -36,6 +41,10 @@ interface DiscoverSpaceState {
 	activeSeedSource: 'locked' | 'playing' | null;
 	lastDiagnostics: ApiDiscoveryResponse['diagnostics'] | null;
 	refreshProgress: { stage: string; progress: number } | null;
+	blendSeeds: DiscoverBlendSeed[];
+	blendHealth: DiscoverBlendHealth | null;
+	blendLoading: boolean;
+	blendError: string | null;
 }
 
 export const discoverSpaceStore = writable<DiscoverSpaceState>({
@@ -52,7 +61,107 @@ export const discoverSpaceStore = writable<DiscoverSpaceState>({
 	activeSeedSource: null,
 	lastDiagnostics: null,
 	refreshProgress: null,
+	blendSeeds: [],
+	blendHealth: null,
+	blendLoading: false,
+	blendError: null,
 });
+
+function blendSeedIdentity(seed: DiscoverBlendSeed): string {
+	if (seed.kind === 'library') return `library:${seed.track_id ?? 0}`;
+	if (seed.kind === 'tidal') return `tidal:${seed.tidal_id ?? 0}`;
+	return `pending:${(seed.artist ?? '').trim().toLowerCase()}:${(seed.title ?? '').trim().toLowerCase()}`;
+}
+
+export function normalizeBlendSeeds(seeds: DiscoverBlendSeed[]): DiscoverBlendSeed[] {
+	const seen = new Set<string>();
+	const unique = seeds
+		.map((seed) => ({ ...seed, identity: seed.identity || blendSeedIdentity(seed) }))
+		.filter((seed) => {
+			if (seen.has(seed.identity)) return false;
+			seen.add(seed.identity);
+			return true;
+		})
+		.slice(0, 4);
+	const weight = unique.length > 0 ? 1 / unique.length : 0;
+	return unique.map((seed) => ({ ...seed, weight }));
+}
+
+export function blendSeedFromNode(node: DiscoverTrackNode): DiscoverBlendSeed {
+	if (node.isInLibrary && node.trackId > 0) {
+		return {
+			kind: 'library',
+			identity: `library:${node.trackId}`,
+			track_id: node.trackId,
+			title: node.title,
+			artist: node.artist,
+		};
+	}
+	const tidalId = node.playable.kind === 'tidal'
+		? node.playable.tidal_id
+		: node.playability === 'resolvable' && node.trackId > 0
+			? node.trackId
+			: null;
+	if (tidalId != null && tidalId > 0) {
+		return {
+			kind: 'tidal',
+			identity: `tidal:${tidalId}`,
+			tidal_id: tidalId,
+			title: node.title,
+			artist: node.artist,
+		};
+	}
+	return {
+		kind: 'pending',
+		identity: `pending:${node.artist.trim().toLowerCase()}:${node.title.trim().toLowerCase()}`,
+		title: node.title,
+		artist: node.artist,
+	};
+}
+
+export function addBlendSeed(node: DiscoverTrackNode): void {
+	discoverSpaceStore.update((s) => ({
+		...s,
+		blendSeeds: normalizeBlendSeeds([...s.blendSeeds, blendSeedFromNode(node)]),
+		blendError: null,
+	}));
+}
+
+export function removeBlendSeed(identity: string): void {
+	discoverSpaceStore.update((s) => {
+		const nextSeeds = normalizeBlendSeeds(s.blendSeeds.filter((seed) => seed.identity !== identity));
+		return {
+			...s,
+			blendSeeds: nextSeeds,
+			blendHealth: nextSeeds.length < 2 ? null : s.blendHealth,
+		};
+	});
+}
+
+export function clearBlend(): void {
+	loadBlendAborter?.abort();
+	discoverSpaceStore.update((s) => ({
+		...s,
+		blendSeeds: [],
+		blendHealth: null,
+		blendLoading: false,
+		blendError: null,
+	}));
+}
+
+function blendRequestBody(seeds: DiscoverBlendSeed[], limit = 100) {
+	return JSON.stringify({
+		seeds: seeds.map(({ kind, track_id, tidal_id, artist, title, weight }) => ({
+			kind,
+			track_id,
+			tidal_id,
+			artist,
+			title,
+			weight,
+		})),
+		limit,
+	});
+}
 
 export async function loadSpace(
 	mode: RadioMode,
@@ -130,6 +239,136 @@ export async function loadSpace(
 		console.error('[discoverspace/store] loadSpace failed:', msg);
 		discoverSpaceStore.update((s) => ({ ...s, loading: false, error: msg }));
 	}
+}
+
+export async function loadBlendSpace(currentTrackId: number | null): Promise<void> {
+	const seeds = get(discoverSpaceStore).blendSeeds;
+	if (seeds.length === 0) return;
+	loadBlendAborter?.abort();
+	const aborter = new AbortController();
+	loadBlendAborter = aborter;
+	const seq = ++loadBlendSeq;
+
+	discoverSpaceStore.update((s) => ({
+		...s,
+		blendLoading: true,
+		blendError: null,
+		loading: true,
+		activeSeedId: null,
+		activeSeedSource: null,
+	}));
+
+	try {
+		const apiBase = getApiBase();
+		const response = await authFetch(`${apiBase}/api/discovery/blend/space`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: blendRequestBody(seeds),
+			signal: aborter.signal,
+		});
+		if (seq !== loadBlendSeq) return;
+		if (!response.ok) throw new Error(`Blend space request failed: ${response.status}`);
+		const data: ApiDiscoveryResponse = await response.json();
+		if (seq !== loadBlendSeq) return;
+		const { nodes, edges } = adaptResponse(data, currentTrackId, null);
+		discoverSpaceStore.update((s) => ({
+			...s,
+			nodes,
+			edges,
+			radioRoute: [],
+			loading: false,
+			blendLoading: false,
+			blendHealth: data.health ?? null,
+			lastDiagnostics: data.diagnostics ?? null,
+		}));
+	} catch (e) {
+		if (e instanceof DOMException && e.name === 'AbortError') return;
+		if (seq !== loadBlendSeq) return;
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		console.error('[discoverspace/store] loadBlendSpace failed:', msg);
+		discoverSpaceStore.update((s) => ({
+			...s,
+			loading: false,
+			blendLoading: false,
+			blendError: msg,
+			error: msg,
+		}));
+	}
+}
+
+function playableBlendNodes(nodes: DiscoverTrackNode[]): DiscoverTrackNode[] {
+	return nodes
+		.filter((node) =>
+			node.role !== 'seed'
+			&& (node.playability === 'playable' || node.playability === 'resolvable')
+		)
+		.sort((a, b) => (b.finalBlendScore ?? b.score) - (a.finalBlendScore ?? a.score));
+}
+
+async function runBlendQueueAction(
+	endpoint: 'add' | 'play' | 'radio',
+	currentTrackId: number | null
+): Promise<void> {
+	const state = get(discoverSpaceStore);
+	const seeds = state.blendSeeds;
+	if (seeds.length === 0) return;
+	const ranked = playableBlendNodes(state.nodes);
+	if (ranked.length === 0 && endpoint !== 'add') {
+		showToast('No playable blend discoveries yet', 'info');
+		return;
+	}
+	discoverSpaceStore.update((s) => ({ ...s, blendLoading: true, blendError: null }));
+	try {
+		const apiBase = getApiBase();
+		const response = await authFetch(`${apiBase}/api/discovery/blend/${endpoint}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: blendRequestBody(seeds),
+		});
+		if (!response.ok) throw new Error(`Blend action failed: ${response.status}`);
+		const result = await response.json();
+		if (result.state && result.queue) {
+			hydratePlayback({ state: result.state, queue: result.queue });
+		}
+		if (endpoint === 'play' || endpoint === 'radio') {
+			const route = ranked.slice(0, 16).map((node, index) => ({
+				trackId: node.trackId,
+				reason: node.primaryReason,
+				stepIndex: index,
+				isCurrent: node.trackId === currentTrackId,
+			}));
+			discoverSpaceStore.update((s) => ({ ...s, radioRoute: route }));
+		}
+		showToast(
+			endpoint === 'add'
+				? 'Added blend discoveries'
+				: endpoint === 'play'
+					? 'Playing blend discoveries'
+					: 'Blend radio started',
+			'success'
+		);
+		discoverSpaceStore.update((s) => ({
+			...s,
+			blendLoading: false,
+			blendHealth: result.health ?? s.blendHealth,
+		}));
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		discoverSpaceStore.update((s) => ({ ...s, blendLoading: false, blendError: msg }));
+		showToast('Blend action failed', 'error');
+	}
+}
+
+export function addBlendDiscoveries(): Promise<void> {
+	return runBlendQueueAction('add', get(currentTrack)?.id ?? null);
+}
+
+export function playBlendDiscoveries(): Promise<void> {
+	return runBlendQueueAction('play', get(currentTrack)?.id ?? null);
+}
+
+export function makeBlendRadio(): Promise<void> {
+	return runBlendQueueAction('radio', get(currentTrack)?.id ?? null);
 }
 
 export function lockSeed(trackId: number): void {

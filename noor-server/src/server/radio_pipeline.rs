@@ -50,9 +50,9 @@ pub fn build_radio_queue_from_candidates_with_seed(
     for c in &pending_cands {
         tx.execute(
             "INSERT INTO queue (track_id, position, source, reason,
-                                pending_artist, pending_title, pending_at)
-             VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'))",
-            rusqlite::params![pos, c.reason, c.artist_name, c.title],
+                                pending_artist, pending_title, pending_at, tidal_id_hint)
+             VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'), ?5)",
+            rusqlite::params![pos, c.reason, c.artist_name, c.title, c.tidal_track_id],
         )?;
         pos += 1;
     }
@@ -71,6 +71,57 @@ pub fn build_radio_queue_from_candidates_with_seed(
         .prepare("SELECT id FROM queue WHERE track_id IS NULL AND pending_at IS NOT NULL")?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(RadioQueueBuild {
+        first_item,
+        pending_item_ids,
+    })
+}
+
+pub fn append_radio_queue_from_candidates(
+    conn: &rusqlite::Connection,
+    candidates: Vec<RadioCandidate>,
+) -> rusqlite::Result<RadioQueueBuild> {
+    let (library_cands, pending_cands): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| c.is_in_library && c.track_id > 0);
+
+    let tx = conn.unchecked_transaction()?;
+    let mut pos: i32 = tx.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM queue",
+        [],
+        |row| row.get(0),
+    )?;
+
+    for c in &library_cands {
+        tx.execute(
+            "INSERT INTO queue (track_id, position, source, reason) VALUES (?1, ?2, 'radio', ?3)",
+            rusqlite::params![c.track_id, pos, c.reason],
+        )?;
+        pos += 1;
+    }
+
+    let mut pending_item_ids = Vec::new();
+    for c in &pending_cands {
+        tx.execute(
+            "INSERT INTO queue (track_id, position, source, reason,
+                                pending_artist, pending_title, pending_at, tidal_id_hint)
+             VALUES (NULL, ?1, 'radio_pending', ?2, ?3, ?4, datetime('now'), ?5)",
+            rusqlite::params![pos, c.reason, c.artist_name, c.title, c.tidal_track_id],
+        )?;
+        pending_item_ids.push(tx.last_insert_rowid());
+        pos += 1;
+    }
+
+    tx.commit()?;
+
+    let first_item: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, track_id FROM queue ORDER BY position ASC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
 
     Ok(RadioQueueBuild {
         first_item,
@@ -129,6 +180,13 @@ mod tests {
         }
     }
 
+    fn tidal_candidate(tidal_track_id: i64, artist_name: &str, title: &str) -> RadioCandidate {
+        RadioCandidate {
+            tidal_track_id: Some(tidal_track_id),
+            ..candidate(0, false, artist_name, title)
+        }
+    }
+
     #[test]
     fn optional_seed_builds_queue_from_candidates_without_seed_row() {
         let conn = conn_with_queue();
@@ -150,5 +208,81 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn pending_external_candidate_preserves_tidal_hint() {
+        let conn = conn_with_queue();
+
+        build_radio_queue_from_candidates_with_seed(
+            &conn,
+            None,
+            vec![tidal_candidate(9001, "External Artist", "External Track")],
+        )
+        .unwrap();
+
+        let hint: Option<i64> = conn
+            .query_row(
+                "SELECT tidal_id_hint FROM queue WHERE position = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hint, Some(9001));
+    }
+
+    #[test]
+    fn append_candidates_preserves_existing_queue_rows() {
+        let conn = conn_with_queue();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (42, 0, 'user_queue')",
+            [],
+        )
+        .unwrap();
+
+        let build = append_radio_queue_from_candidates(
+            &conn,
+            vec![tidal_candidate(9002, "External Artist", "External Track")],
+        )
+        .unwrap();
+
+        assert_eq!(build.first_item, Some((1, Some(42))));
+        assert_eq!(build.pending_item_ids, vec![2]);
+        let rows: Vec<(i32, Option<i64>, Option<i64>)> = conn
+            .prepare("SELECT position, track_id, tidal_id_hint FROM queue ORDER BY position ASC")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows, vec![(0, Some(42), None), (1, None, Some(9002))]);
+    }
+
+    #[test]
+    fn replace_candidates_clears_existing_queue_rows() {
+        let conn = conn_with_queue();
+        conn.execute(
+            "INSERT INTO queue (track_id, position, source) VALUES (42, 0, 'user_queue')",
+            [],
+        )
+        .unwrap();
+
+        let build = build_radio_queue_from_candidates_with_seed(
+            &conn,
+            None,
+            vec![tidal_candidate(9003, "External Artist", "External Track")],
+        )
+        .unwrap();
+
+        assert_eq!(build.first_item, Some((2, None)));
+        assert_eq!(build.pending_item_ids, vec![2]);
+        let rows: Vec<(i32, Option<i64>, Option<i64>)> = conn
+            .prepare("SELECT position, track_id, tidal_id_hint FROM queue ORDER BY position ASC")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows, vec![(0, None, Some(9003))]);
     }
 }

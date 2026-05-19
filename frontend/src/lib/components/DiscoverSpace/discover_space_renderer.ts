@@ -30,6 +30,7 @@ const SOURCE_RING: Record<string, string> = {
 	library: '#40c8a8',  // teal
 	lastfm:  '#c060e8',  // purple
 	engine:  '#4090e0',  // blue
+	external:'#5ee6c8',  // mint
 	mixed:   '#e09040',  // amber
 };
 
@@ -539,10 +540,12 @@ function drawSingleNode(
 ): void {
 	const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
 	const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
-	const r = Math.max(4, node.radius * camera.zoom);
+	const roleScale = node.role === 'external_candidate' ? 1.1 : node.role === 'library_guide' ? 0.86 : 1;
+	const r = Math.max(4, node.radius * roleScale * camera.zoom);
 	const isHovered  = node.trackId === hoveredTrackId;
 	const isSelected = node.trackId === selectedTrackId;
-	const fo = focusOpacity(node.trackId, hoveredTrackId, connectedIds);
+	const roleOpacity = node.role === 'library_guide' ? 0.62 : node.playability === 'pending' ? 0.78 : 1;
+	const fo = focusOpacity(node.trackId, hoveredTrackId, connectedIds) * roleOpacity;
 
 	const withArtwork = shouldShowArtwork(node, camera.zoom, hoveredTrackId, selectedTrackId, routeTrackIds);
 	const img = withArtwork && node.artworkUrl ? getCachedImage(node.artworkUrl) : null;
@@ -552,8 +555,8 @@ function drawSingleNode(
 	// 1. Soft outer glow (behind everything)
 	const breathe = prefersReducedMotion ? 1 : 1 + Math.sin(t * 0.02 + node.trackId * 0.1) * 0.025;
 	const glowR = r * (img ? 2.2 : 2.8) * breathe;
-	const glowStrength = (0.09 + node.confidence * 0.16) * fo;
-	const glowCol = img ? 'rgba(220,220,255,' : 'rgba(180,185,255,';
+	const glowStrength = (0.09 + node.confidence * 0.16 + (node.role === 'external_candidate' ? 0.08 : 0)) * fo;
+	const glowCol = node.role === 'external_candidate' ? 'rgba(94,230,200,' : img ? 'rgba(220,220,255,' : 'rgba(180,185,255,';
 	const glowGrad = ctx.createRadialGradient(sx, sy, r * 0.4, sx, sy, glowR);
 	glowGrad.addColorStop(0, `${glowCol}${glowStrength})`);
 	glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -643,6 +646,17 @@ function drawSingleNode(
 		ctx.beginPath();
 		ctx.arc(sx, sy, (img ? Math.max(r, 10) : r) + Math.max(4, 5 * camera.zoom), 0, Math.PI * 2);
 		ctx.stroke();
+	}
+
+	if (node.playability === 'pending') {
+		ctx.globalAlpha = 0.55 * fo;
+		ctx.setLineDash([3, 4]);
+		ctx.strokeStyle = 'rgba(255,255,255,0.58)';
+		ctx.lineWidth = Math.max(0.8, 1.1 * camera.zoom);
+		ctx.beginPath();
+		ctx.arc(sx, sy, (img ? Math.max(r, 10) : r) + Math.max(6, 7 * camera.zoom), 0, Math.PI * 2);
+		ctx.stroke();
+		ctx.setLineDash([]);
 	}
 
 	ctx.restore();

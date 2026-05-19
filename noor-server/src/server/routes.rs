@@ -5,6 +5,7 @@ use crate::playback::{player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
 };
+use crate::services::discovery_blend as blend;
 use crate::services::discovery_space as ds;
 use crate::services::learning as discovery_learning;
 use crate::services::tidal::{
@@ -383,6 +384,19 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/discovery/radio/status", get(radio_similarity_status))
         // Discovery Sound Space
         .route("/api/discovery/space", post(get_discovery_space))
+        .route(
+            "/api/discovery/blend/space",
+            post(get_discovery_blend_space),
+        )
+        .route(
+            "/api/discovery/blend/add",
+            post(add_discovery_blend_to_queue),
+        )
+        .route("/api/discovery/blend/play", post(play_discovery_blend))
+        .route(
+            "/api/discovery/blend/radio",
+            post(make_discovery_blend_radio),
+        )
         // Sportify-based discovery resolver - single, bulk, and cache-only status poll.
         .route("/api/resolve/tidal/track", get(resolve_tidal_track))
         .route("/api/resolve/tidal/bulk", post(resolve_tidal_bulk))
@@ -2525,6 +2539,533 @@ struct DiscoverySpaceRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct DiscoveryBlendRequest {
+    seeds: Vec<blend::BlendSeedInput>,
+    limit: Option<i64>,
+}
+
+fn blend_seed_error_response(error: blend::BlendSeedError) -> (StatusCode, Json<Value>) {
+    let message = match error {
+        blend::BlendSeedError::Empty => "at least one blend seed is required",
+        blend::BlendSeedError::TooMany => "blend supports up to four seeds",
+        blend::BlendSeedError::InvalidIdentity => "blend seed is missing a valid identity",
+        blend::BlendSeedError::Duplicate => "duplicate blend seeds are not allowed",
+    };
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+}
+
+fn parse_discovery_reason_tags(reason_json: Option<&str>, fallback: &str) -> Vec<String> {
+    let raw_tags = reason_json
+        .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| {
+            value
+                .get("key")
+                .and_then(|key| key.as_str())
+                .or_else(|| value.get("label").and_then(|label| label.as_str()))
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let mut reason_tags = ds::normalize_reason_tags(&raw_tags);
+    if reason_tags.is_empty() {
+        reason_tags.push(ds::normalize_reason(fallback).to_string());
+    }
+    reason_tags
+}
+
+fn blend_anchor(index: usize, count: usize) -> (f64, f64) {
+    match count {
+        0 | 1 => (0.0, 0.0),
+        2 => {
+            if index == 0 {
+                (-260.0, 0.0)
+            } else {
+                (260.0, 0.0)
+            }
+        }
+        _ => {
+            let angle = (index as f64 / count as f64) * std::f64::consts::PI * 2.0
+                - std::f64::consts::FRAC_PI_2;
+            (angle.cos() * 280.0, angle.sin() * 220.0)
+        }
+    }
+}
+
+fn layout_blend_candidate(
+    candidate: &mut blend::ScoredBlendCandidate,
+    seed_count: usize,
+    index: usize,
+) {
+    if candidate.role == blend::CandidateRole::Seed {
+        return;
+    }
+    if seed_count == 2 {
+        let left = candidate
+            .per_seed_scores
+            .first()
+            .map(|score| score.score)
+            .unwrap_or(0.0);
+        let right = candidate
+            .per_seed_scores
+            .get(1)
+            .map(|score| score.score)
+            .unwrap_or(0.0);
+        let total = (left + right).max(0.001);
+        let t = right / total;
+        candidate.x = -260.0 + t * 520.0;
+        candidate.y = ((index as f64 * 37.0).sin() * 90.0)
+            + (1.0 - candidate.blend_score.clamp(0.0, 1.0)) * 120.0;
+        return;
+    }
+
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut total = 0.0;
+    for (seed_index, seed_score) in candidate.per_seed_scores.iter().enumerate() {
+        let (anchor_x, anchor_y) = blend_anchor(seed_index, seed_count);
+        let weight = seed_score.score.max(0.0);
+        x += anchor_x * weight;
+        y += anchor_y * weight;
+        total += weight;
+    }
+    if total > 0.0 {
+        candidate.x = x / total + (index as f64 * 19.0).sin() * 45.0;
+        candidate.y = y / total + (index as f64 * 23.0).cos() * 45.0;
+    } else {
+        let angle = (index as f64 / (seed_count.max(1) as f64)) * std::f64::consts::PI * 2.0;
+        candidate.x = angle.cos() * 180.0;
+        candidate.y = angle.sin() * 140.0;
+    }
+}
+
+fn resolve_tidal_blend_seeds(
+    conn: &rusqlite::Connection,
+    seeds: &mut [blend::BlendSeed],
+) -> rusqlite::Result<()> {
+    for seed in seeds {
+        if seed.kind != blend::BlendSeedKind::Tidal || seed.track_id.is_some() {
+            continue;
+        }
+        if let Some(tidal_id) = seed.tidal_id {
+            let track_id = conn
+                .query_row(
+                    "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+                    params![tidal_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            seed.track_id = track_id;
+        }
+    }
+    Ok(())
+}
+
+fn seed_node_from_track(
+    seed: &blend::BlendSeed,
+    index: usize,
+    count: usize,
+    row: (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ),
+) -> blend::ScoredBlendCandidate {
+    let (x, y) = blend_anchor(index, count);
+    blend::ScoredBlendCandidate {
+        identity: seed.identity.clone(),
+        title: row.1,
+        artist_name: row.2.unwrap_or_default(),
+        album_title: row.3,
+        artwork_url: row.4,
+        duration_ms: row.5,
+        track_id: Some(row.0),
+        tidal_id: seed.tidal_id,
+        is_in_library: true,
+        source: "library".to_string(),
+        reason_tags: vec!["seed".to_string()],
+        role: blend::CandidateRole::Seed,
+        playability: blend::Playability::Playable,
+        per_seed_scores: vec![blend::SeedScore {
+            seed_identity: seed.identity.clone(),
+            seed_track_id: seed.track_id,
+            score: 1.0,
+        }],
+        covered_seed_count: 1,
+        weighted_seed_proximity: 1.0,
+        coverage_bonus: 0.0,
+        external_bonus: 0.0,
+        library_penalty: 0.0,
+        confidence_bonus: 0.0,
+        blend_score: 1.0,
+        x,
+        y,
+    }
+}
+
+fn seed_node_from_external_seed(
+    seed: &blend::BlendSeed,
+    index: usize,
+    count: usize,
+) -> blend::ScoredBlendCandidate {
+    let (x, y) = blend_anchor(index, count);
+    blend::ScoredBlendCandidate {
+        identity: seed.identity.clone(),
+        title: seed
+            .title
+            .clone()
+            .unwrap_or_else(|| "TIDAL seed".to_string()),
+        artist_name: seed.artist.clone().unwrap_or_default(),
+        album_title: None,
+        artwork_url: None,
+        duration_ms: None,
+        track_id: None,
+        tidal_id: seed.tidal_id,
+        is_in_library: false,
+        source: "external".to_string(),
+        reason_tags: vec!["seed".to_string()],
+        role: blend::CandidateRole::Seed,
+        playability: if seed.tidal_id.is_some() {
+            blend::Playability::Resolvable
+        } else {
+            blend::Playability::Pending
+        },
+        per_seed_scores: vec![blend::SeedScore {
+            seed_identity: seed.identity.clone(),
+            seed_track_id: seed.track_id,
+            score: 1.0,
+        }],
+        covered_seed_count: 1,
+        weighted_seed_proximity: 1.0,
+        coverage_bonus: 0.0,
+        external_bonus: 0.0,
+        library_penalty: 0.0,
+        confidence_bonus: 0.0,
+        blend_score: 1.0,
+        x,
+        y,
+    }
+}
+
+fn build_discovery_blend_space(
+    conn: &rusqlite::Connection,
+    seeds: &mut [blend::BlendSeed],
+    limit: i64,
+    library_cap_ratio: f64,
+) -> anyhow::Result<(Vec<blend::ScoredBlendCandidate>, Value)> {
+    resolve_tidal_blend_seeds(conn, seeds)?;
+    let seed_count = seeds.len();
+    let library_seed_ids = seeds
+        .iter()
+        .filter_map(|seed| seed.track_id)
+        .collect::<Vec<_>>();
+    let model = queries::get_selected_discovery_embedding_model(conn)?;
+
+    let mut seed_nodes = Vec::new();
+    for (index, seed) in seeds.iter().enumerate() {
+        if let Some(track_id) = seed.track_id {
+            let row = conn
+                .query_row(
+                    "SELECT t.id, t.title, ar.name, al.title, al.artwork_url, t.duration_ms
+                     FROM tracks t
+                     LEFT JOIN artists ar ON t.artist_id = ar.id
+                     LEFT JOIN albums al ON t.album_id = al.id
+                     WHERE t.id = ?1",
+                    params![track_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(row) = row {
+                seed_nodes.push(seed_node_from_track(seed, index, seed_count, row));
+            }
+        } else {
+            seed_nodes.push(seed_node_from_external_seed(seed, index, seed_count));
+        }
+    }
+
+    let mut candidate_inputs: HashMap<String, blend::BlendCandidateInput> = HashMap::new();
+    if let Some(model) = model {
+        let per_seed_limit = limit.max(1).min(200);
+        let seed_id_set = library_seed_ids.iter().copied().collect::<HashSet<_>>();
+        let library_neighbors = queries::get_track_neighbors_for_seeds(
+            conn,
+            model.id,
+            &library_seed_ids,
+            per_seed_limit,
+        )?;
+        for (seed_id, rows) in library_neighbors {
+            for row in rows {
+                if seed_id_set.contains(&row.track_id) {
+                    continue;
+                }
+                let identity = format!("library:{}", row.track_id);
+                let reason_tags =
+                    parse_discovery_reason_tags(row.reason_json.as_deref(), "library_match");
+                let entry = candidate_inputs.entry(identity.clone()).or_insert_with(|| {
+                    blend::BlendCandidateInput {
+                        identity: identity.clone(),
+                        title: row.title.clone(),
+                        artist_name: row.artist_name.clone().unwrap_or_default(),
+                        album_title: row.album_title.clone(),
+                        artwork_url: row.artwork_url.clone(),
+                        duration_ms: row.duration_ms,
+                        track_id: Some(row.track_id),
+                        tidal_id: None,
+                        is_in_library: true,
+                        confidence: row.confidence,
+                        source: "library".to_string(),
+                        reason_tags: reason_tags.clone(),
+                        per_seed_scores: Vec::new(),
+                    }
+                });
+                entry.per_seed_scores.push((seed_id, row.score));
+            }
+        }
+
+        for seed_id in &library_seed_ids {
+            let rows = queries::get_external_candidate_neighbors(
+                conn,
+                model.id,
+                *seed_id,
+                per_seed_limit,
+                false,
+            )?;
+            for row in rows {
+                let identity = row
+                    .tidal_id
+                    .filter(|id| *id > 0)
+                    .map(|id| format!("tidal:{id}"))
+                    .unwrap_or_else(|| format!("pending:{}", row.candidate_id));
+                let reason_tags =
+                    parse_discovery_reason_tags(row.reason_json.as_deref(), "external_match");
+                let entry = candidate_inputs.entry(identity.clone()).or_insert_with(|| {
+                    blend::BlendCandidateInput {
+                        identity: identity.clone(),
+                        title: row.title.clone(),
+                        artist_name: row.artist_name.clone(),
+                        album_title: None,
+                        artwork_url: None,
+                        duration_ms: row.duration_ms,
+                        track_id: None,
+                        tidal_id: row.tidal_id,
+                        is_in_library: false,
+                        confidence: 0.7,
+                        source: "external".to_string(),
+                        reason_tags: reason_tags.clone(),
+                        per_seed_scores: Vec::new(),
+                    }
+                });
+                entry.per_seed_scores.push((*seed_id, row.score));
+            }
+        }
+    }
+
+    let mut candidates = candidate_inputs
+        .values()
+        .map(|candidate| blend::score_blend_candidate(candidate, seeds))
+        .collect::<Vec<_>>();
+    let resolvable_external_count = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.role == blend::CandidateRole::ExternalCandidate
+                && candidate.playability == blend::Playability::Resolvable
+        })
+        .count();
+    blend::apply_library_guide_cap(
+        &mut candidates,
+        library_cap_ratio,
+        resolvable_external_count < 3,
+    );
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        layout_blend_candidate(candidate, seed_count, index);
+    }
+    candidates.truncate(limit as usize);
+
+    let playable_external_count = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.role == blend::CandidateRole::ExternalCandidate
+                && matches!(
+                    candidate.playability,
+                    blend::Playability::Playable | blend::Playability::Resolvable
+                )
+        })
+        .count();
+    let pending_external_count = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.role == blend::CandidateRole::ExternalCandidate
+                && candidate.playability == blend::Playability::Pending
+        })
+        .count();
+    let library_guide_count = candidates
+        .iter()
+        .filter(|candidate| candidate.role == blend::CandidateRole::LibraryGuide)
+        .count();
+    let coverage_ratio = if candidates.is_empty() || seed_count == 0 {
+        0.0
+    } else {
+        candidates
+            .iter()
+            .map(|candidate| candidate.covered_seed_count as f64 / seed_count as f64)
+            .sum::<f64>()
+            / candidates.len() as f64
+    };
+    let health = json!({
+        "playable_external_count": playable_external_count,
+        "pending_external_count": pending_external_count,
+        "library_guide_count": library_guide_count,
+        "coverage_ratio": coverage_ratio,
+    });
+
+    seed_nodes.append(&mut candidates);
+    Ok((seed_nodes, health))
+}
+
+fn blend_node_json(candidate: &blend::ScoredBlendCandidate) -> Value {
+    let track_id = candidate.track_id.unwrap_or_else(|| {
+        candidate.tidal_id.unwrap_or_else(|| {
+            synthetic_external_track_id(&candidate.artist_name, &candidate.title)
+        })
+    });
+    let score = candidate.blend_score.clamp(0.0, 1.0);
+    json!({
+        "id": format!("track-{track_id}"),
+        "track_id": track_id,
+        "title": candidate.title,
+        "artist_name": candidate.artist_name,
+        "album_title": candidate.album_title,
+        "artwork_url": candidate.artwork_url,
+        "duration_ms": candidate.duration_ms,
+        "similarity_score": score,
+        "score": score,
+        "raw_score": candidate.weighted_seed_proximity,
+        "source": candidate.source,
+        "is_in_library": candidate.is_in_library,
+        "role": candidate.role,
+        "playability": candidate.playability,
+        "reason_tags": candidate.reason_tags,
+        "primary_reason": candidate.reason_tags.first().cloned().unwrap_or_else(|| "blend".to_string()),
+        "per_seed_scores": candidate.per_seed_scores,
+        "coverage_bonus": candidate.coverage_bonus,
+        "external_bonus": candidate.external_bonus,
+        "library_penalty": candidate.library_penalty,
+        "final_blend_score": candidate.blend_score,
+        "is_seed": candidate.role == blend::CandidateRole::Seed,
+        "x": candidate.x,
+        "y": candidate.y,
+        "vx": 0.0,
+        "vy": 0.0,
+        "radius": if candidate.role == blend::CandidateRole::Seed { 20.0 } else { 8.0 + score * 16.0 },
+        "opacity": 0.0,
+        "layout": {
+            "x": candidate.x,
+            "y": candidate.y,
+            "radius_hint": if candidate.role == blend::CandidateRole::Seed { 20.0 } else { 8.0 + score * 16.0 },
+            "distance_from_seed": (1.0 - score).clamp(0.0, 1.0),
+        },
+    })
+}
+
+fn blend_edge_json(
+    seed: &blend::ScoredBlendCandidate,
+    candidate: &blend::ScoredBlendCandidate,
+) -> Vec<Value> {
+    let from_track_id = seed.track_id.unwrap_or_else(|| {
+        seed.tidal_id
+            .unwrap_or_else(|| synthetic_external_track_id(&seed.artist_name, &seed.title))
+    });
+    let to_track_id = candidate.track_id.unwrap_or_else(|| {
+        candidate.tidal_id.unwrap_or_else(|| {
+            synthetic_external_track_id(&candidate.artist_name, &candidate.title)
+        })
+    });
+    candidate
+        .per_seed_scores
+        .iter()
+        .filter(|score| score.seed_track_id == seed.track_id && score.score > 0.0)
+        .map(|score| {
+            json!({
+                "id": format!("blend-{from_track_id}-{to_track_id}"),
+                "from_id": from_track_id,
+                "to_id": to_track_id,
+                "from_track_id": from_track_id,
+                "to_track_id": to_track_id,
+                "type": "blend",
+                "reason": "blend",
+                "primary_reason": "blend",
+                "reason_tags": ["blend"],
+                "weight": score.score,
+                "confidence": 0.7,
+                "source": "blend",
+                "support_count": null,
+                "behavioral_score": 0.0,
+                "audio_score": score.score,
+                "metadata_score": 0.0,
+            })
+        })
+        .collect()
+}
+
+fn blend_candidates_to_radio(
+    candidates: &[blend::ScoredBlendCandidate],
+) -> Vec<crate::services::radio::RadioCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.role != blend::CandidateRole::Seed
+                && matches!(
+                    candidate.playability,
+                    blend::Playability::Playable | blend::Playability::Resolvable
+                )
+        })
+        .map(|candidate| crate::services::radio::RadioCandidate {
+            track_id: candidate
+                .track_id
+                .or(candidate.tidal_id)
+                .unwrap_or_default(),
+            tidal_track_id: candidate.tidal_id,
+            title: candidate.title.clone(),
+            artist_name: candidate.artist_name.clone(),
+            album_title: candidate.album_title.clone(),
+            artwork_url: candidate.artwork_url.clone(),
+            duration_ms: candidate.duration_ms,
+            isrc: None,
+            is_in_library: candidate.is_in_library,
+            source: if candidate.is_in_library {
+                crate::services::radio::RadioSource::Library
+            } else {
+                crate::services::radio::RadioSource::Engine
+            },
+            reason: "Blend discovery".to_string(),
+            similarity_score: candidate.blend_score.clamp(0.0, 1.0),
+            confidence: Some(candidate.blend_score.clamp(0.0, 1.0)),
+            candidate_in_degree_percentile: None,
+            support_count: Some(candidate.covered_seed_count as i64),
+            primary_reason: Some(
+                candidate
+                    .reason_tags
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "blend".to_string()),
+            ),
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
 struct ResolveTidalTrackQuery {
     spotify_id: String,
     /// When true, ignore any cached resolution and re-run the matcher.
@@ -3241,6 +3782,149 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, Json<Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": e.to_string() })),
     )
+}
+
+async fn get_discovery_blend_space(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryBlendRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut seeds =
+        blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
+    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    let (candidates, health) = db
+        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.25))
+        .map_err(internal)?;
+    let seed_nodes = candidates
+        .iter()
+        .filter(|candidate| candidate.role == blend::CandidateRole::Seed)
+        .collect::<Vec<_>>();
+    let tracks = candidates.iter().map(blend_node_json).collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    for seed in seed_nodes {
+        for candidate in candidates
+            .iter()
+            .filter(|candidate| candidate.role != blend::CandidateRole::Seed)
+        {
+            edges.extend(blend_edge_json(seed, candidate));
+        }
+    }
+
+    Ok(Json(json!({
+        "tracks": tracks,
+        "edges": edges,
+        "artists": [],
+        "blend_seeds": seeds,
+        "health": health,
+        "diagnostics": {
+            "node_count": tracks.len(),
+            "edge_count": edges.len(),
+            "source_counts": {},
+            "reason_counts": {},
+        },
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    })))
+}
+
+async fn add_discovery_blend_to_queue(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryBlendRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut seeds =
+        blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
+    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    let (candidates, health) = db
+        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.15))
+        .map_err(internal)?;
+    let tracks = blend_candidates_to_radio(&candidates);
+    if tracks.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "blend has no playable discoveries" })),
+        ));
+    }
+    let build = db
+        .with_conn(move |conn| {
+            Ok(crate::server::radio_pipeline::append_radio_queue_from_candidates(conn, tracks)?)
+        })
+        .map_err(internal)?;
+    let pending_count = build.pending_item_ids.len();
+    {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+    }
+    Ok(Json(json!({
+        "first_playable": match build.first_item {
+            Some((queue_item_id, Some(track_id))) => json!({
+                "type": "library",
+                "queue_item_id": queue_item_id,
+                "track_id": track_id,
+            }),
+            Some((queue_item_id, None)) => json!({
+                "type": "pending",
+                "queue_item_id": queue_item_id,
+                "track_id": null,
+            }),
+            None => json!(null),
+        },
+        "pending_count": pending_count,
+        "health": health,
+    })))
+}
+
+async fn play_discovery_blend(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryBlendRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    play_discovery_blend_inner(state, payload, "blend_play").await
+}
+
+async fn make_discovery_blend_radio(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryBlendRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    play_discovery_blend_inner(state, payload, "blend_radio").await
+}
+
+async fn play_discovery_blend_inner(
+    state: SharedState,
+    payload: DiscoveryBlendRequest,
+    context: &'static str,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut seeds =
+        blend::validate_and_normalize_seeds(&payload.seeds).map_err(blend_seed_error_response)?;
+    let limit = payload.limit.unwrap_or(60).max(1).min(200);
+    let db = {
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    };
+    let (candidates, health) = db
+        .with_conn(|conn| build_discovery_blend_space(conn, &mut seeds, limit, 0.15))
+        .map_err(internal)?;
+    let tracks = blend_candidates_to_radio(&candidates);
+    if tracks.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "blend has no playable discoveries" })),
+        ));
+    }
+    let (first_playable, pending_count) =
+        build_radio_queue_and_spawn_resolvers(&state, &db, None, tracks, context).await?;
+    let snapshot = start_first_radio_queue_item(&state).await?;
+    Ok(Json(json!({
+        "first_playable": first_playable,
+        "pending_count": pending_count,
+        "health": health,
+        "state": snapshot.state,
+        "queue": snapshot.queue,
+    })))
 }
 
 async fn get_discovery_space(
@@ -12305,7 +12989,9 @@ mod tests {
         })
         .expect("seeded");
 
-        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))));
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
 
         let response = app
             .oneshot(
@@ -12913,7 +13599,9 @@ mod tests {
         })
         .expect("seed discovery space");
 
-        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))));
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -12955,6 +13643,219 @@ mod tests {
                 .iter()
                 .any(|edge| { edge["from_track_id"] == 1 && edge["to_track_id"] == 990_001 })
         );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn discovery_blend_space_includes_pending_external_nodes_and_health() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES
+                    (1, 'Seed One', 1, 200000, 1001),
+                    (2, 'Seed Two', 1, 201000, 1002)",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:blend-space",
+                "discovery-fusion-v2",
+                2,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            let pending = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: None,
+                    mbid: None,
+                    dedupe_key: "pending-blend".to_string(),
+                    title: "Pending Blend".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            let resolved = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(990_002),
+                    mbid: None,
+                    dedupe_key: "tidal:990002".to_string(),
+                    title: "Resolved Blend".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(181_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            for seed_id in [1, 2] {
+                queries::replace_external_candidate_neighbors(
+                    conn,
+                    model.id,
+                    seed_id,
+                    &[
+                        queries::ExternalCandidateNeighborWriteRow {
+                            candidate_id: pending.id,
+                            rank: 1,
+                            score: 0.94,
+                            audio_score: 0.94,
+                            metadata_score: 0.0,
+                            reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                        },
+                        queries::ExternalCandidateNeighborWriteRow {
+                            candidate_id: resolved.id,
+                            rank: 2,
+                            score: 0.90,
+                            audio_score: 0.90,
+                            metadata_score: 0.0,
+                            reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                        },
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed blend space");
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discovery/blend/space")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"seeds":[{"kind":"library","track_id":1},{"kind":"library","track_id":2}],"limit":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        let pending = tracks
+            .iter()
+            .find(|track| track["title"] == "Pending Blend")
+            .expect("pending external blend node");
+        assert_eq!(pending["role"], "external_candidate");
+        assert_eq!(pending["playability"], "pending");
+        assert_eq!(body["health"]["pending_external_count"], 1);
+        assert_eq!(body["health"]["playable_external_count"], 1);
+        assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn discovery_blend_add_appends_discoveries_without_replacing_queue() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES (1, 'Seed One', 1, 200000, 1001)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (1, 0, 'user_queue')",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:blend-add",
+                "discovery-fusion-v2",
+                2,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            let resolved = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(990_003),
+                    mbid: None,
+                    dedupe_key: "tidal:990003".to_string(),
+                    title: "Resolved Add".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(181_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            queries::replace_external_candidate_neighbors(
+                conn,
+                model.id,
+                1,
+                &[queries::ExternalCandidateNeighborWriteRow {
+                    candidate_id: resolved.id,
+                    rank: 1,
+                    score: 0.95,
+                    audio_score: 0.95,
+                    metadata_score: 0.0,
+                    reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                }],
+            )?;
+            Ok(())
+        })
+        .expect("seed blend add");
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discovery/blend/add")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"seeds":[{"kind":"library","track_id":1}],"limit":10}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["pending_count"], 1);
+        db.with_conn(|conn| {
+            let rows: Vec<(i32, Option<i64>, Option<i64>)> = conn
+                .prepare(
+                    "SELECT position, track_id, tidal_id_hint FROM queue ORDER BY position ASC",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(rows, vec![(0, Some(1), None), (1, None, Some(990_003))]);
+            Ok(())
+        })
+        .unwrap();
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -14086,6 +14987,10 @@ mod tests {
             ("POST", "/api/discovery/radio"),
             ("POST", "/api/discovery/radio/compute"),
             ("POST", "/api/discovery/space"),
+            ("POST", "/api/discovery/blend/space"),
+            ("POST", "/api/discovery/blend/add"),
+            ("POST", "/api/discovery/blend/play"),
+            ("POST", "/api/discovery/blend/radio"),
             ("GET", "/api/resolve/tidal/track"),
             ("POST", "/api/resolve/tidal/bulk"),
             ("GET", "/api/resolve/tidal/status"),

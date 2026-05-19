@@ -4,6 +4,13 @@
 	import {
 		discoverSpaceStore,
 		loadSpace,
+		loadBlendSpace,
+		addBlendSeed,
+		removeBlendSeed,
+		clearBlend,
+		addBlendDiscoveries,
+		playBlendDiscoveries,
+		makeBlendRadio,
 		lockSeed,
 		unlockSeed,
 	} from '$lib/components/DiscoverSpace/discover_space_store';
@@ -43,6 +50,11 @@
 	let playlistNodes = $state<DiscoverTrackNode[]>([]);
 	let searchQuery = $state('');
 	let isSearching = $state(false);
+	let blendAction = $state<'add' | 'play' | 'radio' | null>(null);
+
+	let canRunBlendActions = $derived(
+		($discoverSpaceStore.blendHealth?.playable_external_count ?? 0) > 0
+	);
 
 	function handleModeChange(mode: RadioMode) {
 		lastLoadedSeedId = resolvedSeedId;
@@ -74,6 +86,34 @@
 			playlistNodes = [...playlistNodes, node];
 		} else {
 			playlistNodes = playlistNodes.filter((n) => n.trackId !== node.trackId);
+		}
+	}
+
+	function handleAddToBlend(node: DiscoverTrackNode) {
+		const nextCount = Math.min(4, $discoverSpaceStore.blendSeeds.length + 1);
+		addBlendSeed(node);
+		if (nextCount >= 2) {
+			loadBlendSpace($currentTrack?.id ?? null);
+		}
+	}
+
+	function handleRemoveBlendSeed(identity: string) {
+		const nextCount = $discoverSpaceStore.blendSeeds.filter((seed) => seed.identity !== identity).length;
+		removeBlendSeed(identity);
+		if (nextCount >= 2) {
+			loadBlendSpace($currentTrack?.id ?? null);
+		}
+	}
+
+	async function runBlendAction(action: 'add' | 'play' | 'radio') {
+		if (blendAction !== null) return;
+		blendAction = action;
+		try {
+			if (action === 'add') await addBlendDiscoveries();
+			else if (action === 'play') await playBlendDiscoveries();
+			else await makeBlendRadio();
+		} finally {
+			blendAction = null;
 		}
 	}
 
@@ -166,6 +206,46 @@
 			>
 				{$discoverSpaceStore.lockedSeedId !== null ? 'Unlock' : 'Lock seed'}
 			</button>
+		</div>
+	{/if}
+
+	{#if $discoverSpaceStore.blendSeeds.length > 0}
+		<div class="blend-strip" aria-label="Blend seeds">
+			<div class="blend-seeds">
+				<span class="blend-label">Blend</span>
+				{#each $discoverSpaceStore.blendSeeds as seed (seed.identity)}
+					<button
+						class="blend-chip"
+						type="button"
+						onclick={() => handleRemoveBlendSeed(seed.identity)}
+						aria-label="Remove {seed.title ?? seed.artist ?? seed.identity} from blend"
+					>
+						<span class="blend-chip-title">{seed.title ?? seed.artist ?? seed.identity}</span>
+						<span class="blend-chip-remove" aria-hidden="true">x</span>
+					</button>
+				{/each}
+			</div>
+			<div class="blend-health">
+				<span>{($discoverSpaceStore.blendHealth?.playable_external_count ?? 0)} ready</span>
+				<span>{($discoverSpaceStore.blendHealth?.pending_external_count ?? 0)} pending</span>
+				{#if $discoverSpaceStore.blendHealth}
+					<span>{Math.round($discoverSpaceStore.blendHealth.coverage_ratio * 100)}% coverage</span>
+				{/if}
+			</div>
+			<div class="blend-actions">
+				<button
+					class="blend-action"
+					type="button"
+					onclick={() => loadBlendSpace($currentTrack?.id ?? null)}
+					disabled={$discoverSpaceStore.blendSeeds.length < 2 || $discoverSpaceStore.blendLoading}
+				>
+					{$discoverSpaceStore.blendLoading ? 'Loading' : 'Map blend'}
+				</button>
+				<button class="blend-action" type="button" onclick={() => runBlendAction('add')} disabled={!canRunBlendActions || blendAction !== null}>Add discoveries</button>
+				<button class="blend-action primary" type="button" onclick={() => runBlendAction('play')} disabled={!canRunBlendActions || blendAction !== null}>Play discoveries</button>
+				<button class="blend-action" type="button" onclick={() => runBlendAction('radio')} disabled={!canRunBlendActions || blendAction !== null}>Make blend radio</button>
+				<button class="blend-action subtle" type="button" onclick={clearBlend}>Clear blend</button>
+			</div>
 		</div>
 	{/if}
 
@@ -264,6 +344,7 @@
 			node={selectedNode}
 			seedNode={anchorNode}
 			onAddToPlaylist={handleAddToPlaylist}
+			onAddToBlend={handleAddToBlend}
 		/>
 	</div>
 
@@ -410,6 +491,87 @@
 		max-width: 260px;
 	}
 	.automix-seed strong { color: rgba(255,255,255,0.6); font-weight: var(--font-weight-medium); }
+
+	.blend-strip {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin: 0 var(--space-3, 12px);
+		padding: 8px 10px;
+		border: 1px solid rgba(94,230,200,0.22);
+		border-radius: 10px;
+		background: rgba(7, 22, 25, 0.72);
+		color: rgba(255,255,255,0.72);
+		font-size: var(--font-size-xs);
+		flex-shrink: 0;
+	}
+	.blend-seeds {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		flex: 1;
+	}
+	.blend-label {
+		color: rgba(94,230,200,0.92);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+	.blend-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		max-width: 180px;
+		min-height: 28px;
+		padding: 4px 8px;
+		border: 1px solid rgba(94,230,200,0.24);
+		border-radius: 999px;
+		background: rgba(94,230,200,0.08);
+		color: rgba(235,255,250,0.88);
+		cursor: pointer;
+	}
+	.blend-chip:hover { background: rgba(94,230,200,0.14); }
+	.blend-chip-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.blend-chip-remove { color: rgba(255,255,255,0.45); }
+	.blend-health {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: rgba(255,255,255,0.48);
+		white-space: nowrap;
+	}
+	.blend-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+	.blend-action {
+		min-height: 30px;
+		padding: 5px 10px;
+		border-radius: 8px;
+		border: 1px solid rgba(255,255,255,0.12);
+		background: rgba(255,255,255,0.06);
+		color: rgba(255,255,255,0.75);
+		cursor: pointer;
+	}
+	.blend-action.primary {
+		border-color: rgba(94,230,200,0.4);
+		background: rgba(94,230,200,0.16);
+		color: rgba(235,255,250,0.95);
+	}
+	.blend-action.subtle { color: rgba(255,255,255,0.48); }
+	.blend-action:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+	.blend-action:disabled {
+		opacity: 0.42;
+		cursor: not-allowed;
+	}
 
 	.page-layout {
 		flex: 1;

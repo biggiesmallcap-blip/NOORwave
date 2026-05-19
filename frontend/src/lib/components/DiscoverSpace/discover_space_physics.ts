@@ -183,7 +183,9 @@ export function applyForces(
 	// ── Integrate: pin seed, dampen + clamp others ────────────────────────────
 	for (const node of nodes) {
 		if (node.isSeed) {
-			node.x = 0; node.y = 0; node.vx = 0; node.vy = 0;
+			node.x = node.layoutHint?.x ?? 0;
+			node.y = node.layoutHint?.y ?? 0;
+			node.vx = 0; node.vy = 0;
 			continue;
 		}
 		if (config.prefersReducedMotion) {
