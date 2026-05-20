@@ -22,28 +22,28 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.39", features = ["bundled", "serde_json"] }
 
 # HTTP client (TIDAL API, metadata APIs, Spotify public stats)
-reqwest = { version = "0.12", features = ["json", "stream", "gzip", "brotli"] }
+reqwest = { version = "0.13", features = ["json", "stream", "gzip", "brotli"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Audio decoding + output
-symphonia = { version = "0.5", features = ["all"] }
+symphonia = { version = "0.6", features = ["all"] }
 cpal = "=0.17.3"
 # Sample-rate conversion. Used when a track's native rate doesn't match the
 # device rate (or when sample-rate-follow is off). Polyphase FFT resampler:
 # steeper filter than linear interpolation, no audible aliasing.
-rubato = "0.16"
+rubato = "2.0"
 
 # Crypto (token encryption)
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.9"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Genre fuzzy matching
 strsim = "0.11"
@@ -56,9 +56,9 @@ aubio-rs = { version = "0.2", default-features = false, features = ["builtin", "
 # BLSTM model weights under vendor/madmom_beats_port_core/models/ are CC BY-NC-SA 4.0.
 madmom_beats_port_core = { path = "vendor/madmom_beats_port_core" }
 num-complex = "0.4"
-hmac = "0.12"
-sha1 = "0.10"
-md5 = "0.7"
+hmac = "0.13"
+sha1 = "0.11"
+md5 = "0.8"
 
 # Utilities
 tracing = "0.1"
