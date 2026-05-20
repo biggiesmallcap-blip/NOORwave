@@ -149,6 +149,25 @@ For grids, anchor the card width (and label widths) to the same custom property 
 
 Small inline thumbnails (track rows, video lists) stay near-fixed: `clamp(2rem, 3vw, 2.5rem)` so they don't shrink to absurdity in narrow lists.
 
+### Search top-result heroes
+
+Search top-result heroes use one text recipe for tracks, albums, and artists:
+
+- Eyebrow: `--font-size-2xs`, `--font-weight-semibold`, uppercase, `--line-height-tight`, and `letter-spacing: 0`.
+- Title: `--font-display`, `--font-size-3xl`, `--font-weight-semibold`, `--line-height-tight`, and `letter-spacing: 0`.
+- Subtitle: `--font-size-sm`, `--font-weight-medium`, `--line-height-snug`, single-line truncation.
+- Primary action: pill button, `--font-size-sm`, `--font-weight-semibold`, `line-height: 1`, and `letter-spacing: 0`.
+
+Do not special-case track heroes into the body font. The top-result card is a hero surface, so its title should keep the same display treatment regardless of whether the result is a track, album, or artist.
+
+### TIDAL artwork URLs
+
+TIDAL artwork must not be rendered from raw API or database URLs. Always route a TIDAL-capable URL through `$lib/utils/artwork.upscaleTidalArtwork(url, size)` directly, or through `$lib/components/ui/ArtworkImage.svelte`.
+
+Allowed TIDAL sizes are `80`, `160`, `320`, `640`, `750`, `1080`, and `1280`. Use `320` for rows, rails, and small tiles, `640` for hero cards and detail covers, and `1280` for lockscreen, MediaSession, and blurred backdrop art. Do not pass arbitrary sizes such as `256` or `512`.
+
+Every rendered image that may receive a TIDAL URL needs an error fallback. Prefer `ArtworkImage` for route and component markup because it normalizes the URL, resets failure state when the source changes, and renders a stable initials fallback. CSS `background-image` is allowed only for decorative backdrops after the URL has been normalized.
+
 ## Z-index scale
 
 | Token | Value | Use for |

@@ -14,6 +14,7 @@
 		toggleTrackFavorite
 	} from '$lib/stores/player';
 	import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
 	export type TrackRowVariant = 'numbered' | 'indexed' | 'art' | 'compact';
 
@@ -162,7 +163,13 @@
 		<span class="cell-index">{index + 1}</span>
 		<div class="cell-art">
 			{#if track.artwork_url}
-				<img class="art" src={track.artwork_url} alt="" />
+				<ArtworkImage
+					className="art"
+					src={track.artwork_url}
+					alt={track.title}
+					size={320}
+					fallbackText={track.title.slice(0, 2).toUpperCase()}
+				/>
 			{:else}
 				<div class="art placeholder">♫</div>
 			{/if}
@@ -336,7 +343,13 @@
 		oncontextmenu={handleContextMenu}
 	>
 		{#if track.artwork_url}
-			<div class="cell-art-thumb" style="background-image:url('{track.artwork_url}')"></div>
+			<ArtworkImage
+				className="cell-art-thumb"
+				src={track.artwork_url}
+				alt={track.title}
+				size={320}
+				fallbackText={track.title.slice(0, 2).toUpperCase()}
+			/>
 		{:else}
 			<div class="cell-art-thumb placeholder"><span>♫</span></div>
 		{/if}

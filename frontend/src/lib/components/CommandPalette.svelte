@@ -24,6 +24,7 @@
 	import { matchCommands, parseSlashInput } from '$lib/search/commands';
 	import { mergeLocalIntoTidal } from '$lib/search/merge_local';
 	import { contextMenu, openMenuAtElement, type MenuItem } from '$lib/stores/context_menu';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
 	let inputEl = $state<HTMLInputElement | null>(null);
 	let query = $state('');
@@ -395,7 +396,13 @@
 							onclick={() => selectArtist(artist)}
 						>
 							{#if artist.artwork_url}
-								<div class="row-art row-art--circle" style="background-image:url('{artist.artwork_url}')"></div>
+								<ArtworkImage
+									className="row-art row-art--circle"
+									src={artist.artwork_url}
+									alt={artist.name}
+									size={320}
+									fallbackText={artist.name.slice(0, 2).toUpperCase()}
+								/>
 							{:else}
 								<div class="row-art row-art--circle row-art--fallback">♪</div>
 							{/if}
@@ -420,7 +427,13 @@
 							onclick={() => selectAlbum(album)}
 						>
 							{#if album.artwork_url}
-								<div class="row-art" style="background-image:url('{album.artwork_url}')"></div>
+								<ArtworkImage
+									className="row-art"
+									src={album.artwork_url}
+									alt={album.title}
+									size={320}
+									fallbackText={album.title.slice(0, 2).toUpperCase()}
+								/>
 							{:else}
 								<div class="row-art row-art--fallback">♫</div>
 							{/if}
@@ -445,7 +458,13 @@
 							onclick={() => void selectTrack(track)}
 						>
 							{#if track.artwork_url}
-								<div class="row-art" style="background-image:url('{track.artwork_url}')"></div>
+								<ArtworkImage
+									className="row-art"
+									src={track.artwork_url}
+									alt={track.title}
+									size={320}
+									fallbackText={track.title.slice(0, 2).toUpperCase()}
+								/>
 							{:else}
 								<div class="row-art row-art--fallback">♫</div>
 							{/if}
@@ -473,7 +492,13 @@
 							onclick={() => selectSpotifyPlaylist(playlist)}
 						>
 							{#if playlist.thumbnail}
-								<div class="row-art" style="background-image:url('{playlist.thumbnail}')"></div>
+								<ArtworkImage
+									className="row-art"
+									src={playlist.thumbnail}
+									alt={playlist.title ?? 'Spotify playlist'}
+									size={320}
+									fallbackText={(playlist.title ?? 'SP').slice(0, 2).toUpperCase()}
+								/>
 							{:else}
 								<div class="row-art row-art--fallback">♫</div>
 							{/if}

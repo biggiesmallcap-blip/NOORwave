@@ -36,4 +36,11 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const providerSearchDone = $derived(');
 		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');
 	});
+
+	test('search page routes artist artwork through the shared fallback component', () => {
+		expect(source).toContain("import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'");
+		expect(source).toContain('<ArtworkImage');
+		expect(source).not.toContain('failedArtistImages');
+		expect(source).not.toContain('topArtistImageFailed');
+	});
 });
