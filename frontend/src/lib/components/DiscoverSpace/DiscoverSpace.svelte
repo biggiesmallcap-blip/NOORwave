@@ -26,7 +26,7 @@
 		seedTrackId: number | null;
 		isLocked: boolean;
 		onHoverNode?: (node: DiscoverTrackNode | null, x: number, y: number) => void;
-		onSelectNode?: (node: DiscoverTrackNode) => void;
+		onSelectNode?: (node: DiscoverTrackNode | null) => void;
 		onNewNodes?: (nodes: DiscoverTrackNode[]) => void;
 	}
 	let {
@@ -60,6 +60,7 @@
 	let panStart = { x: 0, y: 0, cx: 0, cy: 0 };
 	let hoveredNode: DiscoverTrackNode | null = $state(null);
 	let selectedNode: DiscoverTrackNode | null = $state(null);
+	let lastNodeSignature = '';
 
 	// Physics settling — stops mutating node positions once kinetic energy drops
 	let simulationSettled = false;
@@ -69,6 +70,26 @@
 	let rippleNode: DiscoverTrackNode | null = null;
 	let rippleStartTick = 0;
 	const RIPPLE_TICKS = 45; // ≈ 750ms at 60fps
+
+	$effect(() => {
+		const nodes = $discoverSpaceStore.nodes;
+		const signature = nodes.map((node) => node.id).join('|');
+		if (signature === lastNodeSignature) return;
+		lastNodeSignature = signature;
+		const nodeIds = new Set(nodes.map((node) => node.id));
+		if (hoveredNode) {
+			hoveredNode = nodes.find((node) => node.id === hoveredNode?.id) ?? null;
+			if (!hoveredNode) {
+				onHoverNode?.(null, 0, 0);
+			}
+		}
+		if (selectedNode) {
+			selectedNode = nodes.find((node) => node.id === selectedNode?.id) ?? null;
+		}
+		if (rippleNode && !nodeIds.has(rippleNode.id)) {
+			rippleNode = null;
+		}
+	});
 
 	// Warp animation state
 	let warpProgress = 0;
@@ -316,6 +337,7 @@
 				rippleStartTick = tick;
 			} else {
 				selectedNode = null;
+				onSelectNode?.(null);
 			}
 		}
 		isPanning = false;

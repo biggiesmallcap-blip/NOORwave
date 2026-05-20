@@ -130,6 +130,10 @@ export function addBlendSeed(node: DiscoverTrackNode): void {
 export function removeBlendSeed(identity: string): void {
 	discoverSpaceStore.update((s) => {
 		const nextSeeds = normalizeBlendSeeds(s.blendSeeds.filter((seed) => seed.identity !== identity));
+		if (nextSeeds.length < 2) {
+			loadBlendAborter?.abort();
+			loadBlendSeq++;
+		}
 		return {
 			...s,
 			blendSeeds: nextSeeds,
@@ -140,6 +144,7 @@ export function removeBlendSeed(identity: string): void {
 
 export function clearBlend(): void {
 	loadBlendAborter?.abort();
+	loadBlendSeq++;
 	discoverSpaceStore.update((s) => ({
 		...s,
 		blendSeeds: [],
@@ -171,6 +176,8 @@ export async function loadSpace(
 	currentTrackId: number | null
 ): Promise<void> {
 	loadSpaceAborter?.abort();
+	loadBlendAborter?.abort();
+	loadBlendSeq++;
 	const aborter = new AbortController();
 	loadSpaceAborter = aborter;
 	const seq = ++loadSpaceSeq;
@@ -243,7 +250,17 @@ export async function loadSpace(
 
 export async function loadBlendSpace(currentTrackId: number | null): Promise<void> {
 	const seeds = get(discoverSpaceStore).blendSeeds;
-	if (seeds.length === 0) return;
+	if (seeds.length < 2) {
+		loadBlendAborter?.abort();
+		loadBlendSeq++;
+		discoverSpaceStore.update((s) => ({
+			...s,
+			blendHealth: null,
+			blendLoading: false,
+			blendError: null,
+		}));
+		return;
+	}
 	loadBlendAborter?.abort();
 	const aborter = new AbortController();
 	loadBlendAborter = aborter;
@@ -253,6 +270,7 @@ export async function loadBlendSpace(currentTrackId: number | null): Promise<voi
 		...s,
 		blendLoading: true,
 		blendError: null,
+		blendHealth: null,
 		loading: true,
 		activeSeedId: null,
 		activeSeedSource: null,
@@ -311,7 +329,7 @@ async function runBlendQueueAction(
 ): Promise<void> {
 	const state = get(discoverSpaceStore);
 	const seeds = state.blendSeeds;
-	if (seeds.length === 0) return;
+	if (seeds.length < 2) return;
 	const ranked = playableBlendNodes(state.nodes);
 	if (ranked.length === 0 && endpoint !== 'add') {
 		showToast('No playable blend discoveries yet', 'info');
@@ -320,10 +338,11 @@ async function runBlendQueueAction(
 	discoverSpaceStore.update((s) => ({ ...s, blendLoading: true, blendError: null }));
 	try {
 		const apiBase = getApiBase();
+		const limit = endpoint === 'radio' ? 200 : 100;
 		const response = await authFetch(`${apiBase}/api/discovery/blend/${endpoint}`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: blendRequestBody(seeds),
+			body: blendRequestBody(seeds, limit),
 		});
 		if (!response.ok) throw new Error(`Blend action failed: ${response.status}`);
 		const result = await response.json();
