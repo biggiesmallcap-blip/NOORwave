@@ -11,7 +11,7 @@
 
 <p align="center">Incremental sync &nbsp;·&nbsp; Hi-fi playback &nbsp;·&nbsp; Music videos &nbsp;·&nbsp; Genre Galaxy &nbsp;·&nbsp; Spotify discovery &nbsp;·&nbsp; Learning engine</p>
 
-<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.55</a></p>
+<p align="center"><strong>Latest release:</strong> <a href="../../releases/latest">v0.1.56</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square&logo=rust" alt="Rust"/>
@@ -535,6 +535,7 @@ The honest list of what NOOR doesn't do. Some of these are by design, some are n
 
 **Recent release highlights**
 
+- [x] **DiscoverSpace blend hardening and artwork consistency** - external discovery seeds now resolve through known library anchors, blend clearing and remapping reset stale selection state, duplicate anchors no longer inflate coverage, Add discoveries uses the same pending TIDAL resolver path as Play discoveries, Make blend radio asks for a deeper route, and shared artwork rendering now keeps TIDAL CDN sizing and fallbacks consistent across command, row, and search surfaces (v0.1.56)
 - [x] **DiscoverSpace blend discovery** - build two to four seed blends from library, TIDAL, or pending discoveries; the map now marks seed, external candidate, and library guide roles, explains blend scoring, reports blend health, and adds Add discoveries, Play discoveries, and Make blend radio actions that reuse the existing queue and resolver path (v0.1.55)
 - [x] **Spotify mood playlist recovery** - retired Spotify editorial IDs for Party Hits and Happy Hits were replaced with current Spotify-owned playlists, and long Spotify playlist resolution now writes TIDAL match results in batches so playable rows appear while the resolver is still working (v0.1.54)
 - [x] **Mood playlist latency fix** - `/moods` no longer prefetches full Spotify playlists just to render mood cards; TIDAL mood pages and playlist track pages now use in-memory caches so repeated Happy / Focus playlist opens return from cache instead of re-hitting TIDAL or competing with Sportify proxy calls (v0.1.53)
