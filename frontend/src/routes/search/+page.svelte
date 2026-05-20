@@ -17,7 +17,9 @@
   import { tidalSearchTrackToPlayable } from '$lib/utils/track'
   import { canPlayTrack, getPlayableLabel } from '$lib/player/playable'
   import { mergeLocalIntoTidal } from '$lib/search/merge_local'
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
+  import { upscaleTidalArtwork, type TidalArtworkSize } from '$lib/utils/artwork'
 
   const RECENT_KEY = 'noor_recent_searches'
   const RECENT_MAX = 8
@@ -70,15 +72,6 @@
     && !loadingSpotifyAlbums
   )
   let error = $state<string | null>(null)
-  let failedArtistImages = $state(new Set<number>())
-  let topArtistImageFailed = $state(false)
-  $effect(() => {
-    // reset image error state when search results change
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    results
-    failedArtistImages = new Set()
-    topArtistImageFailed = false
-  })
   let debounceTimer: ReturnType<typeof setTimeout>
   // AbortController for in-flight search requests; cancelled on each new input
   // and on route teardown so a slow query doesn't surface a phantom error after
@@ -102,6 +95,8 @@
   let spotifyPlaylistResults = $state<SpotifyPlaylistSearchItem[]>([])
   let spotifyTrackResults = $state<SpotifyTrackSearchItem[]>([])
   let spotifyAlbumResults = $state<SpotifyAlbumSearchItem[]>([])
+  let artistDiscographyArtwork = $state<Map<number, string[]>>(new Map())
+  let artistDiscographyArtworkGeneration = 0
 
   type FilterMode = 'all' | 'artists' | 'albums' | 'tracks' | 'library' | 'playlists'
   let filterMode = $state<FilterMode>('all')
@@ -631,6 +626,12 @@
     return candidates[0].tr
   })
 
+  $effect(() => {
+    const candidates = sortedArtists.slice(0, 16)
+    if (topResult?.kind === 'artist') candidates.unshift(topResult.entry)
+    void loadArtistDiscographyArtwork(candidates)
+  })
+
   function topResultHref(top: TopResult): string {
     switch (top.kind) {
       case 'artist':
@@ -669,6 +670,80 @@
   function initials(name: string): string {
     const parts = name.trim().split(/\s+/).slice(0, 2)
     return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
+  }
+
+  function artworkSrc(url: string | null | undefined, size: TidalArtworkSize): string | null {
+    return upscaleTidalArtwork(url, size)
+  }
+
+  function sameArtistName(a: string | null | undefined, b: string | null | undefined): boolean {
+    return Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase())
+  }
+
+  function artistFallbackArtwork(artist: TidalSearchArtist): string | null {
+    return (
+      sortedAlbums.find((album) => sameArtistName(album.artist_name, artist.name))?.artwork_url
+      ?? sortedTracks.find((track) => sameArtistName(track.artist_name, artist.name))?.artwork_url
+      ?? null
+    )
+  }
+
+  function artistArtworkSources(artist: TidalSearchArtist): string[] {
+    const localDiscographySources = artist.local_id != null
+      ? (artistDiscographyArtwork.get(artist.local_id) ?? [])
+      : []
+    return [artist.artwork_url, artistFallbackArtwork(artist), ...localDiscographySources]
+      .filter((url): url is string => typeof url === 'string' && url.length > 0)
+      .filter((url, index, list) => list.indexOf(url) === index)
+  }
+
+  function artistHeroBackgroundSources(artist: TidalSearchArtist): string[] {
+    const localDiscographySources = artist.local_id != null
+      ? (artistDiscographyArtwork.get(artist.local_id) ?? [])
+      : []
+    return [artistFallbackArtwork(artist), ...localDiscographySources, artist.artwork_url]
+      .filter((url): url is string => typeof url === 'string' && url.length > 0)
+      .filter((url, index, list) => list.indexOf(url) === index)
+  }
+
+  function topHeroBackgroundSources(top: TopResult): string[] {
+    if (top.kind === 'artist') return artistHeroBackgroundSources(top.entry)
+    return [top.entry.artwork_url]
+      .filter((url): url is string => typeof url === 'string' && url.length > 0)
+  }
+
+  async function loadArtistDiscographyArtwork(artists: TidalSearchArtist[]) {
+    const unique = artists
+      .filter((artist) => artist.local_id != null && !artistDiscographyArtwork.has(artist.local_id))
+      .filter((artist, index, list) => list.findIndex((candidate) => candidate.local_id === artist.local_id) === index)
+      .slice(0, 8)
+    if (unique.length === 0) return
+
+    const generation = ++artistDiscographyArtworkGeneration
+    const loaded = await Promise.allSettled(
+      unique.map(async (artist) => {
+        const localId = artist.local_id!
+        const res = await api.getArtistDiscography(localId)
+        const urls = [
+          res.picture_url,
+          ...res.albums.slice(0, 12).map((album) => album.artwork_url),
+          ...res.top_tracks.slice(0, 8).map((track) => track.artwork_url),
+        ].filter((url): url is string => typeof url === 'string' && url.length > 0)
+        return { localId, urls }
+      }),
+    )
+    if (generation !== artistDiscographyArtworkGeneration) return
+
+    const next = new Map(artistDiscographyArtwork)
+    for (const result of loaded) {
+      if (result.status === 'fulfilled') {
+        next.set(
+          result.value.localId,
+          result.value.urls.filter((url, index, list) => list.indexOf(url) === index),
+        )
+      }
+    }
+    artistDiscographyArtwork = next
   }
 
   function albumMenuItems(album: TidalSearchAlbum): MenuItem[] {
@@ -1087,13 +1162,13 @@
               onkeydown={(e) => e.key === 'Enter' && void playLibraryTrack(track)}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title, is_favorite: track.is_favorite })) }}
             >
-              {#if track.artwork_url}
-                <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
-              {:else}
-                <div class="track-art fallback" style={`background: ${letterColor(track.title)}`}>
-                  <span>♫</span>
-                </div>
-              {/if}
+              <ArtworkImage
+                className="track-art"
+                src={track.artwork_url}
+                alt={track.title}
+                size={320}
+                fallbackText={initials(track.title)}
+              />
               <div class="track-meta">
                 <p class="track-title">{track.title}</p>
                 <p class="track-subtitle">
@@ -1127,9 +1202,7 @@
 
     {#if topResult}
       {@const top = topResult}
-      {@const artistBg = top.kind === 'artist'
-        ? (top.entry.artwork_url ?? sortedAlbums.find(a => a.artist_name?.toLowerCase() === top.entry.name?.toLowerCase())?.artwork_url ?? null)
-        : null}
+      {@const topHeroBgSources = topHeroBackgroundSources(top)}
       <section class="top-result-section">
         <h3 class="section-label">Top Result</h3>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1138,28 +1211,38 @@
           class="top-result-card"
           class:in-library={top.entry.in_library}
           class:artist-hero={top.kind === 'artist'}
+          class:has-hero-bg={topHeroBgSources.length > 0}
           role="button"
           tabindex="0"
-          style={top.kind === 'artist' && artistBg && !topArtistImageFailed ? `background-image: url('${artistBg}'); background-size: cover; background-position: center top;` : ''}
           onclick={() => void goto(topResultHref(top))}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), void goto(topResultHref(top)))}
           oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, top.kind === 'track' ? trackContextMenu(top.entry) : top.kind === 'album' ? albumMenuItems(top.entry) : artistMenuItems(top.entry)) }}
         >
+          {#if topHeroBgSources.length > 0}
+            <ArtworkImage
+              className="top-hero-bg"
+              src={topHeroBgSources}
+              alt=""
+              size={1280}
+              decorative={true}
+            />
+          {/if}
           {#if top.kind === 'artist'}
-            {#if artistBg && !topArtistImageFailed}
-              <img
-                class="top-art top-art--circle"
-                src={artistBg}
-                alt={top.entry.name}
-                onerror={() => { topArtistImageFailed = true }}
-              />
-            {:else}
-              <div class="top-art top-art--circle fallback" style={`background: ${letterColor(top.entry.name)}`}>
-                <span>{initials(top.entry.name)}</span>
-              </div>
-            {/if}
+            <ArtworkImage
+              className="top-art top-art--circle"
+              src={artistArtworkSources(top.entry)}
+              alt={top.entry.name}
+              size={320}
+              fallbackText={initials(top.entry.name)}
+            />
           {:else if top.entry.artwork_url}
-            <div class="top-art" style={`background-image: url('${top.entry.artwork_url}')`}></div>
+            <ArtworkImage
+              className="top-art"
+              src={top.entry.artwork_url}
+              alt={top.entry.title}
+              size={640}
+              fallbackText={initials(top.entry.title)}
+            />
           {:else}
             <div class="top-art fallback" style={`background: ${letterColor(top.entry.title)}`}>
               <span>♫</span>
@@ -1167,7 +1250,7 @@
           {/if}
           <div class="top-meta">
             <span class="top-kind">{top.kind === 'artist' ? 'Artist' : top.kind === 'album' ? 'Album' : 'Track'}{#if top.entry.in_library} · In your library{/if}</span>
-            <h2 class="top-title" class:display-face={top.kind !== 'track'}>
+            <h2 class="top-title">
               {top.kind === 'artist' ? top.entry.name : top.entry.title}
             </h2>
             {#if top.kind === 'album' && top.entry.artist_name}
@@ -1202,18 +1285,13 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, artistMenuItems(artist)) }}
             >
               <div class="avatar-wrap">
-                {#if artist.artwork_url && !failedArtistImages.has(artist.tidal_id)}
-                  <img
-                    class="artist-avatar"
-                    src={artist.artwork_url}
-                    alt={artist.name}
-                    onerror={() => { failedArtistImages = new Set([...failedArtistImages, artist.tidal_id]) }}
-                  />
-                {:else}
-                  <div class="artist-avatar fallback" style={`background: ${letterColor(artist.name)}`}>
-                    <span>{initials(artist.name)}</span>
-                  </div>
-                {/if}
+                <ArtworkImage
+                  className="artist-avatar"
+                  src={artistArtworkSources(artist)}
+                  alt={artist.name}
+                  size={320}
+                  fallbackText={initials(artist.name)}
+                />
                 {#if artist.in_library}
                   <span class="lib-badge" aria-label="In your library"></span>
                 {/if}
@@ -1244,7 +1322,13 @@
             >
               <div class="art-wrap">
                 {#if album.artwork_url}
-                  <div class="album-art" style={`background-image: url('${album.artwork_url}')`}></div>
+                  <ArtworkImage
+                    className="album-art"
+                    src={album.artwork_url}
+                    alt={album.title}
+                    size={320}
+                    fallbackText={initials(album.title)}
+                  />
                 {:else}
                   <div class="album-art fallback" style={`background: ${letterColor(album.title)}`}>
                     <span>♫</span>
@@ -1330,10 +1414,13 @@
             >
               <div class="art-wrap">
                 {#if playlist.artwork_url}
-                  <div
-                    class="album-art"
-                    style="background-image: url('{playlist.artwork_url}')"
-                  ></div>
+                  <ArtworkImage
+                    className="album-art"
+                    src={playlist.artwork_url}
+                    alt={playlist.title}
+                    size={320}
+                    fallbackText={initials(playlist.title)}
+                  />
                 {:else}
                   <div class="album-art fallback" style="background: {letterColor(playlist.title)}">
                     <span>♫</span>
@@ -1359,10 +1446,13 @@
             >
               <div class="art-wrap">
                 {#if playlist.thumbnail}
-                  <div
-                    class="album-art"
-                    style="background-image: url('{playlist.thumbnail}')"
-                  ></div>
+                  <ArtworkImage
+                    className="album-art"
+                    src={playlist.thumbnail}
+                    alt={playlist.title ?? 'Spotify playlist'}
+                    size={320}
+                    fallbackText={initials(playlist.title ?? 'SP')}
+                  />
                 {:else}
                   <div class="album-art fallback" style="background: {letterColor(playlist.title ?? 'playlist')}">
                     <span>♫</span>
@@ -1424,7 +1514,13 @@
                 </span>
                 <span class="col-title">
                   {#if track.artwork_url}
-                    <span class="row-art" style={`background-image: url('${track.artwork_url}')`}></span>
+                    <ArtworkImage
+                      className="row-art"
+                      src={track.artwork_url}
+                      alt={track.title}
+                      size={320}
+                      fallbackText={initials(track.title)}
+                    />
                   {:else}
                     <span class="row-art fallback" style={`background: ${letterColor(track.title)}`}>♫</span>
                   {/if}
@@ -1511,7 +1607,13 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, trackContextMenu(track)) }}
             >
               {#if track.artwork_url}
-                <div class="track-art" style={`background-image: url('${track.artwork_url}')`}></div>
+                <ArtworkImage
+                  className="track-art"
+                  src={track.artwork_url}
+                  alt={track.title}
+                  size={320}
+                  fallbackText={initials(track.title)}
+                />
               {:else}
                 <div class="track-art fallback" style={`background: ${letterColor(track.title)}`}>
                   <span>♫</span>
@@ -1629,7 +1731,13 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
-                <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
+                <ArtworkImage
+                  className="track-art"
+                  src={track.artwork_url}
+                  alt={track.title}
+                  size={320}
+                  fallbackText={initials(track.title)}
+                />
               {:else}
                 <div class="track-art fallback" style="background:{letterColor(track.title)}"><span>♫</span></div>
               {/if}
@@ -1661,7 +1769,13 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildTrackMenu({ id: track.id, title: track.title, artist_name: track.artist_name, album_title: track.album_title })) }}
             >
               {#if track.artwork_url}
-                <div class="track-art" style="background-image:url('{track.artwork_url}')"></div>
+                <ArtworkImage
+                  className="track-art"
+                  src={track.artwork_url}
+                  alt={track.title}
+                  size={320}
+                  fallbackText={initials(track.title)}
+                />
               {:else}
                 <div class="track-art fallback" style="background:{letterColor(track.title)}"><span>♫</span></div>
               {/if}
@@ -1940,30 +2054,29 @@
     align-items: center;
     justify-content: center;
   }
-  .top-art--circle { border-radius: 50%; }
   .top-art.fallback span {
     font-size: var(--font-size-4xl);
     color: rgba(255,255,255,0.55);
     font-weight: var(--font-weight-semibold);
   }
-  .top-art--circle.fallback span { font-size: var(--font-size-3xl); }
   .top-meta {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-1);
   }
   .top-kind {
     font-size: var(--font-size-2xs);
+    line-height: var(--line-height-tight);
     text-transform: uppercase;
-    letter-spacing: 1.5px;
+    letter-spacing: 0;
     color: var(--text-tertiary);
     font-weight: var(--font-weight-semibold);
   }
   .top-title {
-    font-family: var(--font-body, inherit);
+    font-family: var(--font-display, serif);
     font-size: var(--font-size-3xl);
-    font-weight: var(--font-weight-bold);
+    font-weight: var(--font-weight-semibold);
     line-height: var(--line-height-tight);
     letter-spacing: 0;
     margin: 0;
@@ -1971,30 +2084,30 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .top-title.display-face {
-    font-family: var(--font-display, serif);
-    font-size: var(--font-size-3xl);
-    font-weight: var(--font-weight-semibold);
-    line-height: var(--line-height-tight);
-    letter-spacing: -0.02em;
-  }
   .top-sub {
     font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    line-height: var(--line-height-snug);
     color: var(--text-secondary);
     margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .top-play-btn {
     align-self: flex-start;
-    margin-top: 10px;
+    margin-top: var(--space-2);
     background: var(--accent);
     color: #fff;
     border: none;
-    border-radius: 22px;
-    padding: 9px 22px;
+    border-radius: 999px;
+    padding: var(--space-2) var(--space-4);
     font-size: var(--font-size-sm);
     font-weight: var(--font-weight-semibold);
+    line-height: 1;
+    letter-spacing: 0;
     cursor: pointer;
-    transition: opacity 0.15s, transform 0.15s;
+    transition: opacity var(--motion-fast), transform var(--motion-fast);
   }
   .top-play-btn:hover { opacity: 0.9; transform: scale(1.03); }
   .section-label {
@@ -2025,9 +2138,6 @@
     transition: transform 0.18s ease;
   }
   .artist-card:hover { transform: translateY(-3px); }
-  .artist-card:hover .artist-avatar {
-    opacity: 0.85;
-  }
   .avatar-wrap, .art-wrap {
     position: relative;
     line-height: 0;
@@ -2075,27 +2185,6 @@
   .album-card.in-library .album-title {
     color: var(--text-primary);
     font-weight: var(--font-weight-semibold);
-  }
-  .artist-avatar {
-    width: 72px;
-    height: 72px;
-    border-radius: 50%;
-    background: var(--bg-raised);
-    object-fit: cover;
-    display: block;
-    transition: opacity 0.15s;
-  }
-  .artist-avatar.fallback {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .artist-avatar.fallback span {
-    font-family: var(--font-body, inherit);
-    font-size: var(--font-size-xl);
-    font-weight: var(--font-weight-semibold);
-    color: rgba(255, 255, 255, 0.78);
-    letter-spacing: 0.02em;
   }
   .artist-name {
     font-size: var(--font-size-xs);
@@ -2250,28 +2339,29 @@
   .row-btn:disabled:hover { color: var(--text-tertiary); }
   .discovery-section { opacity: 0.9; }
   .discovery-section .section-label { color: var(--text-muted); }
-  .top-result-card.artist-hero {
+  .top-result-card.has-hero-bg {
     position: relative;
     overflow: hidden;
     min-height: 200px;
   }
-  .top-result-card.artist-hero::after {
+  .top-result-card.has-hero-bg::after {
     content: '';
     position: absolute;
     inset: 0;
-    background: linear-gradient(to right, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.5) 55%, rgba(0,0,0,0.1) 100%);
+    background:
+      linear-gradient(to right, rgba(0,0,0,0.64) 0%, rgba(0,0,0,0.36) 42%, rgba(0,0,0,0.12) 100%),
+      linear-gradient(to top, rgba(0,0,0,0.18), rgba(0,0,0,0.02));
     pointer-events: none;
-  }
-  .top-result-card.artist-hero .top-art,
-  .top-result-card.artist-hero .top-meta {
-    position: relative;
     z-index: 1;
   }
-  .top-result-card.artist-hero .top-art--circle {
-    width: 100px;
-    height: 100px;
+  .top-result-card.artist-hero .top-meta {
+    position: relative;
+    z-index: 3;
   }
-
+  .top-result-card.has-hero-bg .top-meta {
+    position: relative;
+    z-index: 3;
+  }
   /* Single-category grids — Trending/Library style. Override the carousel's
      horizontal-scroll layout when the matching pill is active. */
   .section-grid-albums {

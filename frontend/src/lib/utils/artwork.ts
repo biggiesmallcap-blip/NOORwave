@@ -6,6 +6,9 @@ type ArtworkItem = {
 
 type ArtworkSource = string | null | undefined | ArtworkItem | ArtworkItem[];
 
+export const TIDAL_ARTWORK_SIZES = [80, 160, 320, 640, 750, 1080, 1280] as const;
+export type TidalArtworkSize = (typeof TIDAL_ARTWORK_SIZES)[number];
+
 export function firstArtworkUrl(...sources: ArtworkSource[]): string | null {
 	for (const source of sources) {
 		const url = artworkFromSource(source);
@@ -44,8 +47,34 @@ function firstString(...values: (string | null | undefined)[]): string | null {
 // big; leave non-TIDAL URLs untouched.
 const TIDAL_ARTWORK_SIZE = /\/\d+x\d+\.jpg(\?.*)?$/i;
 
-export function upscaleTidalArtwork(url: string | null | undefined, size = 1280): string | null {
+export function normalizeTidalArtworkSize(size: number): TidalArtworkSize {
+	for (const allowed of TIDAL_ARTWORK_SIZES) {
+		if (size <= allowed) return allowed;
+	}
+	return 1280;
+}
+
+export function isTidalArtworkUrl(url: string | null | undefined): boolean {
+	return Boolean(url?.includes('resources.tidal.com'));
+}
+
+export function tidalArtworkFallbackSizes(
+	url: string | null | undefined,
+	size: TidalArtworkSize = 1280,
+): TidalArtworkSize[] {
+	const safeSize = normalizeTidalArtworkSize(Number(size));
+	if (!isTidalArtworkUrl(url)) return [safeSize];
+
+	const candidates: TidalArtworkSize[] = [safeSize, 320, 640, 750, 1080, 1280, 160, 80];
+	return candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
+}
+
+export function upscaleTidalArtwork(
+	url: string | null | undefined,
+	size: TidalArtworkSize = 1280,
+): string | null {
 	if (!url) return null;
-	if (!url.includes('resources.tidal.com')) return url;
-	return url.replace(TIDAL_ARTWORK_SIZE, `/${size}x${size}.jpg$1`);
+	if (!isTidalArtworkUrl(url)) return url;
+	const safeSize = normalizeTidalArtworkSize(Number(size));
+	return url.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
 }

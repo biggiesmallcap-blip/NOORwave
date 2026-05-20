@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { firstArtworkUrl, upscaleTidalArtwork } from './artwork';
+import { firstArtworkUrl, tidalArtworkFallbackSizes, upscaleTidalArtwork } from './artwork';
 
 describe('firstArtworkUrl', () => {
 	test('uses the first non-empty artwork value across ordered sources', () => {
@@ -42,6 +42,21 @@ describe('upscaleTidalArtwork', () => {
 		).toBe('https://resources.tidal.com/images/bc8d/750x750.jpg');
 	});
 
+	test('rewrites unsupported cached TIDAL sizes to the requested allowed size', () => {
+		expect(
+			upscaleTidalArtwork('https://resources.tidal.com/images/bc8d/cf41/480x480.jpg', 320),
+		).toBe('https://resources.tidal.com/images/bc8d/cf41/320x320.jpg');
+	});
+
+	test('normalizes arbitrary runtime sizes to a supported TIDAL size', () => {
+		expect(
+			upscaleTidalArtwork(
+				'https://resources.tidal.com/images/bc8d/cf41/480x480.jpg',
+				512 as never,
+			),
+		).toBe('https://resources.tidal.com/images/bc8d/cf41/640x640.jpg');
+	});
+
 	test('preserves a query string after the size segment', () => {
 		expect(
 			upscaleTidalArtwork('https://resources.tidal.com/images/bc8d/640x640.jpg?v=2'),
@@ -57,5 +72,17 @@ describe('upscaleTidalArtwork', () => {
 	test('returns null for missing input', () => {
 		expect(upscaleTidalArtwork(null)).toBeNull();
 		expect(upscaleTidalArtwork(undefined)).toBeNull();
+	});
+});
+
+describe('tidalArtworkFallbackSizes', () => {
+	test('tries smaller TIDAL artist art when the requested hero size fails', () => {
+		expect(
+			tidalArtworkFallbackSizes('https://resources.tidal.com/images/bc8d/cf41/640x640.jpg', 640),
+		).toEqual([640, 320, 750, 1080, 1280, 160, 80]);
+	});
+
+	test('does not retry non-TIDAL URLs with duplicate source URLs', () => {
+		expect(tidalArtworkFallbackSizes('https://img.example/cover.jpg', 640)).toEqual([640]);
 	});
 });
