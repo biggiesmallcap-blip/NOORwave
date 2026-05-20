@@ -2639,23 +2639,79 @@ fn layout_blend_candidate(
     }
 }
 
-fn resolve_tidal_blend_seeds(
+fn resolve_external_blend_seed_anchor(
+    conn: &rusqlite::Connection,
+    seed: &blend::BlendSeed,
+    model_id: Option<i64>,
+) -> rusqlite::Result<Option<i64>> {
+    if let Some(tidal_id) = seed.tidal_id.filter(|id| *id > 0) {
+        if let Some(track_id) = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+                params![tidal_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            return Ok(Some(track_id));
+        }
+
+        return conn
+            .query_row(
+                "SELECT COALESCE(c.resolved_track_id, n.library_track_id)
+                 FROM external_track_candidates c
+                 LEFT JOIN external_track_candidate_neighbors n
+                   ON n.candidate_id = c.id
+                  AND (?2 IS NULL OR n.model_id = ?2)
+                 WHERE c.tidal_id = ?1
+                   AND COALESCE(c.resolved_track_id, n.library_track_id) IS NOT NULL
+                 ORDER BY
+                   CASE WHEN c.resolved_track_id IS NOT NULL THEN 0 ELSE 1 END,
+                   n.score DESC,
+                   n.rank ASC
+                 LIMIT 1",
+                params![tidal_id, model_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional();
+    }
+
+    let artist = seed.artist.as_deref().unwrap_or("").trim();
+    let title = seed.title.as_deref().unwrap_or("").trim();
+    if artist.is_empty() || title.is_empty() {
+        return Ok(None);
+    }
+
+    conn.query_row(
+        "SELECT COALESCE(c.resolved_track_id, n.library_track_id)
+         FROM external_track_candidates c
+         LEFT JOIN external_track_candidate_neighbors n
+           ON n.candidate_id = c.id
+          AND (?3 IS NULL OR n.model_id = ?3)
+         WHERE lower(trim(c.title)) = lower(trim(?1))
+           AND lower(trim(c.artist_name)) = lower(trim(?2))
+           AND COALESCE(c.resolved_track_id, n.library_track_id) IS NOT NULL
+         ORDER BY
+           CASE WHEN c.resolved_track_id IS NOT NULL THEN 0 ELSE 1 END,
+           n.score DESC,
+           n.rank ASC
+         LIMIT 1",
+        params![title, artist, model_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+}
+
+fn resolve_blend_seed_anchors(
     conn: &rusqlite::Connection,
     seeds: &mut [blend::BlendSeed],
+    model_id: Option<i64>,
 ) -> rusqlite::Result<()> {
     for seed in seeds {
-        if seed.kind != blend::BlendSeedKind::Tidal || seed.track_id.is_some() {
-            continue;
-        }
-        if let Some(tidal_id) = seed.tidal_id {
-            let track_id = conn
-                .query_row(
-                    "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
-                    params![tidal_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
-            seed.track_id = track_id;
+        if seed.kind == blend::BlendSeedKind::Library {
+            seed.anchor_track_id = seed.track_id;
+        } else if seed.anchor_track_id.is_none() {
+            seed.anchor_track_id = resolve_external_blend_seed_anchor(conn, seed, model_id)?;
         }
     }
     Ok(())
@@ -2691,7 +2747,7 @@ fn seed_node_from_track(
         playability: blend::Playability::Playable,
         per_seed_scores: vec![blend::SeedScore {
             seed_identity: seed.identity.clone(),
-            seed_track_id: seed.track_id,
+            seed_track_id: seed.anchor_track_id.or(seed.track_id),
             score: 1.0,
         }],
         covered_seed_count: 1,
@@ -2735,7 +2791,7 @@ fn seed_node_from_external_seed(
         },
         per_seed_scores: vec![blend::SeedScore {
             seed_identity: seed.identity.clone(),
-            seed_track_id: seed.track_id,
+            seed_track_id: seed.anchor_track_id.or(seed.track_id),
             score: 1.0,
         }],
         covered_seed_count: 1,
@@ -2756,17 +2812,20 @@ fn build_discovery_blend_space(
     limit: i64,
     library_cap_ratio: f64,
 ) -> anyhow::Result<(Vec<blend::ScoredBlendCandidate>, Value)> {
-    resolve_tidal_blend_seeds(conn, seeds)?;
+    let model = queries::get_selected_discovery_embedding_model(conn)?;
+    resolve_blend_seed_anchors(conn, seeds, model.as_ref().map(|model| model.id))?;
     let seed_count = seeds.len();
     let library_seed_ids = seeds
         .iter()
-        .filter_map(|seed| seed.track_id)
+        .filter_map(|seed| seed.anchor_track_id.or(seed.track_id))
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
-    let model = queries::get_selected_discovery_embedding_model(conn)?;
 
     let mut seed_nodes = Vec::new();
     for (index, seed) in seeds.iter().enumerate() {
-        if let Some(track_id) = seed.track_id {
+        if seed.kind == blend::BlendSeedKind::Library && seed.track_id.is_some() {
+            let track_id = seed.track_id.unwrap_or_default();
             let row = conn
                 .query_row(
                     "SELECT t.id, t.title, ar.name, al.title, al.artwork_url, t.duration_ms
@@ -2799,6 +2858,10 @@ fn build_discovery_blend_space(
     if let Some(model) = model {
         let per_seed_limit = limit.max(1).min(200);
         let seed_id_set = library_seed_ids.iter().copied().collect::<HashSet<_>>();
+        let seed_identity_set = seeds
+            .iter()
+            .map(|seed| seed.identity.clone())
+            .collect::<HashSet<_>>();
         let library_neighbors = queries::get_track_neighbors_for_seeds(
             conn,
             model.id,
@@ -2811,6 +2874,9 @@ fn build_discovery_blend_space(
                     continue;
                 }
                 let identity = format!("library:{}", row.track_id);
+                if seed_identity_set.contains(&identity) {
+                    continue;
+                }
                 let reason_tags =
                     parse_discovery_reason_tags(row.reason_json.as_deref(), "library_match");
                 let entry = candidate_inputs.entry(identity.clone()).or_insert_with(|| {
@@ -2847,7 +2913,10 @@ fn build_discovery_blend_space(
                     .tidal_id
                     .filter(|id| *id > 0)
                     .map(|id| format!("tidal:{id}"))
-                    .unwrap_or_else(|| format!("pending:{}", row.candidate_id));
+                    .unwrap_or_else(|| blend::pending_seed_identity(&row.artist_name, &row.title));
+                if seed_identity_set.contains(&identity) {
+                    continue;
+                }
                 let reason_tags =
                     parse_discovery_reason_tags(row.reason_json.as_deref(), "external_match");
                 let entry = candidate_inputs.entry(identity.clone()).or_insert_with(|| {
@@ -2995,7 +3064,7 @@ fn blend_edge_json(
     candidate
         .per_seed_scores
         .iter()
-        .filter(|score| score.seed_track_id == seed.track_id && score.score > 0.0)
+        .filter(|score| score.seed_identity == seed.identity && score.score > 0.0)
         .map(|score| {
             json!({
                 "id": format!("blend-{from_track_id}-{to_track_id}"),
@@ -3855,7 +3924,9 @@ async fn add_discovery_blend_to_queue(
             Ok(crate::server::radio_pipeline::append_radio_queue_from_candidates(conn, tracks)?)
         })
         .map_err(internal)?;
-    let pending_count = build.pending_item_ids.len();
+    let pending_item_ids = build.pending_item_ids;
+    let pending_count = pending_item_ids.len();
+    spawn_pending_resolvers_for_queue_items(&state, &db, pending_item_ids, "blend_add").await;
     {
         let state_guard = state.read().await;
         let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
@@ -3888,8 +3959,9 @@ async fn play_discovery_blend(
 
 async fn make_discovery_blend_radio(
     State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryBlendRequest>,
+    Json(mut payload): Json<DiscoveryBlendRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    payload.limit = Some(payload.limit.unwrap_or(200).max(120).min(200));
     play_discovery_blend_inner(state, payload, "blend_radio").await
 }
 
@@ -5181,40 +5253,7 @@ async fn build_radio_queue_and_spawn_resolvers(
         }
     };
 
-    if !pending_item_ids.is_empty() {
-        let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
-            let s = state.read().await;
-            if let Some(t) = s.tidal_tokens.clone() {
-                Some(t)
-            } else {
-                drop(s);
-                load_persisted_tidal_tokens(state).await.ok().flatten()
-            }
-        };
-
-        if let Some(tokens) = tokens_opt {
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
-            let (event_tx, tidal_http_client) = {
-                let s = state.read().await;
-                (s.event_tx.clone(), s.tidal_http_client.clone())
-            };
-            for item_id in pending_item_ids {
-                let sem = semaphore.clone();
-                let db_bg = db.clone();
-                let tok = tokens.clone();
-                let tx = event_tx.clone();
-                let http = tidal_http_client.clone();
-                tokio::spawn(async move {
-                    let _permit = sem.acquire_owned().await.ok();
-                    resolve_pending_row(db_bg, tok, item_id, tx, http).await;
-                });
-            }
-        } else {
-            tracing::warn!(
-                "{context}: Tidal tokens unavailable - pending rows will rely on lazy resolution"
-            );
-        }
-    }
+    spawn_pending_resolvers_for_queue_items(state, db, pending_item_ids, context).await;
 
     {
         let s = state.read().await;
@@ -5222,6 +5261,50 @@ async fn build_radio_queue_and_spawn_resolvers(
     }
 
     Ok((first_playable, pending_count))
+}
+
+async fn spawn_pending_resolvers_for_queue_items(
+    state: &SharedState,
+    db: &crate::db::Database,
+    pending_item_ids: Vec<i64>,
+    context: &'static str,
+) {
+    if pending_item_ids.is_empty() {
+        return;
+    }
+
+    let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
+        let s = state.read().await;
+        if let Some(t) = s.tidal_tokens.clone() {
+            Some(t)
+        } else {
+            drop(s);
+            load_persisted_tidal_tokens(state).await.ok().flatten()
+        }
+    };
+
+    if let Some(tokens) = tokens_opt {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(RESOLVER_POOL_SIZE));
+        let (event_tx, tidal_http_client) = {
+            let s = state.read().await;
+            (s.event_tx.clone(), s.tidal_http_client.clone())
+        };
+        for item_id in pending_item_ids {
+            let sem = semaphore.clone();
+            let db_bg = db.clone();
+            let tok = tokens.clone();
+            let tx = event_tx.clone();
+            let http = tidal_http_client.clone();
+            tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.ok();
+                resolve_pending_row(db_bg, tok, item_id, tx, http).await;
+            });
+        }
+    } else {
+        tracing::warn!(
+            "{context}: Tidal tokens unavailable - pending rows will rely on lazy resolution"
+        );
+    }
 }
 
 async fn start_first_radio_queue_item(
@@ -13758,6 +13841,156 @@ mod tests {
         assert_eq!(pending["role"], "external_candidate");
         assert_eq!(pending["playability"], "pending");
         assert_eq!(body["health"]["pending_external_count"], 1);
+        assert_eq!(body["health"]["playable_external_count"], 1);
+        assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn discovery_blend_space_uses_external_seed_anchors() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Guide Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES
+                    (1, 'Guide One', 1, 200000, 1001),
+                    (2, 'Guide Two', 1, 201000, 1002)",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:blend-external-seeds",
+                "discovery-fusion-v2",
+                2,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            let external_seed_one = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(991_001),
+                    mbid: None,
+                    dedupe_key: "tidal:991001".to_string(),
+                    title: "External Seed One".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            let external_seed_two = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(991_002),
+                    mbid: None,
+                    dedupe_key: "tidal:991002".to_string(),
+                    title: "External Seed Two".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(181_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            let shared_discovery = queries::upsert_external_track_candidate(
+                conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(991_003),
+                    mbid: None,
+                    dedupe_key: "tidal:991003".to_string(),
+                    title: "Shared Discovery".to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(182_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            queries::replace_external_candidate_neighbors(
+                conn,
+                model.id,
+                1,
+                &[
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: external_seed_one.id,
+                        rank: 1,
+                        score: 0.99,
+                        audio_score: 0.99,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: shared_discovery.id,
+                        rank: 2,
+                        score: 0.91,
+                        audio_score: 0.91,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                ],
+            )?;
+            queries::replace_external_candidate_neighbors(
+                conn,
+                model.id,
+                2,
+                &[
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: external_seed_two.id,
+                        rank: 1,
+                        score: 0.99,
+                        audio_score: 0.99,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                    queries::ExternalCandidateNeighborWriteRow {
+                        candidate_id: shared_discovery.id,
+                        rank: 2,
+                        score: 0.89,
+                        audio_score: 0.89,
+                        metadata_score: 0.0,
+                        reason_json: Some(r#"[{"key":"external_audio_proxy"}]"#.to_string()),
+                    },
+                ],
+            )?;
+            Ok(())
+        })
+        .expect("seed external blend anchors");
+
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discovery/blend/space")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"seeds":[{"kind":"tidal","tidal_id":991001,"title":"External Seed One","artist":"Outside"},{"kind":"tidal","tidal_id":991002,"title":"External Seed Two","artist":"Outside"}],"limit":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let tracks = body["tracks"].as_array().expect("tracks array");
+        assert!(
+            tracks
+                .iter()
+                .any(|track| track["title"] == "Shared Discovery"),
+            "external blend seeds should produce anchored discoveries"
+        );
         assert_eq!(body["health"]["playable_external_count"], 1);
         assert!(body["health"]["coverage_ratio"].as_f64().unwrap() > 0.0);
 

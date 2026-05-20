@@ -34,6 +34,7 @@ pub struct BlendSeed {
     pub kind: BlendSeedKind,
     pub identity: String,
     pub track_id: Option<i64>,
+    pub anchor_track_id: Option<i64>,
     pub tidal_id: Option<i64>,
     pub artist: Option<String>,
     pub title: Option<String>,
@@ -155,6 +156,7 @@ pub fn validate_and_normalize_seeds(
             kind: seed.kind,
             identity,
             track_id: seed.track_id.filter(|id| *id > 0),
+            anchor_track_id: seed.track_id.filter(|id| *id > 0),
             tidal_id: seed.tidal_id.filter(|id| *id > 0),
             artist: seed.artist.clone(),
             title: seed.title.clone(),
@@ -203,17 +205,27 @@ fn normalize_identity_part(value: &str) -> String {
         .join(" ")
 }
 
+pub fn pending_seed_identity(artist: &str, title: &str) -> String {
+    format!(
+        "pending:{}:{}",
+        normalize_identity_part(artist),
+        normalize_identity_part(title)
+    )
+}
+
 pub fn score_blend_candidate(
     candidate: &BlendCandidateInput,
     seeds: &[BlendSeed],
 ) -> ScoredBlendCandidate {
+    let mut seen_anchor_track_ids = HashSet::new();
     let mut per_seed_scores = Vec::new();
     let mut covered_seed_count = 0usize;
     let mut weighted_seed_proximity = 0.0;
 
     for seed in seeds {
-        let score = seed
-            .track_id
+        let seed_track_id = seed.anchor_track_id.or(seed.track_id);
+        let score = seed_track_id
+            .filter(|track_id| seen_anchor_track_ids.insert(*track_id))
             .and_then(|track_id| {
                 candidate
                     .per_seed_scores
@@ -228,7 +240,7 @@ pub fn score_blend_candidate(
         weighted_seed_proximity += seed.weight * score;
         per_seed_scores.push(SeedScore {
             seed_identity: seed.identity.clone(),
-            seed_track_id: seed.track_id,
+            seed_track_id,
             score,
         });
     }
@@ -497,5 +509,19 @@ mod tests {
             .filter(|candidate| candidate.role == CandidateRole::LibraryGuide)
             .count();
         assert_eq!(libraries, 1);
+    }
+
+    #[test]
+    fn duplicate_external_anchors_do_not_count_as_multi_seed_coverage() {
+        let mut seeds =
+            validate_and_normalize_seeds(&[library_seed(1, Some(0.5)), library_seed(2, Some(0.5))])
+                .expect("valid seeds");
+        seeds[1].anchor_track_id = Some(1);
+        let scored =
+            score_blend_candidate(&candidate("shared-anchor", false, vec![(1, 0.9)]), &seeds);
+
+        assert_eq!(scored.covered_seed_count, 1);
+        assert_eq!(scored.per_seed_scores[0].score, 0.9);
+        assert_eq!(scored.per_seed_scores[1].score, 0.0);
     }
 }

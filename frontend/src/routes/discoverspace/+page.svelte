@@ -51,10 +51,29 @@
 	let searchQuery = $state('');
 	let isSearching = $state(false);
 	let blendAction = $state<'add' | 'play' | 'radio' | null>(null);
+	let lastNodeSignature = '';
 
 	let canRunBlendActions = $derived(
-		($discoverSpaceStore.blendHealth?.playable_external_count ?? 0) > 0
+		!$discoverSpaceStore.blendLoading
+		&& ($discoverSpaceStore.blendHealth?.playable_external_count ?? 0) > 0
 	);
+
+	$effect(() => {
+		const nodes = $discoverSpaceStore.nodes;
+		const signature = nodes.map((node) => node.id).join('|');
+		if (signature === lastNodeSignature) return;
+		lastNodeSignature = signature;
+		if (selectedNode) {
+			selectedNode = nodes.find((node) => node.id === selectedNode?.id) ?? null;
+		}
+		if (hoveredNode) {
+			hoveredNode = nodes.find((node) => node.id === hoveredNode?.id) ?? null;
+			if (!hoveredNode) {
+				hoverX = 0;
+				hoverY = 0;
+			}
+		}
+	});
 
 	function handleModeChange(mode: RadioMode) {
 		lastLoadedSeedId = resolvedSeedId;
@@ -71,7 +90,7 @@
 		hoverY = y;
 	}
 
-	function handleSelectNode(node: DiscoverTrackNode) {
+	function handleSelectNode(node: DiscoverTrackNode | null) {
 		selectedNode = node;
 	}
 
@@ -102,6 +121,16 @@
 		removeBlendSeed(identity);
 		if (nextCount >= 2) {
 			loadBlendSpace($currentTrack?.id ?? null);
+		}
+	}
+
+	function handleClearBlend() {
+		clearBlend();
+		hoveredNode = null;
+		selectedNode = null;
+		if (resolvedSeedId !== null) {
+			lastLoadedSeedId = resolvedSeedId;
+			loadSpace($discoverSpaceStore.mode, resolvedSeedId, undefined, resolvedSeedSource, $currentTrack?.id ?? null);
 		}
 	}
 
@@ -241,10 +270,10 @@
 				>
 					{$discoverSpaceStore.blendLoading ? 'Loading' : 'Map blend'}
 				</button>
-				<button class="blend-action" type="button" onclick={() => runBlendAction('add')} disabled={!canRunBlendActions || blendAction !== null}>Add discoveries</button>
-				<button class="blend-action primary" type="button" onclick={() => runBlendAction('play')} disabled={!canRunBlendActions || blendAction !== null}>Play discoveries</button>
-				<button class="blend-action" type="button" onclick={() => runBlendAction('radio')} disabled={!canRunBlendActions || blendAction !== null}>Make blend radio</button>
-				<button class="blend-action subtle" type="button" onclick={clearBlend}>Clear blend</button>
+				<button class="blend-action" type="button" onclick={() => runBlendAction('add')} disabled={!canRunBlendActions || blendAction !== null || $discoverSpaceStore.blendLoading}>Add discoveries</button>
+				<button class="blend-action primary" type="button" onclick={() => runBlendAction('play')} disabled={!canRunBlendActions || blendAction !== null || $discoverSpaceStore.blendLoading}>Play discoveries</button>
+				<button class="blend-action" type="button" onclick={() => runBlendAction('radio')} disabled={!canRunBlendActions || blendAction !== null || $discoverSpaceStore.blendLoading}>Make blend radio</button>
+				<button class="blend-action subtle" type="button" onclick={handleClearBlend}>Clear blend</button>
 			</div>
 		</div>
 	{/if}
