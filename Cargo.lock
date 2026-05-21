@@ -3179,6 +3179,7 @@ dependencies = [
  "hmac",
  "madmom_beats_port_core",
  "md5",
+ "noor-mix",
  "num-complex",
  "rand 0.8.6",
  "rayon",
