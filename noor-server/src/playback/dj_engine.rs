@@ -1,7 +1,8 @@
 use anyhow::Result;
-use noor_mix::planner::{MixIntent, TransitionSpeedBias, TransitionTemplate};
+use noor_mix::planner::{DJ_PLANNER_VERSION, MixIntent, TransitionSpeedBias, TransitionTemplate};
 use noor_mix::{DjProfile, Planner, Policy, TransitionProgram};
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow};
 use crate::db::{Database, queries};
@@ -19,9 +20,27 @@ pub struct RuntimeSafetyDecision {
     pub force_safe_crossfade: bool,
 }
 
+pub struct DjTransitionPlan {
+    pub program: TransitionProgram,
+    pub rejected_alternatives: Vec<RejectedTransitionAlternative>,
+    pub planner_version: &'static str,
+    pub fallback_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RejectedTransitionAlternative {
+    pub template: &'static str,
+    pub score: f32,
+    pub reason: &'static str,
+}
+
 impl DjEngine {
     pub fn new(db: Database) -> Self {
         Self { db }
+    }
+
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
     }
 
     #[allow(dead_code)]
@@ -38,6 +57,18 @@ impl DjEngine {
         sample_rate: u32,
         channels: u16,
     ) -> Result<Option<TransitionProgram>> {
+        Ok(self
+            .plan_transition_details(from, to, sample_rate, channels)?
+            .map(|plan| plan.program))
+    }
+
+    pub fn plan_transition_details(
+        &self,
+        from: &DjMediaRef,
+        to: &DjMediaRef,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<Option<DjTransitionPlan>> {
         self.db.with_conn(|conn| {
             if !queries::is_dj_engine_enabled(conn)? {
                 return Ok(None);
@@ -54,7 +85,11 @@ impl DjEngine {
                 policy_from_db(conn, from_correction.as_ref(), to_correction.as_ref())?;
             if from_profile.is_none() || to_profile.is_none() {
                 policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
-                return Ok(Some(safe_crossfade_program(sample_rate, channels, policy)));
+                let program = safe_crossfade_program(sample_rate, channels, policy);
+                return Ok(Some(plan_from_program(
+                    program,
+                    Some(missing_profile_reason(from_profile.is_none())),
+                )));
             }
 
             let mut outgoing = profile_from_row(from_profile.as_ref().expect("checked"));
@@ -71,9 +106,10 @@ impl DjEngine {
             program.sample_rate = sample_rate.max(1);
             program.channels = channels.max(1);
             if program.validate().is_err() {
-                return Ok(Some(safe_crossfade_program(sample_rate, channels, policy)));
+                let program = safe_crossfade_program(sample_rate, channels, policy);
+                return Ok(Some(plan_from_program(program, Some("program_invalid"))));
             }
-            Ok(Some(program))
+            Ok(Some(plan_from_program(program, safety.fallback_reason)))
         })
     }
 
@@ -82,6 +118,48 @@ impl DjEngine {
         self.db
             .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
     }
+}
+
+fn plan_from_program(
+    program: TransitionProgram,
+    fallback_reason: Option<&'static str>,
+) -> DjTransitionPlan {
+    DjTransitionPlan {
+        rejected_alternatives: rejected_alternatives_for(&program.template),
+        program,
+        planner_version: DJ_PLANNER_VERSION,
+        fallback_reason,
+    }
+}
+
+fn missing_profile_reason(from_missing: bool) -> &'static str {
+    if from_missing {
+        "current_profile_missing"
+    } else {
+        "next_profile_missing"
+    }
+}
+
+fn rejected_alternatives_for(selected_template: &str) -> Vec<RejectedTransitionAlternative> {
+    const ORDERED: [(&str, f32); 6] = [
+        ("BassSwap32", 0.94),
+        ("BassSwap16", 0.88),
+        ("LongHarmonicBlend", 0.82),
+        ("FilterSweep", 0.76),
+        ("SlamCut", 0.70),
+        ("SafeCrossfade", 0.64),
+    ];
+
+    ORDERED
+        .into_iter()
+        .filter(|(template, _)| *template != selected_template)
+        .take(3)
+        .map(|(template, score)| RejectedTransitionAlternative {
+            template,
+            score,
+            reason: "not_selected",
+        })
+        .collect()
 }
 
 fn runtime_safety_decision(outgoing: &DjProfile, incoming: &DjProfile) -> RuntimeSafetyDecision {

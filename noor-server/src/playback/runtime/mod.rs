@@ -2597,6 +2597,7 @@ mod tests {
         ) -> PreparedTransitionProgram {
             PreparedTransitionProgram {
                 program: program(),
+                transition_event_id: None,
                 queue_generation,
                 current_queue_item_id,
                 next_queue_item_id,
@@ -3442,6 +3443,7 @@ mod tests {
                 loops: vec![],
                 automation: vec![],
             },
+            transition_event_id: None,
             queue_generation,
             current_queue_item_id,
             next_queue_item_id,

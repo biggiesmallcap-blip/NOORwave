@@ -12212,9 +12212,20 @@ async fn sync_session_after_snapshot(
                     .with_conn(|conn| Ok(player::lookup_current_listen_source(conn)))
                     .unwrap_or(crate::db::models::ListenSource::Unknown);
                 let prior = state.live_listen_session.as_ref();
-                state.active_listen_session = Some(player::ActiveListenSession::start(
-                    track.id, now, source, prior,
-                ));
+                let dj_transition_event_id = state
+                    .db
+                    .with_conn(|conn| {
+                        player::latest_open_dj_transition_event_for_pair(
+                            conn,
+                            prior.map(|session| session.last_track_id),
+                            track.id,
+                        )
+                    })
+                    .unwrap_or(None);
+                state.active_listen_session = Some(
+                    player::ActiveListenSession::start(track.id, now, source, prior)
+                        .with_dj_transition_event_id(dj_transition_event_id),
+                );
                 now_playing = Some((
                     track.artist_name.clone().unwrap_or_default(),
                     track.title.clone(),
@@ -12318,6 +12329,7 @@ pub(crate) fn flush_active_listen_session_locked(
     let source = session.source;
     let position_in_session = session.position_in_session;
     let transition_from_track_id = session.transition_from_track_id;
+    let dj_transition_event_id = session.dj_transition_event_id;
     let write_result = state.db.with_conn(|conn| {
         let track = queue::get_track_by_id(conn, track_id)?.ok_or_else(|| {
             anyhow::anyhow!("track {} missing when flushing listen session", track_id)
@@ -12335,6 +12347,12 @@ pub(crate) fn flush_active_listen_session_locked(
             transition_from_track_id,
         )?;
         queries::increment_track_play_summary(conn, track_id, &started_at, completed)?;
+        player::record_dj_transition_listen_outcome(
+            conn,
+            dj_transition_event_id,
+            listened_ms,
+            completed,
+        )?;
         // Capture the fields needed for a Last.fm scrobble. The scrobble
         // helper itself does the source filter + eligibility check + silent
         // no-op when scrobbling isn't configured.

@@ -4,7 +4,7 @@ use crate::db::{
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
-use crate::playback::dj_engine::DjEngine;
+use crate::playback::dj_engine::{DjEngine, DjTransitionPlan};
 use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
@@ -77,6 +77,7 @@ pub struct PreparedPlaybackJob {
 #[derive(Debug, Clone)]
 pub struct PreparedTransitionProgram {
     pub program: noor_mix::TransitionProgram,
+    pub transition_event_id: Option<i64>,
     pub queue_generation: u64,
     pub current_queue_item_id: Option<i64>,
     pub next_queue_item_id: Option<i64>,
@@ -162,6 +163,7 @@ pub struct ActiveListenSession {
     pub source: crate::db::models::ListenSource,
     pub position_in_session: i32,
     pub transition_from_track_id: Option<i64>,
+    pub dj_transition_event_id: Option<i64>,
 }
 
 // Tracks the rolling state of the user's current listening session across multiple
@@ -399,17 +401,47 @@ fn attach_dj_transition_plan_for_pair(
     {
         return Ok(job);
     }
-    if let Some(program) =
-        engine.plan_transition(current, next, sample_rate.max(1), channels.max(1))?
+    if let Some(plan) =
+        engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
+        let transition_event_id = log_dj_transition_event(engine, current, next, &plan)?;
         job = job.with_prepared_transition(PreparedTransitionProgram {
-            program,
+            program: plan.program,
+            transition_event_id: Some(transition_event_id),
             queue_generation: pair.queue_generation,
             current_queue_item_id: pair.current_queue_item_id,
             next_queue_item_id: Some(next_queue_item_id),
         });
     }
     Ok(job)
+}
+
+fn log_dj_transition_event(
+    engine: &DjEngine,
+    current: &DjMediaRef,
+    next: &DjMediaRef,
+    plan: &DjTransitionPlan,
+) -> Result<i64> {
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let program_json = serde_json::to_string(&plan.program)?;
+    let rejected_json = serde_json::to_string(&plan.rejected_alternatives)?;
+    engine.db().with_conn(|conn| {
+        queries::insert_dj_transition_event(
+            conn,
+            current.track_id(),
+            next.track_id(),
+            Some(current_key.media_ref_kind.as_str()),
+            Some(current_key.media_ref_id.as_str()),
+            Some(next_key.media_ref_kind.as_str()),
+            Some(next_key.media_ref_id.as_str()),
+            plan.program.template.as_str(),
+            program_json.as_str(),
+            Some(rejected_json.as_str()),
+            plan.planner_version,
+            plan.fallback_reason,
+        )
+    })
 }
 
 impl ActiveListenSession {
@@ -436,7 +468,13 @@ impl ActiveListenSession {
             source,
             position_in_session: position,
             transition_from_track_id: transition_from,
+            dj_transition_event_id: None,
         }
+    }
+
+    pub fn with_dj_transition_event_id(mut self, event_id: Option<i64>) -> Self {
+        self.dj_transition_event_id = event_id;
+        self
     }
 
     pub fn to_live_session(&self, finished_at: DateTime<Utc>) -> LiveListenSession {
@@ -447,6 +485,46 @@ impl ActiveListenSession {
             position: self.position_in_session,
         }
     }
+}
+
+pub fn latest_open_dj_transition_event_for_pair(
+    conn: &Connection,
+    from_track_id: Option<i64>,
+    to_track_id: i64,
+) -> Result<Option<i64>> {
+    let Some(from_track_id) = from_track_id else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id
+         FROM dj_transition_events
+         WHERE from_track_id = ?1
+           AND to_track_id = ?2
+           AND outcome IS NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT 1",
+        params![from_track_id, to_track_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn record_dj_transition_listen_outcome(
+    conn: &Connection,
+    transition_event_id: Option<i64>,
+    listened_ms: i64,
+    completed: bool,
+) -> Result<()> {
+    let Some(id) = transition_event_id else {
+        return Ok(());
+    };
+    if completed {
+        queries::update_dj_transition_outcome(conn, id, "finished", false)?;
+    } else if listened_ms < 30_000 {
+        queries::update_dj_transition_outcome(conn, id, "skip_within_30s", true)?;
+    }
+    Ok(())
 }
 
 // Reads the queue.source string of the currently-playing queue item and maps it
@@ -2664,6 +2742,387 @@ mod tests {
 
             let program = job.prepared_transition.expect("transition").program;
             assert_eq!(program.template, "SafeCrossfade");
+        }
+    }
+
+    mod dj_transition_logging {
+        use super::*;
+        use crate::db::models::{AudioDjProfileKey, AudioDjProfileRow};
+        use crate::db::schema;
+        use crate::services::audio_analysis::dj_profile::{
+            DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,
+        };
+        use serde_json::Value;
+
+        fn db_with_pair() -> Database {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                conn.execute(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                    ) VALUES (1, 'Track 1', 1, 1, 'tidal', 'LOSSLESS', 'tidal', 180000),
+                             (2, 'Track 2', 1, 2, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source)
+                     VALUES (11, 1, 0, 'manual'), (12, 2, 1, 'manual')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                queries::set_dj_engine_enabled(conn, true)?;
+                seed_profile(conn, "tidal_track", "1", Some(1))?;
+                seed_profile(conn, "tidal_track", "2", Some(2))?;
+                Ok(())
+            })
+            .expect("seed");
+            db
+        }
+
+        fn seed_profile(
+            conn: &Connection,
+            kind: &str,
+            id: &str,
+            track_id: Option<i64>,
+        ) -> Result<()> {
+            let row = AudioDjProfileRow {
+                media_ref_kind: kind.to_string(),
+                media_ref_id: id.to_string(),
+                track_id,
+                queue_item_id: None,
+                tidal_id: id.parse().ok(),
+                profile_version: DJ_PROFILE_VERSION.to_string(),
+                beat_grid_blob: encode_f32_blob(
+                    &(0..64).map(|i| i as f32 * 0.5).collect::<Vec<_>>(),
+                ),
+                downbeats_blob: encode_f32_blob(
+                    &(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>(),
+                ),
+                phrase_boundaries_blob: encode_u32_blob(&(0..16).collect::<Vec<_>>()),
+                mix_in_blob: encode_f32_blob(&[0.0]),
+                mix_out_blob: encode_f32_blob(&[90.0]),
+                intro_end_seconds: Some(16.0),
+                outro_start_seconds: Some(120.0),
+                breakdown_blob: encode_f32_blob(&[]),
+                drop_blob: encode_f32_blob(&[]),
+                safe_transition_windows_blob: encode_f32_blob(&[0.0, 8.0, 1.0]),
+                energy_contour_blob: encode_f32_blob(&[]),
+                vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
+                vocal_density_blob: encode_f32_blob(&[0.0; 16]),
+                lufs_loud_body: Some(-12.0),
+                true_peak_dbtp: Some(-1.0),
+                beat_confidence: Some(0.9),
+                profile_confidence: 0.9,
+                analysis_scope_ms: 90_000,
+                is_temporary: false,
+                source: "test".to_string(),
+                computed_at: "now".to_string(),
+            };
+            queries::upsert_audio_dj_profile(conn, &row)
+        }
+
+        fn next_job(db: &Database) -> PlaybackPreparation {
+            db.with_conn(|conn| {
+                let track = queue::get_track_by_id(conn, 2)?.expect("track");
+                Ok(build_playback_preparation(&track, None, 0, None))
+            })
+            .expect("job")
+        }
+
+        fn plan(db: &Database) -> PreparedTransitionProgram {
+            attach_dj_transition_plan(db, next_job(db), 48_000, 2)
+                .expect("plan")
+                .prepared_transition
+                .expect("transition")
+        }
+
+        fn event_count(db: &Database) -> i64 {
+            db.with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM dj_transition_events", [], |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into)
+            })
+            .expect("count")
+        }
+
+        #[test]
+        fn dj_disabled_does_not_write_dj_transition_events() {
+            let db = db_with_pair();
+            db.with_conn(|conn| queries::set_dj_engine_enabled(conn, false))
+                .expect("disable");
+
+            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+
+            assert!(job.prepared_transition.is_none());
+            assert_eq!(event_count(&db), 0);
+        }
+
+        #[test]
+        fn dj_transition_logging_does_not_replace_playback_transitions() {
+            let db = db_with_pair();
+            let _ = plan(&db);
+            db.with_conn(|conn| {
+                queries::record_playback_transition(conn, 1, 2, "queue", true, 8000)
+            })
+            .expect("legacy transition");
+
+            let counts = db
+                .with_conn(|conn| {
+                    let dj: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM dj_transition_events", [], |row| {
+                            row.get(0)
+                        })?;
+                    let legacy: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM playback_transitions", [], |row| {
+                            row.get(0)
+                        })?;
+                    Ok((dj, legacy))
+                })
+                .expect("counts");
+
+            assert_eq!(counts, (1, 1));
+        }
+
+        #[test]
+        fn dj_transition_logging_limits_rejected_alternatives_to_three() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+            let rejected: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT rejected_alternatives_json FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("rejected");
+            let parsed: Vec<Value> = serde_json::from_str(&rejected).expect("json");
+
+            assert!(parsed.len() <= 3);
+            assert!(parsed.iter().all(|item| item.get("template").is_some()));
+            assert!(parsed.iter().all(|item| item.get("score").is_some()));
+            assert!(parsed.iter().all(|item| item.get("reason").is_some()));
+        }
+
+        #[test]
+        fn dj_transition_logging_uses_planner_version_not_profile_version() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+            let planner_version: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT planner_version FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("planner version");
+
+            assert_eq!(planner_version, noor_mix::planner::DJ_PLANNER_VERSION);
+            assert_ne!(planner_version, DJ_PROFILE_VERSION);
+        }
+
+        #[test]
+        fn external_dj_transition_logging_does_not_require_library_track_id() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM queue WHERE id = 12", [])?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (12, NULL, 1, 'radio_pending', 'External A', 'External B')",
+                    [],
+                )?;
+                seed_profile(conn, "queue_item", "12", None)?;
+                Ok(())
+            })
+            .expect("external");
+            let pair = db.with_conn(load_dj_lookahead_pair).expect("pair");
+            let engine = DjEngine::new(db.clone());
+            let job = attach_dj_transition_plan_for_pair(
+                &engine,
+                PreparedPlaybackJob::test_fixture(99, 1),
+                pair,
+                48_000,
+                2,
+            )
+            .expect("plan");
+
+            let event_id = job
+                .prepared_transition
+                .and_then(|transition| transition.transition_event_id)
+                .expect("event");
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT to_track_id, to_media_ref_kind, to_media_ref_id
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![event_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<i64>>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("event");
+
+            assert_eq!(row.0, None);
+            assert_eq!(row.1, "queue_item");
+            assert_eq!(row.2, "12");
+        }
+
+        #[test]
+        fn skip_mid_transition_updates_dj_event() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    12_000,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let outcome: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("outcome");
+            assert_eq!(outcome, "skip_within_30s");
+        }
+
+        #[test]
+        fn skip_within_30s_counts_as_negative_transition_outcome() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    29_999,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let skip_flag: i64 = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("flag");
+            assert_eq!(skip_flag, 1);
+        }
+
+        #[test]
+        fn skip_after_30s_does_not_count_as_bad_transition_feedback() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    30_000,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome, skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("row");
+            assert_eq!(row, (None, 0));
+        }
+
+        #[test]
+        fn manual_bad_feedback_counts_stronger_than_skip() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    12_000,
+                    false,
+                )?;
+                conn.execute(
+                    "UPDATE dj_transition_events SET user_rating = -1 WHERE id = ?1",
+                    params![transition.transition_event_id],
+                )?;
+                queries::count_recent_bad_dj_feedback_for_ref(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "2".to_string(),
+                    },
+                    3,
+                )
+            })
+            .map(|count| assert_eq!(count, 1))
+            .expect("feedback count");
+        }
+
+        #[test]
+        fn finished_transition_updates_dj_event() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    170_000,
+                    true,
+                )
+            })
+            .expect("outcome");
+
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome, skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("row");
+            assert_eq!(row, ("finished".to_string(), 0));
         }
     }
 
