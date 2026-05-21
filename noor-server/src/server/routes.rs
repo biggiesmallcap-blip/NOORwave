@@ -39,6 +39,7 @@ mod analytics_routes;
 mod audio_analysis_routes;
 mod chart_routes;
 mod discovery_routes;
+mod dj_routes;
 mod duplicates_routes;
 mod enrichment_routes;
 mod genre_routes;
@@ -488,6 +489,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/library/enrich/musicbrainz/portable/import",
             post(enrichment_routes::import_musicbrainz_portable_snapshot),
         )
+        .merge(dj_routes::routes())
         .route("/api/library/tracks/favorite", post(set_track_favorite))
         // Duplicates
         .route(
@@ -13204,6 +13206,204 @@ mod tests {
         db.with_conn(|conn| schema::run_migrations(conn))
             .expect("schema migrations");
         (db, db_path)
+    }
+
+    fn app_for_db(db: Database) -> Router {
+        api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(db))))
+    }
+
+    fn seed_dj_queue_pair(db: &Database) -> (i64, i64) {
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (7001, 'DJ Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id)
+                 VALUES
+                    (7001, 'Outgoing', 7001, 180000, 77001),
+                    (7002, 'Incoming', 7001, 180000, 77002)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (7001, 0, 'test')",
+                [],
+            )?;
+            let current_queue_item_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source) VALUES (7002, 1, 'test')",
+                [],
+            )?;
+            let next_queue_item_id = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE playback_state
+                 SET current_track_id = 7001, current_queue_item_id = ?1, is_playing = 1
+                 WHERE id = 1",
+                params![current_queue_item_id],
+            )?;
+            Ok((current_queue_item_id, next_queue_item_id))
+        })
+        .expect("seed dj queue pair")
+    }
+
+    async fn json_request(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: &str,
+    ) -> axum::response::Response {
+        app.oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body bytes"),
+        )
+        .expect("json body")
+    }
+
+    #[tokio::test]
+    async fn dj_enabled_defaults_false() {
+        let (db, db_path) = fresh_migrated_db();
+        let response = json_request(app_for_db(db), "GET", "/api/dj/enabled", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["enabled"], false);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_enabled_can_be_toggled() {
+        let (db, db_path) = fresh_migrated_db();
+        let app = app_for_db(db);
+        let response =
+            json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["enabled"], true);
+
+        let response = json_request(app, "PUT", "/api/dj/enabled", r#"{"enabled":false}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["enabled"], false);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_enabled_true_starts_current_pair_lookahead() {
+        let (db, db_path) = fresh_migrated_db();
+        let (_current, next) = seed_dj_queue_pair(&db);
+        let app = app_for_db(db);
+        let response =
+            json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = json_request(app, "GET", "/api/dj/status", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["enabled"], true);
+        assert_eq!(body["next"]["media_ref_kind"], "tidal_track");
+        assert_eq!(body["next"]["media_ref_id"], "77002");
+        assert!(next > 0);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_enabled_false_cancels_lookahead_and_discards_program() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_dj_queue_pair(&db);
+        let app = app_for_db(db);
+        let response =
+            json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = json_request(
+            app.clone(),
+            "PUT",
+            "/api/dj/enabled",
+            r#"{"enabled":false}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = json_request(app, "GET", "/api/dj/status", "").await;
+        let body = response_json(response).await;
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["fallback_reason"], "disabled");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_profile_rebuild_returns_accepted_without_blocking() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_dj_queue_pair(&db);
+        let app = app_for_db(db);
+        let response = json_request(
+            app,
+            "POST",
+            "/api/dj/profile-rebuild",
+            r#"{"media_ref_kind":"tidal_track","media_ref_id":"77001"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["accepted"], true);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_profile_rebuild_does_not_mutate_armed_transition() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_dj_queue_pair(&db);
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO dj_transition_events (
+                    from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, program_json, planner_version, outcome
+                 ) VALUES ('tidal_track', '77001', 'tidal_track', '77002', 'SafeCrossfade', '{}', 'v1', 'armed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed transition");
+        let app = app_for_db(db.clone());
+        let response = json_request(
+            app,
+            "POST",
+            "/api/dj/profile-rebuild",
+            r#"{"media_ref_kind":"tidal_track","media_ref_id":"77001"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let outcome: String = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT outcome FROM dj_transition_events LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .expect("outcome");
+        assert_eq!(outcome, "armed");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn dj_profile_returns_404_for_missing_profile() {
+        let (db, db_path) = fresh_migrated_db();
+        let response = json_request(app_for_db(db), "GET", "/api/dj/profile/999", "").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(db_path);
     }
 
     fn seed_spotify_stats_track(
