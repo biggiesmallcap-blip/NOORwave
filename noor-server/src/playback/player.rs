@@ -3,7 +3,7 @@ use crate::db::{
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
-use crate::playback::dj_lookahead::DjMediaRef;
+use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::{
@@ -69,6 +69,33 @@ pub struct PreparedPlaybackJob {
     // from `start_from_offset_ms`. A fresh play has both = 0.
     pub start_from_segment_index: usize,
     pub start_from_offset_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DjLookaheadStart {
+    pub current: Option<DjMediaRef>,
+    pub next: Option<DjMediaRef>,
+    pub current_queue_item_id: Option<i64>,
+    pub next_queue_item_id: Option<i64>,
+    pub queue_generation: u64,
+    pub deadline_samples: u64,
+}
+
+impl DjLookaheadStart {
+    #[allow(dead_code)]
+    pub fn dispatch(
+        &self,
+        runtime: &crate::playback::runtime::PlaybackRuntimeHandle,
+    ) -> Result<()> {
+        runtime.start_dj_lookahead(
+            self.current.clone(),
+            self.next.clone(),
+            self.current_queue_item_id,
+            self.next_queue_item_id,
+            self.queue_generation,
+            self.deadline_samples,
+        )
+    }
 }
 
 impl PreparedPlaybackJob {
@@ -294,6 +321,34 @@ impl PreparedPlaybackJob {
     pub fn source_label(&self) -> &'static str {
         self.source_kind().as_str()
     }
+}
+
+pub fn build_dj_lookahead_start(
+    conn: &Connection,
+    deadline_samples: u64,
+) -> Result<Option<DjLookaheadStart>> {
+    if !queries::is_dj_engine_enabled(conn)? {
+        return Ok(None);
+    }
+    let pair = load_dj_lookahead_pair(conn)?;
+    Ok(dj_lookahead_start_from_pair(pair, deadline_samples))
+}
+
+fn dj_lookahead_start_from_pair(
+    pair: DjLookaheadPair,
+    deadline_samples: u64,
+) -> Option<DjLookaheadStart> {
+    if pair.current.is_none() && pair.next.is_none() {
+        return None;
+    }
+    Some(DjLookaheadStart {
+        current: pair.current,
+        next: pair.next,
+        current_queue_item_id: pair.current_queue_item_id,
+        next_queue_item_id: pair.next_queue_item_id,
+        queue_generation: pair.queue_generation,
+        deadline_samples,
+    })
 }
 
 impl ActiveListenSession {
@@ -2205,6 +2260,156 @@ mod tests {
         ids.iter()
             .map(|id| queue::get_track_by_id(conn, *id).unwrap().unwrap())
             .collect()
+    }
+
+    mod dj_lookahead {
+        use super::*;
+
+        const DEADLINE: u64 = 48_000 * 30;
+
+        fn enable(conn: &Connection) {
+            queries::set_dj_engine_enabled(conn, true).unwrap();
+        }
+
+        fn start(conn: &Connection) -> Option<DjLookaheadStart> {
+            build_dj_lookahead_start(conn, DEADLINE).unwrap()
+        }
+
+        fn seed_queue(conn: &Connection, ids: &[i64]) -> Vec<QueueItem> {
+            let tracks = load_tracks(conn, ids);
+            queue::replace_queue(conn, &tracks, "test").unwrap()
+        }
+
+        #[test]
+        fn dj_disabled_queue_events_do_not_start_dj_lookahead() {
+            let conn = conn();
+            seed_queue(&conn, &[1, 2]);
+            play_track_now(&conn, 1).unwrap();
+
+            assert!(start(&conn).is_none());
+        }
+
+        #[test]
+        fn dj_enable_starts_dj_lookahead_for_active_pair() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert_eq!(start.next_queue_item_id, Some(queued[1].id));
+            assert_eq!(start.deadline_samples, DEADLINE);
+        }
+
+        #[test]
+        fn manual_play_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2]);
+            play_track_now(&conn, 1).unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert_eq!(start.next_queue_item_id, Some(queued[1].id));
+        }
+
+        #[test]
+        fn manual_queue_append_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            enqueue_track(&conn, 2, "user").unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert!(matches!(
+                start.next,
+                Some(DjMediaRef::TidalTrack { tidal_id: 2, .. })
+            ));
+        }
+
+        #[test]
+        fn play_next_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 3]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            let play_next = load_tracks(&conn, &[2]).remove(0);
+            queue::append_tracks(&conn, &[play_next], "user_play_next").unwrap();
+            let inserted = queue::load_queue(&conn).unwrap();
+            let inserted_id = inserted.iter().find(|item| item.track.id == 2).unwrap().id;
+            queue::move_queue_item(&conn, inserted_id, 1).unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.next_queue_item_id, Some(inserted_id));
+        }
+
+        #[test]
+        fn queue_reorder_restarts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2, 3]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            let before = start(&conn).expect("before");
+            queue::move_queue_item(&conn, queued[2].id, 1).unwrap();
+
+            let after = start(&conn).expect("after");
+            assert_ne!(before.next_queue_item_id, after.next_queue_item_id);
+            assert_eq!(after.next_queue_item_id, Some(queued[2].id));
+        }
+
+        #[test]
+        fn pending_resolution_restarts_dj_lookahead_with_tidal_ref() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, pending_artist, pending_title)
+                 VALUES (NULL, 1, 'radio_pending', 'Artist', 'Title')",
+                [],
+            )
+            .unwrap();
+            let pending_id = conn.last_insert_rowid();
+            let before = start(&conn).expect("before");
+            conn.execute(
+                "UPDATE queue SET tidal_id_hint = 99 WHERE id = ?1",
+                params![pending_id],
+            )
+            .unwrap();
+
+            let after = start(&conn).expect("after");
+            assert_ne!(before.queue_generation, after.queue_generation);
+            assert!(matches!(
+                after.next,
+                Some(DjMediaRef::PendingQueueItem {
+                    tidal_id_hint: Some(99),
+                    ..
+                })
+            ));
+        }
     }
 
     fn track_with_tidal_id(id: i64, tidal_id: Option<i64>, quality: Option<&str>) -> Track {
