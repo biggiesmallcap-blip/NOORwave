@@ -593,6 +593,25 @@ fn prepared_dj_lookahead_matches_pair(
     })
 }
 
+fn discard_stale_prepared_transition(
+    state: &PlaybackRuntimeLoopState,
+    job: &mut PreparedPlaybackJob,
+) -> bool {
+    let Some(transition) = job.prepared_transition.as_ref() else {
+        return false;
+    };
+    if prepared_dj_lookahead_matches_pair(
+        state,
+        transition.queue_generation,
+        transition.current_queue_item_id,
+        transition.next_queue_item_id,
+    ) {
+        return false;
+    }
+    job.prepared_transition = None;
+    true
+}
+
 fn record_dj_lookahead_failure(
     state: &mut PlaybackRuntimeLoopState,
     queue_generation: u64,
@@ -838,7 +857,8 @@ fn run_runtime_loop(
                         }
                     }
                 }
-                PlaybackRuntimeCommand::PrepareNext(job) => {
+                PlaybackRuntimeCommand::PrepareNext(mut job) => {
+                    discard_stale_prepared_transition(&state, &mut job);
                     // Only pre-decode if we don't already have a pending engine for this track.
                     let already_pending = state
                         .next_engine
@@ -2393,6 +2413,91 @@ mod tests {
                 Ok(())
             })
             .expect("promote");
+        }
+    }
+
+    mod prepared_transition {
+        use super::*;
+        use crate::playback::player::PreparedTransitionProgram;
+
+        fn program() -> noor_mix::TransitionProgram {
+            noor_mix::TransitionProgram {
+                tier: noor_mix::program::Tier::SafeCrossfade,
+                template: "SafeCrossfade".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                sync_start: 0,
+                intro_start: 0,
+                swap_start: 1,
+                fade_start: 1,
+                resolve_at: 2,
+                loops: vec![],
+                automation: vec![],
+            }
+        }
+
+        fn transition(
+            queue_generation: u64,
+            current_queue_item_id: Option<i64>,
+            next_queue_item_id: Option<i64>,
+        ) -> PreparedTransitionProgram {
+            PreparedTransitionProgram {
+                program: program(),
+                queue_generation,
+                current_queue_item_id,
+                next_queue_item_id,
+            }
+        }
+
+        fn state_with_pair() -> PlaybackRuntimeLoopState {
+            let mut state = test_runtime_loop_state();
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+                Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+            state
+        }
+
+        #[test]
+        fn prepare_next_preserves_transition_program() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(20, Some(11), Some(12)));
+
+            assert!(!discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_some());
+        }
+
+        #[test]
+        fn legacy_prepare_next_has_no_transition_program() {
+            let job = PreparedPlaybackJob::test_fixture(2, 7);
+
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn prepared_transition_discarded_when_generation_is_stale() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(19, Some(11), Some(12)));
+
+            assert!(discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn prepared_transition_discarded_when_next_queue_item_changes() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(20, Some(11), Some(99)));
+
+            assert!(discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_none());
         }
     }
 

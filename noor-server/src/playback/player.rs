@@ -63,12 +63,21 @@ pub struct PreparedPlaybackJob {
     pub generation: u64,
     pub output_sample_rate: Option<u32>,
     pub dj_media_ref: Option<DjMediaRef>,
+    pub prepared_transition: Option<PreparedTransitionProgram>,
     // Segment-aware seek (option C): for DASH-segmented sources, these tell the
     // decoder to skip ahead by `start_from_segment_index` segments. Position
     // accounting in `PlaybackSharedState` is then absolute-track-samples seeded
     // from `start_from_offset_ms`. A fresh play has both = 0.
     pub start_from_segment_index: usize,
     pub start_from_offset_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedTransitionProgram {
+    pub program: noor_mix::TransitionProgram,
+    pub queue_generation: u64,
+    pub current_queue_item_id: Option<i64>,
+    pub next_queue_item_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +140,7 @@ impl PreparedPlaybackJob {
             generation,
             output_sample_rate: None,
             dj_media_ref: None,
+            prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -283,6 +293,7 @@ impl PreparedPlaybackJob {
             generation: 0,
             output_sample_rate: None,
             dj_media_ref: None,
+            prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -295,6 +306,11 @@ impl PreparedPlaybackJob {
 
     pub fn with_dj_media_ref(mut self, media_ref: DjMediaRef) -> Self {
         self.dj_media_ref = Some(media_ref);
+        self
+    }
+
+    pub fn with_prepared_transition(mut self, transition: PreparedTransitionProgram) -> Self {
+        self.prepared_transition = Some(transition);
         self
     }
 
