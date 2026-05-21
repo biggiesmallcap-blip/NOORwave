@@ -3150,6 +3150,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "noor-mix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hound",
+ "rubato",
+ "rustfft",
+ "serde",
+ "symphonia",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "noor-server"
 version = "0.1.56"
 dependencies = [
