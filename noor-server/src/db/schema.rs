@@ -45,6 +45,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_041,
     MIGRATION_042,
     MIGRATION_043,
+    MIGRATION_044,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1179,6 +1180,108 @@ CREATE INDEX IF NOT EXISTS idx_tracks_discovery
     ON tracks(is_favorite DESC, play_count ASC, fidelity_score DESC, date_added DESC, title ASC);
 CREATE INDEX IF NOT EXISTS idx_tracks_play_last
     ON tracks(play_count DESC, last_played_at DESC, id DESC);
+"#;
+
+const MIGRATION_044: &str = r#"
+CREATE TABLE IF NOT EXISTS audio_dj_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_ref_kind TEXT NOT NULL,
+    media_ref_id TEXT NOT NULL,
+    track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+    queue_item_id INTEGER REFERENCES queue(id) ON DELETE SET NULL,
+    tidal_id INTEGER,
+    profile_version TEXT NOT NULL,
+    beat_grid_blob BLOB NOT NULL,
+    downbeats_blob BLOB NOT NULL,
+    phrase_boundaries_blob BLOB NOT NULL,
+    mix_in_blob BLOB NOT NULL,
+    mix_out_blob BLOB NOT NULL,
+    intro_end_seconds REAL,
+    outro_start_seconds REAL,
+    breakdown_blob BLOB NOT NULL,
+    drop_blob BLOB NOT NULL,
+    safe_transition_windows_blob BLOB NOT NULL,
+    energy_contour_blob BLOB NOT NULL,
+    vocal_presence_blob BLOB NOT NULL,
+    vocal_density_blob BLOB NOT NULL,
+    lufs_loud_body REAL,
+    true_peak_dbtp REAL,
+    beat_confidence REAL,
+    profile_confidence REAL NOT NULL DEFAULT 0,
+    analysis_scope_ms INTEGER NOT NULL DEFAULT 0,
+    is_temporary INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'noor_dj_v1',
+    computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(media_ref_kind, media_ref_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_dj_profiles_version
+    ON audio_dj_profiles(profile_version);
+CREATE INDEX IF NOT EXISTS idx_audio_dj_profiles_track
+    ON audio_dj_profiles(track_id)
+    WHERE track_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audio_dj_profiles_tidal
+    ON audio_dj_profiles(tidal_id)
+    WHERE tidal_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS audio_dj_profile_corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_ref_kind TEXT NOT NULL,
+    media_ref_id TEXT NOT NULL,
+    bpm_multiplier REAL,
+    downbeat_offset_beats INTEGER,
+    phrase_offset_bars INTEGER,
+    safe_crossfade_only INTEGER NOT NULL DEFAULT 0,
+    transition_speed_bias TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(media_ref_kind, media_ref_id),
+    CHECK (transition_speed_bias IS NULL OR transition_speed_bias IN ('slower', 'neutral', 'faster'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_dj_profile_corrections_ref
+    ON audio_dj_profile_corrections(media_ref_kind, media_ref_id);
+
+CREATE TABLE IF NOT EXISTS dj_transition_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    from_track_id INTEGER REFERENCES tracks(id),
+    to_track_id INTEGER REFERENCES tracks(id),
+    from_media_ref_kind TEXT,
+    from_media_ref_id TEXT,
+    to_media_ref_kind TEXT,
+    to_media_ref_id TEXT,
+    template TEXT NOT NULL,
+    program_json TEXT NOT NULL,
+    rejected_alternatives_json TEXT,
+    planner_version TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    outcome TEXT,
+    outcome_at TEXT,
+    fallback_reason TEXT,
+    user_rating INTEGER,
+    skip_within_30s INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_dj_transition_events_tracks
+    ON dj_transition_events(from_track_id, to_track_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_dj_transition_events_outcome
+    ON dj_transition_events(outcome)
+    WHERE outcome IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_dj_transition_events_feedback_from
+    ON dj_transition_events(from_media_ref_kind, from_media_ref_id, started_at)
+    WHERE user_rating IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_dj_transition_events_feedback_to
+    ON dj_transition_events(to_media_ref_kind, to_media_ref_id, started_at)
+    WHERE user_rating IS NOT NULL;
+
+INSERT OR IGNORE INTO server_config (key, value)
+VALUES ('dj_engine_enabled', '0');
+INSERT OR IGNORE INTO server_config (key, value)
+VALUES ('dj_mix_intent', 'balanced');
+INSERT OR IGNORE INTO server_config (key, value)
+VALUES ('dj_transition_speed_bias', 'neutral');
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
