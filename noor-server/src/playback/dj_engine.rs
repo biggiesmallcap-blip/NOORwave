@@ -4,7 +4,7 @@ use noor_mix::{DjProfile, Planner, Policy, TransitionProgram};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow};
+use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileRow};
 use crate::db::{Database, queries};
 use crate::playback::dj_lookahead::DjMediaRef;
 use crate::services::audio_analysis::dj_profile::{decode_f32_blob, decode_u32_blob};
@@ -334,6 +334,7 @@ fn estimate_bpm(beats: &[f32]) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::AudioDjProfileKey;
     use crate::db::schema;
     use crate::services::audio_analysis::dj_profile::{
         DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,

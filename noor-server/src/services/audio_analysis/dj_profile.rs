@@ -1,6 +1,4 @@
-use crate::db::models::{
-    AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow, AudioDspFeatures,
-};
+use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow};
 use crate::db::queries;
 use crate::playback::dj_lookahead::DjMediaRef;
 use anyhow::Result;
@@ -403,7 +401,9 @@ fn read_count(blob: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::AudioDspFeatures;
     use crate::db::{Database, schema};
+    use std::time::{Duration, Instant};
 
     fn key(kind: &str, id: &str) -> AudioDjProfileKey {
         AudioDjProfileKey {
@@ -693,6 +693,40 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn profile_build_benchmark() {
+        let cases = [("30s", 30_usize), ("90s", 90_usize), ("full", 180_usize)];
+        for (label, seconds) in cases {
+            let benchmark_samples = samples(seconds);
+            let benchmark_analysis = analysis((seconds / 2).max(1));
+            let mut timings = (0..5)
+                .map(|iteration| {
+                    let started = Instant::now();
+                    let row = build_audio_dj_profile_row_from_analysis(
+                        key("library_track", &(iteration + 1).to_string()),
+                        Some((iteration + 1) as i64),
+                        None,
+                        None,
+                        &benchmark_samples,
+                        48_000,
+                        "benchmark",
+                        &benchmark_analysis,
+                    );
+                    std::hint::black_box(row);
+                    started.elapsed()
+                })
+                .collect::<Vec<_>>();
+            timings.sort_unstable();
+            let median = timings[timings.len() / 2];
+            let peak_bytes = estimated_profile_build_peak_bytes(&benchmark_samples, seconds);
+            println!(
+                "dj_profile_build {label} median_ms={} peak_memory_bytes={peak_bytes}",
+                duration_ms(median)
+            );
+        }
+    }
+
+    #[test]
     fn correction_bpm_multiplier_adjusts_loaded_profile_bpm() {
         let mut profile = LoadedDjProfile {
             bpm: Some(120.0),
@@ -814,5 +848,25 @@ mod tests {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
+    }
+
+    fn estimated_profile_build_peak_bytes(samples: &[f32], seconds: usize) -> usize {
+        let row = row_for("library_track", "999", seconds);
+        std::mem::size_of_val(samples)
+            + row.beat_grid_blob.len()
+            + row.downbeats_blob.len()
+            + row.phrase_boundaries_blob.len()
+            + row.mix_in_blob.len()
+            + row.mix_out_blob.len()
+            + row.safe_transition_windows_blob.len()
+            + row.energy_contour_blob.len()
+            + row.vocal_presence_blob.len()
+            + row.vocal_density_blob.len()
+            + row.breakdown_blob.len()
+            + row.drop_blob.len()
+    }
+
+    fn duration_ms(duration: Duration) -> u128 {
+        duration.as_micros() / 1_000
     }
 }
