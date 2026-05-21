@@ -203,6 +203,7 @@ async fn set_enabled(
     };
 
     if let Some(runtime) = runtime {
+        let _ = runtime.set_dj_engine_enabled(payload.enabled);
         if payload.enabled {
             if let Some(lookahead) = lookahead {
                 let _ = lookahead.dispatch(&runtime);

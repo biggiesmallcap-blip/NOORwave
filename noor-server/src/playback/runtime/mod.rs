@@ -253,6 +253,10 @@ impl PlaybackRuntimeHandle {
         self.send(PlaybackRuntimeCommand::PrepareNext(job))
     }
 
+    pub fn set_dj_engine_enabled(&self, enabled: bool) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::SetDjEngineEnabled { enabled })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn start_dj_lookahead(
         &self,
@@ -455,6 +459,7 @@ struct PlaybackRuntimeLoopState {
     current_exclusive_release_grace_secs: u32,
     /// Last-known WASAPI exclusive callback period policy.
     current_exclusive_latency_mode: ExclusiveLatencyMode,
+    dj_engine_enabled: bool,
     dj_lookahead: Option<RuntimeDjLookahead>,
     dj_lookahead_failure: Option<DjLookaheadFailure>,
     prepared_dj_mixer: Option<PreparedDjMixer>,
@@ -689,6 +694,10 @@ fn prepare_dj_mixer_for_pair(
     state: &mut PlaybackRuntimeLoopState,
     max_block_samples: usize,
 ) -> bool {
+    if !state.dj_engine_enabled {
+        state.prepared_dj_mixer = None;
+        return false;
+    }
     let Some(transition) = state
         .next_engine
         .as_ref()
@@ -702,6 +711,34 @@ fn prepare_dj_mixer_for_pair(
     let did_prepare = prepared.is_some();
     state.prepared_dj_mixer = prepared;
     did_prepare
+}
+
+fn gate_prepare_next_for_dj(
+    state: &mut PlaybackRuntimeLoopState,
+    job: &mut PreparedPlaybackJob,
+) -> bool {
+    if !state.dj_engine_enabled {
+        job.prepared_transition = None;
+        state.prepared_dj_mixer = None;
+        return false;
+    }
+    if discard_stale_prepared_transition(state, job) {
+        state.prepared_dj_mixer = None;
+    }
+    job.prepared_transition.is_some()
+}
+
+fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled: bool) {
+    state.dj_engine_enabled = enabled;
+    if enabled {
+        return;
+    }
+    state.dj_lookahead = None;
+    state.dj_lookahead_failure = None;
+    state.prepared_dj_mixer = None;
+    if let Some(engine) = state.next_engine.as_mut() {
+        engine.job.prepared_transition = None;
+    }
 }
 
 fn record_dj_lookahead_failure(
@@ -721,7 +758,7 @@ fn record_dj_lookahead_failure(
 
 #[allow(clippy::too_many_arguments)]
 fn run_runtime_loop(
-    config: PlaybackRuntimeConfig,
+    mut config: PlaybackRuntimeConfig,
     command_rx: mpsc::Receiver<PlaybackRuntimeCommand>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -757,6 +794,7 @@ fn run_runtime_loop(
         current_exclusive_release_grace_secs:
             crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+        dj_engine_enabled: config.dj_engine_enabled,
         dj_lookahead: None,
         dj_lookahead_failure: None,
         prepared_dj_mixer: None,
@@ -951,9 +989,7 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::PrepareNext(mut job) => {
-                    if discard_stale_prepared_transition(&state, &mut job) {
-                        state.prepared_dj_mixer = None;
-                    }
+                    gate_prepare_next_for_dj(&mut state, &mut job);
                     // Only pre-decode if we don't already have a pending engine for this track.
                     let already_pending = state
                         .next_engine
@@ -1013,6 +1049,10 @@ fn run_runtime_loop(
                         }
                     }
                 }
+                PlaybackRuntimeCommand::SetDjEngineEnabled { enabled } => {
+                    config.dj_engine_enabled = enabled;
+                    set_dj_engine_enabled_in_state(&mut state, enabled);
+                }
                 PlaybackRuntimeCommand::StartDjLookahead {
                     current,
                     next,
@@ -1021,17 +1061,24 @@ fn run_runtime_loop(
                     queue_generation,
                     deadline_samples,
                 } => {
-                    let outcome = start_dj_lookahead_in_state(
-                        &mut state,
-                        current,
-                        next,
-                        current_queue_item_id,
-                        next_queue_item_id,
-                        queue_generation,
-                        deadline_samples,
-                    );
-                    if matches!(outcome, StartDjLookaheadOutcome::MissingNext) {
-                        debug!("DJ lookahead skipped because the next queue item is not resolved");
+                    if !state.dj_engine_enabled {
+                        state.dj_lookahead = None;
+                        state.prepared_dj_mixer = None;
+                    } else {
+                        let outcome = start_dj_lookahead_in_state(
+                            &mut state,
+                            current,
+                            next,
+                            current_queue_item_id,
+                            next_queue_item_id,
+                            queue_generation,
+                            deadline_samples,
+                        );
+                        if matches!(outcome, StartDjLookaheadOutcome::MissingNext) {
+                            debug!(
+                                "DJ lookahead skipped because the next queue item is not resolved"
+                            );
+                        }
                     }
                 }
                 PlaybackRuntimeCommand::CrossfadeStart {
@@ -2646,6 +2693,43 @@ mod tests {
     }
 
     #[test]
+    fn dj_flag_off_does_not_construct_mixer() {
+        let mut state = state_with_ready_dj_pair();
+        state.dj_engine_enabled = false;
+
+        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn dj_flag_off_ignores_transition_program_field() {
+        let mut state = test_runtime_loop_state();
+        state.dj_engine_enabled = false;
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+
+        assert!(!gate_prepare_next_for_dj(&mut state, &mut job));
+        assert!(job.prepared_transition.is_none());
+        assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn disabling_dj_discards_ready_mixer_without_stopping_playback() {
+        let mut state = state_with_ready_dj_pair();
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+
+        set_dj_engine_enabled_in_state(&mut state, false);
+
+        assert!(!state.dj_engine_enabled);
+        assert!(state.prepared_dj_mixer.is_none());
+        let active = state.engine.as_ref().expect("active engine");
+        let next = state.next_engine.as_ref().expect("next engine");
+        assert!(!active.shared.stopped.load(Ordering::SeqCst));
+        assert!(!next.shared.stopped.load(Ordering::SeqCst));
+        assert!(next.job.prepared_transition.is_none());
+    }
+
+    #[test]
     fn effective_output_config_applies_desired_sample_rate() {
         let base = StreamConfig {
             channels: 2,
@@ -3177,6 +3261,7 @@ mod tests {
             current_exclusive_release_grace_secs:
                 crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
             current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+            dj_engine_enabled: true,
             dj_lookahead: None,
             dj_lookahead_failure: None,
             prepared_dj_mixer: None,
@@ -3308,6 +3393,28 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
             )),
         )
+    }
+
+    fn state_with_ready_dj_pair() -> PlaybackRuntimeLoopState {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.25, 0.25, 0.25, 0.25]);
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&next, &[0.5, 0.5, 0.5, 0.5]);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        state
     }
 
     fn finish_engine_buffer(engine: &PlaybackEngine, samples: &[f32]) {

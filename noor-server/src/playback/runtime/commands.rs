@@ -23,6 +23,10 @@ pub enum PlaybackRuntimeCommand {
     },
     /// Pre-decode the next track in background so it can start gaplessly.
     PrepareNext(PreparedPlaybackJob),
+    /// Update the runtime's in-memory DJ gate after the persisted feature flag changes.
+    SetDjEngineEnabled {
+        enabled: bool,
+    },
     /// Start non-audible DJ lookahead for the current plus immediate next queue item.
     StartDjLookahead {
         current: Option<DjMediaRef>,
