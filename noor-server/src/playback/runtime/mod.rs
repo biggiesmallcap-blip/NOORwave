@@ -1,4 +1,5 @@
 use crate::db::audio_settings::ExclusiveLatencyMode;
+use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::output::cpal_shared::{SwapBackend, swap_stream_plan};
 #[cfg(target_os = "windows")]
 use crate::playback::output::wasapi_exclusive::{
@@ -235,6 +236,26 @@ impl PlaybackRuntimeHandle {
         self.send(PlaybackRuntimeCommand::PrepareNext(job))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_dj_lookahead(
+        &self,
+        current: Option<DjMediaRef>,
+        next: Option<DjMediaRef>,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+        queue_generation: u64,
+        deadline_samples: u64,
+    ) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::StartDjLookahead {
+            current,
+            next,
+            current_queue_item_id,
+            next_queue_item_id,
+            queue_generation,
+            deadline_samples,
+        })
+    }
+
     pub fn track_status(&self, track_id: i64, generation: u64) -> PlaybackTrackStatus {
         let (tx, rx) = std::sync::mpsc::channel();
         if self
@@ -417,6 +438,159 @@ struct PlaybackRuntimeLoopState {
     current_exclusive_release_grace_secs: u32,
     /// Last-known WASAPI exclusive callback period policy.
     current_exclusive_latency_mode: ExclusiveLatencyMode,
+    dj_lookahead: Option<RuntimeDjLookahead>,
+    dj_lookahead_failure: Option<DjLookaheadFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDjLookahead {
+    current: Option<DjMediaRef>,
+    next: DjMediaRef,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: i64,
+    queue_generation: u64,
+    deadline_samples: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DjLookaheadFailure {
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    reason: DjLookaheadFailureReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum DjLookaheadFailureReason {
+    NextNotResolved,
+    ResolutionFailed,
+    AnalysisDeadlineMissed,
+    QueueChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartDjLookaheadOutcome {
+    Started,
+    AlreadyCurrent,
+    ReusedPreparedNext,
+    IgnoredStaleGeneration,
+    MissingNext,
+}
+
+impl RuntimeDjLookahead {
+    fn matches_pair(
+        &self,
+        queue_generation: u64,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+    ) -> bool {
+        self.queue_generation == queue_generation
+            && self.current_queue_item_id == current_queue_item_id
+            && Some(self.next_queue_item_id) == next_queue_item_id
+    }
+}
+
+fn start_dj_lookahead_in_state(
+    state: &mut PlaybackRuntimeLoopState,
+    current: Option<DjMediaRef>,
+    next: Option<DjMediaRef>,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    queue_generation: u64,
+    deadline_samples: u64,
+) -> StartDjLookaheadOutcome {
+    if state
+        .dj_lookahead
+        .as_ref()
+        .is_some_and(|lookahead| lookahead.queue_generation > queue_generation)
+    {
+        state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id,
+            reason: DjLookaheadFailureReason::QueueChanged,
+        });
+        return StartDjLookaheadOutcome::IgnoredStaleGeneration;
+    }
+
+    let Some(next) = next else {
+        state.dj_lookahead = None;
+        state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id,
+            reason: DjLookaheadFailureReason::NextNotResolved,
+        });
+        return StartDjLookaheadOutcome::MissingNext;
+    };
+    let Some(next_queue_item_id) = next_queue_item_id else {
+        state.dj_lookahead = None;
+        state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id: None,
+            reason: DjLookaheadFailureReason::NextNotResolved,
+        });
+        return StartDjLookaheadOutcome::MissingNext;
+    };
+
+    if state.dj_lookahead.as_ref().is_some_and(|lookahead| {
+        lookahead.matches_pair(
+            queue_generation,
+            current_queue_item_id,
+            Some(next_queue_item_id),
+        )
+    }) {
+        return StartDjLookaheadOutcome::AlreadyCurrent;
+    }
+
+    let prepared_next = next.track_id().is_some_and(|track_id| {
+        state
+            .next_engine
+            .as_ref()
+            .is_some_and(|engine| engine.track_id == track_id)
+    });
+    state.dj_lookahead = Some(RuntimeDjLookahead {
+        current,
+        next,
+        current_queue_item_id,
+        next_queue_item_id,
+        queue_generation,
+        deadline_samples,
+    });
+    state.dj_lookahead_failure = None;
+    if prepared_next {
+        StartDjLookaheadOutcome::ReusedPreparedNext
+    } else {
+        StartDjLookaheadOutcome::Started
+    }
+}
+
+fn prepared_dj_lookahead_matches_pair(
+    state: &PlaybackRuntimeLoopState,
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+) -> bool {
+    state.dj_lookahead.as_ref().is_some_and(|lookahead| {
+        lookahead.matches_pair(queue_generation, current_queue_item_id, next_queue_item_id)
+    })
+}
+
+fn record_dj_lookahead_failure(
+    state: &mut PlaybackRuntimeLoopState,
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    reason: DjLookaheadFailureReason,
+) {
+    state.dj_lookahead_failure = Some(DjLookaheadFailure {
+        queue_generation,
+        current_queue_item_id,
+        next_queue_item_id,
+        reason,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,6 +631,8 @@ fn run_runtime_loop(
         current_exclusive_release_grace_secs:
             crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+        dj_lookahead: None,
+        dj_lookahead_failure: None,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -700,6 +876,27 @@ fn run_runtime_loop(
                                 warn!("Failed to pre-buffer next track: {err:?}");
                             }
                         }
+                    }
+                }
+                PlaybackRuntimeCommand::StartDjLookahead {
+                    current,
+                    next,
+                    current_queue_item_id,
+                    next_queue_item_id,
+                    queue_generation,
+                    deadline_samples,
+                } => {
+                    let outcome = start_dj_lookahead_in_state(
+                        &mut state,
+                        current,
+                        next,
+                        current_queue_item_id,
+                        next_queue_item_id,
+                        queue_generation,
+                        deadline_samples,
+                    );
+                    if matches!(outcome, StartDjLookaheadOutcome::MissingNext) {
+                        debug!("DJ lookahead skipped because the next queue item is not resolved");
                     }
                 }
                 PlaybackRuntimeCommand::CrossfadeStart {
@@ -1837,6 +2034,198 @@ mod tests {
         atomic::{AtomicU32, AtomicU64},
     };
 
+    mod dj_lookahead {
+        use super::*;
+
+        fn library_ref(track_id: i64) -> DjMediaRef {
+            DjMediaRef::LibraryTrack { track_id }
+        }
+
+        #[test]
+        fn start_dj_lookahead_does_not_promote_next_engine() {
+            let mut state = test_runtime_loop_state();
+            state.next_engine = Some(test_engine_with_shared(2, 10));
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::ReusedPreparedNext);
+            assert!(state.engine.is_none());
+            assert!(state.next_engine.is_some());
+        }
+
+        #[test]
+        fn start_dj_lookahead_ignores_stale_generation() {
+            let mut state = test_runtime_loop_state();
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+            assert_eq!(outcome, StartDjLookaheadOutcome::Started);
+
+            let stale = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(3)),
+                Some(library_ref(4)),
+                Some(13),
+                Some(14),
+                19,
+                48_000,
+            );
+
+            assert_eq!(stale, StartDjLookaheadOutcome::IgnoredStaleGeneration);
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.next_queue_item_id),
+                Some(12)
+            );
+            assert_eq!(
+                state
+                    .dj_lookahead_failure
+                    .as_ref()
+                    .map(|failure| failure.reason),
+                Some(DjLookaheadFailureReason::QueueChanged)
+            );
+        }
+
+        #[test]
+        fn prepared_program_rejected_when_pair_ids_change() {
+            let mut state = test_runtime_loop_state();
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert!(prepared_dj_lookahead_matches_pair(
+                &state,
+                20,
+                Some(11),
+                Some(12)
+            ));
+            assert!(!prepared_dj_lookahead_matches_pair(
+                &state,
+                20,
+                Some(11),
+                Some(99)
+            ));
+        }
+
+        #[test]
+        fn start_dj_lookahead_reuses_existing_prepared_next() {
+            let mut state = test_runtime_loop_state();
+            state.next_engine = Some(test_engine_with_shared(2, 10));
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::ReusedPreparedNext);
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.next.clone()),
+                Some(library_ref(2))
+            );
+        }
+
+        #[test]
+        fn start_dj_lookahead_records_resolution_failure() {
+            let mut state = test_runtime_loop_state();
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                None,
+                Some(11),
+                None,
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::MissingNext);
+            assert!(state.dj_lookahead.is_none());
+            assert_eq!(
+                state
+                    .dj_lookahead_failure
+                    .as_ref()
+                    .map(|failure| failure.reason),
+                Some(DjLookaheadFailureReason::NextNotResolved)
+            );
+        }
+
+        #[test]
+        fn start_dj_lookahead_records_analysis_deadline() {
+            let mut state = test_runtime_loop_state();
+
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                96_000,
+            );
+
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.deadline_samples),
+                Some(96_000)
+            );
+        }
+
+        #[test]
+        fn missed_lookahead_deadline_does_not_delay_playback() {
+            let mut state = test_runtime_loop_state();
+            state.engine = Some(test_engine_with_shared(1, 10));
+
+            record_dj_lookahead_failure(
+                &mut state,
+                20,
+                Some(11),
+                Some(12),
+                DjLookaheadFailureReason::AnalysisDeadlineMissed,
+            );
+
+            assert!(state.engine.is_some());
+            assert_eq!(
+                state
+                    .dj_lookahead_failure
+                    .as_ref()
+                    .map(|failure| failure.reason),
+                Some(DjLookaheadFailureReason::AnalysisDeadlineMissed)
+            );
+        }
+    }
+
     #[test]
     fn effective_output_config_applies_desired_sample_rate() {
         let base = StreamConfig {
@@ -2369,6 +2758,8 @@ mod tests {
             current_exclusive_release_grace_secs:
                 crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
             current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+            dj_lookahead: None,
+            dj_lookahead_failure: None,
         }
     }
 

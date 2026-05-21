@@ -1,5 +1,6 @@
 use super::OutputDeviceSelection;
 use crate::db::audio_settings::ExclusiveLatencyMode;
+use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob};
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,15 @@ pub enum PlaybackRuntimeCommand {
     },
     /// Pre-decode the next track in background so it can start gaplessly.
     PrepareNext(PreparedPlaybackJob),
+    /// Start non-audible DJ lookahead for the current plus immediate next queue item.
+    StartDjLookahead {
+        current: Option<DjMediaRef>,
+        next: Option<DjMediaRef>,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+        queue_generation: u64,
+        deadline_samples: u64,
+    },
     /// Sent by the decoder thread when a track finishes decoding successfully.
     /// Used to start the crossfade stream if the crossfade window has already opened.
     NextDecodeComplete {
