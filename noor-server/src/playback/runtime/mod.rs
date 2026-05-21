@@ -6,6 +6,7 @@ use crate::playback::output::wasapi_exclusive::{
     ExclusiveRenderRole, ExclusiveRenderSource, ExclusiveRuntimeSink, build_exclusive_stream,
 };
 use crate::playback::player::PreparedPlaybackJob;
+use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -80,6 +81,8 @@ pub struct PlaybackRuntimeConfig {
     /// Channel to send mono audio samples for passive DSP analysis.
     /// (track_id, mono_samples, sample_rate)
     pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
+    pub dj_analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<DjAnalysisJob>>,
+    pub dj_engine_enabled: bool,
 }
 
 impl PlaybackRuntimeConfig {
@@ -92,7 +95,19 @@ impl PlaybackRuntimeConfig {
             http_client,
             access_token: access_token.into(),
             analysis_tx,
+            dj_analysis_tx: None,
+            dj_engine_enabled: false,
         }
+    }
+
+    pub fn with_dj_analysis(
+        mut self,
+        dj_engine_enabled: bool,
+        dj_analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<DjAnalysisJob>>,
+    ) -> Self {
+        self.dj_engine_enabled = dj_engine_enabled;
+        self.dj_analysis_tx = dj_analysis_tx;
+        self
     }
 }
 
@@ -2223,6 +2238,161 @@ mod tests {
                     .map(|failure| failure.reason),
                 Some(DjLookaheadFailureReason::AnalysisDeadlineMissed)
             );
+        }
+    }
+
+    mod analysis_profile_key {
+        use super::*;
+        use crate::db::models::{AudioDjProfileKey, AudioDjProfileRow};
+        use crate::db::{Database, queries};
+        use crate::playback::decode::send_dj_analysis_job;
+        use crate::playback::dj_lookahead::DjMediaRef;
+        use crate::services::audio_analysis::dj_profile::{
+            DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,
+        };
+
+        fn config(
+            enabled: bool,
+        ) -> (
+            PlaybackRuntimeConfig,
+            tokio::sync::mpsc::UnboundedReceiver<DjAnalysisJob>,
+        ) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                PlaybackRuntimeConfig::new(reqwest::Client::new(), "", None)
+                    .with_dj_analysis(enabled, Some(tx)),
+                rx,
+            )
+        }
+
+        fn send(
+            enabled: bool,
+            media_ref: DjMediaRef,
+        ) -> Option<crate::services::audio_analysis::dj_profile::DjAnalysisJob> {
+            let (config, mut rx) = config(enabled);
+            let job = PreparedPlaybackJob::test_fixture(media_ref.track_id().unwrap_or(10), 7)
+                .with_dj_media_ref(media_ref);
+            send_dj_analysis_job(
+                &config,
+                job.dj_media_ref.clone(),
+                &job,
+                vec![0.0; 128],
+                48_000,
+                7,
+            );
+            rx.try_recv().ok()
+        }
+
+        #[test]
+        fn dj_analysis_not_sent_when_engine_disabled() {
+            let sent = send(false, DjMediaRef::LibraryTrack { track_id: 1 });
+            assert!(sent.is_none());
+        }
+
+        #[test]
+        fn active_decoder_sends_library_profile_key() {
+            let sent = send(true, DjMediaRef::LibraryTrack { track_id: 1 }).expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "library_track");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "1");
+            assert_eq!(sent.track_id, Some(1));
+        }
+
+        #[test]
+        fn prepared_next_decoder_sends_tidal_profile_key() {
+            let sent = send(
+                true,
+                DjMediaRef::TidalTrack {
+                    tidal_id: 99,
+                    track_id: Some(10),
+                },
+            )
+            .expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "tidal_track");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "99");
+            assert_eq!(sent.tidal_id, Some(99));
+        }
+
+        #[test]
+        fn pending_next_decoder_sends_queue_item_profile_key_when_unresolved() {
+            let sent = send(
+                true,
+                DjMediaRef::PendingQueueItem {
+                    queue_item_id: 44,
+                    pending_artist: "Artist".to_string(),
+                    pending_title: "Title".to_string(),
+                    tidal_id_hint: None,
+                },
+            )
+            .expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "queue_item");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "44");
+            assert_eq!(sent.queue_item_id, Some(44));
+        }
+
+        #[test]
+        fn pending_profile_promotes_after_tidal_resolution() {
+            let db = Database::open_in_memory().expect("db");
+            db.run_migrations().expect("migrations");
+            db.with_conn(|conn| -> anyhow::Result<()> {
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (44, NULL, 0, 'test', 'Artist', 'Title')",
+                    [],
+                )?;
+                let row = AudioDjProfileRow {
+                    media_ref_kind: "queue_item".to_string(),
+                    media_ref_id: "44".to_string(),
+                    track_id: None,
+                    queue_item_id: Some(44),
+                    tidal_id: None,
+                    profile_version: DJ_PROFILE_VERSION.to_string(),
+                    beat_grid_blob: encode_f32_blob(&[0.0, 0.5]),
+                    downbeats_blob: encode_f32_blob(&[0.0]),
+                    phrase_boundaries_blob: encode_u32_blob(&[0]),
+                    mix_in_blob: encode_f32_blob(&[]),
+                    mix_out_blob: encode_f32_blob(&[]),
+                    intro_end_seconds: None,
+                    outro_start_seconds: None,
+                    breakdown_blob: encode_f32_blob(&[]),
+                    drop_blob: encode_f32_blob(&[]),
+                    safe_transition_windows_blob: encode_f32_blob(&[]),
+                    energy_contour_blob: encode_f32_blob(&[]),
+                    vocal_presence_blob: encode_f32_blob(&[]),
+                    vocal_density_blob: encode_f32_blob(&[]),
+                    lufs_loud_body: None,
+                    true_peak_dbtp: None,
+                    beat_confidence: Some(0.8),
+                    profile_confidence: 0.7,
+                    analysis_scope_ms: 30_000,
+                    is_temporary: true,
+                    source: "test".to_string(),
+                    computed_at: "now".to_string(),
+                };
+                queries::upsert_audio_dj_profile(conn, &row)?;
+                queries::promote_temporary_audio_dj_profile(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "queue_item".to_string(),
+                        media_ref_id: "44".to_string(),
+                    },
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "99".to_string(),
+                    },
+                    Some(99),
+                )?;
+                let stable = queries::get_audio_dj_profile(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "99".to_string(),
+                    },
+                )?
+                .expect("stable profile");
+                assert_eq!(stable.tidal_id, Some(99));
+                Ok(())
+            })
+            .expect("promote");
         }
     }
 

@@ -3,6 +3,7 @@ use crate::db::{
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
+use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::{
@@ -61,6 +62,7 @@ pub struct PreparedPlaybackJob {
     pub gapless: GaplessPlan,
     pub generation: u64,
     pub output_sample_rate: Option<u32>,
+    pub dj_media_ref: Option<DjMediaRef>,
     // Segment-aware seek (option C): for DASH-segmented sources, these tell the
     // decoder to skip ahead by `start_from_segment_index` segments. Position
     // accounting in `PlaybackSharedState` is then absolute-track-samples seeded
@@ -101,6 +103,7 @@ impl PreparedPlaybackJob {
             gapless: GaplessPlan::disabled(),
             generation,
             output_sample_rate: None,
+            dj_media_ref: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -252,6 +255,7 @@ impl PreparedPlaybackJob {
             gapless,
             generation: 0,
             output_sample_rate: None,
+            dj_media_ref: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -259,6 +263,11 @@ impl PreparedPlaybackJob {
 
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = generation;
+        self
+    }
+
+    pub fn with_dj_media_ref(mut self, media_ref: DjMediaRef) -> Self {
+        self.dj_media_ref = Some(media_ref);
         self
     }
 

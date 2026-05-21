@@ -2,6 +2,7 @@ use crate::db::models::{
     AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow, AudioDspFeatures,
 };
 use crate::db::queries;
+use crate::playback::dj_lookahead::DjMediaRef;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -12,7 +13,7 @@ pub const DJ_PROFILE_VERSION: &str = "dj_profile_v1";
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DjAnalysisJob {
-    pub media_ref: AudioDjProfileKey,
+    pub media_ref: DjMediaRef,
     pub track_id: Option<i64>,
     pub queue_item_id: Option<i64>,
     pub tidal_id: Option<i64>,
@@ -83,7 +84,7 @@ pub fn persist_dj_analysis_job_from_analysis(
     analysis: &BeatGridAnalysis,
 ) -> Result<()> {
     let row = build_audio_dj_profile_row_from_analysis(
-        job.media_ref.clone(),
+        job.media_ref.profile_key(),
         job.track_id,
         job.queue_item_id,
         job.tidal_id,
@@ -411,6 +412,17 @@ mod tests {
         }
     }
 
+    fn library_ref(track_id: i64) -> DjMediaRef {
+        DjMediaRef::LibraryTrack { track_id }
+    }
+
+    fn tidal_ref(tidal_id: i64) -> DjMediaRef {
+        DjMediaRef::TidalTrack {
+            tidal_id,
+            track_id: None,
+        }
+    }
+
     fn analysis(downbeat_count: usize) -> BeatGridAnalysis {
         BeatGridAnalysis {
             bpm: 120.0,
@@ -456,7 +468,7 @@ mod tests {
     #[test]
     fn dj_analysis_job_uses_media_ref_key() {
         let job = DjAnalysisJob {
-            media_ref: key("tidal_track", "55"),
+            media_ref: tidal_ref(55),
             track_id: None,
             queue_item_id: None,
             tidal_id: Some(55),
@@ -465,8 +477,9 @@ mod tests {
             analysis_scope_ms: 1_000,
             deadline_generation: 7,
         };
-        assert_eq!(job.media_ref.media_ref_kind, "tidal_track");
-        assert_eq!(job.media_ref.media_ref_id, "55");
+        let key = job.media_ref.profile_key();
+        assert_eq!(key.media_ref_kind, "tidal_track");
+        assert_eq!(key.media_ref_id, "55");
     }
 
     #[test]
@@ -516,7 +529,7 @@ mod tests {
             };
             queries::upsert_audio_dsp_features(conn, &dsp)?;
             let job = DjAnalysisJob {
-                media_ref: key("library_track", "1"),
+                media_ref: library_ref(1),
                 track_id: Some(1),
                 queue_item_id: None,
                 tidal_id: None,
@@ -766,7 +779,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         schema::run_migrations(&conn).expect("migrations");
         let job = DjAnalysisJob {
-            media_ref: key("tidal_track", "7"),
+            media_ref: tidal_ref(7),
             track_id: None,
             queue_item_id: None,
             tidal_id: Some(7),

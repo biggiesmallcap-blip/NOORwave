@@ -10,6 +10,7 @@ use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
 use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
+use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
 use crate::services::tidal::stream::resolve_stream;
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt as _;
@@ -26,6 +27,8 @@ use symphonia::core::probe::Hint;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tracing::{debug, warn};
 
+const DJ_ANALYSIS_MAX_SECONDS: usize = 90;
+
 pub(crate) fn decode_and_buffer_job(
     config: PlaybackRuntimeConfig,
     job: PreparedPlaybackJob,
@@ -39,7 +42,7 @@ pub(crate) fn decode_and_buffer_job(
                 "local library playback is not wired into the host-audio runtime yet"
             ));
         }
-        PlaybackSourceRequest::TidalStream(request) => {
+        PlaybackSourceRequest::TidalStream(ref request) => {
             // ── Step 1: resolve the stream URL (async, needs a mini tokio runtime) ──────────
             let rt = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -327,6 +330,12 @@ pub(crate) fn decode_and_buffer_job(
             // ── Pre-loop: passive analysis capture ──────────────────────────────────────
             let mut analysis_sent = false;
             let mut analysis_buf: Vec<f32> = Vec::new();
+            let dj_media_ref = config
+                .dj_engine_enabled
+                .then(|| job.dj_media_ref.clone())
+                .flatten();
+            let mut dj_analysis_sent = false;
+            let mut dj_analysis_buf: Vec<f32> = Vec::new();
 
             // Per-track stateful resampler. Lazily built on the first packet whose
             // input rate doesn't match the live target rate. Rebuilt whenever the
@@ -386,6 +395,27 @@ pub(crate) fn decode_and_buffer_job(
                             ));
                         }
                         analysis_sent = true;
+                    }
+                }
+
+                if !dj_analysis_sent && dj_media_ref.is_some() {
+                    extend_mono_from_interleaved(
+                        &mut dj_analysis_buf,
+                        sb.samples(),
+                        decoded_channels as usize,
+                    );
+                    if dj_analysis_buf.len()
+                        >= decoded_sample_rate as usize * DJ_ANALYSIS_MAX_SECONDS
+                    {
+                        send_dj_analysis_job(
+                            &config,
+                            dj_media_ref.clone(),
+                            &job,
+                            std::mem::take(&mut dj_analysis_buf),
+                            decoded_sample_rate,
+                            shared.generation,
+                        );
+                        dj_analysis_sent = true;
                     }
                 }
 
@@ -479,6 +509,17 @@ pub(crate) fn decode_and_buffer_job(
                 }
             }
 
+            if !dj_analysis_sent && !dj_analysis_buf.is_empty() {
+                send_dj_analysis_job(
+                    &config,
+                    dj_media_ref,
+                    &job,
+                    std::mem::take(&mut dj_analysis_buf),
+                    decoded_sample_rate,
+                    shared.generation,
+                );
+            }
+
             // Apply fade-in / fade-out ramps and mark the stream complete.
             let total = {
                 let mut guard = shared
@@ -512,4 +553,189 @@ pub(crate) fn decode_and_buffer_job(
     }
 
     Ok(())
+}
+
+pub(crate) fn send_dj_analysis_job(
+    config: &PlaybackRuntimeConfig,
+    media_ref: Option<crate::playback::dj_lookahead::DjMediaRef>,
+    job: &PreparedPlaybackJob,
+    samples: Vec<f32>,
+    sample_rate: u32,
+    deadline_generation: u64,
+) {
+    if !config.dj_engine_enabled {
+        return;
+    }
+    let (Some(tx), Some(media_ref)) = (&config.dj_analysis_tx, media_ref) else {
+        return;
+    };
+    if samples.is_empty() {
+        return;
+    }
+
+    let analysis_scope_ms = ((samples.len() as u64).saturating_mul(1000)
+        / sample_rate.max(1) as u64)
+        .min(i64::MAX as u64) as i64;
+    let _ = tx.send(DjAnalysisJob {
+        track_id: media_ref.track_id().or(Some(job.track.id)),
+        queue_item_id: media_ref.queue_item_id(),
+        tidal_id: media_ref.tidal_id(),
+        media_ref,
+        samples,
+        sample_rate,
+        analysis_scope_ms,
+        deadline_generation,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::Track;
+    use crate::playback::dj_lookahead::DjMediaRef;
+    use crate::playback::gapless::GaplessPlan;
+    use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
+
+    fn test_track(track_id: i64) -> Track {
+        Track {
+            id: track_id,
+            title: format!("Track {track_id}"),
+            artist_id: 1,
+            artist_name: None,
+            album_id: None,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: Some(180_000),
+            isrc: None,
+            tidal_id: None,
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: None,
+            best_source: None,
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "local".to_string(),
+            artwork_url: None,
+        }
+    }
+
+    fn test_job(track_id: i64, media_ref: DjMediaRef) -> PreparedPlaybackJob {
+        PreparedPlaybackJob::new(
+            test_track(track_id),
+            PlaybackSourceRequest::LocalLibrary,
+            GaplessPlan::disabled(),
+        )
+        .with_generation(7)
+        .with_dj_media_ref(media_ref)
+    }
+
+    fn test_config(
+        enabled: bool,
+    ) -> (
+        PlaybackRuntimeConfig,
+        tokio::sync::mpsc::UnboundedReceiver<DjAnalysisJob>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            PlaybackRuntimeConfig::new(reqwest::Client::new(), "", None)
+                .with_dj_analysis(enabled, Some(tx)),
+            rx,
+        )
+    }
+
+    #[test]
+    fn dj_analysis_not_sent_when_engine_disabled() {
+        let (config, mut rx) = test_config(false);
+        let job = test_job(1, DjMediaRef::LibraryTrack { track_id: 1 });
+
+        send_dj_analysis_job(
+            &config,
+            job.dj_media_ref.clone(),
+            &job,
+            vec![0.0; 128],
+            48_000,
+            7,
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn active_decoder_sends_library_profile_key() {
+        let (config, mut rx) = test_config(true);
+        let job = test_job(1, DjMediaRef::LibraryTrack { track_id: 1 });
+
+        send_dj_analysis_job(
+            &config,
+            job.dj_media_ref.clone(),
+            &job,
+            vec![0.0; 128],
+            48_000,
+            7,
+        );
+
+        let sent = rx.try_recv().expect("dj job");
+        assert_eq!(sent.media_ref.profile_key().media_ref_kind, "library_track");
+        assert_eq!(sent.media_ref.profile_key().media_ref_id, "1");
+        assert_eq!(sent.track_id, Some(1));
+    }
+
+    #[test]
+    fn prepared_next_decoder_sends_tidal_profile_key() {
+        let (config, mut rx) = test_config(true);
+        let job = test_job(
+            10,
+            DjMediaRef::TidalTrack {
+                tidal_id: 99,
+                track_id: Some(10),
+            },
+        );
+
+        send_dj_analysis_job(
+            &config,
+            job.dj_media_ref.clone(),
+            &job,
+            vec![0.0; 128],
+            48_000,
+            7,
+        );
+
+        let sent = rx.try_recv().expect("dj job");
+        assert_eq!(sent.media_ref.profile_key().media_ref_kind, "tidal_track");
+        assert_eq!(sent.media_ref.profile_key().media_ref_id, "99");
+        assert_eq!(sent.tidal_id, Some(99));
+        assert_eq!(sent.track_id, Some(10));
+    }
+
+    #[test]
+    fn pending_next_decoder_sends_queue_item_profile_key_when_unresolved() {
+        let (config, mut rx) = test_config(true);
+        let job = test_job(
+            10,
+            DjMediaRef::PendingQueueItem {
+                queue_item_id: 44,
+                pending_artist: "Artist".to_string(),
+                pending_title: "Title".to_string(),
+                tidal_id_hint: None,
+            },
+        );
+
+        send_dj_analysis_job(
+            &config,
+            job.dj_media_ref.clone(),
+            &job,
+            vec![0.0; 128],
+            48_000,
+            7,
+        );
+
+        let sent = rx.try_recv().expect("dj job");
+        assert_eq!(sent.media_ref.profile_key().media_ref_kind, "queue_item");
+        assert_eq!(sent.media_ref.profile_key().media_ref_id, "44");
+        assert_eq!(sent.queue_item_id, Some(44));
+    }
 }
