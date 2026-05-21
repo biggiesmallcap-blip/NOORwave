@@ -1,5 +1,6 @@
 pub mod beat_tracker;
 pub mod bpm;
+pub mod dj_profile;
 pub mod engine;
 pub mod features;
 pub mod fingerprint;
