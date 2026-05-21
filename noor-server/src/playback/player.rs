@@ -1,8 +1,10 @@
 use crate::db::audio_settings::AudioQuality;
 use crate::db::{
+    Database,
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
+use crate::playback::dj_engine::DjEngine;
 use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
@@ -365,6 +367,49 @@ fn dj_lookahead_start_from_pair(
         queue_generation: pair.queue_generation,
         deadline_samples,
     })
+}
+
+pub fn attach_dj_transition_plan(
+    db: &Database,
+    job: PlaybackPreparation,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<PlaybackPreparation> {
+    let pair = db.with_conn(load_dj_lookahead_pair)?;
+    attach_dj_transition_plan_for_pair(&DjEngine::new(db.clone()), job, pair, sample_rate, channels)
+}
+
+fn attach_dj_transition_plan_for_pair(
+    engine: &DjEngine,
+    mut job: PlaybackPreparation,
+    pair: DjLookaheadPair,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<PlaybackPreparation> {
+    let (Some(current), Some(next), Some(next_queue_item_id)) = (
+        pair.current.as_ref(),
+        pair.next.as_ref(),
+        pair.next_queue_item_id,
+    ) else {
+        return Ok(job);
+    };
+    if next
+        .track_id()
+        .is_some_and(|next_track_id| next_track_id != job.track.id)
+    {
+        return Ok(job);
+    }
+    if let Some(program) =
+        engine.plan_transition(current, next, sample_rate.max(1), channels.max(1))?
+    {
+        job = job.with_prepared_transition(PreparedTransitionProgram {
+            program,
+            queue_generation: pair.queue_generation,
+            current_queue_item_id: pair.current_queue_item_id,
+            next_queue_item_id: Some(next_queue_item_id),
+        });
+    }
+    Ok(job)
 }
 
 impl ActiveListenSession {
@@ -2425,6 +2470,200 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    mod dj_prepare_next {
+        use super::*;
+        use crate::db::schema;
+
+        fn db_with_pair(next_source: &str) -> Database {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                for id in 1..=4 {
+                    conn.execute(
+                        "INSERT INTO tracks (
+                            id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                        ) VALUES (?1, ?2, 1, ?1, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                        params![id, format!("Track {id}")],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source)
+                     VALUES (11, 1, 0, 'manual'), (12, 2, 1, ?1)",
+                    params![next_source],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed db");
+            db
+        }
+
+        fn enable(db: &Database) {
+            db.with_conn(|conn| queries::set_dj_engine_enabled(conn, true))
+                .expect("enable");
+        }
+
+        fn next_job(db: &Database) -> PlaybackPreparation {
+            db.with_conn(|conn| {
+                let track = queue::get_track_by_id(conn, 2)?.expect("track");
+                Ok(build_playback_preparation(&track, None, 0, None))
+            })
+            .expect("next job")
+        }
+
+        fn planned_job_for_source(source: &str) -> PlaybackPreparation {
+            let db = db_with_pair(source);
+            enable(&db);
+            attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
+        }
+
+        #[test]
+        fn prepare_next_attaches_program_when_enabled() {
+            let job = planned_job_for_source("manual");
+
+            assert!(job.prepared_transition.is_some());
+        }
+
+        #[test]
+        fn prepare_next_omits_program_when_disabled() {
+            let db = db_with_pair("manual");
+            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn dj_planning_does_not_reorder_queue() {
+            let db = db_with_pair("manual");
+            enable(&db);
+            let before = db
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .expect("before");
+
+            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let after = db
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .expect("after");
+
+            assert_eq!(after, before);
+        }
+
+        #[test]
+        fn dj_planning_does_not_replace_next_queue_item() {
+            let db = db_with_pair("manual");
+            enable(&db);
+
+            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let next_queue_track = db
+                .with_conn(|conn| {
+                    conn.query_row("SELECT track_id FROM queue WHERE id = 12", [], |row| {
+                        row.get::<_, Option<i64>>(0)
+                    })
+                    .map_err(anyhow::Error::from)
+                })
+                .expect("next queue item");
+
+            assert_eq!(next_queue_track, Some(2));
+        }
+
+        #[test]
+        fn manual_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("manual")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn radio_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("radio")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn automix_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("automix-new")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn external_next_track_uses_same_plan_transition_path() {
+            assert!(
+                planned_job_for_source("radio_pending")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn pending_next_without_profile_falls_back_to_safe_crossfade() {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                conn.execute(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                     ) VALUES (1, 'Track 1', 1, 1, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (11, 1, 0, 'manual', NULL, NULL),
+                            (12, NULL, 1, 'radio_pending', 'External A', 'External B')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                queries::set_dj_engine_enabled(conn, true)?;
+                Ok(())
+            })
+            .expect("seed pending");
+            let pair = db.with_conn(load_dj_lookahead_pair).expect("pair");
+            let engine = DjEngine::new(db.clone());
+            let job = attach_dj_transition_plan_for_pair(
+                &engine,
+                PreparedPlaybackJob::test_fixture(99, 1),
+                pair,
+                48_000,
+                2,
+            )
+            .expect("plan");
+
+            let program = job.prepared_transition.expect("transition").program;
+            assert_eq!(program.template, "SafeCrossfade");
         }
     }
 

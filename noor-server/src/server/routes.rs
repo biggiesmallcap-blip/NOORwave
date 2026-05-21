@@ -11333,6 +11333,23 @@ async fn handle_near_end(
         user_quality,
     )
     .with_generation(generation);
+    let job = {
+        let state_guard = state.read().await;
+        let channels = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .map(|info| info.channels)
+            .unwrap_or(2);
+        player::attach_dj_transition_plan(
+            &state_guard.db,
+            job,
+            stream_info
+                .as_ref()
+                .and_then(|info| info.sample_rate_hz())
+                .unwrap_or(48_000),
+            channels,
+        )?
+    };
 
     {
         let state_guard = state.read().await;
