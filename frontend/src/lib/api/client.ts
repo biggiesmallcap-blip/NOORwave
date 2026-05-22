@@ -919,6 +919,7 @@ export type DjStatusResponse = {
 	renderer_template?: string;
 	renderer_mode?: 'legacy_overlap' | 'dj_gain_program' | 'dj_full_program';
 	downgrade_reason?: string;
+	planning_reason?: string;
 	sync_target?: string;
 	planned_start_ms?: number;
 	actual_start_ms?: number;
@@ -947,6 +948,7 @@ export type DjTimingHistoryEvent = {
 	to_artist?: string;
 	planned_template: string;
 	renderer_template?: string;
+	planning_reason?: string;
 	planned_start_ms?: number;
 	actual_start_ms?: number;
 	timing_delta_ms?: number;

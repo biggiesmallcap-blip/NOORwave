@@ -154,6 +154,10 @@
 					<dd>{status?.downgrade_reason ?? 'none'}</dd>
 				</div>
 				<div>
+					<dt>Planning reason</dt>
+					<dd>{status?.planning_reason ?? 'none'}</dd>
+				</div>
+				<div>
 					<dt>Sync target</dt>
 					<dd>{status?.sync_target ?? 'none'}</dd>
 				</div>
@@ -186,7 +190,7 @@
 					<dd>{status?.timing_quality ?? 'unknown'}</dd>
 				</div>
 				<div>
-					<dt>Fallback</dt>
+					<dt>Readiness block</dt>
 					<dd>{status?.fallback_reason ?? 'none'}</dd>
 				</div>
 				<div>
@@ -229,6 +233,7 @@
 					<span>Status</span>
 					<span>Timing</span>
 					<span>Quality</span>
+					<span>Plan</span>
 					<span>Source</span>
 					<span>Planned</span>
 					<span>Actual</span>
@@ -241,6 +246,7 @@
 							<span>{event.timing_status ?? 'none'}</span>
 							<span>{formatTimingDirection(event.timing_direction)}</span>
 							<span>{event.timing_quality}</span>
+							<span>{event.planning_reason ?? 'none'}</span>
 							<span>{event.timing_source ?? 'none'}</span>
 							<span>{formatTimingMs(event.planned_start_ms)}</span>
 							<span>{formatTimingMs(event.actual_start_ms)}</span>
@@ -424,7 +430,7 @@
 
 	.timing-history-header {
 		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(7, minmax(4.25rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(8, minmax(4.25rem, auto));
 		gap: var(--space-2);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
@@ -446,7 +452,7 @@
 
 	.timing-history li {
 		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(7, minmax(4.25rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(8, minmax(4.25rem, auto));
 		gap: var(--space-2);
 		align-items: center;
 		padding-top: var(--space-2);

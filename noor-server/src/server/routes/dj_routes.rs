@@ -133,6 +133,7 @@ struct DjStatusResponse {
     renderer_template: Option<String>,
     renderer_mode: Option<String>,
     downgrade_reason: Option<String>,
+    planning_reason: Option<String>,
     sync_target: Option<String>,
     planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
@@ -179,6 +180,7 @@ struct DjTimingHistoryEvent {
     to_artist: Option<String>,
     planned_template: String,
     renderer_template: Option<String>,
+    planning_reason: Option<String>,
     planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
     timing_delta_ms: Option<i64>,
@@ -220,6 +222,7 @@ struct RendererStatus {
     renderer_template: Option<String>,
     renderer_mode: Option<String>,
     downgrade_reason: Option<String>,
+    planning_reason: Option<String>,
     sync_target: Option<String>,
     planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
@@ -422,6 +425,7 @@ async fn get_status(
                         renderer_template: renderer_status.renderer_template,
                         renderer_mode: renderer_status.renderer_mode,
                         downgrade_reason: renderer_status.downgrade_reason,
+                        planning_reason: renderer_status.planning_reason,
                         sync_target: renderer_status.sync_target,
                         planned_start_ms: renderer_status.planned_start_ms,
                         actual_start_ms: renderer_status.actual_start_ms,
@@ -1159,6 +1163,7 @@ fn latest_dj_transition_timing_history(
             to_artist: row.get(4)?,
             planned_template: row.get(5)?,
             renderer_template: renderer_template_from_program_json(&program_json),
+            planning_reason: row.get(7)?,
             planned_start_ms: row.get(8)?,
             actual_start_ms: row.get(9)?,
             timing_delta_ms,
@@ -1293,6 +1298,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             renderer_template: None,
             renderer_mode: None,
             downgrade_reason: None,
+            planning_reason: None,
             sync_target: None,
             planned_start_ms: None,
             actual_start_ms: None,
@@ -1318,10 +1324,9 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             planned_template: Some(transition.template.clone()),
             renderer_template: transition.renderer_template.clone(),
             renderer_mode: Some("dj_gain_program".to_string()),
-            downgrade_reason: transition.fallback_reason.clone().or_else(|| {
-                (transition.template != "SafeCrossfade")
-                    .then(|| "template_not_renderable".to_string())
-            }),
+            downgrade_reason: (transition.template != "SafeCrossfade")
+                .then(|| "template_not_renderable".to_string()),
+            planning_reason: transition.fallback_reason.clone(),
             sync_target: transition.timing_source.clone(),
             planned_start_ms: transition.planned_start_ms,
             actual_start_ms: transition.actual_start_ms,
@@ -1336,6 +1341,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         planned_template: Some(transition.template.clone()),
         renderer_template: None,
         renderer_mode: Some("legacy_overlap".to_string()),
+        planning_reason: transition.fallback_reason.clone(),
         downgrade_reason: Some(
             if transition.template == "SafeCrossfade" {
                 "dj_program_renderer_pending"
@@ -1498,6 +1504,30 @@ mod tests {
     }
 
     #[test]
+    fn renderer_status_keeps_safe_crossfade_planning_reason_out_of_downgrade() {
+        let status = renderer_status_for_transition(Some(&OpenTransition {
+            id: 20,
+            template: "SafeCrossfade".to_string(),
+            renderer_template: Some("SafeCrossfade".to_string()),
+            fallback_reason: Some("next_profile_missing".to_string()),
+            planned_start_ms: Some(112_000),
+            actual_start_ms: Some(112_144),
+            timing_delta_ms: Some(144),
+            timing_source: Some("downbeat_sync".to_string()),
+            timing_status: Some("fired".to_string()),
+        }));
+
+        assert_eq!(status.planned_template.as_deref(), Some("SafeCrossfade"));
+        assert_eq!(status.renderer_template.as_deref(), Some("SafeCrossfade"));
+        assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
+        assert_eq!(status.downgrade_reason, None);
+        assert_eq!(
+            status.planning_reason.as_deref(),
+            Some("next_profile_missing")
+        );
+    }
+
+    #[test]
     fn latest_completed_timing_transition_returns_last_fired_row() {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         crate::db::schema::run_migrations(&conn).expect("migrations");
@@ -1635,12 +1665,13 @@ mod tests {
             "INSERT INTO dj_transition_events (
                 from_track_id, to_track_id,
                 from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
-                template, program_json, planner_version, planned_start_ms,
+                template, program_json, planner_version, fallback_reason, planned_start_ms,
                 actual_start_ms, timing_delta_ms, timing_source, timing_status
              ) VALUES (
                 100, 101,
                 'tidal_track', '1', 'tidal_track', '2',
                 'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                'next_profile_missing',
                 10000, 10320, 320, 'downbeat_sync', 'fired'
              )",
             [],
@@ -1653,6 +1684,10 @@ mod tests {
         assert_eq!(history[0].from_artist.as_deref(), Some("Outgoing Artist"));
         assert_eq!(history[0].to_title.as_deref(), Some("Incoming Track"));
         assert_eq!(history[0].to_artist.as_deref(), Some("Incoming Artist"));
+        assert_eq!(
+            history[0].planning_reason.as_deref(),
+            Some("next_profile_missing")
+        );
         assert_eq!(history[0].timing_direction, "late");
     }
 
@@ -1688,6 +1723,7 @@ mod tests {
                 to_artist: Some("Artist B".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
+                planning_reason: None,
                 planned_start_ms: Some(10_000),
                 actual_start_ms: Some(10_100),
                 timing_delta_ms: Some(100),
@@ -1705,6 +1741,7 @@ mod tests {
                 to_artist: Some("Artist C".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
+                planning_reason: Some("next_profile_missing".to_string()),
                 planned_start_ms: Some(20_000),
                 actual_start_ms: Some(20_800),
                 timing_delta_ms: Some(800),
@@ -1722,6 +1759,7 @@ mod tests {
                 to_artist: Some("Artist D".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
+                planning_reason: Some("analysis_late".to_string()),
                 planned_start_ms: Some(30_000),
                 actual_start_ms: None,
                 timing_delta_ms: None,
