@@ -8240,8 +8240,11 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
 
-        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Guns N Roses')", [])
-            .expect("artist inserted");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Guns N Roses')",
+            [],
+        )
+        .expect("artist inserted");
         conn.execute(
             "INSERT INTO tracks (
                 id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
