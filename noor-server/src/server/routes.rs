@@ -10266,6 +10266,10 @@ fn put_cached_tidal_playlist_tracks(
     tracks: Vec<TidalTrack>,
 ) {
     let mut guard = cache.lock().unwrap();
+    // Sweep expired entries on insert so distinct (playlist, page) keys don't
+    // accumulate dead entries for the process lifetime. Inserts only happen on
+    // a cache miss (after a network fetch), so the O(n) scan is cheap and rare.
+    guard.retain(|_, (stored_at, _)| stored_at.elapsed() < TIDAL_PLAYLIST_TRACKS_CACHE_TTL);
     guard.insert(key, (Instant::now(), tracks));
 }
 
