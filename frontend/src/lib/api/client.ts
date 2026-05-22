@@ -871,6 +871,7 @@ export interface PlaybackRuntimeInfo {
 	last_error: string | null;
 	exclusive_engaged: boolean;
 	exclusive_transport_format: string | null;
+	dj_engine_enabled: boolean;
 }
 
 export type DjEnabledResponse = { enabled: boolean };
