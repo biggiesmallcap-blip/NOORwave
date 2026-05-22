@@ -82,11 +82,16 @@ describe('dj cockpit page contract', () => {
 	test('dj_page_debug_details_use_planner_facts', () => {
 		expect(transitionLane).toContain('Debug planner facts');
 		expect(transitionLane).toContain('Current event');
-		expect(transitionLane).toContain('Recent fires');
+		expect(transitionLane).toContain('Recent timing');
 		expect(transitionLane).toContain('Quality');
+		expect(transitionLane).toContain('Timing direction');
+		expect(transitionLane).toContain('formatTrackLabel');
+		expect(transitionLane).toContain('formatTimingDirection');
+		expect(transitionLane).toContain('formatTimingPair');
 		expect(transitionLane).toContain('Avg delta');
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
+		expect(transitionLane).toContain('Pair');
 		expect(transitionLane).toContain('Planned');
 		expect(transitionLane).toContain('Actual');
 		expect(transitionLane).toContain('Planned template');

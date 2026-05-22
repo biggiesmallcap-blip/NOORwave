@@ -139,6 +139,8 @@ struct DjStatusResponse {
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
     timing_status: Option<String>,
+    timing_quality: String,
+    timing_direction: String,
     fallback_reason: Option<String>,
     profile_confidence_floor: f64,
     last_transition_event_id: Option<i64>,
@@ -171,6 +173,10 @@ struct DjSafeSuggestion {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct DjTimingHistoryEvent {
     event_id: i64,
+    from_title: Option<String>,
+    from_artist: Option<String>,
+    to_title: Option<String>,
+    to_artist: Option<String>,
     planned_template: String,
     renderer_template: Option<String>,
     planned_start_ms: Option<i64>,
@@ -179,6 +185,7 @@ struct DjTimingHistoryEvent {
     timing_source: Option<String>,
     timing_status: Option<String>,
     timing_quality: String,
+    timing_direction: String,
     started_at: String,
 }
 
@@ -219,6 +226,8 @@ struct RendererStatus {
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
     timing_status: Option<String>,
+    timing_quality: String,
+    timing_direction: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +428,8 @@ async fn get_status(
                         timing_delta_ms: renderer_status.timing_delta_ms,
                         timing_source: renderer_status.timing_source,
                         timing_status: renderer_status.timing_status,
+                        timing_quality: renderer_status.timing_quality,
+                        timing_direction: renderer_status.timing_direction,
                         fallback_reason,
                         profile_confidence_floor: DJ_PROFILE_CONFIDENCE_FLOOR,
                         last_transition_event_id: latest_transition
@@ -1109,41 +1120,54 @@ fn latest_dj_transition_timing_history(
     limit: i64,
 ) -> anyhow::Result<Vec<DjTimingHistoryEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, template, program_json, fallback_reason,
+        "SELECT e.id,
+                from_track.title, from_artist.name,
+                to_track.title, to_artist.name,
+                e.template, e.program_json, e.fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status, started_at
-         FROM dj_transition_events
-         WHERE timing_status IN ('fired', 'late', 'missed')
+                timing_source, timing_status, e.started_at
+         FROM dj_transition_events e
+         LEFT JOIN tracks from_track ON from_track.id = e.from_track_id
+         LEFT JOIN artists from_artist ON from_artist.id = from_track.artist_id
+         LEFT JOIN tracks to_track ON to_track.id = e.to_track_id
+         LEFT JOIN artists to_artist ON to_artist.id = to_track.artist_id
+         WHERE e.timing_status IN ('fired', 'late', 'missed')
            AND NOT (
-             timing_status = 'missed'
+             e.timing_status = 'missed'
              AND EXISTS (
                SELECT 1
                FROM dj_transition_events fired
-               WHERE fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
-                 AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
-                 AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
-                 AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+               WHERE fired.from_media_ref_kind IS e.from_media_ref_kind
+                 AND fired.from_media_ref_id IS e.from_media_ref_id
+                 AND fired.to_media_ref_kind IS e.to_media_ref_kind
+                 AND fired.to_media_ref_id IS e.to_media_ref_id
                  AND fired.timing_status = 'fired'
              )
            )
-         ORDER BY started_at DESC, id DESC
+         ORDER BY e.started_at DESC, e.id DESC
          LIMIT ?1",
     )?;
     let rows = stmt.query_map([limit.max(0)], |row| {
-        let program_json: String = row.get(2)?;
-        let timing_delta_ms: Option<i64> = row.get(6)?;
-        let timing_status: Option<String> = row.get(8)?;
+        let program_json: String = row.get(6)?;
+        let timing_delta_ms: Option<i64> = row.get(10)?;
+        let timing_status: Option<String> = row.get(12)?;
         Ok(DjTimingHistoryEvent {
             event_id: row.get(0)?,
-            planned_template: row.get(1)?,
+            from_title: row.get(1)?,
+            from_artist: row.get(2)?,
+            to_title: row.get(3)?,
+            to_artist: row.get(4)?,
+            planned_template: row.get(5)?,
             renderer_template: renderer_template_from_program_json(&program_json),
-            planned_start_ms: row.get(4)?,
-            actual_start_ms: row.get(5)?,
+            planned_start_ms: row.get(8)?,
+            actual_start_ms: row.get(9)?,
             timing_delta_ms,
-            timing_source: row.get(7)?,
+            timing_source: row.get(11)?,
             timing_status: timing_status.clone(),
             timing_quality: timing_quality(timing_status.as_deref(), timing_delta_ms).to_string(),
-            started_at: row.get(9)?,
+            timing_direction: timing_direction(timing_status.as_deref(), timing_delta_ms)
+                .to_string(),
+            started_at: row.get(13)?,
         })
     })?;
     let mut events = Vec::new();
@@ -1165,6 +1189,21 @@ fn timing_quality(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -> 
         151..=500 => "usable",
         501..=1000 => "loose",
         _ => "bad",
+    }
+}
+
+fn timing_direction(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -> &'static str {
+    match timing_status {
+        Some("missed") => "missed",
+        Some("armed") => "pending",
+        Some("late") => "late",
+        Some("fired") => match timing_delta_ms {
+            Some(delta_ms) if delta_ms < -250 => "early",
+            Some(delta_ms) if delta_ms > 250 => "late",
+            Some(_) => "on_time",
+            None => "unknown",
+        },
+        _ => "unknown",
     }
 }
 
@@ -1260,8 +1299,20 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            timing_quality: "unknown".to_string(),
+            timing_direction: "unknown".to_string(),
         };
     };
+    let quality = timing_quality(
+        transition.timing_status.as_deref(),
+        transition.timing_delta_ms,
+    )
+    .to_string();
+    let direction = timing_direction(
+        transition.timing_status.as_deref(),
+        transition.timing_delta_ms,
+    )
+    .to_string();
     if transition.renderer_template.as_deref() == Some("SafeCrossfade") {
         return RendererStatus {
             planned_template: Some(transition.template.clone()),
@@ -1277,6 +1328,8 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_delta_ms: transition.timing_delta_ms,
             timing_source: transition.timing_source.clone(),
             timing_status: transition.timing_status.clone(),
+            timing_quality: quality,
+            timing_direction: direction,
         };
     }
     RendererStatus {
@@ -1297,6 +1350,8 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         timing_delta_ms: transition.timing_delta_ms,
         timing_source: transition.timing_source.clone(),
         timing_status: transition.timing_status.clone(),
+        timing_quality: quality,
+        timing_direction: direction,
     }
 }
 
@@ -1520,6 +1575,7 @@ mod tests {
         assert_eq!(history[0].actual_start_ms, Some(222_040));
         assert_eq!(history[0].timing_status.as_deref(), Some("fired"));
         assert_eq!(history[0].timing_quality, "tight");
+        assert_eq!(history[0].timing_direction, "on_time");
     }
 
     #[test]
@@ -1561,6 +1617,46 @@ mod tests {
     }
 
     #[test]
+    fn timing_history_includes_track_pair_labels() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (10, 'Outgoing Artist'), (11, 'Incoming Artist')",
+            [],
+        )
+        .expect("insert artists");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source)
+             VALUES (100, 'Outgoing Track', 10, 'tidal'), (101, 'Incoming Track', 11, 'tidal')",
+            [],
+        )
+        .expect("insert tracks");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_track_id, to_track_id,
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status
+             ) VALUES (
+                100, 101,
+                'tidal_track', '1', 'tidal_track', '2',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                10000, 10320, 320, 'downbeat_sync', 'fired'
+             )",
+            [],
+        )
+        .expect("insert event");
+
+        let history = latest_dj_transition_timing_history(&conn, 5).expect("history");
+
+        assert_eq!(history[0].from_title.as_deref(), Some("Outgoing Track"));
+        assert_eq!(history[0].from_artist.as_deref(), Some("Outgoing Artist"));
+        assert_eq!(history[0].to_title.as_deref(), Some("Incoming Track"));
+        assert_eq!(history[0].to_artist.as_deref(), Some("Incoming Artist"));
+        assert_eq!(history[0].timing_direction, "late");
+    }
+
+    #[test]
     fn timing_quality_labels_delta_bands_and_missed() {
         assert_eq!(timing_quality(Some("fired"), Some(150)), "tight");
         assert_eq!(timing_quality(Some("fired"), Some(-500)), "usable");
@@ -1571,10 +1667,25 @@ mod tests {
     }
 
     #[test]
+    fn timing_direction_labels_delta_direction_and_status() {
+        assert_eq!(timing_direction(Some("fired"), Some(150)), "on_time");
+        assert_eq!(timing_direction(Some("fired"), Some(-251)), "early");
+        assert_eq!(timing_direction(Some("fired"), Some(251)), "late");
+        assert_eq!(timing_direction(Some("late"), Some(0)), "late");
+        assert_eq!(timing_direction(Some("missed"), None), "missed");
+        assert_eq!(timing_direction(Some("armed"), None), "pending");
+        assert_eq!(timing_direction(Some("fired"), None), "unknown");
+    }
+
+    #[test]
     fn timing_history_summary_counts_quality_and_status() {
         let events = vec![
             DjTimingHistoryEvent {
                 event_id: 1,
+                from_title: Some("A".to_string()),
+                from_artist: Some("Artist A".to_string()),
+                to_title: Some("B".to_string()),
+                to_artist: Some("Artist B".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planned_start_ms: Some(10_000),
@@ -1583,10 +1694,15 @@ mod tests {
                 timing_source: Some("downbeat_sync".to_string()),
                 timing_status: Some("fired".to_string()),
                 timing_quality: "tight".to_string(),
+                timing_direction: "on_time".to_string(),
                 started_at: "now".to_string(),
             },
             DjTimingHistoryEvent {
                 event_id: 2,
+                from_title: Some("B".to_string()),
+                from_artist: Some("Artist B".to_string()),
+                to_title: Some("C".to_string()),
+                to_artist: Some("Artist C".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planned_start_ms: Some(20_000),
@@ -1595,10 +1711,15 @@ mod tests {
                 timing_source: Some("beat_sync".to_string()),
                 timing_status: Some("late".to_string()),
                 timing_quality: "loose".to_string(),
+                timing_direction: "late".to_string(),
                 started_at: "now".to_string(),
             },
             DjTimingHistoryEvent {
                 event_id: 3,
+                from_title: Some("C".to_string()),
+                from_artist: Some("Artist C".to_string()),
+                to_title: Some("D".to_string()),
+                to_artist: Some("Artist D".to_string()),
                 planned_template: "SafeCrossfade".to_string(),
                 renderer_template: Some("SafeCrossfade".to_string()),
                 planned_start_ms: Some(30_000),
@@ -1607,6 +1728,7 @@ mod tests {
                 timing_source: Some("fallback_overlap".to_string()),
                 timing_status: Some("missed".to_string()),
                 timing_quality: "bad".to_string(),
+                timing_direction: "missed".to_string(),
                 started_at: "now".to_string(),
             },
         ];

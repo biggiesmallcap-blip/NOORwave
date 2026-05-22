@@ -79,6 +79,33 @@
 		}
 		return `${value > 0 ? '+' : ''}${value} ms`;
 	}
+
+	function formatTimingDirection(value: string | null | undefined) {
+		switch (value) {
+			case 'on_time':
+				return 'on time';
+			case 'early':
+			case 'late':
+			case 'missed':
+			case 'pending':
+				return value;
+			default:
+				return 'unknown';
+		}
+	}
+
+	function formatTrackLabel(title: string | undefined, artist: string | undefined, fallback: string) {
+		if (!title) {
+			return fallback;
+		}
+		return artist ? `${title} - ${artist}` : title;
+	}
+
+	function formatTimingPair(event: DjStatusResponse['recent_timing_events'][number]) {
+		const from = formatTrackLabel(event.from_title, event.from_artist, `Event ${event.event_id}`);
+		const to = formatTrackLabel(event.to_title, event.to_artist, 'unknown');
+		return `${from} -> ${to}`;
+	}
 </script>
 
 <section class="transition-lane" aria-labelledby="dj-transition-heading">
@@ -151,6 +178,14 @@
 					<dd>{status?.timing_status ?? 'none'}</dd>
 				</div>
 				<div>
+					<dt>Timing direction</dt>
+					<dd>{formatTimingDirection(status?.timing_direction)}</dd>
+				</div>
+				<div>
+					<dt>Timing quality</dt>
+					<dd>{status?.timing_quality ?? 'unknown'}</dd>
+				</div>
+				<div>
 					<dt>Fallback</dt>
 					<dd>{status?.fallback_reason ?? 'none'}</dd>
 				</div>
@@ -159,7 +194,7 @@
 					<dd>{status?.profile_confidence_floor ?? 0}</dd>
 				</div>
 			</dl>
-			<p class="debug-heading">Recent fires</p>
+			<p class="debug-heading">Recent timing</p>
 			{#if timingSummary && timingSummary.event_count > 0}
 				<div class="timing-summary" aria-label="Recent DJ timing summary">
 					<div>
@@ -190,8 +225,9 @@
 			{/if}
 			{#if recentTimingEvents.length > 0}
 				<div class="timing-history-header" aria-hidden="true">
-					<span>Event</span>
+					<span>Pair</span>
 					<span>Status</span>
+					<span>Timing</span>
 					<span>Quality</span>
 					<span>Source</span>
 					<span>Planned</span>
@@ -201,8 +237,9 @@
 				<ul class="timing-history" aria-label="Recent DJ transition timing">
 					{#each recentTimingEvents as event}
 						<li>
-							<span>Event {event.event_id}</span>
+							<span>{formatTimingPair(event)}</span>
 							<span>{event.timing_status ?? 'none'}</span>
+							<span>{formatTimingDirection(event.timing_direction)}</span>
 							<span>{event.timing_quality}</span>
 							<span>{event.timing_source ?? 'none'}</span>
 							<span>{formatTimingMs(event.planned_start_ms)}</span>
@@ -387,7 +424,7 @@
 
 	.timing-history-header {
 		display: grid;
-		grid-template-columns: 1fr repeat(6, minmax(4.5rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(7, minmax(4.25rem, auto));
 		gap: var(--space-2);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
@@ -409,7 +446,7 @@
 
 	.timing-history li {
 		display: grid;
-		grid-template-columns: 1fr repeat(6, minmax(4.5rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(7, minmax(4.25rem, auto));
 		gap: var(--space-2);
 		align-items: center;
 		padding-top: var(--space-2);

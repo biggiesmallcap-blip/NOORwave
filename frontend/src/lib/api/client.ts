@@ -925,6 +925,8 @@ export type DjStatusResponse = {
 	timing_delta_ms?: number;
 	timing_source?: string;
 	timing_status?: string;
+	timing_quality: 'tight' | 'usable' | 'loose' | 'bad' | 'unknown';
+	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'pending' | 'unknown';
 	fallback_reason?: string;
 	profile_confidence_floor: number;
 	last_transition_event_id?: number;
@@ -939,6 +941,10 @@ export type DjStatusResponse = {
 
 export type DjTimingHistoryEvent = {
 	event_id: number;
+	from_title?: string;
+	from_artist?: string;
+	to_title?: string;
+	to_artist?: string;
 	planned_template: string;
 	renderer_template?: string;
 	planned_start_ms?: number;
@@ -947,6 +953,7 @@ export type DjTimingHistoryEvent = {
 	timing_source?: string;
 	timing_status?: 'fired' | 'late' | 'missed';
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad';
+	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'unknown';
 	started_at: string;
 };
 
