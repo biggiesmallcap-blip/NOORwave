@@ -111,7 +111,7 @@ change made; the deferred item was removed from FOLLOWUPS.
 
 ## Verification
 
-- `cargo test -p noor-server`: 739 passed, 0 failed (no regressions).
+- `cargo test -p noor-server`: 741 passed, 0 failed, 2 ignored (no regressions).
 - `cargo check -p noor-server`: clean (only pre-existing dead-code warnings).
 - Index plans/timings measured on read-only copies of the real `noor.db`;
   the live library file was never modified.
