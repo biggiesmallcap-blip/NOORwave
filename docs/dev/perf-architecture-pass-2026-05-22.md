@@ -100,6 +100,20 @@ parses cleanly and matches the indexed tokens (527 hits on the dev library).
 Regression tests: `to_fts_query_treats_apostrophe_as_separator`,
 `search_handles_apostrophe_queries_via_fts`.
 
+### 5. Bounded external HTTP clients (reliability)
+
+reqwest has no default timeout. Two clients were built without one:
+
+- The **Sportify** client. Its result is `join!`ed with local DB search in the
+  `/search` handler, so a hung third-party proxy would hang the entire search
+  response (and any `/discover` call). Added 5s connect / 10s total.
+- The **shared** client (Last.fm, MusicBrainz, Discogs, RSS, session recovery).
+  Added 10s connect / 30s total, matching the existing TIDAL client.
+
+These bound the worst case without affecting sub-second happy-path calls;
+best-effort callers already treat an error/timeout as "no data". Streaming
+audio downloads keep their own dedicated client.
+
 ### Lock-across-await audit: clean
 
 A full audit of `state.write().await` / `state.read().await` guards across
