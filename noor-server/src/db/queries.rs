@@ -3930,11 +3930,19 @@ fn parse_discovery_services(raw: &str) -> Vec<String> {
 // ─── Search (FTS5 + LIKE fallback) ────────────────────────────────────────
 
 /// Strip FTS5 special chars and append `*` to each token for prefix matching.
+///
+/// The apostrophe is treated as a separator, NOT preserved: FTS5 parses a bare
+/// `'` as the start of a string literal, so keeping it turned every query with
+/// an apostrophe ("Don't", "Guns N' Roses") into an `fts5: syntax error` that
+/// silently dropped search into the full-table LIKE scan (~13x slower here).
+/// The unicode61 tokenizer already splits indexed text on apostrophes ("Don't"
+/// -> "don","t"), so mapping `'` to a space ("don't" -> "don* t*") both parses
+/// cleanly and matches how the content was indexed.
 fn to_fts_query(input: &str) -> String {
     let clean: String = input
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '\'' {
+            if c.is_alphanumeric() || c == ' ' {
                 c
             } else {
                 ' '
@@ -8215,6 +8223,43 @@ mod tests {
         assert_eq!(results.albums[0].title, "Disintegration");
         assert_eq!(results.tracks.len(), 1);
         assert_eq!(results.tracks[0].title, "Pictures of You");
+    }
+
+    #[test]
+    fn to_fts_query_treats_apostrophe_as_separator() {
+        // A bare apostrophe is a string-literal opener in FTS5 and used to throw
+        // "fts5: syntax error", forcing the full-table LIKE fallback. It must be
+        // mapped to a separator so the query parses.
+        assert_eq!(to_fts_query("don't"), "don* t*");
+        assert_eq!(to_fts_query("Guns N' Roses"), "Guns* N* Roses*");
+        assert!(!to_fts_query("rock 'n' roll").contains('\''));
+    }
+
+    #[test]
+    fn search_handles_apostrophe_queries_via_fts() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Guns N Roses')", [])
+            .expect("artist inserted");
+        conn.execute(
+            "INSERT INTO tracks (
+                id, title, artist_id, duration_ms, tidal_id, best_quality, best_source,
+                fidelity_score, is_favorite, source
+            ) VALUES (1, 'Don''t Cry', 1, 300000, 201, 'LOSSLESS', 'tidal', 10, 0, 'tidal')",
+            [],
+        )
+        .expect("track inserted");
+
+        // The unicode61 tokenizer splits "Don't" into "don" + "t", so an
+        // apostrophe query must still find it. Before the fix this errored and
+        // fell back to a full-table LIKE scan.
+        let results = search(&conn, "don't", 10).expect("apostrophe search must not error");
+        assert!(
+            results.tracks.iter().any(|t| t.title == "Don't Cry"),
+            "expected to find \"Don't Cry\", got {:?}",
+            results.tracks.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
     }
 
     #[test]
