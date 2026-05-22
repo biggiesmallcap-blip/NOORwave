@@ -22,7 +22,9 @@ use crate::playback::player::{self, PlaybackSourceKind, PlaybackSourceRequest};
 use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
-use crate::services::audio_analysis::dj_profile::{decode_f32_blob, decode_u32_blob};
+use crate::services::audio_analysis::dj_profile::{
+    DJ_PROFILE_VERSION, decode_f32_blob, decode_u32_blob,
+};
 use crate::services::tidal::stream as tidal_stream;
 
 const DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
@@ -525,7 +527,7 @@ async fn rebuild_profile(
                         },
                     ));
                 };
-                if queries::get_audio_dj_profile(conn, &key)?.is_some() {
+                if dj_profile_is_current_version(conn, &key)? {
                     return Ok(RebuildProfileCandidate::Response(
                         RebuildDjProfileResponse {
                             accepted: false,
@@ -569,7 +571,28 @@ async fn queue_tidal_profile_rebuild(
             status: "source_unavailable".to_string(),
         });
     };
-    let inflight_key = dj_profile_inflight_key(&media_ref.profile_key());
+    let media_key = media_ref.profile_key();
+    if !force {
+        let already_current = {
+            let state_guard = state.read().await;
+            state_guard
+                .db
+                .with_conn(|conn| dj_profile_is_current_version(conn, &media_key))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        };
+        if already_current {
+            tracing::debug!(
+                media_ref_kind = %media_key.media_ref_kind,
+                media_ref_id = %media_key.media_ref_id,
+                "Skipping current DJ profile rebuild"
+            );
+            return Ok(RebuildDjProfileResponse {
+                accepted: false,
+                status: "already_current".to_string(),
+            });
+        }
+    }
+    let inflight_key = dj_profile_inflight_key(&media_key);
     let inflight = {
         let state_guard = state.read().await;
         state_guard.dj_profile_rebuild_inflight.clone()
@@ -1021,6 +1044,14 @@ fn profile_response(track_id: i64, profile: &AudioDjProfileRow) -> ProfileRespon
     }
 }
 
+fn dj_profile_is_current_version(
+    conn: &rusqlite::Connection,
+    key: &AudioDjProfileKey,
+) -> anyhow::Result<bool> {
+    Ok(queries::get_audio_dj_profile(conn, key)?
+        .is_some_and(|row| row.profile_version == DJ_PROFILE_VERSION))
+}
+
 fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionResponse {
     DjProfileCorrectionResponse {
         media_ref_kind: row.media_ref_kind,
@@ -1428,6 +1459,57 @@ fn feedback_rating(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
+        AudioDjProfileRow {
+            media_ref_kind: key.media_ref_kind.clone(),
+            media_ref_id: key.media_ref_id.clone(),
+            track_id: None,
+            queue_item_id: None,
+            tidal_id: None,
+            profile_version: version.to_string(),
+            beat_grid_blob: vec![1, 2, 3],
+            downbeats_blob: vec![4, 5],
+            phrase_boundaries_blob: vec![6],
+            mix_in_blob: vec![7],
+            mix_out_blob: vec![8],
+            intro_end_seconds: Some(16.0),
+            outro_start_seconds: Some(180.0),
+            breakdown_blob: vec![9],
+            drop_blob: vec![10],
+            safe_transition_windows_blob: vec![11],
+            energy_contour_blob: vec![12],
+            vocal_presence_blob: vec![13],
+            vocal_density_blob: vec![14],
+            lufs_loud_body: Some(-12.0),
+            true_peak_dbtp: Some(-1.0),
+            beat_confidence: Some(0.9),
+            profile_confidence: 0.85,
+            analysis_scope_ms: 90_000,
+            is_temporary: false,
+            source: "test".to_string(),
+            computed_at: "2026-05-21T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn dj_profile_current_check_requires_current_version() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let key = AudioDjProfileKey {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+        };
+
+        assert!(!dj_profile_is_current_version(&conn, &key).expect("missing"));
+        queries::upsert_audio_dj_profile(&conn, &test_profile_row(&key, "old_profile_v0"))
+            .expect("old profile");
+        assert!(!dj_profile_is_current_version(&conn, &key).expect("old"));
+        queries::upsert_audio_dj_profile(&conn, &test_profile_row(&key, DJ_PROFILE_VERSION))
+            .expect("current profile");
+
+        assert!(dj_profile_is_current_version(&conn, &key).expect("current"));
+    }
 
     #[test]
     fn renderer_status_keeps_non_renderable_template_out_of_main_renderer() {
