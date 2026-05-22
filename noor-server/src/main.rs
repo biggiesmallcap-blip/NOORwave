@@ -56,6 +56,14 @@ pub struct PendingEphemeralTidalTrack {
     pub duration_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedEphemeralTidalNext {
+    pub tidal_track_id: i64,
+    pub synthetic_track: db::models::Track,
+    pub stream_display: StreamDisplayInfo,
+    pub generation: u64,
+}
+
 /// Shared application state accessible by all modules
 pub struct AppState {
     pub db: db::Database,
@@ -128,6 +136,11 @@ pub struct AppState {
     // Audio analysis
     pub analysis_tx:
         Option<tokio::sync::mpsc::UnboundedSender<services::audio_analysis::AnalysisJob>>,
+    pub dj_analysis_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<services::audio_analysis::dj_profile::DjAnalysisJob>,
+    >,
+    pub dj_profile_rebuild_inflight:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     pub audio_analysis_cancel: Arc<AtomicBool>,
     pub audio_analysis_running: Arc<AtomicBool>,
     pub acrcloud_scan_running: Arc<AtomicBool>,
@@ -181,6 +194,7 @@ pub struct AppState {
     /// stream URLs expire (~30 min) so pre-resolving the whole mix is wasteful.
     pub pending_tidal_mix_queue:
         Arc<std::sync::Mutex<std::collections::VecDeque<PendingEphemeralTidalTrack>>>,
+    pub prepared_ephemeral_tidal_next: Option<PreparedEphemeralTidalNext>,
     /// Last.fm app shared secret, loaded once from `LASTFM_API_SECRET` env at
     /// boot. `None` disables every scrobble auth + scrobble call (endpoints
     /// return HTTP 501). Never serialized into responses, never logged.
@@ -707,6 +721,8 @@ async fn main() -> Result<()> {
         services::audio_analysis::AnalysisConfig::default(),
     );
     info!("Audio analysis actor spawned");
+    let dj_analysis_tx = services::audio_analysis::dj_profile::spawn_dj_profile_actor(db.clone());
+    info!("DJ profile analysis actor spawned");
 
     let state = Arc::new(RwLock::new(AppState {
         db,
@@ -737,6 +753,10 @@ async fn main() -> Result<()> {
         rss_aggregator,
         acrcloud_client: None,
         analysis_tx: Some(analysis_tx),
+        dj_analysis_tx: Some(dj_analysis_tx),
+        dj_profile_rebuild_inflight: Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         audio_analysis_cancel: analysis_cancel,
         audio_analysis_running: Arc::new(AtomicBool::new(false)),
         acrcloud_scan_running: Arc::new(AtomicBool::new(false)),
@@ -758,6 +778,7 @@ async fn main() -> Result<()> {
         embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
         master_key,
         pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        prepared_ephemeral_tidal_next: None,
         lastfm_api_secret,
         server_token,
         audio_active: Arc::new(AtomicBool::new(false)),

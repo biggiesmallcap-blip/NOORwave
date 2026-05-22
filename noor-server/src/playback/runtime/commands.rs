@@ -136,6 +136,13 @@ pub enum PlaybackRuntimeEvent {
         track_id: i64,
         generation: u64,
     },
+    DjTransitionPromoted {
+        transition_event_id: i64,
+        outgoing_track_id: i64,
+        generation: u64,
+        actual_start_ms: i64,
+        timing_status: String,
+    },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.
     NearEnd {

@@ -101,6 +101,7 @@ impl DjEngine {
             if safety.force_safe_crossfade {
                 policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
             }
+            lock_v1_renderable_template(&mut policy);
 
             let mut program = Planner::plan(&outgoing, &incoming, &policy);
             program.sample_rate = sample_rate.max(1);
@@ -118,6 +119,10 @@ impl DjEngine {
         self.db
             .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
     }
+}
+
+fn lock_v1_renderable_template(policy: &mut Policy) {
+    policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
 }
 
 fn plan_from_program(
@@ -183,7 +188,7 @@ fn runtime_safety_decision(outgoing: &DjProfile, incoming: &DjProfile) -> Runtim
     }
 }
 
-fn safe_crossfade_program(
+pub(crate) fn safe_crossfade_program(
     sample_rate: u32,
     channels: u16,
     mut policy: Policy,
@@ -528,14 +533,14 @@ mod tests {
         enable(&db);
         seed_profile(&db, "library_track", 1, 0.9);
         seed_profile(&db, "library_track", 2, 0.9);
-        plan(
+        let program = plan(
             &db,
             ref_for("library_track", 1),
             ref_for("library_track", 2),
         )
-        .expect("program")
-        .validate()
-        .expect("valid");
+        .expect("program");
+        assert_eq!(program.template, "SafeCrossfade");
+        program.validate().expect("valid");
     }
 
     #[test]

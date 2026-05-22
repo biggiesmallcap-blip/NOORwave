@@ -53,6 +53,7 @@ pub use tidal_sync_routes::trigger_auto_sync;
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
 
 const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -6534,9 +6535,53 @@ async fn clear_ephemeral_playback_markers(state: &SharedState, clear_mix_queue: 
     let mut state_guard = state.write().await;
     state_guard.external_playback_track = None;
     state_guard.ephemeral_tidal_track = None;
+    state_guard.prepared_ephemeral_tidal_next = None;
     if clear_mix_queue {
         state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
     }
+}
+
+pub(crate) fn active_ephemeral_tidal_mix_dj_pair(
+    state: &crate::AppState,
+) -> Option<crate::playback::dj_lookahead::DjLookaheadPair> {
+    let current = state.ephemeral_tidal_track.as_ref()?;
+    let pending = state
+        .pending_tidal_mix_queue
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::playback::dj_lookahead::build_ephemeral_tidal_mix_pair(current, pending.as_slice())
+}
+
+pub(crate) fn active_ephemeral_tidal_mix_dj_labels(
+    state: &crate::AppState,
+) -> Vec<(
+    crate::db::models::AudioDjProfileKey,
+    (String, Option<String>),
+)> {
+    let mut labels = Vec::new();
+    if let Some(current) = state.ephemeral_tidal_track.as_ref()
+        && let Some(media_ref) = crate::playback::dj_lookahead::tidal_media_ref_for_track(current)
+    {
+        labels.push((
+            media_ref.profile_key(),
+            (current.title.clone(), current.artist_name.clone()),
+        ));
+    }
+    let pending = state.pending_tidal_mix_queue.lock().unwrap();
+    for track in pending.iter() {
+        let media_ref = crate::playback::dj_lookahead::DjMediaRef::TidalTrack {
+            tidal_id: track.tidal_track_id,
+            track_id: None,
+        };
+        labels.push((
+            media_ref.profile_key(),
+            (track.title.clone(), track.artist_name.clone()),
+        ));
+    }
+    labels
 }
 
 async fn overlay_snapshot_with_external_track(
@@ -6557,6 +6602,7 @@ async fn overlay_snapshot_with_external_track_and_position(
     }
     // Ephemeral Tidal track takes priority: it represents a track playing right
     // now that has no DB record.
+    let has_ephemeral_tidal_track = state_guard.ephemeral_tidal_track.is_some();
     if let Some(ephemeral) = &state_guard.ephemeral_tidal_track {
         snapshot.state.current_track = Some(ephemeral.clone());
     } else if snapshot.state.current_track.is_none()
@@ -6577,6 +6623,9 @@ async fn overlay_snapshot_with_external_track_and_position(
         .collect::<Vec<_>>();
     drop(state_guard);
     if !pending.is_empty() {
+        if has_ephemeral_tidal_track {
+            snapshot.queue.clear();
+        }
         let tidal_ids: Vec<i64> = pending.iter().map(|p| p.tidal_track_id).collect();
         let library_states = db
             .with_conn(|conn| queries::get_tidal_track_library_states(conn, &tidal_ids))
@@ -6878,6 +6927,17 @@ async fn build_live_playback_snapshot(
     Ok(snapshot)
 }
 
+async fn build_live_playback_snapshot_json(
+    state: &SharedState,
+) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
+    build_live_playback_snapshot(state).await.map_err(|status| {
+        (
+            status,
+            Json(json!({ "error": "Playback snapshot unavailable" })),
+        )
+    })
+}
+
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let snapshot = build_live_playback_snapshot(&state).await?;
     Ok(Json(json!({
@@ -6888,6 +6948,10 @@ async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Val
 
 async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
     let state = state.read().await;
+    let dj_engine_enabled = state
+        .db
+        .with_conn(queries::is_dj_engine_enabled)
+        .unwrap_or(false);
     let runtime = state.playback_runtime_info.as_ref().map(|info| {
         json!({
             "device_name": info.device_name,
@@ -6897,6 +6961,7 @@ async fn get_playback_runtime(State(state): State<SharedState>) -> Result<Json<V
             "last_error": info.last_error,
             "exclusive_engaged": info.exclusive_engaged,
             "exclusive_transport_format": info.exclusive_transport_format,
+            "dj_engine_enabled": dj_engine_enabled,
         })
     });
     let stream = state.current_stream_display.as_ref().map(|d| {
@@ -10315,7 +10380,16 @@ async fn play_tidal_ephemeral(
         duration_ms: body.duration_ms,
     };
     start_ephemeral_tidal_playback(&state, track).await?;
-    Ok(Json(json!({ "ok": true })))
+    let snapshot = build_live_playback_snapshot_json(&state).await?;
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::QueueUpdated);
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "state": snapshot.state,
+        "queue": snapshot.queue
+    })))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -10386,10 +10460,17 @@ async fn play_tidal_mix(
     }
 
     start_ephemeral_tidal_playback(&state, first).await?;
+    let snapshot = build_live_playback_snapshot_json(&state).await?;
+    {
+        let s = state.read().await;
+        let _ = s.event_tx.send(AppEvent::QueueUpdated);
+    }
     Ok(Json(json!({
         "ok": true,
         "first_tidal_id": first_tidal_id,
-        "shuffle_debug": shuffle_debug
+        "shuffle_debug": shuffle_debug,
+        "state": snapshot.state,
+        "queue": snapshot.queue
     })))
 }
 
@@ -10542,6 +10623,7 @@ async fn start_ephemeral_tidal_playback(
         let mut state_guard = state.write().await;
         state_guard.external_playback_track = None;
         state_guard.ephemeral_tidal_track = Some(synthetic.clone());
+        state_guard.prepared_ephemeral_tidal_next = None;
         state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
             audio_quality: stream_info.audio_quality.clone(),
             sample_rate: stream_info.sample_rate,
@@ -10574,13 +10656,26 @@ async fn start_ephemeral_tidal_playback(
 
     // Build the playback job and start it via the runtime
     let crossfade_ms = current_crossfade_ms(state).await;
-    let job = player::build_playback_preparation(
+    let dj_engine_enabled = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(queries::is_dj_engine_enabled)
+            .unwrap_or(false)
+    };
+    let mut job = player::build_playback_preparation(
         &synthetic,
         Some(&stream_info),
         crossfade_ms,
         user_quality,
     )
     .with_generation(playback_generation);
+    if dj_engine_enabled
+        && let Some(media_ref) =
+            crate::playback::dj_lookahead::tidal_media_ref_for_track(&synthetic)
+    {
+        job = job.with_dj_media_ref(media_ref);
+    }
     let runtime_handle = match ensure_playback_runtime_for_track(state, &synthetic).await {
         Ok(handle) => handle,
         Err(error) => {
@@ -10600,6 +10695,17 @@ async fn start_ephemeral_tidal_playback(
             Json(json!({ "error": message })),
         )
     })?;
+    if dj_engine_enabled {
+        let lookahead = {
+            let state_guard = state.read().await;
+            active_ephemeral_tidal_mix_dj_pair(&state_guard).and_then(|pair| {
+                player::dj_lookahead_start_from_pair(pair, EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+            })
+        };
+        if let Some(lookahead) = lookahead {
+            let _ = lookahead.dispatch(&runtime_handle);
+        }
+    }
 
     sync_session_after_snapshot(
         state,
@@ -10868,11 +10974,16 @@ async fn ensure_playback_runtime_for_track(
             let _ = runtime.handle.shutdown();
         }
 
+        let dj_engine_enabled = state_guard
+            .db
+            .with_conn(queries::is_dj_engine_enabled)
+            .unwrap_or(false);
         let config = playback_runtime::PlaybackRuntimeConfig::new(
             state_guard.http_client.clone(),
             access_token.clone(),
             state_guard.analysis_tx.clone(),
-        );
+        )
+        .with_dj_analysis(dj_engine_enabled, state_guard.dj_analysis_tx.clone());
         let handle = playback_runtime::spawn_runtime(config).map_err(|error| {
             let message = format!("Failed to start host audio runtime: {error}");
             (
@@ -10961,6 +11072,35 @@ fn spawn_playback_runtime_listener(
                         error!("{message}");
                     }
                 }
+                Ok(playback_runtime::PlaybackRuntimeEvent::DjTransitionPromoted {
+                    transition_event_id,
+                    actual_start_ms,
+                    timing_status,
+                    ..
+                }) => {
+                    let state_guard = state.read().await;
+                    match state_guard.db.with_conn(|conn| {
+                        queries::update_dj_transition_fire_timing(
+                            conn,
+                            transition_event_id,
+                            actual_start_ms,
+                            timing_status.as_str(),
+                        )
+                    }) {
+                        Ok(()) => {
+                            info!(
+                                transition_event_id,
+                                actual_start_ms,
+                                timing_status = %timing_status,
+                                "Recorded DJ transition timing"
+                            );
+                        }
+                        Err(error) => {
+                            warn!("Failed to record DJ transition timing: {error}");
+                        }
+                    }
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error(state.clone(), &message).await;
                 }
@@ -11040,6 +11180,7 @@ fn spawn_playback_runtime_listener(
                     }
                     state_guard.external_playback_track = None;
                     state_guard.ephemeral_tidal_track = None;
+                    state_guard.prepared_ephemeral_tidal_next = None;
                     state_guard.current_stream_display = None;
                     state_guard.pending_stream_display = None;
                 }
@@ -11144,11 +11285,228 @@ fn spawn_playback_runtime_listener(
 
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the
 /// runtime so it can pre-decode the track and swap it in gaplessly when the current one ends.
+async fn handle_ephemeral_tidal_near_end(
+    state: SharedState,
+    current_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    let (current_track, pending_track, pending_tracks, handle, sample_rate, channels) = {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        if active_id != Some(current_track_id)
+            || current_playback_generation(&state_guard) != generation
+        {
+            return Ok(true);
+        }
+
+        let Some(current_track) = state_guard.ephemeral_tidal_track.clone() else {
+            return Ok(false);
+        };
+        if current_track.id != current_track_id {
+            return Ok(false);
+        }
+        let pending_tracks = state_guard
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(pending_track) = pending_tracks.first().cloned() else {
+            return Ok(true);
+        };
+        let Some(handle) = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle.clone())
+        else {
+            return Ok(true);
+        };
+        let Some(runtime_info) = state_guard.playback_runtime_info.as_ref() else {
+            return Ok(true);
+        };
+        (
+            current_track,
+            pending_track,
+            pending_tracks,
+            handle,
+            runtime_info.sample_rate,
+            runtime_info.channels,
+        )
+    };
+
+    let dj_engine_enabled = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(queries::is_dj_engine_enabled)
+            .unwrap_or(false)
+    };
+    if !dj_engine_enabled {
+        return Ok(false);
+    }
+
+    let user_quality = current_user_audio_quality(&state).await;
+    let stream_request =
+        build_ephemeral_tidal_stream_request(pending_track.tidal_track_id, user_quality.clone());
+    let resolve_probe = crate::db::models::Track {
+        id: -pending_track.tidal_track_id,
+        title: pending_track.title.clone(),
+        artist_id: 0,
+        artist_name: pending_track.artist_name.clone(),
+        album_id: None,
+        album_title: pending_track.album_title.clone(),
+        disc_number: None,
+        track_number: None,
+        duration_ms: pending_track.duration_ms,
+        isrc: None,
+        tidal_id: Some(pending_track.tidal_track_id),
+        ytmusic_id: None,
+        soundcloud_id: None,
+        best_quality: None,
+        best_source: Some("tidal".to_string()),
+        fidelity_score: 0,
+        is_favorite: false,
+        play_count: 0,
+        last_played_at: None,
+        date_added: None,
+        source: "tidal_ephemeral".to_string(),
+        artwork_url: pending_track.artwork_url.clone(),
+    };
+    let stream_info =
+        match resolve_tidal_playback_stream(&state, &resolve_probe, &stream_request).await {
+            Ok(info) => info,
+            Err(error) => {
+                warn!(
+                    "Skipping DJ pre-buffer for TIDAL mix track {}: {}",
+                    pending_track.tidal_track_id,
+                    describe_tidal_playback_error(&error)
+                );
+                return Ok(true);
+            }
+        };
+
+    {
+        let state_guard = state.read().await;
+        let runtime_token = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.access_token.as_str());
+        let current_token = state_guard
+            .tidal_tokens
+            .as_ref()
+            .map(|tokens| tokens.access_token.as_str());
+        if runtime_token != current_token {
+            info!(
+                "Skipping DJ pre-buffer for TIDAL mix track {} after TIDAL session refresh",
+                pending_track.tidal_track_id
+            );
+            return Ok(true);
+        }
+    }
+
+    let library_state = {
+        let state_guard = state.read().await;
+        lookup_tidal_track_library_state(&state_guard.db, pending_track.tidal_track_id)
+    };
+    let synthetic = build_ephemeral_synthetic_track(&pending_track, &stream_info, library_state);
+    let stream_display = crate::StreamDisplayInfo {
+        audio_quality: stream_info.audio_quality.clone(),
+        sample_rate: stream_info.sample_rate,
+        bit_depth: stream_info.bit_depth,
+    };
+
+    let pair = crate::playback::dj_lookahead::build_ephemeral_tidal_mix_pair(
+        &current_track,
+        &pending_tracks,
+    )
+    .context("ephemeral TIDAL mix pair unavailable")?;
+    let lookahead_start =
+        player::dj_lookahead_start_from_pair(pair.clone(), EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES);
+    let effective_crossfade = current_crossfade_ms(&state).await;
+    let mut job = player::build_playback_preparation(
+        &synthetic,
+        Some(&stream_info),
+        effective_crossfade,
+        user_quality,
+    )
+    .with_generation(generation);
+    if let Some(media_ref) = crate::playback::dj_lookahead::tidal_media_ref_for_track(&synthetic) {
+        job = job.with_dj_media_ref(media_ref);
+    }
+    let engine = crate::playback::dj_engine::DjEngine::new({
+        let state_guard = state.read().await;
+        state_guard.db.clone()
+    });
+    job = player::attach_dj_transition_plan_for_pair_with_current_duration(
+        &engine,
+        job,
+        pair,
+        stream_info.sample_rate_hz().unwrap_or(sample_rate),
+        channels,
+        current_track.duration_ms,
+    )?;
+
+    {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        let pending_front = state_guard
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .front()
+            .map(|track| track.tidal_track_id);
+        if active_id != Some(current_track_id)
+            || current_playback_generation(&state_guard) != generation
+            || state_guard
+                .ephemeral_tidal_track
+                .as_ref()
+                .map(|track| track.id)
+                != Some(current_track_id)
+            || pending_front != Some(pending_track.tidal_track_id)
+        {
+            return Ok(true);
+        }
+    }
+
+    if job.prepared_transition.is_some()
+        && let Some(start) = lookahead_start
+    {
+        start.dispatch(&handle)?;
+    }
+    handle.prepare_next(job)?;
+    {
+        let mut state_guard = state.write().await;
+        state_guard.prepared_ephemeral_tidal_next = Some(crate::PreparedEphemeralTidalNext {
+            tidal_track_id: pending_track.tidal_track_id,
+            synthetic_track: synthetic.clone(),
+            stream_display: stream_display.clone(),
+            generation,
+        });
+        state_guard.pending_stream_display = Some(stream_display);
+    }
+    info!(
+        "DJ pre-buffering TIDAL mix track: {} (tidal id {})",
+        synthetic.title, pending_track.tidal_track_id
+    );
+    Ok(true)
+}
+
 async fn handle_near_end(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
 ) -> anyhow::Result<()> {
+    if handle_ephemeral_tidal_near_end(state.clone(), current_track_id, generation).await? {
+        return Ok(());
+    }
+
     let (next_track, runtime_handle, crossfade_ms) = {
         let state_guard = state.read().await;
 
@@ -11333,14 +11691,14 @@ async fn handle_near_end(
         user_quality,
     )
     .with_generation(generation);
-    let job = {
+    let (job, lookahead_start) = {
         let state_guard = state.read().await;
         let channels = state_guard
             .playback_runtime_info
             .as_ref()
             .map(|info| info.channels)
             .unwrap_or(2);
-        player::attach_dj_transition_plan(
+        let job = player::attach_dj_transition_plan(
             &state_guard.db,
             job,
             stream_info
@@ -11348,7 +11706,15 @@ async fn handle_near_end(
                 .and_then(|info| info.sample_rate_hz())
                 .unwrap_or(48_000),
             channels,
-        )?
+        )?;
+        let lookahead_start = if job.prepared_transition.is_some() {
+            state_guard.db.with_conn(|conn| {
+                player::build_dj_lookahead_start(conn, EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+            })?
+        } else {
+            None
+        };
+        (job, lookahead_start)
     };
 
     {
@@ -11369,6 +11735,11 @@ async fn handle_near_end(
         }
     }
 
+    if job.prepared_transition.is_some()
+        && let Some(start) = lookahead_start
+    {
+        let _ = start.dispatch(&handle);
+    }
     let _ = handle.prepare_next(job);
     if let Some(ref si) = stream_info {
         let mut state_guard = state.write().await;
@@ -11382,6 +11753,113 @@ async fn handle_near_end(
     Ok(())
 }
 
+async fn try_adopt_prepared_ephemeral_tidal_next(
+    state: &SharedState,
+    finished_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    let (prepared, handle) = {
+        let state_guard = state.read().await;
+        let Some(prepared) = state_guard.prepared_ephemeral_tidal_next.clone() else {
+            return Ok(false);
+        };
+        if prepared.generation != generation
+            || state_guard
+                .ephemeral_tidal_track
+                .as_ref()
+                .map(|track| track.id)
+                != Some(finished_track_id)
+        {
+            return Ok(false);
+        }
+        let pending_front = state_guard
+            .pending_tidal_mix_queue
+            .lock()
+            .unwrap()
+            .front()
+            .map(|track| track.tidal_track_id);
+        if pending_front != Some(prepared.tidal_track_id) {
+            return Ok(false);
+        }
+        let Some(handle) = state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle.clone())
+        else {
+            return Ok(false);
+        };
+        (prepared, handle)
+    };
+
+    let prepared_status = handle.track_status(prepared.synthetic_track.id, generation);
+    if !matches!(
+        prepared_status,
+        playback_runtime::PlaybackTrackStatus::Active
+            | playback_runtime::PlaybackTrackStatus::Prepared
+    ) {
+        return Ok(false);
+    }
+
+    let user_quality = current_user_audio_quality(state).await;
+    let mut job = player::build_playback_preparation(
+        &prepared.synthetic_track,
+        None,
+        current_crossfade_ms(state).await,
+        user_quality,
+    )
+    .with_generation(generation);
+    if let Some(media_ref) =
+        crate::playback::dj_lookahead::tidal_media_ref_for_track(&prepared.synthetic_track)
+    {
+        job = job.with_dj_media_ref(media_ref);
+    }
+    handle.switch_to(job)?;
+
+    {
+        let mut state_guard = state.write().await;
+        if current_playback_generation(&state_guard) != generation
+            || state_guard
+                .ephemeral_tidal_track
+                .as_ref()
+                .map(|track| track.id)
+                != Some(finished_track_id)
+        {
+            return Ok(true);
+        }
+        let mut pending = state_guard.pending_tidal_mix_queue.lock().unwrap();
+        if pending.front().map(|track| track.tidal_track_id) != Some(prepared.tidal_track_id) {
+            return Ok(true);
+        }
+        let _ = pending.pop_front();
+        drop(pending);
+
+        state_guard.external_playback_track = None;
+        state_guard.ephemeral_tidal_track = Some(prepared.synthetic_track.clone());
+        state_guard.current_stream_display = Some(prepared.stream_display.clone());
+        state_guard.pending_stream_display = None;
+        state_guard.prepared_ephemeral_tidal_next = None;
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.active_track_id = Some(prepared.synthetic_track.id);
+            info.last_error = None;
+        }
+        let _ = state_guard.event_tx.send(AppEvent::TrackChanged {
+            track_id: prepared.synthetic_track.id,
+        });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+
+    let snapshot = build_live_playback_snapshot(state)
+        .await
+        .map_err(|status| anyhow::anyhow!("playback snapshot failed: {status}"))?;
+    sync_session_after_snapshot(
+        state,
+        &snapshot,
+        Some(player::ListenSessionEndReason::Replaced),
+    )
+    .await;
+    Ok(true)
+}
+
 async fn handle_runtime_finished(
     state: SharedState,
     finished_track_id: i64,
@@ -11392,6 +11870,9 @@ async fn handle_runtime_finished(
         if current_playback_generation(&state_guard) != generation {
             return Ok(());
         }
+    }
+    if let Err(error) = mark_armed_dj_transition_missed_if_needed(&state).await {
+        warn!("Failed to mark missed DJ transition timing: {error}");
     }
 
     let external_finished = {
@@ -11408,6 +11889,14 @@ async fn handle_runtime_finished(
                 .unwrap_or(false)
     };
     if external_finished {
+        if try_adopt_prepared_ephemeral_tidal_next(&state, finished_track_id, generation).await? {
+            return Ok(());
+        }
+        {
+            let mut state_guard = state.write().await;
+            state_guard.prepared_ephemeral_tidal_next = None;
+            state_guard.pending_stream_display = None;
+        }
         // Auto-advance through any queued ephemeral mix continuation before
         // tearing down. Pop the next track out of the pending queue and start
         // it; if the queue is empty, fall through to the existing teardown.
@@ -11655,6 +12144,42 @@ async fn handle_runtime_finished(
     Ok(())
 }
 
+async fn mark_armed_dj_transition_missed_if_needed(state: &SharedState) -> anyhow::Result<()> {
+    let pair = {
+        let state_guard = state.read().await;
+        if let Some(pair) = active_ephemeral_tidal_mix_dj_pair(&state_guard) {
+            pair
+        } else {
+            state_guard
+                .db
+                .with_conn(crate::playback::dj_lookahead::load_dj_lookahead_pair)?
+        }
+    };
+    let (Some(current), Some(next)) = (pair.current.as_ref(), pair.next.as_ref()) else {
+        return Ok(());
+    };
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let updated = {
+        let state_guard = state.read().await;
+        state_guard.db.with_conn(|conn| {
+            queries::mark_dj_transition_timing_status_for_pair(
+                conn,
+                current_key.media_ref_kind.as_str(),
+                current_key.media_ref_id.as_str(),
+                next_key.media_ref_kind.as_str(),
+                next_key.media_ref_id.as_str(),
+                "missed",
+            )
+        })?
+    };
+    if updated > 0 {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+    Ok(())
+}
+
 async fn handle_runtime_error(state: SharedState, message: &str) {
     {
         let mut state_guard = state.write().await;
@@ -11664,6 +12189,7 @@ async fn handle_runtime_error(state: SharedState, message: &str) {
         }
         state_guard.external_playback_track = None;
         state_guard.ephemeral_tidal_track = None;
+        state_guard.prepared_ephemeral_tidal_next = None;
     }
     report_playback_failure(&state, message);
 
@@ -11738,12 +12264,15 @@ async fn resume_session_after_snapshot(state: &SharedState, snapshot: &player::P
 /// re-querying `playback_state`.
 async fn effective_crossfade_ms(state: &SharedState, configured: i32) -> i32 {
     let guard = state.read().await;
-    let exclusive = guard
+    let (exclusive, dj_engine_enabled) = guard
         .db
-        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
-        .map(|s| s.exclusive_mode)
-        .unwrap_or(false);
-    effective_crossfade_for_exclusive(exclusive, configured)
+        .with_conn(|conn| {
+            let settings = crate::db::audio_settings::load(conn)?;
+            let dj_enabled = queries::is_dj_engine_enabled(conn)?;
+            Ok((settings.exclusive_mode, dj_enabled))
+        })
+        .unwrap_or((false, false));
+    effective_crossfade_for_exclusive(exclusive, dj_engine_enabled, configured)
 }
 
 async fn current_crossfade_ms(state: &SharedState) -> i32 {
@@ -11760,19 +12289,29 @@ async fn current_crossfade_ms(state: &SharedState) -> i32 {
         })
         .unwrap_or(0);
 
-    // Bit-perfect exclusive playback must not rewrite samples. Crossfade
-    // requires mixing and gain ramps, so exclusive mode keeps prebuffering but
-    // suppresses the overlap.
-    let exclusive = guard
+    // Bit-perfect exclusive playback must not rewrite samples. DJ mode opts
+    // into processing while keeping exclusive device ownership.
+    let (exclusive, dj_engine_enabled) = guard
         .db
-        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
-        .map(|s| s.exclusive_mode)
-        .unwrap_or(false);
-    effective_crossfade_for_exclusive(exclusive, configured)
+        .with_conn(|conn| {
+            let settings = crate::db::audio_settings::load(conn)?;
+            let dj_enabled = queries::is_dj_engine_enabled(conn)?;
+            Ok((settings.exclusive_mode, dj_enabled))
+        })
+        .unwrap_or((false, false));
+    effective_crossfade_for_exclusive(exclusive, dj_engine_enabled, configured)
 }
 
-fn effective_crossfade_for_exclusive(exclusive: bool, configured: i32) -> i32 {
-    if exclusive { 0 } else { configured.max(0) }
+fn effective_crossfade_for_exclusive(
+    exclusive: bool,
+    dj_engine_enabled: bool,
+    configured: i32,
+) -> i32 {
+    if exclusive && !dj_engine_enabled {
+        0
+    } else {
+        configured.max(0)
+    }
 }
 
 fn should_skip_prebuffer_for_sample_rate_follow_format_change(
@@ -13183,6 +13722,8 @@ mod tests {
             )),
             acrcloud_client: None,
             analysis_tx: None,
+            dj_analysis_tx: None,
+            dj_profile_rebuild_inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             audio_analysis_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             audio_analysis_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             acrcloud_scan_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -13211,6 +13752,7 @@ mod tests {
             pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            prepared_ephemeral_tidal_next: None,
             lastfm_api_secret: None,
             server_token: String::new(),
             audio_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -13378,10 +13920,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dj_profile_rebuild_returns_accepted_without_blocking() {
+    async fn dj_profile_rebuild_does_not_claim_accepted_without_job() {
         let (db, db_path) = fresh_migrated_db();
         seed_dj_queue_pair(&db);
         let app = app_for_db(db);
+        let response =
+            json_request(app.clone(), "PUT", "/api/dj/enabled", r#"{"enabled":true}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
         let response = json_request(
             app,
             "POST",
@@ -13391,7 +13936,8 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        assert_eq!(body["accepted"], true);
+        assert_eq!(body["accepted"], false);
+        assert_eq!(body["status"], "source_unavailable");
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -14336,6 +14882,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tidal_mix_overlay_preserves_pending_deque_order() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (8101, 'Old Playlist Artist')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms)
+                 VALUES
+                    (8101, 'Old Playlist First', 8101, 200000),
+                    (8102, 'Old Playlist Second', 8101, 200000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source)
+                 VALUES (8101, 0, 'playlist'), (8102, 1, 'playlist')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+        {
+            let mut guard = state.write().await;
+            guard.ephemeral_tidal_track = Some(crate::db::models::Track {
+                id: -158_296_914,
+                title: "The Harder They Come".to_string(),
+                artist_id: 0,
+                artist_name: Some("Jimmy Cliff".to_string()),
+                album_id: None,
+                album_title: None,
+                disc_number: None,
+                track_number: None,
+                duration_ms: Some(220_000),
+                isrc: None,
+                tidal_id: Some(158_296_914),
+                ytmusic_id: None,
+                soundcloud_id: None,
+                best_quality: Some("LOSSLESS".to_string()),
+                best_source: Some("tidal".to_string()),
+                fidelity_score: 0,
+                is_favorite: false,
+                play_count: 0,
+                last_played_at: None,
+                date_added: None,
+                source: "tidal_ephemeral".to_string(),
+                artwork_url: None,
+            });
+            let mut pending = guard.pending_tidal_mix_queue.lock().unwrap();
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 873_891_22,
+                title: "The Big Tree".to_string(),
+                artist_name: Some("Stand High Patrol".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(180_000),
+            });
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 341_378_223,
+                title: "Positive".to_string(),
+                artist_name: Some("Jamback".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(170_000),
+            });
+            pending.push_back(crate::PendingEphemeralTidalTrack {
+                tidal_track_id: 172_522_829,
+                title: "Moi Aussi Marianne".to_string(),
+                artist_name: Some("Yatoba Lia".to_string()),
+                album_title: None,
+                artwork_url: None,
+                duration_ms: Some(210_000),
+            });
+        }
+
+        let snapshot = {
+            let guard = state.read().await;
+            guard.db.with_conn(player::load_snapshot).unwrap()
+        };
+        let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
+
+        assert_eq!(
+            snapshot
+                .state
+                .current_track
+                .as_ref()
+                .map(|track| track.title.as_str()),
+            Some("The Harder They Come")
+        );
+        let titles = snapshot
+            .queue
+            .iter()
+            .map(|item| item.track.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec!["The Big Tree", "Positive", "Moi Aussi Marianne"]
+        );
+        assert!(
+            snapshot.queue.iter().all(|item| item.source == "tidal_mix"),
+            "active TIDAL mix overlay must shadow the stale durable playlist queue"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn clear_queue_clears_pending_tidal_mix_overlay() {
         let (db, db_path) = fresh_migrated_db();
         let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
@@ -14496,9 +15150,13 @@ mod tests {
 
     #[test]
     fn exclusive_crossfade_policy_suppresses_crossfade() {
-        assert_eq!(effective_crossfade_for_exclusive(true, 1_500), 0);
-        assert_eq!(effective_crossfade_for_exclusive(false, 1_500), 1_500);
-        assert_eq!(effective_crossfade_for_exclusive(true, -10), 0);
+        assert_eq!(effective_crossfade_for_exclusive(true, false, 1_500), 0);
+        assert_eq!(
+            effective_crossfade_for_exclusive(false, false, 1_500),
+            1_500
+        );
+        assert_eq!(effective_crossfade_for_exclusive(true, true, 1_500), 1_500);
+        assert_eq!(effective_crossfade_for_exclusive(true, true, -10), 0);
     }
 
     #[test]

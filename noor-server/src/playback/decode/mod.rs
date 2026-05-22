@@ -25,7 +25,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const DJ_ANALYSIS_MAX_SECONDS: usize = 90;
 
@@ -105,7 +105,11 @@ pub(crate) fn decode_and_buffer_job(
                 .collect();
             let mut dash_initial = Vec::new();
             let mut remaining_segment_urls = sliced_segment_urls.clone();
-            let initial_media_segments = dash_initial_media_count(sliced_segment_urls.len());
+            let initial_media_segments = if config.dj_analysis_only {
+                sliced_segment_urls.len().min(1)
+            } else {
+                dash_initial_media_count(sliced_segment_urls.len())
+            };
             if initial_media_segments > 0 {
                 let prebuffer_stop = shared.stop_flag();
                 dash_initial = rt
@@ -154,6 +158,7 @@ pub(crate) fn decode_and_buffer_job(
             let download_track_id = shared.track_id;
             let segment_urls = remaining_segment_urls;
             let download_stop = shared.stop_flag();
+            let download_is_analysis_only = config.dj_analysis_only;
             thread::Builder::new()
                 .name("noor-stream-download".into())
                 .spawn(move || {
@@ -213,12 +218,21 @@ pub(crate) fn decode_and_buffer_job(
                                     }
                                     sent_bytes += bytes.len();
                                     if chunk_tx.send(Some(bytes)).is_err() {
-                                        warn!(
-                                            "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
-                                            download_track_id,
-                                            sent_segments,
-                                            total_segments
-                                        );
+                                        if download_is_analysis_only {
+                                            debug!(
+                                                "TIDAL DASH analysis download stopped after capture: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                                download_track_id,
+                                                sent_segments,
+                                                total_segments
+                                            );
+                                        } else {
+                                            warn!(
+                                                "TIDAL DASH download stopped early: track_id={}, sent_segments={}, total_remaining_segments={}",
+                                                download_track_id,
+                                                sent_segments,
+                                                total_segments
+                                            );
+                                        }
                                         break;
                                     }
                                     sent_segments += 1;
@@ -334,6 +348,9 @@ pub(crate) fn decode_and_buffer_job(
                 .dj_engine_enabled
                 .then(|| job.dj_media_ref.clone())
                 .flatten();
+            if config.dj_analysis_only && dj_media_ref.is_none() {
+                return Ok(());
+            }
             let mut dj_analysis_sent = false;
             let mut dj_analysis_buf: Vec<f32> = Vec::new();
 
@@ -417,6 +434,18 @@ pub(crate) fn decode_and_buffer_job(
                         );
                         dj_analysis_sent = true;
                     }
+                }
+                if config.dj_analysis_only {
+                    decoded_packets += 1;
+                    decoded_samples += sb.samples().len() as u64;
+                    if dj_analysis_sent {
+                        debug!(
+                            "DJ analysis-only decode captured profile window: track_id={}, packets={}, samples={}",
+                            shared.track_id, decoded_packets, decoded_samples
+                        );
+                        return Ok(());
+                    }
+                    continue;
                 }
 
                 // Channel-adapt and resample this packet's samples, then push to buffer.
@@ -576,8 +605,13 @@ pub(crate) fn send_dj_analysis_job(
     let analysis_scope_ms = ((samples.len() as u64).saturating_mul(1000)
         / sample_rate.max(1) as u64)
         .min(i64::MAX as u64) as i64;
+    let track_id = media_ref
+        .track_id()
+        .or_else(|| (job.track.id > 0).then_some(job.track.id));
+    let key = media_ref.profile_key();
+    let sample_count = samples.len();
     let _ = tx.send(DjAnalysisJob {
-        track_id: media_ref.track_id().or(Some(job.track.id)),
+        track_id,
         queue_item_id: media_ref.queue_item_id(),
         tidal_id: media_ref.tidal_id(),
         media_ref,
@@ -586,6 +620,14 @@ pub(crate) fn send_dj_analysis_job(
         analysis_scope_ms,
         deadline_generation,
     });
+    info!(
+        media_ref_kind = %key.media_ref_kind,
+        media_ref_id = %key.media_ref_id,
+        sample_count,
+        sample_rate,
+        analysis_scope_ms,
+        "DJ analysis job queued"
+    );
 }
 
 #[cfg(test)]
@@ -709,6 +751,33 @@ mod tests {
         assert_eq!(sent.media_ref.profile_key().media_ref_id, "99");
         assert_eq!(sent.tidal_id, Some(99));
         assert_eq!(sent.track_id, Some(10));
+    }
+
+    #[test]
+    fn active_tidal_decoder_does_not_use_synthetic_negative_track_id() {
+        let (config, mut rx) = test_config(true);
+        let job = test_job(
+            -123,
+            DjMediaRef::TidalTrack {
+                tidal_id: 99,
+                track_id: None,
+            },
+        );
+
+        send_dj_analysis_job(
+            &config,
+            job.dj_media_ref.clone(),
+            &job,
+            vec![0.0; 128],
+            48_000,
+            7,
+        );
+
+        let sent = rx.try_recv().expect("dj job");
+        assert_eq!(sent.media_ref.profile_key().media_ref_kind, "tidal_track");
+        assert_eq!(sent.media_ref.profile_key().media_ref_id, "99");
+        assert_eq!(sent.tidal_id, Some(99));
+        assert_eq!(sent.track_id, None);
     }
 
     #[test]

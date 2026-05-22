@@ -914,14 +914,51 @@ export type DjStatusResponse = {
 	current?: DjDeckStatus;
 	next?: DjDeckStatus;
 	selected_program?: string;
+	planned_template?: string;
+	renderer_template?: string;
+	renderer_mode?: 'legacy_overlap' | 'dj_gain_program' | 'dj_full_program';
+	downgrade_reason?: string;
+	sync_target?: string;
+	planned_start_ms?: number;
+	actual_start_ms?: number;
+	timing_delta_ms?: number;
+	timing_source?: string;
+	timing_status?: string;
 	fallback_reason?: string;
 	profile_confidence_floor: number;
 	last_transition_event_id?: number;
+	recent_timing_events: DjTimingHistoryEvent[];
+	timing_history_summary: DjTimingHistorySummary;
 	safe_crossfade_suggestion?: {
 		media_ref_kind: string;
 		media_ref_id: string;
 		bad_feedback_count: number;
 	};
+};
+
+export type DjTimingHistoryEvent = {
+	event_id: number;
+	planned_template: string;
+	renderer_template?: string;
+	planned_start_ms?: number;
+	actual_start_ms?: number;
+	timing_delta_ms?: number;
+	timing_source?: string;
+	timing_status?: 'fired' | 'late' | 'missed';
+	timing_quality: 'tight' | 'usable' | 'loose' | 'bad';
+	started_at: string;
+};
+
+export type DjTimingHistorySummary = {
+	event_count: number;
+	average_delta_ms?: number;
+	average_abs_delta_ms?: number;
+	tight_count: number;
+	usable_count: number;
+	loose_count: number;
+	bad_count: number;
+	late_count: number;
+	missed_count: number;
 };
 
 export type DjProfileCorrectionRequest = {

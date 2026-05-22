@@ -72,13 +72,38 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Fallback reason');
 	});
 
-	test('dj_page_hides_success_explanations_by_default', () => {
-		expect(transitionLane).toContain('hidden by default');
+	test('dj_page_separates_profile_readiness_from_transition_armed', () => {
+		expect(transitionLane).toContain('Analyzing profiles');
+		expect(transitionLane).toContain('Ready to plan');
+		expect(transitionLane).toContain('Transition armed');
+		expect(transitionLane).not.toContain('Transition ready');
 	});
 
 	test('dj_page_debug_details_use_planner_facts', () => {
 		expect(transitionLane).toContain('Debug planner facts');
-		expect(transitionLane).toContain('Selected program');
+		expect(transitionLane).toContain('Current event');
+		expect(transitionLane).toContain('Recent fires');
+		expect(transitionLane).toContain('Quality');
+		expect(transitionLane).toContain('Avg delta');
+		expect(transitionLane).toContain('Avg abs');
+		expect(transitionLane).toContain('Missed');
+		expect(transitionLane).toContain('Planned');
+		expect(transitionLane).toContain('Actual');
+		expect(transitionLane).toContain('Planned template');
+		expect(transitionLane).toContain('Renderer mode');
+		expect(transitionLane).toContain('Current planned');
+		expect(transitionLane).toContain('Current fire');
+		expect(transitionLane).toContain('Current delta');
+		expect(transitionLane).toContain('Sync source');
+		expect(transitionLane).toContain('Timing status');
+		expect(transitionLane).toContain("'pending'");
+	});
+
+	test('dj_page_does_not_show_non_renderable_templates_as_main_label', () => {
+		expect(transitionLane).toContain('DJ overlap armed');
+		expect(transitionLane).toContain('renderer_template');
+		expect(transitionLane).toContain('planned_template');
+		expect(transitionLane).not.toContain("status?.selected_program ?? 'Transition armed'");
 	});
 
 	test('dj_page_updates_bpm_multiplier_correction', () => {
@@ -100,6 +125,8 @@ describe('dj cockpit page contract', () => {
 		expect(corrections).toContain('Rebuild profile');
 		expect(cockpit).toContain('rebuildDjProfile');
 		expect(cockpit).toContain('Profile rebuild accepted');
+		expect(cockpit).toContain('Profile rebuild already running');
+		expect(cockpit).toContain('Profile source unavailable');
 	});
 
 	test('dj_page_shows_correction_applies_next_when_transition_armed', () => {

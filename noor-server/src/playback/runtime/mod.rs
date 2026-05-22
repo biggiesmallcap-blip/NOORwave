@@ -85,6 +85,7 @@ pub struct PlaybackRuntimeConfig {
     pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
     pub dj_analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<DjAnalysisJob>>,
     pub dj_engine_enabled: bool,
+    pub dj_analysis_only: bool,
 }
 
 impl PlaybackRuntimeConfig {
@@ -99,6 +100,7 @@ impl PlaybackRuntimeConfig {
             analysis_tx,
             dj_analysis_tx: None,
             dj_engine_enabled: false,
+            dj_analysis_only: false,
         }
     }
 
@@ -109,6 +111,11 @@ impl PlaybackRuntimeConfig {
     ) -> Self {
         self.dj_engine_enabled = dj_engine_enabled;
         self.dj_analysis_tx = dj_analysis_tx;
+        self
+    }
+
+    pub fn for_dj_analysis_only(mut self) -> Self {
+        self.dj_analysis_only = true;
         self
     }
 }
@@ -506,7 +513,6 @@ enum StartDjLookaheadOutcome {
     Started,
     AlreadyCurrent,
     ReusedPreparedNext,
-    IgnoredStaleGeneration,
     MissingNext,
 }
 
@@ -532,20 +538,6 @@ fn start_dj_lookahead_in_state(
     queue_generation: u64,
     deadline_samples: u64,
 ) -> StartDjLookaheadOutcome {
-    if state
-        .dj_lookahead
-        .as_ref()
-        .is_some_and(|lookahead| lookahead.queue_generation > queue_generation)
-    {
-        state.dj_lookahead_failure = Some(DjLookaheadFailure {
-            queue_generation,
-            current_queue_item_id,
-            next_queue_item_id,
-            reason: DjLookaheadFailureReason::QueueChanged,
-        });
-        return StartDjLookaheadOutcome::IgnoredStaleGeneration;
-    }
-
     let Some(next) = next else {
         state.dj_lookahead = None;
         state.dj_lookahead_failure = Some(DjLookaheadFailure {
@@ -711,6 +703,41 @@ fn prepare_dj_mixer_for_pair(
     let did_prepare = prepared.is_some();
     state.prepared_dj_mixer = prepared;
     did_prepare
+}
+
+fn arm_active_transition_window(
+    state: &mut PlaybackRuntimeLoopState,
+    job: &PreparedPlaybackJob,
+) -> bool {
+    if job.prepared_transition.is_none() || job.gapless.overlap_ms <= 0 {
+        return false;
+    }
+    let Some(engine) = state.engine.as_ref() else {
+        return false;
+    };
+    let samples = (job.gapless.overlap_ms as u64)
+        .saturating_mul(state.device_sample_rate as u64)
+        .saturating_mul(state.device_channels.max(1) as u64)
+        / 1000;
+    if samples == 0 {
+        return false;
+    }
+    engine
+        .shared
+        .crossfade_samples
+        .store(samples, Ordering::Relaxed);
+    engine
+        .shared
+        .crossfade_start_signaled
+        .store(false, Ordering::Relaxed);
+    info!(
+        track_id = engine.track_id,
+        next_track_id = job.track.id,
+        overlap_ms = job.gapless.overlap_ms,
+        overlap_samples = samples,
+        "DJ transition window armed"
+    );
+    true
 }
 
 fn gate_prepare_next_for_dj(
@@ -990,6 +1017,7 @@ fn run_runtime_loop(
                 }
                 PlaybackRuntimeCommand::PrepareNext(mut job) => {
                     gate_prepare_next_for_dj(&mut state, &mut job);
+                    arm_active_transition_window(&mut state, &job);
                     // Only pre-decode if we don't already have a pending engine for this track.
                     let already_pending = state
                         .next_engine
@@ -1102,6 +1130,7 @@ fn run_runtime_loop(
                                 &position_source,
                                 &buffered_source,
                                 &offset_source,
+                                "fired",
                             );
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
@@ -1136,6 +1165,7 @@ fn run_runtime_loop(
                                 &position_source,
                                 &buffered_source,
                                 &offset_source,
+                                "late",
                             );
                         }
                     }
@@ -2016,11 +2046,17 @@ fn promote_next_to_active(
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    timing_status: &'static str,
 ) {
     state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
     };
+    let transition_event_id = next
+        .job
+        .prepared_transition
+        .as_ref()
+        .and_then(|transition| transition.transition_event_id);
     next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
     next.shared.paused.store(false, Ordering::SeqCst);
 
@@ -2051,7 +2087,29 @@ fn promote_next_to_active(
     if let Some(outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
+        let actual_start_ms = track_position_ms(
+            &outgoing.shared,
+            state.device_sample_rate,
+            state.device_channels,
+        );
         state.fading_out_engine = Some(outgoing);
+        if let Some(transition_event_id) = transition_event_id {
+            info!(
+                transition_event_id,
+                outgoing_track_id = outgoing_id,
+                generation = outgoing_generation,
+                actual_start_ms,
+                timing_status,
+                "DJ transition promotion fired"
+            );
+            let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id: outgoing_id,
+                generation: outgoing_generation,
+                actual_start_ms,
+                timing_status: timing_status.to_string(),
+            });
+        }
         // Tell the routes layer that the audible "current" track has flipped.
         // Reusing Finished keeps the existing queue-advance path.
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
@@ -2063,6 +2121,17 @@ fn promote_next_to_active(
     if state.current_exclusive {
         refresh_exclusive_sources(state);
     }
+}
+
+fn track_position_ms(shared: &PlaybackSharedState, sample_rate: u32, channels: u16) -> i64 {
+    if sample_rate == 0 || channels == 0 {
+        return 0;
+    }
+    let samples = shared
+        .position_offset_samples
+        .load(Ordering::Relaxed)
+        .saturating_add(shared.position_samples.load(Ordering::Relaxed));
+    (samples.saturating_mul(1000) / (u64::from(sample_rate) * u64::from(channels))) as i64
 }
 
 fn promote_prepared_at_boundary(
@@ -2251,7 +2320,7 @@ mod tests {
         }
 
         #[test]
-        fn start_dj_lookahead_ignores_stale_generation() {
+        fn start_dj_lookahead_replaces_lower_hash_generation() {
             let mut state = test_runtime_loop_state();
             let outcome = start_dj_lookahead_in_state(
                 &mut state,
@@ -2264,7 +2333,7 @@ mod tests {
             );
             assert_eq!(outcome, StartDjLookaheadOutcome::Started);
 
-            let stale = start_dj_lookahead_in_state(
+            let replacement = start_dj_lookahead_in_state(
                 &mut state,
                 Some(library_ref(3)),
                 Some(library_ref(4)),
@@ -2274,21 +2343,15 @@ mod tests {
                 48_000,
             );
 
-            assert_eq!(stale, StartDjLookaheadOutcome::IgnoredStaleGeneration);
+            assert_eq!(replacement, StartDjLookaheadOutcome::Started);
             assert_eq!(
                 state
                     .dj_lookahead
                     .as_ref()
                     .map(|lookahead| lookahead.next_queue_item_id),
-                Some(12)
+                Some(14)
             );
-            assert_eq!(
-                state
-                    .dj_lookahead_failure
-                    .as_ref()
-                    .map(|failure| failure.reason),
-                Some(DjLookaheadFailureReason::QueueChanged)
-            );
+            assert!(state.dj_lookahead_failure.is_none());
         }
 
         #[test]
@@ -2694,6 +2757,38 @@ mod tests {
     }
 
     #[test]
+    fn prepared_dj_program_arms_active_transition_window() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        let active = test_engine_with_shared(1, 20);
+        assert_eq!(active.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        state.engine = Some(active);
+
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active.shared.crossfade_samples.load(Ordering::Relaxed),
+            96_000
+        );
+        assert!(
+            !active
+                .shared
+                .crossfade_start_signaled
+                .load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
     fn dj_flag_off_does_not_construct_mixer() {
         let mut state = state_with_ready_dj_pair();
         state.dj_engine_enabled = false;
@@ -2728,6 +2823,67 @@ mod tests {
         assert!(!active.shared.stopped.load(Ordering::SeqCst));
         assert!(!next.shared.stopped.load(Ordering::SeqCst));
         assert!(next.job.prepared_transition.is_none());
+    }
+
+    #[test]
+    fn automatic_crossfade_promotion_emits_timing_event() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_offset_samples
+            .store(192_000, Ordering::Relaxed);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        let mut next = test_engine_with_shared(2, 21);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(77);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "fired",
+        );
+
+        match event_rx.try_recv().expect("timing event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id,
+                generation,
+                actual_start_ms,
+                timing_status,
+            } => {
+                assert_eq!(transition_event_id, 77);
+                assert_eq!(outgoing_track_id, 1);
+                assert_eq!(generation, 20);
+                assert_eq!(actual_start_ms, 3_000);
+                assert_eq!(timing_status, "fired");
+            }
+            other => panic!("expected timing event, got {other:?}"),
+        }
+        match event_rx.try_recv().expect("finished event") {
+            PlaybackRuntimeEvent::Finished {
+                track_id,
+                generation,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 20);
+            }
+            other => panic!("expected finished event, got {other:?}"),
+        }
     }
 
     #[test]

@@ -3,8 +3,13 @@ use crate::db::queries;
 use crate::playback::dj_lookahead::DjMediaRef;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
 use super::bpm::{self, BeatGridAnalysis};
+use super::{onset, tempo};
 
 pub const DJ_PROFILE_VERSION: &str = "dj_profile_v1";
 
@@ -19,6 +24,189 @@ pub struct DjAnalysisJob {
     pub sample_rate: u32,
     pub analysis_scope_ms: i64,
     pub deadline_generation: u64,
+}
+
+/// Spawn the DJ profile analysis actor. Returns the sender for profile jobs.
+///
+/// This actor is intentionally separate from passive DSP analysis. Playback and
+/// explicit rebuilds send decoded PCM here, and the actor writes only
+/// `audio_dj_profiles`.
+pub fn spawn_dj_profile_actor(db: crate::db::Database) -> mpsc::UnboundedSender<DjAnalysisJob> {
+    spawn_dj_profile_actor_with_analyzer(db, bpm::analyze_beat_grid)
+}
+
+fn spawn_dj_profile_actor_with_analyzer(
+    db: crate::db::Database,
+    analyzer: fn(&[f32], u32) -> Option<BeatGridAnalysis>,
+) -> mpsc::UnboundedSender<DjAnalysisJob> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<DjAnalysisJob>();
+
+    tokio::spawn(async move {
+        let inflight = Arc::new(Mutex::new(HashSet::<String>::new()));
+        while let Some(job) = rx.recv().await {
+            if job.samples.is_empty() || job.sample_rate == 0 {
+                continue;
+            }
+
+            let key = job.media_ref.profile_key();
+            let inflight_key = profile_inflight_key(&key);
+            {
+                let Ok(mut guard) = inflight.lock() else {
+                    warn!("DJ profile inflight guard poisoned");
+                    continue;
+                };
+                if !guard.insert(inflight_key.clone()) {
+                    debug!(
+                        media_ref_kind = %key.media_ref_kind,
+                        media_ref_id = %key.media_ref_id,
+                        "Skipping duplicate in-flight DJ profile job"
+                    );
+                    continue;
+                }
+            }
+
+            let db_clone = db.clone();
+            let inflight_clone = inflight.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let result = persist_dj_analysis_job(&db_clone, job, analyzer);
+                clear_profile_inflight(&inflight_clone, &inflight_key);
+                result
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("DJ profile task join failed: {error}"))
+            .and_then(|result| result);
+
+            if let Err(error) = result {
+                warn!(error = %error, "DJ profile analysis failed");
+            }
+        }
+    });
+
+    tx
+}
+
+fn profile_inflight_key(key: &crate::db::models::AudioDjProfileKey) -> String {
+    format!("{}:{}", key.media_ref_kind, key.media_ref_id)
+}
+
+fn clear_profile_inflight(inflight: &Arc<Mutex<HashSet<String>>>, key: &str) {
+    if let Ok(mut guard) = inflight.lock() {
+        guard.remove(key);
+    }
+}
+
+fn persist_dj_analysis_job(
+    db: &crate::db::Database,
+    job: DjAnalysisJob,
+    analyzer: fn(&[f32], u32) -> Option<BeatGridAnalysis>,
+) -> Result<()> {
+    let key = job.media_ref.profile_key();
+    if db.with_conn(|conn| dj_analysis_skips_existing_profile_version(conn, &key))? {
+        debug!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            "Skipping current DJ profile"
+        );
+        return Ok(());
+    }
+
+    let analysis = if job.tidal_id.is_some() {
+        fallback_beat_grid_analysis(&job.samples, job.sample_rate).or_else(|| {
+            warn!(
+                media_ref_kind = %key.media_ref_kind,
+                media_ref_id = %key.media_ref_id,
+                "Persisting provisional DJ profile with default beat grid"
+            );
+            provisional_beat_grid_analysis(&job.samples, job.sample_rate)
+        })
+    } else {
+        analyzer(&job.samples, job.sample_rate)
+            .or_else(|| fallback_beat_grid_analysis(&job.samples, job.sample_rate))
+    };
+    let Some(analysis) = analysis else {
+        warn!(
+            media_ref_kind = %key.media_ref_kind,
+            media_ref_id = %key.media_ref_id,
+            "Skipping DJ profile with no beat-grid analysis"
+        );
+        return Ok(());
+    };
+
+    db.with_conn(|conn| {
+        persist_dj_analysis_job_from_analysis(conn, &job, "dj_playback", &analysis)
+    })?;
+    info!(
+        media_ref_kind = %key.media_ref_kind,
+        media_ref_id = %key.media_ref_id,
+        beats = analysis.beats_seconds.len(),
+        downbeats = analysis.downbeats_seconds.len(),
+        "DJ profile persisted"
+    );
+    Ok(())
+}
+
+fn fallback_beat_grid_analysis(samples: &[f32], sample_rate: u32) -> Option<BeatGridAnalysis> {
+    let env = onset::compute_onset_envelope(samples, sample_rate)?;
+    let estimate = tempo::estimate_tempo(&env)?;
+    if estimate.strength < 0.05 {
+        return None;
+    }
+    let bpm = estimate
+        .bpm
+        .clamp(tempo::BPM_MIN as f64, tempo::BPM_MAX as f64);
+    let beat_seconds = 60.0 / bpm;
+    if !beat_seconds.is_finite() || beat_seconds <= 0.0 {
+        return None;
+    }
+    let duration_seconds = samples.len() as f64 / sample_rate.max(1) as f64;
+    let beat_count = (duration_seconds / beat_seconds).floor() as usize;
+    if beat_count < 4 {
+        return None;
+    }
+    let beats_seconds = (0..beat_count)
+        .map(|beat| (beat as f64 * beat_seconds) as f32)
+        .collect::<Vec<_>>();
+    let downbeats_seconds = beats_seconds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seconds)| (index % 4 == 0).then_some(*seconds))
+        .collect::<Vec<_>>();
+    Some(BeatGridAnalysis {
+        bpm,
+        confidence: estimate.strength,
+        beats_seconds,
+        downbeats_seconds,
+    })
+}
+
+fn provisional_beat_grid_analysis(samples: &[f32], sample_rate: u32) -> Option<BeatGridAnalysis> {
+    if samples.is_empty() || sample_rate == 0 {
+        return None;
+    }
+
+    let bpm = tempo::PRIOR_CENTER_BPM;
+    let beat_seconds = 60.0 / bpm;
+    let duration_seconds = samples.len() as f64 / sample_rate as f64;
+    let beat_count = (duration_seconds / beat_seconds).floor() as usize;
+    if beat_count < 4 {
+        return None;
+    }
+
+    let beats_seconds = (0..beat_count)
+        .map(|beat| (beat as f64 * beat_seconds) as f32)
+        .collect::<Vec<_>>();
+    let downbeats_seconds = beats_seconds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seconds)| (index % 4 == 0).then_some(*seconds))
+        .collect::<Vec<_>>();
+
+    Some(BeatGridAnalysis {
+        bpm,
+        confidence: 0.05,
+        beats_seconds,
+        downbeats_seconds,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -434,10 +622,32 @@ mod tests {
         }
     }
 
+    fn injected_analysis(_samples: &[f32], _sample_rate: u32) -> Option<BeatGridAnalysis> {
+        Some(analysis(64))
+    }
+
+    fn no_analysis(_samples: &[f32], _sample_rate: u32) -> Option<BeatGridAnalysis> {
+        None
+    }
+
     fn samples(seconds: usize) -> Vec<f32> {
         (0..seconds * 48_000)
             .map(|i| if i % 1000 < 500 { 0.5 } else { 0.25 })
             .collect()
+    }
+
+    fn click_train(sample_rate: u32, seconds: usize, bpm: f64) -> Vec<f32> {
+        let total = sample_rate as usize * seconds;
+        let period = (sample_rate as f64 * 60.0 / bpm).round() as usize;
+        let mut out = vec![0.0; total];
+        for start in (0..total).step_by(period.max(1)) {
+            for offset in 0..64 {
+                if let Some(sample) = out.get_mut(start + offset) {
+                    *sample = 1.0;
+                }
+            }
+        }
+        out
     }
 
     fn row_for(kind: &str, id: &str, seconds: usize) -> AudioDjProfileRow {
@@ -685,6 +895,15 @@ mod tests {
     }
 
     #[test]
+    fn fallback_beat_grid_builds_profile_when_primary_analysis_returns_none() {
+        let analysis = fallback_beat_grid_analysis(&click_train(48_000, 30, 120.0), 48_000)
+            .expect("fallback beat grid");
+        assert!(analysis.beats_seconds.len() > 40);
+        assert!(analysis.downbeats_seconds.len() > 10);
+        assert!((analysis.bpm - 120.0).abs() < 4.0);
+    }
+
+    #[test]
     fn profile_confidence_scales_with_analysis_scope() {
         assert_eq!(row_for("library_track", "1", 180).profile_confidence, 1.0);
         assert_eq!(row_for("tidal_track", "1", 90).profile_confidence, 0.65);
@@ -827,6 +1046,101 @@ mod tests {
             .expect("get")
             .expect("profile");
         assert_eq!(loaded.tidal_id, Some(7));
+    }
+
+    #[test]
+    fn tidal_job_persists_provisional_profile_when_detector_fails() {
+        let db = Database::open_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let job = DjAnalysisJob {
+            media_ref: tidal_ref(77),
+            track_id: None,
+            queue_item_id: None,
+            tidal_id: Some(77),
+            samples: vec![0.0; 90 * 48_000],
+            sample_rate: 48_000,
+            analysis_scope_ms: 90_000,
+            deadline_generation: 1,
+        };
+
+        persist_dj_analysis_job(&db, job, no_analysis).expect("persist");
+
+        let loaded = db
+            .with_conn(|conn| queries::get_audio_dj_profile(conn, &key("tidal_track", "77")))
+            .expect("get")
+            .expect("profile");
+        assert_eq!(loaded.tidal_id, Some(77));
+        assert_eq!(loaded.profile_confidence, 0.65);
+        assert!(!decode_f32_blob(&loaded.beat_grid_blob).unwrap().is_empty());
+        assert!(!decode_f32_blob(&loaded.downbeats_blob).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dj_profile_actor_persists_tidal_profile_key() {
+        let db = Database::open_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let tx = spawn_dj_profile_actor_with_analyzer(db.clone(), injected_analysis);
+
+        tx.send(DjAnalysisJob {
+            media_ref: tidal_ref(7),
+            track_id: None,
+            queue_item_id: None,
+            tidal_id: Some(7),
+            samples: click_train(48_000, 30, 120.0),
+            sample_rate: 48_000,
+            analysis_scope_ms: 30_000,
+            deadline_generation: 1,
+        })
+        .expect("send");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let profile = db
+                .with_conn(|conn| queries::get_audio_dj_profile(conn, &key("tidal_track", "7")))
+                .expect("get");
+            if let Some(profile) = profile {
+                assert_eq!(profile.media_ref_kind, "tidal_track");
+                assert_eq!(profile.media_ref_id, "7");
+                assert_eq!(profile.tidal_id, Some(7));
+                break;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for profile");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dj_profile_actor_ignores_empty_samples_and_invalid_sample_rate() {
+        let db = Database::open_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let tx = spawn_dj_profile_actor(db.clone());
+
+        for (tidal_id, samples, sample_rate) in
+            [(8, Vec::new(), 48_000_u32), (9, vec![0.0; 128], 0_u32)]
+        {
+            tx.send(DjAnalysisJob {
+                media_ref: tidal_ref(tidal_id),
+                track_id: None,
+                queue_item_id: None,
+                tidal_id: Some(tidal_id),
+                samples,
+                sample_rate,
+                analysis_scope_ms: 0,
+                deadline_generation: 1,
+            })
+            .expect("send");
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        db.with_conn(|conn| {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM audio_dj_profiles", [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+        .expect("count");
     }
 
     fn correction(

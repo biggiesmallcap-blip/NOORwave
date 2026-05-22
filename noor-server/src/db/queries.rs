@@ -7406,6 +7406,177 @@ pub fn set_dj_global_policy(
     Ok(())
 }
 
+fn validate_dj_fallback_reason(reason: Option<&str>) -> Result<()> {
+    if let Some(reason) = reason
+        && !matches!(
+            reason,
+            "disabled"
+                | "current_profile_missing"
+                | "next_profile_missing"
+                | "profile_low_confidence"
+                | "next_not_resolved"
+                | "fetch_failed"
+                | "decode_late"
+                | "analysis_late"
+                | "program_invalid"
+                | "queue_changed"
+                | "safety_override_safe"
+                | "template_not_renderable"
+        )
+    {
+        bail!("unknown DJ fallback reason: {reason}");
+    }
+    Ok(())
+}
+
+fn validate_dj_timing_source(source: Option<&str>) -> Result<()> {
+    if let Some(source) = source
+        && !matches!(source, "downbeat_sync" | "beat_sync" | "fallback_overlap")
+    {
+        bail!("unknown DJ timing source: {source}");
+    }
+    Ok(())
+}
+
+fn validate_dj_timing_status(status: Option<&str>) -> Result<()> {
+    if let Some(status) = status
+        && !matches!(status, "armed" | "fired" | "late" | "missed")
+    {
+        bail!("unknown DJ timing status: {status}");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_dj_transition_event(
+    conn: &Connection,
+    from_track_id: Option<i64>,
+    to_track_id: Option<i64>,
+    from_media_ref_kind: Option<&str>,
+    from_media_ref_id: Option<&str>,
+    to_media_ref_kind: Option<&str>,
+    to_media_ref_id: Option<&str>,
+    template: &str,
+    program_json: &str,
+    rejected_alternatives_json: Option<&str>,
+    planner_version: &str,
+    fallback_reason: Option<&str>,
+    planned_start_ms: Option<i64>,
+    timing_source: Option<&str>,
+    timing_status: Option<&str>,
+) -> Result<i64> {
+    validate_dj_fallback_reason(fallback_reason)?;
+    validate_dj_timing_source(timing_source)?;
+    validate_dj_timing_status(timing_status)?;
+    conn.execute(
+        "INSERT INTO dj_transition_events (
+            from_track_id, to_track_id, from_media_ref_kind, from_media_ref_id,
+            to_media_ref_kind, to_media_ref_id, template, program_json,
+            rejected_alternatives_json, planner_version, fallback_reason,
+            planned_start_ms, timing_source, timing_status
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            from_track_id,
+            to_track_id,
+            from_media_ref_kind,
+            from_media_ref_id,
+            to_media_ref_kind,
+            to_media_ref_id,
+            template,
+            program_json,
+            rejected_alternatives_json,
+            planner_version,
+            fallback_reason,
+            planned_start_ms,
+            timing_source,
+            timing_status,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_dj_transition_outcome(
+    conn: &Connection,
+    id: i64,
+    outcome: &str,
+    skip_within_30s: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET outcome = ?2,
+             outcome_at = datetime('now'),
+             skip_within_30s = ?3
+         WHERE id = ?1",
+        params![id, outcome, if skip_within_30s { 1 } else { 0 }],
+    )?;
+    Ok(())
+}
+
+pub fn update_dj_transition_fire_timing(
+    conn: &Connection,
+    id: i64,
+    actual_start_ms: i64,
+    timing_status: &str,
+) -> Result<()> {
+    validate_dj_timing_status(Some(timing_status))?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET actual_start_ms = ?2,
+             timing_delta_ms = CASE
+                 WHEN planned_start_ms IS NULL THEN NULL
+                 ELSE ?2 - planned_start_ms
+             END,
+             timing_status = ?3
+         WHERE id = ?1",
+        params![id, actual_start_ms, timing_status],
+    )?;
+    Ok(())
+}
+
+pub fn mark_dj_transition_timing_status_for_pair(
+    conn: &Connection,
+    from_media_ref_kind: &str,
+    from_media_ref_id: &str,
+    to_media_ref_kind: &str,
+    to_media_ref_id: &str,
+    timing_status: &str,
+) -> Result<usize> {
+    validate_dj_timing_status(Some(timing_status))?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET timing_status = ?5
+         WHERE id = (
+             SELECT id
+             FROM dj_transition_events
+             WHERE from_media_ref_kind = ?1
+               AND from_media_ref_id = ?2
+               AND to_media_ref_kind = ?3
+               AND to_media_ref_id = ?4
+               AND outcome IS NULL
+               AND timing_status = 'armed'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM dj_transition_events fired
+                   WHERE fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
+                     AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
+                     AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
+                     AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+                     AND fired.timing_status = 'fired'
+               )
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1
+         )",
+        params![
+            from_media_ref_kind,
+            from_media_ref_id,
+            to_media_ref_kind,
+            to_media_ref_id,
+            timing_status,
+        ],
+    )
+    .map_err(Into::into)
+}
+
 pub fn count_recent_bad_dj_feedback_for_ref(
     conn: &Connection,
     key: &AudioDjProfileKey,
@@ -7477,6 +7648,353 @@ mod tests {
         )
         .optional()
         .expect("query server_config")
+    }
+
+    mod dj_transition_event {
+        use super::*;
+
+        fn setup_conn() -> Connection {
+            let conn = Connection::open_in_memory().expect("in-memory db");
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("foreign keys");
+            schema::run_migrations(&conn).expect("migrations");
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+                .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, tidal_id)
+                 VALUES (1, 'Track 1', 1, 1001), (2, 'Track 2', 1, 1002)",
+                [],
+            )
+            .expect("tracks");
+            conn
+        }
+
+        fn insert_event(conn: &Connection) -> i64 {
+            insert_dj_transition_event(
+                conn,
+                Some(1),
+                Some(2),
+                Some("library_track"),
+                Some("1"),
+                Some("tidal_track"),
+                Some("200"),
+                "SafeCrossfade",
+                r#"{"template":"SafeCrossfade"}"#,
+                None,
+                "dj-v1",
+                None,
+                Some(172_000),
+                Some("downbeat_sync"),
+                Some("armed"),
+            )
+            .expect("insert event")
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            let row = conn
+                .query_row(
+                    "SELECT from_track_id, to_track_id, template, program_json, planner_version,
+                            planned_start_ms, timing_source, timing_status
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                        ))
+                    },
+                )
+                .expect("event");
+
+            assert_eq!(row.0, Some(1));
+            assert_eq!(row.1, Some(2));
+            assert_eq!(row.2, "SafeCrossfade");
+            assert_eq!(row.3, r#"{"template":"SafeCrossfade"}"#);
+            assert_eq!(row.4, "dj-v1");
+            assert_eq!(row.5, Some(172_000));
+            assert_eq!(row.6.as_deref(), Some("downbeat_sync"));
+            assert_eq!(row.7.as_deref(), Some("armed"));
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips_external_refs() {
+            let conn = setup_conn();
+            let id = insert_dj_transition_event(
+                &conn,
+                None,
+                None,
+                Some("queue_item"),
+                Some("44"),
+                Some("tidal_track"),
+                Some("555"),
+                "SafeCrossfade",
+                "{}",
+                None,
+                "dj-v1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("insert external refs");
+
+            let refs = conn
+                .query_row(
+                    "SELECT from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .expect("refs");
+
+            assert_eq!(refs.0.as_deref(), Some("queue_item"));
+            assert_eq!(refs.1.as_deref(), Some("44"));
+            assert_eq!(refs.2.as_deref(), Some("tidal_track"));
+            assert_eq!(refs.3.as_deref(), Some("555"));
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips_rejected_alternatives() {
+            let conn = setup_conn();
+            let rejected = r#"[{"template":"SlamCut","score":0.2,"reason":"low_confidence"}]"#;
+            let id = insert_dj_transition_event(
+                &conn,
+                Some(1),
+                Some(2),
+                Some("library_track"),
+                Some("1"),
+                Some("library_track"),
+                Some("2"),
+                "SafeCrossfade",
+                "{}",
+                Some(rejected),
+                "dj-v1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("insert rejected");
+
+            let loaded: String = conn
+                .query_row(
+                    "SELECT rejected_alternatives_json FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("rejected");
+            assert_eq!(loaded, rejected);
+        }
+
+        #[test]
+        fn insert_dj_transition_event_accepts_known_fallback_reasons() {
+            let conn = setup_conn();
+            let reasons = [
+                "disabled",
+                "current_profile_missing",
+                "next_profile_missing",
+                "profile_low_confidence",
+                "next_not_resolved",
+                "fetch_failed",
+                "decode_late",
+                "analysis_late",
+                "program_invalid",
+                "queue_changed",
+                "safety_override_safe",
+            ];
+
+            for reason in reasons {
+                insert_dj_transition_event(
+                    &conn,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "SafeCrossfade",
+                    "{}",
+                    None,
+                    "dj-v1",
+                    Some(reason),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("reason {reason} rejected: {error}"));
+            }
+            assert!(
+                insert_dj_transition_event(
+                    &conn,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "SafeCrossfade",
+                    "{}",
+                    None,
+                    "dj-v1",
+                    Some("unknown"),
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn update_dj_transition_outcome_sets_timestamp() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_outcome(&conn, id, "bad", true).expect("update");
+
+            let row = conn
+                .query_row(
+                    "SELECT outcome, outcome_at, skip_within_30s
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("outcome");
+            assert_eq!(row.0.as_deref(), Some("bad"));
+            assert!(row.1.is_some());
+            assert_eq!(row.2, 1);
+        }
+
+        #[test]
+        fn manual_skip_outcome_does_not_write_actual_timing() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_outcome(&conn, id, "skip_within_30s", true).expect("update");
+
+            let actual_start_ms: Option<i64> = conn
+                .query_row(
+                    "SELECT actual_start_ms FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("actual");
+            assert_eq!(actual_start_ms, None);
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_sets_delta_and_status() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(&conn, id, 172_144, "fired").expect("timing");
+
+            let row = conn
+                .query_row(
+                    "SELECT actual_start_ms, timing_delta_ms, timing_status
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .expect("timing row");
+            assert_eq!(row.0, Some(172_144));
+            assert_eq!(row.1, Some(144));
+            assert_eq!(row.2.as_deref(), Some("fired"));
+        }
+
+        #[test]
+        fn mark_dj_transition_timing_status_for_pair_updates_only_armed_pair() {
+            let conn = setup_conn();
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark before insert");
+            assert_eq!(updated, 0);
+
+            let id = insert_event(&conn);
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark");
+            assert_eq!(updated, 1);
+
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT timing_status FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("status");
+            assert_eq!(status.as_deref(), Some("missed"));
+        }
+
+        #[test]
+        fn mark_dj_transition_timing_status_for_pair_ignores_pair_that_already_fired() {
+            let conn = setup_conn();
+            let fired_id = insert_event(&conn);
+            update_dj_transition_fire_timing(&conn, fired_id, 172_040, "fired")
+                .expect("mark fired");
+            let armed_id = insert_event(&conn);
+
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark");
+
+            assert_eq!(updated, 0);
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT timing_status FROM dj_transition_events WHERE id = ?1",
+                    params![armed_id],
+                    |row| row.get(0),
+                )
+                .expect("status");
+            assert_eq!(status.as_deref(), Some("armed"));
+        }
     }
 
     mod audio_dj_profile {

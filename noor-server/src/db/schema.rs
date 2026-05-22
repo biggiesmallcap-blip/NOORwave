@@ -46,6 +46,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_042,
     MIGRATION_043,
     MIGRATION_044,
+    MIGRATION_045,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1284,6 +1285,14 @@ INSERT OR IGNORE INTO server_config (key, value)
 VALUES ('dj_transition_speed_bias', 'neutral');
 "#;
 
+const MIGRATION_045: &str = r#"
+ALTER TABLE dj_transition_events ADD COLUMN planned_start_ms INTEGER;
+ALTER TABLE dj_transition_events ADD COLUMN actual_start_ms INTEGER;
+ALTER TABLE dj_transition_events ADD COLUMN timing_delta_ms INTEGER;
+ALTER TABLE dj_transition_events ADD COLUMN timing_source TEXT;
+ALTER TABLE dj_transition_events ADD COLUMN timing_status TEXT;
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1456,5 +1465,32 @@ mod tests {
             !plan.contains("TEMP B-TREE"),
             "discovery query should not need a temp sort, plan was: {plan}"
         );
+    }
+
+    #[test]
+    fn migration_045_adds_dj_transition_timing_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        for column in [
+            "planned_start_ms",
+            "actual_start_ms",
+            "timing_delta_ms",
+            "timing_source",
+            "timing_status",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM pragma_table_info('dj_transition_events')
+                     WHERE name = ?1",
+                    [column],
+                    |row| row.get(0),
+            )
+                .unwrap();
+            assert_eq!(exists, 1, "missing {column}");
+        }
     }
 }

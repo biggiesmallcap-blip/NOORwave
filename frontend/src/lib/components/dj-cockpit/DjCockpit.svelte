@@ -19,8 +19,8 @@
 
 	let transitionArmed = $derived(Boolean(status?.selected_program || status?.last_transition_event_id));
 
-	async function refresh() {
-		loading = true;
+	async function refresh(showLoading = false) {
+		if (showLoading) loading = true;
 		try {
 			const [enabledResponse, policyResponse, statusResponse] = await Promise.all([
 				api.getDjEnabled(),
@@ -39,7 +39,11 @@
 	}
 
 	onMount(() => {
-		void refresh();
+		void refresh(true);
+		const interval = window.setInterval(() => {
+			void refresh();
+		}, 2_000);
+		return () => window.clearInterval(interval);
 	});
 
 	async function setEnabled(next: boolean) {
@@ -104,12 +108,22 @@
 		rebuildStatus = 'Requesting profile rebuild';
 		try {
 			const response = await api.rebuildDjProfile(ref);
-			rebuildStatus = response.accepted ? 'Profile rebuild accepted' : 'Profile is not in the current pair';
+			rebuildStatus = rebuildProfileStatusMessage(response.status, response.accepted);
 			await refresh();
 		} catch {
 			rebuildStatus = 'Profile rebuild failed';
 			showToast('Could not rebuild DJ profile.', 'error');
 		}
+	}
+
+	function rebuildProfileStatusMessage(status: string, accepted: boolean) {
+		if (accepted && status === 'already_running') return 'Profile rebuild already running';
+		if (accepted) return 'Profile rebuild accepted';
+		if (status === 'already_current') return 'Profile already current';
+		if (status === 'dj_disabled') return 'DJ engine disabled';
+		if (status === 'source_unavailable') return 'Profile source unavailable';
+		if (status === 'decode_failed') return 'Profile decode failed';
+		return 'Profile is not in the current pair';
 	}
 
 	async function recordFeedback(rating: 'good' | 'bad' | 'too_safe' | 'too_bold') {

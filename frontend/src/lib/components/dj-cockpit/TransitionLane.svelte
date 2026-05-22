@@ -14,23 +14,86 @@
 	} = $props();
 
 	let fallback = $derived(status?.fallback_reason ?? null);
-	let selectedProgram = $derived(status?.selected_program ?? 'Legacy path');
 	let transitionId = $derived(status?.last_transition_event_id ?? null);
+	let transitionArmed = $derived(Boolean(transitionId || status?.renderer_template || status?.selected_program));
+	let hasPair = $derived(Boolean(status?.current && status?.next));
+	let currentReady = $derived(status?.current?.profile_ready === true);
+	let nextReady = $derived(status?.next?.profile_ready === true);
+	let profileMissing = $derived(hasPair && (!currentReady || !nextReady));
+	let rendererLabel = $derived(
+		status?.renderer_template ??
+			(status?.renderer_mode === 'legacy_overlap'
+				? 'DJ overlap armed'
+				: status?.renderer_mode === 'dj_gain_program'
+					? 'DJ gain program armed'
+					: status?.renderer_mode === 'dj_full_program'
+						? 'DJ full program armed'
+						: 'Transition armed'),
+	);
+	let laneTitle = $derived(
+		!status?.enabled
+			? 'Legacy path'
+			: transitionArmed
+				? rendererLabel
+				: !hasPair
+					? 'Pair not detected'
+					: profileMissing
+						? 'Analyzing profiles'
+						: 'Ready to plan',
+	);
+	let laneCopy = $derived(
+		!status?.enabled
+			? 'Playback is using the legacy path.'
+			: transitionArmed
+				? status?.renderer_mode === 'legacy_overlap'
+					? 'DJ planned this pair, but audio is using the overlap fallback.'
+					: 'Transition armed for the current pair.'
+				: !hasPair
+					? 'Waiting for current and next tracks.'
+					: !currentReady && !nextReady
+						? 'Building current and next DJ profiles.'
+						: !currentReady
+							? 'Building the current DJ profile.'
+							: !nextReady
+								? 'Building the next DJ profile.'
+								: 'Both DJ profiles are ready. Waiting for a transition plan to arm.',
+	);
+	let showFallback = $derived(
+		Boolean(
+			fallback &&
+				!['disabled', 'pair_missing', 'missing_current_profile', 'missing_next_profile'].includes(
+					fallback,
+				),
+		),
+	);
+	let recentTimingEvents = $derived(status?.recent_timing_events ?? []);
+	let timingSummary = $derived(status?.timing_history_summary ?? null);
+
+	function formatTimingMs(value: number | null | undefined) {
+		return typeof value === 'number' ? `${value} ms` : 'pending';
+	}
+
+	function formatTimingDelta(value: number | null | undefined) {
+		if (typeof value !== 'number') {
+			return 'pending';
+		}
+		return `${value > 0 ? '+' : ''}${value} ms`;
+	}
 </script>
 
 <section class="transition-lane" aria-labelledby="dj-transition-heading">
 	<header>
 		<div>
 			<p class="eyebrow">Transition lane</p>
-			<h2 id="dj-transition-heading">{selectedProgram}</h2>
+			<h2 id="dj-transition-heading">{laneTitle}</h2>
 		</div>
 		<span class="event-id">{transitionId ? `Event ${transitionId}` : 'No event armed'}</span>
 	</header>
 
-	{#if fallback}
+	{#if showFallback}
 		<p class="fallback" role="status">Fallback reason: {fallback}</p>
 	{:else}
-		<p class="success">Transition ready. Detailed successful-transition reasons are hidden by default.</p>
+		<p class:pending={!transitionArmed} class:success={transitionArmed} role="status">{laneCopy}</p>
 	{/if}
 
 	<div class="lane-actions" aria-label="Transition feedback">
@@ -45,10 +108,47 @@
 	</button>
 	{#if debugOpen}
 		<div class="debug-panel">
+			<p class="debug-heading">Current event</p>
 			<dl>
 				<div>
-					<dt>Selected program</dt>
-					<dd>{status?.selected_program ?? 'none'}</dd>
+					<dt>Planned template</dt>
+					<dd>{status?.planned_template ?? status?.selected_program ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Renderer template</dt>
+					<dd>{status?.renderer_template ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Renderer mode</dt>
+					<dd>{status?.renderer_mode ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Downgrade</dt>
+					<dd>{status?.downgrade_reason ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Sync target</dt>
+					<dd>{status?.sync_target ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Current planned</dt>
+					<dd>{formatTimingMs(status?.planned_start_ms)}</dd>
+				</div>
+				<div>
+					<dt>Current fire</dt>
+					<dd>{formatTimingMs(status?.actual_start_ms)}</dd>
+				</div>
+				<div>
+					<dt>Current delta</dt>
+					<dd>{formatTimingDelta(status?.timing_delta_ms)}</dd>
+				</div>
+				<div>
+					<dt>Sync source</dt>
+					<dd>{status?.timing_source ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Timing status</dt>
+					<dd>{status?.timing_status ?? 'none'}</dd>
 				</div>
 				<div>
 					<dt>Fallback</dt>
@@ -59,6 +159,61 @@
 					<dd>{status?.profile_confidence_floor ?? 0}</dd>
 				</div>
 			</dl>
+			<p class="debug-heading">Recent fires</p>
+			{#if timingSummary && timingSummary.event_count > 0}
+				<div class="timing-summary" aria-label="Recent DJ timing summary">
+					<div>
+						<span>Avg delta</span>
+						<strong>{formatTimingDelta(timingSummary.average_delta_ms)}</strong>
+					</div>
+					<div>
+						<span>Avg abs</span>
+						<strong>{formatTimingMs(timingSummary.average_abs_delta_ms)}</strong>
+					</div>
+					<div>
+						<span>Late</span>
+						<strong>{timingSummary.late_count}</strong>
+					</div>
+					<div>
+						<span>Missed</span>
+						<strong>{timingSummary.missed_count}</strong>
+					</div>
+					<div>
+						<span>Tight</span>
+						<strong>{timingSummary.tight_count}</strong>
+					</div>
+					<div>
+						<span>Bad</span>
+						<strong>{timingSummary.bad_count}</strong>
+					</div>
+				</div>
+			{/if}
+			{#if recentTimingEvents.length > 0}
+				<div class="timing-history-header" aria-hidden="true">
+					<span>Event</span>
+					<span>Status</span>
+					<span>Quality</span>
+					<span>Source</span>
+					<span>Planned</span>
+					<span>Actual</span>
+					<span>Delta</span>
+				</div>
+				<ul class="timing-history" aria-label="Recent DJ transition timing">
+					{#each recentTimingEvents as event}
+						<li>
+							<span>Event {event.event_id}</span>
+							<span>{event.timing_status ?? 'none'}</span>
+							<span>{event.timing_quality}</span>
+							<span>{event.timing_source ?? 'none'}</span>
+							<span>{formatTimingMs(event.planned_start_ms)}</span>
+							<span>{formatTimingMs(event.actual_start_ms)}</span>
+							<span>{formatTimingDelta(event.timing_delta_ms)}</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="empty-history">No completed DJ transitions yet.</p>
+			{/if}
 		</div>
 	{/if}
 </section>
@@ -113,7 +268,8 @@
 	}
 
 	.fallback,
-	.success {
+	.success,
+	.pending {
 		padding: var(--space-3);
 		border-radius: var(--radius-sm);
 		font-size: var(--font-size-sm);
@@ -129,6 +285,12 @@
 	.success {
 		border: 1px solid color-mix(in srgb, var(--state-success) 28%, transparent);
 		background: color-mix(in srgb, var(--state-success) 9%, transparent);
+		color: var(--text-secondary);
+	}
+
+	.pending {
+		border: 1px solid var(--border-subtle);
+		background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
 		color: var(--text-secondary);
 	}
 
@@ -176,10 +338,20 @@
 	}
 
 	.debug-panel {
+		display: grid;
+		gap: var(--space-3);
 		padding: var(--space-3);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+	}
+
+	.debug-heading {
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
 	}
 
 	dl {
@@ -206,10 +378,109 @@
 		text-align: right;
 	}
 
+	.timing-history,
+	.timing-history-header,
+	.timing-history li,
+	.empty-history {
+		margin: 0;
+	}
+
+	.timing-history-header {
+		display: grid;
+		grid-template-columns: 1fr repeat(6, minmax(4.5rem, auto));
+		gap: var(--space-2);
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
+	}
+
+	.timing-history-header span:not(:first-child) {
+		text-align: right;
+	}
+
+	.timing-history {
+		display: grid;
+		gap: var(--space-2);
+		padding: 0;
+		list-style: none;
+	}
+
+	.timing-history li {
+		display: grid;
+		grid-template-columns: 1fr repeat(6, minmax(4.5rem, auto));
+		gap: var(--space-2);
+		align-items: center;
+		padding-top: var(--space-2);
+		border-top: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+	}
+
+	.timing-history span:first-child,
+	.timing-history span:nth-child(2) {
+		color: var(--text-primary);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.timing-history span:not(:first-child) {
+		text-align: right;
+	}
+
+	.empty-history {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+
+	.timing-summary {
+		display: grid;
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+		gap: var(--space-2);
+	}
+
+	.timing-summary div {
+		display: grid;
+		gap: var(--space-1);
+		padding: var(--space-2);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--bg-surface) 66%, transparent);
+	}
+
+	.timing-summary span {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
+	}
+
+	.timing-summary strong {
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-tight);
+	}
+
 	@media (max-width: 760px) {
 		header,
 		dl div {
 			display: grid;
+		}
+
+		.timing-history li {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.timing-summary {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.timing-history-header {
+			display: none;
+		}
+
+		.timing-history span:not(:first-child) {
+			text-align: left;
 		}
 
 		.lane-actions {
