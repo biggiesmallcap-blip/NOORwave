@@ -684,7 +684,16 @@ async fn main() -> Result<()> {
     // Resolve bind address before db is moved into AppState
     let addr = resolve_bind_addr(&db);
 
-    let http_client = reqwest::Client::new();
+    // Shared client for Last.fm / MusicBrainz / Discogs / RSS / session
+    // recovery. reqwest has no default timeout, so an unresponsive upstream
+    // could otherwise hang the calling request indefinitely. Match the TIDAL
+    // client's bounds (see TidalClient::build_http_client); 30s is ample for
+    // any JSON API call. Streaming downloads use their own client.
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let rss_aggregator = Arc::new(services::rss_feeds::FeedAggregator::new(
         http_client.clone(),
     ));
