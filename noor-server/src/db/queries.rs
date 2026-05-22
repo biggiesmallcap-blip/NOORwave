@@ -7530,6 +7530,22 @@ pub fn update_dj_transition_fire_timing(
          WHERE id = ?1",
         params![id, actual_start_ms, timing_status],
     )?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET timing_status = 'missed'
+         WHERE id <> ?1
+           AND timing_status = 'armed'
+           AND EXISTS (
+               SELECT 1
+               FROM dj_transition_events fired
+               WHERE fired.id = ?1
+                 AND fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
+                 AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
+                 AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
+                 AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+           )",
+        params![id],
+    )?;
     Ok(())
 }
 
@@ -7929,6 +7945,35 @@ mod tests {
             assert_eq!(row.0, Some(172_144));
             assert_eq!(row.1, Some(144));
             assert_eq!(row.2.as_deref(), Some("fired"));
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_closes_duplicate_armed_pair_rows() {
+            let conn = setup_conn();
+            let older_id = insert_event(&conn);
+            let fired_id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(&conn, fired_id, 172_144, "fired").expect("timing");
+
+            let rows: Vec<(i64, Option<String>)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, timing_status
+                         FROM dj_transition_events
+                         WHERE id IN (?1, ?2)
+                         ORDER BY id",
+                    )
+                    .expect("prepare");
+                stmt.query_map(params![older_id, fired_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+            };
+
+            assert_eq!(rows[0], (older_id, Some("missed".to_string())));
+            assert_eq!(rows[1], (fired_id, Some("fired".to_string())));
         }
 
         #[test]
