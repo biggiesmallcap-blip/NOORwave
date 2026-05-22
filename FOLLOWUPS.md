@@ -10,17 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### perf: audit handlers that hold the AppState lock across `.await`
-
-`SharedState = Arc<RwLock<AppState>>`. Some handlers take `state.write().await`
-(or a read lock) and then do a DB call or network `.await` while holding it,
-which serializes all other state access for that span. Audit and shorten these
-critical sections (clone the `Arc` you need, drop the guard, then do the slow
-work). Behavior-sensitive; needs its own concurrency measurement before
-touching. Candidates surfaced near `routes.rs` ephemeral-playback clearing and
-`clear_ephemeral_playback_markers`.
-- Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
-
 ### perf: cache Last.fm `track.getSimilar` per (artist, title)
 
 `services/radio.rs` calls Last.fm `track.getSimilar` on every `/api/radio/song`

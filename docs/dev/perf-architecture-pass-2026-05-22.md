@@ -75,6 +75,40 @@ network/embedding fetch, so the O(n) scan is cheap and rare.
 
 Regression test: `tidal_page_modules_cache_evicts_stale_keys_on_insert`.
 
+### 4. Search: apostrophe queries no longer fall back to a full-table scan
+
+`to_fts_query` preserved the apostrophe in tokens. A bare `'` opens a string
+literal in FTS5, so every query containing one ("Don't", "Guns N' Roses",
+"I'm", "Can't") raised `fts5: syntax error`. `search()` caught it and silently
+fell back to `search_tracks_like`, a `LOWER(col) LIKE '%term%'` scan over all
+35k tracks plus three joins. Apostrophes are extremely common in titles and
+artist names, so this hit real everyday searches.
+
+Fixed by mapping `'` to a separator. The unicode61 tokenizer already splits
+indexed text on apostrophes ("Don't" -> "don","t"), so "don't" -> "don* t*"
+parses cleanly and matches the indexed tokens (527 hits on the dev library).
+
+**Measured** (apostrophe query, 300 reps):
+
+| Path | Per search |
+|------|-----------|
+| LIKE fallback (before) | ~62.6ms |
+| FTS (after) | ~4.9ms (**~13x**) |
+
+...and results are now FTS-ranked instead of arbitrary substring matches.
+
+Regression tests: `to_fts_query_treats_apostrophe_as_separator`,
+`search_handles_apostrophe_queries_via_fts`.
+
+### Lock-across-await audit: clean
+
+A full audit of `state.write().await` / `state.read().await` guards across
+`.await` points in `routes.rs`, the route submodules, and `player.rs` found
+**no** write-lock-across-network, write-lock-across-DB, or read-lock-across-
+network cases. The code already clones tokens/clients/values out of the guard
+and drops it (block scope or explicit `drop`) before any slow `.await`. No
+change made; the deferred item was removed from FOLLOWUPS.
+
 ## Verification
 
 - `cargo test -p noor-server`: 739 passed, 0 failed (no regressions).
