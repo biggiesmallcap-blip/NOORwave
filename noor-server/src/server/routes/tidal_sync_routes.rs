@@ -781,15 +781,9 @@ async fn do_tidal_sync(
                             rusqlite::params![album_ref.id, album_ref.title, track.artist.id, artwork],
                         )?;
                     }
-                    super::insert_tidal_track(&tx, track, false, None)?;
-
-                    let track_id: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM tracks WHERE tidal_id=?1",
-                            rusqlite::params![track.id],
-                            |row| row.get(0),
-                        )
-                        .ok();
+                    // insert_tidal_track already resolves the local row id, so
+                    // reuse it instead of issuing a second lookup per track.
+                    let track_id = super::insert_tidal_track(&tx, track, false, None)?;
                     if let Some(tid) = track_id {
                         tx.execute(
                             "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",

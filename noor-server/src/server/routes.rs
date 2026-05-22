@@ -12406,12 +12406,15 @@ async fn persist_tidal_tokens(
     Ok(())
 }
 
+/// Upsert a TIDAL track (and its artist) and return the local `tracks.id`.
+/// The id is looked up here anyway to attach source genres, so callers that
+/// need it should use the return value rather than issuing a second SELECT.
 pub(super) fn insert_tidal_track(
     conn: &rusqlite::Connection,
     track: &crate::services::tidal::client::TidalTrack,
     is_favorite: bool,
     favorite_created: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<i64>> {
     // Ensure artist exists first (tracks.artist_id is NOT NULL)
     conn.execute(
         "INSERT INTO artists (tidal_id, name) VALUES (?1, ?2)
@@ -12467,7 +12470,7 @@ pub(super) fn insert_tidal_track(
         )?;
     }
 
-    Ok(())
+    Ok(local_track_id)
 }
 
 pub(super) fn apply_tidal_favorite_flags(
