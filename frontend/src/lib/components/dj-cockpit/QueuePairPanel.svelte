@@ -11,6 +11,7 @@
 
 	function confidenceLabel(deck?: DjDeckStatus) {
 		if (deck?.profile_status === 'decode_failed') return 'Analysis failed';
+		if (deck?.profile_status === 'analyzing') return 'Analyzing';
 		if (!deck?.profile_ready) return 'Profile missing';
 		if (deck.profile_confidence == null) return 'Profile ready';
 		return `${Math.round(deck.profile_confidence * 100)}% confidence`;

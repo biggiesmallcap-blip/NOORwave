@@ -903,7 +903,7 @@ export type DjDeckStatus = {
 	title: string;
 	artist?: string;
 	profile_ready: boolean;
-	profile_status: 'ready' | 'missing' | 'decode_failed' | string;
+	profile_status: 'ready' | 'missing' | 'analyzing' | 'decode_failed' | string;
 	profile_error?: string;
 	profile_confidence?: number;
 	beat_count?: number;
@@ -916,6 +916,16 @@ export type DjStatusResponse = {
 	enabled: boolean;
 	current?: DjDeckStatus;
 	next?: DjDeckStatus;
+	planning_status:
+		| 'disabled'
+		| 'pair_missing'
+		| 'waiting_for_profiles'
+		| 'profile_failed'
+		| 'waiting_for_window'
+		| 'ready_to_plan'
+		| 'armed'
+		| 'missed'
+		| string;
 	selected_program?: string;
 	planned_template?: string;
 	renderer_template?: string;

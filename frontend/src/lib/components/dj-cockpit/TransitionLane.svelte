@@ -14,15 +14,17 @@
 	} = $props();
 
 	let fallback = $derived(status?.fallback_reason ?? null);
+	let planningStatus = $derived(status?.planning_status ?? 'disabled');
 	let transitionId = $derived(status?.last_transition_event_id ?? null);
-	let transitionArmed = $derived(Boolean(transitionId || status?.renderer_template || status?.selected_program));
-	let hasPair = $derived(Boolean(status?.current && status?.next));
+	let transitionArmed = $derived(
+		planningStatus === 'armed' ||
+			(planningStatus !== 'missed' &&
+				Boolean(transitionId || status?.renderer_template || status?.selected_program)),
+	);
 	let currentReady = $derived(status?.current?.profile_ready === true);
 	let nextReady = $derived(status?.next?.profile_ready === true);
 	let currentFailed = $derived(status?.current?.profile_status === 'decode_failed');
 	let nextFailed = $derived(status?.next?.profile_status === 'decode_failed');
-	let profileFailed = $derived(currentFailed || nextFailed);
-	let profileMissing = $derived(hasPair && (!currentReady || !nextReady));
 	let rendererLabel = $derived(
 		status?.renderer_template ??
 			(status?.renderer_mode === 'legacy_overlap'
@@ -34,40 +36,48 @@
 						: 'Transition armed'),
 	);
 	let laneTitle = $derived(
-		!status?.enabled
+		planningStatus === 'disabled'
 			? 'Legacy path'
-			: transitionArmed
+			: planningStatus === 'armed'
 				? rendererLabel
-				: !hasPair
+				: planningStatus === 'pair_missing'
 					? 'Pair not detected'
-					: profileFailed
+					: planningStatus === 'profile_failed'
 						? 'Profile analysis failed'
-					: profileMissing
+					: planningStatus === 'waiting_for_profiles'
 						? 'Analyzing profiles'
-						: 'Ready to plan',
+						: planningStatus === 'waiting_for_window'
+							? 'Waiting for mix window'
+							: planningStatus === 'missed'
+								? 'Transition missed'
+								: 'Ready to plan',
 	);
 	let laneCopy = $derived(
-		!status?.enabled
+		planningStatus === 'disabled'
 			? 'Playback is using the legacy path.'
-			: transitionArmed
+			: planningStatus === 'armed'
 				? status?.renderer_mode === 'legacy_overlap'
 					? 'DJ planned this pair, but audio is using the overlap fallback.'
 					: 'Transition armed for the current pair.'
-				: !hasPair
+				: planningStatus === 'pair_missing'
 					? 'Waiting for current and next tracks.'
-					: currentFailed && nextFailed
+					: planningStatus === 'profile_failed' && currentFailed && nextFailed
 						? 'Current and next profile decodes failed.'
-						: currentFailed
+						: planningStatus === 'profile_failed' && currentFailed
 							? 'The current profile decode failed.'
-							: nextFailed
+							: planningStatus === 'profile_failed' && nextFailed
 								? 'The next profile decode failed.'
-					: !currentReady && !nextReady
+								: planningStatus === 'waiting_for_profiles' && !currentReady && !nextReady
 						? 'Building current and next DJ profiles.'
-						: !currentReady
+						: planningStatus === 'waiting_for_profiles' && !currentReady
 							? 'Building the current DJ profile.'
-							: !nextReady
+							: planningStatus === 'waiting_for_profiles' && !nextReady
 								? 'Building the next DJ profile.'
-								: 'Both DJ profiles are ready. Waiting for a transition plan to arm.',
+								: planningStatus === 'waiting_for_window'
+									? 'Both DJ profiles are ready. Waiting for the mix window.'
+									: planningStatus === 'missed'
+										? 'The last armed transition missed its fire point.'
+										: 'Both DJ profiles are ready. Waiting for a transition plan to arm.',
 	);
 	let showFallback = $derived(
 		Boolean(
@@ -212,6 +222,10 @@
 				<div>
 					<dt>Readiness block</dt>
 					<dd>{status?.fallback_reason ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Planning status</dt>
+					<dd>{status?.planning_status ?? 'none'}</dd>
 				</div>
 				<div>
 					<dt>Confidence floor</dt>

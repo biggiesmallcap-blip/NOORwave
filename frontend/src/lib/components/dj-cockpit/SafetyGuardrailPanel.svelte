@@ -8,6 +8,29 @@
 		status: DjStatusResponse | null;
 		onAcceptSafeOnly: () => void;
 	} = $props();
+
+	function formatPlanningStatus(value: string | null | undefined) {
+		switch (value) {
+			case 'waiting_for_profiles':
+				return 'Waiting for profiles';
+			case 'profile_failed':
+				return 'Profile failed';
+			case 'waiting_for_window':
+				return 'Waiting for window';
+			case 'ready_to_plan':
+				return 'Ready to plan';
+			case 'pair_missing':
+				return 'Pair missing';
+			case 'armed':
+				return 'Armed';
+			case 'missed':
+				return 'Missed';
+			case 'disabled':
+				return 'Disabled';
+			default:
+				return 'Unknown';
+		}
+	}
 </script>
 
 <section class="guardrail-panel" aria-labelledby="dj-guardrails-heading">
@@ -34,6 +57,10 @@
 		<div>
 			<dt>Pair freshness</dt>
 			<dd>{status?.fallback_reason === 'queue_changed' ? 'Stale pair' : 'Current pair'}</dd>
+		</div>
+		<div>
+			<dt>Planning state</dt>
+			<dd>{formatPlanningStatus(status?.planning_status)}</dd>
 		</div>
 	</dl>
 

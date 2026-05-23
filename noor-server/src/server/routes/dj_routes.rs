@@ -144,6 +144,7 @@ struct DjStatusResponse {
     enabled: bool,
     current: Option<DjDeckStatus>,
     next: Option<DjDeckStatus>,
+    planning_status: String,
     selected_program: Option<String>,
     planned_template: Option<String>,
     renderer_template: Option<String>,
@@ -387,7 +388,12 @@ async fn get_status(
                             .iter()
                             .find(|(candidate, _)| candidate == &key)
                             .map(|(_, label)| label);
-                        Some(deck_status(conn, &media_ref, label)?)
+                        let inflight_key = dj_profile_inflight_key(&key);
+                        let rebuild_inflight = dj_profile_rebuild_is_inflight(
+                            &state.dj_profile_rebuild_inflight,
+                            &inflight_key,
+                        );
+                        Some(deck_status(conn, &media_ref, label, rebuild_inflight)?)
                     }
                     None => None,
                 };
@@ -398,7 +404,12 @@ async fn get_status(
                             .iter()
                             .find(|(candidate, _)| candidate == &key)
                             .map(|(_, label)| label);
-                        Some(deck_status(conn, &media_ref, label)?)
+                        let inflight_key = dj_profile_inflight_key(&key);
+                        let rebuild_inflight = dj_profile_rebuild_is_inflight(
+                            &state.dj_profile_rebuild_inflight,
+                            &inflight_key,
+                        );
+                        Some(deck_status(conn, &media_ref, label, rebuild_inflight)?)
                     }
                     None => None,
                 };
@@ -427,6 +438,30 @@ async fn get_status(
                 };
                 let latest_transition =
                     latest_open_transition_for_pair(conn, current_ref.as_ref(), next_ref.as_ref())?;
+                let ready_pair_due = active_track_id
+                    .and_then(|track_id| {
+                        let duration_ms = current_track_duration_ms(conn, track_id).ok().flatten();
+                        let runtime = state.playback_runtime.as_ref()?;
+                        let info = state.playback_runtime_info.as_ref()?;
+                        if info.active_track_id != Some(track_id) {
+                            return None;
+                        }
+                        Some(ready_pair_transition_due(
+                            runtime
+                                .handle
+                                .get_position_ms(info.sample_rate, info.channels),
+                            duration_ms,
+                        ))
+                    })
+                    .unwrap_or(false);
+                let planning_status = pair_planning_status(
+                    enabled,
+                    current.as_ref(),
+                    next.as_ref(),
+                    latest_transition.as_ref(),
+                    ready_pair_due,
+                )
+                .to_string();
                 let recent_timing_events =
                     latest_dj_transition_timing_history(conn, DJ_TIMING_HISTORY_LIMIT)?;
                 let tuning_deltas = latest_fired_dj_timing_deltas(conn, 20)?;
@@ -457,6 +492,7 @@ async fn get_status(
                         enabled,
                         current,
                         next,
+                        planning_status,
                         selected_program: latest_transition
                             .as_ref()
                             .map(|transition| transition.template.clone()),
@@ -535,19 +571,24 @@ async fn ready_pair_transition_is_due(
         .get_position_ms(info.sample_rate, info.channels);
     let duration_ms = state_guard
         .db
-        .with_conn(|conn| {
-            conn.query_row(
-                "SELECT duration_ms FROM tracks WHERE id = ?1",
-                [current_track_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .optional()
-            .map(|value| value.flatten())
-            .map_err(anyhow::Error::from)
-        })
+        .with_conn(|conn| current_track_duration_ms(conn, current_track_id))
         .ok()
         .flatten();
     ready_pair_transition_due(position_ms, duration_ms)
+}
+
+fn current_track_duration_ms(
+    conn: &rusqlite::Connection,
+    current_track_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT duration_ms FROM tracks WHERE id = ?1",
+        [current_track_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map(|value| value.flatten())
+    .map_err(anyhow::Error::from)
 }
 
 fn ready_pair_transition_due(position_ms: i64, duration_ms: Option<i64>) -> bool {
@@ -555,6 +596,39 @@ fn ready_pair_transition_due(position_ms: i64, duration_ms: Option<i64>) -> bool
         return false;
     };
     duration_ms.saturating_sub(position_ms.max(0)) <= DJ_READY_PAIR_TRANSITION_WINDOW_MS
+}
+
+fn pair_planning_status(
+    enabled: bool,
+    current: Option<&DjDeckStatus>,
+    next: Option<&DjDeckStatus>,
+    latest_transition: Option<&OpenTransition>,
+    ready_pair_due: bool,
+) -> &'static str {
+    if !enabled {
+        return "disabled";
+    }
+    let (Some(current), Some(next)) = (current, next) else {
+        return "pair_missing";
+    };
+    if current.profile_status == "decode_failed" || next.profile_status == "decode_failed" {
+        return "profile_failed";
+    }
+    if !current.profile_ready || !next.profile_ready {
+        return "waiting_for_profiles";
+    }
+    if let Some(transition) = latest_transition {
+        return if transition.timing_status.as_deref() == Some("missed") {
+            "missed"
+        } else {
+            "armed"
+        };
+    }
+    if ready_pair_due {
+        "ready_to_plan"
+    } else {
+        "waiting_for_window"
+    }
 }
 
 fn claim_ready_pair_transition_planning(current_track_id: i64, generation: u64) -> bool {
@@ -862,6 +936,19 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
     !deck.profile_ready && deck.profile_status != "decode_failed"
+}
+
+fn dj_profile_rebuild_is_inflight(
+    inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    key: &str,
+) -> bool {
+    inflight
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(key).copied())
+        .is_some_and(|started_at| {
+            started_at.elapsed() < Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS)
+        })
 }
 
 fn clear_dj_profile_inflight(
@@ -1245,6 +1332,7 @@ fn deck_status(
     conn: &rusqlite::Connection,
     media_ref: &DjMediaRef,
     label_override: Option<&(String, Option<String>)>,
+    rebuild_inflight: bool,
 ) -> anyhow::Result<DjDeckStatus> {
     let key = media_ref.profile_key();
     let profile = queries::get_audio_dj_profile(conn, &key)?;
@@ -1260,6 +1348,8 @@ fn deck_status(
         "ready".to_string()
     } else if let Some(failure) = rebuild_failure.as_ref() {
         failure.status.clone()
+    } else if rebuild_inflight {
+        "analyzing".to_string()
     } else {
         "missing".to_string()
     };
@@ -1791,6 +1881,23 @@ mod tests {
         }
     }
 
+    fn test_deck_status(profile_ready: bool, profile_status: &str) -> DjDeckStatus {
+        DjDeckStatus {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+            title: "Test Track".to_string(),
+            artist: Some("Test Artist".to_string()),
+            profile_ready,
+            profile_status: profile_status.to_string(),
+            profile_error: None,
+            profile_confidence: profile_ready.then_some(0.85),
+            beat_count: profile_ready.then_some(128),
+            downbeat_count: profile_ready.then_some(32),
+            phrase_count: profile_ready.then_some(8),
+            safe_crossfade_only: false,
+        }
+    }
+
     #[test]
     fn dj_profile_current_check_requires_current_version() {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
@@ -2318,6 +2425,60 @@ mod tests {
     }
 
     #[test]
+    fn pair_planning_status_reports_server_state() {
+        let ready_current = test_deck_status(true, "ready");
+        let ready_next = test_deck_status(true, "ready");
+        let missing_next = test_deck_status(false, "missing");
+        let failed_next = test_deck_status(false, "decode_failed");
+        let armed_transition = OpenTransition {
+            id: 31,
+            template: "SafeCrossfade".to_string(),
+            renderer_template: Some("SafeCrossfade".to_string()),
+            fallback_reason: None,
+            planned_start_ms: Some(180_000),
+            actual_start_ms: None,
+            timing_delta_ms: None,
+            timing_source: Some("downbeat_sync".to_string()),
+            timing_status: Some("armed".to_string()),
+        };
+
+        assert_eq!(
+            pair_planning_status(false, Some(&ready_current), Some(&ready_next), None, false),
+            "disabled"
+        );
+        assert_eq!(
+            pair_planning_status(true, None, Some(&ready_next), None, false),
+            "pair_missing"
+        );
+        assert_eq!(
+            pair_planning_status(true, Some(&ready_current), Some(&failed_next), None, false),
+            "profile_failed"
+        );
+        assert_eq!(
+            pair_planning_status(true, Some(&ready_current), Some(&missing_next), None, false),
+            "waiting_for_profiles"
+        );
+        assert_eq!(
+            pair_planning_status(
+                true,
+                Some(&ready_current),
+                Some(&ready_next),
+                Some(&armed_transition),
+                true
+            ),
+            "armed"
+        );
+        assert_eq!(
+            pair_planning_status(true, Some(&ready_current), Some(&ready_next), None, false),
+            "waiting_for_window"
+        );
+        assert_eq!(
+            pair_planning_status(true, Some(&ready_current), Some(&ready_next), None, true),
+            "ready_to_plan"
+        );
+    }
+
+    #[test]
     fn profile_rebuild_inflight_reports_running_for_recent_duplicate() {
         let inflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let first = mark_dj_profile_rebuild_inflight(
@@ -2354,7 +2515,7 @@ mod tests {
             "DASH stream prebuffer failed".to_string(),
         );
 
-        let deck = deck_status(&conn, &media_ref, None).expect("deck status");
+        let deck = deck_status(&conn, &media_ref, None, false).expect("deck status");
 
         assert!(!deck.profile_ready);
         assert_eq!(deck.profile_status, "decode_failed");
@@ -2365,5 +2526,21 @@ mod tests {
         assert!(!deck_needs_profile_rebuild(&deck));
 
         clear_dj_profile_rebuild_failure(&rebuild_key);
+    }
+
+    #[test]
+    fn deck_status_exposes_inflight_profile_as_analyzing() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 12198474,
+            track_id: None,
+        };
+
+        let deck = deck_status(&conn, &media_ref, None, true).expect("deck status");
+
+        assert!(!deck.profile_ready);
+        assert_eq!(deck.profile_status, "analyzing");
+        assert!(deck.profile_error.is_none());
     }
 }

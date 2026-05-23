@@ -78,8 +78,10 @@ describe('dj cockpit page contract', () => {
 
 	test('dj_page_separates_profile_readiness_from_transition_armed', () => {
 		expect(transitionLane).toContain('Analyzing profiles');
+		expect(transitionLane).toContain('Waiting for mix window');
 		expect(transitionLane).toContain('Ready to plan');
 		expect(transitionLane).toContain('Transition armed');
+		expect(transitionLane).toContain('planning_status');
 		expect(transitionLane).not.toContain('Transition ready');
 	});
 
@@ -87,6 +89,7 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Profile analysis failed');
 		expect(transitionLane).toContain('current_profile_decode_failed');
 		expect(queuePair).toContain('Analysis failed');
+		expect(queuePair).toContain('Analyzing');
 		expect(queuePair).toContain('profile_error');
 	});
 
@@ -118,6 +121,7 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Sync source');
 		expect(transitionLane).toContain('Timing status');
 		expect(transitionLane).toContain("'pending'");
+		expect(transitionLane).toContain('Planning status');
 	});
 
 	test('dj_page_does_not_show_non_renderable_templates_as_main_label', () => {
@@ -157,6 +161,7 @@ describe('dj cockpit page contract', () => {
 
 	test('dj_page_accepts_safe_crossfade_suggestion_only_on_user_action', () => {
 		expect(guardrails).toContain('Accept safe-only suggestion');
+		expect(guardrails).toContain('Planning state');
 		expect(cockpit).toContain('acceptSafeOnlySuggestion');
 	});
 
