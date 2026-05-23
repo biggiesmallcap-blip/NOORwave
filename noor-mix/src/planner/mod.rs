@@ -30,6 +30,13 @@ impl Planner {
             return TransitionTemplate::SafeCrossfade;
         };
         let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, incoming_bpm);
+        if matches!(policy.mix_intent, MixIntent::Bold)
+            && !outgoing.phrase_bar_indices.is_empty()
+            && !incoming.phrase_bar_indices.is_empty()
+        {
+            return TransitionTemplate::FilterSweep;
+        }
+
         if bpm_delta > 8.0 {
             return TransitionTemplate::SlamCut;
         }
@@ -55,14 +62,6 @@ impl Planner {
                 && matches!(camelot_distance, 0 | 1 | 7))
         {
             return TransitionTemplate::SafeCrossfade;
-        }
-
-        if matches!(policy.mix_intent, MixIntent::Bold)
-            && bpm_delta <= 8.0
-            && !outgoing.phrase_bar_indices.is_empty()
-            && !incoming.phrase_bar_indices.is_empty()
-        {
-            return TransitionTemplate::FilterSweep;
         }
 
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
@@ -409,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_bold_still_rejects_slam_cut_bpm_delta() {
+    fn choose_template_bold_prefers_filter_sweep_over_slam_cut_bpm_delta() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
@@ -420,7 +419,7 @@ mod tests {
                 &profile(Some(140.0), Some("8A"), 32),
                 &policy
             ),
-            TransitionTemplate::SlamCut
+            TransitionTemplate::FilterSweep
         );
     }
 
