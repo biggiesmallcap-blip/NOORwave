@@ -1,7 +1,7 @@
 use crate::db::audio_settings::AudioQuality;
 use crate::db::{
     Database,
-    models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
+    models::{PlaybackState, QueueItem, Track},
     queries,
 };
 use crate::playback::automix::{AUTOMIX_MIN_UPCOMING, ensure_automix_queue_depth};
@@ -10,15 +10,21 @@ use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahe
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::generate_shuffle_seed;
-use crate::services::audio_analysis::compute_harmonic_multiplier;
 use crate::services::audio_analysis::dj_profile::decode_f32_blob;
 use crate::services::tidal::stream::{self, StreamInfo, StreamRequest};
-use crate::smart::taste_vector::adapters::from_session_profile;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+use crate::db::models::AudioDspFeatures;
+#[cfg(test)]
+use crate::services::audio_analysis::compute_harmonic_multiplier;
+#[cfg(test)]
+use crate::smart::taste_vector::adapters::from_session_profile;
+#[cfg(test)]
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
 pub struct PlaybackSnapshot {
