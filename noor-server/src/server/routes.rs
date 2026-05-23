@@ -1,7 +1,7 @@
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
-use crate::playback::{player, queue, runtime as playback_runtime};
+use crate::playback::{automix, player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
 };
@@ -7339,7 +7339,7 @@ async fn play_track(
             // play_track resets `user_cleared_at` to 0 above, so the
             // suppression window cannot apply to this user-driven fill.
             let result = bg_db.with_conn(|conn| {
-                player::ensure_automix_queue_depth(conn, player::AUTOMIX_MIN_UPCOMING, false)
+                automix::ensure_automix_queue_depth(conn, automix::AUTOMIX_MIN_UPCOMING, false)
             });
             if result.is_ok() {
                 let _ = bg_tx.send(AppEvent::QueueUpdated);
@@ -8620,15 +8620,15 @@ async fn set_playback_automix(
                 player::set_crossfade_ms(conn, ms)?;
             }
             if let Some(dn) = payload.discover_new {
-                player::set_automix_discover_new(conn, dn)?;
+                automix::set_automix_discover_new(conn, dn)?;
             }
             if let Some(use_learning) = payload.use_learning {
-                player::set_automix_use_learning(conn, use_learning)?;
+                automix::set_automix_use_learning(conn, use_learning)?;
             }
             if let Some(allow_external) = payload.allow_external {
-                player::set_automix_allow_external(conn, allow_external)?;
+                automix::set_automix_allow_external(conn, allow_external)?;
             }
-            player::set_automix_enabled(conn, payload.enabled)
+            automix::set_automix_enabled(conn, payload.enabled)
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
