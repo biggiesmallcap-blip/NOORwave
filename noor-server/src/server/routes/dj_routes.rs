@@ -33,6 +33,7 @@ const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
+const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -199,6 +200,8 @@ struct DjTimingHistorySummary {
     event_count: usize,
     average_delta_ms: Option<i64>,
     average_abs_delta_ms: Option<i64>,
+    median_abs_delta_ms: Option<i64>,
+    worst_abs_delta_ms: Option<i64>,
     tight_count: usize,
     usable_count: usize,
     loose_count: usize,
@@ -395,7 +398,9 @@ async fn get_status(
                     latest_open_transition_for_pair(conn, current_ref.as_ref(), next_ref.as_ref())?;
                 let recent_timing_events =
                     latest_dj_transition_timing_history(conn, DJ_TIMING_HISTORY_LIMIT)?;
-                let timing_history_summary = summarize_timing_history(&recent_timing_events);
+                let tuning_deltas = latest_fired_dj_timing_deltas(conn, 20)?;
+                let timing_history_summary =
+                    summarize_timing_history(&recent_timing_events, &tuning_deltas);
                 let mut missing_profile_refs = Vec::new();
                 if enabled {
                     if current.as_ref().is_some_and(|deck| !deck.profile_ready)
@@ -697,11 +702,7 @@ async fn queue_tidal_profile_rebuild(
         });
     };
 
-    let user_quality = super::current_user_audio_quality(&state).await;
-    let request = tidal_stream::StreamRequest::new(
-        tidal_id,
-        super::requested_tidal_quality(user_quality, None),
-    );
+    let request = dj_profile_analysis_stream_request(tidal_id);
     let track = rebuild_track_for_tidal_ref(&state, tidal_id).await;
     let (http_client, generation) = {
         let state_guard = state.read().await;
@@ -749,6 +750,10 @@ async fn queue_tidal_profile_rebuild(
         accepted: true,
         status: "accepted".to_string(),
     })
+}
+
+fn dj_profile_analysis_stream_request(tidal_id: i64) -> tidal_stream::StreamRequest {
+    tidal_stream::StreamRequest::new(tidal_id, DJ_PROFILE_ANALYSIS_TIDAL_QUALITY)
 }
 
 async fn queue_tidal_profile_rebuild_if_idle(
@@ -1288,8 +1293,8 @@ fn timing_direction(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -
         Some("armed") => "pending",
         Some("late") => "late",
         Some("fired") => match timing_delta_ms {
-            Some(delta_ms) if delta_ms < -250 => "early",
-            Some(delta_ms) if delta_ms > 250 => "late",
+            Some(delta_ms) if delta_ms < -150 => "early",
+            Some(delta_ms) if delta_ms > 150 => "late",
             Some(_) => "on_time",
             None => "unknown",
         },
@@ -1297,7 +1302,30 @@ fn timing_direction(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -
     }
 }
 
-fn summarize_timing_history(events: &[DjTimingHistoryEvent]) -> DjTimingHistorySummary {
+fn latest_fired_dj_timing_deltas(
+    conn: &rusqlite::Connection,
+    limit: i64,
+) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT timing_delta_ms
+         FROM dj_transition_events
+         WHERE timing_status = 'fired'
+           AND timing_delta_ms IS NOT NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit.max(0)], |row| row.get::<_, i64>(0))?;
+    let mut deltas = Vec::new();
+    for row in rows {
+        deltas.push(row?);
+    }
+    Ok(deltas)
+}
+
+fn summarize_timing_history(
+    events: &[DjTimingHistoryEvent],
+    tuning_deltas: &[i64],
+) -> DjTimingHistorySummary {
     let mut delta_sum = 0i64;
     let mut abs_delta_sum = 0i64;
     let mut delta_count = 0i64;
@@ -1332,12 +1360,55 @@ fn summarize_timing_history(events: &[DjTimingHistoryEvent]) -> DjTimingHistoryS
         event_count: events.len(),
         average_delta_ms: (delta_count > 0).then_some(delta_sum / delta_count),
         average_abs_delta_ms: (delta_count > 0).then_some(abs_delta_sum / delta_count),
+        median_abs_delta_ms: median_abs_delta(tuning_deltas),
+        worst_abs_delta_ms: worst_abs_delta(tuning_deltas),
         tight_count,
         usable_count,
         loose_count,
         bad_count,
         late_count,
         missed_count,
+    }
+}
+
+fn median_abs_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut abs_values = deltas.iter().map(|delta| delta.abs()).collect::<Vec<_>>();
+    abs_values.sort_unstable();
+    let middle = abs_values.len() / 2;
+    if abs_values.len() % 2 == 0 {
+        Some((abs_values[middle - 1] + abs_values[middle]) / 2)
+    } else {
+        Some(abs_values[middle])
+    }
+}
+
+fn worst_abs_delta(deltas: &[i64]) -> Option<i64> {
+    deltas.iter().map(|delta| delta.abs()).max()
+}
+
+#[allow(dead_code)]
+fn fire_ahead_evidence_passes(deltas: &[i64]) -> bool {
+    if deltas.len() < 20 {
+        return false;
+    }
+    let positive_count = deltas.iter().filter(|delta| **delta > 0).count();
+    positive_count * 10 >= deltas.len() * 7 && median_delta(deltas).is_some_and(|delta| delta > 150)
+}
+
+fn median_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut values = deltas.to_vec();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2)
+    } else {
+        Some(values[middle])
     }
 }
 
@@ -1404,14 +1475,17 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         transition.timing_delta_ms,
     )
     .to_string();
-    if transition.renderer_template.as_deref() == Some("SafeCrossfade") {
+    if matches!(
+        transition.renderer_template.as_deref(),
+        Some("SafeCrossfade" | "FilterSweep")
+    ) {
+        let downgrade_reason = renderer_downgrade_reason(transition);
         return RendererStatus {
             planned_template: Some(transition.template.clone()),
             renderer_template: transition.renderer_template.clone(),
             renderer_mode: Some("dj_gain_program".to_string()),
-            downgrade_reason: (transition.template != "SafeCrossfade")
-                .then(|| "template_not_renderable".to_string()),
-            planning_reason: transition.fallback_reason.clone(),
+            downgrade_reason,
+            planning_reason: planning_reason_without_renderer_downgrade(transition),
             sync_target: transition.timing_source.clone(),
             planned_start_ms: transition.planned_start_ms,
             actual_start_ms: transition.actual_start_ms,
@@ -1446,9 +1520,35 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
     }
 }
 
+fn renderer_downgrade_reason(transition: &OpenTransition) -> Option<String> {
+    if transition.renderer_template.as_deref() == Some(transition.template.as_str()) {
+        return None;
+    }
+    Some(
+        transition
+            .fallback_reason
+            .as_deref()
+            .filter(|reason| is_renderer_downgrade_reason(reason))
+            .unwrap_or("template_not_renderable")
+            .to_string(),
+    )
+}
+
+fn planning_reason_without_renderer_downgrade(transition: &OpenTransition) -> Option<String> {
+    transition
+        .fallback_reason
+        .as_deref()
+        .filter(|reason| !is_renderer_downgrade_reason(reason))
+        .map(str::to_string)
+}
+
+fn is_renderer_downgrade_reason(reason: &str) -> bool {
+    matches!(reason, "template_not_renderable" | "timing_unstable")
+}
+
 fn renderer_template_from_program_json(program_json: &str) -> Option<String> {
     let program: noor_mix::TransitionProgram = serde_json::from_str(program_json).ok()?;
-    (program.template == "SafeCrossfade").then_some(program.template)
+    matches!(program.template.as_str(), "SafeCrossfade" | "FilterSweep").then_some(program.template)
 }
 
 fn media_ref_label(
@@ -1566,10 +1666,18 @@ mod tests {
     }
 
     #[test]
+    fn dj_profile_rebuild_uses_low_quality_analysis_stream() {
+        let request = dj_profile_analysis_stream_request(28051328);
+
+        assert_eq!(request.track_id, 28051328);
+        assert_eq!(request.audio_quality, "LOW");
+    }
+
+    #[test]
     fn renderer_status_keeps_non_renderable_template_out_of_main_renderer() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
             id: 17,
-            template: "FilterSweep".to_string(),
+            template: "SlamCut".to_string(),
             renderer_template: None,
             fallback_reason: None,
             planned_start_ms: None,
@@ -1579,7 +1687,7 @@ mod tests {
             timing_status: None,
         }));
 
-        assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
+        assert_eq!(status.planned_template.as_deref(), Some("SlamCut"));
         assert_eq!(status.renderer_template, None);
         assert_eq!(status.renderer_mode.as_deref(), Some("legacy_overlap"));
         assert_eq!(
@@ -1589,9 +1697,30 @@ mod tests {
     }
 
     #[test]
-    fn renderer_status_marks_safe_crossfade_renderer_as_pending() {
+    fn renderer_status_exposes_filter_sweep_runtime_program() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
             id: 18,
+            template: "FilterSweep".to_string(),
+            renderer_template: Some("FilterSweep".to_string()),
+            fallback_reason: None,
+            planned_start_ms: Some(112_000),
+            actual_start_ms: Some(112_144),
+            timing_delta_ms: Some(144),
+            timing_source: Some("downbeat_sync".to_string()),
+            timing_status: Some("fired".to_string()),
+        }));
+
+        assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
+        assert_eq!(status.renderer_template.as_deref(), Some("FilterSweep"));
+        assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
+        assert_eq!(status.downgrade_reason, None);
+        assert_eq!(status.timing_direction, "on_time");
+    }
+
+    #[test]
+    fn renderer_status_marks_safe_crossfade_renderer_as_pending() {
+        let status = renderer_status_for_transition(Some(&OpenTransition {
+            id: 19,
             template: "SafeCrossfade".to_string(),
             renderer_template: None,
             fallback_reason: None,
@@ -1614,10 +1743,10 @@ mod tests {
     #[test]
     fn renderer_status_exposes_safe_crossfade_runtime_program() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
-            id: 19,
-            template: "FilterSweep".to_string(),
+            id: 20,
+            template: "SlamCut".to_string(),
             renderer_template: Some("SafeCrossfade".to_string()),
-            fallback_reason: Some("template_not_renderable".to_string()),
+            fallback_reason: None,
             planned_start_ms: Some(112_000),
             actual_start_ms: Some(112_144),
             timing_delta_ms: Some(144),
@@ -1625,13 +1754,14 @@ mod tests {
             timing_status: Some("fired".to_string()),
         }));
 
-        assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
+        assert_eq!(status.planned_template.as_deref(), Some("SlamCut"));
         assert_eq!(status.renderer_template.as_deref(), Some("SafeCrossfade"));
         assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
         assert_eq!(
             status.downgrade_reason.as_deref(),
             Some("template_not_renderable")
         );
+        assert_eq!(status.planning_reason, None);
         assert_eq!(status.planned_start_ms, Some(112_000));
         assert_eq!(status.actual_start_ms, Some(112_144));
         assert_eq!(status.timing_delta_ms, Some(144));
@@ -1661,6 +1791,26 @@ mod tests {
             status.planning_reason.as_deref(),
             Some("next_profile_missing")
         );
+    }
+
+    #[test]
+    fn renderer_status_reports_timing_unstable_as_downgrade_reason() {
+        let status = renderer_status_for_transition(Some(&OpenTransition {
+            id: 21,
+            template: "FilterSweep".to_string(),
+            renderer_template: Some("SafeCrossfade".to_string()),
+            fallback_reason: Some("timing_unstable".to_string()),
+            planned_start_ms: Some(202_091),
+            actual_start_ms: Some(202_640),
+            timing_delta_ms: Some(549),
+            timing_source: Some("downbeat_sync".to_string()),
+            timing_status: Some("fired".to_string()),
+        }));
+
+        assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
+        assert_eq!(status.renderer_template.as_deref(), Some("SafeCrossfade"));
+        assert_eq!(status.downgrade_reason.as_deref(), Some("timing_unstable"));
+        assert_eq!(status.planning_reason, None);
     }
 
     #[test]
@@ -1879,8 +2029,8 @@ mod tests {
     #[test]
     fn timing_direction_labels_delta_direction_and_status() {
         assert_eq!(timing_direction(Some("fired"), Some(150)), "on_time");
-        assert_eq!(timing_direction(Some("fired"), Some(-251)), "early");
-        assert_eq!(timing_direction(Some("fired"), Some(251)), "late");
+        assert_eq!(timing_direction(Some("fired"), Some(-151)), "early");
+        assert_eq!(timing_direction(Some("fired"), Some(151)), "late");
         assert_eq!(timing_direction(Some("late"), Some(0)), "late");
         assert_eq!(timing_direction(Some("missed"), None), "missed");
         assert_eq!(timing_direction(Some("armed"), None), "pending");
@@ -1946,11 +2096,13 @@ mod tests {
             },
         ];
 
-        let summary = summarize_timing_history(&events);
+        let summary = summarize_timing_history(&events, &[100, 800, -1_200, 40]);
 
         assert_eq!(summary.event_count, 3);
         assert_eq!(summary.average_delta_ms, Some(450));
         assert_eq!(summary.average_abs_delta_ms, Some(450));
+        assert_eq!(summary.median_abs_delta_ms, Some(450));
+        assert_eq!(summary.worst_abs_delta_ms, Some(1_200));
         assert_eq!(summary.tight_count, 1);
         assert_eq!(summary.loose_count, 1);
         assert_eq!(summary.bad_count, 1);

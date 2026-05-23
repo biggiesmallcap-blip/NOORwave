@@ -7422,6 +7422,7 @@ fn validate_dj_fallback_reason(reason: Option<&str>) -> Result<()> {
                 | "queue_changed"
                 | "safety_override_safe"
                 | "template_not_renderable"
+                | "timing_unstable"
         )
     {
         bail!("unknown DJ fallback reason: {reason}");

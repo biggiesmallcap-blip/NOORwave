@@ -440,8 +440,14 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
         let planned_template = plan.program.template.clone();
-        let (renderer_program, renderer_fallback_reason) =
-            v1_renderable_program(&plan.program, sample_rate.max(1), channels.max(1));
+        let filter_sweep_unstable = planned_template == "FilterSweep"
+            && engine.db().with_conn(filter_sweep_timing_unstable)?;
+        let (renderer_program, renderer_fallback_reason) = v1_renderable_program(
+            &plan.program,
+            sample_rate.max(1),
+            channels.max(1),
+            filter_sweep_unstable,
+        );
         let renderer_plan = DjTransitionPlan {
             program: renderer_program,
             rejected_alternatives: plan.rejected_alternatives,
@@ -512,6 +518,11 @@ const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
 const DJ_FIRE_AHEAD_POSITIVE_PERCENT: usize = 70;
 const DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS: i64 = 150;
 const DJ_FIRE_AHEAD_MAX_MS: i64 = 150;
+const DJ_FILTER_SWEEP_TIMING_WINDOW: i64 = 20;
+const DJ_FILTER_SWEEP_TIMING_MIN_ROWS: usize = 4;
+const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
+const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
+const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -528,6 +539,48 @@ fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
         deltas.push(row?);
     }
     Ok(fire_ahead_ms_from_deltas(&deltas))
+}
+
+fn filter_sweep_timing_unstable(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT timing_delta_ms
+         FROM dj_transition_events
+         WHERE timing_status = 'fired'
+           AND timing_delta_ms IS NOT NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([DJ_FILTER_SWEEP_TIMING_WINDOW], |row| row.get::<_, i64>(0))?;
+    let mut deltas = Vec::new();
+    for row in rows {
+        deltas.push(row?);
+    }
+    Ok(filter_sweep_timing_unstable_from_deltas(&deltas))
+}
+
+fn filter_sweep_timing_unstable_from_deltas(deltas: &[i64]) -> bool {
+    if deltas.len() < DJ_FILTER_SWEEP_TIMING_MIN_ROWS {
+        return false;
+    }
+    let Some(median_abs) = median_abs_delta(deltas) else {
+        return false;
+    };
+    let worst_abs = deltas.iter().map(|delta| delta.abs()).max().unwrap_or(0);
+    median_abs > DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS || worst_abs > DJ_FILTER_SWEEP_WORST_ABS_MAX_MS
+}
+
+fn median_abs_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut values = deltas.iter().map(|delta| delta.abs()).collect::<Vec<_>>();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2)
+    } else {
+        Some(values[middle])
+    }
 }
 
 fn fire_ahead_ms_from_deltas(deltas: &[i64]) -> u32 {
@@ -696,7 +749,7 @@ fn synced_overlap_from_grid_ms(
     sample_rate: u32,
 ) -> Option<i32> {
     const MIN_SYNC_OVERLAP_MS: i64 = 8_000;
-    const MAX_SYNC_OVERLAP_MS: i64 = 12_000;
+    const MAX_SYNC_OVERLAP_MS: i64 = 16_000;
     let preferred_ms = preferred_overlap_ms.max(250) as i64;
     let program_ms = program_samples
         .map(|samples| {
@@ -754,9 +807,30 @@ fn v1_renderable_program(
     program: &noor_mix::TransitionProgram,
     sample_rate: u32,
     channels: u16,
+    filter_sweep_timing_unstable: bool,
 ) -> (noor_mix::TransitionProgram, Option<&'static str>) {
     if program.template == "SafeCrossfade" {
         return (program.clone(), None);
+    }
+    if program.template == "FilterSweep" {
+        if filter_sweep_timing_unstable {
+            return (
+                crate::playback::dj_engine::safe_crossfade_program(
+                    sample_rate,
+                    channels,
+                    noor_mix::Policy::default(),
+                ),
+                Some("timing_unstable"),
+            );
+        }
+        return (
+            noor_mix::planner::filter_sweep_eq_wash_program(
+                sample_rate,
+                channels,
+                DJ_FILTER_SWEEP_RENDER_MS,
+            ),
+            None,
+        );
     }
     (
         crate::playback::dj_engine::safe_crossfade_program(
@@ -3380,18 +3454,18 @@ mod tests {
 
             assert_eq!(row.0, "FilterSweep");
             assert_eq!(renderer_program.template, "FilterSweep");
-            assert_eq!(renderer_program.resolve_at, 384_000);
+            assert_eq!(renderer_program.resolve_at, 576_000);
             assert_eq!(row.2, None);
         }
 
         #[test]
-        fn v1_renderable_program_passes_filter_sweep_with_safe_duration() {
+        fn v1_renderable_program_passes_filter_sweep_with_wider_duration() {
             let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 32_000);
 
-            let (program, reason) = v1_renderable_program(&input, 48_000, 2);
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "FilterSweep");
-            assert_eq!(program.resolve_at, 384_000);
+            assert_eq!(program.resolve_at, 576_000);
             assert_eq!(reason, None);
             assert!(
                 program
@@ -3406,14 +3480,24 @@ mod tests {
             let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
             input.template = "SlamCut".to_string();
 
-            let (program, reason) = v1_renderable_program(&input, 48_000, 2);
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "SafeCrossfade");
             assert_eq!(reason, Some("template_not_renderable"));
         }
 
         #[test]
-        fn filter_sweep_uses_safe_crossfade_overlap_duration() {
+        fn unstable_timing_downgrades_filter_sweep_to_safe_crossfade() {
+            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, true);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("timing_unstable"));
+        }
+
+        #[test]
+        fn filter_sweep_uses_wider_overlap_than_safe_crossfade() {
             let safe = crate::playback::dj_engine::safe_crossfade_program(
                 48_000,
                 2,
@@ -3422,13 +3506,11 @@ mod tests {
             let filter = noor_mix::planner::filter_sweep_eq_wash_program(
                 48_000,
                 2,
-                noor_mix::Policy::default().default_crossfade_ms,
+                DJ_FILTER_SWEEP_RENDER_MS,
             );
 
-            assert_eq!(
-                dj_gapless_plan_from_program(&filter),
-                dj_gapless_plan_from_program(&safe)
-            );
+            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 8_000);
+            assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 12_000);
         }
 
         #[test]
@@ -3450,6 +3532,17 @@ mod tests {
             assert_eq!(fire_ahead_ms_from_deltas(&mixed), 0);
             assert_eq!(fire_ahead_ms_from_deltas(&low_median), 0);
             assert_eq!(fire_ahead_ms_from_deltas(&passing[..19]), 0);
+        }
+
+        #[test]
+        fn filter_sweep_timing_gate_uses_abs_error_not_signed_bias() {
+            assert!(filter_sweep_timing_unstable_from_deltas(&[
+                549, -399, 303, -375
+            ]));
+            assert!(!filter_sweep_timing_unstable_from_deltas(&[
+                140, -130, 75, -90
+            ]));
+            assert!(!filter_sweep_timing_unstable_from_deltas(&[549, -399, 303]));
         }
 
         #[test]
