@@ -564,6 +564,11 @@ fn put_cached_tidal_page_modules(
     modules: Vec<TidalHomeModule>,
 ) {
     let mut guard = cache.lock().unwrap();
+    // Sweep expired entries on insert so the map stays bounded to the live-TTL
+    // working set instead of accumulating dead keys for the process lifetime.
+    // Inserts only happen on a cache miss (after a network fetch), so the O(n)
+    // scan is cheap and rare.
+    guard.retain(|_, (stored_at, _)| stored_at.elapsed() < TIDAL_HOME_CACHE_TTL);
     guard.insert(key, (Instant::now(), modules));
 }
 
@@ -798,6 +803,38 @@ mod tests {
 
         assert!(get_cached_tidal_page_modules(&cache, &key).is_none());
         assert!(!cache.lock().unwrap().contains_key(&key));
+    }
+
+    #[test]
+    fn tidal_page_modules_cache_evicts_stale_keys_on_insert() {
+        let cache = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let stale_key = tidal_page_modules_cache_key("AU", "pages/old");
+        let fresh_key = tidal_page_modules_cache_key("AU", "pages/new");
+        let modules = vec![TidalHomeModule {
+            id: "x".to_string(),
+            title: "X".to_string(),
+            kind: "PLAYLIST_LIST".to_string(),
+            more_path: None,
+            items: Vec::new(),
+        }];
+
+        // Seed a stale entry that nobody will ever read again.
+        cache.lock().unwrap().insert(
+            stale_key.clone(),
+            (
+                Instant::now() - Duration::from_secs(6 * 60 * 60 + 1),
+                modules.clone(),
+            ),
+        );
+
+        // Inserting an unrelated fresh key must sweep the stale one so the map
+        // can't grow without bound from never-revisited keys.
+        put_cached_tidal_page_modules(&cache, fresh_key.clone(), modules);
+
+        let guard = cache.lock().unwrap();
+        assert!(!guard.contains_key(&stale_key), "stale key should be swept");
+        assert!(guard.contains_key(&fresh_key));
+        assert_eq!(guard.len(), 1);
     }
 }
 

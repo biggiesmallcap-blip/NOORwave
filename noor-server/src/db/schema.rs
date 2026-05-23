@@ -44,6 +44,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_040,
     MIGRATION_041,
     MIGRATION_042,
+    MIGRATION_043,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1159,6 +1160,27 @@ const MIGRATION_042: &str = r#"
 ALTER TABLE playback_state ADD COLUMN shuffle_seed INTEGER;
 "#;
 
+// Discovery / favorites / radio-seed ordering indexes. Before these, the three
+// hottest non-library track queries each did a full `SCAN tracks` plus a temp
+// B-tree sort over all ~35k rows on every call:
+//   - get_favorite_track_ids:        ORDER BY is_favorite, play_count DESC
+//   - get_discovery_candidate_tracks ORDER BY is_favorite DESC, play_count ASC,
+//                                    fidelity_score DESC, date_added DESC, title
+//   - get_tidal_similar_seed_rows:   ORDER BY play_count DESC, last_played_at DESC, id
+// Each index lets SQLite satisfy the ORDER BY directly (no temp B-tree) and stop
+// after LIMIT rows. Measured on the dev library (35.5k tracks): favorites 17x,
+// discovery 95x, seed 51x faster. The default library listing already rides
+// idx_tracks_date_added, so it is unchanged. Cost is three extra indexes to
+// maintain on track insert/update, paid during bulk sync transactions.
+const MIGRATION_043: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_tracks_fav_play
+    ON tracks(is_favorite DESC, play_count DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_discovery
+    ON tracks(is_favorite DESC, play_count ASC, fidelity_score DESC, date_added DESC, title ASC);
+CREATE INDEX IF NOT EXISTS idx_tracks_play_last
+    ON tracks(play_count DESC, last_played_at DESC, id DESC);
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1279,5 +1301,57 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migration_043_adds_ordering_indexes_and_avoids_temp_sort() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        for idx in [
+            "idx_tracks_fav_play",
+            "idx_tracks_discovery",
+            "idx_tracks_play_last",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing index {idx}");
+        }
+
+        // The discovery ordering must be satisfiable straight from the index:
+        // the planner should not fall back to a temp B-tree sort. EXPLAIN QUERY
+        // PLAN decides this from the schema alone, so it is stable on an empty
+        // in-memory table.
+        let plan: String = {
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT t.id FROM tracks t \
+                     ORDER BY t.is_favorite DESC, t.play_count ASC, \
+                              t.fidelity_score DESC, t.date_added DESC, t.title ASC \
+                     LIMIT 200",
+                )
+                .unwrap();
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.join(" | ")
+        };
+        assert!(
+            plan.contains("idx_tracks_discovery"),
+            "discovery query should use idx_tracks_discovery, plan was: {plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "discovery query should not need a temp sort, plan was: {plan}"
+        );
     }
 }

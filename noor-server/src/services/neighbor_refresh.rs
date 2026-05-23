@@ -428,13 +428,22 @@ pub async fn refresh_seed_neighbors(
                     });
                 }
             }
-            lock_refreshed(&refreshed_seeds).insert(
-                seed_id,
-                RefreshEntry {
-                    model_id,
-                    at: Instant::now(),
-                },
-            );
+            {
+                let mut guard = lock_refreshed(&refreshed_seeds);
+                // Sweep on insert: drop TTL-expired entries and any left over
+                // from a previous model so the map tracks only the live working
+                // set instead of every seed ever refreshed this process.
+                guard.retain(|_, entry| {
+                    entry.model_id == model_id && entry.at.elapsed() < REFRESH_TTL
+                });
+                guard.insert(
+                    seed_id,
+                    RefreshEntry {
+                        model_id,
+                        at: Instant::now(),
+                    },
+                );
+            }
             let _ = event_tx.send(AppEvent::DiscoverySpaceRefreshed {
                 seed_track_id: seed_id,
             });
