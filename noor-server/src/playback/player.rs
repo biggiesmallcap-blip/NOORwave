@@ -421,6 +421,21 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
     {
         return Ok(job);
     }
+    if let Some((existing_event_id, existing_program)) = engine
+        .db()
+        .with_conn(|conn| latest_armed_dj_transition_event_for_pair(conn, current, next))?
+    {
+        let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
+        job = job.with_prepared_transition(PreparedTransitionProgram {
+            program: existing_program,
+            transition_event_id: Some(existing_event_id),
+            fire_ahead_ms,
+            queue_generation: pair.queue_generation,
+            current_queue_item_id: pair.current_queue_item_id,
+            next_queue_item_id: Some(next_queue_item_id),
+        });
+        return Ok(job);
+    }
     if let Some(plan) =
         engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
@@ -455,6 +470,42 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         });
     }
     Ok(job)
+}
+
+fn latest_armed_dj_transition_event_for_pair(
+    conn: &Connection,
+    current: &DjMediaRef,
+    next: &DjMediaRef,
+) -> Result<Option<(i64, noor_mix::TransitionProgram)>> {
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let row = conn
+        .query_row(
+            "SELECT id, program_json
+         FROM dj_transition_events
+         WHERE from_media_ref_kind = ?1
+           AND from_media_ref_id = ?2
+           AND to_media_ref_kind = ?3
+           AND to_media_ref_id = ?4
+           AND timing_status = 'armed'
+           AND actual_start_ms IS NULL
+           AND outcome IS NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT 1",
+            params![
+                current_key.media_ref_kind,
+                current_key.media_ref_id,
+                next_key.media_ref_kind,
+                next_key.media_ref_id,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((id, program_json)) = row else {
+        return Ok(None);
+    };
+    let program = serde_json::from_str(&program_json)?;
+    Ok(Some((id, program)))
 }
 
 const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
@@ -3198,6 +3249,16 @@ mod tests {
                 .expect("selected");
 
             assert_eq!(selected, Some(fired_id));
+        }
+
+        #[test]
+        fn repeated_planning_reuses_existing_armed_event_for_pair() {
+            let db = db_with_pair();
+            let first = plan(&db);
+            let second = plan(&db);
+
+            assert_eq!(second.transition_event_id, first.transition_event_id);
+            assert_eq!(event_count(&db), 1);
         }
 
         #[test]
