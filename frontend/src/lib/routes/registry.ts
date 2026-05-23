@@ -11,6 +11,7 @@ export type AppRouteId =
 	| 'playlists'
 	| 'discover'
 	| 'automix'
+	| 'dj'
 	| 'analytics'
 	| 'duplicates'
 	| 'settings';

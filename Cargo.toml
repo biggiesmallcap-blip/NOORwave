@@ -1,5 +1,5 @@
 [workspace]
-members = ["noor-server", "noor-app"]
+members = ["noor-server", "noor-app", "noor-mix"]
 resolver = "2"
 
 [profile.dev]

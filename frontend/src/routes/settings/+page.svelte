@@ -1455,11 +1455,13 @@
 	// out of the path, and sample-rate-follow so the device runs at the FLAC's
 	// native rate. Off mode reverts to the safer defaults that Just Work on
 	// flaky DACs (CD-quality, shared output, fixed device rate).
-	let bitPerfectActive = $derived(
+	let bitPerfectSettingsActive = $derived(
 		$audioSettings.settings?.quality === 'HI_RES_LOSSLESS' &&
 		$audioSettings.settings?.exclusive_mode === true &&
 		$audioSettings.settings?.sample_rate_follow === true
 	);
+	let djProcessingActive = $derived(playbackRuntime?.dj_engine_enabled === true);
+	let bitPerfectActive = $derived(bitPerfectSettingsActive && !djProcessingActive);
 
 	function onBitPerfectToggle(e: Event) {
 		const enable = (e.target as HTMLInputElement).checked;
@@ -2137,11 +2139,13 @@
 						<div>
 							<span class="audio-mode-label">Current mode</span>
 							<strong>
-								{bitPerfectActive ? 'Bit-perfect exclusive' : s.exclusive_mode ? 'Exclusive output' : 'Shared output'}
+								{bitPerfectActive ? 'Bit-perfect exclusive' : s.exclusive_mode && djProcessingActive ? 'Exclusive with DJ processing' : s.exclusive_mode ? 'Exclusive output' : 'Shared output'}
 							</strong>
 							<p>
 								{#if bitPerfectActive}
 									Hi-Res Lossless, exclusive WASAPI, native sample rates. Crossfade is bypassed; same-rate gapless prebuffer stays on.
+								{:else if s.exclusive_mode && djProcessingActive}
+									Exclusive device control is on. DJ processing is active, so playback is not bit-perfect.
 								{:else if s.exclusive_mode}
 									Exclusive device control is on. Crossfade is bypassed for bit-perfect output.
 								{:else}
@@ -2153,7 +2157,7 @@
 							<label class="toggle-switch audio-mode-toggle" aria-label="Toggle bit-perfect mode">
 								<input
 									type="checkbox"
-									checked={bitPerfectActive}
+									checked={bitPerfectSettingsActive}
 									onchange={onBitPerfectToggle}
 								/>
 								<span class="toggle-slider"></span>
