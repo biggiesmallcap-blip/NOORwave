@@ -101,8 +101,6 @@ impl DjEngine {
             if safety.force_safe_crossfade {
                 policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
             }
-            lock_v1_renderable_template(&mut policy);
-
             let mut program = Planner::plan(&outgoing, &incoming, &policy);
             program.sample_rate = sample_rate.max(1);
             program.channels = channels.max(1);
@@ -119,10 +117,6 @@ impl DjEngine {
         self.db
             .with_conn(|conn| queries::count_recent_bad_dj_feedback_for_ref(conn, &key, 3))
     }
-}
-
-fn lock_v1_renderable_template(policy: &mut Policy) {
-    policy.safety_template_override = Some(TransitionTemplate::SafeCrossfade);
 }
 
 fn plan_from_program(
@@ -539,8 +533,43 @@ mod tests {
             ref_for("library_track", 2),
         )
         .expect("program");
-        assert_eq!(program.template, "SafeCrossfade");
+        assert_eq!(program.template, "BassSwap16");
         program.validate().expect("valid");
+    }
+
+    #[test]
+    fn compatible_profiles_can_plan_filter_sweep() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        db.with_conn(|conn| {
+            queries::upsert_audio_dj_profile_correction(
+                conn,
+                &AudioDjProfileCorrectionRow {
+                    media_ref_kind: "library_track".to_string(),
+                    media_ref_id: "2".to_string(),
+                    bpm_multiplier: Some(1.05),
+                    downbeat_offset_beats: None,
+                    phrase_offset_bars: None,
+                    safe_crossfade_only: false,
+                    transition_speed_bias: None,
+                    notes: None,
+                    created_at: "now".to_string(),
+                    updated_at: "now".to_string(),
+                },
+            )
+        })
+        .expect("seed bpm correction");
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "FilterSweep");
     }
 
     #[test]

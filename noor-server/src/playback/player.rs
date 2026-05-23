@@ -524,7 +524,7 @@ fn synced_dj_overlap_ms(
     let Some(profile) = queries::get_audio_dj_profile(conn, &key)? else {
         return Ok(None);
     };
-    if profile.profile_confidence < 0.6 {
+    if profile.profile_confidence < 0.65 {
         return Ok(None);
     }
 
@@ -3020,7 +3020,9 @@ mod tests {
 
     mod dj_transition_logging {
         use super::*;
-        use crate::db::models::{AudioDjProfileKey, AudioDjProfileRow};
+        use crate::db::models::{
+            AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow,
+        };
         use crate::db::schema;
         use crate::services::audio_analysis::dj_profile::{
             DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,
@@ -3225,11 +3227,29 @@ mod tests {
         }
 
         #[test]
-        fn v1_planner_lock_logs_and_prepares_safe_crossfade() {
+        fn v1_planner_logs_and_prepares_filter_sweep_when_renderable() {
             let db = db_with_pair();
+            db.with_conn(|conn| {
+                queries::upsert_audio_dj_profile_correction(
+                    conn,
+                    &AudioDjProfileCorrectionRow {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "2".to_string(),
+                        bpm_multiplier: Some(1.05),
+                        downbeat_offset_beats: None,
+                        phrase_offset_bars: None,
+                        safe_crossfade_only: false,
+                        transition_speed_bias: None,
+                        notes: None,
+                        created_at: "now".to_string(),
+                        updated_at: "now".to_string(),
+                    },
+                )
+            })
+            .expect("seed correction");
             let transition = plan(&db);
 
-            assert_eq!(transition.program.template, "SafeCrossfade");
+            assert_eq!(transition.program.template, "FilterSweep");
             let row: (String, String, Option<String>) = db
                 .with_conn(|conn| {
                     conn.query_row(
@@ -3244,8 +3264,9 @@ mod tests {
             let renderer_program: noor_mix::TransitionProgram =
                 serde_json::from_str(&row.1).expect("program");
 
-            assert_eq!(row.0, "SafeCrossfade");
-            assert_eq!(renderer_program.template, "SafeCrossfade");
+            assert_eq!(row.0, "FilterSweep");
+            assert_eq!(renderer_program.template, "FilterSweep");
+            assert_eq!(renderer_program.resolve_at, 384_000);
             assert_eq!(row.2, None);
         }
 

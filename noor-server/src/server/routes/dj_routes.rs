@@ -28,7 +28,7 @@ use crate::services::audio_analysis::dj_profile::{
 use crate::services::tidal::stream as tidal_stream;
 
 const DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
-const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.6;
+const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.65;
 const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
