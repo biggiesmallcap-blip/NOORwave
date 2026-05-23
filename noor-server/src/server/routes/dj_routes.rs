@@ -7,8 +7,11 @@ use axum::{
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::SharedState;
 use crate::db::{
@@ -33,7 +36,13 @@ const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
+const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
+
+type ReadyPairPlanningKey = (i64, u64);
+
+static READY_PAIR_PLANNING_ATTEMPTS: OnceLock<Mutex<HashMap<ReadyPairPlanningKey, Instant>>> =
+    OnceLock::new();
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -461,7 +470,9 @@ async fn get_status(
         queue_tidal_profile_rebuild_if_idle(state.clone(), media_ref).await?;
     }
     if let Some((current_track_id, generation)) = ready_active_pair {
-        if ready_pair_transition_is_due(&state, current_track_id, generation).await {
+        if ready_pair_transition_is_due(&state, current_track_id, generation).await
+            && claim_ready_pair_transition_planning(current_track_id, generation)
+        {
             tracing::info!(
                 current_track_id,
                 generation,
@@ -522,6 +533,31 @@ fn ready_pair_transition_due(position_ms: i64, duration_ms: Option<i64>) -> bool
         return false;
     };
     duration_ms.saturating_sub(position_ms.max(0)) <= DJ_READY_PAIR_TRANSITION_WINDOW_MS
+}
+
+fn claim_ready_pair_transition_planning(current_track_id: i64, generation: u64) -> bool {
+    let attempts = READY_PAIR_PLANNING_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    let mut attempts = attempts.lock().unwrap_or_else(|error| error.into_inner());
+    claim_ready_pair_transition_planning_at(&mut attempts, current_track_id, generation, now)
+}
+
+fn claim_ready_pair_transition_planning_at(
+    attempts: &mut HashMap<ReadyPairPlanningKey, Instant>,
+    current_track_id: i64,
+    generation: u64,
+    now: Instant,
+) -> bool {
+    let retry_after = Duration::from_secs(DJ_READY_PAIR_PLANNING_RETRY_SECS);
+    attempts.retain(|_, last_attempt| now.duration_since(*last_attempt) < retry_after);
+    let key = (current_track_id, generation);
+    if let Some(last_attempt) = attempts.get(&key)
+        && now.duration_since(*last_attempt) < retry_after
+    {
+        return false;
+    }
+    attempts.insert(key, now);
+    true
 }
 
 async fn get_profile(
@@ -2145,6 +2181,39 @@ mod tests {
         assert!(ready_pair_transition_due(151_000, Some(180_000)));
         assert!(ready_pair_transition_due(180_000, Some(180_000)));
         assert!(!ready_pair_transition_due(151_000, None));
+    }
+
+    #[test]
+    fn ready_pair_transition_planning_cooldown_suppresses_same_generation() {
+        let mut attempts = HashMap::new();
+        let now = Instant::now();
+        let inside_retry = now + Duration::from_secs(DJ_READY_PAIR_PLANNING_RETRY_SECS - 1);
+        let after_retry = now + Duration::from_secs(DJ_READY_PAIR_PLANNING_RETRY_SECS + 1);
+
+        assert!(claim_ready_pair_transition_planning_at(
+            &mut attempts,
+            32335,
+            4,
+            now
+        ));
+        assert!(!claim_ready_pair_transition_planning_at(
+            &mut attempts,
+            32335,
+            4,
+            inside_retry
+        ));
+        assert!(claim_ready_pair_transition_planning_at(
+            &mut attempts,
+            32335,
+            5,
+            inside_retry
+        ));
+        assert!(claim_ready_pair_transition_planning_at(
+            &mut attempts,
+            32335,
+            4,
+            after_retry
+        ));
     }
 
     #[test]

@@ -54,6 +54,8 @@ type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTra
 
 const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
+const PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT: usize = 60;
+const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -11064,7 +11066,8 @@ fn spawn_playback_runtime_listener(
                         .audio_active
                         .store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Err(error) =
-                        handle_runtime_finished(state.clone(), track_id, generation).await
+                        handle_runtime_finished_with_retry(state.clone(), track_id, generation)
+                            .await
                     {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
@@ -12241,6 +12244,49 @@ async fn mark_armed_dj_transition_missed_if_needed(state: &SharedState) -> anyho
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     }
     Ok(())
+}
+
+async fn handle_runtime_finished_with_retry(
+    state: SharedState,
+    finished_track_id: i64,
+    generation: u64,
+) -> anyhow::Result<()> {
+    for attempt in 0..=PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT {
+        match handle_runtime_finished(state.clone(), finished_track_id, generation).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if sqlite_database_locked(&error)
+                    && attempt < PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT =>
+            {
+                let next_attempt = attempt + 1;
+                warn!(
+                    finished_track_id,
+                    generation, next_attempt, "Playback advance hit a locked database; retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(
+                    PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS,
+                ))
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_database_locked(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(rusqlite::Error::SqliteFailure(sqlite_error, _)) =
+            cause.downcast_ref::<rusqlite::Error>()
+        {
+            return matches!(
+                sqlite_error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            );
+        }
+        let message = cause.to_string();
+        message.contains("database is locked") || message.contains("database table is locked")
+    })
 }
 
 async fn handle_runtime_error(state: SharedState, message: &str) {
