@@ -1488,7 +1488,7 @@ mod tests {
                      WHERE name = ?1",
                     [column],
                     |row| row.get(0),
-            )
+                )
                 .unwrap();
             assert_eq!(exists, 1, "missing {column}");
         }
