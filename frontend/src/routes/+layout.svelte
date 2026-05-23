@@ -1014,6 +1014,27 @@
 
 	let queueTotalLabel = $derived(formatQueueTotal(queueTotalMs));
 
+	// Default visible-row cap for both desktop and mobile queue lists. The
+	// cap exists so a 500-row library/radio session doesn't paint thousands
+	// of DOM nodes at boot; users grow it with a "Load more" button so the
+	// rest of the queue isn't silently truncated.
+	const QUEUE_INITIAL_CAP = 40;
+	const QUEUE_LOAD_MORE_STEP = 40;
+	let queueVisibleCount = $state(QUEUE_INITIAL_CAP);
+
+	$effect(() => {
+		// Reset the cap when the queue gets smaller than what we are currently
+		// showing (clear, big remove, snapshot shrink). Without this the
+		// "Load more" button would linger at a count larger than the queue.
+		if (upcomingQueue.length < queueVisibleCount) {
+			queueVisibleCount = Math.max(QUEUE_INITIAL_CAP, Math.min(queueVisibleCount, upcomingQueue.length || QUEUE_INITIAL_CAP));
+		}
+	});
+
+	function loadMoreQueue() {
+		queueVisibleCount = Math.min(upcomingQueue.length, queueVisibleCount + QUEUE_LOAD_MORE_STEP);
+	}
+
 	const QUEUE_EXPANDED_KEY = 'noor.queueExpanded';
 
 	function loadQueueExpanded(): boolean {
@@ -1502,7 +1523,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
-					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
@@ -1622,8 +1643,11 @@
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > 40}
-				<p class="queue-overflow">+ {upcomingQueue.length - 40} more tracks waiting in the queue</p>
+			{#if upcomingQueue.length > queueVisibleCount}
+				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+				</button>
 			{/if}
 		</section>
 	</aside>
@@ -1842,7 +1866,7 @@
 
 			{#if upcomingQueue.length > 0}
 				<div class="mobile-np-queue-list">
-					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
@@ -1922,8 +1946,11 @@
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > 40}
-				<p class="queue-overflow">+ {upcomingQueue.length - 40} more tracks in the queue</p>
+			{#if upcomingQueue.length > queueVisibleCount}
+				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+				</button>
 			{/if}
 		</div>
 	{/if}
@@ -2882,8 +2909,7 @@
 	}
 
 	.queue-time,
-	.queue-empty span,
-	.queue-overflow {
+	.queue-empty span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
@@ -2985,9 +3011,29 @@
 		font-weight: var(--font-weight-semibold);
 	}
 
-	.queue-overflow {
-		padding-top: 12px;
-		border-top: 1px solid var(--border-subtle);
+	.queue-load-more {
+		margin-top: 12px;
+		padding: 8px 16px;
+		border-radius: 999px;
+		border: 1px dashed var(--border-strong);
+		background: color-mix(in srgb, var(--instrument-surface) 60%, transparent);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
+		align-self: center;
+	}
+
+	.queue-load-more:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		border-color: var(--accent-line);
+	}
+
+	.queue-load-more-rest {
+		margin-left: 6px;
+		color: var(--text-tertiary);
 	}
 
 	@media (max-width: 1320px) {
