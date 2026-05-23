@@ -32,6 +32,7 @@ const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.65;
 const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
+const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -455,18 +456,67 @@ async fn get_status(
         queue_tidal_profile_rebuild_if_idle(state.clone(), media_ref).await?;
     }
     if let Some((current_track_id, generation)) = ready_active_pair {
-        tracing::info!(
-            current_track_id,
-            generation,
-            "DJ profiles ready, requesting transition planning"
-        );
-        if let Err(error) =
-            super::handle_near_end(state.clone(), current_track_id, generation).await
-        {
-            tracing::warn!(error = %error, "DJ ready pair planning failed");
+        if ready_pair_transition_is_due(&state, current_track_id, generation).await {
+            tracing::info!(
+                current_track_id,
+                generation,
+                "DJ profiles ready near end, requesting transition planning"
+            );
+            if let Err(error) =
+                super::handle_near_end(state.clone(), current_track_id, generation).await
+            {
+                tracing::warn!(error = %error, "DJ ready pair planning failed");
+            }
         }
     }
     Ok(Json(response))
+}
+
+async fn ready_pair_transition_is_due(
+    state: &SharedState,
+    current_track_id: i64,
+    generation: u64,
+) -> bool {
+    let state_guard = state.read().await;
+    let Some(info) = state_guard.playback_runtime_info.as_ref() else {
+        return false;
+    };
+    if info.active_track_id != Some(current_track_id)
+        || state_guard
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != generation
+    {
+        return false;
+    }
+    let Some(runtime) = state_guard.playback_runtime.as_ref() else {
+        return false;
+    };
+    let position_ms = runtime
+        .handle
+        .get_position_ms(info.sample_rate, info.channels);
+    let duration_ms = state_guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT duration_ms FROM tracks WHERE id = ?1",
+                [current_track_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(anyhow::Error::from)
+        })
+        .ok()
+        .flatten();
+    ready_pair_transition_due(position_ms, duration_ms)
+}
+
+fn ready_pair_transition_due(position_ms: i64, duration_ms: Option<i64>) -> bool {
+    let Some(duration_ms) = duration_ms else {
+        return false;
+    };
+    duration_ms.saturating_sub(position_ms.max(0)) <= DJ_READY_PAIR_TRANSITION_WINDOW_MS
 }
 
 async fn get_profile(
@@ -1902,6 +1952,35 @@ mod tests {
         assert_eq!(summary.bad_count, 1);
         assert_eq!(summary.late_count, 1);
         assert_eq!(summary.missed_count, 1);
+    }
+
+    #[test]
+    fn fire_ahead_evidence_requires_positive_majority_and_median() {
+        let passing = vec![
+            220, 210, 205, 200, 195, 190, 185, 180, 175, 170, 165, 160, 155, 151, 149, -20, -40,
+            -60, -80, -100,
+        ];
+        let mixed = vec![
+            220, 210, 205, 200, 195, 190, 185, 180, 175, 170, -165, -160, -155, -151, -149, -20,
+            -40, -60, -80, -100,
+        ];
+        let low_median = vec![
+            151, 151, 150, 150, 149, 149, 148, 148, 147, 147, 146, 146, 145, 145, 144, -20, -40,
+            -60, -80, -100,
+        ];
+
+        assert!(fire_ahead_evidence_passes(&passing));
+        assert!(!fire_ahead_evidence_passes(&mixed));
+        assert!(!fire_ahead_evidence_passes(&low_median));
+        assert!(!fire_ahead_evidence_passes(&passing[..19]));
+    }
+
+    #[test]
+    fn ready_pair_transition_is_due_only_near_track_end() {
+        assert!(!ready_pair_transition_due(90_000, Some(180_000)));
+        assert!(ready_pair_transition_due(151_000, Some(180_000)));
+        assert!(ready_pair_transition_due(180_000, Some(180_000)));
+        assert!(!ready_pair_transition_due(151_000, None));
     }
 
     #[test]
