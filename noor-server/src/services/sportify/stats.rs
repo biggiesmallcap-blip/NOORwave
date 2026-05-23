@@ -7,18 +7,24 @@
 //! `/api/artists/{id}/spotify-stats`, so funnelling Sportify-sourced numbers
 //! through the same table means stats appear automatically on the legacy
 //! library page with zero frontend wiring. Tracks resolve to TIDAL anyway
-//! (the resolver writes `spotify_track_id → tidal_track_id` mappings), so a
-//! library track's `spotify_track_id` lookup → `spotify_track_stats` lookup
+//! (the resolver writes `spotify_track_id -> tidal_track_id` mappings), so a
+//! library track's `spotify_track_id` lookup -> `spotify_track_stats` lookup
 //! gives us "1.2B plays" labels for free.
+//!
+//! Schema knowledge for these tables lives in `crate::db::queries`; this
+//! module is a best-effort adapter that extracts ids/values from Sportify
+//! payloads and delegates writes there, so the upsert SQL has one home.
 //!
 //! Failure policy: every writeback is best-effort. Sportify is upstream and
 //! subject to breakage; a missing `playcount` or a malformed value must
 //! never bubble up an error that fails the surrounding request. Each helper
-//! takes a connection and returns `()` — write what we can, log what we
+//! takes a connection and returns `()` - write what we can, log what we
 //! can't, move on.
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::db::queries;
 
 use super::models::{SportifyArtist, SportifyTrack};
 
@@ -38,14 +44,8 @@ pub fn write_track_playcount(conn: &Connection, track: &SportifyTrack) {
     let Some(playcount) = track.playcount.filter(|c| *c > 0) else {
         return;
     };
-    if let Err(e) = conn.execute(
-        "INSERT INTO spotify_track_stats (spotify_track_id, playcount, fetched_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(spotify_track_id) DO UPDATE SET
-            playcount = excluded.playcount,
-            fetched_at = excluded.fetched_at",
-        params![spotify_id, playcount, now_secs()],
-    ) {
+    let now = now_secs();
+    if let Err(e) = queries::upsert_spotify_track_stats(conn, spotify_id, playcount, now) {
         tracing::warn!(
             "spotify_track_stats writeback for {} failed: {}",
             spotify_id,
@@ -61,14 +61,7 @@ pub fn write_track_playcount(conn: &Connection, track: &SportifyTrack) {
         .as_ref()
         .and_then(|e| e.isrc.as_deref())
         .filter(|s| !s.is_empty())
-        && let Err(e) = conn.execute(
-            "INSERT INTO spotify_isrc_map (isrc, spotify_track_id, resolved_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(isrc) DO UPDATE SET
-                spotify_track_id = excluded.spotify_track_id,
-                resolved_at = excluded.resolved_at",
-            params![isrc, spotify_id, now_secs()],
-        )
+        && let Err(e) = queries::upsert_spotify_isrc_map(conn, isrc, spotify_id, now)
     {
         tracing::warn!("spotify_isrc_map writeback for {} failed: {}", isrc, e);
     }
@@ -83,13 +76,14 @@ pub fn write_artist_monthly_listeners(conn: &Connection, artist: &SportifyArtist
     let Some(monthly) = artist.monthly_listeners.filter(|c| *c > 0) else {
         return;
     };
-    if let Err(e) = conn.execute(
-        "INSERT INTO spotify_artist_stats (spotify_artist_id, monthly_listeners, fetched_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(spotify_artist_id) DO UPDATE SET
-            monthly_listeners = excluded.monthly_listeners,
-            fetched_at = excluded.fetched_at",
-        params![spotify_id, monthly, now_secs()],
+    if let Err(e) = queries::upsert_spotify_artist_stats(
+        conn,
+        spotify_id,
+        Some(monthly),
+        None,
+        None,
+        None,
+        now_secs(),
     ) {
         tracing::warn!(
             "spotify_artist_stats writeback for {} failed: {}",
