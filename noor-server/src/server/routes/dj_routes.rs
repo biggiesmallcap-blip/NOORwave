@@ -1712,7 +1712,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
     .to_string();
     if matches!(
         transition.renderer_template.as_deref(),
-        Some("SafeCrossfade" | "FilterSweep")
+        Some("SafeCrossfade" | "FilterSweep" | "BassSwap16")
     ) {
         let downgrade_reason = renderer_downgrade_reason(transition);
         return RendererStatus {
@@ -1783,7 +1783,11 @@ fn is_renderer_downgrade_reason(reason: &str) -> bool {
 
 fn renderer_template_from_program_json(program_json: &str) -> Option<String> {
     let program: noor_mix::TransitionProgram = serde_json::from_str(program_json).ok()?;
-    matches!(program.template.as_str(), "SafeCrossfade" | "FilterSweep").then_some(program.template)
+    matches!(
+        program.template.as_str(),
+        "SafeCrossfade" | "FilterSweep" | "BassSwap16"
+    )
+    .then_some(program.template)
 }
 
 fn media_ref_label(
@@ -1967,6 +1971,26 @@ mod tests {
         assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
         assert_eq!(status.downgrade_reason, None);
         assert_eq!(status.timing_direction, "on_time");
+    }
+
+    #[test]
+    fn renderer_status_exposes_bass_swap_16_runtime_program() {
+        let status = renderer_status_for_transition(Some(&OpenTransition {
+            id: 22,
+            template: "BassSwap16".to_string(),
+            renderer_template: Some("BassSwap16".to_string()),
+            fallback_reason: None,
+            planned_start_ms: Some(112_000),
+            actual_start_ms: Some(112_144),
+            timing_delta_ms: Some(144),
+            timing_source: Some("downbeat_sync".to_string()),
+            timing_status: Some("fired".to_string()),
+        }));
+
+        assert_eq!(status.planned_template.as_deref(), Some("BassSwap16"));
+        assert_eq!(status.renderer_template.as_deref(), Some("BassSwap16"));
+        assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
+        assert_eq!(status.downgrade_reason, None);
     }
 
     #[test]

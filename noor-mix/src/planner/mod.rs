@@ -124,7 +124,9 @@ fn build_program(
         template,
         TransitionTemplate::BassSwap16 | TransitionTemplate::BassSwap32
     ) {
-        program.automation.extend(low_band_swap(swap_start));
+        program
+            .automation
+            .extend(bass_swap_eq_handoff(duration_samples));
     }
 
     if matches!(template, TransitionTemplate::FilterSweep) {
@@ -147,6 +149,35 @@ fn build_program(
         });
     }
 
+    program
+}
+
+pub fn bass_swap_16_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let mut program = TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "BassSwap16".to_string(),
+        sample_rate,
+        channels,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: deck_gain_automation(duration_samples),
+    };
+    program
+        .automation
+        .extend(bass_swap_eq_handoff(duration_samples));
     program
 }
 
@@ -235,25 +266,88 @@ fn deck_gain_automation(duration_samples: u64) -> Vec<AutomationEvent> {
     ]
 }
 
-fn low_band_swap(swap_start: u64) -> Vec<AutomationEvent> {
-    let start_sample = swap_start.saturating_sub(1);
-    let end_sample = (swap_start + 1).max(1);
+fn bass_swap_eq_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    if end_sample < 8 {
+        return vec![
+            AutomationEvent {
+                param: Param::LowGain(DeckId::A),
+                start_sample: 0,
+                end_sample,
+                from: 1.0,
+                to: 0.05,
+                curve: Curve::Cosine,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::B),
+                start_sample: 0,
+                end_sample,
+                from: 0.0,
+                to: 1.0,
+                curve: Curve::Cosine,
+            },
+        ];
+    }
+
+    let swap_point = end_sample / 2;
+    let outgoing_low_start = end_sample * 3 / 8;
+    let incoming_low_end = (end_sample * 5 / 8).max(swap_point + 1);
     vec![
         AutomationEvent {
             param: Param::LowGain(DeckId::A),
-            start_sample,
-            end_sample,
+            start_sample: outgoing_low_start,
+            end_sample: swap_point.max(outgoing_low_start + 1),
             from: 1.0,
+            to: 0.05,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample: swap_point.max(1),
+            from: 0.0,
             to: 0.0,
             curve: Curve::Linear,
         },
         AutomationEvent {
             param: Param::LowGain(DeckId::B),
-            start_sample,
-            end_sample,
+            start_sample: swap_point,
+            end_sample: incoming_low_end,
             from: 0.0,
             to: 1.0,
-            curve: Curve::Linear,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::MidGain(DeckId::A),
+            start_sample: swap_point,
+            end_sample,
+            from: 1.0,
+            to: 0.35,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::HighGain(DeckId::A),
+            start_sample: swap_point,
+            end_sample,
+            from: 1.0,
+            to: 0.35,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::MidGain(DeckId::B),
+            start_sample: 0,
+            end_sample,
+            from: 0.55,
+            to: 1.0,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::HighGain(DeckId::B),
+            start_sample: 0,
+            end_sample,
+            from: 0.45,
+            to: 1.0,
+            curve: Curve::Cosine,
         },
     ]
 }
@@ -609,6 +703,73 @@ mod tests {
                 .any(|event| event.param == Param::LowGain(DeckId::A)
                     && event.start_sample <= program.swap_start
                     && event.end_sample >= program.swap_start)
+        );
+    }
+
+    #[test]
+    fn bass_swap_16_shapes_clean_low_ownership_handoff() {
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 16),
+            &profile(Some(121.0), Some("8A"), 16),
+            &Policy::default(),
+        );
+
+        let outgoing_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::A))
+            .expect("outgoing low handoff");
+        let incoming_low_hold = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::B) && event.to == 0.0)
+            .expect("incoming low hold");
+        let incoming_low_rise = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::B) && event.to == 1.0)
+            .expect("incoming low rise");
+
+        assert_eq!(outgoing_low.end_sample, program.swap_start);
+        assert_eq!(incoming_low_hold.end_sample, program.swap_start);
+        assert_eq!(incoming_low_rise.start_sample, program.swap_start);
+        assert_eq!(outgoing_low.to, 0.05);
+        assert_eq!(incoming_low_hold.from, 0.0);
+        assert_eq!(incoming_low_hold.to, 0.0);
+        assert_eq!(incoming_low_rise.from, 0.0);
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::MidGain(DeckId::A)
+                    && event.start_sample == program.swap_start
+                    && event.to < 1.0)
+        );
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::MidGain(DeckId::B)
+                    && event.from < 1.0
+                    && event.to == 1.0)
+        );
+    }
+
+    #[test]
+    fn bass_swap_16_program_uses_requested_duration() {
+        let program = bass_swap_16_program(48_000, 2, 16_000);
+
+        assert_eq!(program.template, "BassSwap16");
+        assert_eq!(program.resolve_at, 768_000);
+        assert_eq!(program.tier, Tier::FullBlend);
+        program.validate().expect("bass swap 16");
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::LowGain(DeckId::B)
+                    && event.start_sample == program.swap_start
+                    && event.to == 1.0)
         );
     }
 
