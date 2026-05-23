@@ -10,6 +10,48 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### feat: cover-sample endpoint for playlist mosaics
+
+`/playlists` hydrates per-card mosaics by calling `GET /api/playlists/:id/tracks`
+or `POST /api/smart/playlists/:id/evaluate` and discarding all but 4 artwork URLs.
+For smart playlists this re-runs the full rule evaluation just for art. Add
+`GET /api/playlists/:id/cover-sample` that returns up to 4 artwork URLs and
+short-circuit `hydrateMosaicFor` to call it. Cache server-side by
+`(playlist_id, updated_at)`.
+- Spawned by: playlists QoL pass (feature/playlists-qol)
+
+### feat: live "matches N tracks" preview in smart-playlist editor
+
+The editor has no live count while the user is tweaking rules; they have to
+save, close, expand, count, reopen. Add a stateless preview endpoint
+`POST /api/smart/playlists/preview` that takes a rules JSON body and returns
+`{ count: number }` without persisting anything. Wire a debounced (300-500ms)
+call in the editor and render the count next to the Ctrl+Enter hint.
+- Spawned by: playlists QoL pass (feature/playlists-qol)
+
+### feat: artist autocomplete in smart-playlist editor
+
+Genre autocomplete is live via `api.getGenres()` + HTML datalist. Artist
+autocomplete needs either a search-by-prefix endpoint
+(`GET /api/artists/search?q=...&limit=20`) or a lighter "all artist names"
+endpoint. `getArtists()` is paginated and returns full Artist rows; not
+suitable for a snappy datalist with thousands of artists.
+- Spawned by: playlists QoL pass (feature/playlists-qol)
+
+### perf: virtualize expanded playlist track lists
+
+`/playlists` currently caps an expanded card's track list at 75 rows with a
+"Show all N" button as an interim measure. Replace with a virtual list so
+500+ track playlists render fully without paying the full DOM cost.
+- Spawned by: playlists QoL pass (feature/playlists-qol)
+
+### chore: scrub remaining non-ASCII from /playlists page
+
+`describeClause` still produces `–` (en-dash), `≥`, `→`, etc. in user-facing
+rule summaries; option labels use `…`. Out of scope for the QoL pass but
+worth a sweep to comply with the repo's ASCII-only rule.
+- Spawned by: playlists QoL pass (feature/playlists-qol)
+
 ### perf: cache Last.fm `track.getSimilar` per (artist, title)
 
 `services/radio.rs` calls Last.fm `track.getSimilar` on every `/api/radio/song`
