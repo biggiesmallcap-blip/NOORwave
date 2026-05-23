@@ -232,6 +232,21 @@ pub struct UpdateSmartPlaylistRequest {
     rules: Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PreviewSmartPlaylistRequest {
+    /// Optional name/description carried over from the editor draft - the
+    /// preview doesn't persist anything so these are decorative.
+    name: Option<String>,
+    description: Option<String>,
+    rules: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArtistSearchParams {
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
 pub fn api_routes(state: SharedState) -> Router {
     Router::new()
         // Library endpoints
@@ -289,6 +304,10 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/playlists/{id}/favorite",
             patch(toggle_playlist_favorite_route),
         )
+        .route(
+            "/api/playlists/{id}/cover-sample",
+            get(get_playlist_cover_sample),
+        )
         .route("/api/smart/playlists", post(create_smart_playlist_route))
         .route(
             "/api/smart/playlists/{id}",
@@ -298,6 +317,11 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/smart/playlists/{id}/evaluate",
             get(evaluate_smart_playlist),
         )
+        .route(
+            "/api/smart/playlists/preview",
+            post(preview_smart_playlist),
+        )
+        .route("/api/artists/search", get(search_artists_route))
         .route(
             "/api/analytics/overview",
             get(analytics_routes::get_analytics_overview),
@@ -1979,6 +2003,103 @@ async fn evaluate_smart_playlist(
             })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Up to four distinct album-artwork URLs for the cover mosaic on /playlists.
+/// Regular playlists return without scanning every track. Smart playlists
+/// still need to evaluate their rules, but the response payload is four
+/// short strings instead of the entire track list.
+async fn get_playlist_cover_sample(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, StatusCode> {
+    const COVER_SAMPLE_LIMIT: i64 = 4;
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let playlist = queries::get_playlist(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("playlist not found"))?;
+            let urls = if playlist.is_smart {
+                let tracks = resolve_smart_playlist_tracks(conn, &playlist)?;
+                unique_artwork_urls(&tracks, COVER_SAMPLE_LIMIT as usize)
+            } else {
+                queries::sample_playlist_artwork(conn, id, COVER_SAMPLE_LIMIT)?
+            };
+            Ok(Json(json!({ "urls": urls })))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn unique_artwork_urls(tracks: &[crate::db::models::Track], limit: usize) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::with_capacity(limit);
+    for track in tracks {
+        let Some(url) = track.artwork_url.as_deref() else {
+            continue;
+        };
+        if seen.insert(url) {
+            out.push(url.to_string());
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Live "matches N tracks" preview for the smart-playlist editor. Accepts a
+/// rules body identical to create/update but never touches the database -
+/// just evaluates and counts.
+async fn preview_smart_playlist(
+    State(state): State<SharedState>,
+    Json(payload): Json<PreviewSmartPlaylistRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let definition = SmartPlaylistDefinition {
+        name: payload.name.unwrap_or_default(),
+        description: payload.description,
+        root: serde_json::from_value(payload.rules).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": format!("Invalid rules: {e}") })),
+            )
+        })?,
+    };
+    let state = state.read().await;
+    state
+        .db
+        .with_conn(|conn| {
+            let tracks = queries::get_all_tracks(conn)?;
+            let context = build_smart_playlist_context(conn)?;
+            let count = crate::smart::playlists::evaluate_playlist(&definition, &tracks, &context).len();
+            Ok(Json(json!({ "count": count })))
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": e.to_string() })),
+            )
+        })
+}
+
+/// Lightweight artist autocomplete - returns `{ id, name }` pairs only.
+/// Powers the smart-playlist editor's artist tag input.
+async fn search_artists_route(
+    State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<ArtistSearchParams>,
+) -> Result<Json<Value>, StatusCode> {
+    let query = params.q.unwrap_or_default();
+    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let state = state.read().await;
+    let results: Vec<(i64, String)> = state
+        .db
+        .with_conn(|conn| queries::search_library_artist_names(conn, &query, limit))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let artists: Vec<Value> = results
+        .into_iter()
+        .map(|(id, name)| json!({ "id": id, "name": name }))
+        .collect();
+    Ok(Json(json!({ "artists": artists })))
 }
 
 async fn create_smart_playlist_route(
@@ -15202,9 +15323,12 @@ mod tests {
             ("GET", "/api/playlists"),
             ("GET", "/api/playlists/1/tracks"),
             ("PATCH", "/api/playlists/1/favorite"),
+            ("GET", "/api/playlists/1/cover-sample"),
             ("POST", "/api/smart/playlists"),
             ("PUT", "/api/smart/playlists/1"),
             ("GET", "/api/smart/playlists/1/evaluate"),
+            ("POST", "/api/smart/playlists/preview"),
+            ("GET", "/api/artists/search"),
             ("GET", "/api/analytics/overview"),
             ("GET", "/api/analytics/dashboard"),
             ("GET", "/api/analytics/signals"),

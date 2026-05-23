@@ -202,12 +202,6 @@
 	// of firing the destructive call on the first click.
 	let pendingDeleteId = $state<number | null>(null);
 
-	// Set of playlist ids whose expanded track list is in "show all" mode.
-	// The first paint after expand caps at TRACKS_PREVIEW_LIMIT to keep big
-	// playlists from rendering hundreds of rows synchronously.
-	let showAllTracksFor = $state<Set<number>>(new Set());
-	const TRACKS_PREVIEW_LIMIT = 75;
-
 	// Phase 5B - back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{
 		expandedIds: number[];
@@ -215,7 +209,6 @@
 		query?: string;
 		filter?: PlaylistFilter;
 		sort?: PlaylistSort;
-		showAllTracksIds?: number[];
 	}> = {
 		capture: () => ({
 			expandedIds: [...expandedPlaylistIds],
@@ -223,7 +216,6 @@
 			query: playlistQuery,
 			filter: playlistFilter,
 			sort: playlistSort,
-			showAllTracksIds: [...showAllTracksFor]
 		}),
 		restore: (saved) => {
 			if (Array.isArray(saved.expandedIds)) {
@@ -232,9 +224,6 @@
 			if (typeof saved.query === 'string') playlistQuery = saved.query;
 			if (saved.filter) playlistFilter = saved.filter;
 			if (saved.sort) playlistSort = saved.sort;
-			if (Array.isArray(saved.showAllTracksIds)) {
-				showAllTracksFor = new Set(saved.showAllTracksIds);
-			}
 			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
 		}
 	};
@@ -265,6 +254,22 @@
 	// time the editor opens, cached for the session.
 	let genreSuggestions = $state<string[]>([]);
 	let genreSuggestionsLoaded = false;
+
+	// Artist suggestions for artist-clause datalists. Fetched per query as
+	// the user types, with a small in-session cache. Library artist tables
+	// can run into the thousands so we never fetch the full list.
+	let artistSuggestions = $state<string[]>([]);
+	let artistQuery = $state('');
+	let artistFetchAbort: AbortController | null = null;
+	const artistCache = new Map<string, string[]>();
+
+	// Live "matches N tracks" preview for the editor. Recomputed on a
+	// debounce when the draft changes; null = idle, undefined-style.
+	let previewCount = $state<number | null>(null);
+	let previewError = $state('');
+	let previewLoading = $state(false);
+	let previewAbort: AbortController | null = null;
+	let previewDebounce: ReturnType<typeof setTimeout> | null = null;
 
 	// Drawer focus management
 	let editorTriggerEl: HTMLElement | null = null;
@@ -425,13 +430,6 @@
 		}
 	}
 
-	function toggleShowAllTracks(id: number, on: boolean) {
-		const next = new Set(showAllTracksFor);
-		if (on) next.add(id);
-		else next.delete(id);
-		showAllTracksFor = next;
-	}
-
 	function openPlaylistContextMenu(
 		playlist: Playlist,
 		event: MouseEvent | { clientX: number; clientY: number },
@@ -557,13 +555,10 @@
 		if (fetchedMosaicIds.has(id)) return;
 		fetchedMosaicIds.add(id);
 		try {
-			const data = playlist.is_smart
-				? await api.evaluateSmartPlaylist(id)
-				: await api.getPlaylistTracks(id);
-			recordMosaic(id, data.tracks, playlist.track_count);
-			if (!playlistTracksById[id]) {
-				playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
-			}
+			const { urls } = await api.getPlaylistCoverSample(id);
+			if (!urls.length) return;
+			setCachedMosaic(id, urls, playlist.track_count);
+			mosaicById = { ...mosaicById, [id]: urls };
 		} catch {
 			// Background task - leave the gradient fallback in place.
 		}
@@ -633,6 +628,7 @@
 			if (!ok) return;
 		}
 		editorOpen = false;
+		resetPreview();
 		const trigger = editorTriggerEl;
 		queueMicrotask(() => trigger?.focus());
 		editorTriggerEl = null;
@@ -659,6 +655,96 @@
 		}
 	}
 
+	async function refreshArtistSuggestions(q: string) {
+		const query = q.trim();
+		if (!query) {
+			artistSuggestions = [];
+			return;
+		}
+		const cached = artistCache.get(query.toLowerCase());
+		if (cached) {
+			artistSuggestions = cached;
+			return;
+		}
+		artistFetchAbort?.abort();
+		const ctrl = new AbortController();
+		artistFetchAbort = ctrl;
+		try {
+			const data = await api.searchLibraryArtistNames(query, ctrl.signal, 20);
+			if (ctrl.signal.aborted) return;
+			const names = data.artists.map((a) => a.name);
+			artistCache.set(query.toLowerCase(), names);
+			artistSuggestions = names;
+		} catch {
+			// Soft fail - leave the previous suggestion list visible.
+		}
+	}
+
+	function schedulePreview() {
+		if (!editorOpen) return;
+		if (previewDebounce) clearTimeout(previewDebounce);
+		previewDebounce = setTimeout(() => {
+			previewDebounce = null;
+			void runPreview();
+		}, 350);
+	}
+
+	async function runPreview() {
+		if (!editorOpen) return;
+		// Skip preview for drafts that won't pass server validation - it
+		// would just round-trip a 400 every keystroke.
+		if (draftClauses.length === 0) {
+			previewCount = null;
+			previewError = '';
+			return;
+		}
+		if (validateDraft()) {
+			previewCount = null;
+			previewError = '';
+			return;
+		}
+		const rootClause: RuleClause = {
+			type: 'group',
+			op: draftLogicOp,
+			clauses: draftClauses.map(draftToClause),
+		};
+		previewAbort?.abort();
+		const ctrl = new AbortController();
+		previewAbort = ctrl;
+		previewLoading = true;
+		previewError = '';
+		try {
+			const data = await api.previewSmartPlaylist(rootClause, ctrl.signal);
+			if (ctrl.signal.aborted) return;
+			previewCount = data.count;
+		} catch (e) {
+			if (ctrl.signal.aborted) return;
+			previewError = String(e);
+			previewCount = null;
+		} finally {
+			if (!ctrl.signal.aborted) previewLoading = false;
+		}
+	}
+
+	function resetPreview() {
+		previewAbort?.abort();
+		if (previewDebounce) {
+			clearTimeout(previewDebounce);
+			previewDebounce = null;
+		}
+		previewCount = null;
+		previewError = '';
+		previewLoading = false;
+	}
+
+	$effect(() => {
+		if (!editorOpen) return;
+		// Touch the reactive bits we care about so the effect re-runs.
+		void draftClauses;
+		void draftLogicOp;
+		schedulePreview();
+	});
+
 	function addClause() {
 		draftClauses = [...draftClauses, defaultDraft()];
 	}
@@ -683,10 +769,17 @@
 		// rather than requiring Enter / Add.
 		const target = e.target as HTMLInputElement;
 		const value = target.value;
+		const clause = draftClauses.find((c) => c.id === clauseId);
+		if (clause?.type === 'artist') {
+			const q = value.replace(/,.*$/, '').trim();
+			if (q !== artistQuery) {
+				artistQuery = q;
+				void refreshArtistSuggestions(q);
+			}
+		}
 		if (!value.includes(',')) return;
 		const parts = value.split(',');
 		const remainder = parts.pop() ?? '';
-		const clause = draftClauses.find((c) => c.id === clauseId);
 		if (!clause) return;
 		const tags = parts.map((t) => t.trim()).filter(Boolean);
 		if (tags.length) {
@@ -841,7 +934,7 @@
 		const fmtRange = (label: string, min: number | null | undefined, max: number | null | undefined, digits = 0) => {
 			const lo = min == null ? 'any' : min.toFixed(digits);
 			const hi = max == null ? 'any' : max.toFixed(digits);
-			return `${label}: ${lo} – ${hi}`;
+			return `${label}: ${lo} - ${hi}`;
 		};
 		switch (clause.type) {
 			case 'group': {
@@ -853,9 +946,9 @@
 			case 'artist': return [`Artist: ${(clause.names ?? []).join(', ') || 'any'}`];
 			case 'date_range': {
 				const f = clause.field === 'last_played_at' ? 'Last played' : 'Date added';
-				return [`${f}: ${clause.range?.start ?? '—'} → ${clause.range?.end ?? 'now'}`];
+				return [`${f}: ${clause.range?.start ?? '-'} -> ${clause.range?.end ?? 'now'}`];
 			}
-			case 'play_count': return [`Play count: ${clause.op ?? '≥'} ${clause.value ?? 0}${clause.value_max != null ? ` – ${clause.value_max}` : ''}`];
+			case 'play_count': return [`Play count: ${clause.op ?? '>='} ${clause.value ?? 0}${clause.value_max != null ? ` - ${clause.value_max}` : ''}`];
 			case 'quality': return [`Min quality: ${clause.minimum ?? '?'}`];
 			case 'not_in_playlist': return [`Exclude from playlists: ${(clause.playlist_ids ?? []).join(', ') || 'none'}`];
 			case 'bpm_range': return [fmtRange('BPM', clause.min, clause.max, 0)];
@@ -925,8 +1018,8 @@
 
 	const NUMBER_OP_LABELS: Record<string, string> = {
 		eq: '= (exactly)',
-		gte: '≥ (at least)',
-		lte: '≤ (at most)',
+		gte: '>= (at least)',
+		lte: '<= (at most)',
 		gt: '> (more than)',
 		lt: '< (fewer than)',
 		between_inclusive: 'between',
@@ -1231,31 +1324,20 @@
 								<p class="playlist-copy">{errorById[playlist.id]}</p>
 							{:else if (playlistTracksById[playlist.id]?.length ?? 0) > 0}
 								{@const allTracks = playlistTracksById[playlist.id] ?? []}
-								{@const showAll = showAllTracksFor.has(playlist.id)}
-								{@const visibleTracks = showAll ? allTracks : allTracks.slice(0, TRACKS_PREVIEW_LIMIT)}
 								<ol class="track-list">
-									{#each visibleTracks as track, i (`${track.id}-${i}`)}
-										<TrackRow
-											{track}
-											variant="art"
-											index={i}
-											isCurrent={$currentTrack?.id === track.id}
-											isPlaying={$isPlaying}
-											onRowClick={() => void playTrack(track.id)}
-										/>
+									{#each allTracks as track, i (`${track.id}-${i}`)}
+										<li class="track-row-lazy">
+											<TrackRow
+												{track}
+												variant="art"
+												index={i}
+												isCurrent={$currentTrack?.id === track.id}
+												isPlaying={$isPlaying}
+												onRowClick={() => void playTrack(track.id)}
+											/>
+										</li>
 									{/each}
 								</ol>
-								{#if allTracks.length > TRACKS_PREVIEW_LIMIT}
-									<div class="track-list-more">
-										{#if showAll}
-											<button class="btn btn-glass btn-sm" onclick={() => toggleShowAllTracks(playlist.id, false)}>Show less</button>
-										{:else}
-											<button class="btn btn-glass btn-sm" onclick={() => toggleShowAllTracks(playlist.id, true)}>
-												Show all {allTracks.length.toLocaleString()}
-											</button>
-										{/if}
-									</div>
-								{/if}
 							{:else}
 								<p class="playlist-copy">No tracks resolved for this playlist.</p>
 							{/if}
@@ -1294,6 +1376,11 @@
 		<datalist id="noor-genre-suggestions">
 			{#each genreSuggestions as g}
 				<option value={g}></option>
+			{/each}
+		</datalist>
+		<datalist id="noor-artist-suggestions">
+			{#each artistSuggestions as a}
+				<option value={a}></option>
 			{/each}
 		</datalist>
 		<div class="editor-head">
@@ -1382,7 +1469,9 @@
 									<input
 										class="field-input"
 										type="text"
-										list={clause.type === 'genre' ? 'noor-genre-suggestions' : undefined}
+										list={clause.type === 'genre'
+											? 'noor-genre-suggestions'
+											: 'noor-artist-suggestions'}
 										placeholder={clause.type === 'genre' ? 'Add genre (e.g. Electronic)' : 'Add artist name'}
 										bind:value={tagInputs[clause.id]}
 										oninput={(e) => onTagInput(clause.id, e)}
@@ -1495,11 +1584,11 @@
 							</div>
 						{/if}
 
-						<!-- Energy / Danceability (0–1) -->
+						<!-- Energy / Danceability (0-1) -->
 						{#if clause.type === 'energy_range' || clause.type === 'danceability_range'}
 							<div class="num-fields">
 								<div class="field-group">
-									<label class="field-label" for="r-min-{clause.id}">Min (0–1)</label>
+									<label class="field-label" for="r-min-{clause.id}">Min (0-1)</label>
 									<input
 										id="r-min-{clause.id}"
 										class="field-input num-input"
@@ -1513,7 +1602,7 @@
 								</div>
 								<span class="and-label">to</span>
 								<div class="field-group">
-									<label class="field-label" for="r-max-{clause.id}">Max (0–1)</label>
+									<label class="field-label" for="r-max-{clause.id}">Max (0-1)</label>
 									<input
 										id="r-max-{clause.id}"
 										class="field-input num-input"
@@ -1531,7 +1620,7 @@
 						<!-- Key signature (musical letter notation) -->
 						{#if clause.type === 'key_signature'}
 							<select class="field-input" bind:value={clause.key_value}>
-								<option value="">Select key…</option>
+								<option value="">Select key...</option>
 								{#each KEY_SIGNATURES as k}
 									<option value={k}>{k}</option>
 								{/each}
@@ -1541,7 +1630,7 @@
 						<!-- Camelot key -->
 						{#if clause.type === 'camelot_key'}
 							<select class="field-input" bind:value={clause.key_value}>
-								<option value="">Select Camelot key…</option>
+								<option value="">Select Camelot key...</option>
 								{#each CAMELOT_KEYS as k}
 									<option value={k}>{k}</option>
 								{/each}
@@ -1580,7 +1669,17 @@
 		</div>
 
 		<div class="editor-foot">
-			<span class="editor-hint">Ctrl+Enter to save</span>
+			<span class="editor-hint">
+				{#if previewError}
+					Preview unavailable
+				{:else if previewLoading}
+					Counting matches...
+				{:else if previewCount !== null}
+					Matches {previewCount.toLocaleString()} track{previewCount === 1 ? '' : 's'}
+				{:else}
+					Ctrl+Enter to save
+				{/if}
+			</span>
 			<button class="btn btn-glass" onclick={() => closeEditor()}>Cancel</button>
 			<button class="btn btn-primary" onclick={saveEditor} disabled={editorSaving}>
 				{editorSaving ? 'Saving...' : editingPlaylistId === null ? 'Create playlist' : 'Save changes'}
@@ -1907,11 +2006,6 @@
 		justify-content: center;
 	}
 
-	.track-list-more {
-		display: flex;
-		justify-content: center;
-		padding-top: 6px;
-	}
 
 	.playlist-actions .btn-sm {
 		min-height: 30px;
@@ -1936,6 +2030,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+	}
+
+	/* Browser-native virtualization: rows outside the viewport skip layout
+	   + paint while their intrinsic-size hint reserves scroll space. Cheaper
+	   than a windowed renderer and keeps every row in the DOM for Ctrl+F /
+	   screen-reader traversal. */
+	.track-row-lazy {
+		content-visibility: auto;
+		contain-intrinsic-size: 0 64px;
 	}
 
 	.clause-error {
