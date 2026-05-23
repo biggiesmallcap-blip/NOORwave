@@ -982,6 +982,50 @@ pub fn add_tracks_to_playlist(
     Ok(to_insert.len())
 }
 
+/// Up to `limit` distinct album-artwork URLs for a regular playlist, ordered
+/// by the earliest position the URL appears at. Built for the `/cover-sample`
+/// endpoint - returning four URLs as a JSON array is cheaper than evaluating
+/// the playlist and discarding everything but the first four.
+pub fn sample_playlist_artwork(
+    conn: &Connection,
+    playlist_id: i64,
+    limit: i64,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT al.artwork_url, MIN(pt.position) AS first_pos
+         FROM playlist_tracks pt
+         JOIN tracks t ON pt.track_id = t.id
+         JOIN albums al ON t.album_id = al.id
+         WHERE pt.playlist_id = ?1 AND al.artwork_url IS NOT NULL
+         GROUP BY al.artwork_url
+         ORDER BY first_pos ASC
+         LIMIT ?2",
+    )?;
+    let urls = stmt
+        .query_map(params![playlist_id, limit], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(urls)
+}
+
+/// Lightweight artist-name search for autocomplete: returns `(id, name)` pairs
+/// only. Reuses the FTS-then-LIKE fallback that powers the global `search`
+/// endpoint so it picks up the same matches.
+pub fn search_library_artist_names(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<(i64, String)>> {
+    let normalized = query.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.max(1);
+    let fts_query = to_fts_query(&normalized);
+    let artists = search_artists_fts(conn, &fts_query, limit)
+        .unwrap_or_else(|_| search_artists_like(conn, &normalized, limit).unwrap_or_default());
+    Ok(artists.into_iter().map(|a| (a.id, a.name)).collect())
+}
+
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {}
