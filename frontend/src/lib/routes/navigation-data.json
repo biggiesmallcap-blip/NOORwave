@@ -6,7 +6,7 @@
 		},
 		{
 			"label": "Signals",
-			"routeIds": ["automix", "analytics", "duplicates"]
+			"routeIds": ["automix", "dj", "analytics", "duplicates"]
 		},
 		{
 			"label": "System",
@@ -14,7 +14,7 @@
 		}
 	],
 	"mobileTabRouteIds": ["home", "library", "genres", "discover"],
-	"mobileMoreRouteIds": ["playlists", "automix", "analytics", "duplicates", "settings"],
+	"mobileMoreRouteIds": ["playlists", "automix", "dj", "analytics", "duplicates", "settings"],
 	"smokePhaseRouteIds": {
 		"shell": ["home", "library", "search", "settings"],
 		"links": ["home", "library", "search", "playlists", "videos", "settings"],

@@ -871,8 +871,134 @@ export interface PlaybackRuntimeInfo {
 	last_error: string | null;
 	exclusive_engaged: boolean;
 	exclusive_transport_format: string | null;
+	dj_engine_enabled: boolean;
 }
 
+export type DjEnabledResponse = { enabled: boolean };
+
+export type DjTransitionSpeedBias = 'slower' | 'neutral' | 'faster';
+
+export type DjProfileResponse = {
+	track_id: number;
+	profile_version: string;
+	beat_count: number;
+	downbeat_count: number;
+	phrase_count: number;
+};
+
+export type DjMixIntent = 'safe' | 'balanced' | 'bold';
+
+export type DjMixIntentResponse = {
+	intent: DjMixIntent;
+};
+
+export type DjPolicyResponse = {
+	mix_intent: DjMixIntent;
+	transition_speed_bias: DjTransitionSpeedBias;
+};
+
+export type DjDeckStatus = {
+	media_ref_kind: string;
+	media_ref_id: string;
+	title: string;
+	artist?: string;
+	profile_ready: boolean;
+	profile_status: 'ready' | 'missing' | 'analyzing' | 'decode_failed' | string;
+	profile_error?: string;
+	profile_confidence?: number;
+	beat_count?: number;
+	downbeat_count?: number;
+	phrase_count?: number;
+	safe_crossfade_only: boolean;
+};
+
+export type DjStatusResponse = {
+	enabled: boolean;
+	current?: DjDeckStatus;
+	next?: DjDeckStatus;
+	planning_status:
+		| 'disabled'
+		| 'pair_missing'
+		| 'waiting_for_profiles'
+		| 'profile_failed'
+		| 'waiting_for_window'
+		| 'ready_to_plan'
+		| 'armed'
+		| 'missed'
+		| string;
+	selected_program?: string;
+	planned_template?: string;
+	renderer_template?: string;
+	renderer_mode?: 'legacy_overlap' | 'dj_gain_program' | 'dj_full_program';
+	downgrade_reason?: string;
+	planning_reason?: string;
+	sync_target?: string;
+	planned_start_ms?: number;
+	actual_start_ms?: number;
+	timing_delta_ms?: number;
+	timing_source?: string;
+	timing_status?: string;
+	timing_quality: 'tight' | 'usable' | 'loose' | 'bad' | 'unknown';
+	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'pending' | 'unknown';
+	fallback_reason?: string;
+	profile_confidence_floor: number;
+	last_transition_event_id?: number;
+	recent_timing_events: DjTimingHistoryEvent[];
+	timing_history_summary: DjTimingHistorySummary;
+	safe_crossfade_suggestion?: {
+		media_ref_kind: string;
+		media_ref_id: string;
+		bad_feedback_count: number;
+	};
+};
+
+export type DjTimingHistoryEvent = {
+	event_id: number;
+	from_title?: string;
+	from_artist?: string;
+	to_title?: string;
+	to_artist?: string;
+	planned_template: string;
+	renderer_template?: string;
+	planning_reason?: string;
+	planned_start_ms?: number;
+	actual_start_ms?: number;
+	timing_delta_ms?: number;
+	timing_source?: string;
+	timing_status?: 'fired' | 'late' | 'missed';
+	timing_quality: 'tight' | 'usable' | 'loose' | 'bad';
+	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'unknown';
+	started_at: string;
+};
+
+export type DjTimingHistorySummary = {
+	event_count: number;
+	average_delta_ms?: number;
+	average_abs_delta_ms?: number;
+	tight_count: number;
+	usable_count: number;
+	loose_count: number;
+	bad_count: number;
+	late_count: number;
+	missed_count: number;
+};
+
+export type DjProfileCorrectionRequest = {
+	media_ref_kind: string;
+	media_ref_id: string;
+	bpm_multiplier?: number;
+	downbeat_offset_beats?: number;
+	phrase_offset_bars?: number;
+	safe_crossfade_only?: boolean;
+	transition_speed_bias?: DjTransitionSpeedBias;
+	notes?: string;
+};
+
+export type DjFeedbackRequest = {
+	transition_event_id?: number;
+	rating: 'good' | 'bad' | 'too_safe' | 'too_bold';
+	reason?: string;
+};
 export interface StreamDisplayInfo {
 	audio_quality: string;
 	sample_rate: number | null;
@@ -1949,6 +2075,30 @@ export const api = {
 		});
 	},
 
+	getPlaylistCoverSample(id: number, signal?: AbortSignal) {
+		return fetchApi<{ urls: string[] }>(
+			`/api/playlists/${id}/cover-sample`,
+			undefined,
+			{ signal },
+		);
+	},
+
+	previewSmartPlaylist(rules: RuleClause, signal?: AbortSignal) {
+		return fetchApi<{ count: number }>('/api/smart/playlists/preview', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ rules }),
+			signal,
+		});
+	},
+
+	searchLibraryArtistNames(q: string, signal?: AbortSignal, limit = 20) {
+		return fetchApi<{ artists: { id: number; name: string }[] }>(
+			`/api/artists/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+			undefined,
+			{ signal },
+		);
+	},
+
 	searchTidalPlaylists(q: string, signal?: AbortSignal, opts?: { limit?: number; offset?: number }) {
 		const limit = opts?.limit ?? 20;
 		const offset = opts?.offset ?? 0;
@@ -2620,6 +2770,69 @@ export const api = {
 		);
 	},
 
+	getDjEnabled(): Promise<DjEnabledResponse> {
+		return fetchApi<DjEnabledResponse>('/api/dj/enabled');
+	},
+
+	setDjEnabled(enabled: boolean): Promise<DjEnabledResponse> {
+		return fetchApi<DjEnabledResponse>('/api/dj/enabled', undefined, {
+			method: 'PUT',
+			body: JSON.stringify({ enabled }),
+		});
+	},
+
+	getDjStatus(): Promise<DjStatusResponse> {
+		return fetchApi<DjStatusResponse>('/api/dj/status');
+	},
+
+	getDjProfile(trackId: number): Promise<DjProfileResponse> {
+		return fetchApi<DjProfileResponse>(`/api/dj/profile/${trackId}`);
+	},
+
+	getDjMixIntent(): Promise<DjMixIntentResponse> {
+		return fetchApi<DjMixIntentResponse>('/api/dj/mix-intent');
+	},
+
+	setDjMixIntent(intent: DjMixIntent): Promise<DjMixIntentResponse> {
+		return fetchApi<DjMixIntentResponse>('/api/dj/mix-intent', undefined, {
+			method: 'PUT',
+			body: JSON.stringify({ intent }),
+		});
+	},
+
+	getDjPolicy(): Promise<DjPolicyResponse> {
+		return fetchApi<DjPolicyResponse>('/api/dj/policy');
+	},
+
+	setDjPolicy(policy: Partial<DjPolicyResponse>): Promise<DjPolicyResponse> {
+		return fetchApi<DjPolicyResponse>('/api/dj/policy', undefined, {
+			method: 'PUT',
+			body: JSON.stringify(policy),
+		});
+	},
+
+	async setDjProfileCorrection(correction: DjProfileCorrectionRequest): Promise<void> {
+		await fetchApi<unknown>('/api/dj/profile-correction', undefined, {
+			method: 'POST',
+			body: JSON.stringify(correction),
+		});
+	},
+
+	rebuildDjProfile(
+		request: Pick<DjProfileCorrectionRequest, 'media_ref_kind' | 'media_ref_id'>,
+	): Promise<{ accepted: boolean; status: string }> {
+		return fetchApi<{ accepted: boolean; status: string }>('/api/dj/profile-rebuild', undefined, {
+			method: 'POST',
+			body: JSON.stringify(request),
+		});
+	},
+
+	async recordDjFeedback(feedback: DjFeedbackRequest): Promise<void> {
+		await fetchApi<unknown>('/api/dj/feedback', undefined, {
+			method: 'POST',
+			body: JSON.stringify(feedback),
+		});
+	},
 	getMusicBrainzStatus() {
 		return fetchApi<MusicBrainzStatus>('/api/library/enrich/musicbrainz/status');
 	},

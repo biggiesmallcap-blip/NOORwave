@@ -41,6 +41,7 @@
 		onNext,
 		onCycleRepeat,
 		onOpenMore,
+		onOpenDjCockpit,
 		onToggleMute,
 		onVolumePreview,
 		onVolumeChange,
@@ -74,6 +75,7 @@
 		onNext: () => void;
 		onCycleRepeat: () => void;
 		onOpenMore: (anchor: HTMLElement) => void;
+		onOpenDjCockpit: () => void;
 		onToggleMute: () => void;
 		onVolumePreview: (volumePercent: number) => void;
 		onVolumeChange: (volume: number) => void;
@@ -195,6 +197,13 @@
 	/>
 
 	<div class="np-controls">
+		<button
+			class="np-dj-btn"
+			type="button"
+			title="Open DJ Cockpit"
+			aria-label="Open DJ Cockpit"
+			onclick={onOpenDjCockpit}
+		>DJ</button>
 		<button
 			class="np-mute-btn"
 			type="button"
@@ -383,6 +392,36 @@
 		flex-shrink: 0;
 		cursor: pointer;
 		transition: background var(--motion-fast), border-color var(--motion-fast);
+	}
+
+	.np-dj-btn {
+		min-width: 2.75rem;
+		min-height: 2.75rem;
+		border-radius: var(--radius-sm);
+		display: grid;
+		place-items: center;
+		background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+		border: 1px solid var(--accent-line);
+		color: var(--accent-strong);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		line-height: 1;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast),
+			color var(--motion-fast);
+	}
+
+	.np-dj-btn:hover,
+	.np-dj-btn:focus-visible {
+		background: var(--accent-soft);
+		border-color: var(--accent-strong);
+	}
+
+	.np-dj-btn:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
 	}
 
 	.np-mute-btn:hover {

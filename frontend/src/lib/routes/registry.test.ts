@@ -29,6 +29,7 @@ describe('route registry', () => {
 			'playlists',
 			'discover',
 			'automix',
+			'dj',
 			'analytics',
 			'duplicates',
 			'settings',
@@ -54,6 +55,7 @@ describe('navigation route groups', () => {
 		expect(MOBILE_MORE_ROUTE_IDS).toEqual([
 			'playlists',
 			'automix',
+			'dj',
 			'analytics',
 			'duplicates',
 			'settings',

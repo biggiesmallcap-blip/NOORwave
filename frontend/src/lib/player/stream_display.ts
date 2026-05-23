@@ -6,6 +6,7 @@ export type PlayerStreamDisplay = {
 
 export type PlayerRuntimeDisplay = {
 	sample_rate?: number | null;
+	dj_engine_enabled?: boolean | null;
 } | null;
 
 const PART_SEPARATOR = ' \u00b7 ';
@@ -45,6 +46,7 @@ export function formatResolutionShort(stream: PlayerStreamDisplay): string {
 
 export function formatPlayerStreamDetail({
 	stream,
+	runtime,
 	exclusiveEngaged,
 }: {
 	stream: PlayerStreamDisplay;
@@ -59,6 +61,6 @@ export function formatPlayerStreamDetail({
 	if (qualityDetail) parts.push(qualityDetail);
 	if (sampleRate) parts.push(formatSampleRate(sampleRate));
 	if (bitDepth) parts.push(`${bitDepth}-bit`);
-	if (exclusiveEngaged) parts.push('Excl');
+	if (exclusiveEngaged) parts.push(runtime?.dj_engine_enabled ? 'Excl DJ' : 'Excl');
 	return parts.join(PART_SEPARATOR);
 }

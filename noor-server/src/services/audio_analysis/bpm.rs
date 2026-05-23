@@ -56,6 +56,54 @@ pub fn detect_bpm(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
     bpm_from_analysis(&result.beat_times, &result.beat_confidences)
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct BeatGridAnalysis {
+    pub bpm: f64,
+    pub confidence: f64,
+    pub beats_seconds: Vec<f32>,
+    pub downbeats_seconds: Vec<f32>,
+}
+
+pub fn analyze_beat_grid(samples: &[f32], sample_rate: u32) -> Option<BeatGridAnalysis> {
+    if sample_rate == 0 || samples.is_empty() {
+        return None;
+    }
+
+    let resampled = if sample_rate == TARGET_SAMPLE_RATE {
+        std::borrow::Cow::Borrowed(samples)
+    } else {
+        std::borrow::Cow::Owned(resample_linear(samples, sample_rate, TARGET_SAMPLE_RATE))
+    };
+    if resampled.len() < MIN_SAMPLES {
+        return None;
+    }
+
+    let config = CoreConfig::default();
+    let result = analyze_with_model_data(
+        resampled.as_ref(),
+        TARGET_SAMPLE_RATE,
+        &config,
+        MODEL_JSON,
+        MODEL_WEIGHTS,
+    )
+    .ok()?;
+    let (bpm, confidence) = bpm_from_analysis(&result.beat_times, &result.beat_confidences)?;
+    let downbeats_seconds = result
+        .beat_times
+        .iter()
+        .zip(result.beat_numbers.iter())
+        .filter_map(|(time, beat_number)| (*beat_number == 1).then_some(*time))
+        .collect::<Vec<_>>();
+
+    Some(BeatGridAnalysis {
+        bpm,
+        confidence,
+        beats_seconds: result.beat_times,
+        downbeats_seconds,
+    })
+}
+
 /// Compute (bpm, mean_confidence) from beat-time + per-beat-confidence arrays.
 /// Returned as `pub(crate)` so the unit tests can exercise it without spinning
 /// up the full model.
@@ -188,6 +236,27 @@ mod tests {
     fn rejects_zero_sample_rate() {
         let s = vec![0.0f32; 44_100 * 8];
         assert!(detect_bpm(&s, 0).is_none());
+    }
+
+    #[test]
+    fn beat_grid_analysis_rejects_short_clip() {
+        let s = vec![0.0f32; 1000];
+        assert!(analyze_beat_grid(&s, 44_100).is_none());
+    }
+
+    #[test]
+    fn beat_grid_analysis_rejects_zero_sample_rate() {
+        let s = vec![0.0f32; 44_100 * 8];
+        assert!(analyze_beat_grid(&s, 0).is_none());
+    }
+
+    #[test]
+    fn bpm_detect_bpm_still_works_for_existing_callers() {
+        let beats: Vec<f32> = (0..16).map(|i| 0.5 * (i as f32)).collect();
+        let confs = vec![0.8; beats.len()];
+        let (bpm, conf) = bpm_from_analysis(&beats, &confs).expect("bpm");
+        assert!((bpm - 120.0).abs() < 1.0);
+        assert!((conf - 0.8).abs() < 1e-6);
     }
 
     /// End-to-end smoke test: synthesize a 120 BPM click train at 44.1kHz,

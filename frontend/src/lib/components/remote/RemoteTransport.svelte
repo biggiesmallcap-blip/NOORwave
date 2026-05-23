@@ -3,6 +3,7 @@
 	import {
 		automixEnabled,
 		currentStreamDisplay,
+		playbackRuntimeInfo,
 		cyclePlayerRepeatMode,
 		cyclePlayerShuffleMode,
 		playNextTrack,
@@ -63,6 +64,7 @@
 	let streamDetail = $derived(
 		formatPlayerStreamDetail({
 			stream: $currentStreamDisplay,
+			runtime: $playbackRuntimeInfo,
 			exclusiveEngaged: $exclusiveStatus.engaged,
 		})
 	);

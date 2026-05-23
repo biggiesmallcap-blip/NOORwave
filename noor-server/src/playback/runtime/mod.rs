@@ -1,10 +1,12 @@
 use crate::db::audio_settings::ExclusiveLatencyMode;
+use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::output::cpal_shared::{SwapBackend, swap_stream_plan};
 #[cfg(target_os = "windows")]
 use crate::playback::output::wasapi_exclusive::{
     ExclusiveRenderRole, ExclusiveRenderSource, ExclusiveRuntimeSink, build_exclusive_stream,
 };
-use crate::playback::player::PreparedPlaybackJob;
+use crate::playback::player::{PreparedPlaybackJob, PreparedTransitionProgram};
+use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -31,6 +33,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tracing::{debug, error, info, warn};
+
+const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
 
 /// Pure decision helper for the SeekTo handler. Moved out of `server::routes`
 /// (r6 fix A: keep the playback runtime free of HTTP-layer dependencies). The
@@ -79,6 +83,9 @@ pub struct PlaybackRuntimeConfig {
     /// Channel to send mono audio samples for passive DSP analysis.
     /// (track_id, mono_samples, sample_rate)
     pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
+    pub dj_analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<DjAnalysisJob>>,
+    pub dj_engine_enabled: bool,
+    pub dj_analysis_only: bool,
 }
 
 impl PlaybackRuntimeConfig {
@@ -91,7 +98,25 @@ impl PlaybackRuntimeConfig {
             http_client,
             access_token: access_token.into(),
             analysis_tx,
+            dj_analysis_tx: None,
+            dj_engine_enabled: false,
+            dj_analysis_only: false,
         }
+    }
+
+    pub fn with_dj_analysis(
+        mut self,
+        dj_engine_enabled: bool,
+        dj_analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<DjAnalysisJob>>,
+    ) -> Self {
+        self.dj_engine_enabled = dj_engine_enabled;
+        self.dj_analysis_tx = dj_analysis_tx;
+        self
+    }
+
+    pub fn for_dj_analysis_only(mut self) -> Self {
+        self.dj_analysis_only = true;
+        self
     }
 }
 
@@ -233,6 +258,30 @@ impl PlaybackRuntimeHandle {
     /// Pre-decode the next track in the background so the transition is gapless.
     pub fn prepare_next(&self, job: PreparedPlaybackJob) -> Result<()> {
         self.send(PlaybackRuntimeCommand::PrepareNext(job))
+    }
+
+    pub fn set_dj_engine_enabled(&self, enabled: bool) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::SetDjEngineEnabled { enabled })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_dj_lookahead(
+        &self,
+        current: Option<DjMediaRef>,
+        next: Option<DjMediaRef>,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+        queue_generation: u64,
+        deadline_samples: u64,
+    ) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::StartDjLookahead {
+            current,
+            next,
+            current_queue_item_id,
+            next_queue_item_id,
+            queue_generation,
+            deadline_samples,
+        })
     }
 
     pub fn track_status(&self, track_id: i64, generation: u64) -> PlaybackTrackStatus {
@@ -417,11 +466,332 @@ struct PlaybackRuntimeLoopState {
     current_exclusive_release_grace_secs: u32,
     /// Last-known WASAPI exclusive callback period policy.
     current_exclusive_latency_mode: ExclusiveLatencyMode,
+    dj_engine_enabled: bool,
+    dj_lookahead: Option<RuntimeDjLookahead>,
+    dj_lookahead_failure: Option<DjLookaheadFailure>,
+    prepared_dj_mixer: Option<PreparedDjMixer>,
+}
+
+struct PreparedDjMixer {
+    mixer: noor_mix::Mixer,
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    current_track_id: i64,
+    next_track_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDjLookahead {
+    current: Option<DjMediaRef>,
+    next: DjMediaRef,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: i64,
+    queue_generation: u64,
+    deadline_samples: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DjLookaheadFailure {
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    reason: DjLookaheadFailureReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum DjLookaheadFailureReason {
+    NextNotResolved,
+    ResolutionFailed,
+    AnalysisDeadlineMissed,
+    QueueChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartDjLookaheadOutcome {
+    Started,
+    AlreadyCurrent,
+    ReusedPreparedNext,
+    MissingNext,
+}
+
+impl RuntimeDjLookahead {
+    fn matches_pair(
+        &self,
+        queue_generation: u64,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+    ) -> bool {
+        self.queue_generation == queue_generation
+            && self.current_queue_item_id == current_queue_item_id
+            && Some(self.next_queue_item_id) == next_queue_item_id
+    }
+}
+
+fn start_dj_lookahead_in_state(
+    state: &mut PlaybackRuntimeLoopState,
+    current: Option<DjMediaRef>,
+    next: Option<DjMediaRef>,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    queue_generation: u64,
+    deadline_samples: u64,
+) -> StartDjLookaheadOutcome {
+    let Some(next) = next else {
+        state.dj_lookahead = None;
+        state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id,
+            reason: DjLookaheadFailureReason::NextNotResolved,
+        });
+        return StartDjLookaheadOutcome::MissingNext;
+    };
+    let Some(next_queue_item_id) = next_queue_item_id else {
+        state.dj_lookahead = None;
+        state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id: None,
+            reason: DjLookaheadFailureReason::NextNotResolved,
+        });
+        return StartDjLookaheadOutcome::MissingNext;
+    };
+
+    if state.dj_lookahead.as_ref().is_some_and(|lookahead| {
+        lookahead.matches_pair(
+            queue_generation,
+            current_queue_item_id,
+            Some(next_queue_item_id),
+        )
+    }) {
+        return StartDjLookaheadOutcome::AlreadyCurrent;
+    }
+
+    let prepared_next = next.track_id().is_some_and(|track_id| {
+        state
+            .next_engine
+            .as_ref()
+            .is_some_and(|engine| engine.track_id == track_id)
+    });
+    state.dj_lookahead = Some(RuntimeDjLookahead {
+        current,
+        next,
+        current_queue_item_id,
+        next_queue_item_id,
+        queue_generation,
+        deadline_samples,
+    });
+    state.dj_lookahead_failure = None;
+    if prepared_next {
+        StartDjLookaheadOutcome::ReusedPreparedNext
+    } else {
+        StartDjLookaheadOutcome::Started
+    }
+}
+
+fn prepared_dj_lookahead_matches_pair(
+    state: &PlaybackRuntimeLoopState,
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+) -> bool {
+    state.dj_lookahead.as_ref().is_some_and(|lookahead| {
+        lookahead.matches_pair(queue_generation, current_queue_item_id, next_queue_item_id)
+    })
+}
+
+fn discard_stale_prepared_transition(
+    state: &PlaybackRuntimeLoopState,
+    job: &mut PreparedPlaybackJob,
+) -> bool {
+    let Some(transition) = job.prepared_transition.as_ref() else {
+        return false;
+    };
+    if prepared_dj_lookahead_matches_pair(
+        state,
+        transition.queue_generation,
+        transition.current_queue_item_id,
+        transition.next_queue_item_id,
+    ) {
+        return false;
+    }
+    job.prepared_transition = None;
+    true
+}
+
+fn dj_mixer_max_block_samples(output_config: &StreamConfig) -> usize {
+    let channels = usize::from(output_config.channels.max(1));
+    match output_config.buffer_size {
+        cpal::BufferSize::Fixed(frames) => frames as usize * channels,
+        cpal::BufferSize::Default => DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES * channels,
+    }
+}
+
+fn decoded_deck_buffer(
+    engine: &PlaybackEngine,
+    channels: u16,
+) -> Option<noor_mix::deck::DeckBuffer> {
+    let guard = engine.shared.buffer.lock().ok()?;
+    if !guard.finished || guard.samples.is_empty() {
+        return None;
+    }
+    Some(noor_mix::deck::DeckBuffer::new(
+        guard.samples.clone(),
+        channels,
+    ))
+}
+
+fn build_prepared_dj_mixer(
+    state: &PlaybackRuntimeLoopState,
+    transition: &PreparedTransitionProgram,
+    max_block_samples: usize,
+) -> Option<PreparedDjMixer> {
+    let active = state.engine.as_ref()?;
+    let next = state.next_engine.as_ref()?;
+    if !prepared_dj_lookahead_matches_pair(
+        state,
+        transition.queue_generation,
+        transition.current_queue_item_id,
+        transition.next_queue_item_id,
+    ) {
+        return None;
+    }
+    let deck_a = decoded_deck_buffer(active, state.device_channels)?;
+    let deck_b = decoded_deck_buffer(next, state.device_channels)?;
+    let mixer = match noor_mix::Mixer::new(
+        transition.program.clone(),
+        deck_a,
+        deck_b,
+        max_block_samples,
+    ) {
+        Ok(mixer) => mixer,
+        Err(error) => {
+            warn!("Prepared DJ mixer rejected transition program: {error:?}");
+            return None;
+        }
+    };
+    Some(PreparedDjMixer {
+        mixer,
+        queue_generation: transition.queue_generation,
+        current_queue_item_id: transition.current_queue_item_id,
+        next_queue_item_id: transition.next_queue_item_id,
+        current_track_id: active.track_id,
+        next_track_id: next.track_id,
+    })
+}
+
+fn prepare_dj_mixer_for_pair(
+    state: &mut PlaybackRuntimeLoopState,
+    max_block_samples: usize,
+) -> bool {
+    if !state.dj_engine_enabled {
+        state.prepared_dj_mixer = None;
+        return false;
+    }
+    let Some(transition) = state
+        .next_engine
+        .as_ref()
+        .and_then(|engine| engine.job.prepared_transition.as_ref())
+        .cloned()
+    else {
+        state.prepared_dj_mixer = None;
+        return false;
+    };
+    let prepared = build_prepared_dj_mixer(state, &transition, max_block_samples);
+    let did_prepare = prepared.is_some();
+    state.prepared_dj_mixer = prepared;
+    did_prepare
+}
+
+fn arm_active_transition_window(
+    state: &mut PlaybackRuntimeLoopState,
+    job: &PreparedPlaybackJob,
+) -> bool {
+    let Some(transition) = job.prepared_transition.as_ref() else {
+        return false;
+    };
+    if job.gapless.overlap_ms <= 0 {
+        return false;
+    }
+    let Some(engine) = state.engine.as_ref() else {
+        return false;
+    };
+    let trigger_ms = u64::from(job.gapless.overlap_ms as u32)
+        .saturating_add(u64::from(transition.fire_ahead_ms));
+    let samples = trigger_ms
+        .saturating_mul(state.device_sample_rate as u64)
+        .saturating_mul(state.device_channels.max(1) as u64)
+        / 1000;
+    if samples == 0 {
+        return false;
+    }
+    engine
+        .shared
+        .crossfade_samples
+        .store(samples, Ordering::Relaxed);
+    engine
+        .shared
+        .crossfade_start_signaled
+        .store(false, Ordering::Relaxed);
+    info!(
+        track_id = engine.track_id,
+        next_track_id = job.track.id,
+        overlap_ms = job.gapless.overlap_ms,
+        fire_ahead_ms = transition.fire_ahead_ms,
+        overlap_samples = samples,
+        "DJ transition window armed"
+    );
+    true
+}
+
+fn gate_prepare_next_for_dj(
+    state: &mut PlaybackRuntimeLoopState,
+    job: &mut PreparedPlaybackJob,
+) -> bool {
+    if !state.dj_engine_enabled {
+        job.prepared_transition = None;
+        state.prepared_dj_mixer = None;
+        return false;
+    }
+    if discard_stale_prepared_transition(state, job) {
+        state.prepared_dj_mixer = None;
+    }
+    job.prepared_transition.is_some()
+}
+
+fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled: bool) {
+    state.dj_engine_enabled = enabled;
+    if enabled {
+        return;
+    }
+    state.dj_lookahead = None;
+    state.dj_lookahead_failure = None;
+    state.prepared_dj_mixer = None;
+    if let Some(engine) = state.next_engine.as_mut() {
+        engine.job.prepared_transition = None;
+    }
+}
+
+fn record_dj_lookahead_failure(
+    state: &mut PlaybackRuntimeLoopState,
+    queue_generation: u64,
+    current_queue_item_id: Option<i64>,
+    next_queue_item_id: Option<i64>,
+    reason: DjLookaheadFailureReason,
+) {
+    state.dj_lookahead_failure = Some(DjLookaheadFailure {
+        queue_generation,
+        current_queue_item_id,
+        next_queue_item_id,
+        reason,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_runtime_loop(
-    config: PlaybackRuntimeConfig,
+    mut config: PlaybackRuntimeConfig,
     command_rx: mpsc::Receiver<PlaybackRuntimeCommand>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -457,6 +827,10 @@ fn run_runtime_loop(
         current_exclusive_release_grace_secs:
             crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+        dj_engine_enabled: config.dj_engine_enabled,
+        dj_lookahead: None,
+        dj_lookahead_failure: None,
+        prepared_dj_mixer: None,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -600,6 +974,9 @@ fn run_runtime_loop(
                                     .shared
                                     .seek_target_samples
                                     .store(target_samples, Ordering::Relaxed);
+                                engine
+                                    .shared
+                                    .set_manual_seek_crossfade_suppression(target_samples);
                                 // Reset fire-once guards so NearEnd /
                                 // CrossfadeStart re-fire after a backward seek.
                                 engine
@@ -634,6 +1011,15 @@ fn run_runtime_loop(
                                 true, // force_restart - bypass switch_is_noop
                             ) {
                                 Ok(()) => {
+                                    if let Some(engine) = state.engine.as_ref() {
+                                        let target_samples = (target_ms.max(0) as u64)
+                                            .saturating_mul(rate)
+                                            .saturating_mul(channels)
+                                            / 1000;
+                                        engine
+                                            .shared
+                                            .set_manual_seek_crossfade_suppression(target_samples);
+                                    }
                                     let _ = respond_to.send(SeekToOutcome::Dispatched);
                                 }
                                 Err(error) => {
@@ -647,7 +1033,9 @@ fn run_runtime_loop(
                         }
                     }
                 }
-                PlaybackRuntimeCommand::PrepareNext(job) => {
+                PlaybackRuntimeCommand::PrepareNext(mut job) => {
+                    gate_prepare_next_for_dj(&mut state, &mut job);
+                    arm_active_transition_window(&mut state, &job);
                     // Only pre-decode if we don't already have a pending engine for this track.
                     let already_pending = state
                         .next_engine
@@ -657,6 +1045,7 @@ fn run_runtime_loop(
                     if !already_pending {
                         // Stop any stale pending engine first.
                         if let Some(mut stale) = state.next_engine.take() {
+                            state.prepared_dj_mixer = None;
                             stale.stop();
                         }
                         let pending_position = Arc::new(AtomicU64::new(0));
@@ -691,6 +1080,10 @@ fn run_runtime_loop(
                                 // block control commands on some Linux/PipeWire setups.
                                 engine.shared.paused.store(true, Ordering::SeqCst);
                                 state.next_engine = Some(engine);
+                                prepare_dj_mixer_for_pair(
+                                    &mut state,
+                                    dj_mixer_max_block_samples(&output_config),
+                                );
                                 #[cfg(target_os = "windows")]
                                 if state.current_exclusive {
                                     refresh_exclusive_sources(&state);
@@ -699,6 +1092,38 @@ fn run_runtime_loop(
                             Err(err) => {
                                 warn!("Failed to pre-buffer next track: {err:?}");
                             }
+                        }
+                    }
+                }
+                PlaybackRuntimeCommand::SetDjEngineEnabled { enabled } => {
+                    config.dj_engine_enabled = enabled;
+                    set_dj_engine_enabled_in_state(&mut state, enabled);
+                }
+                PlaybackRuntimeCommand::StartDjLookahead {
+                    current,
+                    next,
+                    current_queue_item_id,
+                    next_queue_item_id,
+                    queue_generation,
+                    deadline_samples,
+                } => {
+                    if !state.dj_engine_enabled {
+                        state.dj_lookahead = None;
+                        state.prepared_dj_mixer = None;
+                    } else {
+                        let outcome = start_dj_lookahead_in_state(
+                            &mut state,
+                            current,
+                            next,
+                            current_queue_item_id,
+                            next_queue_item_id,
+                            queue_generation,
+                            deadline_samples,
+                        );
+                        if matches!(outcome, StartDjLookaheadOutcome::MissingNext) {
+                            debug!(
+                                "DJ lookahead skipped because the next queue item is not resolved"
+                            );
                         }
                     }
                 }
@@ -716,13 +1141,14 @@ fn run_runtime_loop(
                             .as_ref()
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
-                        if next_ready {
+                        if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
                                 &position_source,
                                 &buffered_source,
                                 &offset_source,
+                                "fired",
                             );
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
@@ -741,18 +1167,25 @@ fn run_runtime_loop(
                         .map(|e| e.track_id == track_id && e.generation == generation)
                         .unwrap_or(false);
                     if pending_match {
+                        prepare_dj_mixer_for_pair(
+                            &mut state,
+                            dj_mixer_max_block_samples(&output_config),
+                        );
                         let crossfade_started = state
                             .engine
                             .as_ref()
                             .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
                             .unwrap_or(false);
-                        if crossfade_started {
+                        if crossfade_started
+                            && !active_engine_suppresses_crossfade_after_seek(&state)
+                        {
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
                                 &position_source,
                                 &buffered_source,
                                 &offset_source,
+                                "late",
                             );
                         }
                     }
@@ -1432,6 +1865,7 @@ fn switch_is_noop_for_active_job(
 }
 
 fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
+    state.prepared_dj_mixer = None;
     if let Some(mut engine) = state.engine.take() {
         engine.stop();
     }
@@ -1632,10 +2066,17 @@ fn promote_next_to_active(
     position_source: &Arc<Mutex<Arc<AtomicU64>>>,
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
+    timing_status: &'static str,
 ) {
+    state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
     };
+    let transition_event_id = next
+        .job
+        .prepared_transition
+        .as_ref()
+        .and_then(|transition| transition.transition_event_id);
     next.shared.fadein_start_samples.store(0, Ordering::Relaxed);
     next.shared.paused.store(false, Ordering::SeqCst);
 
@@ -1666,7 +2107,29 @@ fn promote_next_to_active(
     if let Some(outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
+        let actual_start_ms = track_position_ms(
+            &outgoing.shared,
+            state.device_sample_rate,
+            state.device_channels,
+        );
         state.fading_out_engine = Some(outgoing);
+        if let Some(transition_event_id) = transition_event_id {
+            info!(
+                transition_event_id,
+                outgoing_track_id = outgoing_id,
+                generation = outgoing_generation,
+                actual_start_ms,
+                timing_status,
+                "DJ transition promotion fired"
+            );
+            let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id: outgoing_id,
+                generation: outgoing_generation,
+                actual_start_ms,
+                timing_status: timing_status.to_string(),
+            });
+        }
         // Tell the routes layer that the audible "current" track has flipped.
         // Reusing Finished keeps the existing queue-advance path.
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
@@ -1680,6 +2143,17 @@ fn promote_next_to_active(
     }
 }
 
+fn track_position_ms(shared: &PlaybackSharedState, sample_rate: u32, channels: u16) -> i64 {
+    if sample_rate == 0 || channels == 0 {
+        return 0;
+    }
+    let samples = shared
+        .position_offset_samples
+        .load(Ordering::Relaxed)
+        .saturating_add(shared.position_samples.load(Ordering::Relaxed));
+    (samples.saturating_mul(1000) / (u64::from(sample_rate) * u64::from(channels))) as i64
+}
+
 fn promote_prepared_at_boundary(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
@@ -1687,6 +2161,7 @@ fn promote_prepared_at_boundary(
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
+    state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
     };
@@ -1820,6 +2295,15 @@ fn should_promote_prepared_at_boundary(
         && next.is_some_and(|(_, next_generation)| next_generation == generation)
 }
 
+fn active_engine_suppresses_crossfade_after_seek(state: &PlaybackRuntimeLoopState) -> bool {
+    state.engine.as_ref().is_some_and(|engine| {
+        engine
+            .shared
+            .suppress_crossfade_after_seek
+            .load(Ordering::Relaxed)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::shared::{PlaybackBuffer, write_output_f32};
@@ -1836,6 +2320,626 @@ mod tests {
         Arc,
         atomic::{AtomicU32, AtomicU64},
     };
+
+    mod dj_lookahead {
+        use super::*;
+
+        fn library_ref(track_id: i64) -> DjMediaRef {
+            DjMediaRef::LibraryTrack { track_id }
+        }
+
+        #[test]
+        fn start_dj_lookahead_does_not_promote_next_engine() {
+            let mut state = test_runtime_loop_state();
+            state.next_engine = Some(test_engine_with_shared(2, 10));
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::ReusedPreparedNext);
+            assert!(state.engine.is_none());
+            assert!(state.next_engine.is_some());
+        }
+
+        #[test]
+        fn start_dj_lookahead_replaces_lower_hash_generation() {
+            let mut state = test_runtime_loop_state();
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+            assert_eq!(outcome, StartDjLookaheadOutcome::Started);
+
+            let replacement = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(3)),
+                Some(library_ref(4)),
+                Some(13),
+                Some(14),
+                19,
+                48_000,
+            );
+
+            assert_eq!(replacement, StartDjLookaheadOutcome::Started);
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.next_queue_item_id),
+                Some(14)
+            );
+            assert!(state.dj_lookahead_failure.is_none());
+        }
+
+        #[test]
+        fn prepared_program_rejected_when_pair_ids_change() {
+            let mut state = test_runtime_loop_state();
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert!(prepared_dj_lookahead_matches_pair(
+                &state,
+                20,
+                Some(11),
+                Some(12)
+            ));
+            assert!(!prepared_dj_lookahead_matches_pair(
+                &state,
+                20,
+                Some(11),
+                Some(99)
+            ));
+        }
+
+        #[test]
+        fn start_dj_lookahead_reuses_existing_prepared_next() {
+            let mut state = test_runtime_loop_state();
+            state.next_engine = Some(test_engine_with_shared(2, 10));
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::ReusedPreparedNext);
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.next.clone()),
+                Some(library_ref(2))
+            );
+        }
+
+        #[test]
+        fn start_dj_lookahead_records_resolution_failure() {
+            let mut state = test_runtime_loop_state();
+
+            let outcome = start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                None,
+                Some(11),
+                None,
+                20,
+                48_000,
+            );
+
+            assert_eq!(outcome, StartDjLookaheadOutcome::MissingNext);
+            assert!(state.dj_lookahead.is_none());
+            assert_eq!(
+                state
+                    .dj_lookahead_failure
+                    .as_ref()
+                    .map(|failure| failure.reason),
+                Some(DjLookaheadFailureReason::NextNotResolved)
+            );
+        }
+
+        #[test]
+        fn start_dj_lookahead_records_analysis_deadline() {
+            let mut state = test_runtime_loop_state();
+
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(library_ref(1)),
+                Some(library_ref(2)),
+                Some(11),
+                Some(12),
+                20,
+                96_000,
+            );
+
+            assert_eq!(
+                state
+                    .dj_lookahead
+                    .as_ref()
+                    .map(|lookahead| lookahead.deadline_samples),
+                Some(96_000)
+            );
+        }
+
+        #[test]
+        fn missed_lookahead_deadline_does_not_delay_playback() {
+            let mut state = test_runtime_loop_state();
+            state.engine = Some(test_engine_with_shared(1, 10));
+
+            record_dj_lookahead_failure(
+                &mut state,
+                20,
+                Some(11),
+                Some(12),
+                DjLookaheadFailureReason::AnalysisDeadlineMissed,
+            );
+
+            assert!(state.engine.is_some());
+            assert_eq!(
+                state
+                    .dj_lookahead_failure
+                    .as_ref()
+                    .map(|failure| failure.reason),
+                Some(DjLookaheadFailureReason::AnalysisDeadlineMissed)
+            );
+        }
+    }
+
+    mod analysis_profile_key {
+        use super::*;
+        use crate::db::models::{AudioDjProfileKey, AudioDjProfileRow};
+        use crate::db::{Database, queries};
+        use crate::playback::decode::send_dj_analysis_job;
+        use crate::playback::dj_lookahead::DjMediaRef;
+        use crate::services::audio_analysis::dj_profile::{
+            DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,
+        };
+
+        fn config(
+            enabled: bool,
+        ) -> (
+            PlaybackRuntimeConfig,
+            tokio::sync::mpsc::UnboundedReceiver<DjAnalysisJob>,
+        ) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                PlaybackRuntimeConfig::new(reqwest::Client::new(), "", None)
+                    .with_dj_analysis(enabled, Some(tx)),
+                rx,
+            )
+        }
+
+        fn send(
+            enabled: bool,
+            media_ref: DjMediaRef,
+        ) -> Option<crate::services::audio_analysis::dj_profile::DjAnalysisJob> {
+            let (config, mut rx) = config(enabled);
+            let job = PreparedPlaybackJob::test_fixture(media_ref.track_id().unwrap_or(10), 7)
+                .with_dj_media_ref(media_ref);
+            send_dj_analysis_job(
+                &config,
+                job.dj_media_ref.clone(),
+                &job,
+                vec![0.0; 128],
+                48_000,
+                7,
+            );
+            rx.try_recv().ok()
+        }
+
+        #[test]
+        fn dj_analysis_not_sent_when_engine_disabled() {
+            let sent = send(false, DjMediaRef::LibraryTrack { track_id: 1 });
+            assert!(sent.is_none());
+        }
+
+        #[test]
+        fn active_decoder_sends_library_profile_key() {
+            let sent = send(true, DjMediaRef::LibraryTrack { track_id: 1 }).expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "library_track");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "1");
+            assert_eq!(sent.track_id, Some(1));
+        }
+
+        #[test]
+        fn prepared_next_decoder_sends_tidal_profile_key() {
+            let sent = send(
+                true,
+                DjMediaRef::TidalTrack {
+                    tidal_id: 99,
+                    track_id: Some(10),
+                },
+            )
+            .expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "tidal_track");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "99");
+            assert_eq!(sent.tidal_id, Some(99));
+        }
+
+        #[test]
+        fn pending_next_decoder_sends_queue_item_profile_key_when_unresolved() {
+            let sent = send(
+                true,
+                DjMediaRef::PendingQueueItem {
+                    queue_item_id: 44,
+                    pending_artist: "Artist".to_string(),
+                    pending_title: "Title".to_string(),
+                    tidal_id_hint: None,
+                },
+            )
+            .expect("job");
+            assert_eq!(sent.media_ref.profile_key().media_ref_kind, "queue_item");
+            assert_eq!(sent.media_ref.profile_key().media_ref_id, "44");
+            assert_eq!(sent.queue_item_id, Some(44));
+        }
+
+        #[test]
+        fn pending_profile_promotes_after_tidal_resolution() {
+            let db = Database::open_in_memory().expect("db");
+            db.run_migrations().expect("migrations");
+            db.with_conn(|conn| -> anyhow::Result<()> {
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (44, NULL, 0, 'test', 'Artist', 'Title')",
+                    [],
+                )?;
+                let row = AudioDjProfileRow {
+                    media_ref_kind: "queue_item".to_string(),
+                    media_ref_id: "44".to_string(),
+                    track_id: None,
+                    queue_item_id: Some(44),
+                    tidal_id: None,
+                    profile_version: DJ_PROFILE_VERSION.to_string(),
+                    beat_grid_blob: encode_f32_blob(&[0.0, 0.5]),
+                    downbeats_blob: encode_f32_blob(&[0.0]),
+                    phrase_boundaries_blob: encode_u32_blob(&[0]),
+                    mix_in_blob: encode_f32_blob(&[]),
+                    mix_out_blob: encode_f32_blob(&[]),
+                    intro_end_seconds: None,
+                    outro_start_seconds: None,
+                    breakdown_blob: encode_f32_blob(&[]),
+                    drop_blob: encode_f32_blob(&[]),
+                    safe_transition_windows_blob: encode_f32_blob(&[]),
+                    energy_contour_blob: encode_f32_blob(&[]),
+                    vocal_presence_blob: encode_f32_blob(&[]),
+                    vocal_density_blob: encode_f32_blob(&[]),
+                    lufs_loud_body: None,
+                    true_peak_dbtp: None,
+                    beat_confidence: Some(0.8),
+                    profile_confidence: 0.7,
+                    analysis_scope_ms: 30_000,
+                    is_temporary: true,
+                    source: "test".to_string(),
+                    computed_at: "now".to_string(),
+                };
+                queries::upsert_audio_dj_profile(conn, &row)?;
+                queries::promote_temporary_audio_dj_profile(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "queue_item".to_string(),
+                        media_ref_id: "44".to_string(),
+                    },
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "99".to_string(),
+                    },
+                    Some(99),
+                )?;
+                let stable = queries::get_audio_dj_profile(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "99".to_string(),
+                    },
+                )?
+                .expect("stable profile");
+                assert_eq!(stable.tidal_id, Some(99));
+                Ok(())
+            })
+            .expect("promote");
+        }
+    }
+
+    mod prepared_transition {
+        use super::*;
+        use crate::playback::player::PreparedTransitionProgram;
+
+        fn program() -> noor_mix::TransitionProgram {
+            noor_mix::TransitionProgram {
+                tier: noor_mix::program::Tier::SafeCrossfade,
+                template: "SafeCrossfade".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                sync_start: 0,
+                intro_start: 0,
+                swap_start: 1,
+                fade_start: 1,
+                resolve_at: 2,
+                loops: vec![],
+                automation: vec![],
+            }
+        }
+
+        fn transition(
+            queue_generation: u64,
+            current_queue_item_id: Option<i64>,
+            next_queue_item_id: Option<i64>,
+        ) -> PreparedTransitionProgram {
+            PreparedTransitionProgram {
+                program: program(),
+                transition_event_id: None,
+                fire_ahead_ms: 0,
+                queue_generation,
+                current_queue_item_id,
+                next_queue_item_id,
+            }
+        }
+
+        fn state_with_pair() -> PlaybackRuntimeLoopState {
+            let mut state = test_runtime_loop_state();
+            start_dj_lookahead_in_state(
+                &mut state,
+                Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+                Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+                Some(11),
+                Some(12),
+                20,
+                48_000,
+            );
+            state
+        }
+
+        #[test]
+        fn prepare_next_preserves_transition_program() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(20, Some(11), Some(12)));
+
+            assert!(!discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_some());
+        }
+
+        #[test]
+        fn legacy_prepare_next_has_no_transition_program() {
+            let job = PreparedPlaybackJob::test_fixture(2, 7);
+
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn prepared_transition_discarded_when_generation_is_stale() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(19, Some(11), Some(12)));
+
+            assert!(discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn prepared_transition_discarded_when_next_queue_item_changes() {
+            let state = state_with_pair();
+            let mut job = PreparedPlaybackJob::test_fixture(2, 7)
+                .with_prepared_transition(transition(20, Some(11), Some(99)));
+
+            assert!(discard_stale_prepared_transition(&state, &mut job));
+            assert!(job.prepared_transition.is_none());
+        }
+    }
+
+    #[test]
+    fn runtime_constructs_mixer_before_audio_callback() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.25, 0.25, 0.25, 0.25]);
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&next, &[0.5, 0.5, 0.5, 0.5]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
+        assert_eq!(prepared.queue_generation, 20);
+        assert_eq!(prepared.current_queue_item_id, Some(11));
+        assert_eq!(prepared.next_queue_item_id, Some(12));
+        assert_eq!(prepared.current_track_id, 1);
+        assert_eq!(prepared.next_track_id, 2);
+
+        let mut out = [0.0; 4];
+        prepared.mixer.render_block(&mut out, 0);
+        assert!(out.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn prepared_dj_program_arms_active_transition_window() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        let active = test_engine_with_shared(1, 20);
+        assert_eq!(active.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        state.engine = Some(active);
+
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active.shared.crossfade_samples.load(Ordering::Relaxed),
+            96_000
+        );
+        assert!(
+            !active
+                .shared
+                .crossfade_start_signaled
+                .load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn prepared_dj_program_applies_fire_ahead_to_trigger_window() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        state.engine = Some(test_engine_with_shared(1, 20));
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.fire_ahead_ms = 231;
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active.shared.crossfade_samples.load(Ordering::Relaxed),
+            118_176
+        );
+    }
+
+    #[test]
+    fn dj_flag_off_does_not_construct_mixer() {
+        let mut state = state_with_ready_dj_pair();
+        state.dj_engine_enabled = false;
+
+        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn dj_flag_off_ignores_transition_program_field() {
+        let mut state = test_runtime_loop_state();
+        state.dj_engine_enabled = false;
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+
+        assert!(!gate_prepare_next_for_dj(&mut state, &mut job));
+        assert!(job.prepared_transition.is_none());
+        assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn disabling_dj_discards_ready_mixer_without_stopping_playback() {
+        let mut state = state_with_ready_dj_pair();
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+
+        set_dj_engine_enabled_in_state(&mut state, false);
+
+        assert!(!state.dj_engine_enabled);
+        assert!(state.prepared_dj_mixer.is_none());
+        let active = state.engine.as_ref().expect("active engine");
+        let next = state.next_engine.as_ref().expect("next engine");
+        assert!(!active.shared.stopped.load(Ordering::SeqCst));
+        assert!(!next.shared.stopped.load(Ordering::SeqCst));
+        assert!(next.job.prepared_transition.is_none());
+    }
+
+    #[test]
+    fn automatic_crossfade_promotion_emits_timing_event() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_offset_samples
+            .store(192_000, Ordering::Relaxed);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        let mut next = test_engine_with_shared(2, 21);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(77);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "fired",
+        );
+
+        match event_rx.try_recv().expect("timing event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id,
+                generation,
+                actual_start_ms,
+                timing_status,
+            } => {
+                assert_eq!(transition_event_id, 77);
+                assert_eq!(outgoing_track_id, 1);
+                assert_eq!(generation, 20);
+                assert_eq!(actual_start_ms, 3_000);
+                assert_eq!(timing_status, "fired");
+            }
+            other => panic!("expected timing event, got {other:?}"),
+        }
+        match event_rx.try_recv().expect("finished event") {
+            PlaybackRuntimeEvent::Finished {
+                track_id,
+                generation,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 20);
+            }
+            other => panic!("expected finished event, got {other:?}"),
+        }
+    }
 
     #[test]
     fn effective_output_config_applies_desired_sample_rate() {
@@ -2353,6 +3457,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn manual_seek_near_end_suppresses_crossfade_promotion() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let total_samples = 120 * 48_000 * 2;
+        active
+            .shared
+            .total_samples
+            .store(total_samples, Ordering::Relaxed);
+
+        active
+            .shared
+            .set_manual_seek_crossfade_suppression(total_samples - 48_000);
+        state.engine = Some(active);
+
+        assert!(active_engine_suppresses_crossfade_after_seek(&state));
+    }
+
+    #[test]
+    fn manual_seek_before_near_end_keeps_crossfade_promotion_enabled() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let total_samples = 120 * 48_000 * 2;
+        active
+            .shared
+            .total_samples
+            .store(total_samples, Ordering::Relaxed);
+
+        active.shared.set_manual_seek_crossfade_suppression(0);
+        state.engine = Some(active);
+
+        assert!(!active_engine_suppresses_crossfade_after_seek(&state));
+    }
+
     fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
         PlaybackRuntimeLoopState {
             device_name: "test".to_string(),
@@ -2369,6 +3507,10 @@ mod tests {
             current_exclusive_release_grace_secs:
                 crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
             current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
+            dj_engine_enabled: true,
+            dj_lookahead: None,
+            dj_lookahead_failure: None,
+            prepared_dj_mixer: None,
         }
     }
 
@@ -2497,6 +3639,61 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
             )),
         )
+    }
+
+    fn state_with_ready_dj_pair() -> PlaybackRuntimeLoopState {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.25, 0.25, 0.25, 0.25]);
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&next, &[0.5, 0.5, 0.5, 0.5]);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        state
+    }
+
+    fn finish_engine_buffer(engine: &PlaybackEngine, samples: &[f32]) {
+        let mut buffer = engine.shared.buffer.lock().expect("buffer lock");
+        buffer.samples.extend_from_slice(samples);
+        buffer.mark_finished();
+    }
+
+    fn test_prepared_transition_program(
+        queue_generation: u64,
+        current_queue_item_id: Option<i64>,
+        next_queue_item_id: Option<i64>,
+    ) -> PreparedTransitionProgram {
+        PreparedTransitionProgram {
+            program: noor_mix::TransitionProgram {
+                tier: noor_mix::program::Tier::SafeCrossfade,
+                template: "SafeCrossfade".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                sync_start: 0,
+                intro_start: 0,
+                swap_start: 1,
+                fade_start: 1,
+                resolve_at: 2,
+                loops: vec![],
+                automation: vec![],
+            },
+            transition_event_id: None,
+            fire_ahead_ms: 0,
+            queue_generation,
+            current_queue_item_id,
+            next_queue_item_id,
+        }
     }
 
     // -- Option C: evaluate_seek_decision unit tests (moved from server::routes

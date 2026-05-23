@@ -146,7 +146,7 @@ fn write_output_buffer<T>(
     }
 
     let xfade = shared.crossfade_samples.load(Ordering::Relaxed);
-    let fade_gain = if xfade > 0 {
+    let fade_gain = if xfade > 0 && !shared.suppress_crossfade_after_seek.load(Ordering::Relaxed) {
         let pos = shared.position_samples.load(Ordering::Relaxed);
         let fadein_start = shared.fadein_start_samples.load(Ordering::Relaxed);
         if fadein_start != u64::MAX {
@@ -324,6 +324,7 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
+    pub(crate) suppress_crossfade_after_seek: AtomicBool,
     pub(crate) fadein_start_samples: AtomicU64,
     pub(crate) device_sample_rate: u32,
     pub(crate) device_channels: u16,
@@ -375,6 +376,7 @@ impl PlaybackSharedState {
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
+            suppress_crossfade_after_seek: AtomicBool::new(false),
             fadein_start_samples: AtomicU64::new(u64::MAX),
             device_sample_rate,
             device_channels,
@@ -399,6 +401,18 @@ impl PlaybackSharedState {
     /// invariant to protect.
     pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stopped)
+    }
+
+    pub(crate) fn set_manual_seek_crossfade_suppression(&self, target_samples: u64) {
+        let total = self.total_samples.load(Ordering::Relaxed);
+        let threshold_samples = (NEAR_END_THRESHOLD_MS as u64)
+            .saturating_mul(u64::from(self.device_sample_rate))
+            .saturating_mul(u64::from(self.device_channels.max(1)))
+            / 1_000;
+        let suppress =
+            total > 0 && total.saturating_sub(target_samples) <= threshold_samples.max(1);
+        self.suppress_crossfade_after_seek
+            .store(suppress, Ordering::Relaxed);
     }
 
     /// Audio-thread-safe: publish the current decoded-sample count for
@@ -607,6 +621,40 @@ mod tests {
         // Subsequent calls past threshold are idempotent no-ops via CAS.
         shared.signal_buffer_growth_if_threshold_crossed(BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES * 2);
         assert!(shared.growth_warned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn dj_flag_off_uses_legacy_write_output_path() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.25, -0.5, 0.75, -1.0]);
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0; 4];
+
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(out, [0.25, -0.5, 0.75, -1.0]);
+    }
+
+    #[test]
+    fn dj_enabled_without_ready_mixer_uses_legacy_path() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.125, 0.25, 0.5, 1.0]);
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0; 4];
+
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(out, [0.125, 0.25, 0.5, 1.0]);
     }
 
     #[test]

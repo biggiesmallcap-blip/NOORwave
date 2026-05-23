@@ -10,6 +10,25 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### a11y: scope hidden queue actions out of the accessibility tree per row
+
+`.queue-actions` is `opacity: 0; pointer-events: none` until the row receives
+hover or focus, but the buttons stay in the a11y tree and keep their tabindex.
+Keyboard activation still works, but a screen-reader virtual cursor can list
+buttons that aren't visible. Wiring `inert` on the container needs per-row
+hover/focus state (CSS can't toggle attributes), so it's larger than the rest
+of the polish bundle. Audit item 8 from the 2026-05-23 queue UI audit.
+- Spawned by: feature/queue-ui-qol (Commit 8 area)
+
+### a11y: keep queue-time visible on focus without colliding with action buttons
+
+`.queue-time` currently fades on `:hover` and `:focus-within` because
+`.queue-actions` sits absolutely positioned at `right: 0; top: 50%`. Keyboard
+users lose the duration when a row gains focus. Resolving cleanly needs a row
+relayout (two-line side panel or shrunken icon set), not a one-line CSS
+toggle. Audit item 16 from the 2026-05-23 queue UI audit.
+- Spawned by: feature/queue-ui-qol (Commit 6, c21cf78 area)
+
 ### perf: cache Last.fm `track.getSimilar` per (artist, title)
 
 `services/radio.rs` calls Last.fm `track.getSimilar` on every `/api/radio/song`

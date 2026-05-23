@@ -720,6 +720,57 @@ pub struct AudioDspFeatures {
     pub analysis_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDjProfileKey {
+    pub media_ref_kind: String,
+    pub media_ref_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioDjProfileRow {
+    pub media_ref_kind: String,
+    pub media_ref_id: String,
+    pub track_id: Option<i64>,
+    pub queue_item_id: Option<i64>,
+    pub tidal_id: Option<i64>,
+    pub profile_version: String,
+    pub beat_grid_blob: Vec<u8>,
+    pub downbeats_blob: Vec<u8>,
+    pub phrase_boundaries_blob: Vec<u8>,
+    pub mix_in_blob: Vec<u8>,
+    pub mix_out_blob: Vec<u8>,
+    pub intro_end_seconds: Option<f64>,
+    pub outro_start_seconds: Option<f64>,
+    pub breakdown_blob: Vec<u8>,
+    pub drop_blob: Vec<u8>,
+    pub safe_transition_windows_blob: Vec<u8>,
+    pub energy_contour_blob: Vec<u8>,
+    pub vocal_presence_blob: Vec<u8>,
+    pub vocal_density_blob: Vec<u8>,
+    pub lufs_loud_body: Option<f64>,
+    pub true_peak_dbtp: Option<f64>,
+    pub beat_confidence: Option<f64>,
+    pub profile_confidence: f64,
+    pub analysis_scope_ms: i64,
+    pub is_temporary: bool,
+    pub source: String,
+    pub computed_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioDjProfileCorrectionRow {
+    pub media_ref_kind: String,
+    pub media_ref_id: String,
+    pub bpm_multiplier: Option<f64>,
+    pub downbeat_offset_beats: Option<i64>,
+    pub phrase_offset_bars: Option<i64>,
+    pub safe_crossfade_only: bool,
+    pub transition_speed_bias: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFeaturesStats {
     pub total_analyzed: i64,

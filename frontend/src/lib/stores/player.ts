@@ -14,6 +14,9 @@ import {
 } from '$lib/api/client';
 import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { showToast, dismissToast } from '$lib/stores/toast';
+import { announceQueue, announceResolved } from '$lib/stores/queue_announcer';
+import { offerUndo } from '$lib/stores/queue_undo';
+import { queueItemToTidalPlayable } from '$lib/utils/track';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
 import { clamp01 } from '$lib/utils/math';
@@ -93,7 +96,29 @@ function setCurrentTrack(track: Track | null) {
 }
 
 function setPlaybackQueue(queue: QueueItem[]) {
-	playbackQueue.set(enrichQueue(queue));
+	const enriched = enrichQueue(queue);
+	const previous = get(playbackQueue);
+	const resolvedDelta = countResolvedTransitions(previous, enriched);
+	playbackQueue.set(enriched);
+	if (resolvedDelta > 0) announceResolved(resolvedDelta);
+}
+
+// Count rows whose persisted queue id existed in `previous` as pending and now
+// resolved in `next`. Newly added rows and removed rows are ignored: the live
+// region only surfaces *transitions* so initial hydration and reorderings stay
+// quiet.
+export function countResolvedTransitions(previous: QueueItem[], next: QueueItem[]): number {
+	if (previous.length === 0) return 0;
+	const wasPending = new Set<number>();
+	for (const item of previous) {
+		if (item.is_pending === true) wasPending.add(item.id);
+	}
+	if (wasPending.size === 0) return 0;
+	let resolved = 0;
+	for (const item of next) {
+		if (item.is_pending !== true && wasPending.has(item.id)) resolved += 1;
+	}
+	return resolved;
 }
 
 // ─── Error model ──────────────────────────────────────────────────────────────
@@ -655,6 +680,7 @@ export async function addTrackToQueue(trackId: number) {
 		playerError.set(null);
 		noteSuccess();
 		showToast('Added to queue', 'success');
+		announceQueue('Added to queue');
 	} catch (error) {
 		setError('add to queue', error);
 		throw error;
@@ -715,6 +741,7 @@ export async function removeTrackFromQueue(queueItemId: number) {
 		const result = await api.removeQueueTrack(queueItemId);
 		setPlaybackQueue(result.queue);
 		noteSuccess();
+		announceQueue('Removed from queue');
 	} catch (error) {
 		setError('remove from queue', error, () => removeTrackFromQueue(queueItemId));
 	}
@@ -756,8 +783,9 @@ export async function clearQueue(): Promise<QueueItem[]> {
 			(item) => !result.queue.some((q) => q.id === item.id)
 		);
 		if (restorable.length > 0) {
-			showToast(`Queue cleared — Undo (${restorable.length})`, 'info', 6000);
-			// We register the undo handler externally — caller (layout) wires the toast click.
+			offerUndo(restorable, 6000);
+			showToast(`Queue cleared (${restorable.length})`, 'info', 3000);
+			announceQueue(`Queue cleared, ${restorable.length} ${restorable.length === 1 ? 'track' : 'tracks'} removed. Press Z to undo.`);
 		}
 		return restorable;
 	} catch (error) {
@@ -766,21 +794,59 @@ export async function clearQueue(): Promise<QueueItem[]> {
 	}
 }
 
-export async function restoreQueueItems(items: QueueItem[]): Promise<void> {
-	if (!items.length) return;
+/**
+ * Restore queue rows after a clear-queue. Re-adds each row in its original
+ * order, dispatching by row type so a mixed library + TIDAL + pending queue
+ * is restored correctly:
+ *  - Library rows (`track.id > 0`) re-add via `api.addQueueTrack`.
+ *  - Ephemeral TIDAL rows (negative id, has a `TidalPlayable`) re-add via
+ *    `api.queueAppend(tidalQueueRequest(...))`.
+ *  - Pending rows (`track.id === 0`, never resolved) are skipped because the
+ *    library has no `track_id` to re-append; the pending producer would have
+ *    to be re-run, which is out of scope here.
+ *
+ * Returns counts so callers can announce a meaningful summary. Rows that
+ * failed to restore are surfaced as a count, not silently dropped.
+ */
+export interface RestoreSummary {
+	restored: number;
+	skipped: number;
+}
+
+export async function restoreQueueItems(items: QueueItem[]): Promise<RestoreSummary> {
+	const summary: RestoreSummary = { restored: 0, skipped: 0 };
+	if (!items.length) return summary;
 	try {
-		// Re-add each track in order. addQueueTrack appends to the end.
 		for (const item of items) {
 			if (item.track.id > 0) {
 				await api.addQueueTrack(item.track.id);
+				summary.restored += 1;
+				continue;
 			}
+			const tidal = queueItemToTidalPlayable(item);
+			if (tidal && tidal.tidal_id > 0) {
+				await api.queueAppend(tidalQueueRequest(tidal));
+				summary.restored += 1;
+				continue;
+			}
+			// Pending rows (track.id === 0, is_pending) or rows we can't
+			// reconstruct (no positive library id, no tidal_id) get skipped.
+			summary.skipped += 1;
 		}
 		const snapshot = await api.getPlaybackState();
 		setPlaybackQueue(snapshot.queue);
 		playerError.set(null);
+		if (summary.restored > 0) {
+			announceQueue(
+				summary.skipped === 0
+					? `Restored ${summary.restored} ${summary.restored === 1 ? 'track' : 'tracks'}`
+					: `Restored ${summary.restored}, skipped ${summary.skipped} unresolved`
+			);
+		}
 	} catch (error) {
 		setError('restore queue', error);
 	}
+	return summary;
 }
 
 export async function saveQueueAsPlaylist(
