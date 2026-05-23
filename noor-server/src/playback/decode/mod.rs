@@ -355,10 +355,7 @@ pub(crate) fn decode_and_buffer_job(
             // ── Pre-loop: passive analysis capture ──────────────────────────────────────
             let mut analysis_sent = false;
             let mut analysis_buf: Vec<f32> = Vec::new();
-            let dj_media_ref = config
-                .dj_engine_enabled
-                .then(|| job.dj_media_ref.clone())
-                .flatten();
+            let dj_media_ref = dj_analysis_media_ref_for_decode(&config, &job);
             if config.dj_analysis_only && dj_media_ref.is_none() {
                 return Ok(());
             }
@@ -641,6 +638,17 @@ pub(crate) fn send_dj_analysis_job(
     );
 }
 
+fn dj_analysis_media_ref_for_decode(
+    config: &PlaybackRuntimeConfig,
+    job: &PreparedPlaybackJob,
+) -> Option<crate::playback::dj_lookahead::DjMediaRef> {
+    if !config.dj_engine_enabled || !config.dj_analysis_only {
+        return None;
+    }
+
+    job.dj_media_ref.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +708,35 @@ mod tests {
         )
     }
 
+    fn test_analysis_only_config(
+        enabled: bool,
+    ) -> (
+        PlaybackRuntimeConfig,
+        tokio::sync::mpsc::UnboundedReceiver<DjAnalysisJob>,
+    ) {
+        let (config, rx) = test_config(enabled);
+        (config.for_dj_analysis_only(), rx)
+    }
+
+    #[test]
+    fn playback_decoder_does_not_capture_dj_analysis() {
+        let (config, _rx) = test_config(true);
+        let job = test_job(1, DjMediaRef::LibraryTrack { track_id: 1 });
+
+        assert!(dj_analysis_media_ref_for_decode(&config, &job).is_none());
+    }
+
+    #[test]
+    fn analysis_only_decoder_captures_dj_analysis() {
+        let (config, _rx) = test_analysis_only_config(true);
+        let job = test_job(1, DjMediaRef::LibraryTrack { track_id: 1 });
+
+        assert_eq!(
+            dj_analysis_media_ref_for_decode(&config, &job),
+            Some(DjMediaRef::LibraryTrack { track_id: 1 })
+        );
+    }
+
     #[test]
     fn dj_analysis_not_sent_when_engine_disabled() {
         let (config, mut rx) = test_config(false);
@@ -718,8 +755,8 @@ mod tests {
     }
 
     #[test]
-    fn active_decoder_sends_library_profile_key() {
-        let (config, mut rx) = test_config(true);
+    fn analysis_only_decoder_sends_library_profile_key() {
+        let (config, mut rx) = test_analysis_only_config(true);
         let job = test_job(1, DjMediaRef::LibraryTrack { track_id: 1 });
 
         send_dj_analysis_job(
@@ -738,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn prepared_next_decoder_sends_tidal_profile_key() {
-        let (config, mut rx) = test_config(true);
+    fn analysis_only_decoder_sends_tidal_profile_key() {
+        let (config, mut rx) = test_analysis_only_config(true);
         let job = test_job(
             10,
             DjMediaRef::TidalTrack {
@@ -765,8 +802,8 @@ mod tests {
     }
 
     #[test]
-    fn active_tidal_decoder_does_not_use_synthetic_negative_track_id() {
-        let (config, mut rx) = test_config(true);
+    fn analysis_only_decoder_does_not_use_synthetic_negative_track_id() {
+        let (config, mut rx) = test_analysis_only_config(true);
         let job = test_job(
             -123,
             DjMediaRef::TidalTrack {
@@ -792,8 +829,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_next_decoder_sends_queue_item_profile_key_when_unresolved() {
-        let (config, mut rx) = test_config(true);
+    fn analysis_only_decoder_sends_queue_item_profile_key_when_unresolved() {
+        let (config, mut rx) = test_analysis_only_config(true);
         let job = test_job(
             10,
             DjMediaRef::PendingQueueItem {
