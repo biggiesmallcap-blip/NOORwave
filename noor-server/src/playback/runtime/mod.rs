@@ -974,6 +974,9 @@ fn run_runtime_loop(
                                     .shared
                                     .seek_target_samples
                                     .store(target_samples, Ordering::Relaxed);
+                                engine
+                                    .shared
+                                    .set_manual_seek_crossfade_suppression(target_samples);
                                 // Reset fire-once guards so NearEnd /
                                 // CrossfadeStart re-fire after a backward seek.
                                 engine
@@ -1008,6 +1011,15 @@ fn run_runtime_loop(
                                 true, // force_restart - bypass switch_is_noop
                             ) {
                                 Ok(()) => {
+                                    if let Some(engine) = state.engine.as_ref() {
+                                        let target_samples = (target_ms.max(0) as u64)
+                                            .saturating_mul(rate)
+                                            .saturating_mul(channels)
+                                            / 1000;
+                                        engine
+                                            .shared
+                                            .set_manual_seek_crossfade_suppression(target_samples);
+                                    }
                                     let _ = respond_to.send(SeekToOutcome::Dispatched);
                                 }
                                 Err(error) => {
@@ -1129,7 +1141,7 @@ fn run_runtime_loop(
                             .as_ref()
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
-                        if next_ready {
+                        if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
@@ -1164,7 +1176,9 @@ fn run_runtime_loop(
                             .as_ref()
                             .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
                             .unwrap_or(false);
-                        if crossfade_started {
+                        if crossfade_started
+                            && !active_engine_suppresses_crossfade_after_seek(&state)
+                        {
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
@@ -2279,6 +2293,15 @@ fn should_promote_prepared_at_boundary(
     matches!(outcome, PlaybackTerminalReason::Finished)
         && active == Some((track_id, generation))
         && next.is_some_and(|(_, next_generation)| next_generation == generation)
+}
+
+fn active_engine_suppresses_crossfade_after_seek(state: &PlaybackRuntimeLoopState) -> bool {
+    state.engine.as_ref().is_some_and(|engine| {
+        engine
+            .shared
+            .suppress_crossfade_after_seek
+            .load(Ordering::Relaxed)
+    })
 }
 
 #[cfg(test)]
@@ -3432,6 +3455,40 @@ mod tests {
             }
             other => panic!("expected error event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn manual_seek_near_end_suppresses_crossfade_promotion() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let total_samples = 120 * 48_000 * 2;
+        active
+            .shared
+            .total_samples
+            .store(total_samples, Ordering::Relaxed);
+
+        active
+            .shared
+            .set_manual_seek_crossfade_suppression(total_samples - 48_000);
+        state.engine = Some(active);
+
+        assert!(active_engine_suppresses_crossfade_after_seek(&state));
+    }
+
+    #[test]
+    fn manual_seek_before_near_end_keeps_crossfade_promotion_enabled() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let total_samples = 120 * 48_000 * 2;
+        active
+            .shared
+            .total_samples
+            .store(total_samples, Ordering::Relaxed);
+
+        active.shared.set_manual_seek_crossfade_suppression(0);
+        state.engine = Some(active);
+
+        assert!(!active_engine_suppresses_crossfade_after_seek(&state));
     }
 
     fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {

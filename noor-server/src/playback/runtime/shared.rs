@@ -146,7 +146,7 @@ fn write_output_buffer<T>(
     }
 
     let xfade = shared.crossfade_samples.load(Ordering::Relaxed);
-    let fade_gain = if xfade > 0 {
+    let fade_gain = if xfade > 0 && !shared.suppress_crossfade_after_seek.load(Ordering::Relaxed) {
         let pos = shared.position_samples.load(Ordering::Relaxed);
         let fadein_start = shared.fadein_start_samples.load(Ordering::Relaxed);
         if fadein_start != u64::MAX {
@@ -324,6 +324,7 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) near_end_signaled: AtomicBool,
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
+    pub(crate) suppress_crossfade_after_seek: AtomicBool,
     pub(crate) fadein_start_samples: AtomicU64,
     pub(crate) device_sample_rate: u32,
     pub(crate) device_channels: u16,
@@ -375,6 +376,7 @@ impl PlaybackSharedState {
             near_end_signaled: AtomicBool::new(false),
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
+            suppress_crossfade_after_seek: AtomicBool::new(false),
             fadein_start_samples: AtomicU64::new(u64::MAX),
             device_sample_rate,
             device_channels,
@@ -399,6 +401,18 @@ impl PlaybackSharedState {
     /// invariant to protect.
     pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stopped)
+    }
+
+    pub(crate) fn set_manual_seek_crossfade_suppression(&self, target_samples: u64) {
+        let total = self.total_samples.load(Ordering::Relaxed);
+        let threshold_samples = (NEAR_END_THRESHOLD_MS as u64)
+            .saturating_mul(u64::from(self.device_sample_rate))
+            .saturating_mul(u64::from(self.device_channels.max(1)))
+            / 1_000;
+        let suppress =
+            total > 0 && total.saturating_sub(target_samples) <= threshold_samples.max(1);
+        self.suppress_crossfade_after_seek
+            .store(suppress, Ordering::Relaxed);
     }
 
     /// Audio-thread-safe: publish the current decoded-sample count for
