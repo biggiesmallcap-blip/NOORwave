@@ -57,6 +57,14 @@ impl Planner {
             return TransitionTemplate::SafeCrossfade;
         }
 
+        if matches!(policy.mix_intent, MixIntent::Bold)
+            && bpm_delta <= 8.0
+            && !outgoing.phrase_bar_indices.is_empty()
+            && !incoming.phrase_bar_indices.is_empty()
+        {
+            return TransitionTemplate::FilterSweep;
+        }
+
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
         let incoming_phrases = incoming.phrase_bar_indices.len();
         if outgoing_phrases >= 32 && incoming_phrases >= 32 && bpm_delta <= 3.0 {
@@ -68,14 +76,6 @@ impl Planner {
         if matches!(camelot_distance, 0 | 1 | 7) && bpm_delta <= 3.0 {
             return TransitionTemplate::LongHarmonicBlend;
         }
-        if matches!(policy.mix_intent, MixIntent::Bold)
-            && bpm_delta <= 8.0
-            && !outgoing.phrase_bar_indices.is_empty()
-            && !incoming.phrase_bar_indices.is_empty()
-        {
-            return TransitionTemplate::FilterSweep;
-        }
-
         TransitionTemplate::FilterSweep
     }
 
@@ -389,6 +389,38 @@ mod tests {
                 &policy
             ),
             TransitionTemplate::FilterSweep
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_prefers_filter_sweep_for_compatible_profiles() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 32),
+                &profile(Some(121.0), Some("8A"), 32),
+                &policy
+            ),
+            TransitionTemplate::FilterSweep
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_still_rejects_slam_cut_bpm_delta() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 32),
+                &profile(Some(140.0), Some("8A"), 32),
+                &policy
+            ),
+            TransitionTemplate::SlamCut
         );
     }
 

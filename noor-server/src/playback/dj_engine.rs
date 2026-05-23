@@ -538,6 +538,26 @@ mod tests {
     }
 
     #[test]
+    fn bold_policy_prefers_filter_sweep_for_compatible_profiles() {
+        let db = db();
+        enable(&db);
+        db.with_conn(|conn| queries::set_dj_global_policy(conn, "bold", "neutral"))
+            .expect("set bold policy");
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "FilterSweep");
+        program.validate().expect("valid");
+    }
+
+    #[test]
     fn compatible_profiles_can_plan_filter_sweep() {
         let db = db();
         enable(&db);
