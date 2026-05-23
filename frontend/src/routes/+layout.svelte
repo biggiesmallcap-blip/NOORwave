@@ -45,12 +45,15 @@
 	import { get } from 'svelte/store';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
+	import { queueAnnouncement } from '$lib/stores/queue_announcer';
+	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
+	import { formatReasonForScreenReader } from '$lib/utils/reason';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
@@ -495,6 +498,13 @@
 				event.preventDefault();
 				void cyclePlayerRepeatMode();
 				break;
+			case 'z':
+			case 'Z':
+				if ($pendingUndo) {
+					event.preventDefault();
+					void handleUndoClear();
+				}
+				break;
 		}
 	}
 
@@ -610,7 +620,46 @@
 	}
 
 	function handleQueueTrackKeydown(item: QueueItemType, event: KeyboardEvent) {
-		runOnActivation(event, () => void handleQueueTrackPlay(item));
+		const isPending = item.is_pending === true;
+		if (!isPending && (event.key === 'Enter' || event.key === ' ')) {
+			event.preventDefault();
+			void handleQueueTrackPlay(item);
+			return;
+		}
+		if (event.key === 'Delete' || event.key === 'Backspace') {
+			event.preventDefault();
+			void removeTrackFromQueue(item.id);
+			return;
+		}
+		if (event.altKey && event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (event.shiftKey) {
+				void moveQueueTrackNext(item.id);
+			} else {
+				void reorderQueueRow(item, -1);
+			}
+			return;
+		}
+		if (event.altKey && event.key === 'ArrowDown') {
+			event.preventDefault();
+			void reorderQueueRow(item, 1);
+		}
+	}
+
+	async function reorderQueueRow(item: QueueItemType, delta: -1 | 1) {
+		const fullQueue = get(playbackQueue);
+		const currentIdx = fullQueue.findIndex((q) => q.id === item.id);
+		if (currentIdx === -1) return;
+		const newIdx = currentIdx + delta;
+		if (newIdx < 0 || newIdx >= fullQueue.length) return;
+		// Refuse to move a row above the currently-playing item. The play head
+		// is rendered as the "current" row and is not user-reorderable.
+		const playingId = $currentTrack?.id ?? null;
+		if (playingId != null) {
+			const playingIdx = fullQueue.findIndex((q) => q.track.id === playingId);
+			if (playingIdx >= 0 && newIdx <= playingIdx) return;
+		}
+		await moveQueueItem(item.id, newIdx);
 	}
 
 	async function handleQueueRemove(queueItemId: number, event: MouseEvent) {
@@ -644,8 +693,13 @@
 	}
 
 	// Source slug drives the `.source-*` CSS class that paints the 4px dot on
-	// queue artwork. Keep in sync with formatQueueSource above.
+	// queue artwork. Keep in sync with formatQueueSource above. The one
+	// exception: `automix-new` (the only hyphenated source label in the repo)
+	// keeps its own slug so the dot can wear a ring distinguishing
+	// discover-injected rows from plain automix.
 	function queueSourceSlug(source: string): string {
+		const normalized = source.trim().toLowerCase();
+		if (normalized === 'automix-new') return 'automix-new';
 		return formatQueueSource(source).toLowerCase();
 	}
 
@@ -783,23 +837,72 @@
 	// ─── Scroll active queue row into view ───────────────────────────────────
 	let lastUserScrollAt = $state(0);
 	let queueListEl: HTMLElement | null = $state(null);
+	let currentRowVisible = $state(true);
+
+	function refreshCurrentRowVisibility() {
+		const id = $currentTrack?.id;
+		if (!id || !queueListEl) {
+			currentRowVisible = true;
+			return;
+		}
+		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		if (!row) {
+			currentRowVisible = true;
+			return;
+		}
+		const rect = (row as HTMLElement).getBoundingClientRect();
+		const containerRect = queueListEl.getBoundingClientRect();
+		currentRowVisible = !(rect.bottom < containerRect.top || rect.top > containerRect.bottom);
+	}
 
 	function handleQueueScroll() {
 		lastUserScrollAt = Date.now();
+		refreshCurrentRowVisibility();
+	}
+
+	function jumpToCurrentRow() {
+		const id = $currentTrack?.id;
+		if (!id || !queueListEl) return;
+		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		if (!row) return;
+		(row as HTMLElement).scrollIntoView({
+			block: 'center',
+			behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+		});
+		// Re-enable the auto-jump effect so subsequent track changes follow.
+		lastUserScrollAt = 0;
+		refreshCurrentRowVisibility();
+	}
+
+	function prefersReducedMotion(): boolean {
+		if (typeof window === 'undefined' || !window.matchMedia) return false;
+		return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 	}
 
 	$effect(() => {
 		const id = $currentTrack?.id;
-		if (!id || !queueListEl) return;
-		// Bail if the user scrolled recently — don't yank focus from their browse.
-		if (Date.now() - lastUserScrollAt < 5000) return;
+		if (!id || !queueListEl) {
+			currentRowVisible = true;
+			return;
+		}
 		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
-		if (!row) return;
+		if (!row) {
+			currentRowVisible = true;
+			return;
+		}
 		const rect = row.getBoundingClientRect();
 		const containerRect = queueListEl.getBoundingClientRect();
 		const offscreen = rect.bottom < containerRect.top || rect.top > containerRect.bottom;
-		if (offscreen) {
-			row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		// Bail on the auto-scroll if the user scrolled recently - don't yank
+		// focus from their browse. The jump-to-current chip still shows.
+		if (offscreen && Date.now() - lastUserScrollAt >= 5000) {
+			row.scrollIntoView({
+				block: 'nearest',
+				behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+			});
+			currentRowVisible = true;
+		} else {
+			currentRowVisible = !offscreen;
 		}
 	});
 
@@ -852,23 +955,16 @@
 
 	async function handleClearQueue() {
 		if (upcomingQueue.length === 0) return;
-		const restorable = await clearQueueAction();
-		if (restorable.length > 0) {
-			// Replace the auto-toast with a richer one that has a real undo button.
-			// We can't bind a click handler to the simple text toast, so expose
-			// undo via the keyboard shortcut Z within 6s.
-			const onKey = (event: KeyboardEvent) => {
-				if (isTypingTarget(event.target)) return;
-				if (event.key === 'z' || event.key === 'Z') {
-					event.preventDefault();
-					window.removeEventListener('keydown', onKey);
-					void restoreQueueItems(restorable);
-					showToast(`Restored ${restorable.length} tracks`, 'success');
-				}
-			};
-			window.addEventListener('keydown', onKey);
-			setTimeout(() => window.removeEventListener('keydown', onKey), 6000);
-		}
+		await clearQueueAction();
+		// The store offers an undo: the queue-section renders an Undo chip
+		// bound to `pendingUndo`. Z is the power-user shortcut to fire the
+		// same path without reaching for the mouse.
+	}
+
+	async function handleUndoClear() {
+		const restorable = consumeUndo();
+		if (!restorable) return;
+		await restoreQueueItems(restorable);
 	}
 
 	function stopPropagation(event: Event) {
@@ -922,6 +1018,39 @@
 	}
 
 	let queueTotalLabel = $derived(formatQueueTotal(queueTotalMs));
+
+	// Default visible-row cap for both desktop and mobile queue lists. The
+	// cap exists so a 500-row library/radio session doesn't paint thousands
+	// of DOM nodes at boot; users grow it with a "Load more" button so the
+	// rest of the queue isn't silently truncated.
+	const QUEUE_INITIAL_CAP = 40;
+	const QUEUE_LOAD_MORE_STEP = 40;
+	let queueVisibleCount = $state(QUEUE_INITIAL_CAP);
+	let legendOpen = $state(false);
+
+	type LegendEntry = { slug: string; label: string };
+	const SOURCE_LEGEND: LegendEntry[] = [
+		{ slug: 'library', label: 'Library' },
+		{ slug: 'playlist', label: 'Playlist' },
+		{ slug: 'genre', label: 'Genre' },
+		{ slug: 'automix', label: 'Automix' },
+		{ slug: 'automix-new', label: 'Discover automix' },
+		{ slug: 'discover', label: 'Discover' },
+		{ slug: 'manual', label: 'Manual' },
+	];
+
+	$effect(() => {
+		// Reset the cap when the queue gets smaller than what we are currently
+		// showing (clear, big remove, snapshot shrink). Without this the
+		// "Load more" button would linger at a count larger than the queue.
+		if (upcomingQueue.length < queueVisibleCount) {
+			queueVisibleCount = Math.max(QUEUE_INITIAL_CAP, Math.min(queueVisibleCount, upcomingQueue.length || QUEUE_INITIAL_CAP));
+		}
+	});
+
+	function loadMoreQueue() {
+		queueVisibleCount = Math.min(upcomingQueue.length, queueVisibleCount + QUEUE_LOAD_MORE_STEP);
+	}
 
 	const QUEUE_EXPANDED_KEY = 'noor.queueExpanded';
 
@@ -1274,6 +1403,7 @@
 		/>
 
 		<section class="queue-section">
+			<div class="queue-sr-status" role="status" aria-live="polite" aria-atomic="true">{$queueAnnouncement}</div>
 			<div class="queue-header">
 				<button
 					class="queue-banner"
@@ -1332,7 +1462,7 @@
 						aria-label="Save queue as playlist"
 						onclick={openSaveQueue}
 						disabled={upcomingQueue.length === 0 && !$currentTrack}
-					>＋</button>
+					>★</button>
 					</div>
 					<div class="queue-action-group cleanup-controls" role="group" aria-label="Cleanup controls">
 					<button
@@ -1356,6 +1486,54 @@
 					</div>
 				</div>
 			</div>
+
+			<div class="queue-legend-row">
+				<button
+					class="queue-legend-toggle"
+					type="button"
+					aria-expanded={legendOpen}
+					aria-controls="queue-source-legend"
+					onclick={() => { legendOpen = !legendOpen; }}
+				>
+					Source legend
+					<span aria-hidden="true">{legendOpen ? '▴' : '▾'}</span>
+				</button>
+				{#if legendOpen}
+					<ul class="queue-legend" id="queue-source-legend">
+						{#each SOURCE_LEGEND as entry}
+							<li>
+								<span class="queue-source-dot source-{entry.slug}" aria-hidden="true"></span>
+								<span>{entry.label}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
+			{#if !currentRowVisible && $currentTrack && upcomingQueue.length > 0}
+				<button
+					class="queue-jump-chip"
+					type="button"
+					onclick={jumpToCurrentRow}
+					title="Scroll to the track that is currently playing"
+				>
+					<span aria-hidden="true">↓</span>
+					Jump to now playing
+				</button>
+			{/if}
+
+			{#if $pendingUndo}
+				<div class="queue-undo-bar" role="status">
+					<span class="queue-undo-text">
+						Cleared {$pendingUndo.count} {$pendingUndo.count === 1 ? 'track' : 'tracks'}
+					</span>
+					<button
+						class="queue-undo-btn"
+						type="button"
+						onclick={() => void handleUndoClear()}
+					>Undo<span class="queue-undo-hint" aria-hidden="true">Z</span></button>
+				</div>
+			{/if}
 
 			{#if saveQueueOpen}
 				<form
@@ -1385,11 +1563,12 @@
 			{/if}
 
 			{#if upcomingQueue.length > 0}
-				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
-					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
+							role="listitem"
 							class:active={$currentQueueItemId != null
 								? $currentQueueItemId === item.id
 								: $currentTrack?.id === item.track.id}
@@ -1397,14 +1576,9 @@
 							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
 							class:pending={isPending}
 							class="queue-row"
-							role="button"
-							tabindex={isPending ? undefined : 0}
-							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							draggable={true}
 							data-track-id={item.track.id}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1427,7 +1601,19 @@
 							</div>
 
 							<div class="queue-meta">
-								<p class="queue-title">{item.track.title}</p>
+								<button
+									class="queue-row-play"
+									type="button"
+									aria-label={isPending
+										? `Pending: ${item.track.title}`
+										: `Play ${item.track.title}`}
+									aria-disabled={isPending}
+									disabled={isPending}
+									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+								>
+									<span class="queue-title">{item.track.title}</span>
+								</button>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -1449,9 +1635,12 @@
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
 									{#if item.reason}
+										{@const reasonDesc = formatReasonForScreenReader(item.reason)}
+										{@const reasonId = `queue-reason-${item.id}`}
 										<button
 											class="queue-action icon reason"
 											aria-label="Why is this here?"
+											aria-describedby={reasonDesc ? reasonId : undefined}
 											title="Why is this here?"
 											onmouseenter={(event) => showQueueReason(item.reason, event)}
 											onmousemove={moveQueueReason}
@@ -1460,6 +1649,9 @@
 											onblur={hideQueueReason}
 											onclick={stopPropagation}
 										>ⓘ</button>
+										{#if reasonDesc}
+											<span id={reasonId} class="queue-sr-status">{reasonDesc}</span>
+										{/if}
 									{/if}
 									<button
 										class="queue-action icon"
@@ -1496,12 +1688,15 @@
 			{:else}
 				<div class="queue-empty">
 					<p>Nothing is lined up yet.</p>
-					<span>Start from the library, genres, playlists, or discovery.</span>
+					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > 40}
-				<p class="queue-overflow">+ {upcomingQueue.length - 40} more tracks waiting in the queue</p>
+			{#if upcomingQueue.length > queueVisibleCount}
+				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+				</button>
 			{/if}
 		</section>
 	</aside>
@@ -1719,22 +1914,18 @@
 			</div>
 
 			{#if upcomingQueue.length > 0}
-				<div class="mobile-np-queue-list">
-					{#each upcomingQueue.slice(0, 40) as item, i (`${item.id}-${i}`)}
+				<div class="mobile-np-queue-list" role="list">
+					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
+							role="listitem"
 							class="queue-row"
 							class:active={$currentQueueItemId != null
 								? $currentQueueItemId === item.id
 								: $currentTrack?.id === item.track.id}
 							class:pending={isPending}
-							role="button"
-							tabindex={isPending ? undefined : 0}
-							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
@@ -1750,7 +1941,19 @@
 								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
 							</div>
 							<div class="queue-meta">
-								<p class="queue-title">{item.track.title}</p>
+								<button
+									class="queue-row-play"
+									type="button"
+									aria-label={isPending
+										? `Pending: ${item.track.title}`
+										: `Play ${item.track.title}`}
+									aria-disabled={isPending}
+									disabled={isPending}
+									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+								>
+									<span class="queue-title">{item.track.title}</span>
+								</button>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -1796,12 +1999,15 @@
 			{:else}
 				<div class="queue-empty">
 					<p>Nothing is lined up yet.</p>
-					<span>Start from the library, genres, playlists, or discovery.</span>
+					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
 				</div>
 			{/if}
 
-			{#if upcomingQueue.length > 40}
-				<p class="queue-overflow">+ {upcomingQueue.length - 40} more tracks in the queue</p>
+			{#if upcomingQueue.length > queueVisibleCount}
+				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
+					Load {Math.min(QUEUE_LOAD_MORE_STEP, upcomingQueue.length - queueVisibleCount)} more
+					<span class="queue-load-more-rest">({upcomingQueue.length - queueVisibleCount} waiting)</span>
+				</button>
 			{/if}
 		</div>
 	{/if}
@@ -2244,6 +2450,123 @@
 		padding: 16px;
 	}
 
+	.queue-sr-status {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	.queue-jump-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		align-self: center;
+		margin: 0 0 10px;
+		padding: 6px 14px;
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: color-mix(in srgb, var(--accent-soft) 80%, transparent);
+		color: var(--accent-strong);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background var(--motion-fast), transform var(--motion-fast);
+	}
+
+	.queue-jump-chip:hover {
+		background: var(--accent-soft);
+		transform: translateY(-1px);
+	}
+
+	.queue-undo-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin: 0 0 10px;
+		padding: 8px 12px;
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+		border: 1px solid var(--accent-line);
+		animation: queue-undo-slide-in 180ms ease-out;
+	}
+
+	@keyframes queue-undo-slide-in {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.queue-undo-text {
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+	}
+
+	.queue-undo-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		padding: 5px 12px;
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: var(--accent-strong);
+		color: var(--bg-base);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background var(--motion-fast), transform var(--motion-fast);
+	}
+
+	.queue-undo-btn:hover {
+		transform: translateY(-1px);
+	}
+
+	.queue-undo-hint {
+		display: inline-grid;
+		place-items: center;
+		min-width: 18px;
+		height: 18px;
+		padding: 0 4px;
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--bg-base) 22%, transparent);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.04em;
+	}
+
+	/* Honor OS-level motion-reduction. We still allow opacity transitions
+	   (they're conveying state changes that the user actively triggered),
+	   but flatten translates, rotations, and the spinner so vestibular
+	   users don't get unwanted motion in the queue surface. */
+	@media (prefers-reduced-motion: reduce) {
+		.queue-row,
+		.queue-row:hover,
+		.queue-row:focus-within,
+		.queue-action:hover,
+		.queue-icon-btn:hover:not(:disabled),
+		.queue-undo-btn:hover,
+		.queue-jump-chip:hover,
+		.queue-expand-btn:hover:not(:disabled) {
+			transform: none;
+		}
+		.now-playing-panel.queue-expanded .queue-expand-btn {
+			transform: none;
+		}
+		.queue-spinner,
+		.queue-inline-spinner {
+			animation: none;
+		}
+		.queue-undo-bar {
+			animation: none;
+		}
+	}
+
 	.queue-header {
 		display: flex;
 		align-items: center;
@@ -2457,7 +2780,6 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 46%, transparent);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		cursor: pointer;
 		transition:
 			border-color var(--motion-fast),
 			background var(--motion-fast),
@@ -2524,7 +2846,7 @@
 		line-height: 1;
 		color: var(--text-tertiary);
 		cursor: grab;
-		opacity: 0;
+		opacity: 0.35;
 		transition: opacity var(--motion-fast);
 		user-select: none;
 	}
@@ -2575,6 +2897,13 @@
 	}
 
 	.queue-source-dot.source-automix { background: var(--accent-strong, #6366f1); }
+	.queue-source-dot.source-automix-new {
+		/* Discover-injected automix rows get the automix indigo plus a ring
+		   so users can spot which queue picks came from a TIDAL search vs the
+		   library-only automix path. */
+		background: var(--accent-strong, #6366f1);
+		box-shadow: 0 0 0 2px color-mix(in srgb, #a855f7 70%, transparent);
+	}
 	.queue-source-dot.source-discover { background: #a855f7; }
 	.queue-source-dot.source-genre { background: #22d3ee; }
 	.queue-source-dot.source-playlist { background: #f59e0b; }
@@ -2588,6 +2917,29 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+	}
+
+	.queue-row-play {
+		display: block;
+		width: 100%;
+		padding: 0;
+		margin: 0;
+		border: none;
+		background: transparent;
+		color: inherit;
+		text-align: left;
+		font: inherit;
+		cursor: pointer;
+		border-radius: 4px;
+	}
+
+	.queue-row-play:disabled {
+		cursor: default;
+	}
+
+	.queue-row-play:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
 	}
 
 	.queue-title {
@@ -2643,8 +2995,7 @@
 	}
 
 	.queue-time,
-	.queue-empty span,
-	.queue-overflow {
+	.queue-empty span {
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
@@ -2746,9 +3097,109 @@
 		font-weight: var(--font-weight-semibold);
 	}
 
-	.queue-overflow {
-		padding-top: 12px;
-		border-top: 1px solid var(--border-subtle);
+	.queue-empty-link {
+		color: var(--text-secondary);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.queue-empty-link:hover {
+		color: var(--text-primary);
+	}
+
+	.queue-empty-key {
+		display: inline-grid;
+		place-items: center;
+		min-width: 16px;
+		padding: 0 4px;
+		margin: 0 2px;
+		border-radius: 4px;
+		background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-family: var(--font-mono, monospace);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+	}
+
+	.queue-legend-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-bottom: 6px;
+	}
+
+	.queue-legend-toggle {
+		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px 8px;
+		border-radius: 999px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		cursor: pointer;
+	}
+
+	.queue-legend-toggle:hover {
+		color: var(--text-secondary);
+		border-color: var(--border-subtle);
+	}
+
+	.queue-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px 14px;
+		margin: 0;
+		padding: 8px 10px;
+		list-style: none;
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.queue-legend li {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+	}
+
+	.queue-legend .queue-source-dot {
+		position: static;
+		width: 8px;
+		height: 8px;
+		border-width: 0;
+	}
+
+	.queue-load-more {
+		margin-top: 12px;
+		padding: 8px 16px;
+		border-radius: 999px;
+		border: 1px dashed var(--border-strong);
+		background: color-mix(in srgb, var(--instrument-surface) 60%, transparent);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
+		align-self: center;
+	}
+
+	.queue-load-more:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+		border-color: var(--accent-line);
+	}
+
+	.queue-load-more-rest {
+		margin-left: 6px;
+		color: var(--text-tertiary);
 	}
 
 	@media (max-width: 1320px) {

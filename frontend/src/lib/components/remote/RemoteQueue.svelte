@@ -5,8 +5,10 @@
 		moveQueueTrackNext,
 		playTrackNow,
 		refreshPlaybackState,
-		removeTrackFromQueue
+		removeTrackFromQueue,
+		restoreQueueItems
 	} from '$lib/stores/player';
+	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import {
@@ -109,6 +111,13 @@
 	function onClear() {
 		hapticAccent();
 		void clearQueue();
+	}
+
+	async function onUndoClear() {
+		const restorable = consumeUndo();
+		if (!restorable) return;
+		hapticCommit();
+		await restoreQueueItems(restorable);
 	}
 
 	async function onPlayRow(item: QueueItem) {
@@ -220,6 +229,17 @@
 			</button>
 		</div>
 	</header>
+
+	{#if $pendingUndo}
+		<div class="remote-queue-undo" role="status">
+			<span>Cleared {$pendingUndo.count} {$pendingUndo.count === 1 ? 'track' : 'tracks'}</span>
+			<button
+				class="remote-queue-undo-btn"
+				type="button"
+				onclick={() => void onUndoClear()}
+			>Undo</button>
+		</div>
+	{/if}
 
 	{#if displayQueue.length === 0}
 		<p class="remote-empty">Nothing is lined up.</p>
@@ -495,5 +515,28 @@
 
 	.remote-queue-clear:disabled {
 		opacity: 0.4;
+	}
+
+	.remote-queue-undo {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin: 8px 0 12px;
+		padding: 10px 14px;
+		border-radius: 12px;
+		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+		border: 1px solid var(--accent-line);
+		font-size: var(--font-size-sm);
+	}
+
+	.remote-queue-undo-btn {
+		padding: 6px 14px;
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: var(--accent-strong);
+		color: var(--bg-base);
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-sm);
 	}
 </style>
