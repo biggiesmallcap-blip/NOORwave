@@ -317,10 +317,7 @@ pub fn api_routes(state: SharedState) -> Router {
             "/api/smart/playlists/{id}/evaluate",
             get(evaluate_smart_playlist),
         )
-        .route(
-            "/api/smart/playlists/preview",
-            post(preview_smart_playlist),
-        )
+        .route("/api/smart/playlists/preview", post(preview_smart_playlist))
         .route("/api/artists/search", get(search_artists_route))
         .route(
             "/api/analytics/overview",
@@ -2071,7 +2068,8 @@ async fn preview_smart_playlist(
         .with_conn(|conn| {
             let tracks = queries::get_all_tracks(conn)?;
             let context = build_smart_playlist_context(conn)?;
-            let count = crate::smart::playlists::evaluate_playlist(&definition, &tracks, &context).len();
+            let count =
+                crate::smart::playlists::evaluate_playlist(&definition, &tracks, &context).len();
             Ok(Json(json!({ "count": count })))
         })
         .map_err(|e| {
