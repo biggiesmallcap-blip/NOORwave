@@ -460,7 +460,7 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
 const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
 const DJ_FIRE_AHEAD_POSITIVE_PERCENT: usize = 70;
 const DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS: i64 = 150;
-const DJ_FIRE_AHEAD_MAX_MS: i64 = 300;
+const DJ_FIRE_AHEAD_MAX_MS: i64 = 150;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -489,7 +489,7 @@ fn fire_ahead_ms_from_deltas(deltas: &[i64]) -> u32 {
     }
     median_delta(deltas)
         .filter(|delta| *delta > DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS)
-        .map(|delta| delta.clamp(DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS, DJ_FIRE_AHEAD_MAX_MS) as u32)
+        .map(|delta| (delta / 2).clamp(0, DJ_FIRE_AHEAD_MAX_MS) as u32)
         .unwrap_or(0)
 }
 
@@ -3385,7 +3385,7 @@ mod tests {
                 135, 134, -20, -40,
             ];
 
-            assert_eq!(fire_ahead_ms_from_deltas(&passing), 255);
+            assert_eq!(fire_ahead_ms_from_deltas(&passing), 127);
             assert_eq!(fire_ahead_ms_from_deltas(&mixed), 0);
             assert_eq!(fire_ahead_ms_from_deltas(&low_median), 0);
             assert_eq!(fire_ahead_ms_from_deltas(&passing[..19]), 0);
@@ -3393,7 +3393,7 @@ mod tests {
 
         #[test]
         fn fire_ahead_caps_large_median() {
-            assert_eq!(fire_ahead_ms_from_deltas(&[500; 20]), 300);
+            assert_eq!(fire_ahead_ms_from_deltas(&[500; 20]), 150);
         }
 
         #[test]
