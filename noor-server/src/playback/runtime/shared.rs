@@ -158,8 +158,8 @@ fn write_output_buffer<T>(
                 1.0f32
             }
         } else {
-            let total = shared.total_samples.load(Ordering::Relaxed);
-            if total > 0 {
+            if shared.crossfade_start_signaled.load(Ordering::Relaxed) {
+                let total = shared.total_samples.load(Ordering::Relaxed);
                 let remaining = total.saturating_sub(pos);
                 if remaining < xfade {
                     let t = (remaining as f32 / xfade as f32).clamp(0.0, 1.0);
@@ -655,6 +655,26 @@ mod tests {
         write_output_f32(&mut out, &shared, &command_tx, &event_tx);
 
         assert_eq!(out, [0.125, 0.25, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn armed_crossfade_does_not_attenuate_before_start_signal() {
+        let shared = test_shared_state();
+        shared.crossfade_samples.store(5, Ordering::Relaxed);
+        shared.total_samples.store(10, Ordering::Relaxed);
+        shared.position_samples.store(8, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[1.0, 1.0]);
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0; 2];
+
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(out, [1.0, 1.0]);
     }
 
     #[test]
