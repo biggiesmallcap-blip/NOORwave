@@ -127,6 +127,12 @@ fn build_program(
         program.automation.extend(low_band_swap(swap_start));
     }
 
+    if matches!(template, TransitionTemplate::FilterSweep) {
+        program
+            .automation
+            .extend(filter_sweep_eq_wash(duration_samples));
+    }
+
     if matches!(template, TransitionTemplate::LongHarmonicBlend)
         && outgoing.bpm.zip(incoming.bpm).is_some()
     {
@@ -141,6 +147,35 @@ fn build_program(
         });
     }
 
+    program
+}
+
+pub fn filter_sweep_eq_wash_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let mut program = TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "FilterSweep".to_string(),
+        sample_rate,
+        channels,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: deck_gain_automation(duration_samples),
+    };
+    program
+        .automation
+        .extend(filter_sweep_eq_wash(duration_samples));
     program
 }
 
@@ -221,6 +256,116 @@ fn low_band_swap(swap_start: u64) -> Vec<AutomationEvent> {
             curve: Curve::Linear,
         },
     ]
+}
+
+fn filter_sweep_eq_wash(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    let mut events = Vec::new();
+    if end_sample < 8 {
+        events.push(AutomationEvent {
+            param: Param::LowGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 1.0,
+            to: 0.05,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample,
+            from: 0.0,
+            to: 1.0,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::HighGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 1.0,
+            to: 0.35,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::HighGain(DeckId::B),
+            start_sample: 0,
+            end_sample,
+            from: 0.35,
+            to: 1.0,
+            curve: Curve::Cosine,
+        });
+    } else {
+        let bass_handoff_start = end_sample * 3 / 8;
+        let bass_handoff_end = (end_sample * 5 / 8).max(bass_handoff_start + 1);
+        events.push(AutomationEvent {
+            param: Param::LowGain(DeckId::A),
+            start_sample: bass_handoff_start,
+            end_sample: bass_handoff_end,
+            from: 1.0,
+            to: 0.05,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample: bass_handoff_start.max(1),
+            from: 0.0,
+            to: 0.0,
+            curve: Curve::Linear,
+        });
+        events.push(AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: bass_handoff_start,
+            end_sample: bass_handoff_end,
+            from: 0.0,
+            to: 1.0,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::HighGain(DeckId::A),
+            start_sample: bass_handoff_start,
+            end_sample: bass_handoff_end,
+            from: 1.0,
+            to: 0.35,
+            curve: Curve::Cosine,
+        });
+        events.push(AutomationEvent {
+            param: Param::HighGain(DeckId::B),
+            start_sample: 0,
+            end_sample: bass_handoff_start.max(1),
+            from: 0.35,
+            to: 0.35,
+            curve: Curve::Linear,
+        });
+        events.push(AutomationEvent {
+            param: Param::HighGain(DeckId::B),
+            start_sample: bass_handoff_start,
+            end_sample: bass_handoff_end,
+            from: 0.35,
+            to: 1.0,
+            curve: Curve::Cosine,
+        });
+    }
+
+    events.extend([
+        AutomationEvent {
+            param: Param::MidGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 1.0,
+            to: 0.3,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::MidGain(DeckId::B),
+            start_sample: 0,
+            end_sample,
+            from: 0.45,
+            to: 1.0,
+            curve: Curve::Cosine,
+        },
+    ]);
+    events
 }
 
 #[cfg(test)]
@@ -511,6 +656,61 @@ mod tests {
         );
         assert_eq!(program.template, "FilterSweep");
         program.validate().expect("filter sweep");
+        let outgoing_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::A))
+            .expect("outgoing low automation");
+        let outgoing_high = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::HighGain(DeckId::A))
+            .expect("outgoing high automation");
+        let incoming_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::B) && event.to == 1.0)
+            .expect("incoming low rise automation");
+        let incoming_high = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::HighGain(DeckId::B) && event.to == 1.0)
+            .expect("incoming high rise automation");
+
+        assert_eq!(outgoing_low.to, 0.05);
+        assert!(outgoing_low.start_sample < program.swap_start);
+        assert!(outgoing_low.end_sample > program.swap_start);
+        assert_eq!(outgoing_high.to, 0.35);
+        assert!(outgoing_high.start_sample < program.swap_start);
+        assert!(outgoing_high.end_sample > program.swap_start);
+        assert_eq!(incoming_low.from, 0.0);
+        assert!(incoming_low.start_sample < program.swap_start);
+        assert!(incoming_low.end_sample > program.swap_start);
+        assert_eq!(incoming_high.from, 0.35);
+        assert!(incoming_high.start_sample < program.swap_start);
+        assert!(incoming_high.end_sample > program.swap_start);
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::HighGain(DeckId::A))
+        );
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::LowGain(DeckId::B))
+        );
+    }
+
+    #[test]
+    fn filter_sweep_eq_wash_program_uses_requested_duration() {
+        let program = filter_sweep_eq_wash_program(48_000, 2, 10_000);
+
+        assert_eq!(program.template, "FilterSweep");
+        assert_eq!(program.resolve_at, 480_000);
+        assert_eq!(program.tier, Tier::FullBlend);
+        program.validate().expect("filter sweep eq wash");
     }
 
     #[test]
