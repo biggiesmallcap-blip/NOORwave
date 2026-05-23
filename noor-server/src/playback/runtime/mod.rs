@@ -35,6 +35,7 @@ use std::thread;
 use tracing::{debug, error, info, warn};
 
 const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
+const ENABLE_PREPARED_DJ_MIXER_RENDERER: bool = false;
 
 /// Pure decision helper for the SeekTo handler. Moved out of `server::routes`
 /// (r6 fix A: keep the playback runtime free of HTTP-layer dependencies). The
@@ -472,6 +473,7 @@ struct PlaybackRuntimeLoopState {
     prepared_dj_mixer: Option<PreparedDjMixer>,
 }
 
+#[allow(dead_code)]
 struct PreparedDjMixer {
     mixer: noor_mix::Mixer,
     queue_generation: u64,
@@ -686,6 +688,10 @@ fn prepare_dj_mixer_for_pair(
     state: &mut PlaybackRuntimeLoopState,
     max_block_samples: usize,
 ) -> bool {
+    if !ENABLE_PREPARED_DJ_MIXER_RENDERER {
+        state.prepared_dj_mixer = None;
+        return false;
+    }
     if !state.dj_engine_enabled {
         state.prepared_dj_mixer = None;
         return false;
@@ -2751,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_constructs_mixer_before_audio_callback() {
+    fn prepared_mixer_builder_can_construct_renderer() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
             &mut state,
@@ -2774,8 +2780,12 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
+        let transition = state
+            .next_engine
+            .as_ref()
+            .and_then(|engine| engine.job.prepared_transition.as_ref())
+            .expect("transition");
+        let mut prepared = build_prepared_dj_mixer(&state, transition, 64).expect("prepared mixer");
         assert_eq!(prepared.queue_generation, 20);
         assert_eq!(prepared.current_queue_item_id, Some(11));
         assert_eq!(prepared.next_queue_item_id, Some(12));
@@ -2785,6 +2795,14 @@ mod tests {
         let mut out = [0.0; 4];
         prepared.mixer.render_block(&mut out, 0);
         assert!(out.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn runtime_does_not_construct_unused_mixer() {
+        let mut state = state_with_ready_dj_pair();
+
+        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(state.prepared_dj_mixer.is_none());
     }
 
     #[test]
