@@ -693,8 +693,13 @@
 	}
 
 	// Source slug drives the `.source-*` CSS class that paints the 4px dot on
-	// queue artwork. Keep in sync with formatQueueSource above.
+	// queue artwork. Keep in sync with formatQueueSource above. The one
+	// exception: `automix-new` (the only hyphenated source label in the repo)
+	// keeps its own slug so the dot can wear a ring distinguishing
+	// discover-injected rows from plain automix.
 	function queueSourceSlug(source: string): string {
+		const normalized = source.trim().toLowerCase();
+		if (normalized === 'automix-new') return 'automix-new';
 		return formatQueueSource(source).toLowerCase();
 	}
 
@@ -1021,6 +1026,18 @@
 	const QUEUE_INITIAL_CAP = 40;
 	const QUEUE_LOAD_MORE_STEP = 40;
 	let queueVisibleCount = $state(QUEUE_INITIAL_CAP);
+	let legendOpen = $state(false);
+
+	type LegendEntry = { slug: string; label: string };
+	const SOURCE_LEGEND: LegendEntry[] = [
+		{ slug: 'library', label: 'Library' },
+		{ slug: 'playlist', label: 'Playlist' },
+		{ slug: 'genre', label: 'Genre' },
+		{ slug: 'automix', label: 'Automix' },
+		{ slug: 'automix-new', label: 'Discover automix' },
+		{ slug: 'discover', label: 'Discover' },
+		{ slug: 'manual', label: 'Manual' },
+	];
 
 	$effect(() => {
 		// Reset the cap when the queue gets smaller than what we are currently
@@ -1444,7 +1461,7 @@
 						aria-label="Save queue as playlist"
 						onclick={openSaveQueue}
 						disabled={upcomingQueue.length === 0 && !$currentTrack}
-					>＋</button>
+					>★</button>
 					</div>
 					<div class="queue-action-group cleanup-controls" role="group" aria-label="Cleanup controls">
 					<button
@@ -1467,6 +1484,29 @@
 					>▲</button>
 					</div>
 				</div>
+			</div>
+
+			<div class="queue-legend-row">
+				<button
+					class="queue-legend-toggle"
+					type="button"
+					aria-expanded={legendOpen}
+					aria-controls="queue-source-legend"
+					onclick={() => { legendOpen = !legendOpen; }}
+				>
+					Source legend
+					<span aria-hidden="true">{legendOpen ? '▴' : '▾'}</span>
+				</button>
+				{#if legendOpen}
+					<ul class="queue-legend" id="queue-source-legend">
+						{#each SOURCE_LEGEND as entry}
+							<li>
+								<span class="queue-source-dot source-{entry.slug}" aria-hidden="true"></span>
+								<span>{entry.label}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
 			</div>
 
 			{#if !currentRowVisible && $currentTrack && upcomingQueue.length > 0}
@@ -1639,7 +1679,7 @@
 			{:else}
 				<div class="queue-empty">
 					<p>Nothing is lined up yet.</p>
-					<span>Start from the library, genres, playlists, or discovery.</span>
+					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
 				</div>
 			{/if}
 
@@ -1942,7 +1982,7 @@
 			{:else}
 				<div class="queue-empty">
 					<p>Nothing is lined up yet.</p>
-					<span>Start from the library, genres, playlists, or discovery.</span>
+					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
 				</div>
 			{/if}
 
@@ -2841,6 +2881,13 @@
 	}
 
 	.queue-source-dot.source-automix { background: var(--accent-strong, #6366f1); }
+	.queue-source-dot.source-automix-new {
+		/* Discover-injected automix rows get the automix indigo plus a ring
+		   so users can spot which queue picks came from a TIDAL search vs the
+		   library-only automix path. */
+		background: var(--accent-strong, #6366f1);
+		box-shadow: 0 0 0 2px color-mix(in srgb, #a855f7 70%, transparent);
+	}
 	.queue-source-dot.source-discover { background: #a855f7; }
 	.queue-source-dot.source-genre { background: #22d3ee; }
 	.queue-source-dot.source-playlist { background: #f59e0b; }
@@ -3009,6 +3056,86 @@
 
 	.queue-empty p {
 		font-weight: var(--font-weight-semibold);
+	}
+
+	.queue-empty-link {
+		color: var(--text-secondary);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.queue-empty-link:hover {
+		color: var(--text-primary);
+	}
+
+	.queue-empty-key {
+		display: inline-grid;
+		place-items: center;
+		min-width: 16px;
+		padding: 0 4px;
+		margin: 0 2px;
+		border-radius: 4px;
+		background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-family: var(--font-mono, monospace);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+	}
+
+	.queue-legend-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-bottom: 6px;
+	}
+
+	.queue-legend-toggle {
+		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px 8px;
+		border-radius: 999px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		cursor: pointer;
+	}
+
+	.queue-legend-toggle:hover {
+		color: var(--text-secondary);
+		border-color: var(--border-subtle);
+	}
+
+	.queue-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px 14px;
+		margin: 0;
+		padding: 8px 10px;
+		list-style: none;
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--instrument-surface) 70%, transparent);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.queue-legend li {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+	}
+
+	.queue-legend .queue-source-dot {
+		position: static;
+		width: 8px;
+		height: 8px;
+		border-width: 0;
 	}
 
 	.queue-load-more {
