@@ -53,6 +53,7 @@
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import QueueReasonCard from '$lib/components/QueueReasonCard.svelte';
+	import { formatReasonForScreenReader } from '$lib/utils/reason';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
@@ -1464,9 +1465,12 @@
 								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
 								<div class="queue-actions">
 									{#if item.reason}
+										{@const reasonDesc = formatReasonForScreenReader(item.reason)}
+										{@const reasonId = `queue-reason-${item.id}`}
 										<button
 											class="queue-action icon reason"
 											aria-label="Why is this here?"
+											aria-describedby={reasonDesc ? reasonId : undefined}
 											title="Why is this here?"
 											onmouseenter={(event) => showQueueReason(item.reason, event)}
 											onmousemove={moveQueueReason}
@@ -1475,6 +1479,9 @@
 											onblur={hideQueueReason}
 											onclick={stopPropagation}
 										>ⓘ</button>
+										{#if reasonDesc}
+											<span id={reasonId} class="queue-sr-status">{reasonDesc}</span>
+										{/if}
 									{/if}
 									<button
 										class="queue-action icon"

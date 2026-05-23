@@ -87,3 +87,25 @@ export function formatJaccardPct(jaccard: number | undefined): string | null {
 	if (jaccard === undefined || !Number.isFinite(jaccard)) return null;
 	return `${Math.round(jaccard * 100)}%`;
 }
+
+/**
+ * Render a queue row's reason as a single plain-text sentence for
+ * screen readers. The hover card is `pointer-events: none` and
+ * positioned globally, so SR cannot reach it via aria-describedby on
+ * the floating element. We mirror the parsed breakdown inline next to
+ * the row's ⓘ trigger and point aria-describedby at that span.
+ *
+ * Returns null when there's nothing useful to read (no reason at all).
+ */
+export function formatReasonForScreenReader(raw: string | null | undefined): string | null {
+	const parsed = parseReason(raw);
+	if (!parsed) return null;
+	const parts: string[] = [];
+	if (parsed.prefix) parts.push(parsed.prefix);
+	const jaccard = formatJaccardPct(parsed.genre_jaccard);
+	if (jaccard !== null) parts.push(`Genre overlap ${jaccard}`);
+	const affinity = formatAffinityDelta(parsed.affinity_mult);
+	if (affinity !== null) parts.push(`Affinity ${affinity}`);
+	if (parts.length === 0) return null;
+	return parts.join('. ');
+}
