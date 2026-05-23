@@ -1562,11 +1562,12 @@
 			{/if}
 
 			{#if upcomingQueue.length > 0}
-				<div class="queue-list" id="queue-list" bind:this={queueListEl} onscroll={handleQueueScroll}>
+				<div class="queue-list" id="queue-list" role="list" bind:this={queueListEl} onscroll={handleQueueScroll}>
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
+							role="listitem"
 							class:active={$currentQueueItemId != null
 								? $currentQueueItemId === item.id
 								: $currentTrack?.id === item.track.id}
@@ -1574,14 +1575,9 @@
 							class:drag-over={dragOverItemId === item.id && dragItemId !== item.id}
 							class:pending={isPending}
 							class="queue-row"
-							role="button"
-							tabindex={0}
-							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							draggable={true}
 							data-track-id={item.track.id}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1604,7 +1600,19 @@
 							</div>
 
 							<div class="queue-meta">
-								<p class="queue-title">{item.track.title}</p>
+								<button
+									class="queue-row-play"
+									type="button"
+									aria-label={isPending
+										? `Pending: ${item.track.title}`
+										: `Play ${item.track.title}`}
+									aria-disabled={isPending}
+									disabled={isPending}
+									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+								>
+									<span class="queue-title">{item.track.title}</span>
+								</button>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -1905,22 +1913,18 @@
 			</div>
 
 			{#if upcomingQueue.length > 0}
-				<div class="mobile-np-queue-list">
+				<div class="mobile-np-queue-list" role="list">
 					{#each upcomingQueue.slice(0, queueVisibleCount) as item, i (`${item.id}-${i}`)}
 						{@const aid = item.track.artist_id}
 						{@const isPending = item.is_pending === true}
 						<div
+							role="listitem"
 							class="queue-row"
 							class:active={$currentQueueItemId != null
 								? $currentQueueItemId === item.id
 								: $currentTrack?.id === item.track.id}
 							class:pending={isPending}
-							role="button"
-							tabindex={0}
-							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
@@ -1936,7 +1940,19 @@
 								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
 							</div>
 							<div class="queue-meta">
-								<p class="queue-title">{item.track.title}</p>
+								<button
+									class="queue-row-play"
+									type="button"
+									aria-label={isPending
+										? `Pending: ${item.track.title}`
+										: `Play ${item.track.title}`}
+									aria-disabled={isPending}
+									disabled={isPending}
+									onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
+									onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+								>
+									<span class="queue-title">{item.track.title}</span>
+								</button>
 								{#if isPending}
 									<span class="queue-artist pending-label">
 										<span class="queue-inline-spinner" aria-hidden="true"></span>
@@ -2763,7 +2779,6 @@
 		border: 1px solid color-mix(in srgb, var(--instrument-border) 46%, transparent);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		cursor: pointer;
 		transition:
 			border-color var(--motion-fast),
 			background var(--motion-fast),
@@ -2901,6 +2916,29 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+	}
+
+	.queue-row-play {
+		display: block;
+		width: 100%;
+		padding: 0;
+		margin: 0;
+		border: none;
+		background: transparent;
+		color: inherit;
+		text-align: left;
+		font: inherit;
+		cursor: pointer;
+		border-radius: 4px;
+	}
+
+	.queue-row-play:disabled {
+		cursor: default;
+	}
+
+	.queue-row-play:focus-visible {
+		outline: 2px solid var(--accent-line);
+		outline-offset: 2px;
 	}
 
 	.queue-title {
