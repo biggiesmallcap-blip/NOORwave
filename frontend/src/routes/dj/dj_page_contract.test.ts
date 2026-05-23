@@ -11,6 +11,10 @@ const transitionLane = readFileSync(
 	join(root, 'lib/components/dj-cockpit/TransitionLane.svelte'),
 	'utf8',
 );
+const queuePair = readFileSync(
+	join(root, 'lib/components/dj-cockpit/QueuePairPanel.svelte'),
+	'utf8',
+);
 const corrections = readFileSync(
 	join(root, 'lib/components/dj-cockpit/ProfileCorrectionPanel.svelte'),
 	'utf8',
@@ -77,6 +81,13 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Ready to plan');
 		expect(transitionLane).toContain('Transition armed');
 		expect(transitionLane).not.toContain('Transition ready');
+	});
+
+	test('dj_page_surfaces_profile_decode_failures', () => {
+		expect(transitionLane).toContain('Profile analysis failed');
+		expect(transitionLane).toContain('current_profile_decode_failed');
+		expect(queuePair).toContain('Analysis failed');
+		expect(queuePair).toContain('profile_error');
 	});
 
 	test('dj_page_debug_details_use_planner_facts', () => {

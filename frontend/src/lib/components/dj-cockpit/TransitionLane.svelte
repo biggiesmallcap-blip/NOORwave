@@ -19,6 +19,9 @@
 	let hasPair = $derived(Boolean(status?.current && status?.next));
 	let currentReady = $derived(status?.current?.profile_ready === true);
 	let nextReady = $derived(status?.next?.profile_ready === true);
+	let currentFailed = $derived(status?.current?.profile_status === 'decode_failed');
+	let nextFailed = $derived(status?.next?.profile_status === 'decode_failed');
+	let profileFailed = $derived(currentFailed || nextFailed);
 	let profileMissing = $derived(hasPair && (!currentReady || !nextReady));
 	let rendererLabel = $derived(
 		status?.renderer_template ??
@@ -37,6 +40,8 @@
 				? rendererLabel
 				: !hasPair
 					? 'Pair not detected'
+					: profileFailed
+						? 'Profile analysis failed'
 					: profileMissing
 						? 'Analyzing profiles'
 						: 'Ready to plan',
@@ -50,6 +55,12 @@
 					: 'Transition armed for the current pair.'
 				: !hasPair
 					? 'Waiting for current and next tracks.'
+					: currentFailed && nextFailed
+						? 'Current and next profile decodes failed.'
+						: currentFailed
+							? 'The current profile decode failed.'
+							: nextFailed
+								? 'The next profile decode failed.'
 					: !currentReady && !nextReady
 						? 'Building current and next DJ profiles.'
 						: !currentReady
@@ -63,7 +74,8 @@
 			fallback &&
 				!['disabled', 'pair_missing', 'missing_current_profile', 'missing_next_profile'].includes(
 					fallback,
-				),
+				) &&
+				!['current_profile_decode_failed', 'next_profile_decode_failed'].includes(fallback),
 		),
 	);
 	let recentTimingEvents = $derived(status?.recent_timing_events ?? []);

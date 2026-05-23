@@ -903,6 +903,8 @@ export type DjDeckStatus = {
 	title: string;
 	artist?: string;
 	profile_ready: boolean;
+	profile_status: 'ready' | 'missing' | 'decode_failed' | string;
+	profile_error?: string;
 	profile_confidence?: number;
 	beat_count?: number;
 	downbeat_count?: number;

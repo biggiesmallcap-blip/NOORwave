@@ -37,11 +37,14 @@ const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
+const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
 
 type ReadyPairPlanningKey = (i64, u64);
 
 static READY_PAIR_PLANNING_ATTEMPTS: OnceLock<Mutex<HashMap<ReadyPairPlanningKey, Instant>>> =
+    OnceLock::new();
+static DJ_PROFILE_REBUILD_FAILURES: OnceLock<Mutex<HashMap<String, DjProfileRebuildFailure>>> =
     OnceLock::new();
 
 pub fn routes() -> Router<SharedState> {
@@ -170,6 +173,8 @@ struct DjDeckStatus {
     title: String,
     artist: Option<String>,
     profile_ready: bool,
+    profile_status: String,
+    profile_error: Option<String>,
     profile_confidence: Option<f64>,
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
@@ -274,6 +279,13 @@ enum RebuildProfileCandidate {
 enum ProfileRebuildInflightDecision {
     Start,
     AlreadyRunning,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DjProfileRebuildFailure {
+    status: String,
+    message: String,
+    recorded_at: Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -396,6 +408,16 @@ async fn get_status(
                     Some("disabled".to_string())
                 } else if current.is_none() || next.is_none() {
                     Some("pair_missing".to_string())
+                } else if current
+                    .as_ref()
+                    .is_some_and(|deck| deck.profile_status == "decode_failed")
+                {
+                    Some("current_profile_decode_failed".to_string())
+                } else if next
+                    .as_ref()
+                    .is_some_and(|deck| deck.profile_status == "decode_failed")
+                {
+                    Some("next_profile_decode_failed".to_string())
                 } else if current.as_ref().is_some_and(|deck| !deck.profile_ready) {
                     Some("missing_current_profile".to_string())
                 } else if next.as_ref().is_some_and(|deck| !deck.profile_ready) {
@@ -412,12 +434,12 @@ async fn get_status(
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
                 let mut missing_profile_refs = Vec::new();
                 if enabled {
-                    if current.as_ref().is_some_and(|deck| !deck.profile_ready)
+                    if current.as_ref().is_some_and(deck_needs_profile_rebuild)
                         && let Some(media_ref) = current_ref.clone()
                     {
                         missing_profile_refs.push(media_ref);
                     }
-                    if next.as_ref().is_some_and(|deck| !deck.profile_ready)
+                    if next.as_ref().is_some_and(deck_needs_profile_rebuild)
                         && let Some(media_ref) = next_ref.clone()
                     {
                         missing_profile_refs.push(media_ref);
@@ -694,6 +716,7 @@ async fn queue_tidal_profile_rebuild(
         std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
     )? {
         ProfileRebuildInflightDecision::Start => {
+            clear_dj_profile_rebuild_failure(&inflight_key);
             tracing::info!(
                 media_ref_kind = %media_ref.profile_key().media_ref_kind,
                 media_ref_id = %media_ref.profile_key().media_ref_id,
@@ -774,8 +797,17 @@ async fn queue_tidal_profile_rebuild(
         Arc::new(AtomicU64::new(0)),
     ));
 
+    let inflight_for_decode = inflight.clone();
+    let inflight_key_for_decode = inflight_key.clone();
+    let failure_key = inflight_key.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
+            record_dj_profile_rebuild_failure(
+                &failure_key,
+                "decode_failed",
+                profile_rebuild_error_message(&error),
+            );
+            clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
             tracing::warn!(tidal_id, error = %error, "DJ profile rebuild decode failed");
         } else {
             tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
@@ -828,6 +860,10 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
     format!("{}:{}", key.media_ref_kind, key.media_ref_id)
 }
 
+fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
+    !deck.profile_ready && deck.profile_status != "decode_failed"
+}
+
 fn clear_dj_profile_inflight(
     inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     key: &str,
@@ -835,6 +871,54 @@ fn clear_dj_profile_inflight(
     if let Ok(mut guard) = inflight.lock() {
         guard.remove(key);
     }
+}
+
+fn profile_rebuild_failures() -> &'static Mutex<HashMap<String, DjProfileRebuildFailure>> {
+    DJ_PROFILE_REBUILD_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) {
+    if let Ok(mut guard) = profile_rebuild_failures().lock() {
+        guard.insert(
+            key.to_string(),
+            DjProfileRebuildFailure {
+                status: status.to_string(),
+                message,
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+}
+
+fn clear_dj_profile_rebuild_failure(key: &str) {
+    if let Ok(mut guard) = profile_rebuild_failures().lock() {
+        guard.remove(key);
+    }
+}
+
+fn recent_dj_profile_rebuild_failure(key: &str) -> Option<DjProfileRebuildFailure> {
+    let mut guard = profile_rebuild_failures().lock().ok()?;
+    match guard.get(key) {
+        Some(failure)
+            if failure.recorded_at.elapsed()
+                <= Duration::from_secs(DJ_PROFILE_REBUILD_FAILURE_TTL_SECS) =>
+        {
+            Some(failure.clone())
+        }
+        Some(_) => {
+            guard.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn profile_rebuild_error_message(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if message.trim().is_empty() {
+        return "Profile decode failed".to_string();
+    }
+    message.chars().take(160).collect()
 }
 
 async fn rebuild_track_for_tidal_ref(
@@ -1165,6 +1249,21 @@ fn deck_status(
     let key = media_ref.profile_key();
     let profile = queries::get_audio_dj_profile(conn, &key)?;
     let correction = queries::get_audio_dj_profile_correction(conn, &key)?;
+    let rebuild_key = dj_profile_inflight_key(&key);
+    let rebuild_failure = if profile.is_some() {
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+        None
+    } else {
+        recent_dj_profile_rebuild_failure(&rebuild_key)
+    };
+    let profile_status = if profile.is_some() {
+        "ready".to_string()
+    } else if let Some(failure) = rebuild_failure.as_ref() {
+        failure.status.clone()
+    } else {
+        "missing".to_string()
+    };
+    let profile_error = rebuild_failure.map(|failure| failure.message);
     let (title, artist) = match label_override {
         Some((title, artist)) => (title.clone(), artist.clone()),
         None => media_ref_label(conn, media_ref)?,
@@ -1186,6 +1285,8 @@ fn deck_status(
         title,
         artist,
         profile_ready: profile.is_some(),
+        profile_status,
+        profile_error,
         profile_confidence,
         beat_count,
         downbeat_count,
@@ -2234,5 +2335,35 @@ mod tests {
 
         assert_eq!(first, ProfileRebuildInflightDecision::Start);
         assert_eq!(second, ProfileRebuildInflightDecision::AlreadyRunning);
+    }
+
+    #[test]
+    fn deck_status_exposes_recent_profile_decode_failure() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 12198473,
+            track_id: None,
+        };
+        let key = media_ref.profile_key();
+        let rebuild_key = dj_profile_inflight_key(&key);
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+        record_dj_profile_rebuild_failure(
+            &rebuild_key,
+            "decode_failed",
+            "DASH stream prebuffer failed".to_string(),
+        );
+
+        let deck = deck_status(&conn, &media_ref, None).expect("deck status");
+
+        assert!(!deck.profile_ready);
+        assert_eq!(deck.profile_status, "decode_failed");
+        assert_eq!(
+            deck.profile_error.as_deref(),
+            Some("DASH stream prebuffer failed")
+        );
+        assert!(!deck_needs_profile_rebuild(&deck));
+
+        clear_dj_profile_rebuild_failure(&rebuild_key);
     }
 }

@@ -10,6 +10,7 @@
 	} = $props();
 
 	function confidenceLabel(deck?: DjDeckStatus) {
+		if (deck?.profile_status === 'decode_failed') return 'Analysis failed';
 		if (!deck?.profile_ready) return 'Profile missing';
 		if (deck.profile_confidence == null) return 'Profile ready';
 		return `${Math.round(deck.profile_confidence * 100)}% confidence`;
@@ -32,9 +33,17 @@
 					<h3 title={item.deck.title}>{item.deck.title}</h3>
 					<p title={item.deck.artist ?? 'Unknown artist'}>{item.deck.artist ?? 'Unknown artist'}</p>
 					<div class="deck-status">
-						<span class:ready={item.deck.profile_ready}>{confidenceLabel(item.deck)}</span>
+						<span
+							class:ready={item.deck.profile_ready}
+							class:failed={item.deck.profile_status === 'decode_failed'}
+						>
+							{confidenceLabel(item.deck)}
+						</span>
 						{#if item.deck.safe_crossfade_only}
 							<span class="safe-only">Safe only</span>
+						{/if}
+						{#if item.deck.profile_error}
+							<span class="error-detail" title={item.deck.profile_error}>{item.deck.profile_error}</span>
 						{/if}
 					</div>
 					<dl>
@@ -156,6 +165,18 @@
 	.deck-status .ready {
 		border-color: color-mix(in srgb, var(--state-success) 42%, transparent);
 		color: var(--state-success);
+	}
+
+	.deck-status .failed {
+		border-color: color-mix(in srgb, var(--state-error) 46%, transparent);
+		color: var(--state-error);
+	}
+
+	.deck-status .error-detail {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.deck-status .safe-only {
