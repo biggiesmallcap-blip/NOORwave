@@ -764,6 +764,7 @@ fn gate_prepare_next_for_dj(
 fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled: bool) {
     state.dj_engine_enabled = enabled;
     if enabled {
+        state.current_sample_rate_follow = false;
         return;
     }
     state.dj_lookahead = None;
@@ -2878,6 +2879,17 @@ mod tests {
         assert!(!active.shared.stopped.load(Ordering::SeqCst));
         assert!(!next.shared.stopped.load(Ordering::SeqCst));
         assert!(next.job.prepared_transition.is_none());
+    }
+
+    #[test]
+    fn enabling_dj_forces_sample_rate_follow_off() {
+        let mut state = test_runtime_loop_state();
+        state.current_sample_rate_follow = true;
+
+        set_dj_engine_enabled_in_state(&mut state, true);
+
+        assert!(state.dj_engine_enabled);
+        assert!(!state.current_sample_rate_follow);
     }
 
     #[test]

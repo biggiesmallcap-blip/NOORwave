@@ -11356,10 +11356,15 @@ fn spawn_playback_runtime_listener(
                         device: device_name,
                     });
                     let retry = {
-                        let settings = state_guard
+                        let output_settings = state_guard
                             .db
                             .with_conn(|conn| {
-                                crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
+                                let settings = crate::db::audio_settings::load(conn)?;
+                                let dj_engine_enabled = queries::is_dj_engine_enabled(conn)?;
+                                Ok(runtime_output_settings_from_audio_settings(
+                                    &settings,
+                                    dj_engine_enabled,
+                                ))
                             })
                             .ok();
                         let is_playing = state_guard
@@ -11370,14 +11375,9 @@ fn spawn_playback_runtime_listener(
                             .playback_runtime
                             .as_ref()
                             .map(|runtime| runtime.handle.clone());
-                        settings.and_then(|settings| {
-                            if should_retry_exclusive_release(is_playing, settings.exclusive_mode) {
-                                runtime.map(|runtime| {
-                                    (
-                                        runtime,
-                                        runtime_output_settings_from_audio_settings(&settings),
-                                    )
-                                })
+                        output_settings.and_then(|output| {
+                            if should_retry_exclusive_release(is_playing, output.exclusive_mode) {
+                                runtime.map(|runtime| (runtime, output))
                             } else {
                                 None
                             }
@@ -11788,8 +11788,15 @@ async fn handle_near_end_prebuffer_next(
                     crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
                 })
                 .ok();
+            let dj_engine_enabled = state_guard
+                .db
+                .with_conn(queries::is_dj_engine_enabled)
+                .unwrap_or(false);
             if let Some(settings) = audio_settings
-                && settings.sample_rate_follow
+                && effective_runtime_sample_rate_follow(
+                    settings.sample_rate_follow,
+                    dj_engine_enabled,
+                )
                 && let Some(next_rate) = stream.sample_rate
             {
                 let current_rate = info.sample_rate;
@@ -12542,6 +12549,10 @@ fn effective_crossfade_for_exclusive(
     }
 }
 
+fn effective_runtime_sample_rate_follow(sample_rate_follow: bool, dj_engine_enabled: bool) -> bool {
+    sample_rate_follow && !dj_engine_enabled
+}
+
 fn should_skip_prebuffer_for_sample_rate_follow_format_change(
     exclusive_mode: bool,
     sample_rate_follow: bool,
@@ -12583,13 +12594,17 @@ struct RuntimeOutputSettings {
 
 fn runtime_output_settings_from_audio_settings(
     settings: &crate::db::audio_settings::AudioSettings,
+    dj_engine_enabled: bool,
 ) -> RuntimeOutputSettings {
     RuntimeOutputSettings {
         device: playback_runtime::OutputDeviceSelection::from_pref(
             settings.output_device.as_deref(),
         ),
         exclusive_mode: settings.exclusive_mode,
-        sample_rate_follow: settings.sample_rate_follow,
+        sample_rate_follow: effective_runtime_sample_rate_follow(
+            settings.sample_rate_follow,
+            dj_engine_enabled,
+        ),
         exclusive_release_grace_secs: settings.exclusive_release_grace_secs,
         exclusive_latency_mode: settings.exclusive_latency_mode.clone(),
     }
@@ -12599,18 +12614,24 @@ async fn apply_persisted_runtime_output_settings(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
 ) {
-    let settings = {
+    let output = {
         let guard = state.read().await;
         guard
             .db
-            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
+            .with_conn(|conn| {
+                let settings = crate::db::audio_settings::load(conn)?;
+                let dj_engine_enabled = queries::is_dj_engine_enabled(conn)?;
+                Ok(runtime_output_settings_from_audio_settings(
+                    &settings,
+                    dj_engine_enabled,
+                ))
+            })
             .ok()
     };
 
-    let Some(settings) = settings else {
+    let Some(output) = output else {
         return;
     };
-    let output = runtime_output_settings_from_audio_settings(&settings);
     if let Err(e) = handle.device_swap(
         output.device,
         output.exclusive_mode,
@@ -12637,9 +12658,13 @@ async fn post_audio_exclusive_retry(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let guard = state.read().await;
-    let settings = guard
+    let (settings, dj_engine_enabled) = guard
         .db
-        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+        .with_conn(|conn| {
+            let settings = crate::db::audio_settings::load(conn)?;
+            let dj_engine_enabled = queries::is_dj_engine_enabled(conn)?;
+            Ok((settings, dj_engine_enabled))
+        })
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -12657,7 +12682,7 @@ async fn post_audio_exclusive_retry(
     }
 
     if let Some(runtime) = guard.playback_runtime.as_ref() {
-        let output = runtime_output_settings_from_audio_settings(&settings);
+        let output = runtime_output_settings_from_audio_settings(&settings, dj_engine_enabled);
         if let Err(e) = runtime.handle.device_swap(
             output.device,
             output.exclusive_mode,
@@ -12724,12 +12749,13 @@ async fn put_audio_settings(
 
     let (old, new) = {
         let guard = state.read().await;
-        let (old, saved) = guard
+        let (old, saved, dj_engine_enabled) = guard
             .db
             .with_conn(|conn| {
                 let old = crate::db::audio_settings::load(conn)?;
                 crate::db::audio_settings::save(conn, &new)?;
-                Ok((old, new.clone()))
+                let dj_engine_enabled = queries::is_dj_engine_enabled(conn)?;
+                Ok((old, new.clone(), dj_engine_enabled))
             })
             .map_err(|e| {
                 (
@@ -12750,7 +12776,7 @@ async fn put_audio_settings(
             || old.exclusive_latency_mode != saved.exclusive_latency_mode;
 
         if needs_swap && let Some(runtime) = guard.playback_runtime.as_ref() {
-            let output = runtime_output_settings_from_audio_settings(&saved);
+            let output = runtime_output_settings_from_audio_settings(&saved, dj_engine_enabled);
             if let Err(e) = runtime.handle.device_swap(
                 output.device,
                 output.exclusive_mode,
@@ -13797,7 +13823,7 @@ mod tests {
         settings.exclusive_latency_mode =
             crate::db::audio_settings::ExclusiveLatencyMode::LowLatency;
 
-        let output = runtime_output_settings_from_audio_settings(&settings);
+        let output = runtime_output_settings_from_audio_settings(&settings, false);
 
         match output.device {
             playback_runtime::OutputDeviceSelection::Named(name) => {
@@ -13814,6 +13840,18 @@ mod tests {
             output.exclusive_latency_mode,
             crate::db::audio_settings::ExclusiveLatencyMode::LowLatency
         );
+    }
+
+    #[test]
+    fn runtime_output_settings_disable_sample_rate_follow_for_dj() {
+        let mut settings = crate::db::audio_settings::AudioSettings::default();
+        settings.sample_rate_follow = true;
+
+        let output = runtime_output_settings_from_audio_settings(&settings, true);
+
+        assert!(!output.sample_rate_follow);
+        assert!(!effective_runtime_sample_rate_follow(true, true));
+        assert!(effective_runtime_sample_rate_follow(true, false));
     }
 
     #[test]
