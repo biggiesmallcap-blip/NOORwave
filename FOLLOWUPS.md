@@ -10,6 +10,23 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### refactor(db/signals): extract analytics signals from db/queries.rs
+
+The five `get_signals_*` functions (`get_signals_kpis`, `get_signals_tempo`,
+`get_signals_sonic_field`, `get_signals_ridgeline`, `get_signals_audio_profile`)
+and their `get_analytics_signals` orchestrator form a coherent cluster
+inside the 11k-line `db/queries.rs`. None of them are tested - that's the
+real friction, and it's also why the file shows 1.8/10 hotspot health and
+the "brain method" biomarker on `get_signals_tempo` (148 LOC).
+
+The architecture-review surfaced this as "Worth exploring" because the
+win is `interface as test surface`: pull them into `db/signals.rs` behind
+a `Signals::compute(conn, days, granularity)` interface and build one
+in-memory `TestDb` fixture (listen_history + audio_dsp_features + tracks)
+that exercises every signal through one path. Without the fixture, the
+move is pure code motion - hence deferred.
+- Spawned by: arch/deepening architecture review (2026-05-24)
+
 ### a11y: scope hidden queue actions out of the accessibility tree per row
 
 `.queue-actions` is `opacity: 0; pointer-events: none` until the row receives
