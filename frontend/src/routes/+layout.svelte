@@ -46,6 +46,7 @@
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
+	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
@@ -496,6 +497,13 @@
 				event.preventDefault();
 				void cyclePlayerRepeatMode();
 				break;
+			case 'z':
+			case 'Z':
+				if ($pendingUndo) {
+					event.preventDefault();
+					void handleUndoClear();
+				}
+				break;
 		}
 	}
 
@@ -853,23 +861,16 @@
 
 	async function handleClearQueue() {
 		if (upcomingQueue.length === 0) return;
-		const restorable = await clearQueueAction();
-		if (restorable.length > 0) {
-			// Replace the auto-toast with a richer one that has a real undo button.
-			// We can't bind a click handler to the simple text toast, so expose
-			// undo via the keyboard shortcut Z within 6s.
-			const onKey = (event: KeyboardEvent) => {
-				if (isTypingTarget(event.target)) return;
-				if (event.key === 'z' || event.key === 'Z') {
-					event.preventDefault();
-					window.removeEventListener('keydown', onKey);
-					void restoreQueueItems(restorable);
-					showToast(`Restored ${restorable.length} tracks`, 'success');
-				}
-			};
-			window.addEventListener('keydown', onKey);
-			setTimeout(() => window.removeEventListener('keydown', onKey), 6000);
-		}
+		await clearQueueAction();
+		// The store offers an undo: the queue-section renders an Undo chip
+		// bound to `pendingUndo`. Z is the power-user shortcut to fire the
+		// same path without reaching for the mouse.
+	}
+
+	async function handleUndoClear() {
+		const restorable = consumeUndo();
+		if (!restorable) return;
+		await restoreQueueItems(restorable);
 	}
 
 	function stopPropagation(event: Event) {
@@ -1357,6 +1358,19 @@
 					</div>
 				</div>
 			</div>
+
+			{#if $pendingUndo}
+				<div class="queue-undo-bar" role="status">
+					<span class="queue-undo-text">
+						Cleared {$pendingUndo.count} {$pendingUndo.count === 1 ? 'track' : 'tracks'}
+					</span>
+					<button
+						class="queue-undo-btn"
+						type="button"
+						onclick={() => void handleUndoClear()}
+					>Undo<span class="queue-undo-hint" aria-hidden="true">Z</span></button>
+				</div>
+			{/if}
 
 			{#if saveQueueOpen}
 				<form
@@ -2255,6 +2269,62 @@
 		clip: rect(0, 0, 0, 0);
 		white-space: nowrap;
 		border: 0;
+	}
+
+	.queue-undo-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin: 0 0 10px;
+		padding: 8px 12px;
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+		border: 1px solid var(--accent-line);
+		animation: queue-undo-slide-in 180ms ease-out;
+	}
+
+	@keyframes queue-undo-slide-in {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.queue-undo-text {
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+	}
+
+	.queue-undo-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		padding: 5px 12px;
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: var(--accent-strong);
+		color: var(--bg-base);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background var(--motion-fast), transform var(--motion-fast);
+	}
+
+	.queue-undo-btn:hover {
+		transform: translateY(-1px);
+	}
+
+	.queue-undo-hint {
+		display: inline-grid;
+		place-items: center;
+		min-width: 18px;
+		height: 18px;
+		padding: 0 4px;
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--bg-base) 22%, transparent);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-bold);
+		letter-spacing: 0.04em;
 	}
 
 	.queue-header {
