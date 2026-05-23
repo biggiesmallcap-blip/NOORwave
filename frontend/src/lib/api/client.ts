@@ -1949,6 +1949,30 @@ export const api = {
 		});
 	},
 
+	getPlaylistCoverSample(id: number, signal?: AbortSignal) {
+		return fetchApi<{ urls: string[] }>(
+			`/api/playlists/${id}/cover-sample`,
+			undefined,
+			{ signal },
+		);
+	},
+
+	previewSmartPlaylist(rules: RuleClause, signal?: AbortSignal) {
+		return fetchApi<{ count: number }>('/api/smart/playlists/preview', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ rules }),
+			signal,
+		});
+	},
+
+	searchLibraryArtistNames(q: string, signal?: AbortSignal, limit = 20) {
+		return fetchApi<{ artists: { id: number; name: string }[] }>(
+			`/api/artists/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+			undefined,
+			{ signal },
+		);
+	},
+
 	searchTidalPlaylists(q: string, signal?: AbortSignal, opts?: { limit?: number; offset?: number }) {
 		const limit = opts?.limit ?? 20;
 		const offset = opts?.offset ?? 0;
