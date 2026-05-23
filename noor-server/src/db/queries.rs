@@ -7574,13 +7574,14 @@ pub fn mark_dj_transition_timing_status_for_pair(
                    SELECT 1
                    FROM dj_transition_events fired
                    WHERE fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
-                     AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
-                     AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
-                     AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
-                     AND fired.timing_status = 'fired'
-               )
-             ORDER BY started_at DESC, id DESC
-             LIMIT 1
+                      AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
+                      AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
+                      AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+                      AND fired.id > dj_transition_events.id
+                      AND fired.timing_status = 'fired'
+                )
+              ORDER BY started_at DESC, id DESC
+              LIMIT 1
          )",
         params![
             from_media_ref_kind,
@@ -8013,7 +8014,7 @@ mod tests {
         }
 
         #[test]
-        fn mark_dj_transition_timing_status_for_pair_ignores_pair_that_already_fired() {
+        fn mark_dj_transition_timing_status_for_pair_updates_new_attempt_after_old_fired_pair() {
             let conn = setup_conn();
             let fired_id = insert_event(&conn);
             update_dj_transition_fire_timing(&conn, fired_id, 172_040, "fired")
@@ -8030,7 +8031,7 @@ mod tests {
             )
             .expect("mark");
 
-            assert_eq!(updated, 0);
+            assert_eq!(updated, 1);
             let status: Option<String> = conn
                 .query_row(
                     "SELECT timing_status FROM dj_transition_events WHERE id = ?1",
@@ -8038,7 +8039,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("status");
-            assert_eq!(status.as_deref(), Some("armed"));
+            assert_eq!(status.as_deref(), Some("missed"));
         }
     }
 

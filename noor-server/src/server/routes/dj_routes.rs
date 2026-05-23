@@ -1173,12 +1173,13 @@ fn latest_dj_transition_timing_history(
                SELECT 1
                FROM dj_transition_events fired
                WHERE fired.from_media_ref_kind IS e.from_media_ref_kind
-                 AND fired.from_media_ref_id IS e.from_media_ref_id
-                 AND fired.to_media_ref_kind IS e.to_media_ref_kind
-                 AND fired.to_media_ref_id IS e.to_media_ref_id
-                 AND fired.timing_status = 'fired'
-             )
-           )
+                  AND fired.from_media_ref_id IS e.from_media_ref_id
+                  AND fired.to_media_ref_kind IS e.to_media_ref_kind
+                  AND fired.to_media_ref_id IS e.to_media_ref_id
+                  AND fired.id > e.id
+                  AND fired.timing_status = 'fired'
+              )
+            )
          ORDER BY e.started_at DESC, e.id DESC
          LIMIT ?1",
     )?;
@@ -1698,6 +1699,44 @@ mod tests {
             "INSERT INTO dj_transition_events (
                 from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
                 template, program_json, planner_version, planned_start_ms,
+                timing_source, timing_status
+             ) VALUES (
+                'tidal_track', '1', 'tidal_track', '2',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                222000, 'downbeat_sync', 'missed'
+             )",
+            [],
+        )
+        .expect("insert duplicate missed");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status
+             ) VALUES (
+                'tidal_track', '1', 'tidal_track', '2',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                222000, 222040, 40, 'downbeat_sync', 'fired'
+             )",
+            [],
+        )
+        .expect("insert fired");
+
+        let history = latest_dj_transition_timing_history(&conn, 5).expect("history");
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].timing_status.as_deref(), Some("fired"));
+        assert_eq!(history[0].timing_delta_ms, Some(40));
+    }
+
+    #[test]
+    fn timing_history_keeps_newer_missed_attempt_after_older_fired_pair() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
                 actual_start_ms, timing_delta_ms, timing_source, timing_status
              ) VALUES (
                 'tidal_track', '1', 'tidal_track', '2',
@@ -1719,13 +1758,13 @@ mod tests {
              )",
             [],
         )
-        .expect("insert duplicate missed");
+        .expect("insert newer missed");
 
         let history = latest_dj_transition_timing_history(&conn, 5).expect("history");
 
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].timing_status.as_deref(), Some("fired"));
-        assert_eq!(history[0].timing_delta_ms, Some(40));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].timing_status.as_deref(), Some("missed"));
+        assert_eq!(history[1].timing_status.as_deref(), Some("fired"));
     }
 
     #[test]
