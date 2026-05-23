@@ -8,7 +8,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 8;
+pub(crate) const DASH_INITIAL_MEDIA_SEGMENTS: usize = 2;
 pub(crate) const DASH_SEGMENT_TIMEOUT_SECS: u64 = 12;
 const STREAM_PIPE_RECV_POLL_MS: u64 = 100;
 
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn dash_initial_media_count_prefers_multiple_segments() {
+    fn dash_initial_media_count_primes_startup_without_deep_buffering() {
         assert_eq!(dash_initial_media_count(0), 0);
         assert_eq!(dash_initial_media_count(1), 1);
         assert_eq!(

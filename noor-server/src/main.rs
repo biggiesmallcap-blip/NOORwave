@@ -64,6 +64,13 @@ pub struct PreparedEphemeralTidalNext {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NextPrebufferKey {
+    pub current_track_id: i64,
+    pub next_track_id: i64,
+    pub generation: u64,
+}
+
 /// Shared application state accessible by all modules
 pub struct AppState {
     pub db: db::Database,
@@ -115,6 +122,7 @@ pub struct AppState {
     pub playback_generation: Arc<AtomicU64>,
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
+    pub next_prebuffer_inflight: Option<NextPrebufferKey>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub live_listen_session: Option<playback::player::LiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
@@ -743,6 +751,7 @@ async fn main() -> Result<()> {
         playback_generation: Arc::new(AtomicU64::new(1)),
         current_stream_display: None,
         pending_stream_display: None,
+        next_prebuffer_inflight: None,
         active_listen_session: None,
         live_listen_session: None,
         external_playback_track: None,

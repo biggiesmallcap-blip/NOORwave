@@ -17,6 +17,7 @@ use futures::StreamExt as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Instant;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -112,6 +113,7 @@ pub(crate) fn decode_and_buffer_job(
             };
             if initial_media_segments > 0 {
                 let prebuffer_stop = shared.stop_flag();
+                let prebuffer_started = Instant::now();
                 dash_initial = rt
                     .block_on(async {
                         if prebuffer_stop.load(Ordering::Relaxed) {
@@ -139,6 +141,15 @@ pub(crate) fn decode_and_buffer_job(
                     })
                     .context("DASH stream prebuffer failed")?;
                 remaining_segment_urls.drain(0..initial_media_segments);
+                info!(
+                    "TIDAL DASH prebuffer ready track_id={} start_index={} initial_segments={} remaining_segments={} elapsed_ms={} bytes={}",
+                    shared.track_id,
+                    start_index,
+                    initial_media_segments,
+                    remaining_segment_urls.len(),
+                    prebuffer_started.elapsed().as_millis(),
+                    dash_initial.len()
+                );
                 debug!(
                     "TIDAL DASH prebuffer ready: track_id={}, start_index={}, initial_segments={}, remaining_segments={}",
                     shared.track_id,

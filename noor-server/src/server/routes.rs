@@ -11183,6 +11183,7 @@ fn spawn_playback_runtime_listener(
                     state_guard.prepared_ephemeral_tidal_next = None;
                     state_guard.current_stream_display = None;
                     state_guard.pending_stream_display = None;
+                    state_guard.next_prebuffer_inflight = None;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::NearEnd {
                     track_id,
@@ -11545,7 +11546,49 @@ async fn handle_near_end(
     let (Some(next), Some(handle)) = (next_track, runtime_handle) else {
         return Ok(());
     };
+    if matches!(
+        handle.track_status(next.id, generation),
+        playback_runtime::PlaybackTrackStatus::Active
+            | playback_runtime::PlaybackTrackStatus::Prepared
+    ) {
+        return Ok(());
+    }
+    let prebuffer_key = crate::NextPrebufferKey {
+        current_track_id,
+        next_track_id: next.id,
+        generation,
+    };
+    {
+        let mut state_guard = state.write().await;
+        if !claim_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key) {
+            return Ok(());
+        }
+    }
 
+    let result = handle_near_end_prebuffer_next(
+        state.clone(),
+        current_track_id,
+        generation,
+        next,
+        handle,
+        crossfade_ms,
+    )
+    .await;
+    {
+        let mut state_guard = state.write().await;
+        release_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key);
+    }
+    result
+}
+
+async fn handle_near_end_prebuffer_next(
+    state: SharedState,
+    current_track_id: i64,
+    generation: u64,
+    next: crate::db::models::Track,
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    crossfade_ms: i32,
+) -> anyhow::Result<()> {
     // Resolve the stream URL for the next track (we need a live access token).
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
@@ -11751,6 +11794,26 @@ async fn handle_near_end(
     }
     info!("Pre-buffering next track: {} (id {})", next.title, next.id);
     Ok(())
+}
+
+fn claim_next_prebuffer_slot(
+    slot: &mut Option<crate::NextPrebufferKey>,
+    key: crate::NextPrebufferKey,
+) -> bool {
+    if *slot == Some(key) {
+        return false;
+    }
+    *slot = Some(key);
+    true
+}
+
+fn release_next_prebuffer_slot(
+    slot: &mut Option<crate::NextPrebufferKey>,
+    key: crate::NextPrebufferKey,
+) {
+    if *slot == Some(key) {
+        *slot = None;
+    }
 }
 
 async fn try_adopt_prepared_ephemeral_tidal_next(
@@ -13712,6 +13775,7 @@ mod tests {
             playback_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             current_stream_display: None,
             pending_stream_display: None,
+            next_prebuffer_inflight: None,
             active_listen_session: None,
             live_listen_session: None,
             external_playback_track: None,
@@ -15157,6 +15221,29 @@ mod tests {
         );
         assert_eq!(effective_crossfade_for_exclusive(true, true, 1_500), 1_500);
         assert_eq!(effective_crossfade_for_exclusive(true, true, -10), 0);
+    }
+
+    #[test]
+    fn next_prebuffer_slot_suppresses_duplicate_pair_only() {
+        let key = crate::NextPrebufferKey {
+            current_track_id: 1,
+            next_track_id: 2,
+            generation: 3,
+        };
+        let replacement = crate::NextPrebufferKey {
+            current_track_id: 1,
+            next_track_id: 4,
+            generation: 3,
+        };
+        let mut slot = None;
+
+        assert!(claim_next_prebuffer_slot(&mut slot, key));
+        assert!(!claim_next_prebuffer_slot(&mut slot, key));
+        assert!(claim_next_prebuffer_slot(&mut slot, replacement));
+        release_next_prebuffer_slot(&mut slot, key);
+        assert_eq!(slot, Some(replacement));
+        release_next_prebuffer_slot(&mut slot, replacement);
+        assert_eq!(slot, None);
     }
 
     #[test]
