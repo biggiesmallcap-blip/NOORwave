@@ -832,9 +832,41 @@
 	// ─── Scroll active queue row into view ───────────────────────────────────
 	let lastUserScrollAt = $state(0);
 	let queueListEl: HTMLElement | null = $state(null);
+	let currentRowVisible = $state(true);
+
+	function refreshCurrentRowVisibility() {
+		const id = $currentTrack?.id;
+		if (!id || !queueListEl) {
+			currentRowVisible = true;
+			return;
+		}
+		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		if (!row) {
+			currentRowVisible = true;
+			return;
+		}
+		const rect = (row as HTMLElement).getBoundingClientRect();
+		const containerRect = queueListEl.getBoundingClientRect();
+		currentRowVisible = !(rect.bottom < containerRect.top || rect.top > containerRect.bottom);
+	}
 
 	function handleQueueScroll() {
 		lastUserScrollAt = Date.now();
+		refreshCurrentRowVisibility();
+	}
+
+	function jumpToCurrentRow() {
+		const id = $currentTrack?.id;
+		if (!id || !queueListEl) return;
+		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
+		if (!row) return;
+		(row as HTMLElement).scrollIntoView({
+			block: 'center',
+			behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+		});
+		// Re-enable the auto-jump effect so subsequent track changes follow.
+		lastUserScrollAt = 0;
+		refreshCurrentRowVisibility();
 	}
 
 	function prefersReducedMotion(): boolean {
@@ -844,19 +876,28 @@
 
 	$effect(() => {
 		const id = $currentTrack?.id;
-		if (!id || !queueListEl) return;
-		// Bail if the user scrolled recently - don't yank focus from their browse.
-		if (Date.now() - lastUserScrollAt < 5000) return;
+		if (!id || !queueListEl) {
+			currentRowVisible = true;
+			return;
+		}
 		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
-		if (!row) return;
+		if (!row) {
+			currentRowVisible = true;
+			return;
+		}
 		const rect = row.getBoundingClientRect();
 		const containerRect = queueListEl.getBoundingClientRect();
 		const offscreen = rect.bottom < containerRect.top || rect.top > containerRect.bottom;
-		if (offscreen) {
+		// Bail on the auto-scroll if the user scrolled recently - don't yank
+		// focus from their browse. The jump-to-current chip still shows.
+		if (offscreen && Date.now() - lastUserScrollAt >= 5000) {
 			row.scrollIntoView({
 				block: 'nearest',
 				behavior: prefersReducedMotion() ? 'auto' : 'smooth',
 			});
+			currentRowVisible = true;
+		} else {
+			currentRowVisible = !offscreen;
 		}
 	});
 
@@ -1406,6 +1447,18 @@
 					</div>
 				</div>
 			</div>
+
+			{#if !currentRowVisible && $currentTrack && upcomingQueue.length > 0}
+				<button
+					class="queue-jump-chip"
+					type="button"
+					onclick={jumpToCurrentRow}
+					title="Scroll to the track that is currently playing"
+				>
+					<span aria-hidden="true">↓</span>
+					Jump to now playing
+				</button>
+			{/if}
 
 			{#if $pendingUndo}
 				<div class="queue-undo-bar" role="status">
@@ -2325,6 +2378,28 @@
 		border: 0;
 	}
 
+	.queue-jump-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		align-self: center;
+		margin: 0 0 10px;
+		padding: 6px 14px;
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: color-mix(in srgb, var(--accent-soft) 80%, transparent);
+		color: var(--accent-strong);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+		transition: background var(--motion-fast), transform var(--motion-fast);
+	}
+
+	.queue-jump-chip:hover {
+		background: var(--accent-soft);
+		transform: translateY(-1px);
+	}
+
 	.queue-undo-bar {
 		display: flex;
 		align-items: center;
@@ -2392,6 +2467,7 @@
 		.queue-action:hover,
 		.queue-icon-btn:hover:not(:disabled),
 		.queue-undo-btn:hover,
+		.queue-jump-chip:hover,
 		.queue-expand-btn:hover:not(:disabled) {
 			transform: none;
 		}
@@ -2687,7 +2763,7 @@
 		line-height: 1;
 		color: var(--text-tertiary);
 		cursor: grab;
-		opacity: 0;
+		opacity: 0.35;
 		transition: opacity var(--motion-fast);
 		user-select: none;
 	}

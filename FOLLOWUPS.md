@@ -10,6 +10,15 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### a11y: keep queue-time visible on focus without colliding with action buttons
+
+`.queue-time` currently fades on `:hover` and `:focus-within` because
+`.queue-actions` sits absolutely positioned at `right: 0; top: 50%`. Keyboard
+users lose the duration when a row gains focus. Resolving cleanly needs a row
+relayout (two-line side panel or shrunken icon set), not a one-line CSS
+toggle. Audit item 16 from the 2026-05-23 queue UI audit.
+- Spawned by: feature/queue-ui-qol (Commit 6, c21cf78 area)
+
 ### perf: cache Last.fm `track.getSimilar` per (artist, title)
 
 `services/radio.rs` calls Last.fm `track.getSimilar` on every `/api/radio/song`
