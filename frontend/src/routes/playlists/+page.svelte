@@ -23,9 +23,10 @@
 	} from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
-	import MetricPair from '$lib/components/ui/MetricPair.svelte';
 	import StateBadge from '$lib/components/ui/StateBadge.svelte';
 	import TrackRow from '$lib/components/TrackRow.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import type { MenuItem } from '$lib/stores/context_menu';
 	import {
 		getCachedMosaic,
 		setCachedMosaic,
@@ -193,18 +194,46 @@
 	// kept in sync whenever a playlist's tracks load.
 	let mosaicById = $state<Record<number, string[]>>({});
 
-	// Phase 5B — back/forward state via SvelteKit snapshot.
+	// Per-playlist pre-computed search blob, populated on load. Avoids
+	// JSON.parse(smart_rules) for every playlist on every keystroke.
+	let searchTextById = $state<Record<number, string>>({});
+
+	// Inline delete confirmation - the card flips into a confirm bar instead
+	// of firing the destructive call on the first click.
+	let pendingDeleteId = $state<number | null>(null);
+
+	// Set of playlist ids whose expanded track list is in "show all" mode.
+	// The first paint after expand caps at TRACKS_PREVIEW_LIMIT to keep big
+	// playlists from rendering hundreds of rows synchronously.
+	let showAllTracksFor = $state<Set<number>>(new Set());
+	const TRACKS_PREVIEW_LIMIT = 75;
+
+	// Phase 5B - back/forward state via SvelteKit snapshot.
 	export const snapshot: Snapshot<{
 		expandedIds: number[];
 		scrollY: number;
+		query?: string;
+		filter?: PlaylistFilter;
+		sort?: PlaylistSort;
+		showAllTracksIds?: number[];
 	}> = {
 		capture: () => ({
 			expandedIds: [...expandedPlaylistIds],
-			scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+			scrollY: typeof window !== 'undefined' ? window.scrollY : 0,
+			query: playlistQuery,
+			filter: playlistFilter,
+			sort: playlistSort,
+			showAllTracksIds: [...showAllTracksFor]
 		}),
 		restore: (saved) => {
 			if (Array.isArray(saved.expandedIds)) {
 				expandedPlaylistIds = new Set(saved.expandedIds);
+			}
+			if (typeof saved.query === 'string') playlistQuery = saved.query;
+			if (saved.filter) playlistFilter = saved.filter;
+			if (saved.sort) playlistSort = saved.sort;
+			if (Array.isArray(saved.showAllTracksIds)) {
+				showAllTracksFor = new Set(saved.showAllTracksIds);
 			}
 			requestAnimationFrame(() => window.scrollTo({ top: saved.scrollY, behavior: 'auto' }));
 		}
@@ -223,9 +252,19 @@
 	// Per-clause tag input buffers keyed by draft id
 	let tagInputs = $state<Record<number, string>>({});
 
-	// ─── Delete confirm ───────────────────────────────────────────────────────
+	// Delete confirm
 	let deletingId = $state<number | null>(null);
 	let deleteError = $state('');
+
+	// Editor dirty-tracking - the serialized snapshot of the draft at the
+	// moment the editor opened. Compared against the live draft to decide
+	// whether to prompt before closing.
+	let editorInitialSig = $state('');
+
+	// Genre suggestions for the tag input datalist. Lazily fetched the first
+	// time the editor opens, cached for the session.
+	let genreSuggestions = $state<string[]>([]);
+	let genreSuggestionsLoaded = false;
 
 	// Drawer focus management
 	let editorTriggerEl: HTMLElement | null = null;
@@ -286,7 +325,9 @@
 		try {
 			const data = await api.getPlaylists();
 			playlists = data.playlists;
-			scheduleMosaicPrefetch();
+			const next: Record<number, string> = {};
+			for (const p of playlists) next[p.id] = buildSearchText(p);
+			searchTextById = next;
 		} catch (error) {
 			loadError = `Failed to load playlists: ${error}`;
 		} finally {
@@ -299,43 +340,6 @@
 		if (urls.length === 0) return;
 		setCachedMosaic(id, urls, trackCount);
 		mosaicById = { ...mosaicById, [id]: urls };
-	}
-
-	function scheduleMosaicPrefetch() {
-		const run = () => void prefetchMosaics();
-		const ric = (globalThis as { requestIdleCallback?: (cb: () => void) => void })
-			.requestIdleCallback;
-		if (typeof ric === 'function') ric(run);
-		else setTimeout(run, 200);
-	}
-
-	async function prefetchMosaics() {
-		const targets = playlists.filter((p) => {
-			if (p.track_count <= 0) return false;
-			if (mosaicById[p.id]?.length) return false;
-			return getCachedMosaic(p.id, p.track_count) === null;
-		});
-		if (targets.length === 0) return;
-
-		const POOL = 3;
-		let cursor = 0;
-		const worker = async () => {
-			while (cursor < targets.length) {
-				const playlist = targets[cursor++];
-				try {
-					const data = playlist.is_smart
-						? await api.evaluateSmartPlaylist(playlist.id)
-						: await api.getPlaylistTracks(playlist.id);
-					recordMosaic(playlist.id, data.tracks, playlist.track_count);
-					if (!playlistTracksById[playlist.id]) {
-						playlistTracksById = { ...playlistTracksById, [playlist.id]: data.tracks };
-					}
-				} catch {
-					// Background task — leave the gradient fallback in place.
-				}
-			}
-		};
-		await Promise.all(Array.from({ length: POOL }, worker));
 	}
 
 	function isExpanded(id: number) {
@@ -410,11 +414,158 @@
 
 	async function togglePlaylistFavorite(playlist: Playlist, e: MouseEvent) {
 		e.stopPropagation();
+		// Optimistic flip - revert if the server disagrees.
+		const optimistic = { ...playlist, is_favorite: !playlist.is_favorite };
+		playlists = playlists.map((p) => (p.id === playlist.id ? optimistic : p));
 		try {
 			const updated = await api.togglePlaylistFavorite(playlist.id);
 			playlists = playlists.map((p) => (p.id === playlist.id ? updated.playlist : p));
 		} catch {
-			// Button state will be corrected on the next refresh.
+			playlists = playlists.map((p) => (p.id === playlist.id ? playlist : p));
+		}
+	}
+
+	function toggleShowAllTracks(id: number, on: boolean) {
+		const next = new Set(showAllTracksFor);
+		if (on) next.add(id);
+		else next.delete(id);
+		showAllTracksFor = next;
+	}
+
+	function openPlaylistContextMenu(
+		playlist: Playlist,
+		event: MouseEvent | { clientX: number; clientY: number },
+		anchorToButton = false,
+	) {
+		if ('preventDefault' in event && typeof event.preventDefault === 'function') {
+			event.preventDefault();
+		}
+		if ('stopPropagation' in event && typeof event.stopPropagation === 'function') {
+			event.stopPropagation();
+		}
+		// When triggered by the more-actions button, anchor the menu to the
+		// button's position so it lines up with the click target rather than
+		// the cursor coordinates from the synthetic MouseEvent.
+		const anchor =
+			anchorToButton && event instanceof MouseEvent
+				? (event.currentTarget as HTMLElement | null)
+				: null;
+		const rect = anchor?.getBoundingClientRect();
+		const point = rect
+			? { clientX: rect.right, clientY: rect.bottom + 4 }
+			: { clientX: event.clientX, clientY: event.clientY };
+		openContextMenu(point, buildPlaylistMenu(playlist), playlist.name);
+	}
+
+	function buildPlaylistMenu(playlist: Playlist): MenuItem[] {
+		const items: MenuItem[] = [
+			{ label: 'Play', icon: 'P', onSelect: () => void playPlaylistFromMenu(playlist) },
+			{ label: 'Shuffle', icon: 'X', onSelect: () => void shufflePlaylistFromMenu(playlist) },
+			{ label: 'Radio', icon: 'R', onSelect: () => void radioFromMenu(playlist) },
+			{ separator: true, label: '' },
+			{
+				label: playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites',
+				icon: playlist.is_favorite ? 'F' : 'f',
+				onSelect: () => {
+					// Synthesize a fake MouseEvent shape; togglePlaylistFavorite
+					// only uses stopPropagation, which we no-op here.
+					void togglePlaylistFavorite(playlist, { stopPropagation: () => {} } as MouseEvent);
+				},
+			},
+		];
+		if (playlist.is_smart) {
+			items.push({ separator: true, label: '' });
+			items.push({ label: 'Edit rules', icon: 'E', onSelect: () => openEdit(playlist) });
+			items.push({ label: 'Duplicate', icon: 'D', onSelect: () => void duplicatePlaylist(playlist) });
+			items.push({
+				label: 'Delete',
+				icon: 'x',
+				danger: true,
+				onSelect: () => requestDelete(playlist.id),
+			});
+		}
+		return items;
+	}
+
+	async function playPlaylistFromMenu(playlist: Playlist) {
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		if (!tracks.length) return;
+		const replaced = await api.replacePlaybackQueue(
+			tracks.map((t) => t.id),
+			undefined,
+			undefined,
+			get(shuffleMode),
+		);
+		await playTrackNow(replaced.queue[0]?.track.id ?? tracks[0].id);
+	}
+
+	async function shufflePlaylistFromMenu(playlist: Playlist) {
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		await shufflePlaylist(tracks);
+	}
+
+	async function radioFromMenu(playlist: Playlist) {
+		const tracks = await ensurePlaylistTracks(playlist.id);
+		await startPlaylistRadio(tracks);
+	}
+
+	// IntersectionObserver-backed mosaic loader - only fetches artwork for
+	// cards the user can actually see, instead of hammering the API for
+	// every smart playlist on mount.
+	let mosaicObserver: IntersectionObserver | null = null;
+	const fetchedMosaicIds = new Set<number>();
+
+	function ensureMosaicObserver(): IntersectionObserver | null {
+		if (typeof IntersectionObserver === 'undefined') return null;
+		if (mosaicObserver) return mosaicObserver;
+		mosaicObserver = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (!entry.isIntersecting) continue;
+					const target = entry.target as HTMLElement;
+					const id = Number(target.dataset.playlistId);
+					if (!Number.isFinite(id) || fetchedMosaicIds.has(id)) continue;
+					mosaicObserver?.unobserve(target);
+					void hydrateMosaicFor(id);
+				}
+			},
+			{ rootMargin: '200px 0px', threshold: 0.05 },
+		);
+		return mosaicObserver;
+	}
+
+	function registerCard(node: HTMLElement, playlistId: number) {
+		node.dataset.playlistId = String(playlistId);
+		const observer = ensureMosaicObserver();
+		observer?.observe(node);
+		return {
+			destroy() {
+				observer?.unobserve(node);
+			},
+		};
+	}
+
+	async function hydrateMosaicFor(id: number) {
+		const playlist = playlists.find((p) => p.id === id);
+		if (!playlist || playlist.track_count <= 0) return;
+		if (mosaicById[id]?.length) return;
+		const cached = getCachedMosaic(id, playlist.track_count);
+		if (cached) {
+			mosaicById = { ...mosaicById, [id]: cached };
+			return;
+		}
+		if (fetchedMosaicIds.has(id)) return;
+		fetchedMosaicIds.add(id);
+		try {
+			const data = playlist.is_smart
+				? await api.evaluateSmartPlaylist(id)
+				: await api.getPlaylistTracks(id);
+			recordMosaic(id, data.tracks, playlist.track_count);
+			if (!playlistTracksById[id]) {
+				playlistTracksById = { ...playlistTracksById, [id]: data.tracks };
+			}
+		} catch {
+			// Background task - leave the gradient fallback in place.
 		}
 	}
 
@@ -429,6 +580,8 @@
 		tagInputs = {};
 		editorError = '';
 		editorOpen = true;
+		editorInitialSig = currentDraftSig();
+		void loadGenreSuggestions();
 	}
 
 	function openEdit(playlist: Playlist) {
@@ -456,13 +609,54 @@
 		}
 		tagInputs = {};
 		editorOpen = true;
+		editorInitialSig = currentDraftSig();
+		void loadGenreSuggestions();
 	}
 
-	function closeEditor() {
+	function currentDraftSig(): string {
+		// Stable serialization so reorder-free draft edits flip the dirty flag.
+		return JSON.stringify({
+			name: draftName.trim(),
+			description: draftDescription.trim(),
+			logic: draftLogicOp,
+			clauses: draftClauses.map(draftToClause),
+		});
+	}
+
+	function isEditorDirty(): boolean {
+		return currentDraftSig() !== editorInitialSig;
+	}
+
+	function closeEditor(force = false) {
+		if (!force && isEditorDirty()) {
+			const ok = window.confirm('Discard unsaved changes to this playlist?');
+			if (!ok) return;
+		}
 		editorOpen = false;
 		const trigger = editorTriggerEl;
 		queueMicrotask(() => trigger?.focus());
 		editorTriggerEl = null;
+	}
+
+	async function loadGenreSuggestions() {
+		if (genreSuggestionsLoaded) return;
+		genreSuggestionsLoaded = true;
+		try {
+			const data = await api.getGenres();
+			const names: string[] = [];
+			const walk = (nodes: { name: string; children?: unknown[] }[]) => {
+				for (const node of nodes) {
+					if (node?.name) names.push(node.name);
+					if (Array.isArray(node?.children)) {
+						walk(node.children as { name: string; children?: unknown[] }[]);
+					}
+				}
+			};
+			walk(data.genres as unknown as { name: string; children?: unknown[] }[]);
+			genreSuggestions = Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+		} catch {
+			genreSuggestionsLoaded = false; // allow retry on next open
+		}
 	}
 
 	function addClause() {
@@ -482,6 +676,24 @@
 		clause.names = [...new Set([...clause.names, ...tags])];
 		draftClauses = [...draftClauses]; // trigger reactivity
 		tagInputs = { ...tagInputs, [clauseId]: '' };
+	}
+
+	function onTagInput(clauseId: number, e: Event) {
+		// Auto-tokenize on comma so "rock, pop, soul" splits as the user types,
+		// rather than requiring Enter / Add.
+		const target = e.target as HTMLInputElement;
+		const value = target.value;
+		if (!value.includes(',')) return;
+		const parts = value.split(',');
+		const remainder = parts.pop() ?? '';
+		const clause = draftClauses.find((c) => c.id === clauseId);
+		if (!clause) return;
+		const tags = parts.map((t) => t.trim()).filter(Boolean);
+		if (tags.length) {
+			clause.names = [...new Set([...clause.names, ...tags])];
+			draftClauses = [...draftClauses];
+		}
+		tagInputs = { ...tagInputs, [clauseId]: remainder };
 	}
 
 	function removeTag(clauseId: number, tag: string) {
@@ -521,19 +733,30 @@
 			if (editingPlaylistId === null) {
 				const result = await api.createSmartPlaylist(name, desc, rootClause);
 				playlists = [...playlists, result.playlist];
+				indexPlaylistSearch(result.playlist);
 			} else {
 				const result = await api.updateSmartPlaylist(editingPlaylistId, name, desc, rootClause);
 				playlists = playlists.map((p) => (p.id === editingPlaylistId ? result.playlist : p));
+				indexPlaylistSearch(result.playlist);
 				// Invalidate cached tracks so re-expand re-evaluates
 				const { [editingPlaylistId]: _removed, ...rest } = playlistTracksById;
 				playlistTracksById = rest;
 			}
-			closeEditor();
+			closeEditor(true);
 		} catch (e) {
 			editorError = String(e);
 		} finally {
 			editorSaving = false;
 		}
+	}
+
+	function requestDelete(id: number) {
+		pendingDeleteId = id;
+		deleteError = '';
+	}
+
+	function cancelDelete() {
+		pendingDeleteId = null;
 	}
 
 	async function confirmDelete(id: number) {
@@ -543,11 +766,48 @@
 			await api.deleteSmartPlaylist(id);
 			playlists = playlists.filter((p) => p.id !== id);
 			expandedPlaylistIds = new Set([...expandedPlaylistIds].filter((x) => x !== id));
+			pendingDeleteId = null;
 		} catch (e) {
 			deleteError = String(e);
 		} finally {
 			deletingId = null;
 		}
+	}
+
+	async function duplicatePlaylist(playlist: Playlist) {
+		if (!playlist.is_smart) return;
+		const def = parseSmartDef(playlist.smart_rules);
+		const root = def?.root as RuleClause | undefined;
+		if (!root) return;
+		try {
+			const result = await api.createSmartPlaylist(
+				`${playlist.name} (copy)`,
+				playlist.description ?? null,
+				root
+			);
+			playlists = [...playlists, result.playlist];
+			indexPlaylistSearch(result.playlist);
+		} catch {
+			// Surface via the deleteError bar - it's the existing inline error channel.
+			deleteError = 'Could not duplicate that playlist.';
+		}
+	}
+
+	function indexPlaylistSearch(playlist: Playlist) {
+		searchTextById = { ...searchTextById, [playlist.id]: buildSearchText(playlist) };
+	}
+
+	function buildSearchText(playlist: Playlist): string {
+		const def = parseSmartDef(playlist.smart_rules);
+		const rules = def?.root ? describeClause(def.root).join(' ') : '';
+		return [
+			playlist.name,
+			playlist.description ?? '',
+			playlist.is_smart ? 'smart rules' : 'regular synced playlist',
+			rules,
+		]
+			.join(' ')
+			.toLowerCase();
 	}
 
 	// ─── Derived display helpers ──────────────────────────────────────────────
@@ -610,10 +870,10 @@
 	}
 
 	function playlistSubtitle(playlist: Playlist): string {
-		if (!playlist.is_smart) return playlist.description?.trim() || 'Synced playlist.';
-		const def = parseSmartDef(playlist.smart_rules);
-		if (!def?.root) return 'Smart playlist';
-		return describeClause(def.root)[0] ?? 'Smart playlist';
+		const desc = playlist.description?.trim();
+		if (desc) return desc;
+		if (!playlist.is_smart) return 'Synced playlist.';
+		return 'Smart playlist';
 	}
 
 	function smartSummaryLines(playlist: Playlist): string[] {
@@ -623,6 +883,19 @@
 		if (def.description?.trim()) lines.push(def.description.trim());
 		lines.push(...describeClause(def.root));
 		return lines.slice(0, 4);
+	}
+
+	function smartRuleSummary(playlist: Playlist): string | null {
+		if (!playlist.is_smart) return null;
+		const def = parseSmartDef(playlist.smart_rules);
+		const root = def?.root;
+		if (!root) return 'Smart playlist';
+		if (root.type === 'group') {
+			const op = (root.op ?? 'AND').toUpperCase() === 'OR' ? 'ANY' : 'ALL';
+			const count = Array.isArray(root.clauses) ? root.clauses.length : 0;
+			return `${count} rule${count === 1 ? '' : 's'} - ${op}`;
+		}
+		return '1 rule';
 	}
 
 	const RULE_TYPE_LABELS: Record<string, string> = {
@@ -686,15 +959,7 @@
 	);
 
 	function playlistSearchText(playlist: Playlist): string {
-		return [
-			playlist.name,
-			playlist.description ?? '',
-			playlist.is_smart ? 'smart rules rule driven' : 'regular synced playlist',
-			playlistSubtitle(playlist),
-			...smartSummaryLines(playlist),
-		]
-			.join(' ')
-			.toLowerCase();
+		return searchTextById[playlist.id] ?? buildSearchText(playlist);
 	}
 
 	function comparePlaylists(a: Playlist, b: Playlist): number {
@@ -778,7 +1043,11 @@
 	<title>Playlists | NOOR</title>
 </svelte:head>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && editorOpen) closeEditor(); }} />
+<svelte:window onkeydown={(e) => {
+	if (e.key !== 'Escape') return;
+	if (editorOpen) { closeEditor(); return; }
+	if (pendingDeleteId !== null) { cancelDelete(); }
+}} />
 
 <div class="page-shell playlists-page animate-in">
 	<PageHeader
@@ -791,12 +1060,6 @@
 			<button class="btn btn-primary" onclick={openNew}>New smart playlist</button>
 		{/snippet}
 	</PageHeader>
-
-	<section class="stat-grid">
-		<MetricPair label="Total" value={playlists.length} copy="Synced and local." />
-		<MetricPair label="Smart" value={smartCount()} copy="Rule driven." />
-		<MetricPair label="Regular" value={regularCount()} copy="Curated lists." />
-	</section>
 
 	<section class="playlist-control-band glass">
 		<div class="playlist-search-wrap">
@@ -844,8 +1107,11 @@
 		</div>
 
 		<p class="playlist-result-copy">
-			Showing {filteredPlaylists.length} {activeFilterLabel.toLowerCase()} playlist{filteredPlaylists.length === 1 ? '' : 's'}
-			with {visibleTrackTotal.toLocaleString()} visible track{visibleTrackTotal === 1 ? '' : 's'}.
+			{#if playlistFilter === 'all' && !playlistQuery.trim()}
+				{filteredPlaylists.length} playlist{filteredPlaylists.length === 1 ? '' : 's'} - {visibleTrackTotal.toLocaleString()} track{visibleTrackTotal === 1 ? '' : 's'}
+			{:else}
+				{filteredPlaylists.length} of {playlists.length} - {visibleTrackTotal.toLocaleString()} track{visibleTrackTotal === 1 ? '' : 's'}
+			{/if}
 		</p>
 	</section>
 
@@ -873,8 +1139,11 @@
 						role="button"
 						tabindex="0"
 						aria-expanded={isExpanded(playlist.id)}
+						aria-controls={`pl-body-${playlist.id}`}
 						onclick={() => void expandPlaylist(playlist.id)}
 						onkeydown={(e) => activatePlaylist(playlist.id, e)}
+						oncontextmenu={(e) => openPlaylistContextMenu(playlist, e)}
+						use:registerCard={playlist.id}
 					>
 						<div
 							class="playlist-cover"
@@ -895,27 +1164,16 @@
 						<div class="playlist-meta">
 							<div class="playlist-chip-row">
 								<StateBadge label={playlistSourceLabel(playlist)} tone={playlist.is_smart ? 'active' : 'muted'} compact={true} />
-								{#if playlist.is_favorite}
-									<StateBadge label="Favorite" tone="active" compact={true} />
+								{#if playlist.is_smart}
+									{@const summary = smartRuleSummary(playlist)}
+									{#if summary}
+										<span class="rule-chip" title={smartSummaryLines(playlist).join('\n')}>{summary}</span>
+									{/if}
 								{/if}
 							</div>
 							<h3>{playlist.name}</h3>
 							<p class="playlist-copy">{playlistSubtitle(playlist)}</p>
-							{#if playlist.is_smart}
-								<div class="smart-summary">
-									{#each smartSummaryLines(playlist).slice(0, 2) as line}
-										<p>{line}</p>
-									{/each}
-								</div>
-							{/if}
 						</div>
-						<button
-							class="icon-btn favorite-btn"
-							class:active={playlist.is_favorite}
-							onclick={(e) => void togglePlaylistFavorite(playlist, e)}
-							title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-							aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-						>{playlist.is_favorite ? '♥' : '♡'}</button>
 					</div>
 
 					<div class="playlist-card-foot">
@@ -923,34 +1181,60 @@
 							<strong>{playlist.track_count.toLocaleString()}</strong>
 							<span>tracks</span>
 						</div>
-						<div class="playlist-actions">
-							<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylistQuick(playlist, e)}>Play</button>
-							<button class="btn btn-glass btn-sm" onclick={(e) => void shufflePlaylistQuick(playlist, e)}>Shuffle</button>
-							<button class="btn btn-glass btn-sm" onclick={(e) => void startPlaylistRadioQuick(playlist, e)}>Radio</button>
-							{#if playlist.is_smart}
-								<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); openEdit(playlist); }}>
-									Edit rules
-								</button>
+						{#if pendingDeleteId === playlist.id}
+							<div class="confirm-strip" role="alertdialog" aria-label="Confirm delete">
+								<span class="confirm-copy">Delete "{playlist.name}"?</span>
+								<button class="btn btn-glass btn-sm" onclick={(e) => { e.stopPropagation(); cancelDelete(); }}>Cancel</button>
 								<button
-									class="btn btn-glass btn-sm danger"
+									class="btn btn-sm danger-solid"
 									disabled={deletingId === playlist.id}
 									onclick={(e) => { e.stopPropagation(); void confirmDelete(playlist.id); }}
+								>{deletingId === playlist.id ? 'Deleting...' : 'Delete'}</button>
+							</div>
+						{:else}
+							<div class="playlist-actions">
+								<button class="btn btn-primary btn-sm" onclick={(e) => void playPlaylistQuick(playlist, e)}>Play</button>
+								<button class="btn btn-glass btn-sm" onclick={(e) => void shufflePlaylistQuick(playlist, e)}>Shuffle</button>
+								<button class="btn btn-glass btn-sm" onclick={(e) => void startPlaylistRadioQuick(playlist, e)}>Radio</button>
+								<button
+									class="icon-btn favorite-btn"
+									class:active={playlist.is_favorite}
+									onclick={(e) => void togglePlaylistFavorite(playlist, e)}
+									aria-label={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+									title={playlist.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
 								>
-									{deletingId === playlist.id ? 'Deleting...' : 'Delete'}
+									<svg width="14" height="14" viewBox="0 0 24 24" fill={playlist.is_favorite ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+										<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+									</svg>
 								</button>
-							{/if}
-						</div>
+								<button
+									class="icon-btn more-btn"
+									onclick={(e) => openPlaylistContextMenu(playlist, e, true)}
+									aria-label="More actions"
+									title="More actions"
+								>
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+										<circle cx="5" cy="12" r="1.6" />
+										<circle cx="12" cy="12" r="1.6" />
+										<circle cx="19" cy="12" r="1.6" />
+									</svg>
+								</button>
+							</div>
+						{/if}
 					</div>
 
 					{#if isExpanded(playlist.id)}
-						<div class="playlist-body">
+						<div class="playlist-body" id={`pl-body-${playlist.id}`}>
 							{#if loadingById[playlist.id]}
-								<p class="playlist-copy">Loading tracks…</p>
+								<p class="playlist-copy">Loading tracks...</p>
 							{:else if errorById[playlist.id]}
 								<p class="playlist-copy">{errorById[playlist.id]}</p>
 							{:else if (playlistTracksById[playlist.id]?.length ?? 0) > 0}
+								{@const allTracks = playlistTracksById[playlist.id] ?? []}
+								{@const showAll = showAllTracksFor.has(playlist.id)}
+								{@const visibleTracks = showAll ? allTracks : allTracks.slice(0, TRACKS_PREVIEW_LIMIT)}
 								<ol class="track-list">
-									{#each playlistTracksById[playlist.id] as track, i (`${track.id}-${i}`)}
+									{#each visibleTracks as track, i (`${track.id}-${i}`)}
 										<TrackRow
 											{track}
 											variant="art"
@@ -961,6 +1245,17 @@
 										/>
 									{/each}
 								</ol>
+								{#if allTracks.length > TRACKS_PREVIEW_LIMIT}
+									<div class="track-list-more">
+										{#if showAll}
+											<button class="btn btn-glass btn-sm" onclick={() => toggleShowAllTracks(playlist.id, false)}>Show less</button>
+										{:else}
+											<button class="btn btn-glass btn-sm" onclick={() => toggleShowAllTracks(playlist.id, true)}>
+												Show all {allTracks.length.toLocaleString()}
+											</button>
+										{/if}
+									</div>
+								{/if}
 							{:else}
 								<p class="playlist-copy">No tracks resolved for this playlist.</p>
 							{/if}
@@ -980,7 +1275,7 @@
 		type="button"
 		class="drawer-backdrop"
 		aria-label="Close editor"
-		onclick={closeEditor}
+		onclick={() => closeEditor()}
 	></button>
 	<div
 		class="editor-drawer glass-panel"
@@ -989,12 +1284,23 @@
 		aria-labelledby="editor-title"
 		tabindex="-1"
 		use:trapFocus
+		onkeydown={(e) => {
+			if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+				e.preventDefault();
+				void saveEditor();
+			}
+		}}
 	>
+		<datalist id="noor-genre-suggestions">
+			{#each genreSuggestions as g}
+				<option value={g}></option>
+			{/each}
+		</datalist>
 		<div class="editor-head">
 			<h2 id="editor-title">
 				{editingPlaylistId === null ? 'New smart playlist' : 'Edit smart playlist'}
 			</h2>
-			<button class="close-btn" onclick={closeEditor} aria-label="Close editor">
+			<button class="close-btn" onclick={() => closeEditor()} aria-label="Close editor">
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 					<path d="M18 6L6 18M6 6l12 12" />
 				</svg>
@@ -1015,13 +1321,13 @@
 			</div>
 			<div class="field-group">
 				<label class="field-label" for="draft-desc">Description <span class="optional">(optional)</span></label>
-				<input
+				<textarea
 					id="draft-desc"
-					class="field-input"
-					type="text"
+					class="field-input field-textarea"
+					rows="2"
 					placeholder="Short note about this playlist"
 					bind:value={draftDescription}
-				/>
+				></textarea>
 			</div>
 
 			<!-- Logic operator -->
@@ -1076,8 +1382,10 @@
 									<input
 										class="field-input"
 										type="text"
+										list={clause.type === 'genre' ? 'noor-genre-suggestions' : undefined}
 										placeholder={clause.type === 'genre' ? 'Add genre (e.g. Electronic)' : 'Add artist name'}
 										bind:value={tagInputs[clause.id]}
+										oninput={(e) => onTagInput(clause.id, e)}
 										onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(clause.id); } }}
 									/>
 									<button class="btn btn-glass btn-sm" onclick={() => addTag(clause.id)}>Add</button>
@@ -1272,9 +1580,10 @@
 		</div>
 
 		<div class="editor-foot">
-			<button class="btn btn-glass" onclick={closeEditor}>Cancel</button>
+			<span class="editor-hint">Ctrl+Enter to save</span>
+			<button class="btn btn-glass" onclick={() => closeEditor()}>Cancel</button>
 			<button class="btn btn-primary" onclick={saveEditor} disabled={editorSaving}>
-				{editorSaving ? 'Saving…' : editingPlaylistId === null ? 'Create playlist' : 'Save changes'}
+				{editorSaving ? 'Saving...' : editingPlaylistId === null ? 'Create playlist' : 'Save changes'}
 			</button>
 		</div>
 	</div>
@@ -1491,22 +1800,10 @@
 		text-overflow: ellipsis;
 	}
 
-	.playlist-copy,
-	.smart-summary p {
+	.playlist-copy {
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-snug);
-	}
-
-	.smart-summary {
-		display: flex;
-		flex-direction: column;
-		gap: 3px;
-	}
-
-	.smart-summary p {
-		font-family: var(--font-mono);
-		color: var(--text-tertiary);
 	}
 
 	.icon-btn {
@@ -1557,8 +1854,63 @@
 	.playlist-actions {
 		display: flex;
 		flex-wrap: wrap;
+		align-items: center;
 		justify-content: flex-end;
 		gap: 6px;
+	}
+
+	.rule-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 9px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: color-mix(in srgb, currentColor 6%, transparent);
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-variant-numeric: tabular-nums;
+		cursor: help;
+	}
+
+	.confirm-strip {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.confirm-copy {
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
+	.danger-solid {
+		background: var(--state-error);
+		border: 1px solid var(--state-error);
+		color: #fff;
+	}
+
+	.danger-solid:hover:not(:disabled) {
+		filter: brightness(1.08);
+	}
+
+	.more-btn,
+	.favorite-btn {
+		width: 30px;
+		min-width: 30px;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.track-list-more {
+		display: flex;
+		justify-content: center;
+		padding-top: 6px;
 	}
 
 	.playlist-actions .btn-sm {
@@ -1569,16 +1921,6 @@
 	.btn-sm {
 		padding: 5px 12px;
 		font-size: var(--font-size-sm);
-	}
-
-	.danger {
-		color: var(--state-error);
-		border-color: color-mix(in srgb, var(--state-error) 28%, transparent);
-	}
-
-	.danger:hover:not(:disabled) {
-		background: color-mix(in srgb, var(--state-error) 14%, transparent);
-		border-color: color-mix(in srgb, var(--state-error) 45%, transparent);
 	}
 
 	.playlist-body {
@@ -1732,6 +2074,20 @@
 		outline: none;
 		border-color: var(--accent-line);
 		box-shadow: 0 0 0 3px var(--accent-soft);
+	}
+
+	.field-textarea {
+		min-height: 56px;
+		resize: vertical;
+		font-family: inherit;
+		line-height: var(--line-height-snug);
+	}
+
+	.editor-hint {
+		flex: 1;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* ─── Logic toggle ────────────────────────────────────────── */
