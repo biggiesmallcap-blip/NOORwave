@@ -88,6 +88,8 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('formatTrackLabel');
 		expect(transitionLane).toContain('formatTimingDirection');
 		expect(transitionLane).toContain('formatTimingPair');
+		expect(transitionLane).toContain('formatActualTiming');
+		expect(transitionLane).toContain('formatEventDelta');
 		expect(transitionLane).toContain('Planning reason');
 		expect(transitionLane).toContain('Readiness block');
 		expect(transitionLane).toContain('Avg delta');

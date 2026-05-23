@@ -1268,6 +1268,9 @@ fn timing_quality(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -> 
     if timing_status == Some("missed") {
         return "bad";
     }
+    if timing_status == Some("armed") {
+        return "pending";
+    }
     let Some(delta_ms) = timing_delta_ms else {
         return "bad";
     };
@@ -1869,6 +1872,7 @@ mod tests {
         assert_eq!(timing_quality(Some("late"), Some(1000)), "loose");
         assert_eq!(timing_quality(Some("late"), Some(1001)), "bad");
         assert_eq!(timing_quality(Some("missed"), None), "bad");
+        assert_eq!(timing_quality(Some("armed"), None), "pending");
         assert_eq!(timing_quality(Some("fired"), None), "bad");
     }
 

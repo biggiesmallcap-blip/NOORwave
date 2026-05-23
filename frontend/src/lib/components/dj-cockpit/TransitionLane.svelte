@@ -80,6 +80,14 @@
 		return `${value > 0 ? '+' : ''}${value} ms`;
 	}
 
+	function formatActualTiming(event: DjStatusResponse['recent_timing_events'][number]) {
+		return event.timing_status === 'missed' ? 'missed' : formatTimingMs(event.actual_start_ms);
+	}
+
+	function formatEventDelta(event: DjStatusResponse['recent_timing_events'][number]) {
+		return event.timing_status === 'missed' ? 'missed' : formatTimingDelta(event.timing_delta_ms);
+	}
+
 	function formatTimingDirection(value: string | null | undefined) {
 		switch (value) {
 			case 'on_time':
@@ -249,8 +257,8 @@
 							<span>{event.planning_reason ?? 'none'}</span>
 							<span>{event.timing_source ?? 'none'}</span>
 							<span>{formatTimingMs(event.planned_start_ms)}</span>
-							<span>{formatTimingMs(event.actual_start_ms)}</span>
-							<span>{formatTimingDelta(event.timing_delta_ms)}</span>
+							<span>{formatActualTiming(event)}</span>
+							<span>{formatEventDelta(event)}</span>
 						</li>
 					{/each}
 				</ul>
