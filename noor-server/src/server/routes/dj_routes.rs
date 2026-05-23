@@ -1358,8 +1358,16 @@ fn summarize_timing_history(
 
     DjTimingHistorySummary {
         event_count: events.len(),
-        average_delta_ms: (delta_count > 0).then_some(delta_sum / delta_count),
-        average_abs_delta_ms: (delta_count > 0).then_some(abs_delta_sum / delta_count),
+        average_delta_ms: if delta_count > 0 {
+            Some(delta_sum / delta_count)
+        } else {
+            None
+        },
+        average_abs_delta_ms: if delta_count > 0 {
+            Some(abs_delta_sum / delta_count)
+        } else {
+            None
+        },
         median_abs_delta_ms: median_abs_delta(tuning_deltas),
         worst_abs_delta_ms: worst_abs_delta(tuning_deltas),
         tight_count,
