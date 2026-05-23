@@ -14,6 +14,7 @@ import {
 } from '$lib/api/client';
 import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { showToast, dismissToast } from '$lib/stores/toast';
+import { announceQueue, announceResolved } from '$lib/stores/queue_announcer';
 import { wsConnected } from '$lib/api/ws';
 import { updateLibraryTrackFavorite } from '$lib/stores/library';
 import { clamp01 } from '$lib/utils/math';
@@ -93,7 +94,29 @@ function setCurrentTrack(track: Track | null) {
 }
 
 function setPlaybackQueue(queue: QueueItem[]) {
-	playbackQueue.set(enrichQueue(queue));
+	const enriched = enrichQueue(queue);
+	const previous = get(playbackQueue);
+	const resolvedDelta = countResolvedTransitions(previous, enriched);
+	playbackQueue.set(enriched);
+	if (resolvedDelta > 0) announceResolved(resolvedDelta);
+}
+
+// Count rows whose persisted queue id existed in `previous` as pending and now
+// resolved in `next`. Newly added rows and removed rows are ignored: the live
+// region only surfaces *transitions* so initial hydration and reorderings stay
+// quiet.
+export function countResolvedTransitions(previous: QueueItem[], next: QueueItem[]): number {
+	if (previous.length === 0) return 0;
+	const wasPending = new Set<number>();
+	for (const item of previous) {
+		if (item.is_pending === true) wasPending.add(item.id);
+	}
+	if (wasPending.size === 0) return 0;
+	let resolved = 0;
+	for (const item of next) {
+		if (item.is_pending !== true && wasPending.has(item.id)) resolved += 1;
+	}
+	return resolved;
 }
 
 // ─── Error model ──────────────────────────────────────────────────────────────
@@ -655,6 +678,7 @@ export async function addTrackToQueue(trackId: number) {
 		playerError.set(null);
 		noteSuccess();
 		showToast('Added to queue', 'success');
+		announceQueue('Added to queue');
 	} catch (error) {
 		setError('add to queue', error);
 		throw error;
@@ -715,6 +739,7 @@ export async function removeTrackFromQueue(queueItemId: number) {
 		const result = await api.removeQueueTrack(queueItemId);
 		setPlaybackQueue(result.queue);
 		noteSuccess();
+		announceQueue('Removed from queue');
 	} catch (error) {
 		setError('remove from queue', error, () => removeTrackFromQueue(queueItemId));
 	}
@@ -756,8 +781,9 @@ export async function clearQueue(): Promise<QueueItem[]> {
 			(item) => !result.queue.some((q) => q.id === item.id)
 		);
 		if (restorable.length > 0) {
-			showToast(`Queue cleared — Undo (${restorable.length})`, 'info', 6000);
-			// We register the undo handler externally — caller (layout) wires the toast click.
+			showToast(`Queue cleared - Undo (${restorable.length})`, 'info', 6000);
+			// We register the undo handler externally - caller (layout) wires the toast click.
+			announceQueue(`Queue cleared, ${restorable.length} ${restorable.length === 1 ? 'track' : 'tracks'} removed. Press Z to undo.`);
 		}
 		return restorable;
 	} catch (error) {

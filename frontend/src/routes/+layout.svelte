@@ -45,6 +45,7 @@
 	import { get } from 'svelte/store';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
+	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
@@ -1273,6 +1274,7 @@
 		/>
 
 		<section class="queue-section">
+			<div class="queue-sr-status" role="status" aria-live="polite" aria-atomic="true">{$queueAnnouncement}</div>
 			<div class="queue-header">
 				<button
 					class="queue-banner"
@@ -2241,6 +2243,18 @@
 		border-top: 1px solid var(--border-subtle);
 		margin-top: 16px;
 		padding: 16px;
+	}
+
+	.queue-sr-status {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
 
 	.queue-header {
