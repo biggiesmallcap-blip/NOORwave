@@ -79,6 +79,7 @@ pub struct PreparedPlaybackJob {
 pub struct PreparedTransitionProgram {
     pub program: noor_mix::TransitionProgram,
     pub transition_event_id: Option<i64>,
+    pub fire_ahead_ms: u32,
     pub queue_generation: u64,
     pub current_queue_item_id: Option<i64>,
     pub next_queue_item_id: Option<i64>,
@@ -443,15 +444,67 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
             &renderer_plan,
             &timing_plan,
         )?;
+        let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
         job = job.with_prepared_transition(PreparedTransitionProgram {
             program: renderer_plan.program,
             transition_event_id: Some(transition_event_id),
+            fire_ahead_ms,
             queue_generation: pair.queue_generation,
             current_queue_item_id: pair.current_queue_item_id,
             next_queue_item_id: Some(next_queue_item_id),
         });
     }
     Ok(job)
+}
+
+const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
+const DJ_FIRE_AHEAD_POSITIVE_PERCENT: usize = 70;
+const DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS: i64 = 150;
+const DJ_FIRE_AHEAD_MAX_MS: i64 = 300;
+
+fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
+    let mut stmt = conn.prepare(
+        "SELECT timing_delta_ms
+         FROM dj_transition_events
+         WHERE timing_status = 'fired'
+           AND timing_delta_ms IS NOT NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([DJ_FIRE_AHEAD_WINDOW], |row| row.get::<_, i64>(0))?;
+    let mut deltas = Vec::new();
+    for row in rows {
+        deltas.push(row?);
+    }
+    Ok(fire_ahead_ms_from_deltas(&deltas))
+}
+
+fn fire_ahead_ms_from_deltas(deltas: &[i64]) -> u32 {
+    if deltas.len() < DJ_FIRE_AHEAD_WINDOW as usize {
+        return 0;
+    }
+    let positive_count = deltas.iter().filter(|delta| **delta > 0).count();
+    if positive_count * 100 < deltas.len() * DJ_FIRE_AHEAD_POSITIVE_PERCENT {
+        return 0;
+    }
+    median_delta(deltas)
+        .filter(|delta| *delta > DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS)
+        .map(|delta| delta.clamp(DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS, DJ_FIRE_AHEAD_MAX_MS) as u32)
+        .unwrap_or(0)
+}
+
+fn median_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut values = deltas.to_vec();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2)
+    } else {
+        Some(values[middle])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3268,6 +3321,79 @@ mod tests {
             assert_eq!(renderer_program.template, "FilterSweep");
             assert_eq!(renderer_program.resolve_at, 384_000);
             assert_eq!(row.2, None);
+        }
+
+        #[test]
+        fn v1_renderable_program_passes_filter_sweep_with_safe_duration() {
+            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 32_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2);
+
+            assert_eq!(program.template, "FilterSweep");
+            assert_eq!(program.resolve_at, 384_000);
+            assert_eq!(reason, None);
+            assert!(
+                program
+                    .automation
+                    .iter()
+                    .any(|event| event.param == noor_mix::Param::HighGain(noor_mix::DeckId::A))
+            );
+        }
+
+        #[test]
+        fn v1_renderable_program_downgrades_slam_cut_to_safe_crossfade() {
+            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
+            input.template = "SlamCut".to_string();
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("template_not_renderable"));
+        }
+
+        #[test]
+        fn filter_sweep_uses_safe_crossfade_overlap_duration() {
+            let safe = crate::playback::dj_engine::safe_crossfade_program(
+                48_000,
+                2,
+                noor_mix::Policy::default(),
+            );
+            let filter = noor_mix::planner::filter_sweep_eq_wash_program(
+                48_000,
+                2,
+                noor_mix::Policy::default().default_crossfade_ms,
+            );
+
+            assert_eq!(
+                dj_gapless_plan_from_program(&filter),
+                dj_gapless_plan_from_program(&safe)
+            );
+        }
+
+        #[test]
+        fn fire_ahead_requires_latest_twenty_positive_evidence() {
+            let passing = vec![
+                412, 709, 270, 475, 8, 827, 258, 738, 8, 35, 252, 141, -375, 210, 73, 529, -53, 48,
+                481, 300,
+            ];
+            let mixed = vec![
+                412, 709, 270, 475, -8, -827, -258, -738, -8, -35, 252, 141, -375, 210, 73, 529,
+                -53, 48, 481, 300,
+            ];
+            let low_median = vec![
+                151, 150, 149, 148, 147, 146, 145, 144, 143, 142, 141, 140, 139, 138, 137, 136,
+                135, 134, -20, -40,
+            ];
+
+            assert_eq!(fire_ahead_ms_from_deltas(&passing), 255);
+            assert_eq!(fire_ahead_ms_from_deltas(&mixed), 0);
+            assert_eq!(fire_ahead_ms_from_deltas(&low_median), 0);
+            assert_eq!(fire_ahead_ms_from_deltas(&passing[..19]), 0);
+        }
+
+        #[test]
+        fn fire_ahead_caps_large_median() {
+            assert_eq!(fire_ahead_ms_from_deltas(&[500; 20]), 300);
         }
 
         #[test]

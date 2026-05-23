@@ -709,13 +709,18 @@ fn arm_active_transition_window(
     state: &mut PlaybackRuntimeLoopState,
     job: &PreparedPlaybackJob,
 ) -> bool {
-    if job.prepared_transition.is_none() || job.gapless.overlap_ms <= 0 {
+    let Some(transition) = job.prepared_transition.as_ref() else {
+        return false;
+    };
+    if job.gapless.overlap_ms <= 0 {
         return false;
     }
     let Some(engine) = state.engine.as_ref() else {
         return false;
     };
-    let samples = (job.gapless.overlap_ms as u64)
+    let trigger_ms = u64::from(job.gapless.overlap_ms as u32)
+        .saturating_add(u64::from(transition.fire_ahead_ms));
+    let samples = trigger_ms
         .saturating_mul(state.device_sample_rate as u64)
         .saturating_mul(state.device_channels.max(1) as u64)
         / 1000;
@@ -734,6 +739,7 @@ fn arm_active_transition_window(
         track_id = engine.track_id,
         next_track_id = job.track.id,
         overlap_ms = job.gapless.overlap_ms,
+        fire_ahead_ms = transition.fire_ahead_ms,
         overlap_samples = samples,
         "DJ transition window armed"
     );
@@ -2661,6 +2667,7 @@ mod tests {
             PreparedTransitionProgram {
                 program: program(),
                 transition_event_id: None,
+                fire_ahead_ms: 0,
                 queue_generation,
                 current_queue_item_id,
                 next_queue_item_id,
@@ -2785,6 +2792,31 @@ mod tests {
                 .shared
                 .crossfade_start_signaled
                 .load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn prepared_dj_program_applies_fire_ahead_to_trigger_window() {
+        let mut state = test_runtime_loop_state();
+        state.device_sample_rate = 48_000;
+        state.device_channels = 2;
+        state.engine = Some(test_engine_with_shared(1, 20));
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.fire_ahead_ms = 231;
+        let mut job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        job.gapless = GaplessPlan {
+            enabled: true,
+            overlap_ms: 1_000,
+            prebuffer_ms: 500,
+            requires_stream_metadata: false,
+        };
+
+        assert!(arm_active_transition_window(&mut state, &job));
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(
+            active.shared.crossfade_samples.load(Ordering::Relaxed),
+            118_176
         );
     }
 
@@ -3600,6 +3632,7 @@ mod tests {
                 automation: vec![],
             },
             transition_event_id: None,
+            fire_ahead_ms: 0,
             queue_generation,
             current_queue_item_id,
             next_queue_item_id,
