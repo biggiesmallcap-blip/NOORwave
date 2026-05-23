@@ -1,4 +1,5 @@
 use crate::automation::interpolate;
+use crate::eq::{BandGains, IsolatorEq};
 use crate::limiter::SafetyLimiter;
 use crate::program::{AutomationEvent, DeckId, Param, TransitionProgram};
 
@@ -8,6 +9,8 @@ pub struct Mixer {
     deck_b: crate::deck::DeckBuffer,
     scratch_a: Vec<f32>,
     scratch_b: Vec<f32>,
+    eq_a: IsolatorEq,
+    eq_b: IsolatorEq,
     limiter: SafetyLimiter,
 }
 
@@ -19,12 +22,16 @@ impl Mixer {
         max_block_samples: usize,
     ) -> anyhow::Result<Self> {
         program.validate()?;
+        let sample_rate = program.sample_rate;
+        let channels = program.channels;
         Ok(Self {
             program,
             deck_a,
             deck_b,
             scratch_a: vec![0.0; max_block_samples],
             scratch_b: vec![0.0; max_block_samples],
+            eq_a: IsolatorEq::new(sample_rate, channels),
+            eq_b: IsolatorEq::new(sample_rate, channels),
             limiter: SafetyLimiter::new(0.98),
         })
     }
@@ -42,6 +49,14 @@ impl Mixer {
         let rate_b = param_at(&self.program, Param::PlaybackRate(DeckId::B), master_sample);
         self.deck_a.tick_into(scratch_a, rate_a);
         self.deck_b.tick_into(scratch_b, rate_b);
+        self.eq_a.process_in_place(
+            scratch_a,
+            deck_band_gains(&self.program, DeckId::A, master_sample),
+        );
+        self.eq_b.process_in_place(
+            scratch_b,
+            deck_band_gains(&self.program, DeckId::B, master_sample),
+        );
 
         let channels = usize::from(self.program.channels);
         for (frame_index, (frame_out, (frame_a, frame_b))) in out
@@ -65,6 +80,14 @@ impl Mixer {
     #[cfg(test)]
     fn scratch_capacities(&self) -> (usize, usize) {
         (self.scratch_a.capacity(), self.scratch_b.capacity())
+    }
+}
+
+fn deck_band_gains(program: &TransitionProgram, deck: DeckId, sample: u64) -> BandGains {
+    BandGains {
+        low: param_at(program, Param::LowGain(deck), sample),
+        mid: param_at(program, Param::MidGain(deck), sample),
+        high: param_at(program, Param::HighGain(deck), sample),
     }
 }
 
@@ -186,6 +209,60 @@ mod tests {
         let mut out = [0.0; 4];
         mixer.render_block(&mut out, 0);
         assert!(out.iter().all(|sample| sample.abs() <= 0.98));
+    }
+
+    fn sine(freq: f32, frames: usize, sample_rate: u32) -> Vec<f32> {
+        (0..frames)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin())
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|value| value * value).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn render_block_applies_low_gain_automation() {
+        let sample_rate = 48_000;
+        let frames = sample_rate as usize * 3;
+        let source = sine(50.0, frames, sample_rate);
+        let mut program = valid_program();
+        program.sample_rate = sample_rate;
+        program.resolve_at = frames as u64;
+        program.swap_start = frames as u64 / 2;
+        program.fade_start = program.swap_start;
+        program.automation = vec![
+            AutomationEvent {
+                param: Param::DeckGain(DeckId::A),
+                start_sample: 0,
+                end_sample: frames as u64,
+                from: 1.0,
+                to: 1.0,
+                curve: Curve::Linear,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::A),
+                start_sample: 0,
+                end_sample: frames as u64,
+                from: 0.0,
+                to: 0.0,
+                curve: Curve::Linear,
+            },
+        ];
+        let mut mixer = Mixer::new(
+            program,
+            DeckBuffer::new(source.clone(), 1),
+            DeckBuffer::new(vec![0.0; frames], 1),
+            frames,
+        )
+        .expect("mixer");
+        let mut out = vec![0.0; frames];
+
+        mixer.render_block(&mut out, 0);
+
+        let input_tail = rms(&source[sample_rate as usize * 2..]);
+        let output_tail = rms(&out[sample_rate as usize * 2..]);
+        assert!(output_tail / input_tail < 0.05);
     }
 
     #[test]

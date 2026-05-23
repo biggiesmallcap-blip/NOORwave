@@ -440,13 +440,14 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
         let planned_template = plan.program.template.clone();
-        let filter_sweep_unstable = planned_template == "FilterSweep"
-            && engine.db().with_conn(filter_sweep_timing_unstable)?;
+        let render_timing_unstable =
+            matches!(planned_template.as_str(), "FilterSweep" | "BassSwap16")
+                && engine.db().with_conn(render_timing_unstable)?;
         let (renderer_program, renderer_fallback_reason) = v1_renderable_program(
             &plan.program,
             sample_rate.max(1),
             channels.max(1),
-            filter_sweep_unstable,
+            render_timing_unstable,
         );
         let renderer_plan = DjTransitionPlan {
             program: renderer_program,
@@ -523,6 +524,7 @@ const DJ_FILTER_SWEEP_TIMING_MIN_ROWS: usize = 4;
 const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
 const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
 const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
+const DJ_BASS_SWAP_16_RENDER_MS: u32 = 16_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -541,7 +543,7 @@ fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     Ok(fire_ahead_ms_from_deltas(&deltas))
 }
 
-fn filter_sweep_timing_unstable(conn: &Connection) -> Result<bool> {
+fn render_timing_unstable(conn: &Connection) -> Result<bool> {
     let mut stmt = conn.prepare(
         "SELECT timing_delta_ms
          FROM dj_transition_events
@@ -555,10 +557,10 @@ fn filter_sweep_timing_unstable(conn: &Connection) -> Result<bool> {
     for row in rows {
         deltas.push(row?);
     }
-    Ok(filter_sweep_timing_unstable_from_deltas(&deltas))
+    Ok(render_timing_unstable_from_deltas(&deltas))
 }
 
-fn filter_sweep_timing_unstable_from_deltas(deltas: &[i64]) -> bool {
+fn render_timing_unstable_from_deltas(deltas: &[i64]) -> bool {
     if deltas.len() < DJ_FILTER_SWEEP_TIMING_MIN_ROWS {
         return false;
     }
@@ -807,13 +809,33 @@ fn v1_renderable_program(
     program: &noor_mix::TransitionProgram,
     sample_rate: u32,
     channels: u16,
-    filter_sweep_timing_unstable: bool,
+    render_timing_unstable: bool,
 ) -> (noor_mix::TransitionProgram, Option<&'static str>) {
     if program.template == "SafeCrossfade" {
         return (program.clone(), None);
     }
+    if program.template == "BassSwap16" {
+        if render_timing_unstable {
+            return (
+                crate::playback::dj_engine::safe_crossfade_program(
+                    sample_rate,
+                    channels,
+                    noor_mix::Policy::default(),
+                ),
+                Some("timing_unstable"),
+            );
+        }
+        return (
+            noor_mix::planner::bass_swap_16_program(
+                sample_rate,
+                channels,
+                DJ_BASS_SWAP_16_RENDER_MS,
+            ),
+            None,
+        );
+    }
     if program.template == "FilterSweep" {
-        if filter_sweep_timing_unstable {
+        if render_timing_unstable {
             return (
                 crate::playback::dj_engine::safe_crossfade_program(
                     sample_rate,
@@ -3415,6 +3437,32 @@ mod tests {
         }
 
         #[test]
+        fn v1_planner_logs_and_prepares_bass_swap_16_when_renderable() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            assert_eq!(transition.program.template, "BassSwap16");
+            let row: (String, String, Option<String>) = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT template, program_json, fallback_reason
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("event");
+            let renderer_program: noor_mix::TransitionProgram =
+                serde_json::from_str(&row.1).expect("program");
+
+            assert_eq!(row.0, "BassSwap16");
+            assert_eq!(renderer_program.template, "BassSwap16");
+            assert_eq!(renderer_program.resolve_at, 768_000);
+            assert_eq!(row.2, None);
+        }
+
+        #[test]
         fn v1_planner_logs_and_prepares_filter_sweep_when_renderable() {
             let db = db_with_pair();
             db.with_conn(|conn| {
@@ -3476,6 +3524,21 @@ mod tests {
         }
 
         #[test]
+        fn v1_renderable_program_passes_bass_swap_16_with_low_handoff() {
+            let input = noor_mix::planner::bass_swap_16_program(48_000, 2, 32_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "BassSwap16");
+            assert_eq!(program.resolve_at, 768_000);
+            assert_eq!(reason, None);
+            assert!(program.automation.iter().any(|event| event.param
+                == noor_mix::Param::LowGain(noor_mix::DeckId::B)
+                && event.start_sample == program.swap_start
+                && event.to == 1.0));
+        }
+
+        #[test]
         fn v1_renderable_program_downgrades_slam_cut_to_safe_crossfade() {
             let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
             input.template = "SlamCut".to_string();
@@ -3497,7 +3560,17 @@ mod tests {
         }
 
         #[test]
-        fn filter_sweep_uses_wider_overlap_than_safe_crossfade() {
+        fn unstable_timing_downgrades_bass_swap_16_to_safe_crossfade() {
+            let input = noor_mix::planner::bass_swap_16_program(48_000, 2, 16_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, true);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("timing_unstable"));
+        }
+
+        #[test]
+        fn dj_renderers_use_wider_overlap_than_safe_crossfade() {
             let safe = crate::playback::dj_engine::safe_crossfade_program(
                 48_000,
                 2,
@@ -3508,9 +3581,12 @@ mod tests {
                 2,
                 DJ_FILTER_SWEEP_RENDER_MS,
             );
+            let bass_swap =
+                noor_mix::planner::bass_swap_16_program(48_000, 2, DJ_BASS_SWAP_16_RENDER_MS);
 
             assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 8_000);
             assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 12_000);
+            assert_eq!(dj_gapless_plan_from_program(&bass_swap).overlap_ms, 16_000);
         }
 
         #[test]
@@ -3535,14 +3611,10 @@ mod tests {
         }
 
         #[test]
-        fn filter_sweep_timing_gate_uses_abs_error_not_signed_bias() {
-            assert!(filter_sweep_timing_unstable_from_deltas(&[
-                549, -399, 303, -375
-            ]));
-            assert!(!filter_sweep_timing_unstable_from_deltas(&[
-                140, -130, 75, -90
-            ]));
-            assert!(!filter_sweep_timing_unstable_from_deltas(&[549, -399, 303]));
+        fn renderer_timing_gate_uses_abs_error_not_signed_bias() {
+            assert!(render_timing_unstable_from_deltas(&[549, -399, 303, -375]));
+            assert!(!render_timing_unstable_from_deltas(&[140, -130, 75, -90]));
+            assert!(!render_timing_unstable_from_deltas(&[549, -399, 303]));
         }
 
         #[test]
