@@ -1,14 +1,18 @@
 use crate::db::audio_settings::AudioQuality;
 use crate::db::{
+    Database,
     models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
+use crate::playback::dj_engine::{DjEngine, DjTransitionPlan};
+use crate::playback::dj_lookahead::{DjLookaheadPair, DjMediaRef, load_dj_lookahead_pair};
 use crate::playback::gapless::{self, GaplessPlan, GaplessSettings};
 use crate::playback::queue::{self, ShuffleDebug, ShuffleMode};
 use crate::playback::shuffle::{
     WeightedShuffleProfile, generate_shuffle_seed, genre_shuffle, genre_shuffle_with_rng,
     seeded_rng, true_shuffle, true_shuffle_with_rng,
 };
+use crate::services::audio_analysis::dj_profile::decode_f32_blob;
 use crate::services::audio_analysis::{
     CamelotRelation, camelot_relation, compute_harmonic_multiplier,
 };
@@ -61,12 +65,51 @@ pub struct PreparedPlaybackJob {
     pub gapless: GaplessPlan,
     pub generation: u64,
     pub output_sample_rate: Option<u32>,
+    pub dj_media_ref: Option<DjMediaRef>,
+    pub prepared_transition: Option<PreparedTransitionProgram>,
     // Segment-aware seek (option C): for DASH-segmented sources, these tell the
     // decoder to skip ahead by `start_from_segment_index` segments. Position
     // accounting in `PlaybackSharedState` is then absolute-track-samples seeded
     // from `start_from_offset_ms`. A fresh play has both = 0.
     pub start_from_segment_index: usize,
     pub start_from_offset_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedTransitionProgram {
+    pub program: noor_mix::TransitionProgram,
+    pub transition_event_id: Option<i64>,
+    pub fire_ahead_ms: u32,
+    pub queue_generation: u64,
+    pub current_queue_item_id: Option<i64>,
+    pub next_queue_item_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DjLookaheadStart {
+    pub current: Option<DjMediaRef>,
+    pub next: Option<DjMediaRef>,
+    pub current_queue_item_id: Option<i64>,
+    pub next_queue_item_id: Option<i64>,
+    pub queue_generation: u64,
+    pub deadline_samples: u64,
+}
+
+impl DjLookaheadStart {
+    #[allow(dead_code)]
+    pub fn dispatch(
+        &self,
+        runtime: &crate::playback::runtime::PlaybackRuntimeHandle,
+    ) -> Result<()> {
+        runtime.start_dj_lookahead(
+            self.current.clone(),
+            self.next.clone(),
+            self.current_queue_item_id,
+            self.next_queue_item_id,
+            self.queue_generation,
+            self.deadline_samples,
+        )
+    }
 }
 
 impl PreparedPlaybackJob {
@@ -101,6 +144,8 @@ impl PreparedPlaybackJob {
             gapless: GaplessPlan::disabled(),
             generation,
             output_sample_rate: None,
+            dj_media_ref: None,
+            prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -120,6 +165,7 @@ pub struct ActiveListenSession {
     pub source: crate::db::models::ListenSource,
     pub position_in_session: i32,
     pub transition_from_track_id: Option<i64>,
+    pub dj_transition_event_id: Option<i64>,
 }
 
 // Tracks the rolling state of the user's current listening session across multiple
@@ -252,6 +298,8 @@ impl PreparedPlaybackJob {
             gapless,
             generation: 0,
             output_sample_rate: None,
+            dj_media_ref: None,
+            prepared_transition: None,
             start_from_segment_index: 0,
             start_from_offset_ms: 0,
         }
@@ -259,6 +307,16 @@ impl PreparedPlaybackJob {
 
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = generation;
+        self
+    }
+
+    pub fn with_dj_media_ref(mut self, media_ref: DjMediaRef) -> Self {
+        self.dj_media_ref = Some(media_ref);
+        self
+    }
+
+    pub fn with_prepared_transition(mut self, transition: PreparedTransitionProgram) -> Self {
+        self.prepared_transition = Some(transition);
         self
     }
 
@@ -287,6 +345,536 @@ impl PreparedPlaybackJob {
     }
 }
 
+pub fn build_dj_lookahead_start(
+    conn: &Connection,
+    deadline_samples: u64,
+) -> Result<Option<DjLookaheadStart>> {
+    if !queries::is_dj_engine_enabled(conn)? {
+        return Ok(None);
+    }
+    let pair = load_dj_lookahead_pair(conn)?;
+    Ok(dj_lookahead_start_from_pair(pair, deadline_samples))
+}
+
+pub fn dj_lookahead_start_from_pair(
+    pair: DjLookaheadPair,
+    deadline_samples: u64,
+) -> Option<DjLookaheadStart> {
+    if pair.current.is_none() && pair.next.is_none() {
+        return None;
+    }
+    Some(DjLookaheadStart {
+        current: pair.current,
+        next: pair.next,
+        current_queue_item_id: pair.current_queue_item_id,
+        next_queue_item_id: pair.next_queue_item_id,
+        queue_generation: pair.queue_generation,
+        deadline_samples,
+    })
+}
+
+pub fn attach_dj_transition_plan(
+    db: &Database,
+    job: PlaybackPreparation,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<PlaybackPreparation> {
+    let pair = db.with_conn(load_dj_lookahead_pair)?;
+    attach_dj_transition_plan_for_pair(&DjEngine::new(db.clone()), job, pair, sample_rate, channels)
+}
+
+pub fn attach_dj_transition_plan_for_pair(
+    engine: &DjEngine,
+    job: PlaybackPreparation,
+    pair: DjLookaheadPair,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<PlaybackPreparation> {
+    attach_dj_transition_plan_for_pair_with_current_duration(
+        engine,
+        job,
+        pair,
+        sample_rate,
+        channels,
+        None,
+    )
+}
+
+pub fn attach_dj_transition_plan_for_pair_with_current_duration(
+    engine: &DjEngine,
+    mut job: PlaybackPreparation,
+    pair: DjLookaheadPair,
+    sample_rate: u32,
+    channels: u16,
+    current_duration_ms: Option<i64>,
+) -> Result<PlaybackPreparation> {
+    let (Some(current), Some(next), Some(next_queue_item_id)) = (
+        pair.current.as_ref(),
+        pair.next.as_ref(),
+        pair.next_queue_item_id,
+    ) else {
+        return Ok(job);
+    };
+    if next
+        .track_id()
+        .is_some_and(|next_track_id| next_track_id != job.track.id)
+    {
+        return Ok(job);
+    }
+    if let Some((existing_event_id, existing_program)) = engine
+        .db()
+        .with_conn(|conn| latest_armed_dj_transition_event_for_pair(conn, current, next))?
+    {
+        let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
+        job = job.with_prepared_transition(PreparedTransitionProgram {
+            program: existing_program,
+            transition_event_id: Some(existing_event_id),
+            fire_ahead_ms,
+            queue_generation: pair.queue_generation,
+            current_queue_item_id: pair.current_queue_item_id,
+            next_queue_item_id: Some(next_queue_item_id),
+        });
+        return Ok(job);
+    }
+    if let Some(plan) =
+        engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
+    {
+        let planned_template = plan.program.template.clone();
+        let filter_sweep_unstable = planned_template == "FilterSweep"
+            && engine.db().with_conn(filter_sweep_timing_unstable)?;
+        let (renderer_program, renderer_fallback_reason) = v1_renderable_program(
+            &plan.program,
+            sample_rate.max(1),
+            channels.max(1),
+            filter_sweep_unstable,
+        );
+        let renderer_plan = DjTransitionPlan {
+            program: renderer_program,
+            rejected_alternatives: plan.rejected_alternatives,
+            planner_version: plan.planner_version,
+            fallback_reason: renderer_fallback_reason.or(plan.fallback_reason),
+        };
+        let timing_plan =
+            dj_gapless_plan_for_pair(engine, current, current_duration_ms, &renderer_plan.program);
+        job.gapless = timing_plan.gapless;
+        let transition_event_id = log_dj_transition_event(
+            engine,
+            current,
+            next,
+            &planned_template,
+            &renderer_plan,
+            &timing_plan,
+        )?;
+        let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
+        job = job.with_prepared_transition(PreparedTransitionProgram {
+            program: renderer_plan.program,
+            transition_event_id: Some(transition_event_id),
+            fire_ahead_ms,
+            queue_generation: pair.queue_generation,
+            current_queue_item_id: pair.current_queue_item_id,
+            next_queue_item_id: Some(next_queue_item_id),
+        });
+    }
+    Ok(job)
+}
+
+fn latest_armed_dj_transition_event_for_pair(
+    conn: &Connection,
+    current: &DjMediaRef,
+    next: &DjMediaRef,
+) -> Result<Option<(i64, noor_mix::TransitionProgram)>> {
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let row = conn
+        .query_row(
+            "SELECT id, program_json
+         FROM dj_transition_events
+         WHERE from_media_ref_kind = ?1
+           AND from_media_ref_id = ?2
+           AND to_media_ref_kind = ?3
+           AND to_media_ref_id = ?4
+           AND timing_status = 'armed'
+           AND actual_start_ms IS NULL
+           AND outcome IS NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT 1",
+            params![
+                current_key.media_ref_kind,
+                current_key.media_ref_id,
+                next_key.media_ref_kind,
+                next_key.media_ref_id,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((id, program_json)) = row else {
+        return Ok(None);
+    };
+    let program = serde_json::from_str(&program_json)?;
+    Ok(Some((id, program)))
+}
+
+const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
+const DJ_FIRE_AHEAD_POSITIVE_PERCENT: usize = 70;
+const DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS: i64 = 150;
+const DJ_FIRE_AHEAD_MAX_MS: i64 = 150;
+const DJ_FILTER_SWEEP_TIMING_WINDOW: i64 = 20;
+const DJ_FILTER_SWEEP_TIMING_MIN_ROWS: usize = 4;
+const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
+const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
+const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
+
+fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
+    let mut stmt = conn.prepare(
+        "SELECT timing_delta_ms
+         FROM dj_transition_events
+         WHERE timing_status = 'fired'
+           AND timing_delta_ms IS NOT NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([DJ_FIRE_AHEAD_WINDOW], |row| row.get::<_, i64>(0))?;
+    let mut deltas = Vec::new();
+    for row in rows {
+        deltas.push(row?);
+    }
+    Ok(fire_ahead_ms_from_deltas(&deltas))
+}
+
+fn filter_sweep_timing_unstable(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT timing_delta_ms
+         FROM dj_transition_events
+         WHERE timing_status = 'fired'
+           AND timing_delta_ms IS NOT NULL
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([DJ_FILTER_SWEEP_TIMING_WINDOW], |row| row.get::<_, i64>(0))?;
+    let mut deltas = Vec::new();
+    for row in rows {
+        deltas.push(row?);
+    }
+    Ok(filter_sweep_timing_unstable_from_deltas(&deltas))
+}
+
+fn filter_sweep_timing_unstable_from_deltas(deltas: &[i64]) -> bool {
+    if deltas.len() < DJ_FILTER_SWEEP_TIMING_MIN_ROWS {
+        return false;
+    }
+    let Some(median_abs) = median_abs_delta(deltas) else {
+        return false;
+    };
+    let worst_abs = deltas.iter().map(|delta| delta.abs()).max().unwrap_or(0);
+    median_abs > DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS || worst_abs > DJ_FILTER_SWEEP_WORST_ABS_MAX_MS
+}
+
+fn median_abs_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut values = deltas.iter().map(|delta| delta.abs()).collect::<Vec<_>>();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2)
+    } else {
+        Some(values[middle])
+    }
+}
+
+fn fire_ahead_ms_from_deltas(deltas: &[i64]) -> u32 {
+    if deltas.len() < DJ_FIRE_AHEAD_WINDOW as usize {
+        return 0;
+    }
+    let positive_count = deltas.iter().filter(|delta| **delta > 0).count();
+    if positive_count * 100 < deltas.len() * DJ_FIRE_AHEAD_POSITIVE_PERCENT {
+        return 0;
+    }
+    median_delta(deltas)
+        .filter(|delta| *delta > DJ_FIRE_AHEAD_MEDIAN_FLOOR_MS)
+        .map(|delta| (delta / 2).clamp(0, DJ_FIRE_AHEAD_MAX_MS) as u32)
+        .unwrap_or(0)
+}
+
+fn median_delta(deltas: &[i64]) -> Option<i64> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let mut values = deltas.to_vec();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2)
+    } else {
+        Some(values[middle])
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DjTransitionTimingPlan {
+    gapless: GaplessPlan,
+    planned_start_ms: Option<i64>,
+    timing_source: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncedDjOverlap {
+    overlap_ms: i32,
+    timing_source: &'static str,
+}
+
+fn dj_gapless_plan_from_program(program: &noor_mix::TransitionProgram) -> GaplessPlan {
+    let sample_rate = program.sample_rate.max(1);
+    let overlap_ms = ((program.resolve_at.saturating_mul(1000)) / u64::from(sample_rate))
+        .clamp(250, i32::MAX as u64) as i32;
+    GaplessPlan {
+        enabled: true,
+        overlap_ms,
+        prebuffer_ms: 500,
+        requires_stream_metadata: false,
+    }
+}
+
+fn dj_gapless_plan_for_pair(
+    engine: &DjEngine,
+    current: &DjMediaRef,
+    current_duration_ms: Option<i64>,
+    program: &noor_mix::TransitionProgram,
+) -> DjTransitionTimingPlan {
+    let mut plan = dj_gapless_plan_from_program(program);
+    let mut timing_source = "fallback_overlap";
+    let mut duration_ms = current_duration_ms;
+    if let Ok(Some(synced)) = engine.db().with_conn(|conn| {
+        synced_dj_overlap_ms(conn, current, current_duration_ms, program, plan.overlap_ms)
+    }) {
+        plan.overlap_ms = synced.overlap_ms;
+        timing_source = synced.timing_source;
+    }
+    if duration_ms.is_none() {
+        duration_ms = engine
+            .db()
+            .with_conn(|conn| current_track_duration_ms(conn, current))
+            .ok()
+            .flatten();
+    }
+    DjTransitionTimingPlan {
+        gapless: plan,
+        planned_start_ms: duration_ms
+            .map(|duration| duration.saturating_sub(i64::from(plan.overlap_ms)).max(0)),
+        timing_source,
+    }
+}
+
+fn synced_dj_overlap_ms(
+    conn: &Connection,
+    current: &DjMediaRef,
+    current_duration_ms: Option<i64>,
+    program: &noor_mix::TransitionProgram,
+    preferred_overlap_ms: i32,
+) -> Result<Option<SyncedDjOverlap>> {
+    let Some(duration_ms) = current_duration_ms.or(current_track_duration_ms(conn, current)?)
+    else {
+        return Ok(None);
+    };
+    let key = current.profile_key();
+    let Some(profile) = queries::get_audio_dj_profile(conn, &key)? else {
+        return Ok(None);
+    };
+    if profile.profile_confidence < 0.65 {
+        return Ok(None);
+    }
+
+    let downbeats = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
+    if let Some(overlap_ms) = synced_overlap_from_grid_ms(
+        duration_ms,
+        &downbeats,
+        preferred_overlap_ms,
+        Some(program.resolve_at),
+        program.sample_rate,
+    ) {
+        return Ok(Some(SyncedDjOverlap {
+            overlap_ms,
+            timing_source: "downbeat_sync",
+        }));
+    }
+
+    let beats = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
+    Ok(synced_overlap_from_grid_ms(
+        duration_ms,
+        &beats,
+        preferred_overlap_ms,
+        Some(program.resolve_at),
+        program.sample_rate,
+    )
+    .map(|overlap_ms| SyncedDjOverlap {
+        overlap_ms,
+        timing_source: "beat_sync",
+    }))
+}
+
+fn current_track_duration_ms(conn: &Connection, current: &DjMediaRef) -> Result<Option<i64>> {
+    match current {
+        DjMediaRef::LibraryTrack { track_id }
+        | DjMediaRef::TidalTrack {
+            track_id: Some(track_id),
+            ..
+        } => conn
+            .query_row(
+                "SELECT duration_ms FROM tracks WHERE id = ?1",
+                params![track_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(Into::into),
+        DjMediaRef::TidalTrack { tidal_id, .. } => conn
+            .query_row(
+                "SELECT duration_ms FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+                params![tidal_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(Into::into),
+        DjMediaRef::PendingQueueItem { .. } => Ok(None),
+    }
+}
+
+fn synced_overlap_from_grid_ms(
+    duration_ms: i64,
+    grid_seconds: &[f32],
+    preferred_overlap_ms: i32,
+    program_samples: Option<u64>,
+    sample_rate: u32,
+) -> Option<i32> {
+    const MIN_SYNC_OVERLAP_MS: i64 = 8_000;
+    const MAX_SYNC_OVERLAP_MS: i64 = 16_000;
+    let preferred_ms = preferred_overlap_ms.max(250) as i64;
+    let program_ms = program_samples
+        .map(|samples| {
+            ((samples.saturating_mul(1000)) / u64::from(sample_rate.max(1)))
+                .clamp(250, i64::MAX as u64) as i64
+        })
+        .unwrap_or(preferred_ms);
+    let min_overlap_ms = preferred_ms
+        .max(program_ms)
+        .max(MIN_SYNC_OVERLAP_MS)
+        .min(MAX_SYNC_OVERLAP_MS);
+    let grid = extrapolated_grid_ms(grid_seconds, duration_ms)?;
+
+    grid.into_iter()
+        .filter_map(|start_ms| {
+            let overlap_ms = duration_ms.saturating_sub(start_ms);
+            (overlap_ms >= min_overlap_ms && overlap_ms <= MAX_SYNC_OVERLAP_MS)
+                .then_some(overlap_ms as i32)
+        })
+        .min()
+}
+
+fn extrapolated_grid_ms(grid_seconds: &[f32], duration_ms: i64) -> Option<Vec<i64>> {
+    let mut grid = grid_seconds
+        .iter()
+        .filter_map(|seconds| {
+            seconds
+                .is_finite()
+                .then_some((*seconds * 1000.0).round() as i64)
+        })
+        .filter(|ms| *ms >= 0 && *ms < duration_ms)
+        .collect::<Vec<_>>();
+    grid.sort_unstable();
+    grid.dedup();
+    if grid.len() < 2 {
+        return (!grid.is_empty()).then_some(grid);
+    }
+
+    let interval_ms = grid
+        .windows(2)
+        .filter_map(|pair| {
+            let delta = pair[1].saturating_sub(pair[0]);
+            (delta > 0).then_some(delta)
+        })
+        .min()?;
+    let mut next = grid.last().copied()?.saturating_add(interval_ms);
+    while next < duration_ms {
+        grid.push(next);
+        next = next.saturating_add(interval_ms);
+    }
+    Some(grid)
+}
+
+fn v1_renderable_program(
+    program: &noor_mix::TransitionProgram,
+    sample_rate: u32,
+    channels: u16,
+    filter_sweep_timing_unstable: bool,
+) -> (noor_mix::TransitionProgram, Option<&'static str>) {
+    if program.template == "SafeCrossfade" {
+        return (program.clone(), None);
+    }
+    if program.template == "FilterSweep" {
+        if filter_sweep_timing_unstable {
+            return (
+                crate::playback::dj_engine::safe_crossfade_program(
+                    sample_rate,
+                    channels,
+                    noor_mix::Policy::default(),
+                ),
+                Some("timing_unstable"),
+            );
+        }
+        return (
+            noor_mix::planner::filter_sweep_eq_wash_program(
+                sample_rate,
+                channels,
+                DJ_FILTER_SWEEP_RENDER_MS,
+            ),
+            None,
+        );
+    }
+    (
+        crate::playback::dj_engine::safe_crossfade_program(
+            sample_rate,
+            channels,
+            noor_mix::Policy::default(),
+        ),
+        Some("template_not_renderable"),
+    )
+}
+
+fn log_dj_transition_event(
+    engine: &DjEngine,
+    current: &DjMediaRef,
+    next: &DjMediaRef,
+    planned_template: &str,
+    plan: &DjTransitionPlan,
+    timing_plan: &DjTransitionTimingPlan,
+) -> Result<i64> {
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let program_json = serde_json::to_string(&plan.program)?;
+    let rejected_json = serde_json::to_string(&plan.rejected_alternatives)?;
+    engine.db().with_conn(|conn| {
+        queries::insert_dj_transition_event(
+            conn,
+            current.track_id(),
+            next.track_id(),
+            Some(current_key.media_ref_kind.as_str()),
+            Some(current_key.media_ref_id.as_str()),
+            Some(next_key.media_ref_kind.as_str()),
+            Some(next_key.media_ref_id.as_str()),
+            planned_template,
+            program_json.as_str(),
+            Some(rejected_json.as_str()),
+            plan.planner_version,
+            plan.fallback_reason,
+            timing_plan.planned_start_ms,
+            Some(timing_plan.timing_source),
+            Some("armed"),
+        )
+    })
+}
+
 impl ActiveListenSession {
     pub fn start(
         track_id: i64,
@@ -311,7 +899,13 @@ impl ActiveListenSession {
             source,
             position_in_session: position,
             transition_from_track_id: transition_from,
+            dj_transition_event_id: None,
         }
+    }
+
+    pub fn with_dj_transition_event_id(mut self, event_id: Option<i64>) -> Self {
+        self.dj_transition_event_id = event_id;
+        self
     }
 
     pub fn to_live_session(&self, finished_at: DateTime<Utc>) -> LiveListenSession {
@@ -322,6 +916,53 @@ impl ActiveListenSession {
             position: self.position_in_session,
         }
     }
+}
+
+pub fn latest_open_dj_transition_event_for_pair(
+    conn: &Connection,
+    from_track_id: Option<i64>,
+    to_track_id: i64,
+) -> Result<Option<i64>> {
+    let Some(from_track_id) = from_track_id else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id
+         FROM dj_transition_events
+         WHERE from_track_id = ?1
+           AND to_track_id = ?2
+           AND outcome IS NULL
+         ORDER BY CASE timing_status
+             WHEN 'fired' THEN 0
+             WHEN 'late' THEN 1
+             WHEN 'armed' THEN 2
+             ELSE 3
+         END,
+         started_at DESC,
+         id DESC
+         LIMIT 1",
+        params![from_track_id, to_track_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn record_dj_transition_listen_outcome(
+    conn: &Connection,
+    transition_event_id: Option<i64>,
+    listened_ms: i64,
+    completed: bool,
+) -> Result<()> {
+    let Some(id) = transition_event_id else {
+        return Ok(());
+    };
+    if completed {
+        queries::update_dj_transition_outcome(conn, id, "finished", false)?;
+    } else if listened_ms < 30_000 {
+        queries::update_dj_transition_outcome(conn, id, "skip_within_30s", true)?;
+    }
+    Ok(())
 }
 
 // Reads the queue.source string of the currently-playing queue item and maps it
@@ -1005,10 +1646,14 @@ pub fn build_playback_preparation(
 
     let output_sample_rate = stream_info.and_then(StreamInfo::sample_rate_hz);
 
-    PreparedPlaybackJob {
+    let mut job = PreparedPlaybackJob {
         output_sample_rate,
         ..PreparedPlaybackJob::new(track.clone(), source, gapless)
+    };
+    if let Some(media_ref) = crate::playback::dj_lookahead::tidal_media_ref_for_track(track) {
+        job = job.with_dj_media_ref(media_ref);
     }
+    job
 }
 
 pub fn playback_source_kind(track: &Track) -> &'static str {
@@ -2198,6 +2843,907 @@ mod tests {
             .collect()
     }
 
+    mod dj_lookahead {
+        use super::*;
+
+        const DEADLINE: u64 = 48_000 * 30;
+
+        fn enable(conn: &Connection) {
+            queries::set_dj_engine_enabled(conn, true).unwrap();
+        }
+
+        fn start(conn: &Connection) -> Option<DjLookaheadStart> {
+            build_dj_lookahead_start(conn, DEADLINE).unwrap()
+        }
+
+        fn seed_queue(conn: &Connection, ids: &[i64]) -> Vec<QueueItem> {
+            let tracks = load_tracks(conn, ids);
+            queue::replace_queue(conn, &tracks, "test").unwrap()
+        }
+
+        #[test]
+        fn dj_disabled_queue_events_do_not_start_dj_lookahead() {
+            let conn = conn();
+            seed_queue(&conn, &[1, 2]);
+            play_track_now(&conn, 1).unwrap();
+
+            assert!(start(&conn).is_none());
+        }
+
+        #[test]
+        fn dj_enable_starts_dj_lookahead_for_active_pair() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert_eq!(start.next_queue_item_id, Some(queued[1].id));
+            assert_eq!(start.deadline_samples, DEADLINE);
+        }
+
+        #[test]
+        fn manual_play_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2]);
+            play_track_now(&conn, 1).unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert_eq!(start.next_queue_item_id, Some(queued[1].id));
+        }
+
+        #[test]
+        fn manual_queue_append_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            enqueue_track(&conn, 2, "user").unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.current_queue_item_id, Some(queued[0].id));
+            assert!(matches!(
+                start.next,
+                Some(DjMediaRef::TidalTrack { tidal_id: 2, .. })
+            ));
+        }
+
+        #[test]
+        fn play_next_starts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 3]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            let play_next = load_tracks(&conn, &[2]).remove(0);
+            queue::append_tracks(&conn, &[play_next], "user_play_next").unwrap();
+            let inserted = queue::load_queue(&conn).unwrap();
+            let inserted_id = inserted.iter().find(|item| item.track.id == 2).unwrap().id;
+            queue::move_queue_item(&conn, inserted_id, 1).unwrap();
+
+            let start = start(&conn).expect("lookahead");
+            assert_eq!(start.next_queue_item_id, Some(inserted_id));
+        }
+
+        #[test]
+        fn queue_reorder_restarts_dj_lookahead() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1, 2, 3]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            let before = start(&conn).expect("before");
+            queue::move_queue_item(&conn, queued[2].id, 1).unwrap();
+
+            let after = start(&conn).expect("after");
+            assert_ne!(before.next_queue_item_id, after.next_queue_item_id);
+            assert_eq!(after.next_queue_item_id, Some(queued[2].id));
+        }
+
+        #[test]
+        fn pending_resolution_restarts_dj_lookahead_with_tidal_ref() {
+            let conn = conn();
+            enable(&conn);
+            let queued = seed_queue(&conn, &[1]);
+            conn.execute(
+                "UPDATE playback_state SET current_track_id = 1, current_queue_item_id = ?1 WHERE id = 1",
+                params![queued[0].id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO queue (track_id, position, source, pending_artist, pending_title)
+                 VALUES (NULL, 1, 'radio_pending', 'Artist', 'Title')",
+                [],
+            )
+            .unwrap();
+            let pending_id = conn.last_insert_rowid();
+            let before = start(&conn).expect("before");
+            conn.execute(
+                "UPDATE queue SET tidal_id_hint = 99 WHERE id = ?1",
+                params![pending_id],
+            )
+            .unwrap();
+
+            let after = start(&conn).expect("after");
+            assert_ne!(before.queue_generation, after.queue_generation);
+            assert!(matches!(
+                after.next,
+                Some(DjMediaRef::PendingQueueItem {
+                    tidal_id_hint: Some(99),
+                    ..
+                })
+            ));
+        }
+    }
+
+    mod dj_prepare_next {
+        use super::*;
+        use crate::db::schema;
+
+        fn db_with_pair(next_source: &str) -> Database {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                for id in 1..=4 {
+                    conn.execute(
+                        "INSERT INTO tracks (
+                            id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                        ) VALUES (?1, ?2, 1, ?1, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                        params![id, format!("Track {id}")],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source)
+                     VALUES (11, 1, 0, 'manual'), (12, 2, 1, ?1)",
+                    params![next_source],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed db");
+            db
+        }
+
+        fn enable(db: &Database) {
+            db.with_conn(|conn| queries::set_dj_engine_enabled(conn, true))
+                .expect("enable");
+        }
+
+        fn next_job(db: &Database) -> PlaybackPreparation {
+            db.with_conn(|conn| {
+                let track = queue::get_track_by_id(conn, 2)?.expect("track");
+                Ok(build_playback_preparation(&track, None, 0, None))
+            })
+            .expect("next job")
+        }
+
+        fn planned_job_for_source(source: &str) -> PlaybackPreparation {
+            let db = db_with_pair(source);
+            enable(&db);
+            attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan")
+        }
+
+        #[test]
+        fn prepare_next_attaches_program_when_enabled() {
+            let job = planned_job_for_source("manual");
+
+            assert!(job.prepared_transition.is_some());
+        }
+
+        #[test]
+        fn prepared_dj_program_supplies_runtime_overlap() {
+            let job = planned_job_for_source("manual");
+
+            assert!(job.prepared_transition.is_some());
+            assert!(job.gapless.enabled);
+            assert!(job.gapless.overlap_ms > 0);
+        }
+
+        #[test]
+        fn prepare_next_omits_program_when_disabled() {
+            let db = db_with_pair("manual");
+            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+
+            assert!(job.prepared_transition.is_none());
+        }
+
+        #[test]
+        fn dj_planning_does_not_reorder_queue() {
+            let db = db_with_pair("manual");
+            enable(&db);
+            let before = db
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .expect("before");
+
+            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let after = db
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare("SELECT id FROM queue ORDER BY position, id")?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(rows)
+                })
+                .expect("after");
+
+            assert_eq!(after, before);
+        }
+
+        #[test]
+        fn dj_planning_does_not_replace_next_queue_item() {
+            let db = db_with_pair("manual");
+            enable(&db);
+
+            let _ = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+            let next_queue_track = db
+                .with_conn(|conn| {
+                    conn.query_row("SELECT track_id FROM queue WHERE id = 12", [], |row| {
+                        row.get::<_, Option<i64>>(0)
+                    })
+                    .map_err(anyhow::Error::from)
+                })
+                .expect("next queue item");
+
+            assert_eq!(next_queue_track, Some(2));
+        }
+
+        #[test]
+        fn manual_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("manual")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn radio_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("radio")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn automix_queue_next_uses_plan_transition_path() {
+            assert!(
+                planned_job_for_source("automix-new")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn external_next_track_uses_same_plan_transition_path() {
+            assert!(
+                planned_job_for_source("radio_pending")
+                    .prepared_transition
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn pending_next_without_profile_falls_back_to_safe_crossfade() {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                conn.execute(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                     ) VALUES (1, 'Track 1', 1, 1, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (11, 1, 0, 'manual', NULL, NULL),
+                            (12, NULL, 1, 'radio_pending', 'External A', 'External B')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                queries::set_dj_engine_enabled(conn, true)?;
+                Ok(())
+            })
+            .expect("seed pending");
+            let pair = db.with_conn(load_dj_lookahead_pair).expect("pair");
+            let engine = DjEngine::new(db.clone());
+            let job = attach_dj_transition_plan_for_pair(
+                &engine,
+                PreparedPlaybackJob::test_fixture(99, 1),
+                pair,
+                48_000,
+                2,
+            )
+            .expect("plan");
+
+            let program = job.prepared_transition.expect("transition").program;
+            assert_eq!(program.template, "SafeCrossfade");
+        }
+    }
+
+    mod dj_transition_logging {
+        use super::*;
+        use crate::db::models::{
+            AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow,
+        };
+        use crate::db::schema;
+        use crate::services::audio_analysis::dj_profile::{
+            DJ_PROFILE_VERSION, encode_f32_blob, encode_u32_blob,
+        };
+        use serde_json::Value;
+
+        fn db_with_pair() -> Database {
+            let db = Database::open_in_memory().expect("db");
+            db.with_conn(|conn| {
+                schema::run_migrations(conn)?;
+                conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+                conn.execute(
+                    "INSERT INTO tracks (
+                        id, title, artist_id, tidal_id, source, best_quality, best_source, duration_ms
+                    ) VALUES (1, 'Track 1', 1, 1, 'tidal', 'LOSSLESS', 'tidal', 180000),
+                             (2, 'Track 2', 1, 2, 'tidal', 'LOSSLESS', 'tidal', 180000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source)
+                     VALUES (11, 1, 0, 'manual'), (12, 2, 1, 'manual')",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE playback_state
+                     SET current_track_id = 1, current_queue_item_id = 11, is_playing = 1
+                     WHERE id = 1",
+                    [],
+                )?;
+                queries::set_dj_engine_enabled(conn, true)?;
+                seed_profile(conn, "tidal_track", "1", Some(1))?;
+                seed_profile(conn, "tidal_track", "2", Some(2))?;
+                Ok(())
+            })
+            .expect("seed");
+            db
+        }
+
+        fn seed_profile(
+            conn: &Connection,
+            kind: &str,
+            id: &str,
+            track_id: Option<i64>,
+        ) -> Result<()> {
+            let row = AudioDjProfileRow {
+                media_ref_kind: kind.to_string(),
+                media_ref_id: id.to_string(),
+                track_id,
+                queue_item_id: None,
+                tidal_id: id.parse().ok(),
+                profile_version: DJ_PROFILE_VERSION.to_string(),
+                beat_grid_blob: encode_f32_blob(
+                    &(0..64).map(|i| i as f32 * 0.5).collect::<Vec<_>>(),
+                ),
+                downbeats_blob: encode_f32_blob(
+                    &(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>(),
+                ),
+                phrase_boundaries_blob: encode_u32_blob(&(0..16).collect::<Vec<_>>()),
+                mix_in_blob: encode_f32_blob(&[0.0]),
+                mix_out_blob: encode_f32_blob(&[90.0]),
+                intro_end_seconds: Some(16.0),
+                outro_start_seconds: Some(120.0),
+                breakdown_blob: encode_f32_blob(&[]),
+                drop_blob: encode_f32_blob(&[]),
+                safe_transition_windows_blob: encode_f32_blob(&[0.0, 8.0, 1.0]),
+                energy_contour_blob: encode_f32_blob(&[]),
+                vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
+                vocal_density_blob: encode_f32_blob(&[0.0; 16]),
+                lufs_loud_body: Some(-12.0),
+                true_peak_dbtp: Some(-1.0),
+                beat_confidence: Some(0.9),
+                profile_confidence: 0.9,
+                analysis_scope_ms: 90_000,
+                is_temporary: false,
+                source: "test".to_string(),
+                computed_at: "now".to_string(),
+            };
+            queries::upsert_audio_dj_profile(conn, &row)
+        }
+
+        fn next_job(db: &Database) -> PlaybackPreparation {
+            db.with_conn(|conn| {
+                let track = queue::get_track_by_id(conn, 2)?.expect("track");
+                Ok(build_playback_preparation(&track, None, 0, None))
+            })
+            .expect("job")
+        }
+
+        fn plan(db: &Database) -> PreparedTransitionProgram {
+            attach_dj_transition_plan(db, next_job(db), 48_000, 2)
+                .expect("plan")
+                .prepared_transition
+                .expect("transition")
+        }
+
+        fn event_count(db: &Database) -> i64 {
+            db.with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM dj_transition_events", [], |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into)
+            })
+            .expect("count")
+        }
+
+        #[test]
+        fn latest_open_dj_transition_event_for_pair_prefers_fired_event() {
+            let db = db_with_pair();
+            let fired = plan(&db);
+            let fired_id = fired.transition_event_id.expect("fired event");
+            db.with_conn(|conn| {
+                queries::update_dj_transition_fire_timing(conn, fired_id, 172_040, "fired")
+            })
+            .expect("mark fired");
+            let duplicate = plan(&db);
+            assert_ne!(duplicate.transition_event_id, Some(fired_id));
+
+            let selected = db
+                .with_conn(|conn| latest_open_dj_transition_event_for_pair(conn, Some(1), 2))
+                .expect("selected");
+
+            assert_eq!(selected, Some(fired_id));
+        }
+
+        #[test]
+        fn repeated_planning_reuses_existing_armed_event_for_pair() {
+            let db = db_with_pair();
+            let first = plan(&db);
+            let second = plan(&db);
+
+            assert_eq!(second.transition_event_id, first.transition_event_id);
+            assert_eq!(event_count(&db), 1);
+        }
+
+        #[test]
+        fn dj_disabled_does_not_write_dj_transition_events() {
+            let db = db_with_pair();
+            db.with_conn(|conn| queries::set_dj_engine_enabled(conn, false))
+                .expect("disable");
+
+            let job = attach_dj_transition_plan(&db, next_job(&db), 48_000, 2).expect("plan");
+
+            assert!(job.prepared_transition.is_none());
+            assert_eq!(event_count(&db), 0);
+        }
+
+        #[test]
+        fn dj_transition_logging_does_not_replace_playback_transitions() {
+            let db = db_with_pair();
+            let _ = plan(&db);
+            db.with_conn(|conn| {
+                queries::record_playback_transition(conn, 1, 2, "queue", true, 8000)
+            })
+            .expect("legacy transition");
+
+            let counts = db
+                .with_conn(|conn| {
+                    let dj: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM dj_transition_events", [], |row| {
+                            row.get(0)
+                        })?;
+                    let legacy: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM playback_transitions", [], |row| {
+                            row.get(0)
+                        })?;
+                    Ok((dj, legacy))
+                })
+                .expect("counts");
+
+            assert_eq!(counts, (1, 1));
+        }
+
+        #[test]
+        fn dj_transition_logging_limits_rejected_alternatives_to_three() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+            let rejected: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT rejected_alternatives_json FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("rejected");
+            let parsed: Vec<Value> = serde_json::from_str(&rejected).expect("json");
+
+            assert!(parsed.len() <= 3);
+            assert!(parsed.iter().all(|item| item.get("template").is_some()));
+            assert!(parsed.iter().all(|item| item.get("score").is_some()));
+            assert!(parsed.iter().all(|item| item.get("reason").is_some()));
+        }
+
+        #[test]
+        fn dj_transition_logging_uses_planner_version_not_profile_version() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+            let planner_version: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT planner_version FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("planner version");
+
+            assert_eq!(planner_version, noor_mix::planner::DJ_PLANNER_VERSION);
+            assert_ne!(planner_version, DJ_PROFILE_VERSION);
+        }
+
+        #[test]
+        fn v1_planner_logs_and_prepares_filter_sweep_when_renderable() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                queries::upsert_audio_dj_profile_correction(
+                    conn,
+                    &AudioDjProfileCorrectionRow {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "2".to_string(),
+                        bpm_multiplier: Some(1.05),
+                        downbeat_offset_beats: None,
+                        phrase_offset_bars: None,
+                        safe_crossfade_only: false,
+                        transition_speed_bias: None,
+                        notes: None,
+                        created_at: "now".to_string(),
+                        updated_at: "now".to_string(),
+                    },
+                )
+            })
+            .expect("seed correction");
+            let transition = plan(&db);
+
+            assert_eq!(transition.program.template, "FilterSweep");
+            let row: (String, String, Option<String>) = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT template, program_json, fallback_reason
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("event");
+            let renderer_program: noor_mix::TransitionProgram =
+                serde_json::from_str(&row.1).expect("program");
+
+            assert_eq!(row.0, "FilterSweep");
+            assert_eq!(renderer_program.template, "FilterSweep");
+            assert_eq!(renderer_program.resolve_at, 576_000);
+            assert_eq!(row.2, None);
+        }
+
+        #[test]
+        fn v1_renderable_program_passes_filter_sweep_with_wider_duration() {
+            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 32_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "FilterSweep");
+            assert_eq!(program.resolve_at, 576_000);
+            assert_eq!(reason, None);
+            assert!(
+                program
+                    .automation
+                    .iter()
+                    .any(|event| event.param == noor_mix::Param::HighGain(noor_mix::DeckId::A))
+            );
+        }
+
+        #[test]
+        fn v1_renderable_program_downgrades_slam_cut_to_safe_crossfade() {
+            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
+            input.template = "SlamCut".to_string();
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("template_not_renderable"));
+        }
+
+        #[test]
+        fn unstable_timing_downgrades_filter_sweep_to_safe_crossfade() {
+            let input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, true);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("timing_unstable"));
+        }
+
+        #[test]
+        fn filter_sweep_uses_wider_overlap_than_safe_crossfade() {
+            let safe = crate::playback::dj_engine::safe_crossfade_program(
+                48_000,
+                2,
+                noor_mix::Policy::default(),
+            );
+            let filter = noor_mix::planner::filter_sweep_eq_wash_program(
+                48_000,
+                2,
+                DJ_FILTER_SWEEP_RENDER_MS,
+            );
+
+            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 8_000);
+            assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 12_000);
+        }
+
+        #[test]
+        fn fire_ahead_requires_latest_twenty_positive_evidence() {
+            let passing = vec![
+                412, 709, 270, 475, 8, 827, 258, 738, 8, 35, 252, 141, -375, 210, 73, 529, -53, 48,
+                481, 300,
+            ];
+            let mixed = vec![
+                412, 709, 270, 475, -8, -827, -258, -738, -8, -35, 252, 141, -375, 210, 73, 529,
+                -53, 48, 481, 300,
+            ];
+            let low_median = vec![
+                151, 150, 149, 148, 147, 146, 145, 144, 143, 142, 141, 140, 139, 138, 137, 136,
+                135, 134, -20, -40,
+            ];
+
+            assert_eq!(fire_ahead_ms_from_deltas(&passing), 127);
+            assert_eq!(fire_ahead_ms_from_deltas(&mixed), 0);
+            assert_eq!(fire_ahead_ms_from_deltas(&low_median), 0);
+            assert_eq!(fire_ahead_ms_from_deltas(&passing[..19]), 0);
+        }
+
+        #[test]
+        fn filter_sweep_timing_gate_uses_abs_error_not_signed_bias() {
+            assert!(filter_sweep_timing_unstable_from_deltas(&[
+                549, -399, 303, -375
+            ]));
+            assert!(!filter_sweep_timing_unstable_from_deltas(&[
+                140, -130, 75, -90
+            ]));
+            assert!(!filter_sweep_timing_unstable_from_deltas(&[549, -399, 303]));
+        }
+
+        #[test]
+        fn fire_ahead_caps_large_median() {
+            assert_eq!(fire_ahead_ms_from_deltas(&[500; 20]), 150);
+        }
+
+        #[test]
+        fn external_dj_transition_logging_does_not_require_library_track_id() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM queue WHERE id = 12", [])?;
+                conn.execute(
+                    "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title)
+                     VALUES (12, NULL, 1, 'radio_pending', 'External A', 'External B')",
+                    [],
+                )?;
+                seed_profile(conn, "queue_item", "12", None)?;
+                Ok(())
+            })
+            .expect("external");
+            let pair = db.with_conn(load_dj_lookahead_pair).expect("pair");
+            let engine = DjEngine::new(db.clone());
+            let job = attach_dj_transition_plan_for_pair(
+                &engine,
+                PreparedPlaybackJob::test_fixture(99, 1),
+                pair,
+                48_000,
+                2,
+            )
+            .expect("plan");
+
+            let event_id = job
+                .prepared_transition
+                .and_then(|transition| transition.transition_event_id)
+                .expect("event");
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT to_track_id, to_media_ref_kind, to_media_ref_id
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![event_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<i64>>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("event");
+
+            assert_eq!(row.0, None);
+            assert_eq!(row.1, "queue_item");
+            assert_eq!(row.2, "12");
+        }
+
+        #[test]
+        fn skip_mid_transition_updates_dj_event() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    12_000,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let outcome: String = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("outcome");
+            assert_eq!(outcome, "skip_within_30s");
+        }
+
+        #[test]
+        fn skip_within_30s_counts_as_negative_transition_outcome() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    29_999,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let skip_flag: i64 = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("flag");
+            assert_eq!(skip_flag, 1);
+        }
+
+        #[test]
+        fn skip_after_30s_does_not_count_as_bad_transition_feedback() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    30_000,
+                    false,
+                )
+            })
+            .expect("outcome");
+
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome, skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("row");
+            assert_eq!(row, (None, 0));
+        }
+
+        #[test]
+        fn manual_bad_feedback_counts_stronger_than_skip() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    12_000,
+                    false,
+                )?;
+                conn.execute(
+                    "UPDATE dj_transition_events SET user_rating = -1 WHERE id = ?1",
+                    params![transition.transition_event_id],
+                )?;
+                queries::count_recent_bad_dj_feedback_for_ref(
+                    conn,
+                    &AudioDjProfileKey {
+                        media_ref_kind: "tidal_track".to_string(),
+                        media_ref_id: "2".to_string(),
+                    },
+                    3,
+                )
+            })
+            .map(|count| assert_eq!(count, 1))
+            .expect("feedback count");
+        }
+
+        #[test]
+        fn finished_transition_updates_dj_event() {
+            let db = db_with_pair();
+            let transition = plan(&db);
+
+            db.with_conn(|conn| {
+                record_dj_transition_listen_outcome(
+                    conn,
+                    transition.transition_event_id,
+                    170_000,
+                    true,
+                )
+            })
+            .expect("outcome");
+
+            let row = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT outcome, skip_within_30s FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("row");
+            assert_eq!(row, ("finished".to_string(), 0));
+        }
+    }
+
     fn track_with_tidal_id(id: i64, tidal_id: Option<i64>, quality: Option<&str>) -> Track {
         Track {
             id,
@@ -2488,6 +4034,7 @@ mod tests {
         assert!(prep.is_local());
         assert_eq!(prep.source_kind(), PlaybackSourceKind::LocalLibrary);
         assert!(prep.stream_request().is_none());
+        assert!(prep.dj_media_ref.is_none());
         assert!(!prep.gapless.enabled);
         assert_eq!(prep.track.id, 7);
     }
@@ -2516,6 +4063,33 @@ mod tests {
         assert!(prep.gapless.enabled);
         assert_eq!(prep.gapless.overlap_ms, 1500);
         assert_eq!(prep.output_sample_rate, Some(44_100));
+        assert_eq!(
+            prep.dj_media_ref
+                .as_ref()
+                .map(|media_ref| media_ref.profile_key()),
+            Some(crate::db::models::AudioDjProfileKey {
+                media_ref_kind: "tidal_track".to_string(),
+                media_ref_id: "77".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn synced_overlap_uses_projected_downbeat_before_track_end() {
+        let overlap_ms =
+            synced_overlap_from_grid_ms(180_000, &[0.0, 2.0, 4.0], 8_000, Some(8_000 * 48), 48_000)
+                .expect("overlap");
+
+        assert_eq!(overlap_ms, 8_000);
+    }
+
+    #[test]
+    fn synced_overlap_keeps_preferred_minimum_when_last_grid_is_too_close() {
+        let overlap_ms =
+            synced_overlap_from_grid_ms(181_000, &[0.0, 2.0, 4.0], 8_000, Some(8_000 * 48), 48_000)
+                .expect("overlap");
+
+        assert_eq!(overlap_ms, 9_000);
     }
 
     #[test]

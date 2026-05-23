@@ -47,6 +47,23 @@ describe('formatPlayerStreamDetail', () => {
 		expect(label).toBe('320 kbps AAC \u00b7 Excl');
 	});
 
+	test('marks exclusive playback as DJ processed when the DJ engine is on', () => {
+		const label = formatPlayerStreamDetail({
+			stream: {
+				audio_quality: 'HI_RES_LOSSLESS',
+				sample_rate: 96_000,
+				bit_depth: 24,
+			},
+			runtime: {
+				sample_rate: 96_000,
+				dj_engine_enabled: true,
+			},
+			exclusiveEngaged: true,
+		});
+
+		expect(label).toBe('96 kHz \u00b7 24-bit \u00b7 Excl DJ');
+	});
+
 	test('uses bitrate for the short high quality badge', () => {
 		const label = formatResolutionShort({
 			audio_quality: 'HIGH',

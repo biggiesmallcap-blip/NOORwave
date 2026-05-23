@@ -7146,6 +7146,556 @@ pub fn find_tracks_by_hash(conn: &Connection, hashes: &[u32]) -> Result<Vec<(i64
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+pub fn upsert_audio_dj_profile(conn: &Connection, row: &AudioDjProfileRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audio_dj_profiles (
+            media_ref_kind, media_ref_id, track_id, queue_item_id, tidal_id, profile_version,
+            beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
+            intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
+            safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
+            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            profile_confidence, analysis_scope_ms, is_temporary, source, computed_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+        )
+        ON CONFLICT(media_ref_kind, media_ref_id) DO UPDATE SET
+            track_id = excluded.track_id,
+            queue_item_id = excluded.queue_item_id,
+            tidal_id = excluded.tidal_id,
+            profile_version = excluded.profile_version,
+            beat_grid_blob = excluded.beat_grid_blob,
+            downbeats_blob = excluded.downbeats_blob,
+            phrase_boundaries_blob = excluded.phrase_boundaries_blob,
+            mix_in_blob = excluded.mix_in_blob,
+            mix_out_blob = excluded.mix_out_blob,
+            intro_end_seconds = excluded.intro_end_seconds,
+            outro_start_seconds = excluded.outro_start_seconds,
+            breakdown_blob = excluded.breakdown_blob,
+            drop_blob = excluded.drop_blob,
+            safe_transition_windows_blob = excluded.safe_transition_windows_blob,
+            energy_contour_blob = excluded.energy_contour_blob,
+            vocal_presence_blob = excluded.vocal_presence_blob,
+            vocal_density_blob = excluded.vocal_density_blob,
+            lufs_loud_body = excluded.lufs_loud_body,
+            true_peak_dbtp = excluded.true_peak_dbtp,
+            beat_confidence = excluded.beat_confidence,
+            profile_confidence = excluded.profile_confidence,
+            analysis_scope_ms = excluded.analysis_scope_ms,
+            is_temporary = excluded.is_temporary,
+            source = excluded.source,
+            computed_at = excluded.computed_at",
+        params![
+            row.media_ref_kind,
+            row.media_ref_id,
+            row.track_id,
+            row.queue_item_id,
+            row.tidal_id,
+            row.profile_version,
+            row.beat_grid_blob,
+            row.downbeats_blob,
+            row.phrase_boundaries_blob,
+            row.mix_in_blob,
+            row.mix_out_blob,
+            row.intro_end_seconds,
+            row.outro_start_seconds,
+            row.breakdown_blob,
+            row.drop_blob,
+            row.safe_transition_windows_blob,
+            row.energy_contour_blob,
+            row.vocal_presence_blob,
+            row.vocal_density_blob,
+            row.lufs_loud_body,
+            row.true_peak_dbtp,
+            row.beat_confidence,
+            row.profile_confidence,
+            row.analysis_scope_ms,
+            if row.is_temporary { 1 } else { 0 },
+            row.source,
+            row.computed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_audio_dj_profile(
+    conn: &Connection,
+    key: &AudioDjProfileKey,
+) -> Result<Option<AudioDjProfileRow>> {
+    conn.query_row(
+        "SELECT media_ref_kind, media_ref_id, track_id, queue_item_id, tidal_id,
+            profile_version, beat_grid_blob, downbeats_blob, phrase_boundaries_blob,
+            mix_in_blob, mix_out_blob, intro_end_seconds, outro_start_seconds,
+            breakdown_blob, drop_blob, safe_transition_windows_blob, energy_contour_blob,
+            vocal_presence_blob, vocal_density_blob, lufs_loud_body, true_peak_dbtp,
+            beat_confidence, profile_confidence, analysis_scope_ms, is_temporary,
+            source, computed_at
+         FROM audio_dj_profiles
+         WHERE media_ref_kind = ?1 AND media_ref_id = ?2",
+        params![key.media_ref_kind, key.media_ref_id],
+        audio_dj_profile_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn get_audio_dj_profile_for_track(
+    conn: &Connection,
+    track_id: i64,
+) -> Result<Option<AudioDjProfileRow>> {
+    conn.query_row(
+        "SELECT media_ref_kind, media_ref_id, track_id, queue_item_id, tidal_id,
+            profile_version, beat_grid_blob, downbeats_blob, phrase_boundaries_blob,
+            mix_in_blob, mix_out_blob, intro_end_seconds, outro_start_seconds,
+            breakdown_blob, drop_blob, safe_transition_windows_blob, energy_contour_blob,
+            vocal_presence_blob, vocal_density_blob, lufs_loud_body, true_peak_dbtp,
+            beat_confidence, profile_confidence, analysis_scope_ms, is_temporary,
+            source, computed_at
+         FROM audio_dj_profiles
+         WHERE track_id = ?1
+         ORDER BY computed_at DESC
+         LIMIT 1",
+        params![track_id],
+        audio_dj_profile_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn promote_temporary_audio_dj_profile(
+    conn: &Connection,
+    temporary_key: &AudioDjProfileKey,
+    stable_key: &AudioDjProfileKey,
+    tidal_id: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audio_dj_profiles (
+            media_ref_kind, media_ref_id, track_id, queue_item_id, tidal_id, profile_version,
+            beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
+            intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
+            safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
+            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            profile_confidence, analysis_scope_ms, is_temporary, source, computed_at
+        )
+        SELECT ?3, ?4, track_id, queue_item_id, COALESCE(?5, tidal_id), profile_version,
+            beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
+            intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
+            safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
+            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            profile_confidence, analysis_scope_ms, 0, source, datetime('now')
+        FROM audio_dj_profiles
+        WHERE media_ref_kind = ?1 AND media_ref_id = ?2
+        ON CONFLICT(media_ref_kind, media_ref_id) DO UPDATE SET
+            track_id = excluded.track_id,
+            queue_item_id = excluded.queue_item_id,
+            tidal_id = excluded.tidal_id,
+            profile_version = excluded.profile_version,
+            beat_grid_blob = excluded.beat_grid_blob,
+            downbeats_blob = excluded.downbeats_blob,
+            phrase_boundaries_blob = excluded.phrase_boundaries_blob,
+            mix_in_blob = excluded.mix_in_blob,
+            mix_out_blob = excluded.mix_out_blob,
+            intro_end_seconds = excluded.intro_end_seconds,
+            outro_start_seconds = excluded.outro_start_seconds,
+            breakdown_blob = excluded.breakdown_blob,
+            drop_blob = excluded.drop_blob,
+            safe_transition_windows_blob = excluded.safe_transition_windows_blob,
+            energy_contour_blob = excluded.energy_contour_blob,
+            vocal_presence_blob = excluded.vocal_presence_blob,
+            vocal_density_blob = excluded.vocal_density_blob,
+            lufs_loud_body = excluded.lufs_loud_body,
+            true_peak_dbtp = excluded.true_peak_dbtp,
+            beat_confidence = excluded.beat_confidence,
+            profile_confidence = excluded.profile_confidence,
+            analysis_scope_ms = excluded.analysis_scope_ms,
+            is_temporary = excluded.is_temporary,
+            source = excluded.source,
+            computed_at = excluded.computed_at",
+        params![
+            temporary_key.media_ref_kind,
+            temporary_key.media_ref_id,
+            stable_key.media_ref_kind,
+            stable_key.media_ref_id,
+            tidal_id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_audio_dj_profile_correction(
+    conn: &Connection,
+    row: &AudioDjProfileCorrectionRow,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audio_dj_profile_corrections (
+            media_ref_kind, media_ref_id, bpm_multiplier, downbeat_offset_beats,
+            phrase_offset_bars, safe_crossfade_only, transition_speed_bias, notes,
+            created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(media_ref_kind, media_ref_id) DO UPDATE SET
+            bpm_multiplier = excluded.bpm_multiplier,
+            downbeat_offset_beats = excluded.downbeat_offset_beats,
+            phrase_offset_bars = excluded.phrase_offset_bars,
+            safe_crossfade_only = excluded.safe_crossfade_only,
+            transition_speed_bias = excluded.transition_speed_bias,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at",
+        params![
+            row.media_ref_kind,
+            row.media_ref_id,
+            row.bpm_multiplier,
+            row.downbeat_offset_beats,
+            row.phrase_offset_bars,
+            if row.safe_crossfade_only { 1 } else { 0 },
+            row.transition_speed_bias,
+            row.notes,
+            row.created_at,
+            row.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_audio_dj_profile_correction(
+    conn: &Connection,
+    key: &AudioDjProfileKey,
+) -> Result<Option<AudioDjProfileCorrectionRow>> {
+    conn.query_row(
+        "SELECT media_ref_kind, media_ref_id, bpm_multiplier, downbeat_offset_beats,
+            phrase_offset_bars, safe_crossfade_only, transition_speed_bias, notes,
+            created_at, updated_at
+         FROM audio_dj_profile_corrections
+         WHERE media_ref_kind = ?1 AND media_ref_id = ?2",
+        params![key.media_ref_kind, key.media_ref_id],
+        |row| {
+            Ok(AudioDjProfileCorrectionRow {
+                media_ref_kind: row.get(0)?,
+                media_ref_id: row.get(1)?,
+                bpm_multiplier: row.get(2)?,
+                downbeat_offset_beats: row.get(3)?,
+                phrase_offset_bars: row.get(4)?,
+                safe_crossfade_only: row.get::<_, i64>(5)? != 0,
+                transition_speed_bias: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn is_dj_engine_enabled(conn: &Connection) -> Result<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'dj_engine_enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(value.as_deref(), Some("1") | Some("true")))
+}
+
+pub fn set_dj_engine_enabled(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value)
+         VALUES ('dj_engine_enabled', ?1)",
+        params![if enabled { "1" } else { "0" }],
+    )?;
+    Ok(())
+}
+
+pub fn get_dj_global_policy(conn: &Connection) -> Result<(String, String)> {
+    let mix_intent = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'dj_mix_intent'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "balanced".to_string());
+    let transition_speed_bias = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = 'dj_transition_speed_bias'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "neutral".to_string());
+    Ok((mix_intent, transition_speed_bias))
+}
+
+pub fn set_dj_global_policy(
+    conn: &Connection,
+    mix_intent: &str,
+    transition_speed_bias: &str,
+) -> Result<()> {
+    if !matches!(mix_intent, "safe" | "balanced" | "bold") {
+        bail!("unknown DJ mix intent: {mix_intent}");
+    }
+    if !matches!(transition_speed_bias, "slower" | "neutral" | "faster") {
+        bail!("unknown DJ transition speed bias: {transition_speed_bias}");
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value)
+         VALUES ('dj_mix_intent', ?1)",
+        params![mix_intent],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value)
+         VALUES ('dj_transition_speed_bias', ?1)",
+        params![transition_speed_bias],
+    )?;
+    Ok(())
+}
+
+fn validate_dj_fallback_reason(reason: Option<&str>) -> Result<()> {
+    if let Some(reason) = reason
+        && !matches!(
+            reason,
+            "disabled"
+                | "current_profile_missing"
+                | "next_profile_missing"
+                | "profile_low_confidence"
+                | "next_not_resolved"
+                | "fetch_failed"
+                | "decode_late"
+                | "analysis_late"
+                | "program_invalid"
+                | "queue_changed"
+                | "safety_override_safe"
+                | "template_not_renderable"
+                | "timing_unstable"
+        )
+    {
+        bail!("unknown DJ fallback reason: {reason}");
+    }
+    Ok(())
+}
+
+fn validate_dj_timing_source(source: Option<&str>) -> Result<()> {
+    if let Some(source) = source
+        && !matches!(source, "downbeat_sync" | "beat_sync" | "fallback_overlap")
+    {
+        bail!("unknown DJ timing source: {source}");
+    }
+    Ok(())
+}
+
+fn validate_dj_timing_status(status: Option<&str>) -> Result<()> {
+    if let Some(status) = status
+        && !matches!(status, "armed" | "fired" | "late" | "missed")
+    {
+        bail!("unknown DJ timing status: {status}");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_dj_transition_event(
+    conn: &Connection,
+    from_track_id: Option<i64>,
+    to_track_id: Option<i64>,
+    from_media_ref_kind: Option<&str>,
+    from_media_ref_id: Option<&str>,
+    to_media_ref_kind: Option<&str>,
+    to_media_ref_id: Option<&str>,
+    template: &str,
+    program_json: &str,
+    rejected_alternatives_json: Option<&str>,
+    planner_version: &str,
+    fallback_reason: Option<&str>,
+    planned_start_ms: Option<i64>,
+    timing_source: Option<&str>,
+    timing_status: Option<&str>,
+) -> Result<i64> {
+    validate_dj_fallback_reason(fallback_reason)?;
+    validate_dj_timing_source(timing_source)?;
+    validate_dj_timing_status(timing_status)?;
+    conn.execute(
+        "INSERT INTO dj_transition_events (
+            from_track_id, to_track_id, from_media_ref_kind, from_media_ref_id,
+            to_media_ref_kind, to_media_ref_id, template, program_json,
+            rejected_alternatives_json, planner_version, fallback_reason,
+            planned_start_ms, timing_source, timing_status
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            from_track_id,
+            to_track_id,
+            from_media_ref_kind,
+            from_media_ref_id,
+            to_media_ref_kind,
+            to_media_ref_id,
+            template,
+            program_json,
+            rejected_alternatives_json,
+            planner_version,
+            fallback_reason,
+            planned_start_ms,
+            timing_source,
+            timing_status,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_dj_transition_outcome(
+    conn: &Connection,
+    id: i64,
+    outcome: &str,
+    skip_within_30s: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET outcome = ?2,
+             outcome_at = datetime('now'),
+             skip_within_30s = ?3
+         WHERE id = ?1",
+        params![id, outcome, if skip_within_30s { 1 } else { 0 }],
+    )?;
+    Ok(())
+}
+
+pub fn update_dj_transition_fire_timing(
+    conn: &Connection,
+    id: i64,
+    actual_start_ms: i64,
+    timing_status: &str,
+) -> Result<()> {
+    validate_dj_timing_status(Some(timing_status))?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET actual_start_ms = ?2,
+             timing_delta_ms = CASE
+                 WHEN planned_start_ms IS NULL THEN NULL
+                 ELSE ?2 - planned_start_ms
+             END,
+             timing_status = ?3
+         WHERE id = ?1",
+        params![id, actual_start_ms, timing_status],
+    )?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET timing_status = 'missed'
+         WHERE id <> ?1
+           AND timing_status = 'armed'
+           AND EXISTS (
+               SELECT 1
+               FROM dj_transition_events fired
+               WHERE fired.id = ?1
+                 AND fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
+                 AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
+                 AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
+                 AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+           )",
+        params![id],
+    )?;
+    Ok(())
+}
+
+pub fn mark_dj_transition_timing_status_for_pair(
+    conn: &Connection,
+    from_media_ref_kind: &str,
+    from_media_ref_id: &str,
+    to_media_ref_kind: &str,
+    to_media_ref_id: &str,
+    timing_status: &str,
+) -> Result<usize> {
+    validate_dj_timing_status(Some(timing_status))?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET timing_status = ?5
+         WHERE id = (
+             SELECT id
+             FROM dj_transition_events
+             WHERE from_media_ref_kind = ?1
+               AND from_media_ref_id = ?2
+               AND to_media_ref_kind = ?3
+               AND to_media_ref_id = ?4
+               AND outcome IS NULL
+               AND timing_status = 'armed'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM dj_transition_events fired
+                   WHERE fired.from_media_ref_kind IS dj_transition_events.from_media_ref_kind
+                      AND fired.from_media_ref_id IS dj_transition_events.from_media_ref_id
+                      AND fired.to_media_ref_kind IS dj_transition_events.to_media_ref_kind
+                      AND fired.to_media_ref_id IS dj_transition_events.to_media_ref_id
+                      AND fired.id > dj_transition_events.id
+                      AND fired.timing_status = 'fired'
+                )
+              ORDER BY started_at DESC, id DESC
+              LIMIT 1
+         )",
+        params![
+            from_media_ref_kind,
+            from_media_ref_id,
+            to_media_ref_kind,
+            to_media_ref_id,
+            timing_status,
+        ],
+    )
+    .map_err(Into::into)
+}
+
+pub fn count_recent_bad_dj_feedback_for_ref(
+    conn: &Connection,
+    key: &AudioDjProfileKey,
+    limit: i64,
+) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM (
+            SELECT user_rating
+            FROM dj_transition_events
+            WHERE user_rating IS NOT NULL
+              AND (
+                (from_media_ref_kind = ?1 AND from_media_ref_id = ?2)
+                OR (to_media_ref_kind = ?1 AND to_media_ref_id = ?2)
+              )
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?3
+         )
+         WHERE user_rating < 0",
+        params![key.media_ref_kind, key.media_ref_id, limit.max(0)],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn audio_dj_profile_from_row(row: &Row<'_>) -> rusqlite::Result<AudioDjProfileRow> {
+    Ok(AudioDjProfileRow {
+        media_ref_kind: row.get(0)?,
+        media_ref_id: row.get(1)?,
+        track_id: row.get(2)?,
+        queue_item_id: row.get(3)?,
+        tidal_id: row.get(4)?,
+        profile_version: row.get(5)?,
+        beat_grid_blob: row.get(6)?,
+        downbeats_blob: row.get(7)?,
+        phrase_boundaries_blob: row.get(8)?,
+        mix_in_blob: row.get(9)?,
+        mix_out_blob: row.get(10)?,
+        intro_end_seconds: row.get(11)?,
+        outro_start_seconds: row.get(12)?,
+        breakdown_blob: row.get(13)?,
+        drop_blob: row.get(14)?,
+        safe_transition_windows_blob: row.get(15)?,
+        energy_contour_blob: row.get(16)?,
+        vocal_presence_blob: row.get(17)?,
+        vocal_density_blob: row.get(18)?,
+        lufs_loud_body: row.get(19)?,
+        true_peak_dbtp: row.get(20)?,
+        beat_confidence: row.get(21)?,
+        profile_confidence: row.get(22)?,
+        analysis_scope_ms: row.get(23)?,
+        is_temporary: row.get::<_, i64>(24)? != 0,
+        source: row.get(25)?,
+        computed_at: row.get(26)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7160,6 +7710,689 @@ mod tests {
         )
         .optional()
         .expect("query server_config")
+    }
+
+    mod dj_transition_event {
+        use super::*;
+
+        fn setup_conn() -> Connection {
+            let conn = Connection::open_in_memory().expect("in-memory db");
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("foreign keys");
+            schema::run_migrations(&conn).expect("migrations");
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+                .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, tidal_id)
+                 VALUES (1, 'Track 1', 1, 1001), (2, 'Track 2', 1, 1002)",
+                [],
+            )
+            .expect("tracks");
+            conn
+        }
+
+        fn insert_event(conn: &Connection) -> i64 {
+            insert_dj_transition_event(
+                conn,
+                Some(1),
+                Some(2),
+                Some("library_track"),
+                Some("1"),
+                Some("tidal_track"),
+                Some("200"),
+                "SafeCrossfade",
+                r#"{"template":"SafeCrossfade"}"#,
+                None,
+                "dj-v1",
+                None,
+                Some(172_000),
+                Some("downbeat_sync"),
+                Some("armed"),
+            )
+            .expect("insert event")
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            let row = conn
+                .query_row(
+                    "SELECT from_track_id, to_track_id, template, program_json, planner_version,
+                            planned_start_ms, timing_source, timing_status
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                        ))
+                    },
+                )
+                .expect("event");
+
+            assert_eq!(row.0, Some(1));
+            assert_eq!(row.1, Some(2));
+            assert_eq!(row.2, "SafeCrossfade");
+            assert_eq!(row.3, r#"{"template":"SafeCrossfade"}"#);
+            assert_eq!(row.4, "dj-v1");
+            assert_eq!(row.5, Some(172_000));
+            assert_eq!(row.6.as_deref(), Some("downbeat_sync"));
+            assert_eq!(row.7.as_deref(), Some("armed"));
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips_external_refs() {
+            let conn = setup_conn();
+            let id = insert_dj_transition_event(
+                &conn,
+                None,
+                None,
+                Some("queue_item"),
+                Some("44"),
+                Some("tidal_track"),
+                Some("555"),
+                "SafeCrossfade",
+                "{}",
+                None,
+                "dj-v1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("insert external refs");
+
+            let refs = conn
+                .query_row(
+                    "SELECT from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .expect("refs");
+
+            assert_eq!(refs.0.as_deref(), Some("queue_item"));
+            assert_eq!(refs.1.as_deref(), Some("44"));
+            assert_eq!(refs.2.as_deref(), Some("tidal_track"));
+            assert_eq!(refs.3.as_deref(), Some("555"));
+        }
+
+        #[test]
+        fn insert_dj_transition_event_round_trips_rejected_alternatives() {
+            let conn = setup_conn();
+            let rejected = r#"[{"template":"SlamCut","score":0.2,"reason":"low_confidence"}]"#;
+            let id = insert_dj_transition_event(
+                &conn,
+                Some(1),
+                Some(2),
+                Some("library_track"),
+                Some("1"),
+                Some("library_track"),
+                Some("2"),
+                "SafeCrossfade",
+                "{}",
+                Some(rejected),
+                "dj-v1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("insert rejected");
+
+            let loaded: String = conn
+                .query_row(
+                    "SELECT rejected_alternatives_json FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("rejected");
+            assert_eq!(loaded, rejected);
+        }
+
+        #[test]
+        fn insert_dj_transition_event_accepts_known_fallback_reasons() {
+            let conn = setup_conn();
+            let reasons = [
+                "disabled",
+                "current_profile_missing",
+                "next_profile_missing",
+                "profile_low_confidence",
+                "next_not_resolved",
+                "fetch_failed",
+                "decode_late",
+                "analysis_late",
+                "program_invalid",
+                "queue_changed",
+                "safety_override_safe",
+            ];
+
+            for reason in reasons {
+                insert_dj_transition_event(
+                    &conn,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "SafeCrossfade",
+                    "{}",
+                    None,
+                    "dj-v1",
+                    Some(reason),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("reason {reason} rejected: {error}"));
+            }
+            assert!(
+                insert_dj_transition_event(
+                    &conn,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "SafeCrossfade",
+                    "{}",
+                    None,
+                    "dj-v1",
+                    Some("unknown"),
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn update_dj_transition_outcome_sets_timestamp() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_outcome(&conn, id, "bad", true).expect("update");
+
+            let row = conn
+                .query_row(
+                    "SELECT outcome, outcome_at, skip_within_30s
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("outcome");
+            assert_eq!(row.0.as_deref(), Some("bad"));
+            assert!(row.1.is_some());
+            assert_eq!(row.2, 1);
+        }
+
+        #[test]
+        fn manual_skip_outcome_does_not_write_actual_timing() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_outcome(&conn, id, "skip_within_30s", true).expect("update");
+
+            let actual_start_ms: Option<i64> = conn
+                .query_row(
+                    "SELECT actual_start_ms FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("actual");
+            assert_eq!(actual_start_ms, None);
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_sets_delta_and_status() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(&conn, id, 172_144, "fired").expect("timing");
+
+            let row = conn
+                .query_row(
+                    "SELECT actual_start_ms, timing_delta_ms, timing_status
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .expect("timing row");
+            assert_eq!(row.0, Some(172_144));
+            assert_eq!(row.1, Some(144));
+            assert_eq!(row.2.as_deref(), Some("fired"));
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_closes_duplicate_armed_pair_rows() {
+            let conn = setup_conn();
+            let older_id = insert_event(&conn);
+            let fired_id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(&conn, fired_id, 172_144, "fired").expect("timing");
+
+            let rows: Vec<(i64, Option<String>)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, timing_status
+                         FROM dj_transition_events
+                         WHERE id IN (?1, ?2)
+                         ORDER BY id",
+                    )
+                    .expect("prepare");
+                stmt.query_map(params![older_id, fired_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+            };
+
+            assert_eq!(rows[0], (older_id, Some("missed".to_string())));
+            assert_eq!(rows[1], (fired_id, Some("fired".to_string())));
+        }
+
+        #[test]
+        fn mark_dj_transition_timing_status_for_pair_updates_only_armed_pair() {
+            let conn = setup_conn();
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark before insert");
+            assert_eq!(updated, 0);
+
+            let id = insert_event(&conn);
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark");
+            assert_eq!(updated, 1);
+
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT timing_status FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("status");
+            assert_eq!(status.as_deref(), Some("missed"));
+        }
+
+        #[test]
+        fn mark_dj_transition_timing_status_for_pair_updates_new_attempt_after_old_fired_pair() {
+            let conn = setup_conn();
+            let fired_id = insert_event(&conn);
+            update_dj_transition_fire_timing(&conn, fired_id, 172_040, "fired")
+                .expect("mark fired");
+            let armed_id = insert_event(&conn);
+
+            let updated = mark_dj_transition_timing_status_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+                "missed",
+            )
+            .expect("mark");
+
+            assert_eq!(updated, 1);
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT timing_status FROM dj_transition_events WHERE id = ?1",
+                    params![armed_id],
+                    |row| row.get(0),
+                )
+                .expect("status");
+            assert_eq!(status.as_deref(), Some("missed"));
+        }
+    }
+
+    mod audio_dj_profile {
+        use super::*;
+
+        fn setup_conn() -> Connection {
+            let conn = Connection::open_in_memory().expect("in-memory db");
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("foreign keys");
+            schema::run_migrations(&conn).expect("migrations");
+            conn
+        }
+
+        fn key(kind: &str, id: &str) -> AudioDjProfileKey {
+            AudioDjProfileKey {
+                media_ref_kind: kind.to_string(),
+                media_ref_id: id.to_string(),
+            }
+        }
+
+        fn seed_track(conn: &Connection) -> i64 {
+            conn.execute("INSERT INTO artists (name) VALUES ('Artist')", [])
+                .expect("artist");
+            let artist_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO tracks (title, artist_id, tidal_id) VALUES ('Track', ?1, 12345)",
+                params![artist_id],
+            )
+            .expect("track");
+            conn.last_insert_rowid()
+        }
+
+        fn profile_row(kind: &str, id: &str) -> AudioDjProfileRow {
+            AudioDjProfileRow {
+                media_ref_kind: kind.to_string(),
+                media_ref_id: id.to_string(),
+                track_id: None,
+                queue_item_id: None,
+                tidal_id: None,
+                profile_version: "dj_profile_v1".to_string(),
+                beat_grid_blob: vec![1, 2, 3],
+                downbeats_blob: vec![4, 5],
+                phrase_boundaries_blob: vec![6],
+                mix_in_blob: vec![7],
+                mix_out_blob: vec![8],
+                intro_end_seconds: Some(16.0),
+                outro_start_seconds: Some(180.0),
+                breakdown_blob: vec![9],
+                drop_blob: vec![10],
+                safe_transition_windows_blob: vec![11],
+                energy_contour_blob: vec![12],
+                vocal_presence_blob: vec![13],
+                vocal_density_blob: vec![14],
+                lufs_loud_body: Some(-12.0),
+                true_peak_dbtp: Some(-1.0),
+                beat_confidence: Some(0.9),
+                profile_confidence: 0.85,
+                analysis_scope_ms: 90_000,
+                is_temporary: false,
+                source: "test".to_string(),
+                computed_at: "2026-05-21T00:00:00Z".to_string(),
+            }
+        }
+
+        fn correction_row(kind: &str, id: &str) -> AudioDjProfileCorrectionRow {
+            AudioDjProfileCorrectionRow {
+                media_ref_kind: kind.to_string(),
+                media_ref_id: id.to_string(),
+                bpm_multiplier: Some(2.0),
+                downbeat_offset_beats: Some(1),
+                phrase_offset_bars: Some(-2),
+                safe_crossfade_only: true,
+                transition_speed_bias: Some("faster".to_string()),
+                notes: Some("user correction".to_string()),
+                created_at: "2026-05-21T00:00:00Z".to_string(),
+                updated_at: "2026-05-21T00:00:01Z".to_string(),
+            }
+        }
+
+        fn table_exists(conn: &Connection, table: &str) -> bool {
+            conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
+                |_| Ok(()),
+            )
+            .optional()
+            .expect("table lookup")
+            .is_some()
+        }
+
+        #[test]
+        fn migration_043_creates_audio_dj_profiles() {
+            let conn = setup_conn();
+            assert!(table_exists(&conn, "audio_dj_profiles"));
+            assert!(table_exists(&conn, "dj_transition_events"));
+        }
+
+        #[test]
+        fn migration_043_creates_audio_dj_profile_corrections() {
+            let conn = setup_conn();
+            assert!(table_exists(&conn, "audio_dj_profile_corrections"));
+        }
+
+        #[test]
+        fn upsert_audio_dj_profile_round_trips_library_key() {
+            let conn = setup_conn();
+            let track_id = seed_track(&conn);
+            let mut row = profile_row("library_track", &track_id.to_string());
+            row.track_id = Some(track_id);
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded = get_audio_dj_profile(&conn, &key("library_track", &track_id.to_string()))
+                .expect("get")
+                .expect("profile");
+            assert_eq!(loaded.track_id, Some(track_id));
+            assert_eq!(loaded.media_ref_kind, "library_track");
+
+            let by_track = get_audio_dj_profile_for_track(&conn, track_id)
+                .expect("get track")
+                .expect("track profile");
+            assert_eq!(by_track.media_ref_id, track_id.to_string());
+        }
+
+        #[test]
+        fn upsert_audio_dj_profile_round_trips_tidal_key() {
+            let conn = setup_conn();
+            let mut row = profile_row("tidal_track", "98765");
+            row.tidal_id = Some(98_765);
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded = get_audio_dj_profile(&conn, &key("tidal_track", "98765"))
+                .expect("get")
+                .expect("profile");
+            assert_eq!(loaded.tidal_id, Some(98_765));
+            assert_eq!(loaded.media_ref_id, "98765");
+        }
+
+        #[test]
+        fn audio_dj_profile_allows_external_queue_item_without_track_id() {
+            let conn = setup_conn();
+            conn.execute(
+                "INSERT INTO queue (position, source, pending_artist, pending_title)
+                 VALUES (1, 'radio_pending', 'Artist', 'Title')",
+                [],
+            )
+            .expect("queue item");
+            let queue_item_id = conn.last_insert_rowid();
+            let mut row = profile_row("queue_item", &queue_item_id.to_string());
+            row.queue_item_id = Some(queue_item_id);
+            row.is_temporary = true;
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded =
+                get_audio_dj_profile(&conn, &key("queue_item", &queue_item_id.to_string()))
+                    .expect("get")
+                    .expect("profile");
+            assert_eq!(loaded.track_id, None);
+            assert_eq!(loaded.queue_item_id, Some(queue_item_id));
+            assert!(loaded.is_temporary);
+        }
+
+        #[test]
+        fn audio_dj_profile_stores_confidence_and_scope() {
+            let conn = setup_conn();
+            let mut row = profile_row("tidal_track", "1");
+            row.profile_confidence = 0.4;
+            row.analysis_scope_ms = 30_000;
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded = get_audio_dj_profile(&conn, &key("tidal_track", "1"))
+                .expect("get")
+                .expect("profile");
+            assert_eq!(loaded.profile_confidence, 0.4);
+            assert_eq!(loaded.analysis_scope_ms, 30_000);
+        }
+
+        #[test]
+        fn promote_temporary_audio_dj_profile_copies_to_stable_key() {
+            let conn = setup_conn();
+            let mut row = profile_row("queue_item", "44");
+            row.is_temporary = true;
+            upsert_audio_dj_profile(&conn, &row).expect("upsert temp");
+
+            promote_temporary_audio_dj_profile(
+                &conn,
+                &key("queue_item", "44"),
+                &key("tidal_track", "555"),
+                Some(555),
+            )
+            .expect("promote");
+
+            let stable = get_audio_dj_profile(&conn, &key("tidal_track", "555"))
+                .expect("get stable")
+                .expect("stable");
+            let temporary = get_audio_dj_profile(&conn, &key("queue_item", "44"))
+                .expect("get temp")
+                .expect("temp");
+            assert_eq!(stable.beat_grid_blob, temporary.beat_grid_blob);
+            assert_eq!(stable.tidal_id, Some(555));
+            assert!(!stable.is_temporary);
+            assert!(temporary.is_temporary);
+        }
+
+        #[test]
+        fn upsert_audio_dj_profile_correction_round_trips() {
+            let conn = setup_conn();
+            let row = correction_row("tidal_track", "1");
+            upsert_audio_dj_profile_correction(&conn, &row).expect("upsert correction");
+
+            let loaded = get_audio_dj_profile_correction(&conn, &key("tidal_track", "1"))
+                .expect("get")
+                .expect("correction");
+            assert_eq!(loaded.bpm_multiplier, Some(2.0));
+            assert_eq!(loaded.downbeat_offset_beats, Some(1));
+            assert_eq!(loaded.phrase_offset_bars, Some(-2));
+            assert!(loaded.safe_crossfade_only);
+            assert_eq!(loaded.transition_speed_bias.as_deref(), Some("faster"));
+        }
+
+        #[test]
+        fn audio_dj_profile_correction_rejects_unknown_transition_speed_bias() {
+            let conn = setup_conn();
+            let mut row = correction_row("tidal_track", "1");
+            row.transition_speed_bias = Some("sideways".to_string());
+
+            assert!(upsert_audio_dj_profile_correction(&conn, &row).is_err());
+        }
+
+        #[test]
+        fn dj_engine_enabled_defaults_false() {
+            let conn = setup_conn();
+            assert!(!is_dj_engine_enabled(&conn).expect("enabled"));
+        }
+
+        #[test]
+        fn set_dj_engine_enabled_round_trips() {
+            let conn = setup_conn();
+            set_dj_engine_enabled(&conn, true).expect("enable");
+            assert!(is_dj_engine_enabled(&conn).expect("enabled"));
+            set_dj_engine_enabled(&conn, false).expect("disable");
+            assert!(!is_dj_engine_enabled(&conn).expect("disabled"));
+        }
+
+        #[test]
+        fn dj_global_policy_defaults_balanced_neutral() {
+            let conn = setup_conn();
+            assert_eq!(
+                get_dj_global_policy(&conn).expect("policy"),
+                ("balanced".to_string(), "neutral".to_string())
+            );
+        }
+
+        #[test]
+        fn set_dj_global_policy_round_trips() {
+            let conn = setup_conn();
+            set_dj_global_policy(&conn, "bold", "faster").expect("set policy");
+            assert_eq!(
+                get_dj_global_policy(&conn).expect("policy"),
+                ("bold".to_string(), "faster".to_string())
+            );
+        }
+
+        #[test]
+        fn set_dj_global_policy_rejects_unknown_values() {
+            let conn = setup_conn();
+            assert!(set_dj_global_policy(&conn, "chaos", "neutral").is_err());
+            assert!(set_dj_global_policy(&conn, "safe", "sideways").is_err());
+        }
+
+        #[test]
+        fn count_recent_bad_dj_feedback_for_ref_counts_from_and_to_roles() {
+            let conn = setup_conn();
+            let key = key("tidal_track", "1");
+            conn.execute(
+                "INSERT INTO dj_transition_events (
+                    from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, program_json, planner_version, user_rating, started_at
+                 ) VALUES (?1, ?2, 'tidal_track', '2', 'SafeCrossfade', '{}', 'v1', -1, '2026-05-21T00:00:00Z')",
+                params![key.media_ref_kind, key.media_ref_id],
+            )
+            .expect("from event");
+            conn.execute(
+                "INSERT INTO dj_transition_events (
+                    from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, program_json, planner_version, user_rating, started_at
+                 ) VALUES ('tidal_track', '3', ?1, ?2, 'SafeCrossfade', '{}', 'v1', -1, '2026-05-21T00:00:01Z')",
+                params![key.media_ref_kind, key.media_ref_id],
+            )
+            .expect("to event");
+            conn.execute(
+                "INSERT INTO dj_transition_events (
+                    from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, program_json, planner_version, user_rating, started_at
+                 ) VALUES (?1, ?2, 'tidal_track', '4', 'SafeCrossfade', '{}', 'v1', 1, '2026-05-21T00:00:02Z')",
+                params![key.media_ref_kind, key.media_ref_id],
+            )
+            .expect("good event");
+
+            assert_eq!(
+                count_recent_bad_dj_feedback_for_ref(&conn, &key, 10).expect("count"),
+                2
+            );
+            assert_eq!(
+                count_recent_bad_dj_feedback_for_ref(&conn, &key, 1).expect("count"),
+                0
+            );
+        }
     }
 
     #[test]
