@@ -798,10 +798,15 @@
 		lastUserScrollAt = Date.now();
 	}
 
+	function prefersReducedMotion(): boolean {
+		if (typeof window === 'undefined' || !window.matchMedia) return false;
+		return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+	}
+
 	$effect(() => {
 		const id = $currentTrack?.id;
 		if (!id || !queueListEl) return;
-		// Bail if the user scrolled recently — don't yank focus from their browse.
+		// Bail if the user scrolled recently - don't yank focus from their browse.
 		if (Date.now() - lastUserScrollAt < 5000) return;
 		const row = queueListEl.querySelector(`[data-track-id="${id}"]`);
 		if (!row) return;
@@ -809,7 +814,10 @@
 		const containerRect = queueListEl.getBoundingClientRect();
 		const offscreen = rect.bottom < containerRect.top || rect.top > containerRect.bottom;
 		if (offscreen) {
-			row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+			row.scrollIntoView({
+				block: 'nearest',
+				behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+			});
 		}
 	});
 
@@ -2332,6 +2340,32 @@
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
 		letter-spacing: 0.04em;
+	}
+
+	/* Honor OS-level motion-reduction. We still allow opacity transitions
+	   (they're conveying state changes that the user actively triggered),
+	   but flatten translates, rotations, and the spinner so vestibular
+	   users don't get unwanted motion in the queue surface. */
+	@media (prefers-reduced-motion: reduce) {
+		.queue-row,
+		.queue-row:hover,
+		.queue-row:focus-within,
+		.queue-action:hover,
+		.queue-icon-btn:hover:not(:disabled),
+		.queue-undo-btn:hover,
+		.queue-expand-btn:hover:not(:disabled) {
+			transform: none;
+		}
+		.now-playing-panel.queue-expanded .queue-expand-btn {
+			transform: none;
+		}
+		.queue-spinner,
+		.queue-inline-spinner {
+			animation: none;
+		}
+		.queue-undo-bar {
+			animation: none;
+		}
 	}
 
 	.queue-header {

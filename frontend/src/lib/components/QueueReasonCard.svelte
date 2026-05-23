@@ -99,6 +99,12 @@
 		to { opacity: 1; transform: translateY(0); }
 	}
 
+	@media (prefers-reduced-motion: reduce) {
+		.reason-card {
+			animation: none;
+		}
+	}
+
 	.header {
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold);
