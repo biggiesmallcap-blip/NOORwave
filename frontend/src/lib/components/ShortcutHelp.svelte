@@ -51,7 +51,13 @@
 			title: 'Queue Focus',
 			shortcuts: [
 				{ keys: ['Up'], action: 'Expand the collapsed queue when focused inside it' },
-				{ keys: ['Down'], action: 'Collapse the expanded queue when focused inside it' }
+				{ keys: ['Down'], action: 'Collapse the expanded queue when focused inside it' },
+				{ keys: ['Enter'], action: 'Play the focused row' },
+				{ keys: ['Delete'], action: 'Remove the focused row from the queue' },
+				{ keys: ['Alt', 'Up'], action: 'Move the focused row one position earlier' },
+				{ keys: ['Alt', 'Down'], action: 'Move the focused row one position later' },
+				{ keys: ['Shift', 'Alt', 'Up'], action: 'Promote the focused row to play next' },
+				{ keys: ['Z'], action: 'Undo a recent clear queue (within 6 seconds)' }
 			]
 		}
 	];

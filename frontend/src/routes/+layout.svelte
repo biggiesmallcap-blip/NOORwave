@@ -620,7 +620,46 @@
 	}
 
 	function handleQueueTrackKeydown(item: QueueItemType, event: KeyboardEvent) {
-		runOnActivation(event, () => void handleQueueTrackPlay(item));
+		const isPending = item.is_pending === true;
+		if (!isPending && (event.key === 'Enter' || event.key === ' ')) {
+			event.preventDefault();
+			void handleQueueTrackPlay(item);
+			return;
+		}
+		if (event.key === 'Delete' || event.key === 'Backspace') {
+			event.preventDefault();
+			void removeTrackFromQueue(item.id);
+			return;
+		}
+		if (event.altKey && event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (event.shiftKey) {
+				void moveQueueTrackNext(item.id);
+			} else {
+				void reorderQueueRow(item, -1);
+			}
+			return;
+		}
+		if (event.altKey && event.key === 'ArrowDown') {
+			event.preventDefault();
+			void reorderQueueRow(item, 1);
+		}
+	}
+
+	async function reorderQueueRow(item: QueueItemType, delta: -1 | 1) {
+		const fullQueue = get(playbackQueue);
+		const currentIdx = fullQueue.findIndex((q) => q.id === item.id);
+		if (currentIdx === -1) return;
+		const newIdx = currentIdx + delta;
+		if (newIdx < 0 || newIdx >= fullQueue.length) return;
+		// Refuse to move a row above the currently-playing item. The play head
+		// is rendered as the "current" row and is not user-reorderable.
+		const playingId = $currentTrack?.id ?? null;
+		if (playingId != null) {
+			const playingIdx = fullQueue.findIndex((q) => q.track.id === playingId);
+			if (playingIdx >= 0 && newIdx <= playingIdx) return;
+		}
+		await moveQueueItem(item.id, newIdx);
 	}
 
 	async function handleQueueRemove(queueItemId: number, event: MouseEvent) {
@@ -1422,13 +1461,13 @@
 							class:pending={isPending}
 							class="queue-row"
 							role="button"
-							tabindex={isPending ? undefined : 0}
+							tabindex={0}
 							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							draggable={true}
 							data-track-id={item.track.id}
 							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
+							onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 							ondragstart={(event) => handleQueueDragStart(event, item)}
 							ondragover={(event) => handleQueueDragOver(event, item)}
@@ -1760,11 +1799,11 @@
 								: $currentTrack?.id === item.track.id}
 							class:pending={isPending}
 							role="button"
-							tabindex={isPending ? undefined : 0}
+							tabindex={0}
 							aria-disabled={isPending}
 							title={isPending ? 'Resolving on TIDAL...' : undefined}
 							onclick={isPending ? undefined : () => void handleQueueTrackPlay(item)}
-							onkeydown={isPending ? undefined : (event) => handleQueueTrackKeydown(item, event)}
+							onkeydown={(event) => handleQueueTrackKeydown(item, event)}
 							oncontextmenu={(event) => openQueueRowMenu(item, event)}
 						>
 							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
