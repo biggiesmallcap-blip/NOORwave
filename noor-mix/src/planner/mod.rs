@@ -210,6 +210,26 @@ pub fn bass_swap_32_program(
     program
 }
 
+pub fn slam_cut_program(sample_rate: u32, channels: u16, duration_ms: u32) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    TransitionProgram {
+        tier: Tier::SafeCrossfade,
+        template: "SlamCut".to_string(),
+        sample_rate,
+        channels,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start: duration_samples,
+        fade_start: duration_samples,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: deck_gain_automation(duration_samples),
+    }
+}
+
 pub fn filter_sweep_eq_wash_program(
     sample_rate: u32,
     channels: u16,
@@ -829,6 +849,26 @@ mod tests {
                     && event.start_sample == program.swap_start
                     && event.to == 1.0)
         );
+    }
+
+    #[test]
+    fn slam_cut_program_uses_requested_duration() {
+        let program = slam_cut_program(48_000, 2, 200);
+
+        assert_eq!(program.template, "SlamCut");
+        assert_eq!(program.resolve_at, 9_600);
+        assert_eq!(program.tier, Tier::SafeCrossfade);
+        program.validate().expect("slam cut");
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::DeckGain(DeckId::A))
+        );
+        assert!(program.automation.iter().all(|event| !matches!(
+            event.param,
+            Param::LowGain(_) | Param::MidGain(_) | Param::HighGain(_)
+        )));
     }
 
     #[test]

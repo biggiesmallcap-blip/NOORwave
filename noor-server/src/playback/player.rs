@@ -459,6 +459,7 @@ const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
 const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
 const DJ_BASS_SWAP_16_RENDER_MS: u32 = 16_000;
 const DJ_BASS_SWAP_32_RENDER_MS: u32 = 32_000;
+const DJ_SLAM_CUT_RENDER_MS: u32 = 200;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -785,6 +786,12 @@ fn v1_renderable_program(
                 channels,
                 DJ_BASS_SWAP_32_RENDER_MS,
             ),
+            None,
+        );
+    }
+    if program.template == "SlamCut" {
+        return (
+            noor_mix::planner::slam_cut_program(sample_rate, channels, DJ_SLAM_CUT_RENDER_MS),
             None,
         );
     }
@@ -2619,14 +2626,21 @@ mod tests {
         }
 
         #[test]
-        fn v1_renderable_program_downgrades_slam_cut_to_safe_crossfade() {
+        fn v1_renderable_program_passes_slam_cut_as_short_gain_cut() {
             let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
             input.template = "SlamCut".to_string();
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
-            assert_eq!(program.template, "SafeCrossfade");
-            assert_eq!(reason, Some("template_not_renderable"));
+            assert_eq!(program.template, "SlamCut");
+            assert_eq!(program.resolve_at, 9_600);
+            assert_eq!(reason, None);
+            assert!(program.automation.iter().all(|event| !matches!(
+                event.param,
+                noor_mix::Param::LowGain(_)
+                    | noor_mix::Param::MidGain(_)
+                    | noor_mix::Param::HighGain(_)
+            )));
         }
 
         #[test]
