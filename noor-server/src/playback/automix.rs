@@ -7,8 +7,11 @@
 //! the explanation can never drift from the score it justifies.
 //!
 //! Tests for this module live in `playback::player::tests` because they share
-//! the in-memory database fixture; the items they reach into are `pub(crate)`
-//! for that reason.
+//! the in-memory database fixture; the automix items those tests reach into
+//! are `pub(crate)`. The reverse reach (this module into `player::*`) is via
+//! `pub(super)` for sibling-only helpers (`playback_anchor_index`,
+//! `normalize_genre_key`) and `pub` / `pub(crate)` for items player.rs already
+//! exposed (`load_state`, `load_snapshot`, `build_session_taste_profile`).
 
 use crate::db::{
     models::{AudioDspFeatures, QueueItem, Track},
@@ -791,29 +794,117 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     let mut visited = vec![false; tracks.len()];
     let mut last_album: Option<i64> = None;
 
+    // Helper: lowest index whose visited bit is unset, or None when every
+    // slot has been emitted. Used as the "nothing to avoid" pick and as the
+    // fallback when every remaining candidate happens to share last_album.
+    let first_unvisited = |visited: &[bool]| -> Option<usize> {
+        visited.iter().position(|v| !*v)
+    };
+
     for _ in 0..tracks.len() {
         let pos = if let Some(last_id) = last_album {
             tracks
                 .iter()
                 .enumerate()
                 .position(|(i, t)| !visited[i] && (t.album_id != Some(last_id)))
-                .unwrap_or_else(|| {
-                    // Fallback: pick the first unvisited track.
-                    tracks
-                        .iter()
-                        .enumerate()
-                        .find(|(i, _)| !visited[*i])
-                        .map(|(i, _)| i)
-                        .unwrap_or(0)
-                })
+                .or_else(|| first_unvisited(&visited))
         } else {
-            0
+            // No last album to avoid (first iter, or previous track's
+            // album_id was None). Picking unconditionally from index 0
+            // re-emits the same track every iter once it has been visited,
+            // because last_album stays None when tracks[0].album_id is None.
+            // Always walk to the first *unvisited* index instead.
+            first_unvisited(&visited)
+        };
+        let Some(pos) = pos else {
+            // Every track has been emitted - we're done.
+            break;
         };
         visited[pos] = true;
         last_album = tracks[pos].album_id;
         result.push(tracks[pos].clone());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track_with_album(id: i64, album_id: Option<i64>) -> Track {
+        Track {
+            id,
+            title: format!("T{id}"),
+            artist_id: 1,
+            artist_name: None,
+            album_id,
+            album_title: None,
+            disc_number: None,
+            track_number: None,
+            duration_ms: None,
+            isrc: None,
+            tidal_id: None,
+            ytmusic_id: None,
+            soundcloud_id: None,
+            best_quality: Some("LOSSLESS".to_string()),
+            best_source: Some("tidal".to_string()),
+            fidelity_score: 0,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+            date_added: None,
+            source: "tidal".to_string(),
+            artwork_url: None,
+        }
+    }
+
+    /// Regression: decluster_by_album used to fall back to index 0 every
+    /// iteration when `last_album` was None, producing N copies of tracks[0]
+    /// whenever the first track had `album_id = None`.
+    #[test]
+    fn decluster_by_album_does_not_duplicate_when_first_album_is_none() {
+        let input = vec![
+            track_with_album(1, None),
+            track_with_album(2, Some(10)),
+            track_with_album(3, None),
+            track_with_album(4, Some(10)),
+        ];
+        let out = decluster_by_album(input);
+
+        let ids: Vec<i64> = out.iter().map(|t| t.id).collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        sorted_ids.dedup();
+        assert_eq!(
+            sorted_ids,
+            vec![1, 2, 3, 4],
+            "every input track must appear exactly once, got {ids:?}",
+        );
+    }
+
+    /// When perfect declustering is possible (every album appears the same
+    /// number of times), no two adjacent tracks should share an album.
+    #[test]
+    fn decluster_by_album_spreads_same_album_tracks_apart_when_possible() {
+        let input = vec![
+            track_with_album(1, Some(10)),
+            track_with_album(2, Some(10)),
+            track_with_album(3, Some(20)),
+            track_with_album(4, Some(20)),
+        ];
+        let out = decluster_by_album(input);
+        assert_eq!(out.len(), 4);
+
+        for pair in out.windows(2) {
+            if let (Some(a), Some(b)) = (pair[0].album_id, pair[1].album_id) {
+                assert_ne!(
+                    a, b,
+                    "adjacent tracks share album_id {a}: {:?}",
+                    out.iter().map(|t| (t.id, t.album_id)).collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
 }
 
 /// Score a candidate for automix selection *and* emit the signals that

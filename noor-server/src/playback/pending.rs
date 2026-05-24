@@ -111,11 +111,15 @@ pub fn promote(
     local_track_id: i64,
     score_stored: i32,
 ) -> Result<bool> {
+    // Read pending identity before the UPDATE. `pending_at IS NOT NULL` mirrors
+    // the filter on read_identity / current_pending so the three SELECTs in this
+    // module agree on what "still pending" means; an external write that left
+    // pending_at NULL would skip the cleanup but the UPDATE still proceeds.
     let pending_identity: Option<(Option<i64>, String, String)> = conn
         .query_row(
             "SELECT tidal_id_hint, pending_title, pending_artist
              FROM queue
-             WHERE id = ?1 AND track_id IS NULL",
+             WHERE id = ?1 AND track_id IS NULL AND pending_at IS NOT NULL",
             params![queue_item_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -130,13 +134,20 @@ pub fn promote(
     if promoted
         && let Some((tidal_id_hint, pending_title, pending_artist)) = pending_identity
     {
+        // The row is already committed-promoted at this point. Any failure
+        // reading the resolved tidal_id is best-effort: fall back to
+        // tidal_id_hint so the external-candidate cleanup still runs, and
+        // never let the followup read mask a successful promotion (the
+        // caller's broadcast contract depends on promoted=true reaching it).
         let resolved_tidal_id = conn
             .query_row(
                 "SELECT tidal_id FROM tracks WHERE id = ?1",
                 params![local_track_id],
                 |row| row.get(0),
             )
-            .optional()?
+            .optional()
+            .ok()
+            .flatten()
             .flatten()
             .or(tidal_id_hint);
         let _ = queries::mark_external_candidate_resolved(

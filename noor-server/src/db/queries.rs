@@ -626,6 +626,13 @@ pub fn upsert_spotify_artist_map(
 /// known non-null value when the incoming fetch omitted that field (Spotify
 /// drops `monthly_listeners` for some artists, but we don't want to forget a
 /// number we'd already learned).
+///
+/// On a fresh INSERT this writes whatever the caller passes for each column,
+/// including explicit NULL when the caller passes `None`. The schema declares
+/// those columns nullable with no DEFAULT, so explicit-NULL and default-NULL
+/// produce identical rows today. If a future migration adds a non-NULL DEFAULT
+/// to any of these columns, callers that pass `None` will clobber that default
+/// with NULL; the helper would then need a parallel "partial upsert" variant.
 pub fn upsert_spotify_artist_stats(
     conn: &Connection,
     spotify_artist_id: &str,
