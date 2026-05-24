@@ -7877,8 +7877,10 @@ async fn resolve_pending_current_queue_item(
         s.db.clone()
     };
 
-    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) =
-        db.with_conn(|conn| pending::current_pending(conn)).ok().flatten()?;
+    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) = db
+        .with_conn(|conn| pending::current_pending(conn))
+        .ok()
+        .flatten()?;
 
     // Claim ownership; bail if another resolver already claimed this row.
     let claimed = db

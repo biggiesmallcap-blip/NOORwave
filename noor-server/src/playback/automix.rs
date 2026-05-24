@@ -18,8 +18,8 @@ use crate::db::{
     queries,
 };
 use crate::playback::player::{
-    PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state,
-    normalize_genre_key, playback_anchor_index,
+    PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
+    playback_anchor_index,
 };
 use crate::playback::queue::{self, ShuffleMode};
 use crate::playback::shuffle::{
@@ -797,9 +797,7 @@ fn decluster_by_album(tracks: Vec<Track>) -> Vec<Track> {
     // Helper: lowest index whose visited bit is unset, or None when every
     // slot has been emitted. Used as the "nothing to avoid" pick and as the
     // fallback when every remaining candidate happens to share last_album.
-    let first_unvisited = |visited: &[bool]| -> Option<usize> {
-        visited.iter().position(|v| !*v)
-    };
+    let first_unvisited = |visited: &[bool]| -> Option<usize> { visited.iter().position(|v| !*v) };
 
     for _ in 0..tracks.len() {
         let pos = if let Some(last_id) = last_album {
@@ -898,7 +896,8 @@ mod tests {
         for pair in out.windows(2) {
             if let (Some(a), Some(b)) = (pair[0].album_id, pair[1].album_id) {
                 assert_ne!(
-                    a, b,
+                    a,
+                    b,
                     "adjacent tracks share album_id {a}: {:?}",
                     out.iter().map(|t| (t.id, t.album_id)).collect::<Vec<_>>(),
                 );

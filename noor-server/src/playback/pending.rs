@@ -76,9 +76,7 @@ pub fn read_identity(
 /// but only if it's still pending. Returns `(queue_item_id, artist, title,
 /// tidal_id_hint)` or `None` if there is no current row, or it has already
 /// been resolved.
-pub fn current_pending(
-    conn: &Connection,
-) -> Result<Option<(i64, String, String, Option<i64>)>> {
+pub fn current_pending(conn: &Connection) -> Result<Option<(i64, String, String, Option<i64>)>> {
     Ok(conn
         .query_row(
             "SELECT q.id, q.pending_artist, q.pending_title, q.tidal_id_hint
@@ -131,9 +129,7 @@ pub fn promote(
          WHERE id = ?3 AND track_id IS NULL",
         params![local_track_id, score_stored, queue_item_id],
     )? == 1;
-    if promoted
-        && let Some((tidal_id_hint, pending_title, pending_artist)) = pending_identity
-    {
+    if promoted && let Some((tidal_id_hint, pending_title, pending_artist)) = pending_identity {
         // The row is already committed-promoted at this point. Any failure
         // reading the resolved tidal_id is best-effort: fall back to
         // tidal_id_hint so the external-candidate cleanup still runs, and
