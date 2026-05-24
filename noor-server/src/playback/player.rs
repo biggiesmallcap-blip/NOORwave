@@ -458,6 +458,7 @@ const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
 const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
 const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
 const DJ_BASS_SWAP_16_RENDER_MS: u32 = 16_000;
+const DJ_BASS_SWAP_32_RENDER_MS: u32 = 32_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -763,6 +764,26 @@ fn v1_renderable_program(
                 sample_rate,
                 channels,
                 DJ_BASS_SWAP_16_RENDER_MS,
+            ),
+            None,
+        );
+    }
+    if program.template == "BassSwap32" {
+        if render_timing_unstable {
+            return (
+                crate::playback::dj_engine::safe_crossfade_program(
+                    sample_rate,
+                    channels,
+                    noor_mix::Policy::default(),
+                ),
+                Some("timing_unstable"),
+            );
+        }
+        return (
+            noor_mix::planner::bass_swap_32_program(
+                sample_rate,
+                channels,
+                DJ_BASS_SWAP_32_RENDER_MS,
             ),
             None,
         );
@@ -2324,7 +2345,7 @@ mod tests {
                 downbeats_blob: encode_f32_blob(
                     &(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>(),
                 ),
-                phrase_boundaries_blob: encode_u32_blob(&(0..16).collect::<Vec<_>>()),
+                phrase_boundaries_blob: encode_u32_blob(&(0..2).collect::<Vec<_>>()),
                 mix_in_blob: encode_f32_blob(&[0.0]),
                 mix_out_blob: encode_f32_blob(&[90.0]),
                 intro_end_seconds: Some(16.0),
@@ -2333,8 +2354,8 @@ mod tests {
                 drop_blob: encode_f32_blob(&[]),
                 safe_transition_windows_blob: encode_f32_blob(&[0.0, 8.0, 1.0]),
                 energy_contour_blob: encode_f32_blob(&[]),
-                vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
-                vocal_density_blob: encode_f32_blob(&[0.0; 16]),
+                vocal_presence_blob: encode_f32_blob(&[0.0; 2]),
+                vocal_density_blob: encode_f32_blob(&[0.0; 2]),
                 lufs_loud_body: Some(-12.0),
                 true_peak_dbtp: Some(-1.0),
                 beat_confidence: Some(0.9),
@@ -2583,6 +2604,21 @@ mod tests {
         }
 
         #[test]
+        fn v1_renderable_program_passes_bass_swap_32_with_low_handoff() {
+            let input = noor_mix::planner::bass_swap_32_program(48_000, 2, 16_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "BassSwap32");
+            assert_eq!(program.resolve_at, 1_536_000);
+            assert_eq!(reason, None);
+            assert!(program.automation.iter().any(|event| event.param
+                == noor_mix::Param::LowGain(noor_mix::DeckId::B)
+                && event.start_sample == program.swap_start
+                && event.to == 1.0));
+        }
+
+        #[test]
         fn v1_renderable_program_downgrades_slam_cut_to_safe_crossfade() {
             let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
             input.template = "SlamCut".to_string();
@@ -2614,6 +2650,16 @@ mod tests {
         }
 
         #[test]
+        fn unstable_timing_downgrades_bass_swap_32_to_safe_crossfade() {
+            let input = noor_mix::planner::bass_swap_32_program(48_000, 2, 32_000);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, true);
+
+            assert_eq!(program.template, "SafeCrossfade");
+            assert_eq!(reason, Some("timing_unstable"));
+        }
+
+        #[test]
         fn dj_renderers_use_wider_overlap_than_safe_crossfade() {
             let safe = crate::playback::dj_engine::safe_crossfade_program(
                 48_000,
@@ -2627,10 +2673,16 @@ mod tests {
             );
             let bass_swap =
                 noor_mix::planner::bass_swap_16_program(48_000, 2, DJ_BASS_SWAP_16_RENDER_MS);
+            let bass_swap_32 =
+                noor_mix::planner::bass_swap_32_program(48_000, 2, DJ_BASS_SWAP_32_RENDER_MS);
 
             assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 8_000);
             assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 12_000);
             assert_eq!(dj_gapless_plan_from_program(&bass_swap).overlap_ms, 16_000);
+            assert_eq!(
+                dj_gapless_plan_from_program(&bass_swap_32).overlap_ms,
+                32_000
+            );
         }
 
         #[test]

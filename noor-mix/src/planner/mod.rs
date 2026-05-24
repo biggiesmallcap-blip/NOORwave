@@ -57,8 +57,8 @@ impl Planner {
             && !(bpm_delta <= 3.0
                 && outgoing.has_full_dj_profile()
                 && incoming.has_full_dj_profile()
-                && outgoing.phrase_bar_indices.len() >= 16
-                && incoming.phrase_bar_indices.len() >= 16
+                && outgoing.phrase_bar_indices.len() >= 2
+                && incoming.phrase_bar_indices.len() >= 2
                 && matches!(camelot_distance, 0 | 1 | 7))
         {
             return TransitionTemplate::SafeCrossfade;
@@ -66,10 +66,10 @@ impl Planner {
 
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
         let incoming_phrases = incoming.phrase_bar_indices.len();
-        if outgoing_phrases >= 32 && incoming_phrases >= 32 && bpm_delta <= 3.0 {
+        if outgoing_phrases >= 4 && incoming_phrases >= 4 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap32;
         }
-        if outgoing_phrases >= 16 && incoming_phrases >= 16 && bpm_delta <= 3.0 {
+        if outgoing_phrases >= 2 && incoming_phrases >= 2 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap16;
         }
         if matches!(camelot_distance, 0 | 1 | 7) && bpm_delta <= 3.0 {
@@ -165,6 +165,35 @@ pub fn bass_swap_16_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "BassSwap16".to_string(),
+        sample_rate,
+        channels,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: deck_gain_automation(duration_samples),
+    };
+    program
+        .automation
+        .extend(bass_swap_eq_handoff(duration_samples));
+    program
+}
+
+pub fn bass_swap_32_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let mut program = TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "BassSwap32".to_string(),
         sample_rate,
         channels,
         sync_start: 0,
@@ -570,8 +599,8 @@ mod tests {
         };
         assert_eq!(
             Planner::choose_template(
-                &profile(Some(120.0), Some("8A"), 4),
-                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(120.0), Some("8A"), 1),
+                &profile(Some(120.0), Some("8A"), 1),
                 &policy
             ),
             TransitionTemplate::SafeCrossfade
@@ -582,8 +611,8 @@ mod tests {
     fn choose_template_uses_bass_swap_32_for_long_phrases() {
         assert_eq!(
             Planner::choose_template(
-                &profile(Some(120.0), Some("8A"), 32),
-                &profile(Some(121.0), Some("8A"), 32),
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(121.0), Some("8A"), 4),
                 &Policy::default()
             ),
             TransitionTemplate::BassSwap32
@@ -594,8 +623,8 @@ mod tests {
     fn choose_template_uses_bass_swap_16_for_medium_phrases() {
         assert_eq!(
             Planner::choose_template(
-                &profile(Some(120.0), Some("8A"), 16),
-                &profile(Some(121.0), Some("8A"), 16),
+                &profile(Some(120.0), Some("8A"), 2),
+                &profile(Some(121.0), Some("8A"), 2),
                 &Policy::default()
             ),
             TransitionTemplate::BassSwap16
@@ -606,8 +635,8 @@ mod tests {
     fn choose_template_uses_long_harmonic_blend_for_compatible_short_profiles() {
         assert_eq!(
             Planner::choose_template(
-                &profile(Some(120.0), Some("8A"), 4),
-                &profile(Some(121.0), Some("9A"), 4),
+                &profile(Some(120.0), Some("8A"), 1),
+                &profile(Some(121.0), Some("9A"), 1),
                 &Policy::default()
             ),
             TransitionTemplate::LongHarmonicBlend
@@ -691,8 +720,8 @@ mod tests {
     #[test]
     fn bass_swap_16_low_band_crosses_at_swap_start() {
         let program = Planner::plan(
-            &profile(Some(120.0), Some("8A"), 16),
-            &profile(Some(121.0), Some("8A"), 16),
+            &profile(Some(120.0), Some("8A"), 2),
+            &profile(Some(121.0), Some("8A"), 2),
             &Policy::default(),
         );
         assert_eq!(program.template, "BassSwap16");
@@ -709,8 +738,8 @@ mod tests {
     #[test]
     fn bass_swap_16_shapes_clean_low_ownership_handoff() {
         let program = Planner::plan(
-            &profile(Some(120.0), Some("8A"), 16),
-            &profile(Some(121.0), Some("8A"), 16),
+            &profile(Some(120.0), Some("8A"), 2),
+            &profile(Some(121.0), Some("8A"), 2),
             &Policy::default(),
         );
 
@@ -776,12 +805,30 @@ mod tests {
     #[test]
     fn bass_swap_32_resolves_after_32_bars() {
         let program = Planner::plan(
-            &profile(Some(120.0), Some("8A"), 32),
-            &profile(Some(121.0), Some("8A"), 32),
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(121.0), Some("8A"), 4),
             &Policy::default(),
         );
         assert_eq!(program.template, "BassSwap32");
         assert_eq!(program.resolve_at, 32 * 96_000);
+    }
+
+    #[test]
+    fn bass_swap_32_program_uses_requested_duration() {
+        let program = bass_swap_32_program(48_000, 2, 32_000);
+
+        assert_eq!(program.template, "BassSwap32");
+        assert_eq!(program.resolve_at, 1_536_000);
+        assert_eq!(program.tier, Tier::FullBlend);
+        program.validate().expect("bass swap 32");
+        assert!(
+            program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::LowGain(DeckId::B)
+                    && event.start_sample == program.swap_start
+                    && event.to == 1.0)
+        );
     }
 
     #[test]
