@@ -558,7 +558,7 @@ pub(crate) fn decode_and_buffer_job(
             }
 
             // Apply fade-in / fade-out ramps and mark the stream complete.
-            let total = {
+            let buffer_len = {
                 let mut guard = shared
                     .buffer
                     .lock()
@@ -569,13 +569,24 @@ pub(crate) fn decode_and_buffer_job(
                 guard.mark_finished();
                 guard.samples.len() as u64
             };
-            shared.total_samples.store(total, Ordering::Relaxed);
-            let total_secs = total as f64
+            // total_samples is ABSOLUTE (offset + local count) to match
+            // position_samples, which is also ABSOLUTE. For a fresh play the
+            // offset is 0 and the two are equal; for a segment-restart engine
+            // (option C) the offset is non-zero, so storing LOCAL count here
+            // would race position past total and make the fade-out branch in
+            // write_output_buffer immediately compute remaining=0 (silence)
+            // as soon as crossfade_samples gets armed.
+            let offset = shared.position_offset_samples.load(Ordering::Relaxed);
+            let absolute_total = offset.saturating_add(buffer_len);
+            shared
+                .total_samples
+                .store(absolute_total, Ordering::Relaxed);
+            let total_secs = absolute_total as f64
                 / (shared.target_sample_rate.load(Ordering::Relaxed).max(1) as f64
                     * device_channels.max(1) as f64);
             debug!(
-                "Playback decoder finished: track_id={}, packets={}, buffered_samples={}, duration_secs={:.3}",
-                shared.track_id, decoded_packets, total, total_secs
+                "Playback decoder finished: track_id={}, packets={}, buffered_samples={}, offset_samples={}, total_samples={}, duration_secs={:.3}",
+                shared.track_id, decoded_packets, buffer_len, offset, absolute_total, total_secs
             );
 
             // Notify the runtime loop that this engine's decode is complete.

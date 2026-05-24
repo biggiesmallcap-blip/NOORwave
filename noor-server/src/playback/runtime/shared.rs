@@ -657,6 +657,114 @@ mod tests {
         assert_eq!(out, [0.125, 0.25, 0.5, 1.0]);
     }
 
+    /// Regression: a segment-restart engine (offset > 0) plus an armed DJ
+    /// crossfade must not immediately mute the active track. The bug was that
+    /// the decoder used to store LOCAL `samples.len()` into `total_samples`
+    /// while `position_samples` is ABSOLUTE (offset + local). When DJ arming
+    /// then set `crossfade_samples > 0`, the fade-out branch computed
+    /// `remaining = total.saturating_sub(pos)` which saturated to 0, dropping
+    /// fade_gain to sin(0) = 0 — audible silence for the entire window
+    /// between arming and the actual transition. The fix is that the decoder
+    /// stores ABSOLUTE total (offset + samples.len()), so this test simulates
+    /// the post-fix invariant and asserts no premature attenuation.
+    #[test]
+    fn armed_crossfade_does_not_mute_segment_restart_active() {
+        let shared = test_shared_state();
+        // Mimic a segment-restart engine: offset is the segment start in
+        // absolute samples (e.g. 120s into a track at 48000 Hz / 2 ch).
+        let offset_samples: u64 = 120 * 48_000 * 2;
+        shared
+            .position_offset_samples
+            .store(offset_samples, Ordering::Relaxed);
+
+        // Local buffer covers the remaining 60s of the track.
+        let local_samples: u64 = 60 * 48_000 * 2;
+        // Decoder-stored total is ABSOLUTE (offset + local) per the contract.
+        shared
+            .total_samples
+            .store(offset_samples + local_samples, Ordering::Relaxed);
+
+        // Position: ~30s into this segment's playback (still ABSOLUTE).
+        let played_samples: u64 = 30 * 48_000 * 2;
+        shared
+            .position_samples
+            .store(offset_samples + played_samples, Ordering::Relaxed);
+
+        // DJ arming for a 13s overlap (matches the BassSwap16 user log).
+        let xfade: u64 = 13 * 48_000 * 2;
+        shared.crossfade_samples.store(xfade, Ordering::Relaxed);
+        shared
+            .crossfade_start_signaled
+            .store(false, Ordering::Relaxed);
+
+        // 30s into the segment, 30s remaining, xfade=13s — gain must be 1.0.
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        }
+
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(
+            out,
+            [1.0, 1.0, 1.0, 1.0],
+            "armed but pre-fire-window active deck must play full-volume"
+        );
+    }
+
+    /// Regression: the crossfade-start signal must not fire prematurely on a
+    /// segment-restart engine. Same root cause as the fade-out mute bug — if
+    /// `total_samples` was LOCAL while `position_samples` is ABSOLUTE,
+    /// `total - pos` would saturate to 0 < xfade and CrossfadeStart would be
+    /// emitted immediately, causing the runtime to promote the next engine
+    /// before the actual transition window opened.
+    #[test]
+    fn crossfade_start_does_not_fire_early_on_segment_restart() {
+        let shared = test_shared_state();
+        let offset_samples: u64 = 120 * 48_000 * 2;
+        shared
+            .position_offset_samples
+            .store(offset_samples, Ordering::Relaxed);
+
+        let local_samples: u64 = 60 * 48_000 * 2;
+        shared
+            .total_samples
+            .store(offset_samples + local_samples, Ordering::Relaxed);
+
+        let played_samples: u64 = 30 * 48_000 * 2;
+        shared
+            .position_samples
+            .store(offset_samples + played_samples, Ordering::Relaxed);
+
+        let xfade: u64 = 13 * 48_000 * 2;
+        shared.crossfade_samples.store(xfade, Ordering::Relaxed);
+        shared
+            .crossfade_start_signaled
+            .store(false, Ordering::Relaxed);
+
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+        }
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert!(
+            !shared.crossfade_start_signaled.load(Ordering::Relaxed),
+            "30s remaining with 13s xfade must leave the start-signal pending"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "no CrossfadeStart command should be queued yet"
+        );
+    }
+
     #[test]
     fn seek_to_decoded_position_applies_immediately() {
         let mut buffer = PlaybackBuffer::new(0);
