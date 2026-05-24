@@ -29,7 +29,8 @@ impl Planner {
         let (Some(outgoing_bpm), Some(incoming_bpm)) = (outgoing.bpm, incoming.bpm) else {
             return TransitionTemplate::SafeCrossfade;
         };
-        let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, incoming_bpm);
+        let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
+        let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm);
         if matches!(policy.mix_intent, MixIntent::Bold)
             && !outgoing.phrase_bar_indices.is_empty()
             && !incoming.phrase_bar_indices.is_empty()
@@ -138,7 +139,10 @@ fn build_program(
     if matches!(template, TransitionTemplate::LongHarmonicBlend)
         && outgoing.bpm.zip(incoming.bpm).is_some()
     {
-        let rate = incoming.bpm.map(|b| bpm / b).unwrap_or(1.0);
+        let rate = incoming
+            .bpm
+            .map(|b| bpm / scoring::nearest_tempo_family_bpm(bpm, b))
+            .unwrap_or(1.0);
         program.automation.push(AutomationEvent {
             param: Param::PlaybackRate(DeckId::B),
             start_sample: 0,
@@ -635,6 +639,18 @@ mod tests {
     }
 
     #[test]
+    fn choose_template_treats_half_time_grid_as_compatible() {
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(124.0), Some("8A"), 2),
+                &profile(Some(62.0), Some("8A"), 2),
+                &Policy::default()
+            ),
+            TransitionTemplate::BassSwap16
+        );
+    }
+
+    #[test]
     fn choose_template_missing_camelot_is_safe_crossfade() {
         assert_eq!(
             Planner::choose_template(
@@ -924,6 +940,26 @@ mod tests {
             .expect("rate automation")
             .to;
         assert_eq!(rate, 0.97);
+    }
+
+    #[test]
+    fn long_harmonic_blend_normalizes_half_time_rate() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::LongHarmonicBlend),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(124.0), Some("8A"), 1),
+            &profile(Some(62.0), Some("8A"), 1),
+            &policy,
+        );
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
+            .expect("rate automation")
+            .to;
+        assert_eq!(rate, 1.0);
     }
 
     #[test]

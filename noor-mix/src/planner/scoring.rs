@@ -21,6 +21,20 @@ pub fn bpm_delta_pct(a: f32, b: f32) -> f32 {
     ((a - b).abs() / a.min(b)) * 100.0
 }
 
+pub fn nearest_tempo_family_bpm(reference: f32, bpm: f32) -> f32 {
+    if !reference.is_finite() || !bpm.is_finite() || reference <= 0.0 || bpm <= 0.0 {
+        return bpm;
+    }
+
+    [bpm, bpm * 2.0, bpm / 2.0]
+        .into_iter()
+        .filter(|candidate| candidate.is_finite() && *candidate > 0.0)
+        .min_by(|left, right| {
+            bpm_delta_pct(reference, *left).total_cmp(&bpm_delta_pct(reference, *right))
+        })
+        .unwrap_or(bpm)
+}
+
 pub fn energy_delta(a: Option<f32>, b: Option<f32>) -> Option<f32> {
     Some((a? - b?).abs())
 }
@@ -65,6 +79,12 @@ mod tests {
     #[test]
     fn bpm_delta_pct_is_symmetric() {
         assert_eq!(bpm_delta_pct(120.0, 126.0), bpm_delta_pct(126.0, 120.0));
+    }
+
+    #[test]
+    fn nearest_tempo_family_bpm_accepts_half_time_grid() {
+        assert_eq!(nearest_tempo_family_bpm(124.0, 62.0), 124.0);
+        assert_eq!(nearest_tempo_family_bpm(62.0, 124.0), 62.0);
     }
 
     #[test]

@@ -409,8 +409,11 @@ impl PlaybackSharedState {
             .saturating_mul(u64::from(self.device_sample_rate))
             .saturating_mul(u64::from(self.device_channels.max(1)))
             / 1_000;
-        let suppress =
-            total > 0 && total.saturating_sub(target_samples) <= threshold_samples.max(1);
+        let crossfade_samples = self.crossfade_samples.load(Ordering::Relaxed);
+        let transition_start_samples = total.saturating_sub(crossfade_samples);
+        let suppress = total > 0
+            && (target_samples >= transition_start_samples
+                || total.saturating_sub(target_samples) <= threshold_samples.max(1));
         self.suppress_crossfade_after_seek
             .store(suppress, Ordering::Relaxed);
     }

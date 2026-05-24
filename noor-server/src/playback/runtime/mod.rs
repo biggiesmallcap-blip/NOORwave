@@ -3476,6 +3476,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_seek_past_crossfade_window_suppresses_crossfade_promotion() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let total_samples = 120 * 48_000 * 2;
+        let crossfade_samples = 30 * 48_000 * 2;
+        active
+            .shared
+            .total_samples
+            .store(total_samples, Ordering::Relaxed);
+        active
+            .shared
+            .crossfade_samples
+            .store(crossfade_samples, Ordering::Relaxed);
+
+        active
+            .shared
+            .set_manual_seek_crossfade_suppression(total_samples - crossfade_samples);
+        state.engine = Some(active);
+
+        assert!(active_engine_suppresses_crossfade_after_seek(&state));
+    }
+
+    #[test]
     fn manual_seek_before_near_end_keeps_crossfade_promotion_enabled() {
         let mut state = test_runtime_loop_state();
         let active = test_engine_with_shared(1, 20);
