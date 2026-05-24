@@ -81,13 +81,6 @@ with the URL swapped). Same parser caveat as moods if the response uses
 `PAGE_LINKS` modules.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation)
 
-### chore: remove `?debug=raw` from `/api/tidal/page/*` once moods parser ships
-
-Added as a one-off diagnostic to dump unparsed TIDAL payloads. Pull it (and
-`TidalClient::get_page_raw`) out once `parse_home_modules` handles every
-shape we care about.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
-
 ### feat: lightweight Spotify playlist metadata endpoint
 
 `/charts` fetches each chart card's cover via `getSpotifyPlaylist`, which
