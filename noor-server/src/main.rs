@@ -186,8 +186,7 @@ pub struct AppState {
     >,
     /// Cached embedding load (per model) for the seed-refresh path.
     /// Avoids full table scans when several seeds are refreshed in sequence.
-    pub embedding_cache:
-        Arc<std::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
+    pub embedding_cache: Arc<std::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
