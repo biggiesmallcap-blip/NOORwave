@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Reject any commit that would fail CI's `cargo fmt --all -- --check`.
+# Skips when no Rust files are staged so frontend-only commits stay fast.
+#
+# Activate once per clone: git config core.hooksPath .githooks
+set -e
+
+if git diff --cached --name-only --diff-filter=ACM | grep -q '\.rs$'; then
+  if ! cargo fmt --all -- --check; then
+    echo
+    echo "pre-commit: rustfmt found unformatted code." >&2
+    echo "  run: cargo fmt --all" >&2
+    echo "  then re-stage and re-commit." >&2
+    exit 1
+  fi
+fi
