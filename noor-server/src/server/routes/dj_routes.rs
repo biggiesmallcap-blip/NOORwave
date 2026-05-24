@@ -1710,10 +1710,11 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         transition.timing_delta_ms,
     )
     .to_string();
-    if matches!(
-        transition.renderer_template.as_deref(),
-        Some("SafeCrossfade" | "FilterSweep" | "BassSwap16")
-    ) {
+    if transition
+        .renderer_template
+        .as_deref()
+        .is_some_and(is_renderable_template)
+    {
         let downgrade_reason = renderer_downgrade_reason(transition);
         return RendererStatus {
             planned_template: Some(transition.template.clone()),
@@ -1781,13 +1782,21 @@ fn is_renderer_downgrade_reason(reason: &str) -> bool {
     matches!(reason, "template_not_renderable" | "timing_unstable")
 }
 
+fn is_renderable_template(template: &str) -> bool {
+    matches!(
+        template,
+        "SafeCrossfade"
+            | "FilterSweep"
+            | "BassSwap16"
+            | "BassSwap32"
+            | "SlamCut"
+            | "LongHarmonicBlend"
+    )
+}
+
 fn renderer_template_from_program_json(program_json: &str) -> Option<String> {
     let program: noor_mix::TransitionProgram = serde_json::from_str(program_json).ok()?;
-    matches!(
-        program.template.as_str(),
-        "SafeCrossfade" | "FilterSweep" | "BassSwap16"
-    )
-    .then_some(program.template)
+    is_renderable_template(program.template.as_str()).then_some(program.template)
 }
 
 fn media_ref_label(
@@ -1933,7 +1942,7 @@ mod tests {
     fn renderer_status_keeps_non_renderable_template_out_of_main_renderer() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
             id: 17,
-            template: "SlamCut".to_string(),
+            template: "UnknownTemplate".to_string(),
             renderer_template: None,
             fallback_reason: None,
             planned_start_ms: None,
@@ -1943,7 +1952,7 @@ mod tests {
             timing_status: None,
         }));
 
-        assert_eq!(status.planned_template.as_deref(), Some("SlamCut"));
+        assert_eq!(status.planned_template.as_deref(), Some("UnknownTemplate"));
         assert_eq!(status.renderer_template, None);
         assert_eq!(status.renderer_mode.as_deref(), Some("legacy_overlap"));
         assert_eq!(
@@ -1991,6 +2000,53 @@ mod tests {
         assert_eq!(status.renderer_template.as_deref(), Some("BassSwap16"));
         assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
         assert_eq!(status.downgrade_reason, None);
+    }
+
+    #[test]
+    fn renderer_status_exposes_new_runtime_programs() {
+        for template in ["BassSwap32", "SlamCut", "LongHarmonicBlend"] {
+            let status = renderer_status_for_transition(Some(&OpenTransition {
+                id: 23,
+                template: template.to_string(),
+                renderer_template: Some(template.to_string()),
+                fallback_reason: None,
+                planned_start_ms: Some(112_000),
+                actual_start_ms: Some(112_144),
+                timing_delta_ms: Some(144),
+                timing_source: Some("downbeat_sync".to_string()),
+                timing_status: Some("fired".to_string()),
+            }));
+
+            assert_eq!(status.planned_template.as_deref(), Some(template));
+            assert_eq!(status.renderer_template.as_deref(), Some(template));
+            assert_eq!(status.renderer_mode.as_deref(), Some("dj_gain_program"));
+            assert_eq!(status.downgrade_reason, None);
+        }
+    }
+
+    #[test]
+    fn renderer_template_from_program_json_accepts_new_runtime_programs() {
+        for template in ["BassSwap32", "SlamCut", "LongHarmonicBlend"] {
+            let program = noor_mix::TransitionProgram {
+                tier: noor_mix::Tier::FullBlend,
+                template: template.to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                sync_start: 0,
+                intro_start: 0,
+                swap_start: 1,
+                fade_start: 1,
+                resolve_at: 1,
+                loops: vec![],
+                automation: vec![],
+            };
+            let json = serde_json::to_string(&program).expect("program json");
+
+            assert_eq!(
+                renderer_template_from_program_json(&json).as_deref(),
+                Some(template)
+            );
+        }
     }
 
     #[test]
