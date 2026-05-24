@@ -48,7 +48,7 @@ pub struct EmbeddingCache {
 
 /// `std::sync::Mutex` poisons on panic. We treat poisoning as "ignore old state"
 /// rather than panicking the request thread — the worst case is one extra refresh.
-fn lock_refreshed<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock_or_poisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -58,7 +58,7 @@ pub fn is_seed_fresh(
     seed_id: i64,
     model_id: i64,
 ) -> bool {
-    let guard = lock_refreshed(refreshed);
+    let guard = lock_or_poisoned(refreshed);
     match guard.get(&seed_id) {
         Some(entry) => entry.model_id == model_id && entry.at.elapsed() < REFRESH_TTL,
         None => false,
@@ -203,7 +203,7 @@ pub async fn refresh_seed_neighbors(
     event_tx: broadcast::Sender<AppEvent>,
     seed_id: i64,
     refreshed_seeds: Arc<Mutex<HashMap<i64, RefreshEntry>>>,
-    embedding_cache: Arc<tokio::sync::Mutex<Option<EmbeddingCache>>>,
+    embedding_cache: Arc<Mutex<Option<EmbeddingCache>>>,
 ) {
     let tx = event_tx.clone();
     let send_progress = move |stage: &str, progress: f32| {
@@ -214,9 +214,10 @@ pub async fn refresh_seed_neighbors(
         });
     };
 
-    // Try the cache first (async lock, OK to hold across await — short).
+    // Try the cache first. The guard never crosses an `.await` — just a TTL
+    // check and two `Arc::clone`s — so a sync mutex is the right tool here.
     let cached = {
-        let guard = embedding_cache.lock().await;
+        let guard = lock_or_poisoned(&embedding_cache);
         guard.as_ref().and_then(|c| {
             if c.built_at.elapsed() < EMBEDDING_CACHE_TTL {
                 Some((c.model_id, Arc::clone(&c.vec_map), Arc::clone(&c.meta_map)))
@@ -252,7 +253,7 @@ pub async fn refresh_seed_neighbors(
                     let embeddings = get_model_embeddings(conn, model.id)?;
                     if embeddings.is_empty() {
                         info!("[neighbor_refresh] model {} has no embeddings", model.id);
-                        lock_refreshed(&refreshed_for_blocking).insert(
+                        lock_or_poisoned(&refreshed_for_blocking).insert(
                             seed_id,
                             RefreshEntry {
                                 model_id: model.id,
@@ -274,7 +275,7 @@ pub async fn refresh_seed_neighbors(
                 let embeddings = get_model_embeddings(conn, model.id)?;
                 if embeddings.is_empty() {
                     info!("[neighbor_refresh] model {} has no embeddings", model.id);
-                    lock_refreshed(&refreshed_for_blocking).insert(
+                    lock_or_poisoned(&refreshed_for_blocking).insert(
                         seed_id,
                         RefreshEntry {
                             model_id: model.id,
@@ -294,7 +295,7 @@ pub async fn refresh_seed_neighbors(
 
             let Some(seed_vec) = vec_map.get(&seed_id) else {
                 warn!("[neighbor_refresh] seed {seed_id} not in embedding table — skipping");
-                lock_refreshed(&refreshed_for_blocking).insert(
+                lock_or_poisoned(&refreshed_for_blocking).insert(
                     seed_id,
                     RefreshEntry {
                         model_id: model.id,
@@ -415,7 +416,7 @@ pub async fn refresh_seed_neighbors(
         Ok(Some((model_id, vec_map, meta_map))) => {
             // Refresh cache so subsequent seeds reuse the same embedding snapshot.
             {
-                let mut guard = cache_for_store.lock().await;
+                let mut guard = lock_or_poisoned(&cache_for_store);
                 let stale = guard.as_ref().is_none_or(|c| {
                     c.built_at.elapsed() >= EMBEDDING_CACHE_TTL || c.model_id != model_id
                 });
@@ -429,7 +430,7 @@ pub async fn refresh_seed_neighbors(
                 }
             }
             {
-                let mut guard = lock_refreshed(&refreshed_seeds);
+                let mut guard = lock_or_poisoned(&refreshed_seeds);
                 // Sweep on insert: drop TTL-expired entries and any left over
                 // from a previous model so the map tracks only the live working
                 // set instead of every seed ever refreshed this process.
@@ -495,7 +496,7 @@ mod tests {
         let (db, model_id) = db_with_active_model_no_embeddings();
         let refreshed: Arc<Mutex<HashMap<i64, RefreshEntry>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let cache = Arc::new(tokio::sync::Mutex::new(None));
+        let cache: Arc<Mutex<Option<EmbeddingCache>>> = Arc::new(Mutex::new(None));
         let (tx, _rx) = broadcast::channel(8);
         let seed_id: i64 = 99999;
 

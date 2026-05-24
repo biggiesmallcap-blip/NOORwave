@@ -400,21 +400,17 @@ pub(super) async fn get_tidal_mix_tracks(
 pub(super) async fn get_tidal_page_modules(
     State(state): State<SharedState>,
     Path(section): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let wire_path = resolve_page_path(&section, None)?;
-    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
-    fetch_page_modules(state, wire_path, debug_raw).await
+    fetch_page_modules(state, wire_path).await
 }
 
 pub(super) async fn get_tidal_page_modules_with_id(
     State(state): State<SharedState>,
     Path((section, id)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let wire_path = resolve_page_path(&section, Some(id.as_str()))?;
-    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
-    fetch_page_modules(state, wire_path, debug_raw).await
+    fetch_page_modules(state, wire_path).await
 }
 
 // Whitelist + wire-path normalization. Returns 404 for anything not on the
@@ -449,7 +445,6 @@ fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCo
 async fn fetch_page_modules(
     state: SharedState,
     page_path: String,
-    debug_raw: bool,
 ) -> Result<Json<Value>, StatusCode> {
     let (tokens, http_client, tidal_http_client, page_modules_cache) = {
         let in_memory = {
@@ -482,32 +477,6 @@ async fn fetch_page_modules(
         tokens.country_code.clone(),
     );
     let cache_key = tidal_page_modules_cache_key(&tokens.country_code, &page_path);
-    if debug_raw {
-        let raw = match client.get_page_raw(&page_path).await {
-            Ok(r) => r,
-            Err(e) if super::error_looks_like_auth(&e) => {
-                let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
-                    .await
-                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
-                let retry = TidalClient::with_http(
-                    tidal_http_client.clone(),
-                    refreshed.access_token.clone(),
-                    refreshed.country_code.clone(),
-                );
-                retry.get_page_raw(&page_path).await.map_err(|e| {
-                    tracing::warn!("TIDAL get_page_raw({page_path}) failed after refresh: {e}");
-                    StatusCode::BAD_GATEWAY
-                })?
-            }
-            Err(e) => {
-                tracing::warn!("TIDAL get_page_raw({page_path}) failed: {e}");
-                return Err(StatusCode::BAD_GATEWAY);
-            }
-        };
-        return Ok(Json(
-            json!({ "raw": raw, "source": "tidal", "page": page_path }),
-        ));
-    }
     if let Some(cached) = get_cached_tidal_page_modules(&page_modules_cache, &cache_key) {
         return Ok(Json(
             json!({ "modules": cached, "source": "tidal", "page": page_path, "cached": true }),
@@ -845,7 +814,6 @@ mod tests {
 pub(super) async fn get_tidal_mood_page(
     State(state): State<SharedState>,
     Path(slug): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     if slug.is_empty()
         || slug.len() > 64
@@ -856,8 +824,7 @@ pub(super) async fn get_tidal_mood_page(
         return Err(StatusCode::BAD_REQUEST);
     }
     let wire_path = format!("pages/{}", slug);
-    let debug_raw = query.get("debug").map(String::as_str) == Some("raw");
-    fetch_page_modules(state, wire_path, debug_raw).await
+    fetch_page_modules(state, wire_path).await
 }
 
 // Shared TIDAL session loader -- mirrors the inline block other handlers use.

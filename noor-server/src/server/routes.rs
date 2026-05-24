@@ -13892,7 +13892,7 @@ mod tests {
             discovery_train_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             radio_similarity_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            embedding_cache: Arc::new(std::sync::Mutex::new(None)),
             master_key: crate::services::crypto::MasterKey::load_or_generate(
                 &std::env::temp_dir().join(format!("noor-test-key-{}", uuid::Uuid::new_v4())),
             )

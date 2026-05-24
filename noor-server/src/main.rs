@@ -186,8 +186,7 @@ pub struct AppState {
     >,
     /// Cached embedding load (per model) for the seed-refresh path.
     /// Avoids full table scans when several seeds are refreshed in sequence.
-    pub embedding_cache:
-        Arc<tokio::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
+    pub embedding_cache: Arc<std::sync::Mutex<Option<services::neighbor_refresh::EmbeddingCache>>>,
     /// Symmetric key used to encrypt service secrets (currently only the
     /// Last.fm scrobble session_key — see `services/crypto.rs`).
     pub master_key: services::crypto::MasterKey,
@@ -784,7 +783,7 @@ async fn main() -> Result<()> {
         discovery_train_cancel: Arc::new(AtomicBool::new(false)),
         radio_similarity_running: Arc::new(AtomicBool::new(false)),
         refreshed_seeds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        embedding_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        embedding_cache: Arc::new(std::sync::Mutex::new(None)),
         master_key,
         pending_tidal_mix_queue: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         prepared_ephemeral_tidal_next: None,

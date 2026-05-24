@@ -53,14 +53,6 @@ request with no per-instance cache, so replaying the same seed re-hits the
 network. Add a TTL cache keyed on `(artist, title)` like the TIDAL mixes cache.
 - Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
 
-### perf: embedding cache uses an async mutex for sync-only work
-
-`AppState::embedding_cache` is a `tokio::sync::Mutex` but the critical section
-is just a TTL check + `Arc` clone (no `.await` inside). A `std::sync::Mutex`
-avoids the async-scheduler overhead. Low risk, small win; verify no `.await`
-ever lands inside the guard first.
-- Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` — when it returns 200, restore the entry.
@@ -89,13 +81,6 @@ with the URL swapped). Same parser caveat as moods if the response uses
 `PAGE_LINKS` modules.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (slug investigation)
 
-### chore: remove `?debug=raw` from `/api/tidal/page/*` once moods parser ships
-
-Added as a one-off diagnostic to dump unparsed TIDAL payloads. Pull it (and
-`TidalClient::get_page_raw`) out once `parse_home_modules` handles every
-shape we care about.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
-
 ### feat: lightweight Spotify playlist metadata endpoint
 
 `/charts` fetches each chart card's cover via `getSpotifyPlaylist`, which
@@ -104,15 +89,6 @@ returns the full track list + triggers TIDAL resolution server-side. For the
 `GET /api/discovery/sportify/playlist/{id}/meta` returning just title,
 thumbnail, owner, follower count (no tracks). Wire `/charts` to use it.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45
-
-### feat: save-to-library for Spotify tracks and albums
-
-`save_spotify_playlist` exists; the equivalent handlers for individual tracks
-and full albums do not. Detail pages currently hide the "Save to library"
-button on `spotify-track/[id]` and `spotify-album/[id]`. Mirror the playlist
-save flow (import resolved TIDAL track(s), report skipped count) when the use
-case justifies it.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 1.3 explicit non-goal)
 
 ### feat: save-to-library for Spotify tracks and albums
 
