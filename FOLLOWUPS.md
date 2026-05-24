@@ -53,14 +53,6 @@ request with no per-instance cache, so replaying the same seed re-hits the
 network. Add a TTL cache keyed on `(artist, title)` like the TIDAL mixes cache.
 - Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
 
-### perf: embedding cache uses an async mutex for sync-only work
-
-`AppState::embedding_cache` is a `tokio::sync::Mutex` but the critical section
-is just a TTL check + `Arc` clone (no `.await` inside). A `std::sync::Mutex`
-avoids the async-scheduler overhead. Low risk, small win; verify no `.await`
-ever lands inside the guard first.
-- Spawned by: docs/dev/perf-architecture-pass-2026-05-22.md
-
 ### chore: re-add Viral 50 Global to /charts when Sportify proxy recovers
 
 Removed `37i9dQZEVXbLiRSasKsNU9` (Viral 50 Global) from `frontend/src/routes/charts/+page.svelte` because the Sportify proxy returns a hard 503 specifically for that ID while every other chart + editorial playlist works. Periodically curl `https://sportify.xcasper.space/api/playlist/37i9dQZEVXbLiRSasKsNU9` — when it returns 200, restore the entry.
