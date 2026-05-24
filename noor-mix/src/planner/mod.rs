@@ -230,6 +230,41 @@ pub fn slam_cut_program(sample_rate: u32, channels: u16, duration_ms: u32) -> Tr
     }
 }
 
+pub fn long_harmonic_blend_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+    rate: f32,
+) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let mut program = TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "LongHarmonicBlend".to_string(),
+        sample_rate,
+        channels,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: deck_gain_automation(duration_samples),
+    };
+    program.automation.push(AutomationEvent {
+        param: Param::PlaybackRate(DeckId::B),
+        start_sample: 0,
+        end_sample: duration_samples,
+        from: 1.0,
+        to: rate.clamp(0.97, 1.03),
+        curve: Curve::Linear,
+    });
+    program
+}
+
 pub fn filter_sweep_eq_wash_program(
     sample_rate: u32,
     channels: u16,
@@ -889,6 +924,27 @@ mod tests {
             .expect("rate automation")
             .to;
         assert_eq!(rate, 0.97);
+    }
+
+    #[test]
+    fn long_harmonic_blend_program_uses_requested_duration() {
+        let program = long_harmonic_blend_program(48_000, 2, 16_000, 0.985);
+
+        assert_eq!(program.template, "LongHarmonicBlend");
+        assert_eq!(program.resolve_at, 768_000);
+        assert_eq!(program.tier, Tier::FullBlend);
+        program.validate().expect("long harmonic blend");
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
+            .expect("rate automation")
+            .to;
+        assert_eq!(rate, 0.985);
+        assert!(program.automation.iter().all(|event| !matches!(
+            event.param,
+            Param::LowGain(_) | Param::MidGain(_) | Param::HighGain(_)
+        )));
     }
 
     #[test]

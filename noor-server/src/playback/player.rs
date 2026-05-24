@@ -460,6 +460,7 @@ const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
 const DJ_BASS_SWAP_16_RENDER_MS: u32 = 16_000;
 const DJ_BASS_SWAP_32_RENDER_MS: u32 = 32_000;
 const DJ_SLAM_CUT_RENDER_MS: u32 = 200;
+const DJ_LONG_HARMONIC_BLEND_RENDER_MS: u32 = 16_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let mut stmt = conn.prepare(
@@ -792,6 +793,23 @@ fn v1_renderable_program(
     if program.template == "SlamCut" {
         return (
             noor_mix::planner::slam_cut_program(sample_rate, channels, DJ_SLAM_CUT_RENDER_MS),
+            None,
+        );
+    }
+    if program.template == "LongHarmonicBlend" {
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+            .map(|event| event.to)
+            .unwrap_or(1.0);
+        return (
+            noor_mix::planner::long_harmonic_blend_program(
+                sample_rate,
+                channels,
+                DJ_LONG_HARMONIC_BLEND_RENDER_MS,
+                rate,
+            ),
             None,
         );
     }
@@ -2641,6 +2659,42 @@ mod tests {
                     | noor_mix::Param::MidGain(_)
                     | noor_mix::Param::HighGain(_)
             )));
+        }
+
+        #[test]
+        fn v1_renderable_program_passes_long_harmonic_blend_rate() {
+            let input = noor_mix::planner::long_harmonic_blend_program(48_000, 2, 32_000, 0.985);
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "LongHarmonicBlend");
+            assert_eq!(program.resolve_at, 768_000);
+            assert_eq!(reason, None);
+            let rate = program
+                .automation
+                .iter()
+                .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+                .expect("rate automation")
+                .to;
+            assert_eq!(rate, 0.985);
+        }
+
+        #[test]
+        fn v1_renderable_program_defaults_long_harmonic_blend_rate() {
+            let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
+            input.template = "LongHarmonicBlend".to_string();
+
+            let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
+
+            assert_eq!(program.template, "LongHarmonicBlend");
+            assert_eq!(reason, None);
+            let rate = program
+                .automation
+                .iter()
+                .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+                .expect("rate automation")
+                .to;
+            assert_eq!(rate, 1.0);
         }
 
         #[test]
