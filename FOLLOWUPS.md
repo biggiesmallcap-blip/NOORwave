@@ -114,15 +114,6 @@ save flow (import resolved TIDAL track(s), report skipped count) when the use
 case justifies it.
 - Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 1.3 explicit non-goal)
 
-### feat: save-to-library for Spotify tracks and albums
-
-`save_spotify_playlist` exists; the equivalent handlers for individual tracks
-and full albums do not. Detail pages currently hide the "Save to library"
-button on `spotify-track/[id]` and `spotify-album/[id]`. Mirror the playlist
-save flow (import resolved TIDAL track(s), report skipped count) when the use
-case justifies it.
-- Spawned by: https://github.com/biggiesmallcap-blip/NOORwave/pull/45 (Task 1.3 explicit non-goal)
-
 ### fix: server-time fetch for Spotify TOTP token mint
 
 `spotify_public::token::mint` signs the TOTP with local UTC. The 30s window
