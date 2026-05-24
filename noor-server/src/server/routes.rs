@@ -1,7 +1,7 @@
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
-use crate::playback::{player, queue, runtime as playback_runtime};
+use crate::playback::{automix, pending, player, queue, runtime as playback_runtime};
 use crate::services::discovery::{
     DiscoveryCandidateSeed, DiscoveryProvider, TidalDiscoveryProvider,
 };
@@ -7339,7 +7339,7 @@ async fn play_track(
             // play_track resets `user_cleared_at` to 0 above, so the
             // suppression window cannot apply to this user-driven fill.
             let result = bg_db.with_conn(|conn| {
-                player::ensure_automix_queue_depth(conn, player::AUTOMIX_MIN_UPCOMING, false)
+                automix::ensure_automix_queue_depth(conn, automix::AUTOMIX_MIN_UPCOMING, false)
             });
             if result.is_ok() {
                 let _ = bg_tx.send(AppEvent::QueueUpdated);
@@ -7722,12 +7722,12 @@ async fn find_pending_tidal_match(
     Ok(best.map(|(score, track)| (score, import_metadata_from_search_track(track))))
 }
 
-/// Atomically promote a pending queue row to a resolved library row.
+/// Atomically promote a pending queue row to a resolved library row, then
+/// broadcast `QueueUpdated` if this caller won the race.
 ///
-/// Returns `true` iff this caller won the promotion race (queue row had
-/// `track_id IS NULL` at the moment of UPDATE). Both resolver paths funnel
-/// through this so the event-emission contract is the same: any successful
-/// promotion broadcasts `QueueUpdated` exactly once.
+/// Wraps [`pending::promote`] so both resolver paths funnel through one
+/// event-emission contract: any successful promotion broadcasts exactly
+/// once.
 fn promote_pending_row_emit(
     db: &crate::db::Database,
     event_tx: &tokio::sync::broadcast::Sender<AppEvent>,
@@ -7736,45 +7736,7 @@ fn promote_pending_row_emit(
     score_stored: i32,
 ) -> bool {
     let promoted = db
-        .with_conn(move |conn| {
-            let pending_identity: Option<(Option<i64>, String, String)> = conn
-                .query_row(
-                    "SELECT tidal_id_hint, pending_title, pending_artist
-                     FROM queue
-                     WHERE id = ?1 AND track_id IS NULL",
-                    rusqlite::params![queue_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            let promoted = conn.execute(
-                "UPDATE queue
-                 SET track_id = ?1, resolved_at = datetime('now'),
-                     tidal_match_score = ?2, resolving_at = NULL
-                 WHERE id = ?3 AND track_id IS NULL",
-                rusqlite::params![local_track_id, score_stored, queue_item_id],
-            )? == 1;
-            if promoted
-                && let Some((tidal_id_hint, pending_title, pending_artist)) = pending_identity
-            {
-                let resolved_tidal_id = conn
-                    .query_row(
-                        "SELECT tidal_id FROM tracks WHERE id = ?1",
-                        rusqlite::params![local_track_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten()
-                    .or(tidal_id_hint);
-                let _ = queries::mark_external_candidate_resolved(
-                    conn,
-                    resolved_tidal_id,
-                    &pending_title,
-                    &pending_artist,
-                    local_track_id,
-                );
-            }
-            Ok(promoted)
-        })
+        .with_conn(move |conn| pending::promote(conn, queue_item_id, local_track_id, score_stored))
         .unwrap_or(false);
     if promoted {
         let _ = event_tx.send(AppEvent::QueueUpdated);
@@ -7795,17 +7757,8 @@ async fn resolve_pending_row(
     event_tx: tokio::sync::broadcast::Sender<AppEvent>,
     http: reqwest::Client,
 ) {
-    let row: Option<(String, String, Option<i64>)> = db
-        .with_conn(move |conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT pending_artist, pending_title, tidal_id_hint FROM queue
-                     WHERE id = ?1 AND track_id IS NULL AND pending_at IS NOT NULL",
-                    rusqlite::params![queue_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?)
-        })
+    let row = db
+        .with_conn(move |conn| pending::read_identity(conn, queue_item_id))
         .unwrap_or(None);
 
     let (pending_artist, pending_title, tidal_id_hint) = match row {
@@ -7814,13 +7767,7 @@ async fn resolve_pending_row(
     };
 
     let claimed = db
-        .with_conn(move |conn| {
-            Ok(conn.execute(
-                "UPDATE queue SET resolving_at = datetime('now')
-                 WHERE id = ?1 AND resolving_at IS NULL AND track_id IS NULL",
-                rusqlite::params![queue_item_id],
-            )? == 1)
-        })
+        .with_conn(move |conn| pending::try_claim(conn, queue_item_id))
         .unwrap_or(false);
     if !claimed {
         return;
@@ -7828,11 +7775,8 @@ async fn resolve_pending_row(
 
     let release = |db: &crate::db::Database, qid: i64| {
         let _ = db.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE queue SET resolving_at = NULL WHERE id = ?1",
-                rusqlite::params![qid],
-            )
-            .map_err(anyhow::Error::from)
+            pending::release(conn, qid);
+            Ok(())
         });
     };
 
@@ -7933,36 +7877,14 @@ async fn resolve_pending_current_queue_item(
         s.db.clone()
     };
 
-    let (queue_item_id, pending_artist, pending_title, tidal_id_hint): (
-        i64,
-        String,
-        String,
-        Option<i64>,
-    ) = db
-        .with_conn(|conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT q.id, q.pending_artist, q.pending_title, q.tidal_id_hint
-                 FROM playback_state ps
-                 JOIN queue q ON q.id = ps.current_queue_item_id
-                 WHERE ps.id = 1 AND q.track_id IS NULL AND q.pending_at IS NOT NULL",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()?)
-        })
+    let (queue_item_id, pending_artist, pending_title, tidal_id_hint) = db
+        .with_conn(|conn| pending::current_pending(conn))
         .ok()
         .flatten()?;
 
     // Claim ownership; bail if another resolver already claimed this row.
     let claimed = db
-        .with_conn(|conn| {
-            Ok(conn.execute(
-                "UPDATE queue SET resolving_at = datetime('now')
-                 WHERE id = ?1 AND resolving_at IS NULL AND track_id IS NULL",
-                rusqlite::params![queue_item_id],
-            )? == 1)
-        })
+        .with_conn(|conn| pending::try_claim(conn, queue_item_id))
         .unwrap_or(false);
     if !claimed {
         return None;
@@ -7970,11 +7892,8 @@ async fn resolve_pending_current_queue_item(
 
     let release_lock = |db: &crate::db::Database, qid: i64| {
         let _ = db.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE queue SET resolving_at = NULL WHERE id = ?1",
-                rusqlite::params![qid],
-            )
-            .map_err(anyhow::Error::from)
+            pending::release(conn, qid);
+            Ok(())
         });
     };
 
@@ -8620,15 +8539,15 @@ async fn set_playback_automix(
                 player::set_crossfade_ms(conn, ms)?;
             }
             if let Some(dn) = payload.discover_new {
-                player::set_automix_discover_new(conn, dn)?;
+                automix::set_automix_discover_new(conn, dn)?;
             }
             if let Some(use_learning) = payload.use_learning {
-                player::set_automix_use_learning(conn, use_learning)?;
+                automix::set_automix_use_learning(conn, use_learning)?;
             }
             if let Some(allow_external) = payload.allow_external {
-                player::set_automix_allow_external(conn, allow_external)?;
+                automix::set_automix_allow_external(conn, allow_external)?;
             }
-            player::set_automix_enabled(conn, payload.enabled)
+            automix::set_automix_enabled(conn, payload.enabled)
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
