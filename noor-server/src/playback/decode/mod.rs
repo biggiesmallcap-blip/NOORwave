@@ -14,10 +14,11 @@ use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
 use crate::services::tidal::stream::resolve_stream;
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt as _;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -29,6 +30,170 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tracing::{debug, info, warn};
 
 const DJ_ANALYSIS_MAX_SECONDS: usize = 90;
+const DJ_ANALYSIS_DASH_PREFETCH_MEDIA_SEGMENTS: usize = 3;
+const DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS: usize = 3;
+const DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 150;
+const PLAYBACK_BUFFER_RETAIN_BEHIND_MS: i32 = 10_000;
+const PLAYBACK_DECODE_HIGH_WATER_SECS: u64 = 45;
+const PLAYBACK_DECODE_LOW_WATER_SECS: u64 = 30;
+const PLAYBACK_DECODE_BACKPRESSURE_SLEEP_MS: u64 = 25;
+
+#[derive(Debug)]
+struct DashPrebuffer {
+    bytes: Vec<u8>,
+    fetched_media_segments: usize,
+    stopped: bool,
+    ended_after_prefix_failure: bool,
+}
+
+fn dash_prebuffer_media_count(total_segments: usize, dj_analysis_only: bool) -> usize {
+    if dj_analysis_only {
+        total_segments.min(DJ_ANALYSIS_DASH_PREFETCH_MEDIA_SEGMENTS)
+    } else {
+        dash_initial_media_count(total_segments)
+    }
+}
+
+async fn fetch_dash_prebuffer<F, Fut>(
+    init_url: &str,
+    media_urls: &[String],
+    dj_analysis_only: bool,
+    stop: &std::sync::atomic::AtomicBool,
+    mut fetch: F,
+) -> Result<DashPrebuffer>
+where
+    F: FnMut(String, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    let media_count = dash_prebuffer_media_count(media_urls.len(), dj_analysis_only);
+    if media_count == 0 {
+        return Ok(DashPrebuffer {
+            bytes: Vec::new(),
+            fetched_media_segments: 0,
+            stopped: stop.load(Ordering::Relaxed),
+            ended_after_prefix_failure: false,
+        });
+    }
+
+    if stop.load(Ordering::Relaxed) {
+        return Ok(DashPrebuffer {
+            bytes: Vec::new(),
+            fetched_media_segments: 0,
+            stopped: true,
+            ended_after_prefix_failure: false,
+        });
+    }
+
+    let mut bytes =
+        fetch_dash_prebuffer_part(init_url.to_string(), 0, dj_analysis_only, &mut fetch).await?;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(DashPrebuffer {
+            bytes,
+            fetched_media_segments: 0,
+            stopped: true,
+            ended_after_prefix_failure: false,
+        });
+    }
+
+    let mut fetched_media_segments = 0usize;
+    for (idx, segment_url) in media_urls.iter().take(media_count).enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(DashPrebuffer {
+                bytes,
+                fetched_media_segments,
+                stopped: true,
+                ended_after_prefix_failure: false,
+            });
+        }
+
+        match fetch_dash_prebuffer_part(segment_url.clone(), idx + 1, dj_analysis_only, &mut fetch)
+            .await
+        {
+            Ok(segment) => {
+                bytes.extend(segment);
+                fetched_media_segments += 1;
+            }
+            Err(_) if dj_analysis_only && fetched_media_segments > 0 => {
+                return Ok(DashPrebuffer {
+                    bytes,
+                    fetched_media_segments,
+                    stopped: false,
+                    ended_after_prefix_failure: true,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(DashPrebuffer {
+        bytes,
+        fetched_media_segments,
+        stopped: false,
+        ended_after_prefix_failure: false,
+    })
+}
+
+async fn fetch_dash_prebuffer_part<F, Fut>(
+    url: String,
+    segment_index: usize,
+    dj_analysis_only: bool,
+    fetch: &mut F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(String, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    let attempts = if dj_analysis_only {
+        DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS
+    } else {
+        1
+    };
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match fetch(url.clone(), segment_index).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts {
+                    tokio::time::sleep(Duration::from_millis(
+                        DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS,
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("DASH prebuffer fetch failed")))
+}
+
+fn decoded_output_samples_for_secs(secs: u64, sample_rate: u32, channels: u16) -> usize {
+    secs.saturating_mul(sample_rate as u64)
+        .saturating_mul(channels.max(1) as u64)
+        .min(usize::MAX as u64) as usize
+}
+
+fn should_backpressure_decode(unread_samples: usize, high_water_samples: usize) -> bool {
+    unread_samples > high_water_samples
+}
+
+fn apply_playback_decode_backpressure(
+    shared: &Arc<PlaybackSharedState>,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<()> {
+    let high_water =
+        decoded_output_samples_for_secs(PLAYBACK_DECODE_HIGH_WATER_SECS, sample_rate, channels);
+    let low_water =
+        decoded_output_samples_for_secs(PLAYBACK_DECODE_LOW_WATER_SECS, sample_rate, channels);
+    if !should_backpressure_decode(shared.unread_buffered_samples()?, high_water) {
+        return Ok(());
+    }
+
+    while !shared.stopped.load(Ordering::Relaxed) && shared.unread_buffered_samples()? > low_water {
+        thread::sleep(Duration::from_millis(PLAYBACK_DECODE_BACKPRESSURE_SLEEP_MS));
+    }
+    Ok(())
+}
 
 pub(crate) fn decode_and_buffer_job(
     config: PlaybackRuntimeConfig,
@@ -106,46 +271,46 @@ pub(crate) fn decode_and_buffer_job(
                 .collect();
             let mut dash_initial = Vec::new();
             let mut remaining_segment_urls = sliced_segment_urls.clone();
-            let initial_media_segments = if config.dj_analysis_only {
-                sliced_segment_urls.len().min(1)
-            } else {
-                dash_initial_media_count(sliced_segment_urls.len())
-            };
-            if initial_media_segments > 0 {
+            let mut prebuffered_media_segments = 0usize;
+            let target_media_segments =
+                dash_prebuffer_media_count(sliced_segment_urls.len(), config.dj_analysis_only);
+            if target_media_segments > 0 {
                 let prebuffer_stop = shared.stop_flag();
                 let prebuffer_started = Instant::now();
-                dash_initial = rt
-                    .block_on(async {
-                        if prebuffer_stop.load(Ordering::Relaxed) {
-                            return anyhow::Ok(Vec::new());
-                        }
-                        let mut bytes =
-                            append_stream_bytes(&config.http_client, &stream_info.url, 0).await?;
-                        if prebuffer_stop.load(Ordering::Relaxed) {
-                            return anyhow::Ok(bytes);
-                        }
-                        for (idx, segment_url) in sliced_segment_urls
-                            .iter()
-                            .take(initial_media_segments)
-                            .enumerate()
-                        {
-                            if prebuffer_stop.load(Ordering::Relaxed) {
-                                return anyhow::Ok(bytes);
-                            }
-                            bytes.extend(
-                                append_stream_bytes(&config.http_client, segment_url, idx + 1)
-                                    .await?,
-                            );
-                        }
-                        anyhow::Ok(bytes)
-                    })
+                let prebuffer = rt
+                    .block_on(fetch_dash_prebuffer(
+                        &stream_info.url,
+                        &sliced_segment_urls,
+                        config.dj_analysis_only,
+                        &prebuffer_stop,
+                        |url, segment_index| {
+                            let http = config.http_client.clone();
+                            async move { append_stream_bytes(&http, &url, segment_index).await }
+                        },
+                    ))
                     .context("DASH stream prebuffer failed")?;
-                remaining_segment_urls.drain(0..initial_media_segments);
+                if prebuffer.ended_after_prefix_failure {
+                    warn!(
+                        "TIDAL DASH analysis prebuffer stopped at contiguous prefix: track_id={}, fetched_segments={}, target_segments={}",
+                        shared.track_id, prebuffer.fetched_media_segments, target_media_segments
+                    );
+                }
+                if config.dj_analysis_only
+                    && !prebuffer.stopped
+                    && prebuffer.fetched_media_segments == 0
+                {
+                    return Err(anyhow!(
+                        "DASH stream prebuffer failed: fetched no media segments"
+                    ));
+                }
+                prebuffered_media_segments = prebuffer.fetched_media_segments;
+                dash_initial = prebuffer.bytes;
+                remaining_segment_urls.drain(0..prebuffered_media_segments);
                 info!(
                     "TIDAL DASH prebuffer ready track_id={} start_index={} initial_segments={} remaining_segments={} elapsed_ms={} bytes={}",
                     shared.track_id,
                     start_index,
-                    initial_media_segments,
+                    prebuffered_media_segments,
                     remaining_segment_urls.len(),
                     prebuffer_started.elapsed().as_millis(),
                     dash_initial.len()
@@ -154,7 +319,7 @@ pub(crate) fn decode_and_buffer_job(
                     "TIDAL DASH prebuffer ready: track_id={}, start_index={}, initial_segments={}, remaining_segments={}",
                     shared.track_id,
                     start_index,
-                    initial_media_segments,
+                    prebuffered_media_segments,
                     remaining_segment_urls.len()
                 );
             }
@@ -221,7 +386,7 @@ pub(crate) fn decode_and_buffer_job(
                                     let bytes = append_stream_bytes(
                                         &http,
                                         &seg_url,
-                                        initial_media_segments + idx + 1,
+                                        prebuffered_media_segments + idx + 1,
                                     )
                                     .await?;
                                     if download_stop.load(Ordering::Relaxed) {
@@ -521,6 +686,22 @@ pub(crate) fn decode_and_buffer_job(
                 decoded_packets += 1;
                 decoded_samples += resampled.len() as u64;
 
+                if !config.dj_analysis_only {
+                    let retain_samples = crate::playback::runtime::shared::samples_from_ms(
+                        PLAYBACK_BUFFER_RETAIN_BEHIND_MS,
+                        live_target_rate,
+                        device_channels,
+                    );
+                    let compact_threshold = retain_samples.saturating_mul(2);
+                    if compact_threshold > 0
+                        && buffered_samples.saturating_sub(shared.unread_buffered_samples()?)
+                            > compact_threshold
+                    {
+                        let _ = shared.compact_consumed_buffer(retain_samples)?;
+                    }
+                    apply_playback_decode_backpressure(&shared, live_target_rate, device_channels)?;
+                }
+
                 // Observe the audio-thread's growth signal off the real-time
                 // thread. local guard makes it one log per buffer; the audio
                 // thread's CAS makes the signal cheap and idempotent.
@@ -667,6 +848,8 @@ mod tests {
     use crate::playback::dj_lookahead::DjMediaRef;
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool;
 
     fn test_track(track_id: i64) -> Track {
         Track {
@@ -727,6 +910,126 @@ mod tests {
     ) {
         let (config, rx) = test_config(enabled);
         (config.for_dj_analysis_only(), rx)
+    }
+
+    fn run_dash_prebuffer_test(
+        dj_analysis_only: bool,
+        outcomes: Vec<Result<Vec<u8>>>,
+    ) -> Result<DashPrebuffer> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let stop = AtomicBool::new(false);
+        let segments = ["s1", "s2", "s3", "s4"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let mut outcomes = VecDeque::from(outcomes);
+        rt.block_on(fetch_dash_prebuffer(
+            "init",
+            &segments,
+            dj_analysis_only,
+            &stop,
+            move |_url, _segment_index| {
+                let outcome = outcomes
+                    .pop_front()
+                    .unwrap_or_else(|| Err(anyhow!("unexpected fetch")));
+                async move { outcome }
+            },
+        ))
+    }
+
+    #[test]
+    fn analysis_only_dash_accepts_contiguous_media_prefix() {
+        let prebuffer = run_dash_prebuffer_test(
+            true,
+            vec![
+                Ok(vec![0]),
+                Ok(vec![1]),
+                Err(anyhow!("segment 2 failed")),
+                Err(anyhow!("segment 2 failed")),
+                Err(anyhow!("segment 2 failed")),
+            ],
+        )
+        .expect("analysis prefix");
+
+        assert_eq!(prebuffer.bytes, vec![0, 1]);
+        assert_eq!(prebuffer.fetched_media_segments, 1);
+        assert!(prebuffer.ended_after_prefix_failure);
+    }
+
+    #[test]
+    fn analysis_only_dash_never_skips_failed_media_gap() {
+        let prebuffer = run_dash_prebuffer_test(
+            true,
+            vec![
+                Ok(vec![0]),
+                Ok(vec![1]),
+                Err(anyhow!("segment 2 failed")),
+                Err(anyhow!("segment 2 failed")),
+                Err(anyhow!("segment 2 failed")),
+                Ok(vec![3]),
+            ],
+        )
+        .expect("analysis prefix");
+
+        assert_eq!(prebuffer.bytes, vec![0, 1]);
+        assert_eq!(prebuffer.fetched_media_segments, 1);
+    }
+
+    #[test]
+    fn analysis_only_dash_retries_first_media_segment() {
+        let prebuffer = run_dash_prebuffer_test(
+            true,
+            vec![
+                Ok(vec![0]),
+                Err(anyhow!("segment 1 failed")),
+                Ok(vec![1]),
+                Ok(vec![2]),
+                Ok(vec![3]),
+            ],
+        )
+        .expect("analysis retry");
+
+        assert_eq!(prebuffer.bytes, vec![0, 1, 2, 3]);
+        assert_eq!(prebuffer.fetched_media_segments, 3);
+        assert!(!prebuffer.ended_after_prefix_failure);
+    }
+
+    #[test]
+    fn analysis_only_dash_fails_after_first_media_retries_are_exhausted() {
+        let error = run_dash_prebuffer_test(
+            true,
+            vec![
+                Ok(vec![0]),
+                Err(anyhow!("segment 1 failed once")),
+                Err(anyhow!("segment 1 failed twice")),
+                Err(anyhow!("segment 1 failed finally")),
+            ],
+        )
+        .expect_err("first media failure should fail analysis prebuffer");
+
+        assert!(error.to_string().contains("segment 1 failed finally"));
+    }
+
+    #[test]
+    fn playback_dash_prebuffer_remains_fail_fast() {
+        let error = run_dash_prebuffer_test(
+            false,
+            vec![Ok(vec![0]), Ok(vec![1]), Err(anyhow!("segment 2 failed"))],
+        )
+        .expect_err("playback prebuffer should fail on second media segment");
+
+        assert!(error.to_string().contains("segment 2 failed"));
+    }
+
+    #[test]
+    fn decode_backpressure_uses_unread_samples_only() {
+        let high_water = decoded_output_samples_for_secs(45, 48_000, 2);
+
+        assert!(!should_backpressure_decode(high_water, high_water));
+        assert!(should_backpressure_decode(high_water + 1, high_water));
     }
 
     #[test]

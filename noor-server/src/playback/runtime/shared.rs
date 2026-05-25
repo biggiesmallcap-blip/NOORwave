@@ -431,6 +431,28 @@ impl PlaybackSharedState {
             .store(offset.saturating_add(samples_len as u64), Ordering::Relaxed);
     }
 
+    pub(crate) fn unread_buffered_samples(&self) -> Result<usize> {
+        let guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        Ok(guard.unread_samples())
+    }
+
+    pub(crate) fn compact_consumed_buffer(&self, retain_behind_samples: usize) -> Result<usize> {
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        let removed = guard.compact_consumed(retain_behind_samples);
+        if removed > 0 {
+            self.position_offset_samples
+                .fetch_add(removed as u64, Ordering::Relaxed);
+            self.publish_buffered_samples(guard.samples.len());
+        }
+        Ok(removed)
+    }
+
     /// Audio-thread-safe signal: when the underlying buffer crosses
     /// BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES, flip the growth_warned flag once.
     /// Only the CAS false -> true succeeds the first time; subsequent calls
@@ -504,6 +526,20 @@ impl PlaybackBuffer {
             }
         }
         available
+    }
+
+    fn unread_samples(&self) -> usize {
+        self.samples.len().saturating_sub(self.read_pos)
+    }
+
+    fn compact_consumed(&mut self, retain_behind_samples: usize) -> usize {
+        if self.read_pos <= retain_behind_samples {
+            return 0;
+        }
+        let remove = self.read_pos - retain_behind_samples;
+        self.samples.drain(0..remove);
+        self.read_pos -= remove;
+        remove
     }
 
     pub(crate) fn mark_finished(&mut self) {
@@ -624,6 +660,45 @@ mod tests {
         // Subsequent calls past threshold are idempotent no-ops via CAS.
         shared.signal_buffer_growth_if_threshold_crossed(BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES * 2);
         assert!(shared.growth_warned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn compact_consumed_buffer_preserves_unread_and_retained_samples() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples = (0..20).map(|sample| sample as f32).collect();
+            buffer.read_pos = 12;
+        }
+
+        let removed = shared
+            .compact_consumed_buffer(4)
+            .expect("compact consumed buffer");
+
+        assert_eq!(removed, 8);
+        let buffer = shared.buffer.lock().expect("buffer lock");
+        assert_eq!(buffer.read_pos, 4);
+        assert_eq!(buffer.samples[0], 8.0);
+        assert_eq!(buffer.samples[4], 12.0);
+        assert_eq!(buffer.unread_samples(), 8);
+    }
+
+    #[test]
+    fn compact_consumed_buffer_advances_offset_and_buffered_telemetry() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples = (0..20).map(|sample| sample as f32).collect();
+            buffer.read_pos = 12;
+        }
+
+        let removed = shared
+            .compact_consumed_buffer(4)
+            .expect("compact consumed buffer");
+
+        assert_eq!(removed, 8);
+        assert_eq!(shared.position_offset_samples.load(Ordering::Relaxed), 8);
+        assert_eq!(shared.buffered_samples.load(Ordering::Relaxed), 20);
     }
 
     #[test]

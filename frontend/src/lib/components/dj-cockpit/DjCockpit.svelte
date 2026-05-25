@@ -122,6 +122,7 @@
 		if (status === 'already_current') return 'Profile already current';
 		if (status === 'dj_disabled') return 'DJ engine disabled';
 		if (status === 'source_unavailable') return 'Profile source unavailable';
+		if (status === 'retrying') return 'Profile retrying';
 		if (status === 'decode_failed') return 'Profile decode failed';
 		return 'Profile is not in the current pair';
 	}

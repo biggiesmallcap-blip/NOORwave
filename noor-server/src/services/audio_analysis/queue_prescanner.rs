@@ -25,6 +25,116 @@ pub const BATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3
 /// stalls a segment indefinitely (observed for some catalog rows), the actor
 /// gets stuck. 60 s comfortably exceeds the ~45 s nominal cost.
 pub const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MIN_PARTIAL_BYTES: usize = 32 * 1024;
+const STREAM_REJECTED_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const TRANSIENT_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_TRANSIENT_FAILURES_PER_BATCH: usize = 2;
+
+static PRESCAN_NEGATIVE_CACHE: LazyLock<Mutex<HashMap<i64, PrescanNegativeCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrescanFailureClass {
+    PermanentSkip,
+    TransientFailure,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PrescanNegativeCacheEntry {
+    class: PrescanFailureClass,
+    expires_at: StdInstant,
+}
+
+fn prescan_failure_ttl(class: PrescanFailureClass) -> Duration {
+    match class {
+        PrescanFailureClass::PermanentSkip => STREAM_REJECTED_CACHE_TTL,
+        PrescanFailureClass::TransientFailure => TRANSIENT_FAILURE_CACHE_TTL,
+    }
+}
+
+fn cache_prescan_failure(track_id: i64, class: PrescanFailureClass) {
+    if let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() {
+        guard.insert(
+            track_id,
+            PrescanNegativeCacheEntry {
+                class,
+                expires_at: StdInstant::now() + prescan_failure_ttl(class),
+            },
+        );
+    }
+}
+
+fn classify_stream_resolve_for_prescan(
+    error: &crate::services::tidal::stream::StreamResolveError,
+) -> Option<PrescanFailureClass> {
+    if error.is_stream_rejected() {
+        Some(PrescanFailureClass::PermanentSkip)
+    } else {
+        None
+    }
+}
+
+fn prescan_negative_cache_contains(track_id: i64) -> bool {
+    let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() else {
+        return false;
+    };
+    let Some(entry) = guard.get(&track_id).copied() else {
+        return false;
+    };
+    if entry.expires_at <= StdInstant::now() {
+        guard.remove(&track_id);
+        return false;
+    }
+    true
+}
+
+fn cached_prescan_failure_class(track_id: i64) -> Option<PrescanFailureClass> {
+    let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() else {
+        return None;
+    };
+    let Some(entry) = guard.get(&track_id).copied() else {
+        return None;
+    };
+    if entry.expires_at <= StdInstant::now() {
+        guard.remove(&track_id);
+        return None;
+    }
+    Some(entry.class)
+}
+
+#[cfg(test)]
+fn clear_prescan_negative_cache_for_tests() {
+    if let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() {
+        guard.clear();
+    }
+}
+
+fn should_abort_prescan_batch(transient_failures: usize) -> bool {
+    transient_failures >= MAX_TRANSIENT_FAILURES_PER_BATCH
+}
+
+fn reqwest_error_summary(error: &reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_status() {
+        "status"
+    } else {
+        "request failed"
+    };
+    if let Some(status) = error.status() {
+        format!("{kind}: {status}")
+    } else {
+        kind.to_string()
+    }
+}
 
 /// One row of queue state, projected for the pure selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +177,9 @@ use crate::SharedState;
 use crate::db::queries;
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant as StdInstant};
 
 /// Resolve the TIDAL LOW-quality stream for `track_id`, pull the audio bytes
 /// (capped at 8 MB so the MP4 `moov` atom is included — see `scanner.rs` for
@@ -80,6 +193,11 @@ use futures::StreamExt;
 ///
 /// Emits `AppEvent::TrackAnalyzed { track_id }` only on a successful save.
 pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> Result<bool> {
+    if prescan_negative_cache_contains(track_id) {
+        tracing::info!(track_id, "prescanner skip: cached recent failure");
+        return Ok(false);
+    }
+
     let (tokens, http_client, db) = {
         let s = state.read().await;
         let Some(tokens) = s.tidal_tokens.clone() else {
@@ -129,14 +247,29 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
 
     tracing::info!(track_id, tidal_id, "prescanner: starting analysis");
 
-    let stream_info = crate::services::tidal::stream::get_stream_url(
+    let stream_info = match crate::services::tidal::stream::get_stream_url(
         &http_client,
         &tokens.access_token,
         tidal_id,
         "LOW",
     )
     .await
-    .map_err(|e| anyhow::anyhow!("resolve stream url: {}", e))?;
+    {
+        Ok(stream_info) => stream_info,
+        Err(error) => {
+            if let Some(class) = classify_stream_resolve_for_prescan(&error) {
+                cache_prescan_failure(track_id, class);
+                tracing::info!(
+                    track_id,
+                    tidal_id,
+                    error = %error,
+                    "prescanner skip: TIDAL stream rejected"
+                );
+                return Ok(false);
+            }
+            return Err(anyhow::anyhow!("resolve stream url: {}", error));
+        }
+    };
 
     // 8 MB ≈ 11 min of 96 kbps AAC; keeps the moov atom intact for Symphonia.
     const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -147,14 +280,42 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         if buf.len() >= MAX_BYTES {
             break;
         }
-        let resp = http_client
-            .get(seg_url)
-            .send()
-            .await
-            .context("fetch segment")?;
+        let resp = match http_client.get(seg_url).send().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
+                let error_summary = reqwest_error_summary(&error);
+                if buf.len() >= MIN_PARTIAL_BYTES {
+                    tracing::info!(
+                        track_id,
+                        bytes = buf.len(),
+                        error = %error_summary,
+                        "prescanner: continuing with partial clip after segment fetch failure"
+                    );
+                    break;
+                }
+                return Err(anyhow::anyhow!("fetch segment: {error_summary}"));
+            }
+        };
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let c = chunk.context("stream chunk")?;
+            let c = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
+                    let error_summary = reqwest_error_summary(&error);
+                    if buf.len() >= MIN_PARTIAL_BYTES {
+                        tracing::info!(
+                            track_id,
+                            bytes = buf.len(),
+                            error = %error_summary,
+                            "prescanner: continuing with partial clip after stream chunk failure"
+                        );
+                        break 'segments;
+                    }
+                    return Err(anyhow::anyhow!("stream chunk: {error_summary}"));
+                }
+            };
             let remaining = MAX_BYTES.saturating_sub(buf.len());
             if c.len() <= remaining {
                 buf.extend_from_slice(&c);
@@ -164,7 +325,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
             }
         }
     }
-    if buf.len() < 32 * 1024 {
+    if buf.len() < MIN_PARTIAL_BYTES {
         tracing::info!(
             track_id,
             bytes = buf.len(),
@@ -306,6 +467,7 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
         super::CURRENT_ANALYSIS_VERSION,
     );
 
+    let mut transient_failures = 0usize;
     for track_id in track_ids {
         // Mid-batch cancel: if a fresh queue event landed in the broadcast
         // buffer since the last track, bail and let the outer loop re-debounce.
@@ -326,12 +488,30 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!(track_id, "queue prescanner prefetch failed: {}", e),
-            Err(_) => tracing::warn!(
-                track_id,
-                timeout_secs = PREFETCH_TIMEOUT.as_secs(),
-                "queue prescanner prefetch timed out"
-            ),
+            Ok(Err(e)) => {
+                tracing::warn!(track_id, "queue prescanner prefetch failed: {}", e);
+                if cached_prescan_failure_class(track_id)
+                    == Some(PrescanFailureClass::TransientFailure)
+                {
+                    transient_failures += 1;
+                }
+            }
+            Err(_) => {
+                cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
+                transient_failures += 1;
+                tracing::warn!(
+                    track_id,
+                    timeout_secs = PREFETCH_TIMEOUT.as_secs(),
+                    "queue prescanner prefetch timed out"
+                );
+            }
+        }
+        if should_abort_prescan_batch(transient_failures) {
+            tracing::warn!(
+                transient_failures,
+                "queue prescanner batch stopped after repeated transient failures"
+            );
+            break;
         }
         tokio::time::sleep(INTER_TRACK_DELAY).await;
     }
@@ -392,6 +572,15 @@ pub fn spawn(state: SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::tidal::stream::StreamResolveError;
+
+    static PRESCAN_CACHE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn prescan_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        PRESCAN_CACHE_TEST_LOCK
+            .lock()
+            .expect("prescan cache test lock")
+    }
 
     fn c(track_id: i64, position: i64, tidal: bool, version: Option<&str>) -> PrescanCandidate {
         PrescanCandidate {
@@ -462,5 +651,61 @@ mod tests {
             c(2, 2, true, Some("v5")), // already current
         ];
         assert_eq!(pick_next_unanalyzed(&cs, 0, 5, "v5"), vec![1]);
+    }
+
+    #[test]
+    fn stream_rejected_is_cached_as_quiet_permanent_skip() {
+        let _guard = prescan_cache_test_guard();
+        clear_prescan_negative_cache_for_tests();
+        let error = StreamResolveError::StreamRejected {
+            message: "TIDAL rejected playback request with 401 Unauthorized".to_string(),
+        };
+
+        let class = classify_stream_resolve_for_prescan(&error).expect("classified");
+        cache_prescan_failure(31985, class);
+
+        assert_eq!(class, PrescanFailureClass::PermanentSkip);
+        assert!(prescan_negative_cache_contains(31985));
+        assert_eq!(
+            cached_prescan_failure_class(31985),
+            Some(PrescanFailureClass::PermanentSkip)
+        );
+        clear_prescan_negative_cache_for_tests();
+    }
+
+    #[test]
+    fn session_expired_is_not_cached_as_track_failure() {
+        let _guard = prescan_cache_test_guard();
+        clear_prescan_negative_cache_for_tests();
+        let track_id = 31986;
+        let error = StreamResolveError::SessionExpired {
+            message: "expired".to_string(),
+        };
+
+        assert_eq!(classify_stream_resolve_for_prescan(&error), None);
+        assert!(!prescan_negative_cache_contains(track_id));
+    }
+
+    #[test]
+    fn transient_failures_abort_batch_after_threshold() {
+        assert!(!should_abort_prescan_batch(
+            MAX_TRANSIENT_FAILURES_PER_BATCH - 1
+        ));
+        assert!(should_abort_prescan_batch(MAX_TRANSIENT_FAILURES_PER_BATCH));
+    }
+
+    #[test]
+    fn permanent_skips_do_not_count_as_transient_batch_failures() {
+        let _guard = prescan_cache_test_guard();
+        clear_prescan_negative_cache_for_tests();
+        cache_prescan_failure(31985, PrescanFailureClass::PermanentSkip);
+
+        let transient_failures = usize::from(
+            cached_prescan_failure_class(31985) == Some(PrescanFailureClass::TransientFailure),
+        );
+
+        assert_eq!(transient_failures, 0);
+        assert!(!should_abort_prescan_batch(transient_failures));
+        clear_prescan_negative_cache_for_tests();
     }
 }

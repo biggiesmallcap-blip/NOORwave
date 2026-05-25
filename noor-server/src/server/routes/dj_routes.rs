@@ -36,12 +36,16 @@ const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
+#[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
 
+#[cfg(test)]
 type ReadyPairPlanningKey = (i64, u64);
 
+#[cfg(test)]
+#[allow(dead_code)]
 static READY_PAIR_PLANNING_ATTEMPTS: OnceLock<Mutex<HashMap<ReadyPairPlanningKey, Instant>>> =
     OnceLock::new();
 static DJ_PROFILE_REBUILD_FAILURES: OnceLock<Mutex<HashMap<String, DjProfileRebuildFailure>>> =
@@ -160,6 +164,7 @@ struct DjStatusResponse {
     timing_quality: String,
     timing_direction: String,
     fallback_reason: Option<String>,
+    rejected_alternatives: Vec<DjRejectedAlternative>,
     profile_confidence_floor: f64,
     last_transition_event_id: Option<i64>,
     recent_timing_events: Vec<DjTimingHistoryEvent>,
@@ -190,7 +195,7 @@ struct DjSafeSuggestion {
     bad_feedback_count: i64,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 struct DjTimingHistoryEvent {
     event_id: i64,
     from_title: Option<String>,
@@ -200,6 +205,7 @@ struct DjTimingHistoryEvent {
     planned_template: String,
     renderer_template: Option<String>,
     planning_reason: Option<String>,
+    rejected_alternatives: Vec<DjRejectedAlternative>,
     planned_start_ms: Option<i64>,
     actual_start_ms: Option<i64>,
     timing_delta_ms: Option<i64>,
@@ -208,6 +214,13 @@ struct DjTimingHistoryEvent {
     timing_quality: String,
     timing_direction: String,
     started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct DjRejectedAlternative {
+    template: String,
+    score: f64,
+    reason: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -235,9 +248,10 @@ struct OpenTransition {
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
     timing_status: Option<String>,
+    rejected_alternatives: Vec<DjRejectedAlternative>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct RendererStatus {
     planned_template: Option<String>,
     renderer_template: Option<String>,
@@ -252,6 +266,7 @@ struct RendererStatus {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    rejected_alternatives: Vec<DjRejectedAlternative>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +366,9 @@ async fn set_enabled(
             let _ = runtime.start_dj_lookahead(None, None, None, None, u64::MAX, 0);
         }
     }
+    if payload.enabled {
+        queue_missing_dj_profiles_for_current_pair(state.clone()).await?;
+    }
 
     Ok(Json(EnabledResponse {
         enabled: payload.enabled,
@@ -360,7 +378,7 @@ async fn set_enabled(
 async fn get_status(
     State(state): State<SharedState>,
 ) -> Result<Json<DjStatusResponse>, StatusCode> {
-    let (response, missing_profile_refs, ready_active_pair) = {
+    let response = {
         let state = state.read().await;
         let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state);
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state);
@@ -368,9 +386,6 @@ async fn get_status(
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
-        let playback_generation = state
-            .playback_generation
-            .load(std::sync::atomic::Ordering::Relaxed);
         state
             .db
             .with_conn(|conn| {
@@ -467,85 +482,88 @@ async fn get_status(
                 let tuning_deltas = latest_fired_dj_timing_deltas(conn, 20)?;
                 let timing_history_summary =
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
-                let mut missing_profile_refs = Vec::new();
-                if enabled {
-                    if current.as_ref().is_some_and(deck_needs_profile_rebuild)
-                        && let Some(media_ref) = current_ref.clone()
-                    {
-                        missing_profile_refs.push(media_ref);
-                    }
-                    if next.as_ref().is_some_and(deck_needs_profile_rebuild)
-                        && let Some(media_ref) = next_ref.clone()
-                    {
-                        missing_profile_refs.push(media_ref);
+                let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
+                Ok(DjStatusResponse {
+                    enabled,
+                    current,
+                    next,
+                    planning_status,
+                    selected_program: latest_transition
+                        .as_ref()
+                        .map(|transition| transition.template.clone()),
+                    planned_template: renderer_status.planned_template,
+                    renderer_template: renderer_status.renderer_template,
+                    renderer_mode: renderer_status.renderer_mode,
+                    downgrade_reason: renderer_status.downgrade_reason,
+                    planning_reason: renderer_status.planning_reason,
+                    sync_target: renderer_status.sync_target,
+                    planned_start_ms: renderer_status.planned_start_ms,
+                    actual_start_ms: renderer_status.actual_start_ms,
+                    timing_delta_ms: renderer_status.timing_delta_ms,
+                    timing_source: renderer_status.timing_source,
+                    timing_status: renderer_status.timing_status,
+                    timing_quality: renderer_status.timing_quality,
+                    timing_direction: renderer_status.timing_direction,
+                    fallback_reason,
+                    rejected_alternatives: renderer_status.rejected_alternatives,
+                    profile_confidence_floor: DJ_PROFILE_CONFIDENCE_FLOOR,
+                    last_transition_event_id: latest_transition
+                        .as_ref()
+                        .map(|transition| transition.id),
+                    recent_timing_events,
+                    timing_history_summary,
+                    safe_crossfade_suggestion,
+                })
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    Ok(Json(response))
+}
+
+async fn queue_missing_dj_profiles_for_current_pair(state: SharedState) -> Result<(), StatusCode> {
+    let missing_profile_refs = {
+        let state_guard = state.read().await;
+        let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state_guard);
+        let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state_guard);
+        state_guard
+            .db
+            .with_conn(|conn| {
+                if !queries::is_dj_engine_enabled(conn)? {
+                    return Ok(Vec::new());
+                }
+                let pair = match ephemeral_pair {
+                    Some(pair) => pair,
+                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
+                };
+                let mut missing = Vec::new();
+                for media_ref in [pair.current, pair.next].into_iter().flatten() {
+                    let key = media_ref.profile_key();
+                    let label = ephemeral_labels
+                        .iter()
+                        .find(|(candidate, _)| candidate == &key)
+                        .map(|(_, label)| label);
+                    let inflight_key = dj_profile_inflight_key(&key);
+                    let rebuild_inflight = dj_profile_rebuild_is_inflight(
+                        &state_guard.dj_profile_rebuild_inflight,
+                        &inflight_key,
+                    );
+                    let deck = deck_status(conn, &media_ref, label, rebuild_inflight)?;
+                    if deck_needs_profile_rebuild(&deck) {
+                        missing.push(media_ref);
                     }
                 }
-                let ready_active_pair = enabled
-                    .then_some(())
-                    .filter(|_| current_ref.is_some() && next_ref.is_some())
-                    .and(active_track_id)
-                    .filter(|_| fallback_reason.is_none() && latest_transition.is_none())
-                    .map(|track_id| (track_id, playback_generation));
-                let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
-                Ok((
-                    DjStatusResponse {
-                        enabled,
-                        current,
-                        next,
-                        planning_status,
-                        selected_program: latest_transition
-                            .as_ref()
-                            .map(|transition| transition.template.clone()),
-                        planned_template: renderer_status.planned_template,
-                        renderer_template: renderer_status.renderer_template,
-                        renderer_mode: renderer_status.renderer_mode,
-                        downgrade_reason: renderer_status.downgrade_reason,
-                        planning_reason: renderer_status.planning_reason,
-                        sync_target: renderer_status.sync_target,
-                        planned_start_ms: renderer_status.planned_start_ms,
-                        actual_start_ms: renderer_status.actual_start_ms,
-                        timing_delta_ms: renderer_status.timing_delta_ms,
-                        timing_source: renderer_status.timing_source,
-                        timing_status: renderer_status.timing_status,
-                        timing_quality: renderer_status.timing_quality,
-                        timing_direction: renderer_status.timing_direction,
-                        fallback_reason,
-                        profile_confidence_floor: DJ_PROFILE_CONFIDENCE_FLOOR,
-                        last_transition_event_id: latest_transition
-                            .as_ref()
-                            .map(|transition| transition.id),
-                        recent_timing_events,
-                        timing_history_summary,
-                        safe_crossfade_suggestion,
-                    },
-                    missing_profile_refs,
-                    ready_active_pair,
-                ))
+                Ok(missing)
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
     for media_ref in missing_profile_refs {
         queue_tidal_profile_rebuild_if_idle(state.clone(), media_ref).await?;
     }
-    if let Some((current_track_id, generation)) = ready_active_pair {
-        if ready_pair_transition_is_due(&state, current_track_id, generation).await
-            && claim_ready_pair_transition_planning(current_track_id, generation)
-        {
-            tracing::info!(
-                current_track_id,
-                generation,
-                "DJ profiles ready near end, requesting transition planning"
-            );
-            if let Err(error) =
-                super::handle_near_end(state.clone(), current_track_id, generation).await
-            {
-                tracing::warn!(error = %error, "DJ ready pair planning failed");
-            }
-        }
-    }
-    Ok(Json(response))
+    Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn ready_pair_transition_is_due(
     state: &SharedState,
     current_track_id: i64,
@@ -631,6 +649,8 @@ fn pair_planning_status(
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn claim_ready_pair_transition_planning(current_track_id: i64, generation: u64) -> bool {
     let attempts = READY_PAIR_PLANNING_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
@@ -638,6 +658,7 @@ fn claim_ready_pair_transition_planning(current_track_id: i64, generation: u64) 
     claim_ready_pair_transition_planning_at(&mut attempts, current_track_id, generation, now)
 }
 
+#[cfg(test)]
 fn claim_ready_pair_transition_planning_at(
     attempts: &mut HashMap<ReadyPairPlanningKey, Instant>,
     current_track_id: i64,
@@ -784,11 +805,12 @@ async fn queue_tidal_profile_rebuild(
         let state_guard = state.read().await;
         state_guard.dj_profile_rebuild_inflight.clone()
     };
-    match mark_dj_profile_rebuild_inflight(
-        &inflight,
-        &inflight_key,
-        std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
-    )? {
+    let retry_after = if force {
+        std::time::Duration::ZERO
+    } else {
+        std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS)
+    };
+    match mark_dj_profile_rebuild_inflight(&inflight, &inflight_key, retry_after)? {
         ProfileRebuildInflightDecision::Start => {
             clear_dj_profile_rebuild_failure(&inflight_key);
             tracing::info!(
@@ -876,14 +898,16 @@ async fn queue_tidal_profile_rebuild(
     let failure_key = inflight_key.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
-            record_dj_profile_rebuild_failure(
-                &failure_key,
-                "decode_failed",
-                profile_rebuild_error_message(&error),
-            );
-            clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
-            tracing::warn!(tidal_id, error = %error, "DJ profile rebuild decode failed");
+            let status = profile_rebuild_failure_status(&error);
+            let message = profile_rebuild_error_message(&error, status);
+            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
+            if status != "retrying" {
+                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            }
+            tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         } else {
+            clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            clear_dj_profile_rebuild_failure(&failure_key);
             tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
         }
     });
@@ -935,7 +959,18 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
 }
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
-    !deck.profile_ready && deck.profile_status != "decode_failed"
+    !deck.profile_ready && matches!(deck.profile_status.as_str(), "missing" | "retrying")
+}
+
+#[cfg(test)]
+fn ready_pair_can_request_transition_planning(
+    current: Option<&DjDeckStatus>,
+    next: Option<&DjDeckStatus>,
+) -> bool {
+    let (Some(current), Some(next)) = (current, next) else {
+        return false;
+    };
+    current.profile_status != "decode_failed" && next.profile_status != "decode_failed"
 }
 
 fn dj_profile_rebuild_is_inflight(
@@ -1000,7 +1035,28 @@ fn recent_dj_profile_rebuild_failure(key: &str) -> Option<DjProfileRebuildFailur
     }
 }
 
-fn profile_rebuild_error_message(error: &anyhow::Error) -> String {
+fn profile_rebuild_failure_status(error: &anyhow::Error) -> &'static str {
+    let message = error.to_string();
+    if profile_rebuild_error_is_retryable(message.as_str()) {
+        "retrying"
+    } else {
+        "decode_failed"
+    }
+}
+
+fn profile_rebuild_error_is_retryable(message: &str) -> bool {
+    message.contains("DASH stream prebuffer failed")
+        || message.contains("DASH segment")
+        || message.contains("timed out")
+        || message.contains("request failed")
+        || message.contains("chunk error")
+        || message.contains("returned error status")
+}
+
+fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
+    if status == "retrying" {
+        return "DASH stream prebuffer failed. Retrying analysis.".to_string();
+    }
     let message = error.to_string();
     if message.trim().is_empty() {
         return "Profile decode failed".to_string();
@@ -1398,7 +1454,7 @@ fn latest_open_transition_for_pair(
     conn.query_row(
         "SELECT id, template, program_json, fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status
+                timing_source, timing_status, rejected_alternatives_json
          FROM dj_transition_events
          WHERE from_media_ref_kind = ?1
            AND from_media_ref_id = ?2
@@ -1425,6 +1481,7 @@ fn latest_open_transition_for_pair(
                 timing_delta_ms: row.get(6)?,
                 timing_source: row.get(7)?,
                 timing_status: row.get(8)?,
+                rejected_alternatives: decode_rejected_alternatives(row.get(9)?),
             })
         },
     )
@@ -1438,16 +1495,36 @@ fn latest_dj_transition_timing_history(
 ) -> anyhow::Result<Vec<DjTimingHistoryEvent>> {
     let mut stmt = conn.prepare(
         "SELECT e.id,
-                from_track.title, from_artist.name,
-                to_track.title, to_artist.name,
+                COALESCE(from_track.title, from_tidal_track.title, from_queue_track.title, from_queue.pending_title, e.from_media_ref_kind || ':' || e.from_media_ref_id),
+                COALESCE(from_artist.name, from_tidal_artist.name, from_queue_artist.name, from_queue.pending_artist),
+                COALESCE(to_track.title, to_tidal_track.title, to_queue_track.title, to_queue.pending_title, e.to_media_ref_kind || ':' || e.to_media_ref_id),
+                COALESCE(to_artist.name, to_tidal_artist.name, to_queue_artist.name, to_queue.pending_artist),
                 e.template, e.program_json, e.fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status, e.started_at
+                timing_source, timing_status, e.started_at, e.rejected_alternatives_json
          FROM dj_transition_events e
          LEFT JOIN tracks from_track ON from_track.id = e.from_track_id
          LEFT JOIN artists from_artist ON from_artist.id = from_track.artist_id
          LEFT JOIN tracks to_track ON to_track.id = e.to_track_id
          LEFT JOIN artists to_artist ON to_artist.id = to_track.artist_id
+         LEFT JOIN tracks from_tidal_track
+           ON e.from_media_ref_kind = 'tidal_track'
+          AND from_tidal_track.tidal_id = CAST(e.from_media_ref_id AS INTEGER)
+         LEFT JOIN artists from_tidal_artist ON from_tidal_artist.id = from_tidal_track.artist_id
+         LEFT JOIN tracks to_tidal_track
+           ON e.to_media_ref_kind = 'tidal_track'
+          AND to_tidal_track.tidal_id = CAST(e.to_media_ref_id AS INTEGER)
+         LEFT JOIN artists to_tidal_artist ON to_tidal_artist.id = to_tidal_track.artist_id
+         LEFT JOIN queue from_queue
+           ON e.from_media_ref_kind = 'queue_item'
+          AND from_queue.id = CAST(e.from_media_ref_id AS INTEGER)
+         LEFT JOIN tracks from_queue_track ON from_queue_track.id = from_queue.track_id
+         LEFT JOIN artists from_queue_artist ON from_queue_artist.id = from_queue_track.artist_id
+         LEFT JOIN queue to_queue
+           ON e.to_media_ref_kind = 'queue_item'
+          AND to_queue.id = CAST(e.to_media_ref_id AS INTEGER)
+         LEFT JOIN tracks to_queue_track ON to_queue_track.id = to_queue.track_id
+         LEFT JOIN artists to_queue_artist ON to_queue_artist.id = to_queue_track.artist_id
          WHERE e.timing_status IN ('fired', 'late', 'missed')
            AND NOT (
              e.timing_status = 'missed'
@@ -1469,6 +1546,7 @@ fn latest_dj_transition_timing_history(
         let program_json: String = row.get(6)?;
         let timing_delta_ms: Option<i64> = row.get(10)?;
         let timing_status: Option<String> = row.get(12)?;
+        let rejected_json: Option<String> = row.get(14)?;
         Ok(DjTimingHistoryEvent {
             event_id: row.get(0)?,
             from_title: row.get(1)?,
@@ -1487,6 +1565,7 @@ fn latest_dj_transition_timing_history(
             timing_direction: timing_direction(timing_status.as_deref(), timing_delta_ms)
                 .to_string(),
             started_at: row.get(13)?,
+            rejected_alternatives: decode_rejected_alternatives(rejected_json),
         })
     })?;
     let mut events = Vec::new();
@@ -1527,6 +1606,13 @@ fn timing_direction(timing_status: Option<&str>, timing_delta_ms: Option<i64>) -
         },
         _ => "unknown",
     }
+}
+
+fn decode_rejected_alternatives(json: Option<String>) -> Vec<DjRejectedAlternative> {
+    let Some(json) = json else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<DjRejectedAlternative>>(&json).unwrap_or_default()
 }
 
 fn latest_fired_dj_timing_deltas(
@@ -1660,6 +1746,7 @@ fn open_transition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenTra
         timing_delta_ms: row.get(6)?,
         timing_source: row.get(7)?,
         timing_status: row.get(8)?,
+        rejected_alternatives: Vec::new(),
     })
 }
 
@@ -1698,6 +1785,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: None,
             timing_quality: "unknown".to_string(),
             timing_direction: "unknown".to_string(),
+            rejected_alternatives: Vec::new(),
         };
     };
     let quality = timing_quality(
@@ -1730,6 +1818,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: transition.timing_status.clone(),
             timing_quality: quality,
             timing_direction: direction,
+            rejected_alternatives: transition.rejected_alternatives.clone(),
         };
     }
     RendererStatus {
@@ -1753,6 +1842,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         timing_status: transition.timing_status.clone(),
         timing_quality: quality,
         timing_direction: direction,
+        rejected_alternatives: transition.rejected_alternatives.clone(),
     }
 }
 
@@ -1950,6 +2040,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("UnknownTemplate"));
@@ -1973,6 +2064,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
@@ -1994,6 +2086,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("BassSwap16"));
@@ -2015,6 +2108,7 @@ mod tests {
                 timing_delta_ms: Some(144),
                 timing_source: Some("downbeat_sync".to_string()),
                 timing_status: Some("fired".to_string()),
+                rejected_alternatives: Vec::new(),
             }));
 
             assert_eq!(status.planned_template.as_deref(), Some(template));
@@ -2061,6 +2155,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("SafeCrossfade"));
@@ -2084,6 +2179,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("SlamCut"));
@@ -2113,6 +2209,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("SafeCrossfade"));
@@ -2137,6 +2234,7 @@ mod tests {
             timing_delta_ms: Some(549),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            rejected_alternatives: Vec::new(),
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("FilterSweep"));
@@ -2348,6 +2446,44 @@ mod tests {
     }
 
     #[test]
+    fn timing_history_resolves_tidal_media_ref_labels_without_track_ids() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO artists (id, name) VALUES (10, 'Outgoing Artist'), (11, 'Incoming Artist')",
+            [],
+        )
+        .expect("insert artists");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, source, tidal_id)
+             VALUES (100, 'Outgoing Track', 10, 'tidal', 2501),
+                    (101, 'Incoming Track', 11, 'tidal', 2502)",
+            [],
+        )
+        .expect("insert tracks");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status
+             ) VALUES (
+                'tidal_track', '2501', 'tidal_track', '2502',
+                'BassSwap16', '{\"template\":\"BassSwap16\"}', 'dj-v1',
+                10000, 10120, 120, 'downbeat_sync', 'fired'
+             )",
+            [],
+        )
+        .expect("insert event");
+
+        let history = latest_dj_transition_timing_history(&conn, 5).expect("history");
+
+        assert_eq!(history[0].from_title.as_deref(), Some("Outgoing Track"));
+        assert_eq!(history[0].from_artist.as_deref(), Some("Outgoing Artist"));
+        assert_eq!(history[0].to_title.as_deref(), Some("Incoming Track"));
+        assert_eq!(history[0].to_artist.as_deref(), Some("Incoming Artist"));
+    }
+
+    #[test]
     fn timing_quality_labels_delta_bands_and_missed() {
         assert_eq!(timing_quality(Some("fired"), Some(150)), "tight");
         assert_eq!(timing_quality(Some("fired"), Some(-500)), "usable");
@@ -2389,6 +2525,7 @@ mod tests {
                 timing_quality: "tight".to_string(),
                 timing_direction: "on_time".to_string(),
                 started_at: "now".to_string(),
+                rejected_alternatives: Vec::new(),
             },
             DjTimingHistoryEvent {
                 event_id: 2,
@@ -2407,6 +2544,7 @@ mod tests {
                 timing_quality: "loose".to_string(),
                 timing_direction: "late".to_string(),
                 started_at: "now".to_string(),
+                rejected_alternatives: Vec::new(),
             },
             DjTimingHistoryEvent {
                 event_id: 3,
@@ -2425,6 +2563,7 @@ mod tests {
                 timing_quality: "bad".to_string(),
                 timing_direction: "missed".to_string(),
                 started_at: "now".to_string(),
+                rejected_alternatives: Vec::new(),
             },
         ];
 
@@ -2509,6 +2648,7 @@ mod tests {
         let ready_current = test_deck_status(true, "ready");
         let ready_next = test_deck_status(true, "ready");
         let missing_next = test_deck_status(false, "missing");
+        let retrying_next = test_deck_status(false, "retrying");
         let failed_next = test_deck_status(false, "decode_failed");
         let armed_transition = OpenTransition {
             id: 31,
@@ -2520,6 +2660,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("armed".to_string()),
+            rejected_alternatives: Vec::new(),
         };
 
         assert_eq!(
@@ -2538,6 +2679,18 @@ mod tests {
             pair_planning_status(true, Some(&ready_current), Some(&missing_next), None, false),
             "waiting_for_profiles"
         );
+        assert_eq!(
+            pair_planning_status(true, Some(&ready_current), Some(&retrying_next), None, true),
+            "waiting_for_profiles"
+        );
+        assert!(ready_pair_can_request_transition_planning(
+            Some(&ready_current),
+            Some(&retrying_next)
+        ));
+        assert!(!ready_pair_can_request_transition_planning(
+            Some(&ready_current),
+            Some(&failed_next)
+        ));
         assert_eq!(
             pair_planning_status(
                 true,
@@ -2579,6 +2732,37 @@ mod tests {
     }
 
     #[test]
+    fn forced_profile_rebuild_bypasses_recent_inflight_marker() {
+        let inflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let first = mark_dj_profile_rebuild_inflight(
+            &inflight,
+            "tidal_track:250295728",
+            std::time::Duration::from_secs(60),
+        )
+        .expect("first mark");
+        let forced = mark_dj_profile_rebuild_inflight(
+            &inflight,
+            "tidal_track:250295728",
+            std::time::Duration::ZERO,
+        )
+        .expect("force mark");
+
+        assert_eq!(first, ProfileRebuildInflightDecision::Start);
+        assert_eq!(forced, ProfileRebuildInflightDecision::Start);
+    }
+
+    #[test]
+    fn retryable_profile_rebuild_errors_are_retrying() {
+        let error = anyhow::anyhow!("DASH stream prebuffer failed");
+
+        assert_eq!(profile_rebuild_failure_status(&error), "retrying");
+        assert_eq!(
+            profile_rebuild_error_message(&error, "retrying"),
+            "DASH stream prebuffer failed. Retrying analysis."
+        );
+    }
+
+    #[test]
     fn deck_status_exposes_recent_profile_decode_failure() {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         crate::db::schema::run_migrations(&conn).expect("migrations");
@@ -2604,6 +2788,36 @@ mod tests {
             Some("DASH stream prebuffer failed")
         );
         assert!(!deck_needs_profile_rebuild(&deck));
+
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+    }
+
+    #[test]
+    fn deck_status_exposes_recent_profile_retrying_failure() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 12198475,
+            track_id: None,
+        };
+        let key = media_ref.profile_key();
+        let rebuild_key = dj_profile_inflight_key(&key);
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+        record_dj_profile_rebuild_failure(
+            &rebuild_key,
+            "retrying",
+            "DASH stream prebuffer failed. Retrying analysis.".to_string(),
+        );
+
+        let deck = deck_status(&conn, &media_ref, None, false).expect("deck status");
+
+        assert!(!deck.profile_ready);
+        assert_eq!(deck.profile_status, "retrying");
+        assert_eq!(
+            deck.profile_error.as_deref(),
+            Some("DASH stream prebuffer failed. Retrying analysis.")
+        );
+        assert!(deck_needs_profile_rebuild(&deck));
 
         clear_dj_profile_rebuild_failure(&rebuild_key);
     }

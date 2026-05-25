@@ -136,6 +136,37 @@
 		const to = formatTrackLabel(event.to_title, event.to_artist, 'unknown');
 		return `${from} -> ${to}`;
 	}
+
+	function formatDecisionSummary() {
+		const planned = status?.planned_template ?? status?.selected_program;
+		const rendered = status?.renderer_template;
+		if (!planned && !rendered) return 'No planner decision yet';
+		if (status?.planning_reason === 'profile_low_confidence') {
+			return `${rendered ?? planned} fired because one profile was below the confidence floor.`;
+		}
+		if (status?.planning_reason === 'current_profile_missing') {
+			return `${rendered ?? planned} fired because the current profile was missing.`;
+		}
+		if (status?.planning_reason === 'next_profile_missing') {
+			return `${rendered ?? planned} fired because the next profile was missing.`;
+		}
+		if (status?.downgrade_reason === 'timing_unstable') {
+			return `${rendered ?? 'SafeCrossfade'} rendered because recent timing was unstable for ${planned}.`;
+		}
+		if (status?.downgrade_reason === 'template_not_renderable') {
+			return `${rendered ?? 'SafeCrossfade'} rendered because ${planned} was not renderable for this pair.`;
+		}
+		if (rendered && planned && rendered !== planned) {
+			return `${rendered} rendered after ${planned} was downgraded.`;
+		}
+		return `${rendered ?? planned} fired from the planner result for this pair.`;
+	}
+
+	function formatRejectedAlternative(
+		alternative: DjStatusResponse['rejected_alternatives'][number],
+	) {
+		return `${alternative.template} ${alternative.score.toFixed(2)} - ${alternative.reason}`;
+	}
 </script>
 
 <section class="transition-lane" aria-labelledby="dj-transition-heading">
@@ -224,6 +255,10 @@
 					<dd>{status?.fallback_reason ?? 'none'}</dd>
 				</div>
 				<div>
+					<dt>Decision</dt>
+					<dd>{formatDecisionSummary()}</dd>
+				</div>
+				<div>
 					<dt>Planning status</dt>
 					<dd>{status?.planning_status ?? 'none'}</dd>
 				</div>
@@ -232,6 +267,14 @@
 					<dd>{status?.profile_confidence_floor ?? 0}</dd>
 				</div>
 			</dl>
+			{#if status?.rejected_alternatives?.length}
+				<p class="debug-heading">Rejected alternatives</p>
+				<ul class="rejected-alternatives" aria-label="Rejected DJ transition alternatives">
+					{#each status.rejected_alternatives as alternative}
+						<li>{formatRejectedAlternative(alternative)}</li>
+					{/each}
+				</ul>
+			{/if}
 			<p class="debug-heading">Recent timing</p>
 			{#if timingSummary && timingSummary.event_count > 0}
 				<div class="timing-summary" aria-label="Recent DJ timing summary">
@@ -458,6 +501,7 @@
 	.timing-history,
 	.timing-history-header,
 	.timing-history li,
+	.rejected-alternatives,
 	.empty-history {
 		margin: 0;
 	}
@@ -508,6 +552,15 @@
 	.empty-history {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
+	}
+
+	.rejected-alternatives {
+		display: grid;
+		gap: var(--space-1);
+		padding-left: var(--space-4);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-snug);
 	}
 
 	.timing-summary {

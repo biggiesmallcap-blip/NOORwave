@@ -2147,10 +2147,7 @@ fn track_position_ms(shared: &PlaybackSharedState, sample_rate: u32, channels: u
     if sample_rate == 0 || channels == 0 {
         return 0;
     }
-    let samples = shared
-        .position_offset_samples
-        .load(Ordering::Relaxed)
-        .saturating_add(shared.position_samples.load(Ordering::Relaxed));
+    let samples = shared.position_samples.load(Ordering::Relaxed);
     (samples.saturating_mul(1000) / (u64::from(sample_rate) * u64::from(channels))) as i64
 }
 
@@ -2165,6 +2162,11 @@ fn promote_prepared_at_boundary(
     let Some(next) = state.next_engine.take() else {
         return;
     };
+    let transition_event_id = next
+        .job
+        .prepared_transition
+        .as_ref()
+        .and_then(|transition| transition.transition_event_id);
     next.shared
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
@@ -2182,7 +2184,29 @@ fn promote_prepared_at_boundary(
     if let Some(mut outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
+        let actual_start_ms = track_position_ms(
+            &outgoing.shared,
+            state.device_sample_rate,
+            state.device_channels,
+        );
         outgoing.stop();
+        if let Some(transition_event_id) = transition_event_id {
+            info!(
+                transition_event_id,
+                outgoing_track_id = outgoing_id,
+                generation = outgoing_generation,
+                actual_start_ms,
+                timing_status = "late",
+                "DJ transition boundary fallback fired"
+            );
+            let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id: outgoing_id,
+                generation: outgoing_generation,
+                actual_start_ms,
+                timing_status: "late".to_string(),
+            });
+        }
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
             track_id: outgoing_id,
             generation: outgoing_generation,
@@ -2891,7 +2915,7 @@ mod tests {
         active
             .shared
             .position_samples
-            .store(96_000, Ordering::Relaxed);
+            .store(288_000, Ordering::Relaxed);
         let mut next = test_engine_with_shared(2, 21);
         let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
         transition.transition_event_id = Some(77);
@@ -2926,6 +2950,62 @@ mod tests {
                 assert_eq!(generation, 20);
                 assert_eq!(actual_start_ms, 3_000);
                 assert_eq!(timing_status, "fired");
+            }
+            other => panic!("expected timing event, got {other:?}"),
+        }
+        match event_rx.try_recv().expect("finished event") {
+            PlaybackRuntimeEvent::Finished {
+                track_id,
+                generation,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 20);
+            }
+            other => panic!("expected finished event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boundary_fallback_promotion_emits_late_timing_event() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(480_000, Ordering::Relaxed);
+        let mut next = test_engine_with_shared(2, 20);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(78);
+        next.job = PreparedPlaybackJob::test_fixture(2, 20).with_prepared_transition(transition);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_prepared_at_boundary(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+        );
+
+        match event_rx.try_recv().expect("timing event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                outgoing_track_id,
+                generation,
+                actual_start_ms,
+                timing_status,
+            } => {
+                assert_eq!(transition_event_id, 78);
+                assert_eq!(outgoing_track_id, 1);
+                assert_eq!(generation, 20);
+                assert_eq!(actual_start_ms, 5_000);
+                assert_eq!(timing_status, "late");
             }
             other => panic!("expected timing event, got {other:?}"),
         }

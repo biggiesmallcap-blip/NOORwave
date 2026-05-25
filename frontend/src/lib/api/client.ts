@@ -903,7 +903,7 @@ export type DjDeckStatus = {
 	title: string;
 	artist?: string;
 	profile_ready: boolean;
-	profile_status: 'ready' | 'missing' | 'analyzing' | 'decode_failed' | string;
+	profile_status: 'ready' | 'missing' | 'analyzing' | 'retrying' | 'decode_failed' | string;
 	profile_error?: string;
 	profile_confidence?: number;
 	beat_count?: number;
@@ -941,6 +941,7 @@ export type DjStatusResponse = {
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad' | 'unknown';
 	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'pending' | 'unknown';
 	fallback_reason?: string;
+	rejected_alternatives: DjRejectedAlternative[];
 	profile_confidence_floor: number;
 	last_transition_event_id?: number;
 	recent_timing_events: DjTimingHistoryEvent[];
@@ -968,7 +969,14 @@ export type DjTimingHistoryEvent = {
 	timing_status?: 'fired' | 'late' | 'missed';
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad';
 	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'unknown';
+	rejected_alternatives: DjRejectedAlternative[];
 	started_at: string;
+};
+
+export type DjRejectedAlternative = {
+	template: string;
+	score: number;
+	reason: string;
 };
 
 export type DjTimingHistorySummary = {

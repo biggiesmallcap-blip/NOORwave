@@ -89,6 +89,7 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Profile analysis failed');
 		expect(transitionLane).toContain('current_profile_decode_failed');
 		expect(queuePair).toContain('Analysis failed');
+		expect(queuePair).toContain('Retrying analysis');
 		expect(queuePair).toContain('Analyzing');
 		expect(queuePair).toContain('profile_error');
 	});
@@ -106,6 +107,9 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('formatEventDelta');
 		expect(transitionLane).toContain('Planning reason');
 		expect(transitionLane).toContain('Readiness block');
+		expect(transitionLane).toContain('Decision');
+		expect(transitionLane).toContain('Rejected alternatives');
+		expect(transitionLane).toContain('formatRejectedAlternative');
 		expect(transitionLane).toContain('Avg delta');
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
