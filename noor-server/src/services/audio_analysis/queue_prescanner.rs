@@ -23,12 +23,16 @@ pub const INTER_TRACK_DELAY: std::time::Duration = std::time::Duration::from_mil
 pub const BATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 /// Hard ceiling on the per-track preview download + decode chain. If TIDAL
 /// stalls a segment indefinitely (observed for some catalog rows), the actor
-/// gets stuck. 60 s comfortably exceeds the ~45 s nominal cost.
+/// gets stuck. Segment fetches use a shorter guard so one slow media segment
+/// does not consume the full per-track budget.
 pub const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const SEGMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const MIN_PARTIAL_BYTES: usize = 32 * 1024;
+const MAX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DASH_MEDIA_SEGMENTS: usize = 12;
 const STREAM_REJECTED_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const TRANSIENT_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const MAX_TRANSIENT_FAILURES_PER_BATCH: usize = 2;
+const MAX_TRANSIENT_FAILURES_PER_BATCH: usize = LOOKAHEAD;
 
 static PRESCAN_NEGATIVE_CACHE: LazyLock<Mutex<HashMap<i64, PrescanNegativeCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -113,6 +117,10 @@ fn should_abort_prescan_batch(transient_failures: usize) -> bool {
     transient_failures >= MAX_TRANSIENT_FAILURES_PER_BATCH
 }
 
+fn prescan_dash_media_segments(total_segments: usize) -> usize {
+    total_segments.min(MAX_DASH_MEDIA_SEGMENTS)
+}
+
 fn reqwest_error_summary(error: &reqwest::Error) -> String {
     let kind = if error.is_timeout() {
         "timeout"
@@ -176,14 +184,28 @@ use crate::AppEvent;
 use crate::SharedState;
 use crate::db::queries;
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
-/// Resolve the TIDAL LOW-quality stream for `track_id`, pull the audio bytes
-/// (capped at 8 MB so the MP4 `moov` atom is included — see `scanner.rs` for
-/// the rationale), decode the first ~30 s to mono f32, run DSP, and persist.
+async fn fetch_prescan_segment(
+    http_client: &reqwest::Client,
+    seg_url: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    let resp = tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, http_client.get(seg_url).send())
+        .await
+        .map_err(|_| "timeout".to_string())?
+        .map_err(|error| reqwest_error_summary(&error))?;
+
+    tokio::time::timeout(SEGMENT_FETCH_TIMEOUT, resp.bytes())
+        .await
+        .map_err(|_| "timeout".to_string())?
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| reqwest_error_summary(&error))
+}
+
+/// Resolve the TIDAL LOW-quality stream for `track_id`, pull a bounded preview
+/// window, decode the first ~30 s to mono f32, run DSP, and persist.
 ///
 /// Skips silently (returns `Ok(false)`) when:
 /// - the track is already at `CURRENT_ANALYSIS_VERSION`
@@ -271,20 +293,29 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         }
     };
 
-    // 8 MB ≈ 11 min of 96 kbps AAC; keeps the moov atom intact for Symphonia.
-    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    // Keep the init segment plus enough media segments for a preview window.
+    // Walking the whole DASH manifest lets one slow catalog row starve the
+    // lookahead batch.
     let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
-    'segments: for seg_url in
-        std::iter::once(&stream_info.url).chain(stream_info.segment_urls.iter())
+    let media_segments = prescan_dash_media_segments(stream_info.segment_urls.len());
+    for seg_url in std::iter::once(&stream_info.url)
+        .chain(stream_info.segment_urls.iter().take(media_segments))
     {
         if buf.len() >= MAX_BYTES {
             break;
         }
-        let resp = match http_client.get(seg_url).send().await {
-            Ok(resp) => resp,
-            Err(error) => {
+        match fetch_prescan_segment(&http_client, seg_url).await {
+            Ok(segment) => {
+                let remaining = MAX_BYTES.saturating_sub(buf.len());
+                if segment.len() <= remaining {
+                    buf.extend_from_slice(&segment);
+                } else {
+                    buf.extend_from_slice(&segment[..remaining]);
+                    break;
+                }
+            }
+            Err(error_summary) => {
                 cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
-                let error_summary = reqwest_error_summary(&error);
                 if buf.len() >= MIN_PARTIAL_BYTES {
                     tracing::info!(
                         track_id,
@@ -295,33 +326,6 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
                     break;
                 }
                 return Err(anyhow::anyhow!("fetch segment: {error_summary}"));
-            }
-        };
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let c = match chunk {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
-                    let error_summary = reqwest_error_summary(&error);
-                    if buf.len() >= MIN_PARTIAL_BYTES {
-                        tracing::info!(
-                            track_id,
-                            bytes = buf.len(),
-                            error = %error_summary,
-                            "prescanner: continuing with partial clip after stream chunk failure"
-                        );
-                        break 'segments;
-                    }
-                    return Err(anyhow::anyhow!("stream chunk: {error_summary}"));
-                }
-            };
-            let remaining = MAX_BYTES.saturating_sub(buf.len());
-            if c.len() <= remaining {
-                buf.extend_from_slice(&c);
-            } else {
-                buf.extend_from_slice(&c[..remaining]);
-                break 'segments;
             }
         }
     }
@@ -692,6 +696,21 @@ mod tests {
             MAX_TRANSIENT_FAILURES_PER_BATCH - 1
         ));
         assert!(should_abort_prescan_batch(MAX_TRANSIENT_FAILURES_PER_BATCH));
+    }
+
+    #[test]
+    fn two_transient_failures_do_not_abort_prescan_batch() {
+        assert!(!should_abort_prescan_batch(2));
+    }
+
+    #[test]
+    fn dash_prescan_caps_media_segments_to_preview_window() {
+        assert_eq!(prescan_dash_media_segments(0), 0);
+        assert_eq!(prescan_dash_media_segments(5), 5);
+        assert_eq!(
+            prescan_dash_media_segments(MAX_DASH_MEDIA_SEGMENTS + 10),
+            MAX_DASH_MEDIA_SEGMENTS
+        );
     }
 
     #[test]
