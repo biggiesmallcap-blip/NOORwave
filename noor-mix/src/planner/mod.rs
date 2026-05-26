@@ -339,6 +339,7 @@ fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: 
         TransitionTemplate::BassSwap16 => bar_samples * 16,
         TransitionTemplate::LongHarmonicBlend => bar_samples * 16,
         TransitionTemplate::FilterSweep => bar_samples * 8,
+        TransitionTemplate::DropTease16 => bar_samples * 16,
         TransitionTemplate::SlamCut => bar_samples.max(1),
         TransitionTemplate::SafeCrossfade => {
             u64::from(policy.default_crossfade_ms) * 48_000 / 1_000
@@ -353,7 +354,8 @@ fn tier_for_template(template: TransitionTemplate) -> Tier {
         TransitionTemplate::BassSwap16
         | TransitionTemplate::BassSwap32
         | TransitionTemplate::LongHarmonicBlend
-        | TransitionTemplate::FilterSweep => Tier::FullBlend,
+        | TransitionTemplate::FilterSweep
+        | TransitionTemplate::DropTease16 => Tier::FullBlend,
     }
 }
 
@@ -365,6 +367,7 @@ fn template_name(template: TransitionTemplate) -> &'static str {
         TransitionTemplate::BassSwap32 => "BassSwap32",
         TransitionTemplate::LongHarmonicBlend => "LongHarmonicBlend",
         TransitionTemplate::FilterSweep => "FilterSweep",
+        TransitionTemplate::DropTease16 => "DropTease16",
     }
 }
 
@@ -1125,6 +1128,34 @@ mod tests {
                 .iter()
                 .any(|event| event.param == Param::LowGain(DeckId::B))
         );
+    }
+
+    #[test]
+    fn drop_tease_16_override_builds_but_is_not_auto_selected() {
+        let bold = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        let selected = Planner::choose_template(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(121.0), Some("8A"), 4),
+            &bold,
+        );
+        assert_eq!(selected, TransitionTemplate::FilterSweep);
+
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::DropTease16),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(121.0), Some("8A"), 4),
+            &policy,
+        );
+
+        assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.resolve_at, 16 * 96_000);
+        program.validate().expect("drop tease guardrail program");
     }
 
     #[test]

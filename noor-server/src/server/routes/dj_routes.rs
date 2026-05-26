@@ -1830,7 +1830,11 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             if transition.template == "SafeCrossfade" {
                 "dj_program_renderer_pending"
             } else {
-                "template_not_renderable"
+                transition
+                    .fallback_reason
+                    .as_deref()
+                    .filter(|reason| is_renderer_downgrade_reason(reason))
+                    .unwrap_or("template_not_renderable")
             }
             .to_string(),
         ),
@@ -1869,7 +1873,10 @@ fn planning_reason_without_renderer_downgrade(transition: &OpenTransition) -> Op
 }
 
 fn is_renderer_downgrade_reason(reason: &str) -> bool {
-    matches!(reason, "template_not_renderable" | "timing_unstable")
+    matches!(
+        reason,
+        "template_not_renderable" | "timing_unstable" | "overlay_not_handoff"
+    )
 }
 
 fn is_renderable_template(template: &str) -> bool {
@@ -2049,6 +2056,30 @@ mod tests {
         assert_eq!(
             status.downgrade_reason.as_deref(),
             Some("template_not_renderable")
+        );
+    }
+
+    #[test]
+    fn renderer_status_keeps_drop_tease_out_of_handoff_renderer() {
+        let status = renderer_status_for_transition(Some(&OpenTransition {
+            id: 171,
+            template: "DropTease16".to_string(),
+            renderer_template: None,
+            fallback_reason: Some("overlay_not_handoff".to_string()),
+            planned_start_ms: None,
+            actual_start_ms: None,
+            timing_delta_ms: None,
+            timing_source: None,
+            timing_status: None,
+            rejected_alternatives: Vec::new(),
+        }));
+
+        assert_eq!(status.planned_template.as_deref(), Some("DropTease16"));
+        assert_eq!(status.renderer_template, None);
+        assert_eq!(status.renderer_mode.as_deref(), Some("legacy_overlap"));
+        assert_eq!(
+            status.downgrade_reason.as_deref(),
+            Some("overlay_not_handoff")
         );
     }
 

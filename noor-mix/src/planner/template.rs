@@ -8,4 +8,5 @@ pub enum TransitionTemplate {
     BassSwap32,
     LongHarmonicBlend,
     FilterSweep,
+    DropTease16,
 }

@@ -662,6 +662,9 @@ fn build_prepared_dj_mixer(
     ) {
         return None;
     }
+    if !handoff_mixer_program(&transition.program) {
+        return None;
+    }
     let (deck_a, active_frames) = decoded_deck_buffer(active, state.device_channels)?;
     let (deck_b, _) = decoded_deck_buffer(next, state.device_channels)?;
     let mut program = transition.program.clone();
@@ -3072,6 +3075,36 @@ mod tests {
         assert_eq!(buffer.samples.len(), 10);
         assert_samples_close(&buffer.samples[4..], &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
         assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn drop_tease_program_does_not_prepare_handoff_mixer() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program.template = "DropTease16".to_string();
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(state.prepared_dj_mixer.is_none());
     }
 
     #[test]
