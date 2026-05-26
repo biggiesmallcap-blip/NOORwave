@@ -124,7 +124,11 @@ fn build_program(
         fade_start,
         resolve_at: duration_samples,
         loops: vec![],
-        automation: deck_gain_automation(duration_samples),
+        automation: if matches!(template, TransitionTemplate::DropTease16) {
+            drop_tease_overlay_automation(duration_samples)
+        } else {
+            deck_gain_automation(duration_samples)
+        },
     };
     program.deck_b_start_frame = incoming_sync_start_frame(incoming, sample_rate);
 
@@ -333,6 +337,33 @@ pub fn filter_sweep_eq_wash_program(
     program
 }
 
+pub fn drop_tease_16_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+) -> TransitionProgram {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "DropTease16".to_string(),
+        sample_rate,
+        channels,
+        deck_a_start_frame: 0,
+        deck_b_start_frame: 0,
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: drop_tease_overlay_automation(duration_samples),
+    }
+}
+
 fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: u64) -> u64 {
     match template {
         TransitionTemplate::BassSwap32 => bar_samples * 32,
@@ -387,6 +418,46 @@ fn deck_gain_automation(duration_samples: u64) -> Vec<AutomationEvent> {
             end_sample: duration_samples,
             from: 0.0,
             to: 1.0,
+            curve: Curve::EqualPowerIn,
+        },
+    ]
+}
+
+fn drop_tease_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    let fade_in_end = (end_sample / 4).max(1);
+    let fade_out_start = (end_sample * 3 / 4).max(fade_in_end);
+    vec![
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 0.0,
+            to: 0.0,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: 0,
+            end_sample: fade_in_end,
+            from: 0.0,
+            to: 1.0,
+            curve: Curve::EqualPowerIn,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_in_end,
+            end_sample: fade_out_start.max(fade_in_end + 1),
+            from: 1.0,
+            to: 1.0,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_out_start,
+            end_sample,
+            from: 1.0,
+            to: 0.0,
             curve: Curve::EqualPowerIn,
         },
     ]
@@ -1155,7 +1226,31 @@ mod tests {
 
         assert_eq!(program.template, "DropTease16");
         assert_eq!(program.resolve_at, 16 * 96_000);
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::A) && event.from == 0.0 && event.to == 0.0
+        }));
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B) && event.from == 1.0 && event.to == 0.0
+        }));
         program.validate().expect("drop tease guardrail program");
+    }
+
+    #[test]
+    fn drop_tease_16_program_uses_overlay_gain_shape() {
+        let program = drop_tease_16_program(48_000, 2, 16_000);
+
+        assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.resolve_at, 768_000);
+        assert_eq!(program.tier, Tier::FullBlend);
+        program.validate().expect("drop tease program");
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::A) && event.from == 0.0 && event.to == 0.0
+        }));
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B)
+                && event.start_sample == program.resolve_at * 3 / 4
+                && event.to == 0.0
+        }));
     }
 
     #[test]

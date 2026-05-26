@@ -1807,7 +1807,14 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         return RendererStatus {
             planned_template: Some(transition.template.clone()),
             renderer_template: transition.renderer_template.clone(),
-            renderer_mode: Some("dj_gain_program".to_string()),
+            renderer_mode: Some(
+                if transition.renderer_template.as_deref() == Some("DropTease16") {
+                    "dj_overlay_program"
+                } else {
+                    "dj_gain_program"
+                }
+                .to_string(),
+            ),
             downgrade_reason,
             planning_reason: planning_reason_without_renderer_downgrade(transition),
             sync_target: transition.timing_source.clone(),
@@ -1888,6 +1895,7 @@ fn is_renderable_template(template: &str) -> bool {
             | "BassSwap32"
             | "SlamCut"
             | "LongHarmonicBlend"
+            | "DropTease16"
     )
 }
 
@@ -2060,12 +2068,12 @@ mod tests {
     }
 
     #[test]
-    fn renderer_status_keeps_drop_tease_out_of_handoff_renderer() {
+    fn renderer_status_exposes_drop_tease_overlay_renderer() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
             id: 171,
             template: "DropTease16".to_string(),
-            renderer_template: None,
-            fallback_reason: Some("overlay_not_handoff".to_string()),
+            renderer_template: Some("DropTease16".to_string()),
+            fallback_reason: None,
             planned_start_ms: None,
             actual_start_ms: None,
             timing_delta_ms: None,
@@ -2075,12 +2083,9 @@ mod tests {
         }));
 
         assert_eq!(status.planned_template.as_deref(), Some("DropTease16"));
-        assert_eq!(status.renderer_template, None);
-        assert_eq!(status.renderer_mode.as_deref(), Some("legacy_overlap"));
-        assert_eq!(
-            status.downgrade_reason.as_deref(),
-            Some("overlay_not_handoff")
-        );
+        assert_eq!(status.renderer_template.as_deref(), Some("DropTease16"));
+        assert_eq!(status.renderer_mode.as_deref(), Some("dj_overlay_program"));
+        assert_eq!(status.downgrade_reason, None);
     }
 
     #[test]

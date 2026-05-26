@@ -662,7 +662,7 @@ fn build_prepared_dj_mixer(
     ) {
         return None;
     }
-    if !handoff_mixer_program(&transition.program) {
+    if !handoff_mixer_program(&transition.program) && !overlay_mixer_program(&transition.program) {
         return None;
     }
     let (deck_a, active_frames) = decoded_deck_buffer(active, state.device_channels)?;
@@ -702,6 +702,33 @@ fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
         program.template.as_str(),
         "SafeCrossfade" | "BassSwap16" | "BassSwap32" | "LongHarmonicBlend" | "FilterSweep"
     ) && deck_b_consumed_frames(program).is_some()
+}
+
+fn overlay_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
+    program.template == "DropTease16" && deck_b_consumed_frames(program).is_some()
+}
+
+fn render_prepared_mixer_to_buffer(
+    prepared: &mut PreparedDjMixer,
+    channels: usize,
+) -> Option<Vec<f32>> {
+    let render_frames = prepared.program.resolve_at as usize;
+    let render_samples = render_frames.checked_mul(channels)?;
+    if render_samples == 0 {
+        return None;
+    }
+    let block_samples = prepared
+        .max_block_samples
+        .max(channels)
+        .saturating_sub(prepared.max_block_samples.max(channels) % channels)
+        .max(channels);
+    let mut rendered = vec![0.0; render_samples];
+    let mut master_frame = 0_u64;
+    for block in rendered.chunks_mut(block_samples) {
+        prepared.mixer.render_block(block, master_frame);
+        master_frame = master_frame.saturating_add((block.len() / channels) as u64);
+    }
+    Some(rendered)
 }
 
 fn deck_b_consumed_frames(program: &noor_mix::TransitionProgram) -> Option<u64> {
@@ -751,24 +778,9 @@ fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -
         return false;
     };
     let channels = usize::from(state.device_channels.max(1));
-    let render_frames = prepared.program.resolve_at as usize;
-    let Some(render_samples) = render_frames.checked_mul(channels) else {
+    let Some(mut rendered) = render_prepared_mixer_to_buffer(&mut prepared, channels) else {
         return false;
     };
-    if render_samples == 0 {
-        return false;
-    }
-    let block_samples = prepared
-        .max_block_samples
-        .max(channels)
-        .saturating_sub(prepared.max_block_samples.max(channels) % channels)
-        .max(channels);
-    let mut rendered = vec![0.0; render_samples];
-    let mut master_frame = 0_u64;
-    for block in rendered.chunks_mut(block_samples) {
-        prepared.mixer.render_block(block, master_frame);
-        master_frame = master_frame.saturating_add((block.len() / channels) as u64);
-    }
 
     let Some(next) = state.next_engine.as_ref() else {
         return false;
@@ -788,6 +800,62 @@ fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -
     let remainder_start = deck_b_resume_sample.min(guard.samples.len());
     let remainder = guard.samples[remainder_start..].to_vec();
     rendered.extend_from_slice(&remainder);
+    guard.samples = rendered;
+    guard.read_pos = 0;
+    guard.started = false;
+    guard.started_notified = false;
+    guard.starved_notified = false;
+    guard.finished_notified = false;
+    guard.finished = true;
+    next.shared
+        .total_samples
+        .store(guard.samples.len() as u64, Ordering::Relaxed);
+    next.shared.publish_buffered_samples(guard.samples.len());
+    next.shared.crossfade_samples.store(0, Ordering::Relaxed);
+    next.shared
+        .crossfade_start_signaled
+        .store(true, Ordering::Relaxed);
+    next.shared
+        .fadein_start_samples
+        .store(u64::MAX, Ordering::Relaxed);
+    true
+}
+
+fn install_prepared_overlay_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> bool {
+    let Some(prepared) = state.prepared_dj_mixer.as_ref() else {
+        return false;
+    };
+    if !overlay_mixer_program(&prepared.program) {
+        return false;
+    }
+    if state
+        .engine
+        .as_ref()
+        .map(|engine| engine.track_id != prepared.current_track_id)
+        .unwrap_or(true)
+        || state
+            .next_engine
+            .as_ref()
+            .map(|engine| engine.track_id != prepared.next_track_id)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    let Some(mut prepared) = state.prepared_dj_mixer.take() else {
+        return false;
+    };
+    let channels = usize::from(state.device_channels.max(1));
+    let Some(rendered) = render_prepared_mixer_to_buffer(&mut prepared, channels) else {
+        return false;
+    };
+    let Some(next) = state.next_engine.as_ref() else {
+        return false;
+    };
+    let mut guard = match next.shared.buffer.lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
     guard.samples = rendered;
     guard.read_pos = 0;
     guard.started = false;
@@ -830,6 +898,52 @@ fn prepare_dj_mixer_for_pair(
     let did_prepare = prepared.is_some();
     state.prepared_dj_mixer = prepared;
     did_prepare
+}
+
+fn prepared_overlay_program(state: &PlaybackRuntimeLoopState) -> bool {
+    state
+        .prepared_dj_mixer
+        .as_ref()
+        .is_some_and(|prepared| overlay_mixer_program(&prepared.program))
+}
+
+fn start_prepared_overlay(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    timing_status: &'static str,
+    device_sample_rate: u32,
+    device_channels: u16,
+) -> bool {
+    let transition_event_id = state
+        .next_engine
+        .as_ref()
+        .and_then(|next| next.job.prepared_transition.as_ref())
+        .and_then(|transition| transition.transition_event_id);
+    let Some(active) = state.engine.as_ref() else {
+        return false;
+    };
+    let outgoing_track_id = active.track_id;
+    let outgoing_generation = active.generation;
+    let actual_start_ms = track_position_ms(&active.shared, device_sample_rate, device_channels);
+    active.shared.crossfade_samples.store(0, Ordering::Relaxed);
+
+    if !install_prepared_overlay_mixer_buffer(state) {
+        return false;
+    }
+    let Some(next) = state.next_engine.as_ref() else {
+        return false;
+    };
+    next.shared.paused.store(false, Ordering::SeqCst);
+    if let Some(transition_event_id) = transition_event_id {
+        let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
+            transition_event_id,
+            outgoing_track_id,
+            generation: outgoing_generation,
+            actual_start_ms,
+            timing_status: timing_status.to_string(),
+        });
+    }
+    true
 }
 
 fn arm_active_transition_window(
@@ -1269,17 +1383,29 @@ fn run_runtime_loop(
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
                         if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
-                            let rendered_dj_mixer =
-                                install_prepared_handoff_mixer_buffer(&mut state);
-                            promote_next_to_active(
-                                &mut state,
-                                &event_tx,
-                                &position_source,
-                                &buffered_source,
-                                &offset_source,
-                                "fired",
-                                rendered_dj_mixer,
-                            );
+                            if prepared_overlay_program(&state) {
+                                let device_sample_rate = state.device_sample_rate;
+                                let device_channels = state.device_channels;
+                                start_prepared_overlay(
+                                    &mut state,
+                                    &event_tx,
+                                    "fired",
+                                    device_sample_rate,
+                                    device_channels,
+                                );
+                            } else {
+                                let rendered_dj_mixer =
+                                    install_prepared_handoff_mixer_buffer(&mut state);
+                                promote_next_to_active(
+                                    &mut state,
+                                    &event_tx,
+                                    &position_source,
+                                    &buffered_source,
+                                    &offset_source,
+                                    "fired",
+                                    rendered_dj_mixer,
+                                );
+                            }
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
                     }
@@ -1309,17 +1435,29 @@ fn run_runtime_loop(
                         if crossfade_started
                             && !active_engine_suppresses_crossfade_after_seek(&state)
                         {
-                            let rendered_dj_mixer =
-                                install_prepared_handoff_mixer_buffer(&mut state);
-                            promote_next_to_active(
-                                &mut state,
-                                &event_tx,
-                                &position_source,
-                                &buffered_source,
-                                &offset_source,
-                                "late",
-                                rendered_dj_mixer,
-                            );
+                            if prepared_overlay_program(&state) {
+                                let device_sample_rate = state.device_sample_rate;
+                                let device_channels = state.device_channels;
+                                start_prepared_overlay(
+                                    &mut state,
+                                    &event_tx,
+                                    "late",
+                                    device_sample_rate,
+                                    device_channels,
+                                );
+                            } else {
+                                let rendered_dj_mixer =
+                                    install_prepared_handoff_mixer_buffer(&mut state);
+                                promote_next_to_active(
+                                    &mut state,
+                                    &event_tx,
+                                    &position_source,
+                                    &buffered_source,
+                                    &offset_source,
+                                    "late",
+                                    rendered_dj_mixer,
+                                );
+                            }
                         }
                     }
                 }
@@ -3078,7 +3216,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_tease_program_does_not_prepare_handoff_mixer() {
+    fn drop_tease_program_starts_overlay_without_promotion() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
             &mut state,
@@ -3091,10 +3229,33 @@ mod tests {
         );
 
         let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
         finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2]);
 
         let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(99);
         transition.program.template = "DropTease16".to_string();
+        transition.program.automation = vec![
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::A),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 0.0,
+                to: 0.0,
+                curve: noor_mix::Curve::Linear,
+            },
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 1.0,
+                to: 1.0,
+                curve: noor_mix::Curve::Linear,
+            },
+        ];
 
         let mut next = test_engine_with_shared(2, 21);
         next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
@@ -3103,8 +3264,36 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(!install_prepared_handoff_mixer_buffer(&mut state));
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        assert!(start_prepared_overlay(
+            &mut state, &event_tx, "fired", 48_000, 2
+        ));
+
         assert!(state.prepared_dj_mixer.is_none());
+        assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
+        assert_eq!(
+            state.next_engine.as_ref().map(|engine| engine.track_id),
+            Some(2)
+        );
+        let next = state.next_engine.as_ref().expect("overlay engine");
+        assert!(!next.shared.paused.load(Ordering::SeqCst));
+        let buffer = next.shared.buffer.lock().expect("buffer lock");
+        assert_samples_close(&buffer.samples, &[0.0, 0.0, 0.4, 0.4]);
+        match event_rx.try_recv().expect("overlay event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                transition_event_id,
+                actual_start_ms,
+                timing_status,
+                ..
+            } => {
+                assert_eq!(transition_event_id, 99);
+                assert_eq!(actual_start_ms, 1_000);
+                assert_eq!(timing_status, "fired");
+            }
+            other => panic!("expected overlay event, got {other:?}"),
+        }
     }
 
     #[test]

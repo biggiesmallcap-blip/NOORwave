@@ -33,7 +33,9 @@
 					? 'DJ gain program armed'
 					: status?.renderer_mode === 'dj_full_program'
 						? 'DJ full program armed'
-						: 'Transition armed'),
+						: status?.renderer_mode === 'dj_overlay_program'
+							? 'DJ overlay armed'
+							: 'Transition armed'),
 	);
 	let laneTitle = $derived(
 		planningStatus === 'disabled'
@@ -58,6 +60,8 @@
 			: planningStatus === 'armed'
 				? status?.renderer_mode === 'legacy_overlap'
 					? 'DJ planned this pair, but audio is using the overlap fallback.'
+					: status?.renderer_mode === 'dj_overlay_program'
+						? 'Overlay armed for the current pair.'
 					: 'Transition armed for the current pair.'
 				: planningStatus === 'pair_missing'
 					? 'Waiting for current and next tracks.'
@@ -155,6 +159,9 @@
 		}
 		if (status?.downgrade_reason === 'template_not_renderable') {
 			return `${rendered ?? 'SafeCrossfade'} rendered because ${planned} was not renderable for this pair.`;
+		}
+		if (status?.renderer_mode === 'dj_overlay_program') {
+			return `${rendered ?? planned} overlay fired from the planner result for this pair.`;
 		}
 		if (rendered && planned && rendered !== planned) {
 			return `${rendered} rendered after ${planned} was downgraded.`;

@@ -95,7 +95,7 @@ export interface TidalDiscographyAlbum {
 	release_date: string | null;
 	release_type: string | null;
 	// TIDAL's editorial filter that surfaced this album. More reliable than
-	// release_type for bucketing — release_type on the body field disagrees
+	// release_type for bucketing - release_type on the body field disagrees
 	// with the filter often enough to leave whole sections empty.
 	source_filter: 'ALBUMS' | 'EPSANDSINGLES' | 'COMPILATIONS' | 'LIVE' | null;
 	number_of_tracks: number | null;
@@ -668,7 +668,7 @@ export interface TidalPlayable {
 	is_favorite?: boolean;
 }
 
-/** Phase 5 — entry returned by `GET /api/charts`.
+/** Phase 5 - entry returned by `GET /api/charts`.
  *
  * Either `local_track` (when the chart entry resolved to a library track) or
  * `tidal_playable` (when it didn't) is set; the frontend picks the row
@@ -929,7 +929,7 @@ export type DjStatusResponse = {
 	selected_program?: string;
 	planned_template?: string;
 	renderer_template?: string;
-	renderer_mode?: 'legacy_overlap' | 'dj_gain_program' | 'dj_full_program';
+	renderer_mode?: 'legacy_overlap' | 'dj_gain_program' | 'dj_full_program' | 'dj_overlay_program';
 	downgrade_reason?: string;
 	planning_reason?: string;
 	sync_target?: string;
@@ -1163,7 +1163,7 @@ export interface AnalyticsDashboard {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Analytics signals — GET /api/analytics/signals
+// Analytics signals - GET /api/analytics/signals
 // Spec: C:\Users\Felix\.claude\plans\lets-revision-analytics-stats-crystalline-melody.md
 // JSON schema: noor-server/tests/fixtures/signals-schema.json
 // ─────────────────────────────────────────────────────────────────────────
@@ -1619,7 +1619,7 @@ export interface TidalRadioStationsResponse {
 	source: string;
 }
 
-/** One item inside a TIDAL home discover module. Per-kind fields are optional —
+/** One item inside a TIDAL home discover module. Per-kind fields are optional -
  *  the frontend dispatches on `kind` to pick the right shelf renderer. */
 export interface TidalHomeItem {
 	kind: 'track' | 'album' | 'playlist';
@@ -1638,7 +1638,7 @@ export interface TidalHomeModule {
 	id: string;
 	title: string;
 	kind: string;                     // TRACK_LIST | ALBUM_LIST | PLAYLIST_LIST | MIXED_TYPES_LIST | …
-	more_path?: string | null;        // upstream `pagedList.dataApiPath` — used by per-module detail route
+	more_path?: string | null;        // upstream `pagedList.dataApiPath` - used by per-module detail route
 	items: TidalHomeItem[];
 }
 
@@ -1842,7 +1842,7 @@ async function fetchApiResponse(
 	});
 
 	if (resp.status === 401) {
-		// Token was rejected — dispatch an event so the UI can show the connect screen
+		// Token was rejected - dispatch an event so the UI can show the connect screen
 		window.dispatchEvent(new CustomEvent('noor:unauthorized'));
 	}
 
@@ -2118,7 +2118,7 @@ export const api = {
 	},
 
 	/**
-	 * Search Spotify (via the Sportify proxy) for playlists. Best-effort —
+	 * Search Spotify (via the Sportify proxy) for playlists. Best-effort -
 	 * the caller should swallow errors so a Sportify outage never breaks
 	 * /search or Ctrl+K rendering.
 	 */
@@ -2416,7 +2416,7 @@ export const api = {
 		);
 		const { signals } = response;
 
-		// Length assertions — fail fast and loud if the server ever returns sparse rows.
+		// Length assertions - fail fast and loud if the server ever returns sparse rows.
 		// Layout has not started rendering at this point, so a thrown error surfaces in
 		// the page-level catch rather than producing mis-aligned ridges.
 		const axis = signals.tempo.bucket_axis;
@@ -2690,7 +2690,7 @@ export const api = {
 		});
 	},
 
-	/** POST /api/radio/start — atomically builds queue and returns first playable item. */
+	/** POST /api/radio/start - atomically builds queue and returns first playable item. */
 	startRadioStart(params: {
 		seed_track_id: number;
 		blend?: RadioBlend;
@@ -3090,24 +3090,24 @@ export const api = {
 	},
 
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────
-	// 503 here means TIDAL isn't connected — the YourMixesShelf surfaces a
+	// 503 here means TIDAL isn't connected - the YourMixesShelf surfaces a
 	// connect prompt rather than an error toast.
 	getTidalMixes() {
 		return fetchApi<TidalMixesResponse>('/api/tidal/mixes');
 	},
 
-	// Personal Radio Stations — same 503/connect-prompt contract as getTidalMixes.
+	// Personal Radio Stations - same 503/connect-prompt contract as getTidalMixes.
 	getTidalRadioStations() {
 		return fetchApi<TidalRadioStationsResponse>('/api/tidal/radio-stations');
 	},
 
-	// Editorial home modules from TIDAL pages/home — drives the search-page
+	// Editorial home modules from TIDAL pages/home - drives the search-page
 	// discover surface. 503 when TIDAL is disconnected.
 	getTidalHomeModules() {
 		return fetchApi<TidalHomeModulesResponse>('/api/tidal/home-modules');
 	},
 
-	// Generic editorial page fetch — drives /charts, /moods, and (eventually)
+	// Generic editorial page fetch - drives /charts, /moods, and (eventually)
 	// /genres / /new-releases. Backend whitelists the section + optional id.
 	// Path is split on / so each segment is encoded individually (needed for
 	// `mood/{id}` style two-segment paths).
@@ -3142,7 +3142,7 @@ export const api = {
 		);
 	},
 
-	// Mix track list — used to queue + play a mix when a card is clicked.
+	// Mix track list - used to queue + play a mix when a card is clicked.
 	getTidalMixTracks(mixId: string) {
 		return fetchApi<{ tracks: TidalDiscographyTrack[] }>(
 			`/api/tidal/mixes/${encodeURIComponent(mixId)}/tracks`

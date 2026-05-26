@@ -809,14 +809,10 @@ fn v1_renderable_program(
         return (renderer_program, None);
     }
     if program.template == "DropTease16" {
-        return (
-            crate::playback::dj_engine::safe_crossfade_program(
-                sample_rate,
-                channels,
-                noor_mix::Policy::default(),
-            ),
-            Some("overlay_not_handoff"),
-        );
+        let mut renderer_program =
+            noor_mix::planner::drop_tease_16_program(sample_rate, channels, 16_000);
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     if program.template == "FilterSweep" {
         if render_timing_unstable {
@@ -2744,14 +2740,20 @@ mod tests {
         }
 
         #[test]
-        fn v1_renderable_program_does_not_treat_drop_tease_as_handoff() {
+        fn v1_renderable_program_preserves_drop_tease_as_overlay() {
             let mut input = noor_mix::planner::filter_sweep_eq_wash_program(48_000, 2, 10_000);
             input.template = "DropTease16".to_string();
+            input.deck_b_start_frame = 384_000;
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
-            assert_eq!(program.template, "SafeCrossfade");
-            assert_eq!(reason, Some("overlay_not_handoff"));
+            assert_eq!(program.template, "DropTease16");
+            assert_eq!(program.deck_b_start_frame, 384_000);
+            assert_eq!(reason, None);
+            assert!(program.automation.iter().any(|event| event.param
+                == noor_mix::Param::DeckGain(noor_mix::DeckId::A)
+                && event.from == 0.0
+                && event.to == 0.0));
         }
 
         #[test]
