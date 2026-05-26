@@ -12,6 +12,8 @@ pub use template::TransitionTemplate;
 const SMALL_TEMPO_NUDGE_MIN: f32 = 0.97;
 const SMALL_TEMPO_NUDGE_MAX: f32 = 1.03;
 const PLAYBACK_RATE_EPSILON: f32 = 0.0001;
+const DROP_TEASE_CONFIDENCE_FLOOR: f32 = 0.65;
+const PLANNER_SAMPLE_RATE: u32 = 48_000;
 
 pub struct Planner;
 
@@ -35,6 +37,9 @@ impl Planner {
         };
         let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
         let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm);
+        if drop_tease_candidate_ready(outgoing, incoming, policy) {
+            return TransitionTemplate::DropTease16;
+        }
         if matches!(policy.mix_intent, MixIntent::Bold)
             && !outgoing.phrase_bar_indices.is_empty()
             && !incoming.phrase_bar_indices.is_empty()
@@ -104,7 +109,7 @@ fn build_program(
     incoming: &DjProfile,
     policy: &Policy,
 ) -> TransitionProgram {
-    let sample_rate = 48_000;
+    let sample_rate = PLANNER_SAMPLE_RATE;
     let channels = 2;
     let bpm = outgoing.bpm.or(incoming.bpm).unwrap_or(120.0).max(1.0);
     let bar_samples = ((60.0 / bpm) * 4.0 * sample_rate as f32) as u64;
@@ -130,7 +135,11 @@ fn build_program(
             deck_gain_automation(duration_samples)
         },
     };
-    program.deck_b_start_frame = incoming_sync_start_frame(incoming, sample_rate);
+    program.deck_b_start_frame = if matches!(template, TransitionTemplate::DropTease16) {
+        incoming_drop_tease_start_frame(incoming, swap_start, sample_rate)
+    } else {
+        incoming_sync_start_frame(incoming, sample_rate)
+    };
 
     if matches!(
         template,
@@ -165,6 +174,43 @@ fn build_program(
     program
 }
 
+fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
+    if !matches!(policy.mix_intent, MixIntent::Bold) {
+        return false;
+    }
+    if !outgoing.has_full_dj_profile() || !incoming.has_full_dj_profile() {
+        return false;
+    }
+    if outgoing.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
+        || incoming.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
+    {
+        return false;
+    }
+    if outgoing.downbeat_seconds.is_empty()
+        || incoming.downbeat_seconds.is_empty()
+        || outgoing.phrase_bar_indices.len() < 4
+        || incoming.phrase_bar_indices.len() < 4
+    {
+        return false;
+    }
+    let Some(rate) = small_tempo_nudge_rate(outgoing, incoming) else {
+        return false;
+    };
+    if !(SMALL_TEMPO_NUDGE_MIN..=SMALL_TEMPO_NUDGE_MAX).contains(&rate) {
+        return false;
+    }
+    let Some(outgoing_bpm) = outgoing.bpm else {
+        return false;
+    };
+    let min_drop_lead_frames = bar_samples_for_bpm(outgoing_bpm, PLANNER_SAMPLE_RATE) * 8;
+    first_valid_drop_frame(incoming, PLANNER_SAMPLE_RATE)
+        .is_some_and(|drop_frame| drop_frame >= min_drop_lead_frames)
+}
+
+fn bar_samples_for_bpm(bpm: f32, sample_rate: u32) -> u64 {
+    ((60.0 / bpm.max(1.0)) * 4.0 * sample_rate as f32) as u64
+}
+
 fn incoming_sync_start_frame(incoming: &DjProfile, sample_rate: u32) -> u64 {
     incoming
         .downbeat_seconds
@@ -174,6 +220,25 @@ fn incoming_sync_start_frame(incoming: &DjProfile, sample_rate: u32) -> u64 {
         .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .map(|seconds| (seconds * sample_rate as f32).round() as u64)
         .unwrap_or(0)
+}
+
+fn incoming_drop_tease_start_frame(
+    incoming: &DjProfile,
+    drop_alignment_sample: u64,
+    sample_rate: u32,
+) -> u64 {
+    first_valid_drop_frame(incoming, sample_rate)
+        .map(|drop_frame| drop_frame.saturating_sub(drop_alignment_sample))
+        .unwrap_or_else(|| incoming_sync_start_frame(incoming, sample_rate))
+}
+
+fn first_valid_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
+    incoming
+        .drop_seconds
+        .iter()
+        .copied()
+        .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * sample_rate as f32).round() as u64)
 }
 
 fn small_tempo_nudge_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
@@ -1202,7 +1267,96 @@ mod tests {
     }
 
     #[test]
-    fn drop_tease_16_override_builds_but_is_not_auto_selected() {
+    fn choose_template_bold_selects_drop_tease_for_confident_drop_candidate() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        assert_eq!(
+            Planner::choose_template(&outgoing, &incoming, &policy),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
+    fn choose_template_drop_tease_rejects_safe_and_balanced_intents() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        for mix_intent in [MixIntent::Safe, MixIntent::Balanced] {
+            let policy = Policy {
+                mix_intent,
+                ..Policy::default()
+            };
+            assert_ne!(
+                Planner::choose_template(&outgoing, &incoming, &policy),
+                TransitionTemplate::DropTease16
+            );
+        }
+    }
+
+    #[test]
+    fn choose_template_drop_tease_rejects_unsafe_candidates() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+
+        let mut missing_drop = profile(Some(121.0), Some("8A"), 4);
+        missing_drop.drop_seconds.clear();
+        assert_ne!(
+            Planner::choose_template(&outgoing, &missing_drop, &policy),
+            TransitionTemplate::DropTease16
+        );
+
+        let mut low_confidence = profile(Some(121.0), Some("8A"), 4);
+        low_confidence.drop_seconds = vec![32.0];
+        low_confidence.profile_confidence = 0.5;
+        assert_ne!(
+            Planner::choose_template(&outgoing, &low_confidence, &policy),
+            TransitionTemplate::DropTease16
+        );
+
+        let mut unsafe_tempo = profile(Some(130.0), Some("8A"), 4);
+        unsafe_tempo.drop_seconds = vec![32.0];
+        assert_ne!(
+            Planner::choose_template(&outgoing, &unsafe_tempo, &policy),
+            TransitionTemplate::DropTease16
+        );
+
+        let mut early_drop = profile(Some(121.0), Some("8A"), 4);
+        early_drop.drop_seconds = vec![4.0];
+        assert_ne!(
+            Planner::choose_template(&outgoing, &early_drop, &policy),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
+    fn drop_tease_plan_aligns_incoming_drop_to_overlay_swap() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program = Planner::plan(&outgoing, &incoming, &policy);
+
+        assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.swap_start, 768_000);
+        assert_eq!(program.deck_b_start_frame, 768_000);
+    }
+
+    #[test]
+    fn drop_tease_16_override_builds_even_without_auto_candidate() {
         let bold = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
