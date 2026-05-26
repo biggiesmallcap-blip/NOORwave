@@ -447,7 +447,7 @@ struct PlaybackRuntimeLoopState {
     next_engine: Option<PlaybackEngine>,
     /// Engine that's still audible during the crossfade fade-out window. It
     /// keeps producing audio (with a fade-out gain ramp) until its buffer
-    /// drains, at which point it self-terminates and we drop it silently —
+    /// drains, at which point it self-terminates and we drop it silently -
     /// the queue advance has already happened at swap time.
     fading_out_engine: Option<PlaybackEngine>,
     /// Last-known exclusive mode flag from the most recent `DeviceSwap`. When
@@ -1159,7 +1159,7 @@ fn run_runtime_loop(
                     generation,
                 } => {
                     // Decode for the pre-decoded next engine completed. If the outgoing
-                    // engine has already entered the crossfade window, promote now —
+                    // engine has already entered the crossfade window, promote now -
                     // the user will hear a clipped fade-in, but it's better than silence.
                     let pending_match = state
                         .next_engine
@@ -1321,7 +1321,7 @@ fn run_runtime_loop(
                     outcome,
                 } => {
                     // The fading-out engine reaching its terminal state is the
-                    // expected end of a crossfade — drop it silently. The queue
+                    // expected end of a crossfade - drop it silently. The queue
                     // advance already happened at promotion time via Finished.
                     let fading = state
                         .fading_out_engine
@@ -1441,7 +1441,7 @@ fn run_runtime_loop(
                     // route layer (Task 7) is the one that flips this toggle and
                     // also re-issues `DeviceSwap` on track transitions when the
                     // next track's native rate differs from the current stream
-                    // rate — runtime.rs has no view of the next track's StreamInfo
+                    // rate - runtime.rs has no view of the next track's StreamInfo
                     // until decode begins, so it cannot drive that comparison
                     // itself. Optional `desired_sample_rate` allows the route layer
                     // to specify an exact target (e.g. next track's native rate).
@@ -1492,7 +1492,7 @@ fn run_runtime_loop(
                     // Rebuild the stream on every live engine so they all play on
                     // the new device. swap_stream now transparently falls back to
                     // cpal shared on exclusive failure (and emits an
-                    // ExclusiveModeFailed event), so a hard error here is rare —
+                    // ExclusiveModeFailed event), so a hard error here is rare -
                     // typically only a cpal shared build failure.
                     let mut swap_failed = false;
                     if exclusive {
@@ -1677,7 +1677,7 @@ fn transition_to_job(
     // No-op when state.engine is already playing the requested track. This
     // happens after a crossfade swap: promote_next_to_active emitted Finished
     // for the OUTGOING track, which caused routes to call switch_to(NEW track)
-    // — but we already promoted that engine. Re-doing the swap would tear down
+    // - but we already promoted that engine. Re-doing the swap would tear down
     // a perfectly good audio stream and cold-start a duplicate.
     // position_source was already redirected to the promoted engine at promotion
     // time, so the handle reads the correct counter without any extra work here.
@@ -1692,7 +1692,7 @@ fn transition_to_job(
 
     stop_current_engine(state);
     // A user-initiated track change (skip / new play) abandons any in-flight
-    // crossfade — kill the fading-out engine so it doesn't keep producing audio
+    // crossfade - kill the fading-out engine so it doesn't keep producing audio
     // underneath the new track.
     if let Some(mut prior) = state.fading_out_engine.take() {
         prior.stop();
@@ -1759,7 +1759,7 @@ fn transition_to_job(
             refresh_exclusive_sources(state);
         }
     } else {
-        // Cold start — stop any stale next_engine.
+        // Cold start - stop any stale next_engine.
         if let Some(mut stale) = state.next_engine.take() {
             stale.stop();
         }
@@ -2696,6 +2696,8 @@ mod tests {
                 template: "SafeCrossfade".to_string(),
                 sample_rate: 48_000,
                 channels: 2,
+                deck_a_start_frame: 0,
+                deck_b_start_frame: 0,
                 sync_start: 0,
                 intro_start: 0,
                 swap_start: 1,
@@ -2808,6 +2810,42 @@ mod tests {
         let mut out = [0.0; 4];
         prepared.mixer.render_block(&mut out, 0);
         assert!(out.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn runtime_prepared_mixer_honors_program_start_frames() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program.deck_a_start_frame = 1;
+        transition.program.deck_b_start_frame = 2;
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
+        let mut out = [0.0; 2];
+
+        prepared.mixer.render_block(&mut out, 0);
+
+        assert!(out.iter().all(|sample| (*sample - 0.7).abs() < 1e-6));
     }
 
     #[test]
@@ -3783,6 +3821,8 @@ mod tests {
                 template: "SafeCrossfade".to_string(),
                 sample_rate: 48_000,
                 channels: 2,
+                deck_a_start_frame: 0,
+                deck_b_start_frame: 0,
                 sync_start: 0,
                 intro_start: 0,
                 swap_start: 1,

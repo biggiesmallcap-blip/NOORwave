@@ -43,8 +43,10 @@ pub struct AutomationEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopRegion {
     pub deck: DeckId,
-    pub start_sample: u64,
-    pub end_sample: u64,
+    #[serde(default, alias = "start_sample")]
+    pub start_frame: u64,
+    #[serde(default, alias = "end_sample")]
+    pub end_frame: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +55,10 @@ pub struct TransitionProgram {
     pub template: String,
     pub sample_rate: u32,
     pub channels: u16,
+    #[serde(default)]
+    pub deck_a_start_frame: u64,
+    #[serde(default)]
+    pub deck_b_start_frame: u64,
     pub sync_start: u64,
     pub intro_start: u64,
     pub swap_start: u64,
@@ -96,7 +102,7 @@ impl TransitionProgram {
             return Err(ProgramError::NonMonotonicMarkers);
         }
         for region in &self.loops {
-            if region.start_sample >= region.end_sample {
+            if region.start_frame >= region.end_frame {
                 return Err(ProgramError::EmptyLoopRegion);
             }
         }
@@ -141,6 +147,8 @@ mod tests {
             template: "BassSwap16".to_string(),
             sample_rate: 48_000,
             channels: 2,
+            deck_a_start_frame: 0,
+            deck_b_start_frame: 0,
             sync_start: 0,
             intro_start: 48_000,
             swap_start: 96_000,

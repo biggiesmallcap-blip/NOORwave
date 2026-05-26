@@ -46,6 +46,8 @@ mod tests {
             template: "SafeCrossfade".to_string(),
             sample_rate: 48_000,
             channels: 2,
+            deck_a_start_frame: 0,
+            deck_b_start_frame: 0,
             sync_start: 0,
             intro_start: 0,
             swap_start: 96_000,

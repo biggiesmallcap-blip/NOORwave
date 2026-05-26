@@ -1,7 +1,7 @@
 use crate::automation::interpolate;
 use crate::eq::{BandGains, IsolatorEq};
 use crate::limiter::SafetyLimiter;
-use crate::program::{AutomationEvent, DeckId, Param, TransitionProgram};
+use crate::program::{AutomationEvent, DeckId, LoopRegion, Param, TransitionProgram};
 
 pub struct Mixer {
     program: TransitionProgram,
@@ -24,6 +24,11 @@ impl Mixer {
         program.validate()?;
         let sample_rate = program.sample_rate;
         let channels = program.channels;
+        let mut deck_a = deck_a;
+        let mut deck_b = deck_b;
+        deck_a.set_position_frame(program.deck_a_start_frame);
+        deck_b.set_position_frame(program.deck_b_start_frame);
+        apply_loop_regions(&program, &mut deck_a, &mut deck_b);
         Ok(Self {
             program,
             deck_a,
@@ -83,6 +88,27 @@ impl Mixer {
     }
 }
 
+fn apply_loop_regions(
+    program: &TransitionProgram,
+    deck_a: &mut crate::deck::DeckBuffer,
+    deck_b: &mut crate::deck::DeckBuffer,
+) {
+    for region in &program.loops {
+        apply_loop_region(region, deck_a, deck_b);
+    }
+}
+
+fn apply_loop_region(
+    region: &LoopRegion,
+    deck_a: &mut crate::deck::DeckBuffer,
+    deck_b: &mut crate::deck::DeckBuffer,
+) {
+    match region.deck {
+        DeckId::A => deck_a.set_loop_region(region.start_frame, region.end_frame),
+        DeckId::B => deck_b.set_loop_region(region.start_frame, region.end_frame),
+    }
+}
+
 fn deck_band_gains(program: &TransitionProgram, deck: DeckId, sample: u64) -> BandGains {
     BandGains {
         low: param_at(program, Param::LowGain(deck), sample),
@@ -135,6 +161,8 @@ mod tests {
             template: "SafeCrossfade".to_string(),
             sample_rate: 48_000,
             channels: 1,
+            deck_a_start_frame: 0,
+            deck_b_start_frame: 0,
             sync_start: 0,
             intro_start: 0,
             swap_start: 4,
@@ -170,6 +198,47 @@ mod tests {
         let mut out = [0.0; 4];
         mixer.render_block(&mut out, 0);
         assert_eq!(out, [0.75; 4]);
+    }
+
+    #[test]
+    fn render_block_applies_program_start_frames() {
+        let mut program = valid_program();
+        program.deck_a_start_frame = 2;
+        program.deck_b_start_frame = 4;
+        let mut mixer = Mixer::new(
+            program,
+            DeckBuffer::new(vec![0.0, 0.1, 0.2, 0.3, 0.4], 1),
+            DeckBuffer::new(vec![0.0, 0.1, 0.2, 0.3, 0.4], 1),
+            8,
+        )
+        .expect("mixer");
+        let mut out = [0.0; 3];
+
+        mixer.render_block(&mut out, 0);
+
+        assert_samples_close(&out, &[0.6, 0.7, 0.8]);
+    }
+
+    #[test]
+    fn render_block_applies_program_loop_regions() {
+        let mut program = valid_program();
+        program.loops = vec![LoopRegion {
+            deck: DeckId::A,
+            start_frame: 1,
+            end_frame: 3,
+        }];
+        let mut mixer = Mixer::new(
+            program,
+            DeckBuffer::new(vec![0.0, 0.1, 0.2, 0.3], 1),
+            DeckBuffer::new(vec![0.0; 4], 1),
+            8,
+        )
+        .expect("mixer");
+        let mut out = [0.0; 5];
+
+        mixer.render_block(&mut out, 0);
+
+        assert_samples_close(&out, &[0.0, 0.1, 0.2, 0.1, 0.2]);
     }
 
     #[test]
@@ -219,6 +288,16 @@ mod tests {
 
     fn rms(samples: &[f32]) -> f32 {
         (samples.iter().map(|value| value * value).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    fn assert_samples_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (*actual - *expected).abs() < 1e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
     }
 
     #[test]

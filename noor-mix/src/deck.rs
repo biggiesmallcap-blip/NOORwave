@@ -7,12 +7,23 @@ pub struct DeckBuffer {
 
 impl DeckBuffer {
     pub fn new(samples: Vec<f32>, channels: u16) -> Self {
+        Self::new_at(samples, channels, 0)
+    }
+
+    pub fn new_at(samples: Vec<f32>, channels: u16, start_frame: u64) -> Self {
+        let channels = channels.max(1);
+        let frame_count = samples.len() / usize::from(channels);
         Self {
             samples,
-            channels: channels.max(1),
-            position: 0.0,
+            channels,
+            position: clamped_frame_position(start_frame, frame_count),
             loop_region: None,
         }
+    }
+
+    pub fn set_position_frame(&mut self, start_frame: u64) {
+        let frame_count = self.samples.len() / usize::from(self.channels);
+        self.position = clamped_frame_position(start_frame, frame_count);
     }
 
     pub fn set_loop_region(&mut self, start_frame: u64, end_frame: u64) {
@@ -38,7 +49,7 @@ impl DeckBuffer {
         };
 
         for frame in out.chunks_mut(channels) {
-            let base_frame = self.position.floor().max(0.0) as usize;
+            let base_frame = (self.position.floor().max(0.0) as usize).min(frame_count - 1);
             let next_frame = (base_frame + 1).min(frame_count - 1);
             let frac = (self.position - base_frame as f64) as f32;
 
@@ -70,6 +81,11 @@ impl DeckBuffer {
     }
 }
 
+fn clamped_frame_position(start_frame: u64, frame_count: usize) -> f64 {
+    let max_frame = frame_count.saturating_sub(1) as u64;
+    start_frame.min(max_frame) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +113,21 @@ mod tests {
         let mut out = [0.0; 4];
         deck.tick_into(&mut out, 1.5);
         assert_eq!(out, [0.0, 1.5, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn new_at_starts_from_source_frame() {
+        let mut deck = DeckBuffer::new_at(vec![0.0, 1.0, 2.0, 3.0], 1, 2);
+        let mut out = [0.0; 3];
+        deck.tick_into(&mut out, 1.0);
+        assert_eq!(out, [2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn new_at_clamps_past_end_to_last_frame() {
+        let mut deck = DeckBuffer::new_at(vec![0.0, 1.0, 2.0], 1, 99);
+        let mut out = [0.0; 2];
+        deck.tick_into(&mut out, 1.0);
+        assert_eq!(out, [2.0, 2.0]);
     }
 }
