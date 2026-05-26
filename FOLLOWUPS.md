@@ -14,11 +14,12 @@ back to the PR or commit that flagged it.
 
 Phase 1 ships beat-phase sync with the existing `PlaybackRate` cap of
 `0.97..1.03`. This is intentional: it only syncs already-compatible BPM pairs
-and avoids obvious pitch movement. The offline metric harness now exists in
-`noor-mix::stretch_eval`; the remaining work is wiring an actual Signalsmith
-Stretch candidate renderer into that harness and running the documented fixture
-matrix before any wider runtime cap ships. Do not use Rubber Band without
-license review.
+and avoids obvious pitch movement. The offline metric harness and optional
+`signalsmith-eval` renderer now exist in `noor-mix::stretch_eval`; the feature
+compile gate is currently blocked until `libclang.dll` is available and
+`LIBCLANG_PATH` points at it. After that, run the documented fixture matrix
+before any wider runtime cap ships. Do not use Rubber Band without license
+review.
 - Spawned by: DJ beat-sync design planning, 2026-05-26
 
 ### refactor(db/signals): extract analytics signals from db/queries.rs

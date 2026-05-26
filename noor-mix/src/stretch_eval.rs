@@ -84,6 +84,30 @@ pub fn evaluate_stretch_render(
     }
 }
 
+#[cfg(feature = "signalsmith-eval")]
+pub fn render_signalsmith_stretch(
+    input: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    tempo_ratio: f32,
+) -> Option<Vec<f32>> {
+    if !tempo_ratio.is_finite() || tempo_ratio <= 0.0 {
+        return None;
+    }
+    let channels = channels.max(1);
+    let channels_usize = usize::from(channels);
+    if input.len() % channels_usize != 0 {
+        return None;
+    }
+    let input_frames = input.len() / channels_usize;
+    let output_frames = (input_frames as f32 / tempo_ratio).round().max(1.0) as usize;
+    let output_samples = output_frames.checked_mul(channels_usize)?;
+    let mut output = vec![0.0_f32; output_samples];
+    let mut stretch =
+        signalsmith_stretch::Stretch::preset_default(u32::from(channels), sample_rate.max(1));
+    stretch.exact(input, &mut output).then_some(output)
+}
+
 fn phase_drift_ms(
     output: &[f32],
     sample_rate: u32,
@@ -222,6 +246,27 @@ mod tests {
         output
     }
 
+    fn print_eval_row(
+        renderer: &str,
+        seconds: usize,
+        tempo_ratio: f32,
+        render_ms: u128,
+        report: &StretchEvaluationReport,
+    ) {
+        let delta_pct = (tempo_ratio - 1.0).abs() * 100.0;
+        println!(
+            "smart_stretch_eval renderer={renderer} window_secs={seconds} tempo_ratio={tempo_ratio:.3} render_ms={render_ms} finite={} length_error_frames={} peak={:.3} rms_change_db={:.2} phase_markers={}/{} max_phase_drift_ms={:.3} passed={}",
+            report.finite,
+            report.length_error_frames,
+            report.peak,
+            report.rms_change_db,
+            report.phase_marker_matched,
+            report.phase_marker_count,
+            report.max_phase_drift_ms,
+            report.passes_objective_gate(delta_pct)
+        );
+    }
+
     #[test]
     fn stretch_eval_tracks_length_and_phase_for_ideal_clicks() {
         let sample_rate = 48_000;
@@ -310,7 +355,6 @@ mod tests {
                     0,
                 );
                 let render_ms = started.elapsed().as_millis();
-                let delta_pct = (tempo_ratio - 1.0).abs() * 100.0;
                 let report = evaluate_stretch_render(
                     &input,
                     &output,
@@ -319,15 +363,56 @@ mod tests {
                     tempo_ratio,
                     &markers,
                 );
-                println!(
-                    "smart_stretch_eval_baseline window_secs={seconds} tempo_ratio={tempo_ratio:.3} render_ms={render_ms} length_error_frames={} peak={:.3} rms_change_db={:.2} max_phase_drift_ms={:.3} passed={}",
-                    report.length_error_frames,
-                    report.peak,
-                    report.rms_change_db,
-                    report.max_phase_drift_ms,
-                    report.passes_objective_gate(delta_pct)
+                print_eval_row(
+                    "synthetic_baseline",
+                    seconds,
+                    tempo_ratio,
+                    render_ms,
+                    &report,
                 );
+
+                #[cfg(feature = "signalsmith-eval")]
+                {
+                    let started = Instant::now();
+                    let output =
+                        render_signalsmith_stretch(&input, sample_rate, channels, tempo_ratio)
+                            .expect("signalsmith render");
+                    let render_ms = started.elapsed().as_millis();
+                    let report = evaluate_stretch_render(
+                        &input,
+                        &output,
+                        sample_rate,
+                        channels,
+                        tempo_ratio,
+                        &markers,
+                    );
+                    print_eval_row("signalsmith", seconds, tempo_ratio, render_ms, &report);
+                }
             }
         }
+    }
+
+    #[cfg(feature = "signalsmith-eval")]
+    #[test]
+    fn signalsmith_renderer_uses_frame_based_output_size() {
+        let sample_rate = 48_000;
+        let channels = 2;
+        let tempo_ratio = 1.05;
+        let (input, markers) = click_track(sample_rate, channels, 30, 120.0);
+
+        let output =
+            render_signalsmith_stretch(&input, sample_rate, channels, tempo_ratio).expect("render");
+        let report = evaluate_stretch_render(
+            &input,
+            &output,
+            sample_rate,
+            channels,
+            tempo_ratio,
+            &markers,
+        );
+
+        assert!(report.finite, "{report:?}");
+        assert!(report.length_error_frames.abs() <= 1, "{report:?}");
+        assert!(report.peak <= 0.98, "{report:?}");
     }
 }

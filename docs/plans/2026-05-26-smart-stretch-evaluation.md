@@ -97,6 +97,7 @@ Implemented:
 - `noor-mix::stretch_eval::evaluate_stretch_render` records objective metrics for a candidate stretched render.
 - Normal tests cover finite sample detection, output length error, peak/RMS reporting, and click-marker phase drift.
 - The ignored baseline benchmark prints the same metrics across 30s, 90s, and 180s synthetic click fixtures.
+- `signalsmith-eval` adds an optional Signalsmith candidate renderer for offline evaluation only.
 
 Run the harness with:
 
@@ -106,7 +107,25 @@ cargo test -p noor-mix smart_stretch_evaluation_baseline_benchmark -- --ignored 
 
 Still left before `Smart Stretch Now`:
 
-- Wire an actual Signalsmith Stretch candidate renderer into the offline harness.
+- Install or expose `libclang.dll` so the optional Signalsmith feature can compile.
 - Run fixed synthetic and musical fixtures in both slower and faster directions at 3, 5, 8, and 12 percent tempo deltas.
 - Record render time, phase drift, peak, RMS movement, output length error, and manual listening notes.
 - Keep runtime playback capped to the existing `0.97..1.03` direct playback-rate path until the evaluation passes.
+
+## Signalsmith Feature Gate Result
+
+Attempted on 2026-05-26 with:
+
+```powershell
+cargo test -p noor-mix --features signalsmith-eval stretch_eval
+```
+
+Result: blocked by native toolchain setup before evaluation could run.
+
+Exact blocker:
+
+```text
+Unable to find libclang: "couldn't find any valid shared libraries matching: ['clang.dll', 'libclang.dll'], set the `LIBCLANG_PATH` environment variable to a path where one of these files can be found (invalid: [])"
+```
+
+Per the hardened plan, do not vendor C++ or switch crates in this slice. The optional `signalsmith-eval` feature can be retried after `libclang.dll` is available and `LIBCLANG_PATH` points at it.
