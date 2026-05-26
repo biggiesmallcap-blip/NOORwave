@@ -2443,6 +2443,34 @@ mod tests {
             .expect("count")
         }
 
+        fn make_pair_drop_tease_ready(db: &Database) {
+            db.with_conn(|conn| {
+                queries::set_dj_global_policy(conn, "bold", "neutral")?;
+                let phrase_blob = encode_u32_blob(&(0..4).collect::<Vec<_>>());
+                let drop_blob = encode_f32_blob(&[32.0]);
+                let vocal_blob = encode_f32_blob(&[0.0; 4]);
+                conn.execute(
+                    "UPDATE audio_dj_profiles
+                     SET phrase_boundaries_blob = ?1,
+                         vocal_presence_blob = ?2,
+                         vocal_density_blob = ?2
+                     WHERE media_ref_id = '1'",
+                    params![&phrase_blob, &vocal_blob],
+                )?;
+                conn.execute(
+                    "UPDATE audio_dj_profiles
+                     SET phrase_boundaries_blob = ?1,
+                         drop_blob = ?2,
+                         vocal_presence_blob = ?3,
+                         vocal_density_blob = ?3
+                     WHERE media_ref_id = '2'",
+                    params![&phrase_blob, &drop_blob, &vocal_blob],
+                )?;
+                Ok(())
+            })
+            .expect("drop tease profile fixture");
+        }
+
         #[test]
         fn latest_open_dj_transition_event_for_pair_prefers_fired_event() {
             let db = db_with_pair();
@@ -2574,6 +2602,33 @@ mod tests {
             assert_eq!(row.0, "BassSwap16");
             assert_eq!(renderer_program.template, "BassSwap16");
             assert_eq!(renderer_program.resolve_at, 768_000);
+            assert_eq!(row.2, None);
+        }
+
+        #[test]
+        fn v1_planner_logs_and_prepares_drop_tease_overlay_when_candidate_matches() {
+            let db = db_with_pair();
+            make_pair_drop_tease_ready(&db);
+            let transition = plan(&db);
+
+            assert_eq!(transition.program.template, "DropTease16");
+            let row: (String, String, Option<String>) = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT template, program_json, fallback_reason
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![transition.transition_event_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("event");
+            let renderer_program: noor_mix::TransitionProgram =
+                serde_json::from_str(&row.1).expect("program");
+
+            assert_eq!(row.0, "DropTease16");
+            assert_eq!(renderer_program.template, "DropTease16");
+            assert_eq!(renderer_program.deck_b_start_frame, 768_000);
             assert_eq!(row.2, None);
         }
 
