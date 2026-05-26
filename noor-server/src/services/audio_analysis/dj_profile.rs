@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use super::bpm::{self, BeatGridAnalysis};
 use super::{onset, tempo};
 
-pub const DJ_PROFILE_VERSION: &str = "dj_profile_v1";
+pub const DJ_PROFILE_VERSION: &str = "dj_profile_v2";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -214,6 +214,13 @@ pub struct SafeTransitionWindow {
     pub start_seconds: f32,
     pub end_seconds: f32,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StructureCandidate {
+    seconds: f32,
+    confidence: f32,
+    reason: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -423,13 +430,24 @@ fn build_audio_dj_profile_row_from_analysis(
         ((samples.len() as f64 / sample_rate as f64) * 1000.0).round() as i64
     };
     let profile_confidence = profile_confidence(&key, analysis_scope_ms);
-    let phrase_boundaries = phrase_boundaries_every_eight_downbeats(&analysis.downbeats_seconds);
     let energy_contour =
         energy_contour_by_phrase(samples, sample_rate, &analysis.downbeats_seconds);
+    let phrase_boundaries =
+        phrase_boundaries_from_structure(&analysis.downbeats_seconds, &energy_contour);
     let mix_in = mix_in_points(&analysis.downbeats_seconds, profile_confidence);
     let mix_out = mix_out_points(&analysis.downbeats_seconds, profile_confidence);
     let windows = safe_transition_windows(&mix_in, &mix_out, profile_confidence);
     let confident_structure = profile_confidence >= 0.4 && !analysis.downbeats_seconds.is_empty();
+    let breakdown_candidates = breakdown_candidates(
+        &analysis.downbeats_seconds,
+        &energy_contour,
+        profile_confidence,
+    );
+    let drop_candidates = drop_candidates(
+        &analysis.downbeats_seconds,
+        &energy_contour,
+        profile_confidence,
+    );
 
     AudioDjProfileRow {
         media_ref_kind: key.media_ref_kind.clone(),
@@ -454,20 +472,8 @@ fn build_audio_dj_profile_row_from_analysis(
                     .unwrap_or(0.0),
             )
         }),
-        breakdown_blob: encode_f32_blob(
-            analysis
-                .downbeats_seconds
-                .get(16)
-                .map(std::slice::from_ref)
-                .unwrap_or(&[]),
-        ),
-        drop_blob: encode_f32_blob(
-            analysis
-                .downbeats_seconds
-                .get(24)
-                .map(std::slice::from_ref)
-                .unwrap_or(&[]),
-        ),
+        breakdown_blob: encode_f32_blob(&candidate_seconds(&breakdown_candidates)),
+        drop_blob: encode_f32_blob(&candidate_seconds(&drop_candidates)),
         safe_transition_windows_blob: encode_safe_transition_windows(&windows),
         energy_contour_blob: encode_f32_blob(&energy_contour),
         vocal_presence_blob: encode_f32_blob(&vec![0.0; phrase_boundaries.len().max(1)]),
@@ -497,6 +503,21 @@ fn profile_confidence(key: &AudioDjProfileKey, analysis_scope_ms: i64) -> f64 {
 
 fn phrase_boundaries_every_eight_downbeats(downbeats: &[f32]) -> Vec<u32> {
     (0..downbeats.len() as u32).step_by(8).collect()
+}
+
+fn phrase_boundaries_from_structure(downbeats: &[f32], energy_contour: &[f32]) -> Vec<u32> {
+    let mut boundaries = phrase_boundaries_every_eight_downbeats(downbeats);
+    boundaries.extend((0..downbeats.len() as u32).step_by(16));
+    for (phrase_index, window) in energy_contour.windows(2).enumerate() {
+        let energy_rise = window[1] - window[0];
+        if energy_rise >= 0.2 {
+            boundaries.push(((phrase_index + 1) * 8) as u32);
+        }
+    }
+    boundaries.retain(|bar| (*bar as usize) < downbeats.len());
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
 }
 
 fn mix_in_points(downbeats: &[f32], confidence: f64) -> Vec<f32> {
@@ -535,6 +556,84 @@ fn safe_transition_windows(
             end_seconds: start_seconds + 8.0,
             confidence: profile_confidence as f32,
         })
+        .collect()
+}
+
+fn breakdown_candidates(
+    downbeats: &[f32],
+    energy_contour: &[f32],
+    profile_confidence: f64,
+) -> Vec<StructureCandidate> {
+    if profile_confidence < 0.65 || downbeats.len() < 16 {
+        return Vec::new();
+    }
+    energy_contour
+        .windows(2)
+        .enumerate()
+        .filter_map(|(phrase_index, window)| {
+            let energy_drop = window[0] - window[1];
+            let bar_index = (phrase_index + 1) * 8;
+            let confidence = (profile_confidence as f32 * (0.55 + energy_drop.max(0.0))).min(1.0);
+            (energy_drop >= 0.2)
+                .then(|| downbeats.get(bar_index).copied())
+                .flatten()
+                .map(|seconds| StructureCandidate {
+                    seconds,
+                    confidence,
+                    reason: "energy_drop",
+                })
+                .filter(|candidate| candidate.confidence >= 0.5)
+        })
+        .collect()
+}
+
+fn drop_candidates(
+    downbeats: &[f32],
+    energy_contour: &[f32],
+    profile_confidence: f64,
+) -> Vec<StructureCandidate> {
+    if profile_confidence < 0.65 || downbeats.len() < 16 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for phrase_index in 1..energy_contour.len() {
+        let bar_index = phrase_index * 8;
+        let Some(seconds) = downbeats.get(bar_index).copied() else {
+            continue;
+        };
+        let previous_energy = energy_contour.get(phrase_index - 1).copied().unwrap_or(0.0);
+        let current_energy = energy_contour.get(phrase_index).copied().unwrap_or(0.0);
+        let energy_rise = current_energy - previous_energy;
+        let sixteen_bar_aligned = bar_index % 16 == 0;
+        let local_energy = current_energy.max(previous_energy);
+        let (confidence, reason) = if energy_rise >= 0.2 {
+            (
+                (profile_confidence as f32 * (0.65 + energy_rise)).min(1.0),
+                "energy_rise",
+            )
+        } else if sixteen_bar_aligned && local_energy >= 0.5 {
+            (
+                (profile_confidence as f32 * (0.55 + local_energy * 0.25)).min(1.0),
+                "sixteen_bar_phrase",
+            )
+        } else {
+            continue;
+        };
+        if confidence >= 0.5 {
+            candidates.push(StructureCandidate {
+                seconds,
+                confidence,
+                reason,
+            });
+        }
+    }
+    candidates
+}
+
+fn candidate_seconds(candidates: &[StructureCandidate]) -> Vec<f32> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.seconds)
         .collect()
 }
 
@@ -673,6 +772,7 @@ mod tests {
     #[test]
     fn dj_profile_version_is_independent_from_planner_version() {
         assert_ne!(DJ_PROFILE_VERSION, "dj_planner_v1");
+        assert_eq!(DJ_PROFILE_VERSION, "dj_profile_v2");
     }
 
     #[test]
@@ -697,7 +797,14 @@ mod tests {
         let db = Database::open_in_memory().expect("db");
         db.run_migrations().expect("migrations");
         db.with_conn(|conn| {
-            let row = row_for("tidal_track", "1", 90);
+            let mut row = row_for("tidal_track", "1", 90);
+            row.profile_version = "dj_profile_v1".to_string();
+            queries::upsert_audio_dj_profile(conn, &row)?;
+            assert!(!super::dj_analysis_skips_existing_profile_version(
+                conn,
+                &key("tidal_track", "1")
+            )?);
+            row.profile_version = DJ_PROFILE_VERSION.to_string();
             queries::upsert_audio_dj_profile(conn, &row)?;
             assert!(super::dj_analysis_skips_existing_profile_version(
                 conn,
@@ -766,12 +873,70 @@ mod tests {
     }
 
     #[test]
-    fn structure_markers_are_persisted_in_v1_profile() {
+    fn phrase_boundaries_include_energy_change_candidates() {
+        let downbeats = analysis(40).downbeats_seconds;
+        assert_eq!(
+            super::phrase_boundaries_from_structure(&downbeats, &[0.2, 0.3, 0.8, 0.7]),
+            vec![0, 8, 16, 24, 32]
+        );
+    }
+
+    #[test]
+    fn structure_markers_are_persisted_in_v2_profile() {
         let row = row_for("library_track", "1", 180);
         assert!(row.intro_end_seconds.is_some());
         assert!(row.outro_start_seconds.is_some());
-        assert!(!row.breakdown_blob.is_empty());
-        assert!(!row.drop_blob.is_empty());
+        assert!(decode_f32_blob(&row.drop_blob).unwrap().len() > 1);
+    }
+
+    #[test]
+    fn profile_builder_covers_short_mid_and_full_windows() {
+        let short = row_for("tidal_track", "1", 30);
+        let mid = row_for("tidal_track", "2", 90);
+        let full = row_for("library_track", "3", 180);
+
+        assert_eq!(short.profile_confidence, 0.4);
+        assert_eq!(mid.profile_confidence, 0.65);
+        assert_eq!(full.profile_confidence, 1.0);
+        assert!(decode_f32_blob(&short.drop_blob).unwrap().is_empty());
+        assert!(!decode_f32_blob(&mid.drop_blob).unwrap().is_empty());
+        assert!(decode_f32_blob(&full.drop_blob).unwrap().len() >= 3);
+    }
+
+    #[test]
+    fn low_confidence_profile_omits_drop_candidates() {
+        let row = row_for("tidal_track", "1", 10);
+        assert!(row.profile_confidence < 0.4);
+        assert!(decode_f32_blob(&row.drop_blob).unwrap().is_empty());
+    }
+
+    #[test]
+    fn drop_candidates_use_phrase_structure_not_fixed_twenty_fourth_downbeat() {
+        let row = row_for("library_track", "1", 180);
+        let drops = decode_f32_blob(&row.drop_blob).expect("drops");
+        let downbeats = decode_f32_blob(&row.downbeats_blob).expect("downbeats");
+
+        assert_ne!(drops, vec![downbeats[24]]);
+        assert!(drops.contains(&downbeats[16]));
+        assert!(drops.contains(&downbeats[32]));
+    }
+
+    #[test]
+    fn drop_candidates_carry_confidence_and_reason() {
+        let downbeats = analysis(40).downbeats_seconds;
+        let candidates = super::drop_candidates(&downbeats, &[0.1, 0.2, 0.8, 0.75, 0.9], 1.0);
+
+        let energy_rise = candidates
+            .iter()
+            .find(|candidate| candidate.reason == "energy_rise")
+            .expect("energy rise candidate");
+        assert_eq!(energy_rise.seconds, downbeats[16]);
+        assert!(energy_rise.confidence >= 0.9);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.reason == "sixteen_bar_phrase")
+        );
     }
 
     #[test]

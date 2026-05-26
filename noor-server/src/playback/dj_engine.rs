@@ -402,7 +402,7 @@ mod tests {
                 profile_version: DJ_PROFILE_VERSION.to_string(),
                 beat_grid_blob: encode_f32_blob(&(0..64).map(|i| i as f32 * 0.5).collect::<Vec<_>>()),
                 downbeats_blob: encode_f32_blob(&(0..16).map(|i| i as f32 * 2.0).collect::<Vec<_>>()),
-                phrase_boundaries_blob: encode_u32_blob(&(0..16).collect::<Vec<_>>()),
+                phrase_boundaries_blob: encode_u32_blob(&[0, 8]),
                 mix_in_blob: encode_f32_blob(&[0.0]),
                 mix_out_blob: encode_f32_blob(&[90.0]),
                 intro_end_seconds: Some(16.0),
