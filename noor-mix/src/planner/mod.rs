@@ -9,6 +9,10 @@ use crate::program::{AutomationEvent, Curve, DeckId, Param, Tier, TransitionProg
 pub use policy::{DJ_PLANNER_VERSION, MixIntent, Policy, TransitionSpeedBias};
 pub use template::TransitionTemplate;
 
+const SMALL_TEMPO_NUDGE_MIN: f32 = 0.97;
+const SMALL_TEMPO_NUDGE_MAX: f32 = 1.03;
+const PLAYBACK_RATE_EPSILON: f32 = 0.0001;
+
 pub struct Planner;
 
 impl Planner {
@@ -122,6 +126,7 @@ fn build_program(
         loops: vec![],
         automation: deck_gain_automation(duration_samples),
     };
+    program.deck_b_start_frame = incoming_sync_start_frame(incoming, sample_rate);
 
     if matches!(
         template,
@@ -138,24 +143,42 @@ fn build_program(
             .extend(filter_sweep_eq_wash(duration_samples));
     }
 
-    if matches!(template, TransitionTemplate::LongHarmonicBlend)
-        && outgoing.bpm.zip(incoming.bpm).is_some()
-    {
-        let rate = incoming
-            .bpm
-            .map(|b| bpm / scoring::nearest_tempo_family_bpm(bpm, b))
-            .unwrap_or(1.0);
-        program.automation.push(AutomationEvent {
-            param: Param::PlaybackRate(DeckId::B),
-            start_sample: 0,
-            end_sample: duration_samples,
-            from: 1.0,
-            to: rate.clamp(0.97, 1.03),
-            curve: Curve::Linear,
-        });
+    if !matches!(template, TransitionTemplate::SlamCut) {
+        if let Some(rate) = small_tempo_nudge_rate(outgoing, incoming) {
+            if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
+                program.automation.push(AutomationEvent {
+                    param: Param::PlaybackRate(DeckId::B),
+                    start_sample: 0,
+                    end_sample: duration_samples,
+                    from: rate,
+                    to: rate,
+                    curve: Curve::Linear,
+                });
+            }
+        }
     }
 
     program
+}
+
+fn incoming_sync_start_frame(incoming: &DjProfile, sample_rate: u32) -> u64 {
+    incoming
+        .downbeat_seconds
+        .iter()
+        .chain(incoming.beat_grid_seconds.iter())
+        .copied()
+        .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * sample_rate as f32).round() as u64)
+        .unwrap_or(0)
+}
+
+fn small_tempo_nudge_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
+    let outgoing_bpm = outgoing.bpm?.max(1.0);
+    let incoming_bpm = incoming.bpm?.max(1.0);
+    let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
+    let rate = outgoing_bpm / comparable_incoming_bpm;
+    (rate.is_finite() && (SMALL_TEMPO_NUDGE_MIN..=SMALL_TEMPO_NUDGE_MAX).contains(&rate))
+        .then_some(rate)
 }
 
 pub fn bass_swap_16_program(
@@ -272,7 +295,7 @@ pub fn long_harmonic_blend_program(
         param: Param::PlaybackRate(DeckId::B),
         start_sample: 0,
         end_sample: duration_samples,
-        from: 1.0,
+        from: rate.clamp(0.97, 1.03),
         to: rate.clamp(0.97, 1.03),
         curve: Curve::Linear,
     });
@@ -819,6 +842,57 @@ mod tests {
     }
 
     #[test]
+    fn planner_applies_small_tempo_nudge_inside_three_percent() {
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 2),
+            &profile(Some(122.0), Some("8A"), 2),
+            &Policy::default(),
+        );
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
+            .expect("rate automation");
+
+        assert_eq!(rate.from, rate.to);
+        assert!((rate.to - 120.0 / 122.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn planner_omits_tempo_nudge_outside_three_percent() {
+        let policy = Policy {
+            safety_template_override: Some(TransitionTemplate::LongHarmonicBlend),
+            ..Policy::default()
+        };
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 4),
+            &profile(Some(126.0), Some("8A"), 4),
+            &policy,
+        );
+
+        assert!(
+            !program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::PlaybackRate(DeckId::B))
+        );
+    }
+
+    #[test]
+    fn planner_sets_incoming_start_frame_from_downbeat() {
+        let mut incoming = profile(Some(121.0), Some("8A"), 2);
+        incoming.downbeat_seconds = vec![8.0];
+
+        let program = Planner::plan(
+            &profile(Some(120.0), Some("8A"), 2),
+            &incoming,
+            &Policy::default(),
+        );
+
+        assert_eq!(program.deck_b_start_frame, 384_000);
+    }
+
+    #[test]
     fn bass_swap_16_shapes_clean_low_ownership_handoff() {
         let program = Planner::plan(
             &profile(Some(120.0), Some("8A"), 2),
@@ -935,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn long_harmonic_blend_rejects_large_rate_delta() {
+    fn long_harmonic_blend_omits_large_rate_delta() {
         let policy = Policy {
             safety_template_override: Some(TransitionTemplate::LongHarmonicBlend),
             ..Policy::default()
@@ -945,17 +1019,16 @@ mod tests {
             &profile(Some(126.0), Some("8A"), 4),
             &policy,
         );
-        let rate = program
-            .automation
-            .iter()
-            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
-            .expect("rate automation")
-            .to;
-        assert_eq!(rate, 0.97);
+        assert!(
+            !program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::PlaybackRate(DeckId::B))
+        );
     }
 
     #[test]
-    fn long_harmonic_blend_normalizes_half_time_rate() {
+    fn long_harmonic_blend_skips_noop_half_time_rate() {
         let policy = Policy {
             safety_template_override: Some(TransitionTemplate::LongHarmonicBlend),
             ..Policy::default()
@@ -965,13 +1038,12 @@ mod tests {
             &profile(Some(62.0), Some("8A"), 1),
             &policy,
         );
-        let rate = program
-            .automation
-            .iter()
-            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
-            .expect("rate automation")
-            .to;
-        assert_eq!(rate, 1.0);
+        assert!(
+            !program
+                .automation
+                .iter()
+                .any(|event| event.param == Param::PlaybackRate(DeckId::B))
+        );
     }
 
     #[test]

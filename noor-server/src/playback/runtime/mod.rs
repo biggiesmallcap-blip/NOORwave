@@ -694,19 +694,40 @@ fn align_runtime_program_source_frames(
     }
 }
 
-fn safe_crossfade_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
-    program.template == "SafeCrossfade"
-        && !program
-            .automation
-            .iter()
-            .any(|event| matches!(event.param, noor_mix::Param::PlaybackRate(_)))
+fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
+    matches!(
+        program.template.as_str(),
+        "SafeCrossfade" | "BassSwap16" | "BassSwap32" | "LongHarmonicBlend" | "FilterSweep"
+    ) && deck_b_consumed_frames(program).is_some()
 }
 
-fn install_prepared_safe_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> bool {
+fn deck_b_consumed_frames(program: &noor_mix::TransitionProgram) -> Option<u64> {
+    let mut deck_b_rate = 1.0_f32;
+    let mut deck_b_rate_event_seen = false;
+    for event in &program.automation {
+        let noor_mix::Param::PlaybackRate(deck) = event.param else {
+            continue;
+        };
+        if deck != noor_mix::DeckId::B
+            || deck_b_rate_event_seen
+            || event.start_sample != 0
+            || event.end_sample < program.resolve_at
+            || (event.from - event.to).abs() > 0.0001
+            || !event.to.is_finite()
+        {
+            return None;
+        }
+        deck_b_rate = event.to;
+        deck_b_rate_event_seen = true;
+    }
+    Some(((program.resolve_at as f64) * deck_b_rate.max(0.0) as f64).floor() as u64)
+}
+
+fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> bool {
     let Some(prepared) = state.prepared_dj_mixer.as_ref() else {
         return false;
     };
-    if !safe_crossfade_mixer_program(&prepared.program) {
+    if !handoff_mixer_program(&prepared.program) {
         return false;
     }
     if state
@@ -749,10 +770,13 @@ fn install_prepared_safe_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> b
     let Some(next) = state.next_engine.as_ref() else {
         return false;
     };
+    let Some(deck_b_consumed_frames) = deck_b_consumed_frames(&prepared.program) else {
+        return false;
+    };
     let deck_b_resume_frame = prepared
         .program
         .deck_b_start_frame
-        .saturating_add(prepared.program.resolve_at);
+        .saturating_add(deck_b_consumed_frames);
     let deck_b_resume_sample = (deck_b_resume_frame as usize).saturating_mul(channels);
     let mut guard = match next.shared.buffer.lock() {
         Ok(guard) => guard,
@@ -1242,7 +1266,8 @@ fn run_runtime_loop(
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
                         if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
-                            let rendered_dj_mixer = install_prepared_safe_mixer_buffer(&mut state);
+                            let rendered_dj_mixer =
+                                install_prepared_handoff_mixer_buffer(&mut state);
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
@@ -1281,7 +1306,8 @@ fn run_runtime_loop(
                         if crossfade_started
                             && !active_engine_suppresses_crossfade_after_seek(&state)
                         {
-                            let rendered_dj_mixer = install_prepared_safe_mixer_buffer(&mut state);
+                            let rendered_dj_mixer =
+                                install_prepared_handoff_mixer_buffer(&mut state);
                             promote_next_to_active(
                                 &mut state,
                                 &event_tx,
@@ -2966,7 +2992,7 @@ mod tests {
     }
 
     #[test]
-    fn installs_safe_mixer_buffer_with_incoming_remainder() {
+    fn installs_handoff_mixer_buffer_with_incoming_remainder() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
             &mut state,
@@ -2990,7 +3016,7 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(install_prepared_safe_mixer_buffer(&mut state));
+        assert!(install_prepared_handoff_mixer_buffer(&mut state));
 
         let next = state.next_engine.as_ref().expect("next engine");
         let buffer = next.shared.buffer.lock().expect("buffer lock");
@@ -3000,6 +3026,52 @@ mod tests {
         assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 8);
         assert_eq!(next.shared.crossfade_samples.load(Ordering::Relaxed), 0);
         assert!(state.prepared_dj_mixer.is_none());
+    }
+
+    #[test]
+    fn installs_rate_adjusted_handoff_remainder_from_consumed_frames() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition
+            .program
+            .automation
+            .push(noor_mix::AutomationEvent {
+                param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 0.97,
+                to: 0.97,
+                curve: noor_mix::Curve::Linear,
+            });
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(install_prepared_handoff_mixer_buffer(&mut state));
+
+        let next = state.next_engine.as_ref().expect("next engine");
+        let buffer = next.shared.buffer.lock().expect("buffer lock");
+        assert_eq!(buffer.samples.len(), 10);
+        assert_samples_close(&buffer.samples[4..], &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+        assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 10);
     }
 
     #[test]
@@ -3032,7 +3104,7 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
         assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(install_prepared_safe_mixer_buffer(&mut state));
+        assert!(install_prepared_handoff_mixer_buffer(&mut state));
 
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
         let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));

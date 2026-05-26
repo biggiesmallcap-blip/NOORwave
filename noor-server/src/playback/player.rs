@@ -752,49 +752,45 @@ fn v1_renderable_program(
     }
     if program.template == "BassSwap16" {
         if render_timing_unstable {
-            return (
-                crate::playback::dj_engine::safe_crossfade_program(
-                    sample_rate,
-                    channels,
-                    noor_mix::Policy::default(),
-                ),
-                Some("timing_unstable"),
-            );
-        }
-        return (
-            noor_mix::planner::bass_swap_16_program(
+            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
                 sample_rate,
                 channels,
-                DJ_BASS_SWAP_16_RENDER_MS,
-            ),
-            None,
+                noor_mix::Policy::default(),
+            );
+            preserve_planner_sync_fields(&mut renderer_program, program);
+            return (renderer_program, Some("timing_unstable"));
+        }
+        let mut renderer_program = noor_mix::planner::bass_swap_16_program(
+            sample_rate,
+            channels,
+            DJ_BASS_SWAP_16_RENDER_MS,
         );
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     if program.template == "BassSwap32" {
         if render_timing_unstable {
-            return (
-                crate::playback::dj_engine::safe_crossfade_program(
-                    sample_rate,
-                    channels,
-                    noor_mix::Policy::default(),
-                ),
-                Some("timing_unstable"),
-            );
-        }
-        return (
-            noor_mix::planner::bass_swap_32_program(
+            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
                 sample_rate,
                 channels,
-                DJ_BASS_SWAP_32_RENDER_MS,
-            ),
-            None,
+                noor_mix::Policy::default(),
+            );
+            preserve_planner_sync_fields(&mut renderer_program, program);
+            return (renderer_program, Some("timing_unstable"));
+        }
+        let mut renderer_program = noor_mix::planner::bass_swap_32_program(
+            sample_rate,
+            channels,
+            DJ_BASS_SWAP_32_RENDER_MS,
         );
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     if program.template == "SlamCut" {
-        return (
-            noor_mix::planner::slam_cut_program(sample_rate, channels, DJ_SLAM_CUT_RENDER_MS),
-            None,
-        );
+        let mut renderer_program =
+            noor_mix::planner::slam_cut_program(sample_rate, channels, DJ_SLAM_CUT_RENDER_MS);
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     if program.template == "LongHarmonicBlend" {
         let rate = program
@@ -803,35 +799,32 @@ fn v1_renderable_program(
             .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
             .map(|event| event.to)
             .unwrap_or(1.0);
-        return (
-            noor_mix::planner::long_harmonic_blend_program(
-                sample_rate,
-                channels,
-                DJ_LONG_HARMONIC_BLEND_RENDER_MS,
-                rate,
-            ),
-            None,
+        let mut renderer_program = noor_mix::planner::long_harmonic_blend_program(
+            sample_rate,
+            channels,
+            DJ_LONG_HARMONIC_BLEND_RENDER_MS,
+            rate,
         );
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     if program.template == "FilterSweep" {
         if render_timing_unstable {
-            return (
-                crate::playback::dj_engine::safe_crossfade_program(
-                    sample_rate,
-                    channels,
-                    noor_mix::Policy::default(),
-                ),
-                Some("timing_unstable"),
-            );
-        }
-        return (
-            noor_mix::planner::filter_sweep_eq_wash_program(
+            let mut renderer_program = crate::playback::dj_engine::safe_crossfade_program(
                 sample_rate,
                 channels,
-                DJ_FILTER_SWEEP_RENDER_MS,
-            ),
-            None,
+                noor_mix::Policy::default(),
+            );
+            preserve_planner_sync_fields(&mut renderer_program, program);
+            return (renderer_program, Some("timing_unstable"));
+        }
+        let mut renderer_program = noor_mix::planner::filter_sweep_eq_wash_program(
+            sample_rate,
+            channels,
+            DJ_FILTER_SWEEP_RENDER_MS,
         );
+        preserve_planner_sync_fields(&mut renderer_program, program);
+        return (renderer_program, None);
     }
     (
         crate::playback::dj_engine::safe_crossfade_program(
@@ -841,6 +834,32 @@ fn v1_renderable_program(
         ),
         Some("template_not_renderable"),
     )
+}
+
+fn preserve_planner_sync_fields(
+    renderer_program: &mut noor_mix::TransitionProgram,
+    planner_program: &noor_mix::TransitionProgram,
+) {
+    renderer_program.deck_a_start_frame = planner_program.deck_a_start_frame;
+    renderer_program.deck_b_start_frame = planner_program.deck_b_start_frame;
+    if let Some(rate) = planner_program
+        .automation
+        .iter()
+        .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+        .map(|event| event.to)
+    {
+        renderer_program
+            .automation
+            .retain(|event| event.param != noor_mix::Param::PlaybackRate(noor_mix::DeckId::B));
+        renderer_program.automation.push(noor_mix::AutomationEvent {
+            param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
+            start_sample: 0,
+            end_sample: renderer_program.resolve_at,
+            from: rate,
+            to: rate,
+            curve: noor_mix::Curve::Linear,
+        });
+    }
 }
 
 fn log_dj_transition_event(
@@ -968,7 +987,7 @@ pub fn record_dj_transition_listen_outcome(
 
 // Reads the queue.source string of the currently-playing queue item and maps it
 // to a ListenSource. Returns Unknown if no current queue item or the source
-// label isn't one we recognize — those rows still get written, they just count
+// label isn't one we recognize - those rows still get written, they just count
 // at half confidence in the trainer.
 pub fn lookup_current_listen_source(conn: &Connection) -> crate::db::models::ListenSource {
     use crate::db::models::ListenSource;
@@ -1181,7 +1200,7 @@ pub struct ReconcileOutcome {
 /// Run inside a single transaction so the queue and playback_state never
 /// drift. Behavior:
 /// 1. Delete queue rows pointing at any of `deleted_track_ids`. Pending rows
-///    (track_id IS NULL) are unaffected — Last.fm radio neighbors don't
+///    (track_id IS NULL) are unaffected - Last.fm radio neighbors don't
 ///    reference local track IDs.
 /// 2. If the current track is in the deleted set, advance `current_track_id`
 ///    and `current_queue_item_id` to the next surviving queue row. The next
@@ -1202,7 +1221,7 @@ pub fn reconcile_after_track_delete(
     let tx = conn.unchecked_transaction()?;
 
     // Snapshot the queue before deletion so we can pick the next survivor by
-    // position — `current_queue_item_id` would be invalid after deletion.
+    // position - `current_queue_item_id` would be invalid after deletion.
     let rows: Vec<(i64, Option<i64>, i32)> = {
         let mut stmt =
             tx.prepare("SELECT id, track_id, position FROM queue ORDER BY position ASC, id ASC")?;
@@ -1514,7 +1533,7 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         return load_snapshot(conn);
     }
 
-    // Nothing was playing — jump to the first item rather than doing nothing.
+    // Nothing was playing - jump to the first item rather than doing nothing.
     if current_index.is_none()
         && let Some(first_item) = queue_items.first()
     {
@@ -1533,7 +1552,7 @@ pub fn previous_track(conn: &Connection) -> Result<PlaybackSnapshot> {
         return load_snapshot(conn);
     }
 
-    // Already at the start of the queue — just restart position.
+    // Already at the start of the queue - just restart position.
     conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
     load_snapshot(conn)
 }
@@ -2615,13 +2634,30 @@ mod tests {
 
         #[test]
         fn v1_renderable_program_passes_bass_swap_16_with_low_handoff() {
-            let input = noor_mix::planner::bass_swap_16_program(48_000, 2, 32_000);
+            let mut input = noor_mix::planner::bass_swap_16_program(48_000, 2, 32_000);
+            input.deck_b_start_frame = 384_000;
+            input.automation.push(noor_mix::AutomationEvent {
+                param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: input.resolve_at,
+                from: 0.985,
+                to: 0.985,
+                curve: noor_mix::Curve::Linear,
+            });
 
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "BassSwap16");
             assert_eq!(program.resolve_at, 768_000);
+            assert_eq!(program.deck_b_start_frame, 384_000);
             assert_eq!(reason, None);
+            let rate = program
+                .automation
+                .iter()
+                .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+                .expect("rate automation");
+            assert_eq!(rate.from, 0.985);
+            assert_eq!(rate.to, 0.985);
             assert!(program.automation.iter().any(|event| event.param
                 == noor_mix::Param::LowGain(noor_mix::DeckId::B)
                 && event.start_sample == program.swap_start
@@ -3128,7 +3164,7 @@ mod tests {
     fn automix_reason_does_not_claim_harmonic_match_on_key_clash_with_close_bpm() {
         // 8A vs 10A is a Camelot clash, but a near-identical BPM pushes the
         // *combined* harmonic multiplier above 1.0. The reason must still call
-        // it a key clash — deriving the signal from the Camelot relationship,
+        // it a key clash - deriving the signal from the Camelot relationship,
         // not the blended multiplier.
         let profile = SessionTasteProfile {
             current_source: Some("tidal".to_string()),
@@ -3458,7 +3494,7 @@ mod tests {
         // Same setup as `next_track_extends_queue_when_automix_is_enabled`:
         // two tracks queued, automix on, current = 2. The non-suppressed
         // refill path is already covered by that sibling test; here we
-        // verify the new gate alone — that with `recently_cleared = true`
+        // verify the new gate alone - that with `recently_cleared = true`
         // the helper short-circuits before any extension work and returns
         // the existing queue unmodified.
         let conn = conn();
@@ -3472,7 +3508,7 @@ mod tests {
         )
         .unwrap();
 
-        // Suppression on — must return the 2 existing items, never call the
+        // Suppression on - must return the 2 existing items, never call the
         // extension path (which would otherwise touch tables not present in
         // this minimal test schema and panic).
         let suppressed = ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, true).unwrap();
@@ -3945,7 +3981,7 @@ mod tests {
         let outcome = reconcile_after_track_delete(&conn, &[1]).unwrap();
         assert!(outcome.current_changed);
         assert!(!outcome.stopped_playback);
-        // Pending rows always survive — they don't reference local track IDs.
+        // Pending rows always survive - they don't reference local track IDs.
         assert_eq!(outcome.new_current_track_id, None);
 
         let remaining = queue::load_queue(&conn).unwrap();
@@ -3967,7 +4003,7 @@ mod tests {
         )
         .unwrap();
 
-        // Delete track 3 — current (track 1) is unaffected.
+        // Delete track 3 - current (track 1) is unaffected.
         let outcome = reconcile_after_track_delete(&conn, &[3]).unwrap();
         assert!(outcome.queue_changed);
         assert!(!outcome.current_changed);
@@ -4008,7 +4044,7 @@ mod tests {
     /// `build_automix_extension_with_reasons` needs (the standard `conn()`
     /// helper above lacks `embedding_models`, `track_embeddings`, and
     /// `track_similarity`). Returns a connection with one seed track
-    /// inserted but **no** embedding row and **no** similarity rows —
+    /// inserted but **no** embedding row and **no** similarity rows -
     /// the "no recommendation signal" case the guard targets.
     fn empty_signal_conn() -> (Connection, Track) {
         let conn = Connection::open_in_memory().unwrap();
@@ -4135,7 +4171,7 @@ mod tests {
             &[], // empty queue
             ShuffleMode::Off,
             12,   // typical needed
-            true, // use_learning enabled — fast-path will run, find no model, fall through
+            true, // use_learning enabled - fast-path will run, find no model, fall through
         )
         .expect("extension call");
         assert!(
@@ -4171,7 +4207,7 @@ mod tests {
         let extension = extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 12, true)
             .expect("extension call");
 
-        // We don't pin contents — only that the empty-signal guard
+        // We don't pin contents - only that the empty-signal guard
         // didn't bail. Sparse-signal seeds still walk through the
         // random-pool path which is intended legacy behaviour.
         assert!(
@@ -4217,12 +4253,12 @@ mod tests {
     }
 
     /// Metadata fallback: seed has no signal AND is the only track by its
-    /// artist/album, with no genre tags — the truly-orphan path. The
+    /// artist/album, with no genre tags - the truly-orphan path. The
     /// extension must stay empty (no random kitchen-sink fill).
     #[test]
     fn build_automix_extension_returns_empty_when_no_artist_album_or_genre() {
         let (conn, seed) = empty_signal_conn();
-        // No additional tracks, no genre rows — seed is completely isolated.
+        // No additional tracks, no genre rows - seed is completely isolated.
         let extension = extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 12, true)
             .expect("extension call");
 
@@ -4301,7 +4337,7 @@ mod parity_tests {
     //! stays frozen, so divergence indicates a migration bug rather than a
     //! tuning miss.
     //!
-    //! Fixture is built in-memory with no database — `automix_score` only
+    //! Fixture is built in-memory with no database - `automix_score` only
     //! consumes plain data, so a DB round-trip would add noise without
     //! adding signal.
     use super::*;
@@ -4310,7 +4346,7 @@ mod parity_tests {
 
     /// Frozen snapshot of `automix_score` taken at Phase 1 start. The body
     /// is a verbatim copy of `super::automix_score` and must not be
-    /// modified by the migration commit — the whole point is that this
+    /// modified by the migration commit - the whole point is that this
     /// path keeps producing the original numbers while the live function
     /// changes shape underneath it.
     fn automix_score_old(
