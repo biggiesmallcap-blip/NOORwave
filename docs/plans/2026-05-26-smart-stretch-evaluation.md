@@ -89,3 +89,24 @@ If the gate passes, the next implementation plan must still keep stretch in prep
 - Fall back to `SafeCrossfade` or the 3 percent small nudge path on any failure.
 
 No realtime stretch engine is approved by this gate.
+
+## Current Implementation Status
+
+Implemented:
+
+- `noor-mix::stretch_eval::evaluate_stretch_render` records objective metrics for a candidate stretched render.
+- Normal tests cover finite sample detection, output length error, peak/RMS reporting, and click-marker phase drift.
+- The ignored baseline benchmark prints the same metrics across 30s, 90s, and 180s synthetic click fixtures.
+
+Run the harness with:
+
+```powershell
+cargo test -p noor-mix smart_stretch_evaluation_baseline_benchmark -- --ignored --nocapture
+```
+
+Still left before `Smart Stretch Now`:
+
+- Wire an actual Signalsmith Stretch candidate renderer into the offline harness.
+- Run fixed synthetic and musical fixtures in both slower and faster directions at 3, 5, 8, and 12 percent tempo deltas.
+- Record render time, phase drift, peak, RMS movement, output length error, and manual listening notes.
+- Keep runtime playback capped to the existing `0.97..1.03` direct playback-rate path until the evaluation passes.
