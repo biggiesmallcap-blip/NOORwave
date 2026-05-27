@@ -32,6 +32,8 @@ const DJ_ANALYSIS_MAX_SECONDS: usize = 90;
 const DJ_ANALYSIS_DASH_PREFETCH_MEDIA_SEGMENTS: usize = 3;
 const DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS: usize = 3;
 const DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 150;
+const PLAYBACK_DASH_PREFETCH_ATTEMPTS: usize = 2;
+const PLAYBACK_DASH_PREFETCH_RETRY_BACKOFF_MS: u64 = 100;
 const PLAYBACK_BUFFER_RETAIN_BEHIND_MS: i32 = 10_000;
 const PLAYBACK_DECODE_HIGH_WATER_SECS: u64 = 45;
 const PLAYBACK_DECODE_LOW_WATER_SECS: u64 = 30;
@@ -142,10 +144,16 @@ where
     F: FnMut(String, usize) -> Fut,
     Fut: Future<Output = Result<Vec<u8>>>,
 {
-    let attempts = if dj_analysis_only {
-        DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS
+    let (attempts, retry_backoff_ms) = if dj_analysis_only {
+        (
+            DJ_ANALYSIS_DASH_PREFETCH_ATTEMPTS,
+            DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS,
+        )
     } else {
-        1
+        (
+            PLAYBACK_DASH_PREFETCH_ATTEMPTS,
+            PLAYBACK_DASH_PREFETCH_RETRY_BACKOFF_MS,
+        )
     };
     let mut last_error = None;
     for attempt in 0..attempts {
@@ -154,10 +162,7 @@ where
             Err(error) => {
                 last_error = Some(error);
                 if attempt + 1 < attempts {
-                    tokio::time::sleep(Duration::from_millis(
-                        DJ_ANALYSIS_DASH_PREFETCH_RETRY_BACKOFF_MS,
-                    ))
-                    .await;
+                    tokio::time::sleep(Duration::from_millis(retry_backoff_ms)).await;
                 }
             }
         }
@@ -1014,11 +1019,34 @@ mod tests {
     fn playback_dash_prebuffer_remains_fail_fast() {
         let error = run_dash_prebuffer_test(
             false,
-            vec![Ok(vec![0]), Ok(vec![1]), Err(anyhow!("segment 2 failed"))],
+            vec![
+                Ok(vec![0]),
+                Ok(vec![1]),
+                Err(anyhow!("segment 2 failed once")),
+                Err(anyhow!("segment 2 failed finally")),
+            ],
         )
         .expect_err("playback prebuffer should fail on second media segment");
 
-        assert!(error.to_string().contains("segment 2 failed"));
+        assert!(error.to_string().contains("segment 2 failed finally"));
+    }
+
+    #[test]
+    fn playback_dash_prebuffer_retries_transient_first_media_failure() {
+        let prebuffer = run_dash_prebuffer_test(
+            false,
+            vec![
+                Ok(vec![0]),
+                Err(anyhow!("segment 1 failed once")),
+                Ok(vec![1]),
+                Ok(vec![2]),
+            ],
+        )
+        .expect("playback retry");
+
+        assert_eq!(prebuffer.bytes, vec![0, 1, 2]);
+        assert_eq!(prebuffer.fetched_media_segments, 2);
+        assert!(!prebuffer.ended_after_prefix_failure);
     }
 
     #[test]
