@@ -125,6 +125,12 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Sync source');
 		expect(transitionLane).toContain('Timing status');
 		expect(transitionLane).toContain("'pending'");
+		expect(transitionLane).toContain('overlay_details');
+		expect(transitionLane).toContain('Overlay status');
+		expect(transitionLane).toContain('Overlay tempo');
+		expect(transitionLane).toContain('Deck B start frame');
+		expect(transitionLane).toContain('Drop source');
+		expect(transitionLane).toContain('formatTempoRatio');
 		expect(transitionLane).toContain('Planning status');
 	});
 

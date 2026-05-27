@@ -912,6 +912,15 @@ export type DjDeckStatus = {
 	safe_crossfade_only: boolean;
 };
 
+export type DjOverlayDetails = {
+	overlay_status: string;
+	overlay_start_ms?: number;
+	overlay_end_ms?: number;
+	tempo_ratio?: number;
+	deck_b_start_frame: number;
+	drop_source: 'program_json' | string;
+};
+
 export type DjStatusResponse = {
 	enabled: boolean;
 	current?: DjDeckStatus;
@@ -940,6 +949,7 @@ export type DjStatusResponse = {
 	timing_status?: string;
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad' | 'unknown';
 	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'pending' | 'unknown';
+	overlay_details?: DjOverlayDetails;
 	fallback_reason?: string;
 	rejected_alternatives: DjRejectedAlternative[];
 	profile_confidence_floor: number;

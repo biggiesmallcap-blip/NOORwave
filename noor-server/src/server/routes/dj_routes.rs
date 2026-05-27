@@ -163,6 +163,7 @@ struct DjStatusResponse {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    overlay_details: Option<DjOverlayDetails>,
     fallback_reason: Option<String>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
     profile_confidence_floor: f64,
@@ -216,6 +217,16 @@ struct DjTimingHistoryEvent {
     started_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct DjOverlayDetails {
+    overlay_status: String,
+    overlay_start_ms: Option<i64>,
+    overlay_end_ms: Option<i64>,
+    tempo_ratio: Option<f64>,
+    deck_b_start_frame: u64,
+    drop_source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct DjRejectedAlternative {
     template: String,
@@ -248,6 +259,7 @@ struct OpenTransition {
     timing_delta_ms: Option<i64>,
     timing_source: Option<String>,
     timing_status: Option<String>,
+    overlay_details: Option<DjOverlayDetails>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
 }
 
@@ -266,6 +278,7 @@ struct RendererStatus {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    overlay_details: Option<DjOverlayDetails>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
 }
 
@@ -504,6 +517,7 @@ async fn get_status(
                     timing_status: renderer_status.timing_status,
                     timing_quality: renderer_status.timing_quality,
                     timing_direction: renderer_status.timing_direction,
+                    overlay_details: renderer_status.overlay_details,
                     fallback_reason,
                     rejected_alternatives: renderer_status.rejected_alternatives,
                     profile_confidence_floor: DJ_PROFILE_CONFIDENCE_FLOOR,
@@ -1471,16 +1485,23 @@ fn latest_open_transition_for_pair(
         ],
         |row| {
             let program_json: String = row.get(2)?;
+            let planned_start_ms: Option<i64> = row.get(4)?;
+            let timing_status: Option<String> = row.get(8)?;
             Ok(OpenTransition {
                 id: row.get(0)?,
                 template: row.get(1)?,
                 renderer_template: renderer_template_from_program_json(&program_json),
                 fallback_reason: row.get(3)?,
-                planned_start_ms: row.get(4)?,
+                planned_start_ms,
                 actual_start_ms: row.get(5)?,
                 timing_delta_ms: row.get(6)?,
                 timing_source: row.get(7)?,
-                timing_status: row.get(8)?,
+                timing_status: timing_status.clone(),
+                overlay_details: overlay_details_from_program_json(
+                    &program_json,
+                    planned_start_ms,
+                    timing_status.as_deref(),
+                ),
                 rejected_alternatives: decode_rejected_alternatives(row.get(9)?),
             })
         },
@@ -1736,16 +1757,23 @@ fn median_delta(deltas: &[i64]) -> Option<i64> {
 #[cfg(test)]
 fn open_transition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenTransition> {
     let program_json: String = row.get(2)?;
+    let planned_start_ms: Option<i64> = row.get(4)?;
+    let timing_status: Option<String> = row.get(8)?;
     Ok(OpenTransition {
         id: row.get(0)?,
         template: row.get(1)?,
         renderer_template: renderer_template_from_program_json(&program_json),
         fallback_reason: row.get(3)?,
-        planned_start_ms: row.get(4)?,
+        planned_start_ms,
         actual_start_ms: row.get(5)?,
         timing_delta_ms: row.get(6)?,
         timing_source: row.get(7)?,
-        timing_status: row.get(8)?,
+        timing_status: timing_status.clone(),
+        overlay_details: overlay_details_from_program_json(
+            &program_json,
+            planned_start_ms,
+            timing_status.as_deref(),
+        ),
         rejected_alternatives: Vec::new(),
     })
 }
@@ -1785,6 +1813,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: None,
             timing_quality: "unknown".to_string(),
             timing_direction: "unknown".to_string(),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         };
     };
@@ -1825,6 +1854,11 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: transition.timing_status.clone(),
             timing_quality: quality,
             timing_direction: direction,
+            overlay_details: if transition.renderer_template.as_deref() == Some("DropTease16") {
+                transition.overlay_details.clone()
+            } else {
+                None
+            },
             rejected_alternatives: transition.rejected_alternatives.clone(),
         };
     }
@@ -1853,6 +1887,7 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         timing_status: transition.timing_status.clone(),
         timing_quality: quality,
         timing_direction: direction,
+        overlay_details: None,
         rejected_alternatives: transition.rejected_alternatives.clone(),
     }
 }
@@ -1902,6 +1937,36 @@ fn is_renderable_template(template: &str) -> bool {
 fn renderer_template_from_program_json(program_json: &str) -> Option<String> {
     let program: noor_mix::TransitionProgram = serde_json::from_str(program_json).ok()?;
     is_renderable_template(program.template.as_str()).then_some(program.template)
+}
+
+fn overlay_details_from_program_json(
+    program_json: &str,
+    planned_start_ms: Option<i64>,
+    timing_status: Option<&str>,
+) -> Option<DjOverlayDetails> {
+    let program: noor_mix::TransitionProgram = serde_json::from_str(program_json).ok()?;
+    if program.template != "DropTease16" || program.sample_rate == 0 {
+        return None;
+    }
+    let resolve_ms = ((u128::from(program.resolve_at) * 1_000)
+        + (u128::from(program.sample_rate) / 2))
+        / u128::from(program.sample_rate);
+    let overlay_end_ms = planned_start_ms
+        .zip(i64::try_from(resolve_ms).ok())
+        .and_then(|(start_ms, duration_ms)| start_ms.checked_add(duration_ms));
+    let tempo_ratio = program
+        .automation
+        .iter()
+        .find(|event| event.param == noor_mix::Param::PlaybackRate(noor_mix::DeckId::B))
+        .and_then(|event| event.to.is_finite().then_some(f64::from(event.to)));
+    Some(DjOverlayDetails {
+        overlay_status: timing_status.unwrap_or("armed").to_string(),
+        overlay_start_ms: planned_start_ms,
+        overlay_end_ms,
+        tempo_ratio,
+        deck_b_start_frame: program.deck_b_start_frame,
+        drop_source: "program_json".to_string(),
+    })
 }
 
 fn media_ref_label(
@@ -2055,6 +2120,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2079,6 +2145,14 @@ mod tests {
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            overlay_details: Some(DjOverlayDetails {
+                overlay_status: "armed".to_string(),
+                overlay_start_ms: Some(120_000),
+                overlay_end_ms: Some(151_000),
+                tempo_ratio: Some(1.02),
+                deck_b_start_frame: 384_000,
+                drop_source: "program_json".to_string(),
+            }),
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2086,6 +2160,17 @@ mod tests {
         assert_eq!(status.renderer_template.as_deref(), Some("DropTease16"));
         assert_eq!(status.renderer_mode.as_deref(), Some("dj_overlay_program"));
         assert_eq!(status.downgrade_reason, None);
+        assert_eq!(
+            status.overlay_details,
+            Some(DjOverlayDetails {
+                overlay_status: "armed".to_string(),
+                overlay_start_ms: Some(120_000),
+                overlay_end_ms: Some(151_000),
+                tempo_ratio: Some(1.02),
+                deck_b_start_frame: 384_000,
+                drop_source: "program_json".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -2100,6 +2185,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2122,6 +2208,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2144,6 +2231,7 @@ mod tests {
                 timing_delta_ms: Some(144),
                 timing_source: Some("downbeat_sync".to_string()),
                 timing_status: Some("fired".to_string()),
+                overlay_details: None,
                 rejected_alternatives: Vec::new(),
             }));
 
@@ -2182,6 +2270,45 @@ mod tests {
     }
 
     #[test]
+    fn overlay_details_from_program_json_exposes_drop_tease_facts() {
+        let program = noor_mix::TransitionProgram {
+            tier: noor_mix::Tier::FullBlend,
+            template: "DropTease16".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            deck_a_start_frame: 0,
+            deck_b_start_frame: 384_000,
+            sync_start: 0,
+            intro_start: 0,
+            swap_start: 24_000,
+            fade_start: 24_000,
+            resolve_at: 48_000,
+            loops: vec![],
+            automation: vec![noor_mix::AutomationEvent {
+                param: noor_mix::Param::PlaybackRate(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: 48_000,
+                from: 1.02,
+                to: 1.02,
+                curve: noor_mix::Curve::Linear,
+            }],
+        };
+        let json = serde_json::to_string(&program).expect("program json");
+
+        assert_eq!(
+            overlay_details_from_program_json(&json, Some(120_000), Some("fired")),
+            Some(DjOverlayDetails {
+                overlay_status: "fired".to_string(),
+                overlay_start_ms: Some(120_000),
+                overlay_end_ms: Some(121_000),
+                tempo_ratio: Some(1.0199999809265137),
+                deck_b_start_frame: 384_000,
+                drop_source: "program_json".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn renderer_status_marks_safe_crossfade_renderer_as_pending() {
         let status = renderer_status_for_transition(Some(&OpenTransition {
             id: 19,
@@ -2193,6 +2320,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: None,
             timing_status: None,
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2217,6 +2345,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2247,6 +2376,7 @@ mod tests {
             timing_delta_ms: Some(144),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2272,6 +2402,7 @@ mod tests {
             timing_delta_ms: Some(549),
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2698,6 +2829,7 @@ mod tests {
             timing_delta_ms: None,
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("armed".to_string()),
+            overlay_details: None,
             rejected_alternatives: Vec::new(),
         };
 

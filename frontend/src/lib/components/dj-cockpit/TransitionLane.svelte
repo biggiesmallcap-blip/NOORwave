@@ -94,6 +94,7 @@
 	);
 	let recentTimingEvents = $derived(status?.recent_timing_events ?? []);
 	let timingSummary = $derived(status?.timing_history_summary ?? null);
+	let overlayDetails = $derived(status?.overlay_details ?? null);
 
 	function formatTimingMs(value: number | null | undefined) {
 		return typeof value === 'number' ? `${value} ms` : 'pending';
@@ -104,6 +105,10 @@
 			return 'pending';
 		}
 		return `${value > 0 ? '+' : ''}${value} ms`;
+	}
+
+	function formatTempoRatio(value: number | null | undefined) {
+		return typeof value === 'number' ? `${value.toFixed(3)}x` : 'none';
 	}
 
 	function formatActualTiming(event: DjStatusResponse['recent_timing_events'][number]) {
@@ -257,6 +262,32 @@
 					<dt>Timing quality</dt>
 					<dd>{status?.timing_quality ?? 'unknown'}</dd>
 				</div>
+				{#if overlayDetails}
+					<div>
+						<dt>Overlay status</dt>
+						<dd>{overlayDetails.overlay_status}</dd>
+					</div>
+					<div>
+						<dt>Overlay start</dt>
+						<dd>{formatTimingMs(overlayDetails.overlay_start_ms)}</dd>
+					</div>
+					<div>
+						<dt>Overlay end</dt>
+						<dd>{formatTimingMs(overlayDetails.overlay_end_ms)}</dd>
+					</div>
+					<div>
+						<dt>Overlay tempo</dt>
+						<dd>{formatTempoRatio(overlayDetails.tempo_ratio)}</dd>
+					</div>
+					<div>
+						<dt>Deck B start frame</dt>
+						<dd>{overlayDetails.deck_b_start_frame}</dd>
+					</div>
+					<div>
+						<dt>Drop source</dt>
+						<dd>{overlayDetails.drop_source}</dd>
+					</div>
+				{/if}
 				<div>
 					<dt>Readiness block</dt>
 					<dd>{status?.fallback_reason ?? 'none'}</dd>
