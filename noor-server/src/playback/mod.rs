@@ -2,6 +2,7 @@ pub mod automix;
 pub mod decode;
 pub mod dj_engine;
 pub mod dj_lookahead;
+pub mod dj_queue_ranker;
 pub mod gapless;
 pub mod output;
 pub mod pending;

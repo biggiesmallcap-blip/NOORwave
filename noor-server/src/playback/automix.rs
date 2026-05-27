@@ -17,6 +17,9 @@ use crate::db::{
     models::{AudioDspFeatures, QueueItem, Track},
     queries,
 };
+use crate::playback::dj_queue_ranker::{
+    GeneratedCandidate, append_dj_reason, rank_generated_candidates,
+};
 use crate::playback::player::{
     PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
     playback_anchor_index,
@@ -242,7 +245,7 @@ fn append_automix_external_candidates(
         (limit.max(1) * 4).max(12) as i64,
         true,
     )?;
-    let mut appended = 0usize;
+    let mut candidates = Vec::new();
     for row in rows {
         if let Some(tidal_id) = row.tidal_id
             && queued_tidal_ids.contains(&tidal_id)
@@ -253,13 +256,48 @@ fn append_automix_external_candidates(
         if queued_pairs.contains(&pair) {
             continue;
         }
+        candidates.push(row);
+    }
+
+    let generated = candidates
+        .into_iter()
+        .map(|row| GeneratedCandidate {
+            track_id: None,
+            tidal_id: row.tidal_id,
+            item: row,
+        })
+        .collect::<Vec<_>>();
+    let fallback = generated
+        .iter()
+        .map(|candidate| RankedExternalCandidate {
+            row: candidate.item.clone(),
+            score: 1.0,
+            reasons: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let ranked = rank_generated_candidates(conn, seed_track_id, generated)
+        .map(|ranked| {
+            ranked
+                .into_iter()
+                .map(|ranked| RankedExternalCandidate {
+                    row: ranked.item,
+                    score: ranked.score,
+                    reasons: ranked.reasons,
+                })
+                .collect()
+        })
+        .unwrap_or(fallback);
+    let mut appended = 0usize;
+    for ranked in ranked {
+        let row = ranked.row;
+        let reason = append_dj_reason("external similarity", ranked.score, &ranked.reasons);
         queue::append_external_track(
             conn,
             &queue::ExternalTrackInsert {
                 artist: &row.artist_name,
                 title: &row.title,
                 source: "automix-new",
-                reason: Some("external similarity"),
+                reason: Some(&reason),
                 tidal_id_hint: row.tidal_id,
                 local_track_id: None,
             },
@@ -270,6 +308,46 @@ fn append_automix_external_candidates(
         }
     }
     Ok(appended)
+}
+
+struct RankedExternalCandidate {
+    row: queries::ExternalCandidateNeighborRow,
+    score: f64,
+    reasons: Vec<&'static str>,
+}
+
+fn rank_automix_selections(
+    conn: &Connection,
+    seed_track_id: i64,
+    selections: Vec<AutomixSelection>,
+) -> Vec<AutomixSelection> {
+    let generated = selections
+        .into_iter()
+        .map(|selection| GeneratedCandidate {
+            track_id: Some(selection.track.id),
+            tidal_id: selection.track.tidal_id,
+            item: selection,
+        })
+        .collect::<Vec<_>>();
+    let fallback = generated
+        .iter()
+        .map(|candidate| candidate.item.clone())
+        .collect::<Vec<_>>();
+    rank_generated_candidates(conn, seed_track_id, generated)
+        .map(|ranked| {
+            ranked
+                .into_iter()
+                .map(|ranked| {
+                    let mut selection = ranked.item;
+                    if let Some(reason) = selection.reason.as_deref() {
+                        selection.reason =
+                            Some(append_dj_reason(reason, ranked.score, &ranked.reasons));
+                    }
+                    selection
+                })
+                .collect()
+        })
+        .unwrap_or(fallback)
 }
 
 fn load_queued_external_identities(
@@ -379,6 +457,7 @@ pub(crate) fn build_automix_extension_with_reasons(
                     .filter_map(|track| by_track.remove(&track.id))
                     .collect();
             }
+            ordered = rank_automix_selections(conn, current_track.id, ordered);
             ordered.truncate(needed);
             if !ordered.is_empty() {
                 return Ok(ordered);
