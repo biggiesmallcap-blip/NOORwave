@@ -92,6 +92,9 @@ describe('dj cockpit page contract', () => {
 		expect(queuePair).toContain('Retrying analysis');
 		expect(queuePair).toContain('Analyzing');
 		expect(queuePair).toContain('profile_error');
+		expect(queuePair).toContain('Passive DSP retrying');
+		expect(queuePair).toContain('passive_analysis_status');
+		expect(queuePair).toContain('passive_analysis_reason');
 	});
 
 	test('dj_page_debug_details_use_planner_facts', () => {

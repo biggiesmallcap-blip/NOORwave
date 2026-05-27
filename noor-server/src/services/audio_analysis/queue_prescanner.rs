@@ -26,7 +26,7 @@ pub const BATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3
 /// gets stuck. Segment fetches use a shorter guard so one slow media segment
 /// does not consume the full per-track budget.
 pub const PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const SEGMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+const SEGMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const MIN_PARTIAL_BYTES: usize = 32 * 1024;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DASH_MEDIA_SEGMENTS: usize = 12;
@@ -43,9 +43,35 @@ enum PrescanFailureClass {
     TransientFailure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrescanFailureReason {
+    StreamRejected,
+    ResolveOkSegmentTimeout,
+    ResolveOkSegmentFetchFailed,
+    PrefetchTimeout,
+}
+
+impl PrescanFailureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            PrescanFailureReason::StreamRejected => "stream_rejected",
+            PrescanFailureReason::ResolveOkSegmentTimeout => "resolve_ok_segment_timeout",
+            PrescanFailureReason::ResolveOkSegmentFetchFailed => "resolve_ok_segment_fetch_failed",
+            PrescanFailureReason::PrefetchTimeout => "prefetch_timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrescanStatusSnapshot {
+    pub status: &'static str,
+    pub reason: &'static str,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PrescanNegativeCacheEntry {
     class: PrescanFailureClass,
+    reason: PrescanFailureReason,
     expires_at: StdInstant,
 }
 
@@ -56,12 +82,13 @@ fn prescan_failure_ttl(class: PrescanFailureClass) -> Duration {
     }
 }
 
-fn cache_prescan_failure(track_id: i64, class: PrescanFailureClass) {
+fn cache_prescan_failure(track_id: i64, class: PrescanFailureClass, reason: PrescanFailureReason) {
     if let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() {
         guard.insert(
             track_id,
             PrescanNegativeCacheEntry {
                 class,
+                reason,
                 expires_at: StdInstant::now() + prescan_failure_ttl(class),
             },
         );
@@ -106,6 +133,26 @@ fn cached_prescan_failure_class(track_id: i64) -> Option<PrescanFailureClass> {
     Some(entry.class)
 }
 
+pub fn prescan_status_for_track(track_id: i64) -> Option<PrescanStatusSnapshot> {
+    let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() else {
+        return None;
+    };
+    let Some(entry) = guard.get(&track_id).copied() else {
+        return None;
+    };
+    if entry.expires_at <= StdInstant::now() {
+        guard.remove(&track_id);
+        return None;
+    }
+    Some(PrescanStatusSnapshot {
+        status: match entry.class {
+            PrescanFailureClass::PermanentSkip => "skipped",
+            PrescanFailureClass::TransientFailure => "retrying",
+        },
+        reason: entry.reason.as_str(),
+    })
+}
+
 #[cfg(test)]
 fn clear_prescan_negative_cache_for_tests() {
     if let Ok(mut guard) = PRESCAN_NEGATIVE_CACHE.lock() {
@@ -141,6 +188,14 @@ fn reqwest_error_summary(error: &reqwest::Error) -> String {
         format!("{kind}: {status}")
     } else {
         kind.to_string()
+    }
+}
+
+fn segment_fetch_failure_reason(error_summary: &str) -> PrescanFailureReason {
+    if error_summary.contains("timeout") {
+        PrescanFailureReason::ResolveOkSegmentTimeout
+    } else {
+        PrescanFailureReason::ResolveOkSegmentFetchFailed
     }
 }
 
@@ -280,7 +335,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
         Ok(stream_info) => stream_info,
         Err(error) => {
             if let Some(class) = classify_stream_resolve_for_prescan(&error) {
-                cache_prescan_failure(track_id, class);
+                cache_prescan_failure(track_id, class, PrescanFailureReason::StreamRejected);
                 tracing::info!(
                     track_id,
                     tidal_id,
@@ -298,14 +353,31 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     // lookahead batch.
     let mut buf: Vec<u8> = Vec::with_capacity(512 * 1024);
     let media_segments = prescan_dash_media_segments(stream_info.segment_urls.len());
-    for seg_url in std::iter::once(&stream_info.url)
-        .chain(stream_info.segment_urls.iter().take(media_segments))
+    match fetch_prescan_segment(&http_client, &stream_info.url).await {
+        Ok(segment) => buf.extend_from_slice(&segment[..segment.len().min(MAX_BYTES)]),
+        Err(error_summary) => {
+            let reason = segment_fetch_failure_reason(&error_summary);
+            cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure, reason);
+            return Err(anyhow::anyhow!(
+                "{}: init segment: {error_summary}",
+                reason.as_str()
+            ));
+        }
+    }
+    let mut last_segment_error: Option<(PrescanFailureReason, String)> = None;
+    let mut media_segments_fetched = 0usize;
+    for (segment_index, seg_url) in stream_info
+        .segment_urls
+        .iter()
+        .take(media_segments)
+        .enumerate()
     {
         if buf.len() >= MAX_BYTES {
             break;
         }
         match fetch_prescan_segment(&http_client, seg_url).await {
             Ok(segment) => {
+                media_segments_fetched += 1;
                 let remaining = MAX_BYTES.saturating_sub(buf.len());
                 if segment.len() <= remaining {
                     buf.extend_from_slice(&segment);
@@ -315,21 +387,47 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
                 }
             }
             Err(error_summary) => {
-                cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
-                if buf.len() >= MIN_PARTIAL_BYTES {
-                    tracing::info!(
-                        track_id,
-                        bytes = buf.len(),
-                        error = %error_summary,
-                        "prescanner: continuing with partial clip after segment fetch failure"
-                    );
-                    break;
-                }
-                return Err(anyhow::anyhow!("fetch segment: {error_summary}"));
+                let reason = segment_fetch_failure_reason(&error_summary);
+                last_segment_error = Some((reason, error_summary.clone()));
+                cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure, reason);
+                tracing::warn!(
+                    track_id,
+                    segment_index,
+                    reason = reason.as_str(),
+                    error = %error_summary,
+                    bytes = buf.len(),
+                    "prescanner: media segment fetch failed, trying next segment"
+                );
+                continue;
             }
         }
     }
+    if media_segments_fetched == 0
+        && let Some((reason, error_summary)) = last_segment_error.as_ref()
+    {
+        return Err(anyhow::anyhow!(
+            "{}: no media segments fetched after retries: {error_summary}",
+            reason.as_str()
+        ));
+    }
+    if buf.len() >= MIN_PARTIAL_BYTES
+        && let Some((reason, error_summary)) = last_segment_error.as_ref()
+    {
+        tracing::info!(
+            track_id,
+            bytes = buf.len(),
+            reason = reason.as_str(),
+            error = %error_summary,
+            "prescanner: continuing with partial clip after segment fetch failure"
+        );
+    }
     if buf.len() < MIN_PARTIAL_BYTES {
+        if let Some((reason, error_summary)) = last_segment_error {
+            return Err(anyhow::anyhow!(
+                "{}: insufficient preview bytes after segment retries: {error_summary}",
+                reason.as_str()
+            ));
+        }
         tracing::info!(
             track_id,
             bytes = buf.len(),
@@ -501,7 +599,11 @@ async fn run_batch(state: &SharedState, event_rx: &mut broadcast::Receiver<AppEv
                 }
             }
             Err(_) => {
-                cache_prescan_failure(track_id, PrescanFailureClass::TransientFailure);
+                cache_prescan_failure(
+                    track_id,
+                    PrescanFailureClass::TransientFailure,
+                    PrescanFailureReason::PrefetchTimeout,
+                );
                 transient_failures += 1;
                 tracing::warn!(
                     track_id,
@@ -666,7 +768,7 @@ mod tests {
         };
 
         let class = classify_stream_resolve_for_prescan(&error).expect("classified");
-        cache_prescan_failure(31985, class);
+        cache_prescan_failure(31985, class, PrescanFailureReason::StreamRejected);
 
         assert_eq!(class, PrescanFailureClass::PermanentSkip);
         assert!(prescan_negative_cache_contains(31985));
@@ -717,7 +819,11 @@ mod tests {
     fn permanent_skips_do_not_count_as_transient_batch_failures() {
         let _guard = prescan_cache_test_guard();
         clear_prescan_negative_cache_for_tests();
-        cache_prescan_failure(31985, PrescanFailureClass::PermanentSkip);
+        cache_prescan_failure(
+            31985,
+            PrescanFailureClass::PermanentSkip,
+            PrescanFailureReason::StreamRejected,
+        );
 
         let transient_failures = usize::from(
             cached_prescan_failure_class(31985) == Some(PrescanFailureClass::TransientFailure),
@@ -726,5 +832,37 @@ mod tests {
         assert_eq!(transient_failures, 0);
         assert!(!should_abort_prescan_batch(transient_failures));
         clear_prescan_negative_cache_for_tests();
+    }
+
+    #[test]
+    fn segment_timeout_is_reported_as_transient_retry() {
+        let _guard = prescan_cache_test_guard();
+        clear_prescan_negative_cache_for_tests();
+        cache_prescan_failure(
+            31987,
+            PrescanFailureClass::TransientFailure,
+            PrescanFailureReason::ResolveOkSegmentTimeout,
+        );
+
+        assert_eq!(
+            prescan_status_for_track(31987),
+            Some(PrescanStatusSnapshot {
+                status: "retrying",
+                reason: "resolve_ok_segment_timeout",
+            })
+        );
+        clear_prescan_negative_cache_for_tests();
+    }
+
+    #[test]
+    fn segment_fetch_failure_reason_distinguishes_timeout() {
+        assert_eq!(
+            segment_fetch_failure_reason("timeout"),
+            PrescanFailureReason::ResolveOkSegmentTimeout
+        );
+        assert_eq!(
+            segment_fetch_failure_reason("connect"),
+            PrescanFailureReason::ResolveOkSegmentFetchFailed
+        );
     }
 }

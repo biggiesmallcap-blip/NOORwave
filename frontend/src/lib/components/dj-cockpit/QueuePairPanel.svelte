@@ -17,6 +17,12 @@
 		if (deck.profile_confidence == null) return 'Profile ready';
 		return `${Math.round(deck.profile_confidence * 100)}% confidence`;
 	}
+
+	function passiveAnalysisLabel(deck?: DjDeckStatus) {
+		if (deck?.passive_analysis_status === 'retrying') return 'Passive DSP retrying';
+		if (deck?.passive_analysis_status === 'skipped') return 'Passive DSP skipped';
+		return null;
+	}
 </script>
 
 <section class="pair-panel" aria-labelledby="dj-pair-heading">
@@ -44,8 +50,16 @@
 						{#if item.deck.safe_crossfade_only}
 							<span class="safe-only">Safe only</span>
 						{/if}
+						{#if passiveAnalysisLabel(item.deck)}
+							<span class="passive-analysis">{passiveAnalysisLabel(item.deck)}</span>
+						{/if}
 						{#if item.deck.profile_error}
 							<span class="error-detail" title={item.deck.profile_error}>{item.deck.profile_error}</span>
+						{/if}
+						{#if item.deck.passive_analysis_reason}
+							<span class="error-detail" title={item.deck.passive_analysis_reason}>
+								{item.deck.passive_analysis_reason}
+							</span>
 						{/if}
 					</div>
 					<dl>
@@ -184,6 +198,11 @@
 	.deck-status .safe-only {
 		border-color: color-mix(in srgb, var(--state-warning) 42%, transparent);
 		color: var(--state-warning);
+	}
+
+	.deck-status .passive-analysis {
+		border-color: color-mix(in srgb, var(--state-warning) 34%, transparent);
+		color: var(--text-secondary);
 	}
 
 	dl {

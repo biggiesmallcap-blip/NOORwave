@@ -909,6 +909,8 @@ export type DjDeckStatus = {
 	beat_count?: number;
 	downbeat_count?: number;
 	phrase_count?: number;
+	passive_analysis_status?: 'ready' | 'missing' | 'retrying' | 'skipped' | string;
+	passive_analysis_reason?: string;
 	safe_crossfade_only: boolean;
 };
 

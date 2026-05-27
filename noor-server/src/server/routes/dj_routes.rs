@@ -189,6 +189,8 @@ struct DjDeckStatus {
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
     phrase_count: Option<usize>,
+    passive_analysis_status: Option<String>,
+    passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
 }
 
@@ -1445,6 +1447,9 @@ fn deck_status(
         Some((title, artist)) => (title.clone(), artist.clone()),
         None => media_ref_label(conn, media_ref)?,
     };
+    let passive_analysis = media_ref
+        .track_id()
+        .and_then(crate::services::audio_analysis::queue_prescanner::prescan_status_for_track);
     let (beat_count, downbeat_count, phrase_count, profile_confidence) =
         if let Some(profile) = profile.as_ref() {
             (
@@ -1468,6 +1473,12 @@ fn deck_status(
         beat_count,
         downbeat_count,
         phrase_count,
+        passive_analysis_status: passive_analysis
+            .as_ref()
+            .map(|snapshot| snapshot.status.to_string()),
+        passive_analysis_reason: passive_analysis
+            .as_ref()
+            .map(|snapshot| snapshot.reason.to_string()),
         safe_crossfade_only: correction.is_some_and(|row| row.safe_crossfade_only),
     })
 }
@@ -2116,6 +2127,8 @@ mod tests {
             beat_count: profile_ready.then_some(128),
             downbeat_count: profile_ready.then_some(32),
             phrase_count: profile_ready.then_some(8),
+            passive_analysis_status: None,
+            passive_analysis_reason: None,
             safe_crossfade_only: false,
         }
     }
