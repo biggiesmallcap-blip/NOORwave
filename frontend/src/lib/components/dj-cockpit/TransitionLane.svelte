@@ -396,32 +396,16 @@
 						<li>
 							<div class="timing-history-title">
 								<span>{formatTimingPair(event)}</span>
-								<span>{formatTimingState(event)}</span>
+								<span class="timing-state-pill">{formatTimingState(event)}</span>
 							</div>
 							<dl class="timing-history-details">
-								<div>
-									<dt>Plan</dt>
-									<dd>{event.planning_reason ?? 'none'}</dd>
-								</div>
-								<div>
-									<dt>Source</dt>
-									<dd>{event.timing_source ?? 'none'}</dd>
-								</div>
 								<div>
 									<dt>Template</dt>
 									<dd>{event.renderer_template ?? event.planned_template}</dd>
 								</div>
 								<div>
-									<dt>Runtime</dt>
-									<dd>{event.runtime_renderer_status ?? 'none'}</dd>
-								</div>
-								<div>
-									<dt>Rendered</dt>
-									<dd>{formatRuntimeRendered(event.runtime_rendered_dj_mixer)}</dd>
-								</div>
-								<div>
-									<dt>Reason</dt>
-									<dd>{event.runtime_renderer_reason ?? 'none'}</dd>
+									<dt>Source</dt>
+									<dd>{event.timing_source ?? 'none'}</dd>
 								</div>
 								<div>
 									<dt>Planned</dt>
@@ -622,13 +606,18 @@
 
 	.timing-history li {
 		display: grid;
-		gap: var(--space-2);
-		padding: var(--space-2);
+		gap: var(--space-1);
+		padding: var(--space-1) var(--space-2);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		background: color-mix(in srgb, var(--bg-surface) 66%, transparent);
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
+	}
+
+	.timing-history li:nth-child(even) {
+		border-color: color-mix(in srgb, var(--accent-line) 24%, var(--border-subtle));
+		background: color-mix(in srgb, var(--bg-elevated) 70%, var(--accent-soft) 30%);
 	}
 
 	.timing-history-title {
@@ -641,23 +630,31 @@
 	.timing-history-title span:first-child {
 		color: var(--text-primary);
 		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-2xs);
 	}
 
-	.timing-history-title span:nth-child(2) {
+	.timing-state-pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 0 var(--space-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-surface) 74%, transparent);
 		color: var(--text-tertiary);
-		text-transform: uppercase;
 		font-size: var(--font-size-2xs);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
 	}
 
 	.timing-history-details {
 		display: grid;
 		gap: var(--space-1) var(--space-2);
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(5, minmax(0, 1fr));
 	}
 
 	.timing-history-details div {
 		display: grid;
-		gap: var(--space-1);
+		gap: 0;
 	}
 
 	.timing-history-details dt {
@@ -670,8 +667,11 @@
 	.timing-history-details dd {
 		margin: 0;
 		color: var(--text-primary);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-2xs);
 		text-align: left;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		overflow: hidden;
 	}
 
 	.empty-history {
@@ -731,7 +731,7 @@
 		}
 
 		.timing-history-details {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 	}
 </style>
