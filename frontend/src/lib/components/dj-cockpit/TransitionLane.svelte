@@ -93,6 +93,7 @@
 		),
 	);
 	let recentTimingEvents = $derived(status?.recent_timing_events ?? []);
+	let recentTimingHistory = $derived(recentTimingEvents.slice(0, 5));
 	let timingSummary = $derived(status?.timing_history_summary ?? null);
 	let overlayDetails = $derived(status?.overlay_details ?? null);
 
@@ -151,6 +152,11 @@
 		const from = formatTrackLabel(event.from_title, event.from_artist, `Event ${event.event_id}`);
 		const to = formatTrackLabel(event.to_title, event.to_artist, 'unknown');
 		return `${from} -> ${to}`;
+	}
+
+	function formatTimingState(event: DjStatusResponse['recent_timing_events'][number]) {
+		const status = event.timing_status ?? 'none';
+		return `${status} - ${formatTimingDirection(event.timing_direction)} - ${event.timing_quality}`;
 	}
 
 	function formatDecisionSummary() {
@@ -355,7 +361,7 @@
 					{/each}
 				</ul>
 			{/if}
-			<p class="debug-heading">Recent timing</p>
+			<p class="debug-heading">Recent timing (last 5)</p>
 			{#if timingSummary && timingSummary.event_count > 0}
 				<div class="timing-summary" aria-label="Recent DJ timing summary">
 					<div>
@@ -384,36 +390,52 @@
 					</div>
 				</div>
 			{/if}
-			{#if recentTimingEvents.length > 0}
-				<div class="timing-history-header" aria-hidden="true">
-					<span>Pair</span>
-					<span>Status</span>
-					<span>Timing</span>
-					<span>Quality</span>
-					<span>Plan</span>
-					<span>Source</span>
-					<span>Runtime</span>
-					<span>Rendered</span>
-					<span>Reason</span>
-					<span>Planned</span>
-					<span>Actual</span>
-					<span>Delta</span>
-				</div>
+			{#if recentTimingHistory.length > 0}
 				<ul class="timing-history" aria-label="Recent DJ transition timing">
-					{#each recentTimingEvents as event}
+					{#each recentTimingHistory as event}
 						<li>
-							<span>{formatTimingPair(event)}</span>
-							<span>{event.timing_status ?? 'none'}</span>
-							<span>{formatTimingDirection(event.timing_direction)}</span>
-							<span>{event.timing_quality}</span>
-							<span>{event.planning_reason ?? 'none'}</span>
-							<span>{event.timing_source ?? 'none'}</span>
-							<span>{event.runtime_renderer_status ?? 'none'}</span>
-							<span>{formatRuntimeRendered(event.runtime_rendered_dj_mixer)}</span>
-							<span>{event.runtime_renderer_reason ?? 'none'}</span>
-							<span>{formatTimingMs(event.planned_start_ms)}</span>
-							<span>{formatActualTiming(event)}</span>
-							<span>{formatEventDelta(event)}</span>
+							<div class="timing-history-title">
+								<span>{formatTimingPair(event)}</span>
+								<span>{formatTimingState(event)}</span>
+							</div>
+							<dl class="timing-history-details">
+								<div>
+									<dt>Plan</dt>
+									<dd>{event.planning_reason ?? 'none'}</dd>
+								</div>
+								<div>
+									<dt>Source</dt>
+									<dd>{event.timing_source ?? 'none'}</dd>
+								</div>
+								<div>
+									<dt>Template</dt>
+									<dd>{event.renderer_template ?? event.planned_template}</dd>
+								</div>
+								<div>
+									<dt>Runtime</dt>
+									<dd>{event.runtime_renderer_status ?? 'none'}</dd>
+								</div>
+								<div>
+									<dt>Rendered</dt>
+									<dd>{formatRuntimeRendered(event.runtime_rendered_dj_mixer)}</dd>
+								</div>
+								<div>
+									<dt>Reason</dt>
+									<dd>{event.runtime_renderer_reason ?? 'none'}</dd>
+								</div>
+								<div>
+									<dt>Planned</dt>
+									<dd>{formatTimingMs(event.planned_start_ms)}</dd>
+								</div>
+								<div>
+									<dt>Actual</dt>
+									<dd>{formatActualTiming(event)}</dd>
+								</div>
+								<div>
+									<dt>Delta</dt>
+									<dd>{formatEventDelta(event)}</dd>
+								</div>
+							</dl>
 						</li>
 					{/each}
 				</ul>
@@ -585,26 +607,10 @@
 	}
 
 	.timing-history,
-	.timing-history-header,
 	.timing-history li,
 	.rejected-alternatives,
 	.empty-history {
 		margin: 0;
-	}
-
-	.timing-history-header {
-		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(11, minmax(3.75rem, auto));
-		gap: var(--space-2);
-		color: var(--text-tertiary);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-		text-transform: uppercase;
-	}
-
-	.timing-history-header span:not(:first-child) {
-		text-align: right;
 	}
 
 	.timing-history {
@@ -616,23 +622,56 @@
 
 	.timing-history li {
 		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(11, minmax(3.75rem, auto));
 		gap: var(--space-2);
-		align-items: center;
-		padding-top: var(--space-2);
-		border-top: 1px solid var(--border-subtle);
+		padding: var(--space-2);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--bg-surface) 66%, transparent);
 		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 	}
 
-	.timing-history span:first-child,
-	.timing-history span:nth-child(2) {
+	.timing-history-title {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: space-between;
+		gap: var(--space-1) var(--space-2);
+	}
+
+	.timing-history-title span:first-child {
 		color: var(--text-primary);
 		font-weight: var(--font-weight-semibold);
 	}
 
-	.timing-history span:not(:first-child) {
-		text-align: right;
+	.timing-history-title span:nth-child(2) {
+		color: var(--text-tertiary);
+		text-transform: uppercase;
+		font-size: var(--font-size-2xs);
+	}
+
+	.timing-history-details {
+		display: grid;
+		gap: var(--space-1) var(--space-2);
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.timing-history-details div {
+		display: grid;
+		gap: var(--space-1);
+	}
+
+	.timing-history-details dt {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		line-height: var(--line-height-tight);
+		text-transform: uppercase;
+	}
+
+	.timing-history-details dd {
+		margin: 0;
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		text-align: left;
 	}
 
 	.empty-history {
@@ -683,23 +722,15 @@
 			display: grid;
 		}
 
-		.timing-history li {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
 		.timing-summary {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 
-		.timing-history-header {
-			display: none;
-		}
-
-		.timing-history span:not(:first-child) {
-			text-align: left;
-		}
-
 		.lane-actions {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.timing-history-details {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
