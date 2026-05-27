@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
-  import { letterColor } from '$lib/utils/color';
+  import { upscaleTidalArtwork, type TidalArtworkSize } from '$lib/utils/artwork';
 
   interface Artist {
     id: number;
@@ -26,8 +26,32 @@
   let currentIndex = $state(0);
   let paused = $state(false);
   let timer: ReturnType<typeof setInterval> | undefined;
+  let failedImageUrls = $state<Set<string>>(new Set());
 
   const current = $derived(artists[currentIndex] ?? artists[0]);
+  const muralArtists = $derived.by<Artist[]>(() => {
+    const group: Artist[] = [];
+    const seen = new Set<number>();
+
+    for (const artist of artists) {
+      if (!artist || seen.has(artist.id)) continue;
+      group.push(artist);
+      seen.add(artist.id);
+      if (group.length >= 20) break;
+    }
+
+    return group;
+  });
+  const heroHasImage = $derived(muralArtists.some(artist => !!artistArtUrl(artist, 640)));
+  const heroKindLabel = $derived(
+    current?.kind === 'forgotten_favorite'
+      ? (muralArtists.length > 1 ? 'FEATURED ARTISTS' : 'FORGOTTEN FAVORITE')
+      : (muralArtists.length >= 20
+        ? 'YOUR TOP 20 ARTISTS'
+        : muralArtists.length > 1
+          ? 'YOUR TOP ARTISTS'
+          : 'YOUR TOP ARTIST')
+  );
 
   function initials(name: string): string {
     return name.split(/\s+/).map(p => p[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
@@ -52,11 +76,39 @@
     startTimer();
   }
 
+  function selectMuralArtist(artistId: number) {
+    const nextIndex = artists.findIndex(artist => artist.id === artistId);
+    if (nextIndex < 0) return;
+    currentIndex = nextIndex;
+    startTimer();
+  }
+
   function openHeroContextMenu(event: MouseEvent) {
-    if (!current || !onContextMenu) return;
+    if (!current) return;
+    openArtistContextMenu(event, current.id);
+  }
+
+  function openArtistContextMenu(event: MouseEvent, artistId: number) {
+    if (!onContextMenu) return;
     event.preventDefault();
     event.stopPropagation();
-    onContextMenu(event, current.id);
+    onContextMenu(event, artistId);
+  }
+
+  function rawArtistArtUrl(artist: Artist | undefined): string | null {
+    return artist?.photo_url ?? artist?.fallback_art_url ?? null;
+  }
+
+  function artistArtUrl(artist: Artist | undefined, size: TidalArtworkSize): string | null {
+    const rawUrl = rawArtistArtUrl(artist);
+    if (!rawUrl || failedImageUrls.has(rawUrl)) return null;
+    return upscaleTidalArtwork(rawUrl, size);
+  }
+
+  function markArtistArtFailed(artist: Artist) {
+    const rawUrl = rawArtistArtUrl(artist);
+    if (!rawUrl) return;
+    failedImageUrls = new Set([...failedImageUrls, rawUrl]);
   }
 
   $effect(() => {
@@ -71,47 +123,41 @@
 </script>
 
 {#if current}
-  {@const heroArt = current.photo_url ?? current.fallback_art_url ?? null}
   <div
     class="library-hero-card"
-    class:has-image={!!heroArt}
+    class:has-image={heroHasImage}
     onmouseenter={() => paused = true}
     onmouseleave={() => paused = false}
     oncontextmenu={openHeroContextMenu}
     role="region"
-    aria-label="Featured artist"
+    aria-label="Top artists"
   >
-    {#key currentIndex}
-      <div
-        class="hero-bg"
-        style={heroArt
-          ? `background-image: url('${heroArt}')`
-          : `background: ${letterColor(current.name)}`}
-        in:fade={{ duration: 600 }}
-      ></div>
-    {/key}
+    <div class="hero-bg-mural" in:fade={{ duration: 600 }} aria-label="Top artists mural">
+      {#each muralArtists as artist (artist.id)}
+        {@const panelArt = artistArtUrl(artist, 640)}
+        <button
+          class="mural-panel"
+          class:mural-panel--featured={current?.id === artist.id}
+          type="button"
+          onclick={() => selectMuralArtist(artist.id)}
+          oncontextmenu={(event) => openArtistContextMenu(event, artist.id)}
+          aria-label={`Select ${artist.name}`}
+        >
+          {#if panelArt}
+            <img src={panelArt} alt="" onerror={() => markArtistArtFailed(artist)} />
+          {:else}
+            <span class="mural-fallback">{initials(artist.name)}</span>
+          {/if}
+        </button>
+      {/each}
+    </div>
 
     <div class="hero-overlay"></div>
 
     <div class="hero-content">
-      <button
-        class="hero-art hero-artist-link"
-        type="button"
-        onclick={() => onArtistClick?.(current.id)}
-        aria-label={`Open ${current.name}`}
-      >
-        {#if heroArt}
-          <div class="hero-thumb" style="background-image: url('{heroArt}')"></div>
-        {:else}
-          <div class="hero-thumb hero-thumb--fallback" style="background: {letterColor(current.name)}">
-            <span>{initials(current.name)}</span>
-          </div>
-        {/if}
-      </button>
-
       <div class="hero-meta">
         <span class="hero-kind" class:hero-kind--forgotten={current.kind === 'forgotten_favorite'}>
-          {current.kind === 'forgotten_favorite' ? 'FORGOTTEN FAVORITE' : 'YOUR TOP ARTIST'}
+          {heroKindLabel}
         </span>
         <h2 class="hero-title">
           <button class="hero-title-link" type="button" onclick={() => onArtistClick?.(current.id)}>
@@ -134,11 +180,13 @@
     {#if artists.length > 1}
       <button class="hero-nav hero-nav--prev" onclick={() => jump(-1)} aria-label="Previous artist">‹</button>
       <button class="hero-nav hero-nav--next" onclick={() => jump(1)} aria-label="Next artist">›</button>
-      <div class="hero-dots" aria-hidden="true">
-        {#each artists as _, i}
-          <span class="hero-dot" class:active={i === currentIndex}></span>
-        {/each}
-      </div>
+      {#if artists.length <= 8}
+        <div class="hero-dots" aria-hidden="true">
+          {#each artists as _, i}
+            <span class="hero-dot" class:active={i === currentIndex}></span>
+          {/each}
+        </div>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -153,13 +201,25 @@
     min-height: 200px;
   }
 
-  .hero-bg {
+  .hero-bg-mural {
     position: absolute;
-    inset: -8%;
-    background-size: cover;
-    background-position: center;
-    filter: blur(40px) saturate(1.4);
+    inset: -6%;
     z-index: 0;
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    overflow: hidden;
+    background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 28%, transparent));
+  }
+
+  .hero-bg-mural::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 78% 50%, rgba(255,255,255,0.24), transparent 28%),
+      linear-gradient(90deg, rgba(0,0,0,0.08), transparent 34%, rgba(0,0,0,0.04));
+    pointer-events: none;
   }
 
   .hero-overlay {
@@ -167,11 +227,13 @@
     inset: 0;
     background: linear-gradient(
       to right,
-      rgba(0,0,0,0.92) 0%,
-      rgba(0,0,0,0.6) 55%,
-      rgba(0,0,0,0.15) 100%
+      rgba(0,0,0,0.66) 0%,
+      rgba(0,0,0,0.34) 38%,
+      rgba(0,0,0,0.08) 68%,
+      transparent 100%
     );
     z-index: 1;
+    pointer-events: none;
   }
 
   .library-hero-card:not(.has-image) .hero-overlay {
@@ -181,23 +243,12 @@
   .hero-content {
     position: relative;
     z-index: 2;
-    display: flex;
+    display: grid;
     align-items: center;
-    gap: 28px;
     padding: 28px 32px;
+    pointer-events: none;
   }
 
-  .hero-thumb {
-    width: clamp(120px, 12vw, 180px);
-    aspect-ratio: 1 / 1;
-    border-radius: 8px;
-    background-size: cover;
-    background-position: center;
-    flex-shrink: 0;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-  }
-
-  .hero-artist-link,
   .hero-title-link {
     appearance: none;
     border: 0;
@@ -206,38 +257,123 @@
     padding: 0;
     font: inherit;
     cursor: pointer;
+    pointer-events: auto;
   }
 
-  .hero-artist-link {
+  .mural-panel {
+    appearance: none;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: var(--bg-raised);
+    color: var(--text-primary);
+    cursor: pointer;
+    overflow: hidden;
+    transform: skewX(-8deg) scaleX(1.1);
+    transform-origin: center;
+    opacity: 0.96;
+    filter: saturate(1.18) brightness(1.16);
+    box-shadow: none;
+    transition:
+      opacity var(--motion-fast),
+      filter var(--motion-fast),
+      transform var(--motion-base),
+      box-shadow var(--motion-base);
+  }
+
+  .mural-panel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      rgba(0,0,0,0.34),
+      rgba(0,0,0,0.05) 46%,
+      rgba(0,0,0,0.38)
+    );
+    opacity: 0.22;
+    pointer-events: none;
+  }
+
+  .mural-panel--featured {
+    z-index: var(--z-raised);
+    opacity: 1;
+    transform: skewX(-8deg) scaleX(1.1) scale(1.045);
+    filter: saturate(1.95) contrast(1.2) brightness(1.52);
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.34),
+      0 14px 34px rgba(0,0,0,0.34),
+      0 0 30px color-mix(in srgb, var(--accent) 46%, transparent);
+  }
+
+  .mural-panel--featured::after {
+    opacity: 0.08;
+    background: linear-gradient(
+      90deg,
+      rgba(0,0,0,0.12),
+      rgba(255,255,255,0.08) 48%,
+      rgba(0,0,0,0.18)
+    );
+  }
+
+  .mural-panel img,
+  .mural-fallback {
     display: block;
+    width: 100%;
+    height: 100%;
   }
 
-  .hero-artist-link:focus-visible,
+  .mural-panel img {
+    object-fit: cover;
+    transform: skewX(8deg) scale(1.24);
+    transition: transform var(--motion-base), opacity var(--motion-fast);
+  }
+
+  .mural-panel:hover img,
+  .mural-panel:focus-visible img {
+    transform: skewX(8deg) scale(1.32);
+  }
+
+  .mural-panel--featured img {
+    transform: skewX(8deg) scale(1.3);
+  }
+
+  .mural-panel--featured:hover img,
+  .mural-panel--featured:focus-visible img {
+    transform: skewX(8deg) scale(1.36);
+  }
+
+  .mural-fallback {
+    display: grid;
+    place-items: center;
+    background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 26%, var(--bg-surface)));
+    color: rgba(255,255,255,0.78);
+    font-size: var(--font-size-2xl);
+    font-weight: var(--font-weight-bold);
+    transform: skewX(8deg) scale(1.08);
+  }
+
+  .mural-panel:focus-visible,
   .hero-title-link:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 4px;
     border-radius: 8px;
   }
 
-  .hero-thumb--fallback {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--font-size-4xl);
-    font-weight: var(--font-weight-bold);
-    color: rgba(255,255,255,0.9);
-  }
-
   .hero-meta {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-width: min(36rem, 55vw);
+    text-shadow: 0 2px 18px rgba(0,0,0,0.62);
   }
 
   .hero-kind {
     font-size: var(--font-size-2xs);
     font-weight: var(--font-weight-semibold);
-    letter-spacing: 1.5px;
+    letter-spacing: 0;
     color: var(--accent);
     text-transform: uppercase;
     transition: color 300ms ease;
@@ -272,6 +408,7 @@
     gap: 10px;
     align-items: center;
     margin-top: 4px;
+    pointer-events: auto;
   }
 
   .hero-play {
@@ -327,4 +464,20 @@
     transition: background 200ms ease;
   }
   .hero-dot.active { background: rgba(255,255,255,0.85); }
+
+  @media (max-width: 760px) {
+    .hero-bg-mural {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-rows: repeat(4, minmax(0, 1fr));
+    }
+
+    .hero-content {
+      gap: var(--space-3);
+      padding: var(--space-4);
+    }
+
+    .hero-meta {
+      max-width: 100%;
+    }
+  }
 </style>

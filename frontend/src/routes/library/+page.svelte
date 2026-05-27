@@ -1,3 +1,25 @@
+<script lang="ts" module>
+	import type { Track as CachedTrack } from '$lib/api/client';
+
+	type CachedHomeAlbumCard = {
+		id: number;
+		title: string;
+		artist_id: number | null;
+		artist_name: string | null;
+		artwork_url: string | null;
+	};
+
+	const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000;
+	const homePanelCandidateCache = {
+		recentTracks: [] as CachedTrack[],
+		randomTracks: [] as CachedTrack[],
+		randomAlbums: [] as CachedHomeAlbumCard[],
+		randomRequestKey: '',
+		suggestionTracks: [] as CachedTrack[],
+		suggestionRequestKey: '',
+	};
+</script>
+
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
@@ -33,6 +55,7 @@
 	import { buildTrackMenu } from '$lib/player/track_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
+	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { parseQuery } from '$lib/search/query_parser';
 	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
 	import { goto } from '$app/navigation';
@@ -71,9 +94,9 @@
 		}), artist.name);
 	}
 
-	function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number) {
-		const card = recentAlbums.find(a => a.id === albumId);
-		const album = card ?? { id: albumId, title: '' };
+	function handleHomeAlbumContextMenu(e: MouseEvent, albumId: number, fallback?: HomeAlbumCard) {
+		const card = recentAlbums.find(a => a.id === albumId) ?? fallback;
+		const album = $albums.find(a => a.id === albumId) ?? (card ? albumFromHomeCard(card) : { id: albumId, title: '' });
 		openContextMenu(e, buildAlbumMenu(album, {
 			isLocal: true,
 			addToPlaylistSubmenu: buildAddToPlaylistSubmenu(async () => {
@@ -85,6 +108,7 @@
 
 	const PAGE_SIZE = 100;
 	const RECENT_TRACK_LIMIT = 10;
+	const HOME_MURAL_ITEM_LIMIT = 12;
 	const ALL_SEARCH_ARTIST_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_ALBUM_PREVIEW_LIMIT = 12;
 	const ALL_SEARCH_TRACK_PREVIEW_LIMIT = 10;
@@ -110,7 +134,7 @@
 	let artists = $state<Artist[]>([]);
 	let artistsLoading = $state(false);
 	let failedArtistImages = $state(new Set<string>());
-	let recentTracks = $state<Track[]>([]);
+	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -185,6 +209,13 @@
 			recentTracks = data.tracks
 				.filter((track) => track.last_played_at)
 				.slice(0, RECENT_TRACK_LIMIT);
+			homePanelCandidateCache.recentTracks = recentTracks;
+			if (recentTracks.length === 0) {
+				suggestionCandidateTracks = [];
+				suggestionCandidateRequestKey = '';
+				homePanelCandidateCache.suggestionTracks = [];
+				homePanelCandidateCache.suggestionRequestKey = '';
+			}
 		} catch (error) {
 			console.error('Failed to load recent tracks:', error);
 		}
@@ -846,20 +877,7 @@
 
 		const all = [...countMap.values()];
 		const played = all.filter(a => a.playCount > 0).sort((a, b) => b.playCount - a.playCount);
-		const top: HeroArtist[] = played.slice(0, 5).map(a => ({ ...a, kind: 'top' }));
-
-		// Forgotten favourite: an artist in the local DB (which only contains
-		// Tidal-favourited artists) that the user has barely listened to.
-		const topIds = new Set(top.map(a => a.id));
-		const candidates = all
-			.filter(a => !topIds.has(a.id) && !!(a.photo_url ?? a.fallback_art_url) && a.playCount === 0);
-		const fallback = candidates.length === 0
-			? all.filter(a => !topIds.has(a.id) && !!(a.photo_url ?? a.fallback_art_url) && a.playCount < 2)
-			: candidates;
-		if (fallback.length > 0) {
-			const pick = fallback[Math.floor(Math.random() * fallback.length)];
-			top.push({ ...pick, kind: 'forgotten_favorite' as const });
-		}
+		const top: HeroArtist[] = played.slice(0, 20).map(a => ({ ...a, kind: 'top' }));
 
 		return top;
 	});
@@ -915,6 +933,26 @@
 		artwork_url: string | null;
 	}
 
+	type HomeMuralItemKind = 'track' | 'album';
+
+	interface HomeMuralItem {
+		id: number;
+		kind: HomeMuralItemKind;
+		title: string;
+		subtitle: string;
+		artwork_url: string | null;
+		track?: Track;
+		album?: HomeAlbumCard;
+	}
+
+	interface HomeMuralPanel {
+		id: string;
+		label: string;
+		caption: string;
+		kind: HomeMuralItemKind;
+		items: HomeMuralItem[];
+	}
+
 	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
 		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
 
@@ -941,11 +979,406 @@
 			.map(({ card }) => card);
 	});
 
+	let randomPanelTracks = $state<Track[]>(homePanelCandidateCache.randomTracks);
+	let randomPanelAlbums = $state<HomeAlbumCard[]>(homePanelCandidateCache.randomAlbums);
+	let randomPanelRequestKey = $state(homePanelCandidateCache.randomRequestKey);
+	let suggestionCandidateTracks = $state<Track[]>(homePanelCandidateCache.suggestionTracks);
+	let suggestionCandidateRequestKey = $state(homePanelCandidateCache.suggestionRequestKey);
+
+	let suggestedTrackItems = $derived.by<HomeMuralItem[]>(() => {
+		const seeds = listenHistorySeeds();
+		const seedTrackIds = new Set(seeds.map(track => track.id));
+		const seedArtistIds = new Set(seeds.map(track => track.artist_id).filter((id): id is number => id != null));
+		const seedAlbumIds = new Set(seeds.map(track => track.album_id).filter((id): id is number => id != null));
+		const scored = suggestionCandidateTracks
+			.map(track => ({ track, score: listenHistoryTrackScore(track, seedTrackIds, seedArtistIds, seedAlbumIds) }))
+			.filter(({ score }) => score > 0)
+			.sort((a, b) => b.score - a.score || stableRank(a.track.id, dailySalt(11)) - stableRank(b.track.id, dailySalt(11)));
+		const selected = scored.slice(0, HOME_MURAL_ITEM_LIMIT).map(({ track }) => track);
+
+		return selected.slice(0, HOME_MURAL_ITEM_LIMIT).map(trackToMuralItem);
+	});
+
+	let suggestedAlbumItems = $derived.by<HomeMuralItem[]>(() => {
+		const seeds = listenHistorySeeds();
+		const seedTrackIds = new Set(seeds.map(track => track.id));
+		const seedArtistIds = new Set(seeds.map(track => track.artist_id).filter((id): id is number => id != null));
+		const seedAlbumIds = new Set(seeds.map(track => track.album_id).filter((id): id is number => id != null));
+		const byAlbum = new Map<number, { card: HomeAlbumCard; score: number }>();
+
+		for (const track of suggestionCandidateTracks) {
+			if (!track.album_id || seedAlbumIds.has(track.album_id)) continue;
+			const score = listenHistoryTrackScore(track, seedTrackIds, seedArtistIds, seedAlbumIds);
+			if (score <= 0) continue;
+			const existing = byAlbum.get(track.album_id);
+			if (existing) {
+				existing.score += score;
+				if (!existing.card.artwork_url && track.artwork_url) existing.card.artwork_url = track.artwork_url;
+			} else {
+				byAlbum.set(track.album_id, { card: homeAlbumCardFromTrack(track), score });
+			}
+		}
+
+		const selected = [...byAlbum.values()]
+			.sort((a, b) => b.score - a.score || stableRank(a.card.id, dailySalt(21)) - stableRank(b.card.id, dailySalt(21)))
+			.slice(0, HOME_MURAL_ITEM_LIMIT)
+			.map(({ card }) => card);
+
+		return selected.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem);
+	});
+
+	let randomTrackItems = $derived.by<HomeMuralItem[]>(() =>
+		randomPanelTracks.map(trackToMuralItem)
+	);
+
+	let randomAlbumItems = $derived.by<HomeMuralItem[]>(() =>
+		randomPanelAlbums.map(albumToMuralItem)
+	);
+
+	let homeMuralPanels = $derived.by<HomeMuralPanel[]>(() => {
+		const panels: HomeMuralPanel[] = [
+			{
+				id: 'suggested-tracks',
+				label: 'Suggested tracks',
+				caption: 'Listen history suggestions',
+				kind: 'track',
+				items: suggestedTrackItems,
+			},
+			{
+				id: 'suggested-albums',
+				label: 'Suggested albums',
+				caption: 'Listen history suggestions',
+				kind: 'album',
+				items: suggestedAlbumItems,
+			},
+			{
+				id: 'random-tracks',
+				label: 'Random tracks',
+				caption: 'Library shuffle picks',
+				kind: 'track',
+				items: randomTrackItems,
+			},
+			{
+				id: 'random-albums',
+				label: 'Random albums',
+				caption: 'Library shuffle picks',
+				kind: 'album',
+				items: randomAlbumItems,
+			},
+		];
+		return panels.filter(panel => panel.items.length > 0);
+	});
+
 	// Per-tile lazy artwork. Keyed by domain-prefixed id so we never collide
 	// (track 5 and album 5 are independent entries). Populated by lazyTidalArt
 	// when a tile without baked artwork scrolls into view.
 	let lazyArt = $state<Record<string, string>>({});
 	let artistLazyArt = $state<Record<number, string>>({});
+	let failedHomePanelArtUrls = $state<Set<string>>(new Set());
+
+	function dailySalt(offset: number): number {
+		const now = new Date();
+		return now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate() + offset;
+	}
+
+	function homePanelRefreshBucket(): number {
+		return Math.floor(Date.now() / HOME_PANEL_CACHE_REFRESH_MS);
+	}
+
+	function stableRank(id: number, salt: number): number {
+		let value = Math.imul(id ^ salt, 0x45d9f3b);
+		value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+		return (value ^ (value >>> 16)) >>> 0;
+	}
+
+	function stableRandomOffsets(total: number, saltOffset: number, limit: number, refreshBucket: number): number[] {
+		const count = Math.min(Math.max(total, 0), limit);
+		if (count === 0) return [];
+
+		const salt = dailySalt(saltOffset) ^ total ^ refreshBucket;
+		const offsets: number[] = [];
+		const used = new Set<number>();
+		let attempt = 0;
+
+		while (offsets.length < count && attempt < count * 16 + 64) {
+			const offset = stableRank(attempt + 1, salt) % total;
+			if (!used.has(offset)) {
+				used.add(offset);
+				offsets.push(offset);
+			}
+			attempt++;
+		}
+
+		for (let offset = 0; offsets.length < count && offset < total; offset++) {
+			if (!used.has(offset)) offsets.push(offset);
+		}
+
+		return offsets;
+	}
+
+	async function loadRandomPanelCandidates(trackTotal: number, albumTotal: number, requestKey: string, refreshBucket: number) {
+		const [tracksForPanel, albumsForPanel] = await Promise.all([
+			loadRandomPanelTracks(trackTotal, refreshBucket),
+			loadRandomPanelAlbums(albumTotal, refreshBucket),
+		]);
+		if (randomPanelRequestKey === requestKey) {
+			randomPanelTracks = tracksForPanel;
+			randomPanelAlbums = albumsForPanel;
+			homePanelCandidateCache.randomTracks = tracksForPanel;
+			homePanelCandidateCache.randomAlbums = albumsForPanel;
+			homePanelCandidateCache.randomRequestKey = requestKey;
+		}
+	}
+
+	async function loadRandomPanelTracks(trackTotal: number, refreshBucket: number): Promise<Track[]> {
+		if (trackTotal <= 0) return [];
+		const offsets = stableRandomOffsets(trackTotal, 31, HOME_MURAL_ITEM_LIMIT, refreshBucket);
+		const responses = await Promise.all(
+			offsets.map(offset => api.getTracks('date_added', 'desc', 1, offset, true, false))
+		);
+		return uniqueById(responses.flatMap(response => response.tracks));
+	}
+
+	async function loadRandomPanelAlbums(albumTotal: number, refreshBucket: number): Promise<HomeAlbumCard[]> {
+		if (albumTotal <= 0) return [];
+		const offsets = stableRandomOffsets(albumTotal, 41, HOME_MURAL_ITEM_LIMIT, refreshBucket);
+		const responses = await Promise.all(
+			offsets.map(offset => api.getAlbums('title', 'asc', 1, offset, true))
+		);
+		return uniqueById(responses.flatMap(response => response.albums).map(album => ({
+			id: album.id,
+			title: album.title,
+			artist_id: album.artist_id ?? null,
+			artist_name: album.artist_name,
+			artwork_url: album.artwork_url,
+		})));
+	}
+
+	function uniqueById<T extends { id: number }>(items: T[]): T[] {
+		const seen = new Set<number>();
+		const result: T[] = [];
+		for (const item of items) {
+			if (seen.has(item.id)) continue;
+			seen.add(item.id);
+			result.push(item);
+		}
+		return result;
+	}
+
+	function uniquePositiveIds(ids: Array<number | null | undefined>, limit: number): number[] {
+		const seen = new Set<number>();
+		const result: number[] = [];
+		for (const id of ids) {
+			if (id == null || id <= 0 || seen.has(id)) continue;
+			seen.add(id);
+			result.push(id);
+			if (result.length >= limit) break;
+		}
+		return result;
+	}
+
+	async function loadSuggestionCandidates(seedTracks: Track[], requestKey: string) {
+		const seedArtistIds = uniquePositiveIds(seedTracks.map(track => track.artist_id), 8);
+		const seedAlbumIds = uniquePositiveIds(seedTracks.map(track => track.album_id), 8);
+		const artistResults = await Promise.allSettled(seedArtistIds.map(id => api.getArtistTracks(id)));
+		const albumResults = await Promise.allSettled(seedAlbumIds.map(id => api.getAlbumTracks(id)));
+		const artistTracks = artistResults.flatMap(result =>
+			result.status === 'fulfilled' ? result.value.tracks : []
+		);
+		const albumTracks = albumResults.flatMap(result =>
+			result.status === 'fulfilled' ? result.value.tracks : []
+		);
+		const candidates = uniqueById([...seedTracks, ...albumTracks, ...artistTracks]);
+		if (suggestionCandidateRequestKey === requestKey) {
+			suggestionCandidateTracks = candidates;
+			homePanelCandidateCache.suggestionTracks = candidates;
+			homePanelCandidateCache.suggestionRequestKey = requestKey;
+		}
+	}
+
+	function listenHistorySeeds(): Track[] {
+		const seen = new Set<number>();
+		const seeds: Track[] = [];
+		const playedTracks = [...$tracks]
+			.filter(track => track.last_played_at)
+			.sort((a, b) => (b.last_played_at ?? '').localeCompare(a.last_played_at ?? ''));
+
+		for (const track of [...recentTracks, ...playedTracks]) {
+			if (seen.has(track.id)) continue;
+			seen.add(track.id);
+			seeds.push(track);
+			if (seeds.length >= HOME_MURAL_ITEM_LIMIT) break;
+		}
+
+		return seeds;
+	}
+
+	function listenHistoryTrackScore(
+		track: Track,
+		seedTrackIds: Set<number>,
+		seedArtistIds: Set<number>,
+		seedAlbumIds: Set<number>,
+	): number {
+		if (seedTrackIds.has(track.id)) return 0;
+		let score = 0;
+		if (seedArtistIds.has(track.artist_id)) score += 8;
+		if (track.album_id && seedAlbumIds.has(track.album_id)) score += 3;
+		if (track.is_favorite) score += 1.2;
+		if ((track.play_count ?? 0) === 0) score += 1.4;
+		else score += Math.min(track.play_count ?? 0, 12) * 0.12;
+		if (track.fidelity_score > 0) score += Math.min(track.fidelity_score, 100) / 100;
+		if (track.last_played_at) score -= 0.8;
+		return score;
+	}
+
+	function homeAlbumCardFromTrack(track: Track): HomeAlbumCard {
+		return {
+			id: track.album_id ?? 0,
+			title: track.album_title ?? 'Unknown Album',
+			artist_id: track.artist_id ?? null,
+			artist_name: track.artist_name,
+			artwork_url: track.artwork_url,
+		};
+	}
+
+	function albumFromHomeCard(card: HomeAlbumCard): Album {
+		return {
+			id: card.id,
+			tidal_id: null,
+			title: card.title,
+			artist_id: card.artist_id ?? 0,
+			artist_name: card.artist_name,
+			year: null,
+			artwork_url: card.artwork_url,
+			release_type: null,
+			track_count: null,
+			source: 'tidal',
+		};
+	}
+
+	function trackToMuralItem(track: Track): HomeMuralItem {
+		return {
+			id: track.id,
+			kind: 'track',
+			title: track.title,
+			subtitle: track.artist_name ?? track.album_title ?? 'Unknown artist',
+			artwork_url: track.artwork_url,
+			track,
+		};
+	}
+
+	function albumToMuralItem(album: HomeAlbumCard): HomeMuralItem {
+		return {
+			id: album.id,
+			kind: 'album',
+			title: album.title,
+			subtitle: album.artist_name ?? 'Unknown artist',
+			artwork_url: album.artwork_url,
+			album,
+		};
+	}
+
+	function fallbackLetters(label: string): string {
+		return label.split(/\s+/).map(part => part[0]?.toUpperCase() ?? '').join('').slice(0, 2) || '?';
+	}
+
+	function homePanelArtUrl(item: HomeMuralItem): string | null {
+		const rawUrl = item.artwork_url;
+		if (!rawUrl || failedHomePanelArtUrls.has(rawUrl)) return null;
+		return upscaleTidalArtwork(rawUrl, 320);
+	}
+
+	function markHomePanelArtFailed(item: HomeMuralItem) {
+		const rawUrl = item.artwork_url;
+		if (!rawUrl) return;
+		failedHomePanelArtUrls = new Set([...failedHomePanelArtUrls, rawUrl]);
+	}
+
+	function openHomeAlbumCard(card: HomeAlbumCard) {
+		const found = $albums.find(album => album.id === card.id);
+		void openAlbumDetail(found ?? albumFromHomeCard(card));
+	}
+
+	async function playHomeMuralTrack(item: HomeMuralItem, panel: HomeMuralPanel) {
+		if (!item.track) return;
+		const seen = new Set<number>();
+		const trackIds = panel.items
+			.filter((candidate) => candidate.kind === 'track' && candidate.track)
+			.map((candidate) => candidate.track!.id)
+			.filter((trackId) => {
+				if (seen.has(trackId)) return false;
+				seen.add(trackId);
+				return true;
+			});
+		if (!seen.has(item.track.id)) {
+			trackIds.unshift(item.track.id);
+		}
+
+		try {
+			if (trackIds.length > 0) {
+				await api.replacePlaybackQueue(trackIds, undefined, undefined, get(shuffleMode));
+			}
+			await playTrackNow(item.track.id);
+		} catch (error) {
+			console.error('Failed to play home panel track:', error);
+			await playTrackNow(item.track.id);
+		}
+	}
+
+	function openHomeMuralItem(item: HomeMuralItem, panel: HomeMuralPanel) {
+		if (item.kind === 'track' && item.track) {
+			void playHomeMuralTrack(item, panel);
+			return;
+		}
+		if (item.kind === 'album' && item.album) {
+			openHomeAlbumCard(item.album);
+		}
+	}
+
+	function openHomeMuralItemContextMenu(event: MouseEvent, item: HomeMuralItem) {
+		event.preventDefault();
+		event.stopPropagation();
+		if (item.kind === 'track' && item.track) {
+			openContextMenu(event, buildTrackMenu(item.track), item.title);
+			return;
+		}
+		if (item.kind === 'album' && item.album) {
+			handleHomeAlbumContextMenu(event, item.id, item.album);
+		}
+	}
+
+	$effect(() => {
+		const trackTotal = $totalTracks;
+		const albumTotal = $totalAlbums;
+		if (trackTotal <= 0 && albumTotal <= 0) return;
+
+		const refreshBucket = homePanelRefreshBucket();
+		const requestKey = `${dailySalt(0)}:${refreshBucket}:${trackTotal}:${albumTotal}`;
+		if (randomPanelRequestKey === requestKey) return;
+		randomPanelRequestKey = requestKey;
+
+		void loadRandomPanelCandidates(trackTotal, albumTotal, requestKey, refreshBucket).catch((error) => {
+			console.error('Failed to load random library panels:', error);
+		});
+	});
+
+	$effect(() => {
+		const seeds = listenHistorySeeds();
+		const seedKey = seeds.map(track => `${track.id}:${track.last_played_at ?? ''}`).join('|');
+		const requestKey = seedKey ? `${homePanelRefreshBucket()}:${seedKey}` : '';
+		if (!requestKey) {
+			return;
+		}
+		if (suggestionCandidateRequestKey === requestKey) return;
+		suggestionCandidateRequestKey = requestKey;
+
+		void loadSuggestionCandidates(seeds, requestKey).catch((error) => {
+			if (suggestionCandidateRequestKey === requestKey) {
+				suggestionCandidateTracks = [];
+			}
+			console.error('Failed to load suggestion candidates:', error);
+		});
+	});
 
 	// ── Home view handlers ─────────────────────────────────────────────────
 
@@ -1420,6 +1853,41 @@
 				/>
 			{:else if $isLoading}
 				<div class="home-loading">Loading your library…</div>
+			{/if}
+
+			{#if homeMuralPanels.length > 0}
+				<section class="home-mural-grid" aria-label="Library suggestion panels">
+					{#each homeMuralPanels as panel (panel.id)}
+						<article class="home-mural-panel" aria-label={panel.label}>
+							<div class="home-mural-bg">
+								{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
+									{@const artUrl = homePanelArtUrl(item)}
+									<button
+										class="home-mural-tile"
+										class:home-mural-tile--album={item.kind === 'album'}
+										type="button"
+										onclick={() => openHomeMuralItem(item, panel)}
+										oncontextmenu={(event) => openHomeMuralItemContextMenu(event, item)}
+										aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
+										title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
+									>
+										{#if artUrl}
+											<img src={artUrl} alt="" loading="lazy" onerror={() => markHomePanelArtFailed(item)} />
+										{:else}
+											<span class="home-mural-fallback">{fallbackLetters(item.title)}</span>
+										{/if}
+									</button>
+								{/each}
+							</div>
+							<div class="home-mural-shade"></div>
+							<div class="home-mural-copy">
+								<span class="home-mural-caption">{panel.caption}</span>
+								<h3 class="home-mural-title">{panel.label}</h3>
+								<span class="home-mural-count">{panel.items.length} picks</span>
+							</div>
+						</article>
+					{/each}
+				</section>
 			{/if}
 
 			{#if recentArtists.length > 0}
@@ -2085,6 +2553,157 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
+	}
+
+	.home-mural-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-4);
+	}
+
+	.home-mural-panel {
+		position: relative;
+		min-height: clamp(140px, 15vw, 210px);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		border: 1px solid var(--border-subtle);
+		background: var(--panel-bg);
+	}
+
+	.home-mural-bg {
+		position: absolute;
+		inset: -7%;
+		z-index: 0;
+		display: grid;
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 24%, transparent));
+	}
+
+	.home-mural-bg::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background:
+			radial-gradient(circle at 78% 42%, rgba(255,255,255,0.2), transparent 30%),
+			linear-gradient(90deg, rgba(0,0,0,0.06), transparent 42%, rgba(0,0,0,0.02));
+		pointer-events: none;
+	}
+
+	.home-mural-tile {
+		appearance: none;
+		position: relative;
+		min-width: 0;
+		min-height: 0;
+		padding: 0;
+		border: 0;
+		background: var(--bg-raised);
+		color: var(--text-primary);
+		cursor: pointer;
+		overflow: hidden;
+		opacity: 0.96;
+		filter: saturate(1.18) brightness(1.16);
+		transform: skewX(-7deg) scaleX(1.08);
+		transform-origin: center;
+		transition:
+			filter var(--motion-fast),
+			opacity var(--motion-fast),
+			transform var(--motion-base),
+			box-shadow var(--motion-base);
+	}
+
+	.home-mural-tile::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(90deg, rgba(0,0,0,0.18), transparent 48%, rgba(0,0,0,0.2));
+		opacity: 0.18;
+		pointer-events: none;
+	}
+
+	.home-mural-tile:hover,
+	.home-mural-tile:focus-visible {
+		z-index: var(--z-raised);
+		opacity: 1;
+		filter: saturate(1.8) brightness(1.42);
+		transform: skewX(-7deg) scaleX(1.08) scale(1.045);
+		box-shadow:
+			0 0 0 1px rgba(255,255,255,0.32),
+			0 14px 30px rgba(0,0,0,0.32),
+			0 0 24px color-mix(in srgb, var(--accent) 38%, transparent);
+		outline: none;
+	}
+
+	.home-mural-tile img,
+	.home-mural-fallback {
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+
+	.home-mural-tile img {
+		object-fit: cover;
+		transform: skewX(7deg) scale(1.24);
+		transition: transform var(--motion-base);
+	}
+
+	.home-mural-tile:hover img,
+	.home-mural-tile:focus-visible img {
+		transform: skewX(7deg) scale(1.34);
+	}
+
+	.home-mural-fallback {
+		display: grid;
+		place-items: center;
+		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
+		color: rgba(255,255,255,0.78);
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-bold);
+		transform: skewX(7deg) scale(1.08);
+	}
+
+	.home-mural-shade {
+		position: absolute;
+		inset: 0;
+		z-index: var(--z-base);
+		background: linear-gradient(90deg, rgba(0,0,0,0.68) 0%, rgba(0,0,0,0.3) 42%, rgba(0,0,0,0.06) 78%, transparent 100%);
+		pointer-events: none;
+	}
+
+	.home-mural-copy {
+		position: relative;
+		z-index: calc(var(--z-base) + 1);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+		gap: var(--space-1);
+		min-height: clamp(140px, 15vw, 210px);
+		max-width: min(22rem, 70%);
+		padding: var(--space-4);
+		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
+		pointer-events: none;
+	}
+
+	.home-mural-caption,
+	.home-mural-count {
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0;
+		text-transform: uppercase;
+		color: var(--accent);
+	}
+
+	.home-mural-title {
+		margin: 0;
+		color: var(--text-primary);
+		font-size: var(--font-size-xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+	}
+
+	.home-mural-count {
+		color: var(--text-secondary);
+		text-transform: none;
 	}
 
 	.section-label {
@@ -2939,6 +3558,19 @@
 	}
 
 	@media (max-width: 760px) {
+		.home-mural-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.home-mural-bg {
+			grid-template-columns: repeat(4, minmax(0, 1fr));
+			grid-template-rows: repeat(3, minmax(0, 1fr));
+		}
+
+		.home-mural-copy {
+			max-width: 82%;
+		}
+
 		.library-hero {
 			padding: 16px;
 			gap: 12px;
