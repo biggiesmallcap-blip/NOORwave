@@ -12,6 +12,7 @@ use super::bpm::{self, BeatGridAnalysis};
 use super::{onset, tempo};
 
 pub const DJ_PROFILE_VERSION: &str = "dj_profile_v2";
+pub const DJ_WAVEFORM_PEAK_COUNT: usize = 512;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -315,6 +316,31 @@ pub fn decode_f32_blob(blob: &[u8]) -> Option<Vec<f32>> {
     Some(values)
 }
 
+pub fn waveform_peaks(samples: &[f32]) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let mut peaks = Vec::with_capacity(DJ_WAVEFORM_PEAK_COUNT);
+    for bucket in 0..DJ_WAVEFORM_PEAK_COUNT {
+        let start = bucket * samples.len() / DJ_WAVEFORM_PEAK_COUNT;
+        let end = ((bucket + 1) * samples.len() / DJ_WAVEFORM_PEAK_COUNT).max(start + 1);
+        let peak = samples[start..end.min(samples.len())]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        peaks.push(peak);
+    }
+
+    let max_peak = peaks.iter().copied().fold(0.0_f32, f32::max);
+    if max_peak > 0.0 {
+        for peak in &mut peaks {
+            *peak = (*peak / max_peak).clamp(0.0, 1.0);
+        }
+    }
+    peaks
+}
+
 pub fn encode_u32_blob(values: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + values.len() * 4);
     out.extend_from_slice(&(values.len() as u32).to_le_bytes());
@@ -478,6 +504,7 @@ fn build_audio_dj_profile_row_from_analysis(
         energy_contour_blob: encode_f32_blob(&energy_contour),
         vocal_presence_blob: encode_f32_blob(&vec![0.0; phrase_boundaries.len().max(1)]),
         vocal_density_blob: encode_f32_blob(&vec![0.0; phrase_boundaries.len().max(1)]),
+        waveform_peaks_blob: encode_f32_blob(&waveform_peaks(samples)),
         lufs_loud_body: None,
         true_peak_dbtp: None,
         beat_confidence: Some(analysis.confidence),
@@ -1015,6 +1042,19 @@ mod tests {
     }
 
     #[test]
+    fn waveform_peaks_are_compact_and_normalized() {
+        let samples = (0..2048)
+            .map(|index| if index % 2 == 0 { 0.25 } else { -0.5 })
+            .collect::<Vec<_>>();
+
+        let peaks = waveform_peaks(&samples);
+
+        assert_eq!(peaks.len(), DJ_WAVEFORM_PEAK_COUNT);
+        assert!(peaks.iter().all(|peak| *peak >= 0.0 && *peak <= 1.0));
+        assert!(peaks.iter().any(|peak| (*peak - 1.0).abs() < f32::EPSILON));
+    }
+
+    #[test]
     fn profile_row_blobs_decode_to_expected_lengths() {
         let row = row_for("library_track", "1", 180);
         assert_eq!(decode_f32_blob(&row.beat_grid_blob).unwrap().len(), 256);
@@ -1022,6 +1062,10 @@ mod tests {
         assert_eq!(
             decode_u32_blob(&row.phrase_boundaries_blob).unwrap().len(),
             8
+        );
+        assert_eq!(
+            decode_f32_blob(&row.waveform_peaks_blob).unwrap().len(),
+            DJ_WAVEFORM_PEAK_COUNT
         );
     }
 

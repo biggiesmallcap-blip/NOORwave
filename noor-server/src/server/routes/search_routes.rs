@@ -7,6 +7,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+const SPORTIFY_PLAYLIST_WARN_THROTTLE_MS: u64 = 30_000;
+const SPORTIFY_PLAYLIST_WARN_KEY_CAP: usize = 1024;
+static SPORTIFY_PLAYLIST_WARN_STATE: OnceLock<Mutex<HashMap<u64, u64>>> = OnceLock::new();
+static SPORTIFY_PLAYLIST_WARN_CLOCK_START: OnceLock<Instant> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SearchParams {
@@ -49,7 +59,21 @@ pub(super) async fn search(
             )
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!("sportify playlist search failed: {}", e);
+                let error_text = e.to_string();
+                let warn_key = sportify_playlist_warn_key(&params.q, &error_text);
+                if claim_throttled_warn_slot(
+                    sportify_playlist_warn_state(),
+                    warn_key,
+                    monotonic_now_ms(),
+                    SPORTIFY_PLAYLIST_WARN_THROTTLE_MS,
+                ) {
+                    tracing::warn!("sportify playlist search failed: {}", error_text);
+                } else {
+                    tracing::debug!(
+                        "sportify playlist search failed (suppressed): {}",
+                        error_text
+                    );
+                }
                 Vec::new()
             }),
             None => Vec::new(),
@@ -125,6 +149,97 @@ async fn fetch_spotify_playlist_search_compact(
             })
         })
         .collect())
+}
+
+fn sportify_playlist_warn_state() -> &'static Mutex<HashMap<u64, u64>> {
+    SPORTIFY_PLAYLIST_WARN_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn monotonic_now_ms() -> u64 {
+    SPORTIFY_PLAYLIST_WARN_CLOCK_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+fn sportify_playlist_warn_key(query: &str, error: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    query.trim().to_ascii_lowercase().hash(&mut hasher);
+    error.trim().to_ascii_lowercase().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn claim_throttled_warn_slot(
+    state: &Mutex<HashMap<u64, u64>>,
+    key: u64,
+    now_ms: u64,
+    min_interval_ms: u64,
+) -> bool {
+    let Ok(mut guard) = state.lock() else {
+        // Fail-open on poisoned lock so we don't lose warning visibility.
+        return true;
+    };
+
+    if guard.len() > SPORTIFY_PLAYLIST_WARN_KEY_CAP {
+        guard.clear();
+    }
+
+    if let Some(last_ms) = guard.get(&key).copied()
+        && now_ms.saturating_sub(last_ms) < min_interval_ms
+    {
+        return false;
+    }
+
+    guard.insert(key, now_ms);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> Mutex<HashMap<u64, u64>> {
+        Mutex::new(HashMap::new())
+    }
+
+    #[test]
+    fn throttle_claim_allows_first_event() {
+        let state = state();
+        assert!(claim_throttled_warn_slot(&state, 1, 10_000, 30_000));
+    }
+
+    #[test]
+    fn throttle_claim_rejects_events_inside_window_for_same_key() {
+        let state = state();
+        assert!(claim_throttled_warn_slot(&state, 1, 10_000, 30_000));
+        assert!(!claim_throttled_warn_slot(&state, 1, 15_000, 30_000));
+    }
+
+    #[test]
+    fn throttle_claim_allows_after_window_and_updates_timestamp() {
+        let state = state();
+        assert!(claim_throttled_warn_slot(&state, 1, 10_000, 30_000));
+        assert!(claim_throttled_warn_slot(&state, 1, 45_000, 30_000));
+        let guard = state.lock().expect("lock state");
+        assert_eq!(guard.get(&1).copied(), Some(45_000));
+    }
+
+    #[test]
+    fn throttle_is_keyed_by_query_and_error() {
+        let state = state();
+        let k1 = sportify_playlist_warn_key("daft punk", "sportify request failed: /api/search");
+        let k2 = sportify_playlist_warn_key("phoenix", "sportify request failed: /api/search");
+        assert_ne!(k1, k2);
+        assert!(claim_throttled_warn_slot(&state, k1, 10_000, 30_000));
+        assert!(claim_throttled_warn_slot(&state, k2, 10_001, 30_000));
+    }
+
+    #[test]
+    fn warn_key_normalizes_whitespace_and_case() {
+        let a = sportify_playlist_warn_key("  DaFt PuNk ", "Sportify request failed: /api/search");
+        let b = sportify_playlist_warn_key("daft punk", "sportify request failed: /api/search");
+        assert_eq!(a, b);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,4 +333,10 @@ pub(super) async fn search_underrated(
             Ok(Json(json!({ "tracks": results })))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[cfg(test)]
+mod tests_legacy {
+    // Legacy mod name retained only to avoid duplicate symbol clashes if this file
+    // is merged with older local work. This module intentionally has no tests.
 }

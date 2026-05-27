@@ -26,8 +26,12 @@ enum MoodProbeOutcome {
         modules: Vec<TidalHomeModule>,
         cache_hit: bool,
     },
-    Timeout { slug: String },
-    Error { slug: String },
+    Timeout {
+        slug: String,
+    },
+    Error {
+        slug: String,
+    },
 }
 
 /// Returns the authenticated user's TIDAL mixes (Daily Discovery, My Mix N,
@@ -537,7 +541,8 @@ async fn load_tidal_home_modules_cached(
     tidal_http_client: reqwest::Client,
     page_modules_cache: &TidalPageModulesCache,
 ) -> Result<(Vec<TidalHomeModule>, bool), StatusCode> {
-    let cache_key = tidal_page_modules_cache_key(&tokens.country_code, TIDAL_HOME_MODULES_PAGE_PATH);
+    let cache_key =
+        tidal_page_modules_cache_key(&tokens.country_code, TIDAL_HOME_MODULES_PAGE_PATH);
     if let Some(cached) = get_cached_tidal_page_modules(page_modules_cache, &cache_key) {
         return Ok((cached, true));
     }
@@ -619,7 +624,10 @@ pub(super) async fn get_tidal_moods(
     };
     let (mood_cache, page_modules_cache) = {
         let s = state.read().await;
-        (s.tidal_moods_cache.clone(), s.tidal_page_modules_cache.clone())
+        (
+            s.tidal_moods_cache.clone(),
+            s.tidal_page_modules_cache.clone(),
+        )
     };
     if let Some(cached) = get_cached_tidal_mood_categories(&mood_cache) {
         let elapsed_ms = started_at.elapsed().as_millis();
@@ -1110,7 +1118,8 @@ mod tests {
             json!({ "slug": "mood_uncached", "title": "Uncached" }),
         ];
 
-        let (merged, pending, cache_hits) = apply_cached_mood_category_probes(categories, "AU", &cache);
+        let (merged, pending, cache_hits) =
+            apply_cached_mood_category_probes(categories, "AU", &cache);
 
         assert_eq!(cache_hits, 1);
         assert_eq!(pending.len(), 1);

@@ -573,6 +573,10 @@ enum DjRuntimeRendererReason {
     RenderBufferFailed,
     BufferLockFailed,
     DjDisabled,
+    NextDecodeLateAtFire,
+    NextDeckMissingAtFire,
+    TransitionPlanMissingAtFire,
+    SyncWindowNotSignaled,
 }
 
 impl DjRuntimeRendererReason {
@@ -590,6 +594,10 @@ impl DjRuntimeRendererReason {
             Self::RenderBufferFailed => "render_buffer_failed",
             Self::BufferLockFailed => "buffer_lock_failed",
             Self::DjDisabled => "dj_disabled",
+            Self::NextDecodeLateAtFire => "next_decode_late_at_fire",
+            Self::NextDeckMissingAtFire => "next_deck_missing_at_fire",
+            Self::TransitionPlanMissingAtFire => "transition_plan_missing_at_fire",
+            Self::SyncWindowNotSignaled => "sync_window_not_signaled",
         }
     }
 }
@@ -607,6 +615,14 @@ impl DjRuntimeRendererOutcome {
             rendered: true,
             status: DjRuntimeRendererStatus::RenderedHandoff,
             reason: DjRuntimeRendererReason::None,
+        }
+    }
+
+    fn rendered_handoff_with_reason(reason: DjRuntimeRendererReason) -> Self {
+        Self {
+            rendered: true,
+            status: DjRuntimeRendererStatus::RenderedHandoff,
+            reason,
         }
     }
 
@@ -679,6 +695,57 @@ fn runtime_renderer_failure_reason(
         failure.reason
     } else {
         DjRuntimeRendererReason::PreparedMixerMissing
+    }
+}
+
+fn runtime_renderer_fire_block_reason(
+    state: &PlaybackRuntimeLoopState,
+    next_ready: bool,
+) -> DjRuntimeRendererReason {
+    let Some(next) = state.next_engine.as_ref() else {
+        return DjRuntimeRendererReason::NextDeckMissingAtFire;
+    };
+    if next.job.prepared_transition.is_none() {
+        return DjRuntimeRendererReason::TransitionPlanMissingAtFire;
+    }
+    if !next_ready {
+        return DjRuntimeRendererReason::NextDecodeLateAtFire;
+    }
+    DjRuntimeRendererReason::PreparedMixerMissing
+}
+
+fn runtime_renderer_boundary_fallback_reason(
+    state: &PlaybackRuntimeLoopState,
+) -> DjRuntimeRendererReason {
+    let reason =
+        runtime_renderer_failure_reason(state, DjRuntimeRendererReason::PreparedMixerMissing);
+    if reason != DjRuntimeRendererReason::PreparedMixerMissing {
+        return reason;
+    }
+    let crossfade_signaled = state
+        .engine
+        .as_ref()
+        .map(|engine| {
+            engine
+                .shared
+                .crossfade_start_signaled
+                .load(Ordering::Relaxed)
+        })
+        .unwrap_or(false);
+    if crossfade_signaled {
+        DjRuntimeRendererReason::PreparedMixerMissing
+    } else {
+        DjRuntimeRendererReason::SyncWindowNotSignaled
+    }
+}
+
+fn runtime_renderer_late_fire_reason(state: &PlaybackRuntimeLoopState) -> DjRuntimeRendererReason {
+    let reason =
+        runtime_renderer_failure_reason(state, DjRuntimeRendererReason::PreparedMixerMissing);
+    if reason == DjRuntimeRendererReason::PreparedMixerMissing {
+        DjRuntimeRendererReason::NextDecodeLateAtFire
+    } else {
+        reason
     }
 }
 
@@ -1154,6 +1221,7 @@ fn start_prepared_overlay(
     state: &mut PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     timing_status: &'static str,
+    runtime_renderer_reason: DjRuntimeRendererReason,
     device_sample_rate: u32,
     device_channels: u16,
 ) -> Result<(), DjRuntimeRendererReason> {
@@ -1187,7 +1255,7 @@ fn start_prepared_overlay(
                 .status
                 .as_str()
                 .to_string(),
-            runtime_renderer_reason: DjRuntimeRendererReason::None.as_str().to_string(),
+            runtime_renderer_reason: runtime_renderer_reason.as_str().to_string(),
         });
     }
     Ok(())
@@ -1639,6 +1707,7 @@ fn run_runtime_loop(
                                     &mut state,
                                     &event_tx,
                                     "fired",
+                                    DjRuntimeRendererReason::None,
                                     device_sample_rate,
                                     device_channels,
                                 ) {
@@ -1667,6 +1736,9 @@ fn run_runtime_loop(
                                     runtime_renderer,
                                 );
                             }
+                        } else if !active_engine_suppresses_crossfade_after_seek(&state) {
+                            let reason = runtime_renderer_fire_block_reason(&state, next_ready);
+                            record_current_runtime_renderer_failure(&mut state, reason);
                         }
                         // If not ready yet, NextDecodeComplete handles the late path.
                     }
@@ -1684,15 +1756,20 @@ fn run_runtime_loop(
                         .map(|e| e.track_id == track_id && e.generation == generation)
                         .unwrap_or(false);
                     if pending_match {
-                        let _ = prepare_dj_mixer_for_pair(
-                            &mut state,
-                            dj_mixer_max_block_samples(&output_config),
-                        );
                         let crossfade_started = state
                             .engine
                             .as_ref()
                             .map(|e| e.shared.crossfade_start_signaled.load(Ordering::Relaxed))
                             .unwrap_or(false);
+                        let late_fire_reason = if crossfade_started {
+                            runtime_renderer_late_fire_reason(&state)
+                        } else {
+                            DjRuntimeRendererReason::None
+                        };
+                        let _ = prepare_dj_mixer_for_pair(
+                            &mut state,
+                            dj_mixer_max_block_samples(&output_config),
+                        );
                         if crossfade_started
                             && !active_engine_suppresses_crossfade_after_seek(&state)
                         {
@@ -1703,6 +1780,7 @@ fn run_runtime_loop(
                                     &mut state,
                                     &event_tx,
                                     "late",
+                                    late_fire_reason,
                                     device_sample_rate,
                                     device_channels,
                                 ) {
@@ -1711,7 +1789,11 @@ fn run_runtime_loop(
                             } else {
                                 let runtime_renderer =
                                     match install_prepared_handoff_mixer_buffer(&mut state) {
-                                        Ok(()) => DjRuntimeRendererOutcome::rendered_handoff(),
+                                        Ok(()) => {
+                                            DjRuntimeRendererOutcome::rendered_handoff_with_reason(
+                                                late_fire_reason,
+                                            )
+                                        }
                                         Err(reason) => {
                                             let failure =
                                                 runtime_renderer_failure_reason(&state, reason);
@@ -2721,7 +2803,7 @@ fn promote_prepared_at_boundary(
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
     let runtime_renderer = DjRuntimeRendererOutcome::boundary_fallback(
-        runtime_renderer_failure_reason(state, DjRuntimeRendererReason::PreparedMixerMissing),
+        runtime_renderer_boundary_fallback_reason(state),
     );
     state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
@@ -2749,7 +2831,7 @@ fn promote_prepared_at_boundary(
     if let Some(mut outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
-        let actual_start_ms = track_position_ms(
+        let boundary_handoff_ms = track_position_ms(
             &outgoing.shared,
             state.device_sample_rate,
             state.device_channels,
@@ -2760,18 +2842,18 @@ fn promote_prepared_at_boundary(
                 transition_event_id,
                 outgoing_track_id = outgoing_id,
                 generation = outgoing_generation,
-                actual_start_ms,
-                timing_status = "late",
+                boundary_handoff_ms,
+                timing_status = "missed",
                 runtime_renderer_status = runtime_renderer.status.as_str(),
                 runtime_renderer_reason = runtime_renderer.reason.as_str(),
-                "DJ transition boundary fallback fired"
+                "DJ transition boundary fallback missed planned fire"
             );
             let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
                 transition_event_id,
                 outgoing_track_id: outgoing_id,
                 generation: outgoing_generation,
-                actual_start_ms,
-                timing_status: "late".to_string(),
+                actual_start_ms: boundary_handoff_ms,
+                timing_status: "missed".to_string(),
                 runtime_rendered_dj_mixer: false,
                 runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
                 runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
@@ -3250,6 +3332,7 @@ mod tests {
                     energy_contour_blob: encode_f32_blob(&[]),
                     vocal_presence_blob: encode_f32_blob(&[]),
                     vocal_density_blob: encode_f32_blob(&[]),
+                    waveform_peaks_blob: encode_f32_blob(&[0.0, 1.0, 0.0]),
                     lufs_loud_body: None,
                     true_peak_dbtp: None,
                     beat_confidence: Some(0.8),
@@ -3587,7 +3670,17 @@ mod tests {
             Err(DjRuntimeRendererReason::ProgramNotMixerRenderable)
         );
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
-        assert!(start_prepared_overlay(&mut state, &event_tx, "fired", 48_000, 2).is_ok());
+        assert!(
+            start_prepared_overlay(
+                &mut state,
+                &event_tx,
+                "fired",
+                DjRuntimeRendererReason::None,
+                48_000,
+                2
+            )
+            .is_ok()
+        );
 
         assert!(state.prepared_dj_mixer.is_none());
         assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
@@ -3907,7 +4000,58 @@ mod tests {
     }
 
     #[test]
-    fn boundary_fallback_promotion_emits_late_timing_event() {
+    fn runtime_renderer_fire_block_reason_names_fire_miss_cause() {
+        let mut state = test_runtime_loop_state();
+        assert_eq!(
+            runtime_renderer_fire_block_reason(&state, false),
+            DjRuntimeRendererReason::NextDeckMissingAtFire
+        );
+
+        state.next_engine = Some(test_engine_with_shared(2, 21));
+        assert_eq!(
+            runtime_renderer_fire_block_reason(&state, false),
+            DjRuntimeRendererReason::TransitionPlanMissingAtFire
+        );
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        state.next_engine = Some(next);
+        assert_eq!(
+            runtime_renderer_fire_block_reason(&state, false),
+            DjRuntimeRendererReason::NextDecodeLateAtFire
+        );
+    }
+
+    #[test]
+    fn runtime_renderer_late_fire_reason_preserves_decode_late_cause() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        let mut next = test_engine_with_shared(2, 21);
+        let transition = test_prepared_transition_program(20, Some(11), Some(12));
+        next.job =
+            PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition.clone());
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        assert_eq!(
+            runtime_renderer_late_fire_reason(&state),
+            DjRuntimeRendererReason::NextDecodeLateAtFire
+        );
+
+        record_runtime_renderer_failure(
+            &mut state,
+            &transition,
+            DjRuntimeRendererReason::NextDecodeLateAtFire,
+        );
+        assert_eq!(
+            runtime_renderer_late_fire_reason(&state),
+            DjRuntimeRendererReason::NextDecodeLateAtFire
+        );
+    }
+
+    #[test]
+    fn boundary_fallback_promotion_emits_missed_timing_event() {
         let mut state = test_runtime_loop_state();
         let active = test_engine_with_shared(1, 20);
         active
@@ -3949,10 +4093,10 @@ mod tests {
                 assert_eq!(outgoing_track_id, 1);
                 assert_eq!(generation, 20);
                 assert_eq!(actual_start_ms, 5_000);
-                assert_eq!(timing_status, "late");
+                assert_eq!(timing_status, "missed");
                 assert!(!runtime_rendered_dj_mixer);
                 assert_eq!(runtime_renderer_status, "boundary_fallback");
-                assert_eq!(runtime_renderer_reason, "prepared_mixer_missing");
+                assert_eq!(runtime_renderer_reason, "sync_window_not_signaled");
             }
             other => panic!("expected timing event, got {other:?}"),
         }

@@ -444,6 +444,7 @@ mod tests {
                 energy_contour_blob: encode_f32_blob(&[]),
                 vocal_presence_blob: encode_f32_blob(&[0.0; 16]),
                 vocal_density_blob: encode_f32_blob(&[0.0; 16]),
+                waveform_peaks_blob: encode_f32_blob(&[0.0, 0.5, 1.0, 0.5]),
                 lufs_loud_body: Some(-12.0),
                 true_peak_dbtp: Some(-1.0),
                 beat_confidence: Some(0.9),

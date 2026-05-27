@@ -159,9 +159,9 @@
 			<h1 id="dj-cockpit-heading">Transition control</h1>
 		</div>
 		<div class="engine-toggle">
-			<span>{enabled ? 'DJ engine on' : 'Legacy playback path'}</span>
+			<span>{enabled ? 'DJ transitions on' : 'Use legacy playback'}</span>
 			<button type="button" aria-pressed={enabled} disabled={saving} onclick={() => void setEnabled(!enabled)}>
-				{enabled ? 'Disable DJ' : 'Enable DJ'}
+				{enabled ? 'Use legacy playback' : 'DJ transitions on'}
 			</button>
 		</div>
 	</header>
@@ -169,6 +169,10 @@
 	{#if !enabled}
 		<p class="disabled-note">
 			Playback is using the legacy path. DJ lookahead and transition planning are stopped.
+		</p>
+	{:else}
+		<p class="enabled-note">
+			DJ is planning the next eligible current-plus-next pair.
 		</p>
 	{/if}
 
@@ -278,6 +282,7 @@
 	}
 
 	.disabled-note,
+	.enabled-note,
 	.rebuild-status {
 		padding: var(--space-3);
 		border: 1px solid color-mix(in srgb, var(--state-warning) 36%, transparent);
@@ -286,6 +291,12 @@
 		color: var(--state-warning);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-snug);
+	}
+
+	.enabled-note {
+		border-color: color-mix(in srgb, var(--state-success) 32%, transparent);
+		background: color-mix(in srgb, var(--state-success) 8%, transparent);
+		color: var(--text-secondary);
 	}
 
 	.workspace {

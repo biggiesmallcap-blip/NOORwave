@@ -7160,11 +7160,11 @@ pub fn upsert_audio_dj_profile(conn: &Connection, row: &AudioDjProfileRow) -> Re
             beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
             intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
             safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
-            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            vocal_density_blob, waveform_peaks_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
             profile_confidence, analysis_scope_ms, is_temporary, source, computed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+            ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
         )
         ON CONFLICT(media_ref_kind, media_ref_id) DO UPDATE SET
             track_id = excluded.track_id,
@@ -7184,6 +7184,7 @@ pub fn upsert_audio_dj_profile(conn: &Connection, row: &AudioDjProfileRow) -> Re
             energy_contour_blob = excluded.energy_contour_blob,
             vocal_presence_blob = excluded.vocal_presence_blob,
             vocal_density_blob = excluded.vocal_density_blob,
+            waveform_peaks_blob = excluded.waveform_peaks_blob,
             lufs_loud_body = excluded.lufs_loud_body,
             true_peak_dbtp = excluded.true_peak_dbtp,
             beat_confidence = excluded.beat_confidence,
@@ -7212,6 +7213,7 @@ pub fn upsert_audio_dj_profile(conn: &Connection, row: &AudioDjProfileRow) -> Re
             row.energy_contour_blob,
             row.vocal_presence_blob,
             row.vocal_density_blob,
+            row.waveform_peaks_blob,
             row.lufs_loud_body,
             row.true_peak_dbtp,
             row.beat_confidence,
@@ -7234,7 +7236,7 @@ pub fn get_audio_dj_profile(
             profile_version, beat_grid_blob, downbeats_blob, phrase_boundaries_blob,
             mix_in_blob, mix_out_blob, intro_end_seconds, outro_start_seconds,
             breakdown_blob, drop_blob, safe_transition_windows_blob, energy_contour_blob,
-            vocal_presence_blob, vocal_density_blob, lufs_loud_body, true_peak_dbtp,
+            vocal_presence_blob, vocal_density_blob, waveform_peaks_blob, lufs_loud_body, true_peak_dbtp,
             beat_confidence, profile_confidence, analysis_scope_ms, is_temporary,
             source, computed_at
          FROM audio_dj_profiles
@@ -7255,7 +7257,7 @@ pub fn get_audio_dj_profile_for_track(
             profile_version, beat_grid_blob, downbeats_blob, phrase_boundaries_blob,
             mix_in_blob, mix_out_blob, intro_end_seconds, outro_start_seconds,
             breakdown_blob, drop_blob, safe_transition_windows_blob, energy_contour_blob,
-            vocal_presence_blob, vocal_density_blob, lufs_loud_body, true_peak_dbtp,
+            vocal_presence_blob, vocal_density_blob, waveform_peaks_blob, lufs_loud_body, true_peak_dbtp,
             beat_confidence, profile_confidence, analysis_scope_ms, is_temporary,
             source, computed_at
          FROM audio_dj_profiles
@@ -7281,14 +7283,14 @@ pub fn promote_temporary_audio_dj_profile(
             beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
             intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
             safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
-            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            vocal_density_blob, waveform_peaks_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
             profile_confidence, analysis_scope_ms, is_temporary, source, computed_at
         )
         SELECT ?3, ?4, track_id, queue_item_id, COALESCE(?5, tidal_id), profile_version,
             beat_grid_blob, downbeats_blob, phrase_boundaries_blob, mix_in_blob, mix_out_blob,
             intro_end_seconds, outro_start_seconds, breakdown_blob, drop_blob,
             safe_transition_windows_blob, energy_contour_blob, vocal_presence_blob,
-            vocal_density_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
+            vocal_density_blob, waveform_peaks_blob, lufs_loud_body, true_peak_dbtp, beat_confidence,
             profile_confidence, analysis_scope_ms, 0, source, datetime('now')
         FROM audio_dj_profiles
         WHERE media_ref_kind = ?1 AND media_ref_id = ?2
@@ -7310,6 +7312,7 @@ pub fn promote_temporary_audio_dj_profile(
             energy_contour_blob = excluded.energy_contour_blob,
             vocal_presence_blob = excluded.vocal_presence_blob,
             vocal_density_blob = excluded.vocal_density_blob,
+            waveform_peaks_blob = excluded.waveform_peaks_blob,
             lufs_loud_body = excluded.lufs_loud_body,
             true_peak_dbtp = excluded.true_peak_dbtp,
             beat_confidence = excluded.beat_confidence,
@@ -7527,6 +7530,10 @@ fn validate_dj_runtime_renderer_reason(reason: Option<&str>) -> Result<()> {
                 | "render_buffer_failed"
                 | "buffer_lock_failed"
                 | "dj_disabled"
+                | "next_decode_late_at_fire"
+                | "next_deck_missing_at_fire"
+                | "transition_plan_missing_at_fire"
+                | "sync_window_not_signaled"
         )
     {
         bail!("unknown DJ runtime renderer reason: {reason}");
@@ -7658,8 +7665,12 @@ pub fn update_dj_transition_fire_timing(
     validate_dj_runtime_renderer_reason(Some(runtime_renderer_reason))?;
     conn.execute(
         "UPDATE dj_transition_events
-         SET actual_start_ms = ?2,
+         SET actual_start_ms = CASE
+                 WHEN ?3 = 'missed' THEN NULL
+                 ELSE ?2
+             END,
              timing_delta_ms = CASE
+                 WHEN ?3 = 'missed' THEN NULL
                  WHEN planned_start_ms IS NULL THEN NULL
                  ELSE ?2 - planned_start_ms
              END,
@@ -7787,14 +7798,15 @@ fn audio_dj_profile_from_row(row: &Row<'_>) -> rusqlite::Result<AudioDjProfileRo
         energy_contour_blob: row.get(16)?,
         vocal_presence_blob: row.get(17)?,
         vocal_density_blob: row.get(18)?,
-        lufs_loud_body: row.get(19)?,
-        true_peak_dbtp: row.get(20)?,
-        beat_confidence: row.get(21)?,
-        profile_confidence: row.get(22)?,
-        analysis_scope_ms: row.get(23)?,
-        is_temporary: row.get::<_, i64>(24)? != 0,
-        source: row.get(25)?,
-        computed_at: row.get(26)?,
+        waveform_peaks_blob: row.get(19)?,
+        lufs_loud_body: row.get(20)?,
+        true_peak_dbtp: row.get(21)?,
+        beat_confidence: row.get(22)?,
+        profile_confidence: row.get(23)?,
+        analysis_scope_ms: row.get(24)?,
+        is_temporary: row.get::<_, i64>(25)? != 0,
+        source: row.get(26)?,
+        computed_at: row.get(27)?,
     })
 }
 
@@ -8113,6 +8125,83 @@ mod tests {
         }
 
         #[test]
+        fn update_dj_transition_fire_timing_leaves_missed_fire_timing_empty() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(
+                &conn,
+                id,
+                199_465,
+                "missed",
+                false,
+                "boundary_fallback",
+                "prepared_mixer_missing",
+            )
+            .expect("timing");
+
+            let row = conn
+                .query_row(
+                    "SELECT actual_start_ms, timing_delta_ms, timing_status,
+                            runtime_rendered_dj_mixer, runtime_renderer_status,
+                            runtime_renderer_reason
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .expect("timing row");
+
+            assert_eq!(row.0, None);
+            assert_eq!(row.1, None);
+            assert_eq!(row.2.as_deref(), Some("missed"));
+            assert_eq!(row.3, Some(0));
+            assert_eq!(row.4.as_deref(), Some("boundary_fallback"));
+            assert_eq!(row.5.as_deref(), Some("prepared_mixer_missing"));
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_accepts_precise_miss_reasons() {
+            let conn = setup_conn();
+
+            for reason in [
+                "next_decode_late_at_fire",
+                "next_deck_missing_at_fire",
+                "transition_plan_missing_at_fire",
+                "sync_window_not_signaled",
+            ] {
+                let id = insert_event(&conn);
+                update_dj_transition_fire_timing(
+                    &conn,
+                    id,
+                    199_465,
+                    "missed",
+                    false,
+                    "boundary_fallback",
+                    reason,
+                )
+                .expect("timing");
+
+                let stored_reason: Option<String> = conn
+                    .query_row(
+                        "SELECT runtime_renderer_reason FROM dj_transition_events WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .expect("stored reason");
+                assert_eq!(stored_reason.as_deref(), Some(reason));
+            }
+        }
+
+        #[test]
         fn update_dj_transition_fire_timing_closes_duplicate_armed_pair_rows() {
             let conn = setup_conn();
             let older_id = insert_event(&conn);
@@ -8275,6 +8364,7 @@ mod tests {
                 energy_contour_blob: vec![12],
                 vocal_presence_blob: vec![13],
                 vocal_density_blob: vec![14],
+                waveform_peaks_blob: vec![15],
                 lufs_loud_body: Some(-12.0),
                 true_peak_dbtp: Some(-1.0),
                 beat_confidence: Some(0.9),
@@ -8396,6 +8486,34 @@ mod tests {
                 .expect("profile");
             assert_eq!(loaded.profile_confidence, 0.4);
             assert_eq!(loaded.analysis_scope_ms, 30_000);
+        }
+
+        #[test]
+        fn audio_dj_profile_peak_blob_round_trips() {
+            let conn = setup_conn();
+            let mut row = profile_row("tidal_track", "1");
+            row.waveform_peaks_blob = vec![1, 2, 3, 4, 5];
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded = get_audio_dj_profile(&conn, &key("tidal_track", "1"))
+                .expect("get")
+                .expect("profile");
+
+            assert_eq!(loaded.waveform_peaks_blob, vec![1, 2, 3, 4, 5]);
+        }
+
+        #[test]
+        fn audio_dj_profile_empty_peak_blob_loads() {
+            let conn = setup_conn();
+            let mut row = profile_row("tidal_track", "1");
+            row.waveform_peaks_blob = Vec::new();
+
+            upsert_audio_dj_profile(&conn, &row).expect("upsert");
+            let loaded = get_audio_dj_profile(&conn, &key("tidal_track", "1"))
+                .expect("get")
+                .expect("profile");
+
+            assert!(loaded.waveform_peaks_blob.is_empty());
         }
 
         #[test]

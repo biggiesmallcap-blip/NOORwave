@@ -11,6 +11,10 @@ const transitionLane = readFileSync(
 	join(root, 'lib/components/dj-cockpit/TransitionLane.svelte'),
 	'utf8',
 );
+const transitionWaveform = readFileSync(
+	join(root, 'lib/components/dj-cockpit/TransitionWaveform.svelte'),
+	'utf8',
+);
 const queuePair = readFileSync(
 	join(root, 'lib/components/dj-cockpit/QueuePairPanel.svelte'),
 	'utf8',
@@ -56,8 +60,11 @@ describe('dj cockpit page contract', () => {
 	});
 
 	test('dj_disabled_state_explains_legacy_path', () => {
+		expect(cockpit).toContain('DJ transitions on');
+		expect(cockpit).toContain('Use legacy playback');
 		expect(cockpit).toContain('Playback is using the legacy path');
 		expect(cockpit).toContain('DJ lookahead and transition planning are stopped');
+		expect(cockpit).toContain('next eligible current-plus-next pair');
 	});
 
 	test('dj_page_renders_current_and_next_pair', () => {
@@ -74,6 +81,21 @@ describe('dj cockpit page contract', () => {
 
 	test('dj_page_shows_fallback_reason', () => {
 		expect(transitionLane).toContain('Fallback reason');
+	});
+
+	test('dj_page_shows_transition_waveform_visual', () => {
+		expect(transitionLane).toContain('TransitionWaveform');
+		expect(transitionWaveform).toContain('Transition visual');
+		expect(transitionWaveform).toContain('Mix window');
+		expect(transitionWaveform).toContain('Read-only transition waveform');
+		expect(transitionWaveform).toContain('waveform_status');
+		expect(transitionWaveform).toContain('waveform_peaks');
+		expect(transitionWaveform).toContain('Planned fire');
+		expect(transitionWaveform).toContain('Actual fire');
+		expect(transitionWaveform).toContain('Fire delta');
+		expect(transitionWaveform).toContain('missed');
+		expect(transitionWaveform).not.toContain('<canvas');
+		expect(transitionWaveform).not.toContain('style:');
 	});
 
 	test('dj_page_separates_profile_readiness_from_transition_armed', () => {
@@ -122,22 +144,32 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
 		expect(transitionLane).toContain('Plan');
-		expect(transitionLane).toContain('Planned');
-		expect(transitionLane).toContain('Actual');
+		expect(transitionLane).toContain('Planned fire');
+		expect(transitionLane).toContain('Actual fire');
 		expect(transitionLane).toContain('Planned template');
 		expect(transitionLane).toContain('Renderer mode');
-		expect(transitionLane).toContain('Current planned');
-		expect(transitionLane).toContain('Current fire');
-		expect(transitionLane).toContain('Current delta');
+		expect(transitionLane).toContain('Fire delta');
 		expect(transitionLane).toContain('Sync source');
 		expect(transitionLane).toContain('Timing status');
 		expect(transitionLane).toContain('Runtime rendered');
 		expect(transitionLane).toContain('Runtime status');
 		expect(transitionLane).toContain('Runtime reason');
+		expect(transitionLane).toContain('Cause');
 		expect(transitionLane).toContain('runtime_rendered_dj_mixer');
 		expect(transitionLane).toContain('runtime_renderer_status');
 		expect(transitionLane).toContain('runtime_renderer_reason');
 		expect(transitionLane).toContain('formatRuntimeRendered');
+		expect(transitionLane).toContain('formatRuntimeReason');
+		expect(transitionLane).toContain('formatActualFire');
+		expect(transitionLane).toContain('formatFireDelta');
+		expect(transitionLane).toContain('next_decode_late_at_fire');
+		expect(transitionLane).toContain('next_deck_missing_at_fire');
+		expect(transitionLane).toContain('transition_plan_missing_at_fire');
+		expect(transitionLane).toContain('sync_window_not_signaled');
+		expect(transitionLane).toContain('Decode late');
+		expect(transitionLane).toContain('Next deck missing');
+		expect(transitionLane).toContain('Plan missing');
+		expect(transitionLane).toContain('Sync missed');
 		expect(transitionLane).toContain("'pending'");
 		expect(transitionLane).toContain('overlay_details');
 		expect(transitionLane).toContain('Overlay status');
@@ -156,8 +188,13 @@ describe('dj cockpit page contract', () => {
 	});
 
 	test('dj_page_updates_bpm_multiplier_correction', () => {
+		expect(corrections).toContain('Transition rules');
+		expect(corrections).not.toContain('Profile overrides');
 		expect(corrections).toContain('bpm_multiplier');
 		expect(corrections).toContain('BPM multiplier');
+		expect(corrections).toContain('Rules change planning');
+		expect(corrections).toContain('Forces SafeCrossfade');
+		expect(corrections).toContain('Requests faster handoff');
 	});
 
 	test('dj_page_updates_downbeat_and_phrase_corrections', () => {
@@ -189,8 +226,10 @@ describe('dj cockpit page contract', () => {
 		expect(cockpit).toContain('acceptSafeOnlySuggestion');
 	});
 
-	test('dj_page_does_not_show_waveform_canvas', () => {
-		expect(page + cockpit + transitionLane).not.toContain('<canvas');
+	test('dj_page_keeps_waveform_read_only', () => {
+		expect(page + cockpit + transitionLane + transitionWaveform).not.toContain('<canvas');
+		expect(transitionWaveform).not.toContain('draggable');
+		expect(transitionWaveform).not.toContain('onpointermove');
 	});
 
 	test('dj_page_controls_have_accessible_names', () => {
