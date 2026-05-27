@@ -7658,8 +7658,12 @@ pub fn update_dj_transition_fire_timing(
     validate_dj_runtime_renderer_reason(Some(runtime_renderer_reason))?;
     conn.execute(
         "UPDATE dj_transition_events
-         SET actual_start_ms = ?2,
+         SET actual_start_ms = CASE
+                 WHEN ?3 = 'missed' THEN NULL
+                 ELSE ?2
+             END,
              timing_delta_ms = CASE
+                 WHEN ?3 = 'missed' THEN NULL
                  WHEN planned_start_ms IS NULL THEN NULL
                  ELSE ?2 - planned_start_ms
              END,
@@ -8110,6 +8114,50 @@ mod tests {
             assert_eq!(row.3, Some(1));
             assert_eq!(row.4.as_deref(), Some("rendered_handoff"));
             assert_eq!(row.5.as_deref(), Some("none"));
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_leaves_missed_fire_timing_empty() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(
+                &conn,
+                id,
+                199_465,
+                "missed",
+                false,
+                "boundary_fallback",
+                "prepared_mixer_missing",
+            )
+            .expect("timing");
+
+            let row = conn
+                .query_row(
+                    "SELECT actual_start_ms, timing_delta_ms, timing_status,
+                            runtime_rendered_dj_mixer, runtime_renderer_status,
+                            runtime_renderer_reason
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .expect("timing row");
+
+            assert_eq!(row.0, None);
+            assert_eq!(row.1, None);
+            assert_eq!(row.2.as_deref(), Some("missed"));
+            assert_eq!(row.3, Some(0));
+            assert_eq!(row.4.as_deref(), Some("boundary_fallback"));
+            assert_eq!(row.5.as_deref(), Some("prepared_mixer_missing"));
         }
 
         #[test]

@@ -2749,7 +2749,7 @@ fn promote_prepared_at_boundary(
     if let Some(mut outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
-        let actual_start_ms = track_position_ms(
+        let boundary_handoff_ms = track_position_ms(
             &outgoing.shared,
             state.device_sample_rate,
             state.device_channels,
@@ -2760,18 +2760,18 @@ fn promote_prepared_at_boundary(
                 transition_event_id,
                 outgoing_track_id = outgoing_id,
                 generation = outgoing_generation,
-                actual_start_ms,
-                timing_status = "late",
+                boundary_handoff_ms,
+                timing_status = "missed",
                 runtime_renderer_status = runtime_renderer.status.as_str(),
                 runtime_renderer_reason = runtime_renderer.reason.as_str(),
-                "DJ transition boundary fallback fired"
+                "DJ transition boundary fallback missed planned fire"
             );
             let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
                 transition_event_id,
                 outgoing_track_id: outgoing_id,
                 generation: outgoing_generation,
-                actual_start_ms,
-                timing_status: "late".to_string(),
+                actual_start_ms: boundary_handoff_ms,
+                timing_status: "missed".to_string(),
                 runtime_rendered_dj_mixer: false,
                 runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
                 runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
@@ -3907,7 +3907,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_fallback_promotion_emits_late_timing_event() {
+    fn boundary_fallback_promotion_emits_missed_timing_event() {
         let mut state = test_runtime_loop_state();
         let active = test_engine_with_shared(1, 20);
         active
@@ -3949,7 +3949,7 @@ mod tests {
                 assert_eq!(outgoing_track_id, 1);
                 assert_eq!(generation, 20);
                 assert_eq!(actual_start_ms, 5_000);
-                assert_eq!(timing_status, "late");
+                assert_eq!(timing_status, "missed");
                 assert!(!runtime_rendered_dj_mixer);
                 assert_eq!(runtime_renderer_status, "boundary_fallback");
                 assert_eq!(runtime_renderer_reason, "prepared_mixer_missing");

@@ -122,13 +122,11 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
 		expect(transitionLane).toContain('Plan');
-		expect(transitionLane).toContain('Planned');
-		expect(transitionLane).toContain('Actual');
+		expect(transitionLane).toContain('Planned fire');
+		expect(transitionLane).toContain('Actual fire');
 		expect(transitionLane).toContain('Planned template');
 		expect(transitionLane).toContain('Renderer mode');
-		expect(transitionLane).toContain('Current planned');
-		expect(transitionLane).toContain('Current fire');
-		expect(transitionLane).toContain('Current delta');
+		expect(transitionLane).toContain('Fire delta');
 		expect(transitionLane).toContain('Sync source');
 		expect(transitionLane).toContain('Timing status');
 		expect(transitionLane).toContain('Runtime rendered');
@@ -138,6 +136,8 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('runtime_renderer_status');
 		expect(transitionLane).toContain('runtime_renderer_reason');
 		expect(transitionLane).toContain('formatRuntimeRendered');
+		expect(transitionLane).toContain('formatActualFire');
+		expect(transitionLane).toContain('formatFireDelta');
 		expect(transitionLane).toContain("'pending'");
 		expect(transitionLane).toContain('overlay_details');
 		expect(transitionLane).toContain('Overlay status');

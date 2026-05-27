@@ -119,12 +119,26 @@
 		return value ? 'yes' : 'no';
 	}
 
+	function formatActualFire(
+		timingStatus: string | null | undefined,
+		actualStartMs: number | null | undefined,
+	) {
+		return timingStatus === 'missed' ? 'missed' : formatTimingMs(actualStartMs);
+	}
+
+	function formatFireDelta(
+		timingStatus: string | null | undefined,
+		timingDeltaMs: number | null | undefined,
+	) {
+		return timingStatus === 'missed' ? 'missed' : formatTimingDelta(timingDeltaMs);
+	}
+
 	function formatActualTiming(event: DjStatusResponse['recent_timing_events'][number]) {
-		return event.timing_status === 'missed' ? 'missed' : formatTimingMs(event.actual_start_ms);
+		return formatActualFire(event.timing_status, event.actual_start_ms);
 	}
 
 	function formatEventDelta(event: DjStatusResponse['recent_timing_events'][number]) {
-		return event.timing_status === 'missed' ? 'missed' : formatTimingDelta(event.timing_delta_ms);
+		return formatFireDelta(event.timing_status, event.timing_delta_ms);
 	}
 
 	function formatTimingDirection(value: string | null | undefined) {
@@ -271,16 +285,16 @@
 					<dd>{status?.sync_target ?? 'none'}</dd>
 				</div>
 				<div>
-					<dt>Current planned</dt>
+					<dt>Planned fire</dt>
 					<dd>{formatTimingMs(status?.planned_start_ms)}</dd>
 				</div>
 				<div>
-					<dt>Current fire</dt>
-					<dd>{formatTimingMs(status?.actual_start_ms)}</dd>
+					<dt>Actual fire</dt>
+					<dd>{formatActualFire(status?.timing_status, status?.actual_start_ms)}</dd>
 				</div>
 				<div>
-					<dt>Current delta</dt>
-					<dd>{formatTimingDelta(status?.timing_delta_ms)}</dd>
+					<dt>Fire delta</dt>
+					<dd>{formatFireDelta(status?.timing_status, status?.timing_delta_ms)}</dd>
 				</div>
 				<div>
 					<dt>Sync source</dt>
@@ -408,15 +422,15 @@
 									<dd>{event.timing_source ?? 'none'}</dd>
 								</div>
 								<div>
-									<dt>Planned</dt>
+									<dt>Planned fire</dt>
 									<dd>{formatTimingMs(event.planned_start_ms)}</dd>
 								</div>
 								<div>
-									<dt>Actual</dt>
+									<dt>Actual fire</dt>
 									<dd>{formatActualTiming(event)}</dd>
 								</div>
 								<div>
-									<dt>Delta</dt>
+									<dt>Fire delta</dt>
 									<dd>{formatEventDelta(event)}</dd>
 								</div>
 							</dl>
