@@ -7499,6 +7499,41 @@ fn validate_dj_timing_status(status: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn validate_dj_runtime_renderer_status(status: Option<&str>) -> Result<()> {
+    if let Some(status) = status
+        && !matches!(
+            status,
+            "rendered_handoff" | "rendered_overlay" | "legacy_overlap" | "boundary_fallback"
+        )
+    {
+        bail!("unknown DJ runtime renderer status: {status}");
+    }
+    Ok(())
+}
+
+fn validate_dj_runtime_renderer_reason(reason: Option<&str>) -> Result<()> {
+    if let Some(reason) = reason
+        && !matches!(
+            reason,
+            "none"
+                | "prepared_mixer_missing"
+                | "lookahead_pair_mismatch"
+                | "program_not_mixer_renderable"
+                | "active_deck_not_decoded"
+                | "next_deck_not_decoded"
+                | "mixer_rejected"
+                | "active_track_changed"
+                | "next_track_changed"
+                | "render_buffer_failed"
+                | "buffer_lock_failed"
+                | "dj_disabled"
+        )
+    {
+        bail!("unknown DJ runtime renderer reason: {reason}");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn insert_dj_transition_event(
     conn: &Connection,
@@ -7569,8 +7604,13 @@ pub fn update_dj_transition_fire_timing(
     id: i64,
     actual_start_ms: i64,
     timing_status: &str,
+    runtime_rendered_dj_mixer: bool,
+    runtime_renderer_status: &str,
+    runtime_renderer_reason: &str,
 ) -> Result<()> {
     validate_dj_timing_status(Some(timing_status))?;
+    validate_dj_runtime_renderer_status(Some(runtime_renderer_status))?;
+    validate_dj_runtime_renderer_reason(Some(runtime_renderer_reason))?;
     conn.execute(
         "UPDATE dj_transition_events
          SET actual_start_ms = ?2,
@@ -7578,9 +7618,19 @@ pub fn update_dj_transition_fire_timing(
                  WHEN planned_start_ms IS NULL THEN NULL
                  ELSE ?2 - planned_start_ms
              END,
-             timing_status = ?3
+             timing_status = ?3,
+             runtime_rendered_dj_mixer = ?4,
+             runtime_renderer_status = ?5,
+             runtime_renderer_reason = ?6
          WHERE id = ?1",
-        params![id, actual_start_ms, timing_status],
+        params![
+            id,
+            actual_start_ms,
+            timing_status,
+            if runtime_rendered_dj_mixer { 1 } else { 0 },
+            runtime_renderer_status,
+            runtime_renderer_reason,
+        ],
     )?;
     conn.execute(
         "UPDATE dj_transition_events
@@ -7979,11 +8029,22 @@ mod tests {
             let conn = setup_conn();
             let id = insert_event(&conn);
 
-            update_dj_transition_fire_timing(&conn, id, 172_144, "fired").expect("timing");
+            update_dj_transition_fire_timing(
+                &conn,
+                id,
+                172_144,
+                "fired",
+                true,
+                "rendered_handoff",
+                "none",
+            )
+            .expect("timing");
 
             let row = conn
                 .query_row(
-                    "SELECT actual_start_ms, timing_delta_ms, timing_status
+                    "SELECT actual_start_ms, timing_delta_ms, timing_status,
+                            runtime_rendered_dj_mixer, runtime_renderer_status,
+                            runtime_renderer_reason
                      FROM dj_transition_events WHERE id = ?1",
                     params![id],
                     |row| {
@@ -7991,6 +8052,9 @@ mod tests {
                             row.get::<_, Option<i64>>(0)?,
                             row.get::<_, Option<i64>>(1)?,
                             row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
                         ))
                     },
                 )
@@ -7998,6 +8062,9 @@ mod tests {
             assert_eq!(row.0, Some(172_144));
             assert_eq!(row.1, Some(144));
             assert_eq!(row.2.as_deref(), Some("fired"));
+            assert_eq!(row.3, Some(1));
+            assert_eq!(row.4.as_deref(), Some("rendered_handoff"));
+            assert_eq!(row.5.as_deref(), Some("none"));
         }
 
         #[test]
@@ -8006,7 +8073,16 @@ mod tests {
             let older_id = insert_event(&conn);
             let fired_id = insert_event(&conn);
 
-            update_dj_transition_fire_timing(&conn, fired_id, 172_144, "fired").expect("timing");
+            update_dj_transition_fire_timing(
+                &conn,
+                fired_id,
+                172_144,
+                "fired",
+                false,
+                "legacy_overlap",
+                "next_deck_not_decoded",
+            )
+            .expect("timing");
 
             let rows: Vec<(i64, Option<String>)> = {
                 let mut stmt = conn
@@ -8069,8 +8145,16 @@ mod tests {
         fn mark_dj_transition_timing_status_for_pair_updates_new_attempt_after_old_fired_pair() {
             let conn = setup_conn();
             let fired_id = insert_event(&conn);
-            update_dj_transition_fire_timing(&conn, fired_id, 172_040, "fired")
-                .expect("mark fired");
+            update_dj_transition_fire_timing(
+                &conn,
+                fired_id,
+                172_040,
+                "fired",
+                false,
+                "legacy_overlap",
+                "prepared_mixer_missing",
+            )
+            .expect("mark fired");
             let armed_id = insert_event(&conn);
 
             let updated = mark_dj_transition_timing_status_for_pair(

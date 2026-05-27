@@ -11117,6 +11117,9 @@ fn spawn_playback_runtime_listener(
                     transition_event_id,
                     actual_start_ms,
                     timing_status,
+                    runtime_rendered_dj_mixer,
+                    runtime_renderer_status,
+                    runtime_renderer_reason,
                     ..
                 }) => {
                     let state_guard = state.read().await;
@@ -11126,6 +11129,9 @@ fn spawn_playback_runtime_listener(
                             transition_event_id,
                             actual_start_ms,
                             timing_status.as_str(),
+                            runtime_rendered_dj_mixer,
+                            runtime_renderer_status.as_str(),
+                            runtime_renderer_reason.as_str(),
                         )
                     }) {
                         Ok(()) => {

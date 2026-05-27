@@ -47,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_043,
     MIGRATION_044,
     MIGRATION_045,
+    MIGRATION_046,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1291,6 +1292,12 @@ ALTER TABLE dj_transition_events ADD COLUMN actual_start_ms INTEGER;
 ALTER TABLE dj_transition_events ADD COLUMN timing_delta_ms INTEGER;
 ALTER TABLE dj_transition_events ADD COLUMN timing_source TEXT;
 ALTER TABLE dj_transition_events ADD COLUMN timing_status TEXT;
+"#;
+
+const MIGRATION_046: &str = r#"
+ALTER TABLE dj_transition_events ADD COLUMN runtime_rendered_dj_mixer INTEGER;
+ALTER TABLE dj_transition_events ADD COLUMN runtime_renderer_status TEXT;
+ALTER TABLE dj_transition_events ADD COLUMN runtime_renderer_reason TEXT;
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -2477,7 +2477,15 @@ mod tests {
             let fired = plan(&db);
             let fired_id = fired.transition_event_id.expect("fired event");
             db.with_conn(|conn| {
-                queries::update_dj_transition_fire_timing(conn, fired_id, 172_040, "fired")
+                queries::update_dj_transition_fire_timing(
+                    conn,
+                    fired_id,
+                    172_040,
+                    "fired",
+                    true,
+                    "rendered_handoff",
+                    "none",
+                )
             })
             .expect("mark fired");
             let duplicate = plan(&db);

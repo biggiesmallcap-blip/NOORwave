@@ -111,6 +111,13 @@
 		return typeof value === 'number' ? `${value.toFixed(3)}x` : 'none';
 	}
 
+	function formatRuntimeRendered(value: boolean | null | undefined) {
+		if (typeof value !== 'boolean') {
+			return 'unknown';
+		}
+		return value ? 'yes' : 'no';
+	}
+
 	function formatActualTiming(event: DjStatusResponse['recent_timing_events'][number]) {
 		return event.timing_status === 'missed' ? 'missed' : formatTimingMs(event.actual_start_ms);
 	}
@@ -262,6 +269,18 @@
 					<dt>Timing quality</dt>
 					<dd>{status?.timing_quality ?? 'unknown'}</dd>
 				</div>
+				<div>
+					<dt>Runtime rendered</dt>
+					<dd>{formatRuntimeRendered(status?.runtime_rendered_dj_mixer)}</dd>
+				</div>
+				<div>
+					<dt>Runtime status</dt>
+					<dd>{status?.runtime_renderer_status ?? 'none'}</dd>
+				</div>
+				<div>
+					<dt>Runtime reason</dt>
+					<dd>{status?.runtime_renderer_reason ?? 'none'}</dd>
+				</div>
 				{#if overlayDetails}
 					<div>
 						<dt>Overlay status</dt>
@@ -350,6 +369,9 @@
 					<span>Quality</span>
 					<span>Plan</span>
 					<span>Source</span>
+					<span>Runtime</span>
+					<span>Rendered</span>
+					<span>Reason</span>
 					<span>Planned</span>
 					<span>Actual</span>
 					<span>Delta</span>
@@ -363,6 +385,9 @@
 							<span>{event.timing_quality}</span>
 							<span>{event.planning_reason ?? 'none'}</span>
 							<span>{event.timing_source ?? 'none'}</span>
+							<span>{event.runtime_renderer_status ?? 'none'}</span>
+							<span>{formatRuntimeRendered(event.runtime_rendered_dj_mixer)}</span>
+							<span>{event.runtime_renderer_reason ?? 'none'}</span>
 							<span>{formatTimingMs(event.planned_start_ms)}</span>
 							<span>{formatActualTiming(event)}</span>
 							<span>{formatEventDelta(event)}</span>
@@ -546,7 +571,7 @@
 
 	.timing-history-header {
 		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(8, minmax(4.25rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(11, minmax(3.75rem, auto));
 		gap: var(--space-2);
 		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
@@ -568,7 +593,7 @@
 
 	.timing-history li {
 		display: grid;
-		grid-template-columns: minmax(10rem, 1fr) repeat(8, minmax(4.25rem, auto));
+		grid-template-columns: minmax(10rem, 1fr) repeat(11, minmax(3.75rem, auto));
 		gap: var(--space-2);
 		align-items: center;
 		padding-top: var(--space-2);

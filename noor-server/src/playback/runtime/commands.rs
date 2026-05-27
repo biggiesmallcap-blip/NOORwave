@@ -142,6 +142,9 @@ pub enum PlaybackRuntimeEvent {
         generation: u64,
         actual_start_ms: i64,
         timing_status: String,
+        runtime_rendered_dj_mixer: bool,
+        runtime_renderer_status: String,
+        runtime_renderer_reason: String,
     },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.

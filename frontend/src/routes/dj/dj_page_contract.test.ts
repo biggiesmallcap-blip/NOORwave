@@ -124,6 +124,13 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Current delta');
 		expect(transitionLane).toContain('Sync source');
 		expect(transitionLane).toContain('Timing status');
+		expect(transitionLane).toContain('Runtime rendered');
+		expect(transitionLane).toContain('Runtime status');
+		expect(transitionLane).toContain('Runtime reason');
+		expect(transitionLane).toContain('runtime_rendered_dj_mixer');
+		expect(transitionLane).toContain('runtime_renderer_status');
+		expect(transitionLane).toContain('runtime_renderer_reason');
+		expect(transitionLane).toContain('formatRuntimeRendered');
 		expect(transitionLane).toContain("'pending'");
 		expect(transitionLane).toContain('overlay_details');
 		expect(transitionLane).toContain('Overlay status');

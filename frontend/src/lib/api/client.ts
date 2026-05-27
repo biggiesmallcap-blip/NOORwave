@@ -921,6 +921,28 @@ export type DjOverlayDetails = {
 	drop_source: 'program_json' | string;
 };
 
+export type DjRuntimeRendererStatus =
+	| 'rendered_handoff'
+	| 'rendered_overlay'
+	| 'legacy_overlap'
+	| 'boundary_fallback'
+	| string;
+
+export type DjRuntimeRendererReason =
+	| 'none'
+	| 'prepared_mixer_missing'
+	| 'lookahead_pair_mismatch'
+	| 'program_not_mixer_renderable'
+	| 'active_deck_not_decoded'
+	| 'next_deck_not_decoded'
+	| 'mixer_rejected'
+	| 'active_track_changed'
+	| 'next_track_changed'
+	| 'render_buffer_failed'
+	| 'buffer_lock_failed'
+	| 'dj_disabled'
+	| string;
+
 export type DjStatusResponse = {
 	enabled: boolean;
 	current?: DjDeckStatus;
@@ -949,6 +971,9 @@ export type DjStatusResponse = {
 	timing_status?: string;
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad' | 'unknown';
 	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'pending' | 'unknown';
+	runtime_rendered_dj_mixer?: boolean;
+	runtime_renderer_status?: DjRuntimeRendererStatus;
+	runtime_renderer_reason?: DjRuntimeRendererReason;
 	overlay_details?: DjOverlayDetails;
 	fallback_reason?: string;
 	rejected_alternatives: DjRejectedAlternative[];
@@ -979,6 +1004,9 @@ export type DjTimingHistoryEvent = {
 	timing_status?: 'fired' | 'late' | 'missed';
 	timing_quality: 'tight' | 'usable' | 'loose' | 'bad';
 	timing_direction: 'on_time' | 'early' | 'late' | 'missed' | 'unknown';
+	runtime_rendered_dj_mixer?: boolean;
+	runtime_renderer_status?: DjRuntimeRendererStatus;
+	runtime_renderer_reason?: DjRuntimeRendererReason;
 	rejected_alternatives: DjRejectedAlternative[];
 	started_at: string;
 };

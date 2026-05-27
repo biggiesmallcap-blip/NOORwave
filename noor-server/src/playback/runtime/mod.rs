@@ -470,6 +470,7 @@ struct PlaybackRuntimeLoopState {
     dj_lookahead: Option<RuntimeDjLookahead>,
     dj_lookahead_failure: Option<DjLookaheadFailure>,
     prepared_dj_mixer: Option<PreparedDjMixer>,
+    last_dj_renderer_failure: Option<DjRuntimeRendererReason>,
 }
 
 struct PreparedDjMixer {
@@ -499,6 +500,101 @@ struct DjLookaheadFailure {
     current_queue_item_id: Option<i64>,
     next_queue_item_id: Option<i64>,
     reason: DjLookaheadFailureReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DjRuntimeRendererStatus {
+    RenderedHandoff,
+    RenderedOverlay,
+    LegacyOverlap,
+    BoundaryFallback,
+}
+
+impl DjRuntimeRendererStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RenderedHandoff => "rendered_handoff",
+            Self::RenderedOverlay => "rendered_overlay",
+            Self::LegacyOverlap => "legacy_overlap",
+            Self::BoundaryFallback => "boundary_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DjRuntimeRendererReason {
+    None,
+    PreparedMixerMissing,
+    LookaheadPairMismatch,
+    ProgramNotMixerRenderable,
+    ActiveDeckNotDecoded,
+    NextDeckNotDecoded,
+    MixerRejected,
+    ActiveTrackChanged,
+    NextTrackChanged,
+    RenderBufferFailed,
+    BufferLockFailed,
+    DjDisabled,
+}
+
+impl DjRuntimeRendererReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PreparedMixerMissing => "prepared_mixer_missing",
+            Self::LookaheadPairMismatch => "lookahead_pair_mismatch",
+            Self::ProgramNotMixerRenderable => "program_not_mixer_renderable",
+            Self::ActiveDeckNotDecoded => "active_deck_not_decoded",
+            Self::NextDeckNotDecoded => "next_deck_not_decoded",
+            Self::MixerRejected => "mixer_rejected",
+            Self::ActiveTrackChanged => "active_track_changed",
+            Self::NextTrackChanged => "next_track_changed",
+            Self::RenderBufferFailed => "render_buffer_failed",
+            Self::BufferLockFailed => "buffer_lock_failed",
+            Self::DjDisabled => "dj_disabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DjRuntimeRendererOutcome {
+    rendered: bool,
+    status: DjRuntimeRendererStatus,
+    reason: DjRuntimeRendererReason,
+}
+
+impl DjRuntimeRendererOutcome {
+    fn rendered_handoff() -> Self {
+        Self {
+            rendered: true,
+            status: DjRuntimeRendererStatus::RenderedHandoff,
+            reason: DjRuntimeRendererReason::None,
+        }
+    }
+
+    fn rendered_overlay() -> Self {
+        Self {
+            rendered: true,
+            status: DjRuntimeRendererStatus::RenderedOverlay,
+            reason: DjRuntimeRendererReason::None,
+        }
+    }
+
+    fn legacy_overlap(reason: DjRuntimeRendererReason) -> Self {
+        Self {
+            rendered: false,
+            status: DjRuntimeRendererStatus::LegacyOverlap,
+            reason,
+        }
+    }
+
+    fn boundary_fallback(reason: DjRuntimeRendererReason) -> Self {
+        Self {
+            rendered: false,
+            status: DjRuntimeRendererStatus::BoundaryFallback,
+            reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -634,14 +730,18 @@ fn dj_mixer_max_block_samples(output_config: &StreamConfig) -> usize {
 fn decoded_deck_buffer(
     engine: &PlaybackEngine,
     channels: u16,
-) -> Option<(noor_mix::deck::DeckBuffer, u64)> {
-    let guard = engine.shared.buffer.lock().ok()?;
+) -> Result<(noor_mix::deck::DeckBuffer, u64), DjRuntimeRendererReason> {
+    let guard = engine
+        .shared
+        .buffer
+        .lock()
+        .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
     if !guard.finished || guard.samples.is_empty() {
-        return None;
+        return Err(DjRuntimeRendererReason::ActiveDeckNotDecoded);
     }
     let channels = usize::from(channels.max(1));
     let frames = (guard.samples.len() / channels) as u64;
-    Some((
+    Ok((
         noor_mix::deck::DeckBuffer::new(guard.samples.clone(), channels as u16),
         frames,
     ))
@@ -651,32 +751,46 @@ fn build_prepared_dj_mixer(
     state: &PlaybackRuntimeLoopState,
     transition: &PreparedTransitionProgram,
     max_block_samples: usize,
-) -> Option<PreparedDjMixer> {
-    let active = state.engine.as_ref()?;
-    let next = state.next_engine.as_ref()?;
+) -> Result<PreparedDjMixer, DjRuntimeRendererReason> {
+    let active = state
+        .engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::ActiveDeckNotDecoded)?;
+    let next = state
+        .next_engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)?;
     if !prepared_dj_lookahead_matches_pair(
         state,
         transition.queue_generation,
         transition.current_queue_item_id,
         transition.next_queue_item_id,
     ) {
-        return None;
+        return Err(DjRuntimeRendererReason::LookaheadPairMismatch);
     }
     if !handoff_mixer_program(&transition.program) && !overlay_mixer_program(&transition.program) {
-        return None;
+        return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
     }
-    let (deck_a, active_frames) = decoded_deck_buffer(active, state.device_channels)?;
-    let (deck_b, _) = decoded_deck_buffer(next, state.device_channels)?;
+    let (deck_a, active_frames) =
+        decoded_deck_buffer(active, state.device_channels).map_err(|reason| match reason {
+            DjRuntimeRendererReason::BufferLockFailed => DjRuntimeRendererReason::BufferLockFailed,
+            _ => DjRuntimeRendererReason::ActiveDeckNotDecoded,
+        })?;
+    let (deck_b, _) =
+        decoded_deck_buffer(next, state.device_channels).map_err(|reason| match reason {
+            DjRuntimeRendererReason::BufferLockFailed => DjRuntimeRendererReason::BufferLockFailed,
+            _ => DjRuntimeRendererReason::NextDeckNotDecoded,
+        })?;
     let mut program = transition.program.clone();
     align_runtime_program_source_frames(&mut program, active_frames);
     let mixer = match noor_mix::Mixer::new(program.clone(), deck_a, deck_b, max_block_samples) {
         Ok(mixer) => mixer,
         Err(error) => {
             warn!("Prepared DJ mixer rejected transition program: {error:?}");
-            return None;
+            return Err(DjRuntimeRendererReason::MixerRejected);
         }
     };
-    Some(PreparedDjMixer {
+    Ok(PreparedDjMixer {
         mixer,
         program,
         max_block_samples,
@@ -753,41 +867,47 @@ fn deck_b_consumed_frames(program: &noor_mix::TransitionProgram) -> Option<u64> 
     Some(((program.resolve_at as f64) * deck_b_rate.max(0.0) as f64).floor() as u64)
 }
 
-fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> bool {
-    let Some(prepared) = state.prepared_dj_mixer.as_ref() else {
-        return false;
-    };
+fn install_prepared_handoff_mixer_buffer(
+    state: &mut PlaybackRuntimeLoopState,
+) -> Result<(), DjRuntimeRendererReason> {
+    let prepared = state
+        .prepared_dj_mixer
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
     if !handoff_mixer_program(&prepared.program) {
-        return false;
+        return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
     }
     if state
         .engine
         .as_ref()
         .map(|engine| engine.track_id != prepared.current_track_id)
         .unwrap_or(true)
-        || state
-            .next_engine
-            .as_ref()
-            .map(|engine| engine.track_id != prepared.next_track_id)
-            .unwrap_or(true)
     {
-        return false;
+        return Err(DjRuntimeRendererReason::ActiveTrackChanged);
+    }
+    if state
+        .next_engine
+        .as_ref()
+        .map(|engine| engine.track_id != prepared.next_track_id)
+        .unwrap_or(true)
+    {
+        return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
-    let Some(mut prepared) = state.prepared_dj_mixer.take() else {
-        return false;
-    };
+    let mut prepared = state
+        .prepared_dj_mixer
+        .take()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
     let channels = usize::from(state.device_channels.max(1));
-    let Some(mut rendered) = render_prepared_mixer_to_buffer(&mut prepared, channels) else {
-        return false;
-    };
+    let mut rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
+        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
 
-    let Some(next) = state.next_engine.as_ref() else {
-        return false;
-    };
-    let Some(deck_b_consumed_frames) = deck_b_consumed_frames(&prepared.program) else {
-        return false;
-    };
+    let next = state
+        .next_engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)?;
+    let deck_b_consumed_frames = deck_b_consumed_frames(&prepared.program)
+        .ok_or(DjRuntimeRendererReason::ProgramNotMixerRenderable)?;
     let deck_b_resume_frame = prepared
         .program
         .deck_b_start_frame
@@ -795,7 +915,7 @@ fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -
     let deck_b_resume_sample = (deck_b_resume_frame as usize).saturating_mul(channels);
     let mut guard = match next.shared.buffer.lock() {
         Ok(guard) => guard,
-        Err(_) => return false,
+        Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
     };
     let remainder_start = deck_b_resume_sample.min(guard.samples.len());
     let remainder = guard.samples[remainder_start..].to_vec();
@@ -818,43 +938,50 @@ fn install_prepared_handoff_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -
     next.shared
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
-    true
+    Ok(())
 }
 
-fn install_prepared_overlay_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -> bool {
-    let Some(prepared) = state.prepared_dj_mixer.as_ref() else {
-        return false;
-    };
+fn install_prepared_overlay_mixer_buffer(
+    state: &mut PlaybackRuntimeLoopState,
+) -> Result<(), DjRuntimeRendererReason> {
+    let prepared = state
+        .prepared_dj_mixer
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
     if !overlay_mixer_program(&prepared.program) {
-        return false;
+        return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
     }
     if state
         .engine
         .as_ref()
         .map(|engine| engine.track_id != prepared.current_track_id)
         .unwrap_or(true)
-        || state
-            .next_engine
-            .as_ref()
-            .map(|engine| engine.track_id != prepared.next_track_id)
-            .unwrap_or(true)
     {
-        return false;
+        return Err(DjRuntimeRendererReason::ActiveTrackChanged);
+    }
+    if state
+        .next_engine
+        .as_ref()
+        .map(|engine| engine.track_id != prepared.next_track_id)
+        .unwrap_or(true)
+    {
+        return Err(DjRuntimeRendererReason::NextTrackChanged);
     }
 
-    let Some(mut prepared) = state.prepared_dj_mixer.take() else {
-        return false;
-    };
+    let mut prepared = state
+        .prepared_dj_mixer
+        .take()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
     let channels = usize::from(state.device_channels.max(1));
-    let Some(rendered) = render_prepared_mixer_to_buffer(&mut prepared, channels) else {
-        return false;
-    };
-    let Some(next) = state.next_engine.as_ref() else {
-        return false;
-    };
+    let rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
+        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    let next = state
+        .next_engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)?;
     let mut guard = match next.shared.buffer.lock() {
         Ok(guard) => guard,
-        Err(_) => return false,
+        Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
     };
     guard.samples = rendered;
     guard.read_pos = 0;
@@ -874,16 +1001,17 @@ fn install_prepared_overlay_mixer_buffer(state: &mut PlaybackRuntimeLoopState) -
     next.shared
         .fadein_start_samples
         .store(u64::MAX, Ordering::Relaxed);
-    true
+    Ok(())
 }
 
 fn prepare_dj_mixer_for_pair(
     state: &mut PlaybackRuntimeLoopState,
     max_block_samples: usize,
-) -> bool {
+) -> Result<(), DjRuntimeRendererReason> {
     if !state.dj_engine_enabled {
         state.prepared_dj_mixer = None;
-        return false;
+        state.last_dj_renderer_failure = Some(DjRuntimeRendererReason::DjDisabled);
+        return Err(DjRuntimeRendererReason::DjDisabled);
     }
     let Some(transition) = state
         .next_engine
@@ -892,12 +1020,21 @@ fn prepare_dj_mixer_for_pair(
         .cloned()
     else {
         state.prepared_dj_mixer = None;
-        return false;
+        state.last_dj_renderer_failure = Some(DjRuntimeRendererReason::PreparedMixerMissing);
+        return Err(DjRuntimeRendererReason::PreparedMixerMissing);
     };
-    let prepared = build_prepared_dj_mixer(state, &transition, max_block_samples);
-    let did_prepare = prepared.is_some();
-    state.prepared_dj_mixer = prepared;
-    did_prepare
+    match build_prepared_dj_mixer(state, &transition, max_block_samples) {
+        Ok(prepared) => {
+            state.prepared_dj_mixer = Some(prepared);
+            state.last_dj_renderer_failure = None;
+            Ok(())
+        }
+        Err(reason) => {
+            state.prepared_dj_mixer = None;
+            state.last_dj_renderer_failure = Some(reason);
+            Err(reason)
+        }
+    }
 }
 
 fn prepared_overlay_program(state: &PlaybackRuntimeLoopState) -> bool {
@@ -913,25 +1050,23 @@ fn start_prepared_overlay(
     timing_status: &'static str,
     device_sample_rate: u32,
     device_channels: u16,
-) -> bool {
+) -> Result<(), DjRuntimeRendererReason> {
     let transition_event_id = state
         .next_engine
         .as_ref()
         .and_then(|next| next.job.prepared_transition.as_ref())
         .and_then(|transition| transition.transition_event_id);
     let Some(active) = state.engine.as_ref() else {
-        return false;
+        return Err(DjRuntimeRendererReason::ActiveDeckNotDecoded);
     };
     let outgoing_track_id = active.track_id;
     let outgoing_generation = active.generation;
     let actual_start_ms = track_position_ms(&active.shared, device_sample_rate, device_channels);
     active.shared.crossfade_samples.store(0, Ordering::Relaxed);
 
-    if !install_prepared_overlay_mixer_buffer(state) {
-        return false;
-    }
+    install_prepared_overlay_mixer_buffer(state)?;
     let Some(next) = state.next_engine.as_ref() else {
-        return false;
+        return Err(DjRuntimeRendererReason::NextDeckNotDecoded);
     };
     next.shared.paused.store(false, Ordering::SeqCst);
     if let Some(transition_event_id) = transition_event_id {
@@ -941,9 +1076,15 @@ fn start_prepared_overlay(
             generation: outgoing_generation,
             actual_start_ms,
             timing_status: timing_status.to_string(),
+            runtime_rendered_dj_mixer: true,
+            runtime_renderer_status: DjRuntimeRendererOutcome::rendered_overlay()
+                .status
+                .as_str()
+                .to_string(),
+            runtime_renderer_reason: DjRuntimeRendererReason::None.as_str().to_string(),
         });
     }
-    true
+    Ok(())
 }
 
 fn arm_active_transition_window(
@@ -1010,6 +1151,7 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     state.dj_lookahead = None;
     state.dj_lookahead_failure = None;
     state.prepared_dj_mixer = None;
+    state.last_dj_renderer_failure = Some(DjRuntimeRendererReason::DjDisabled);
     if let Some(engine) = state.next_engine.as_mut() {
         engine.job.prepared_transition = None;
     }
@@ -1072,6 +1214,7 @@ fn run_runtime_loop(
         dj_lookahead: None,
         dj_lookahead_failure: None,
         prepared_dj_mixer: None,
+        last_dj_renderer_failure: None,
     };
 
     let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
@@ -1321,7 +1464,7 @@ fn run_runtime_loop(
                                 // block control commands on some Linux/PipeWire setups.
                                 engine.shared.paused.store(true, Ordering::SeqCst);
                                 state.next_engine = Some(engine);
-                                prepare_dj_mixer_for_pair(
+                                let _ = prepare_dj_mixer_for_pair(
                                     &mut state,
                                     dj_mixer_max_block_samples(&output_config),
                                 );
@@ -1386,16 +1529,24 @@ fn run_runtime_loop(
                             if prepared_overlay_program(&state) {
                                 let device_sample_rate = state.device_sample_rate;
                                 let device_channels = state.device_channels;
-                                start_prepared_overlay(
+                                if let Err(reason) = start_prepared_overlay(
                                     &mut state,
                                     &event_tx,
                                     "fired",
                                     device_sample_rate,
                                     device_channels,
-                                );
+                                ) {
+                                    state.last_dj_renderer_failure = Some(reason);
+                                }
                             } else {
-                                let rendered_dj_mixer =
-                                    install_prepared_handoff_mixer_buffer(&mut state);
+                                let runtime_renderer =
+                                    match install_prepared_handoff_mixer_buffer(&mut state) {
+                                        Ok(()) => DjRuntimeRendererOutcome::rendered_handoff(),
+                                        Err(reason) => {
+                                            state.last_dj_renderer_failure = Some(reason);
+                                            DjRuntimeRendererOutcome::legacy_overlap(reason)
+                                        }
+                                    };
                                 promote_next_to_active(
                                     &mut state,
                                     &event_tx,
@@ -1403,7 +1554,7 @@ fn run_runtime_loop(
                                     &buffered_source,
                                     &offset_source,
                                     "fired",
-                                    rendered_dj_mixer,
+                                    runtime_renderer,
                                 );
                             }
                         }
@@ -1423,7 +1574,7 @@ fn run_runtime_loop(
                         .map(|e| e.track_id == track_id && e.generation == generation)
                         .unwrap_or(false);
                     if pending_match {
-                        prepare_dj_mixer_for_pair(
+                        let _ = prepare_dj_mixer_for_pair(
                             &mut state,
                             dj_mixer_max_block_samples(&output_config),
                         );
@@ -1438,16 +1589,24 @@ fn run_runtime_loop(
                             if prepared_overlay_program(&state) {
                                 let device_sample_rate = state.device_sample_rate;
                                 let device_channels = state.device_channels;
-                                start_prepared_overlay(
+                                if let Err(reason) = start_prepared_overlay(
                                     &mut state,
                                     &event_tx,
                                     "late",
                                     device_sample_rate,
                                     device_channels,
-                                );
+                                ) {
+                                    state.last_dj_renderer_failure = Some(reason);
+                                }
                             } else {
-                                let rendered_dj_mixer =
-                                    install_prepared_handoff_mixer_buffer(&mut state);
+                                let runtime_renderer =
+                                    match install_prepared_handoff_mixer_buffer(&mut state) {
+                                        Ok(()) => DjRuntimeRendererOutcome::rendered_handoff(),
+                                        Err(reason) => {
+                                            state.last_dj_renderer_failure = Some(reason);
+                                            DjRuntimeRendererOutcome::legacy_overlap(reason)
+                                        }
+                                    };
                                 promote_next_to_active(
                                     &mut state,
                                     &event_tx,
@@ -1455,7 +1614,7 @@ fn run_runtime_loop(
                                     &buffered_source,
                                     &offset_source,
                                     "late",
-                                    rendered_dj_mixer,
+                                    runtime_renderer,
                                 );
                             }
                         }
@@ -2338,7 +2497,7 @@ fn promote_next_to_active(
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
     timing_status: &'static str,
-    rendered_dj_mixer: bool,
+    runtime_renderer: DjRuntimeRendererOutcome,
 ) {
     state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
@@ -2349,7 +2508,7 @@ fn promote_next_to_active(
         .prepared_transition
         .as_ref()
         .and_then(|transition| transition.transition_event_id);
-    if rendered_dj_mixer {
+    if runtime_renderer.rendered {
         next.shared.crossfade_samples.store(0, Ordering::Relaxed);
         next.shared
             .fadein_start_samples
@@ -2391,7 +2550,7 @@ fn promote_next_to_active(
             state.device_sample_rate,
             state.device_channels,
         );
-        if rendered_dj_mixer {
+        if runtime_renderer.rendered {
             outgoing.stop();
         } else {
             state.fading_out_engine = Some(outgoing);
@@ -2403,7 +2562,9 @@ fn promote_next_to_active(
                 generation = outgoing_generation,
                 actual_start_ms,
                 timing_status,
-                rendered_dj_mixer,
+                rendered_dj_mixer = runtime_renderer.rendered,
+                runtime_renderer_status = runtime_renderer.status.as_str(),
+                runtime_renderer_reason = runtime_renderer.reason.as_str(),
                 "DJ transition promotion fired"
             );
             let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
@@ -2412,6 +2573,9 @@ fn promote_next_to_active(
                 generation: outgoing_generation,
                 actual_start_ms,
                 timing_status: timing_status.to_string(),
+                runtime_rendered_dj_mixer: runtime_renderer.rendered,
+                runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
+                runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
             });
         }
         // Tell the routes layer that the audible "current" track has flipped.
@@ -2442,6 +2606,11 @@ fn promote_prepared_at_boundary(
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
 ) {
+    let runtime_renderer = DjRuntimeRendererOutcome::boundary_fallback(
+        state
+            .last_dj_renderer_failure
+            .unwrap_or(DjRuntimeRendererReason::PreparedMixerMissing),
+    );
     state.prepared_dj_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
@@ -2481,6 +2650,8 @@ fn promote_prepared_at_boundary(
                 generation = outgoing_generation,
                 actual_start_ms,
                 timing_status = "late",
+                runtime_renderer_status = runtime_renderer.status.as_str(),
+                runtime_renderer_reason = runtime_renderer.reason.as_str(),
                 "DJ transition boundary fallback fired"
             );
             let _ = event_tx.send(PlaybackRuntimeEvent::DjTransitionPromoted {
@@ -2489,6 +2660,9 @@ fn promote_prepared_at_boundary(
                 generation: outgoing_generation,
                 actual_start_ms,
                 timing_status: "late".to_string(),
+                runtime_rendered_dj_mixer: false,
+                runtime_renderer_status: runtime_renderer.status.as_str().to_string(),
+                runtime_renderer_reason: runtime_renderer.reason.as_str().to_string(),
             });
         }
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
@@ -3083,7 +3257,7 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
         assert_eq!(prepared.queue_generation, 20);
         assert_eq!(prepared.current_queue_item_id, Some(11));
@@ -3123,7 +3297,7 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         let prepared = state.prepared_dj_mixer.as_mut().expect("prepared mixer");
         let mut out = [0.0; 2];
 
@@ -3156,8 +3330,8 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(install_prepared_handoff_mixer_buffer(&mut state));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
 
         let next = state.next_engine.as_ref().expect("next engine");
         let buffer = next.shared.buffer.lock().expect("buffer lock");
@@ -3205,8 +3379,8 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(install_prepared_handoff_mixer_buffer(&mut state));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
 
         let next = state.next_engine.as_ref().expect("next engine");
         let buffer = next.shared.buffer.lock().expect("buffer lock");
@@ -3264,12 +3438,13 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
 
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(!install_prepared_handoff_mixer_buffer(&mut state));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert_eq!(
+            install_prepared_handoff_mixer_buffer(&mut state),
+            Err(DjRuntimeRendererReason::ProgramNotMixerRenderable)
+        );
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
-        assert!(start_prepared_overlay(
-            &mut state, &event_tx, "fired", 48_000, 2
-        ));
+        assert!(start_prepared_overlay(&mut state, &event_tx, "fired", 48_000, 2).is_ok());
 
         assert!(state.prepared_dj_mixer.is_none());
         assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
@@ -3286,11 +3461,17 @@ mod tests {
                 transition_event_id,
                 actual_start_ms,
                 timing_status,
+                runtime_rendered_dj_mixer,
+                runtime_renderer_status,
+                runtime_renderer_reason,
                 ..
             } => {
                 assert_eq!(transition_event_id, 99);
                 assert_eq!(actual_start_ms, 1_000);
                 assert_eq!(timing_status, "fired");
+                assert!(runtime_rendered_dj_mixer);
+                assert_eq!(runtime_renderer_status, "rendered_overlay");
+                assert_eq!(runtime_renderer_reason, "none");
             }
             other => panic!("expected overlay event, got {other:?}"),
         }
@@ -3325,8 +3506,8 @@ mod tests {
 
         state.engine = Some(active);
         state.next_engine = Some(next);
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
-        assert!(install_prepared_handoff_mixer_buffer(&mut state));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+        assert!(install_prepared_handoff_mixer_buffer(&mut state).is_ok());
 
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
         let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
@@ -3340,7 +3521,7 @@ mod tests {
             &buffered_source,
             &offset_source,
             "fired",
-            true,
+            DjRuntimeRendererOutcome::rendered_handoff(),
         );
 
         assert!(outgoing_stopped.load(Ordering::SeqCst));
@@ -3351,11 +3532,17 @@ mod tests {
                 transition_event_id,
                 actual_start_ms,
                 timing_status,
+                runtime_rendered_dj_mixer,
+                runtime_renderer_status,
+                runtime_renderer_reason,
                 ..
             } => {
                 assert_eq!(transition_event_id, 88);
                 assert_eq!(actual_start_ms, 1_000);
                 assert_eq!(timing_status, "fired");
+                assert!(runtime_rendered_dj_mixer);
+                assert_eq!(runtime_renderer_status, "rendered_handoff");
+                assert_eq!(runtime_renderer_reason, "none");
             }
             other => panic!("expected timing event, got {other:?}"),
         }
@@ -3423,7 +3610,10 @@ mod tests {
         let mut state = state_with_ready_dj_pair();
         state.dj_engine_enabled = false;
 
-        assert!(!prepare_dj_mixer_for_pair(&mut state, 64));
+        assert_eq!(
+            prepare_dj_mixer_for_pair(&mut state, 64),
+            Err(DjRuntimeRendererReason::DjDisabled)
+        );
         assert!(state.prepared_dj_mixer.is_none());
     }
 
@@ -3442,7 +3632,7 @@ mod tests {
     #[test]
     fn disabling_dj_discards_ready_mixer_without_stopping_playback() {
         let mut state = state_with_ready_dj_pair();
-        assert!(prepare_dj_mixer_for_pair(&mut state, 64));
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
 
         set_dj_engine_enabled_in_state(&mut state, false);
 
@@ -3486,7 +3676,7 @@ mod tests {
             &buffered_source,
             &offset_source,
             "fired",
-            false,
+            DjRuntimeRendererOutcome::legacy_overlap(DjRuntimeRendererReason::PreparedMixerMissing),
         );
 
         match event_rx.try_recv().expect("timing event") {
@@ -3496,12 +3686,18 @@ mod tests {
                 generation,
                 actual_start_ms,
                 timing_status,
+                runtime_rendered_dj_mixer,
+                runtime_renderer_status,
+                runtime_renderer_reason,
             } => {
                 assert_eq!(transition_event_id, 77);
                 assert_eq!(outgoing_track_id, 1);
                 assert_eq!(generation, 20);
                 assert_eq!(actual_start_ms, 3_000);
                 assert_eq!(timing_status, "fired");
+                assert!(!runtime_rendered_dj_mixer);
+                assert_eq!(runtime_renderer_status, "legacy_overlap");
+                assert_eq!(runtime_renderer_reason, "prepared_mixer_missing");
             }
             other => panic!("expected timing event, got {other:?}"),
         }
@@ -3552,12 +3748,18 @@ mod tests {
                 generation,
                 actual_start_ms,
                 timing_status,
+                runtime_rendered_dj_mixer,
+                runtime_renderer_status,
+                runtime_renderer_reason,
             } => {
                 assert_eq!(transition_event_id, 78);
                 assert_eq!(outgoing_track_id, 1);
                 assert_eq!(generation, 20);
                 assert_eq!(actual_start_ms, 5_000);
                 assert_eq!(timing_status, "late");
+                assert!(!runtime_rendered_dj_mixer);
+                assert_eq!(runtime_renderer_status, "boundary_fallback");
+                assert_eq!(runtime_renderer_reason, "prepared_mixer_missing");
             }
             other => panic!("expected timing event, got {other:?}"),
         }
@@ -4166,6 +4368,7 @@ mod tests {
             dj_lookahead: None,
             dj_lookahead_failure: None,
             prepared_dj_mixer: None,
+            last_dj_renderer_failure: None,
         }
     }
 

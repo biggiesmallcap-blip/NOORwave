@@ -163,6 +163,9 @@ struct DjStatusResponse {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    runtime_rendered_dj_mixer: Option<bool>,
+    runtime_renderer_status: Option<String>,
+    runtime_renderer_reason: Option<String>,
     overlay_details: Option<DjOverlayDetails>,
     fallback_reason: Option<String>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
@@ -214,6 +217,9 @@ struct DjTimingHistoryEvent {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    runtime_rendered_dj_mixer: Option<bool>,
+    runtime_renderer_status: Option<String>,
+    runtime_renderer_reason: Option<String>,
     started_at: String,
 }
 
@@ -260,6 +266,9 @@ struct OpenTransition {
     timing_source: Option<String>,
     timing_status: Option<String>,
     overlay_details: Option<DjOverlayDetails>,
+    runtime_rendered_dj_mixer: Option<bool>,
+    runtime_renderer_status: Option<String>,
+    runtime_renderer_reason: Option<String>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
 }
 
@@ -278,6 +287,9 @@ struct RendererStatus {
     timing_status: Option<String>,
     timing_quality: String,
     timing_direction: String,
+    runtime_rendered_dj_mixer: Option<bool>,
+    runtime_renderer_status: Option<String>,
+    runtime_renderer_reason: Option<String>,
     overlay_details: Option<DjOverlayDetails>,
     rejected_alternatives: Vec<DjRejectedAlternative>,
 }
@@ -517,6 +529,9 @@ async fn get_status(
                     timing_status: renderer_status.timing_status,
                     timing_quality: renderer_status.timing_quality,
                     timing_direction: renderer_status.timing_direction,
+                    runtime_rendered_dj_mixer: renderer_status.runtime_rendered_dj_mixer,
+                    runtime_renderer_status: renderer_status.runtime_renderer_status,
+                    runtime_renderer_reason: renderer_status.runtime_renderer_reason,
                     overlay_details: renderer_status.overlay_details,
                     fallback_reason,
                     rejected_alternatives: renderer_status.rejected_alternatives,
@@ -1468,7 +1483,8 @@ fn latest_open_transition_for_pair(
     conn.query_row(
         "SELECT id, template, program_json, fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status, rejected_alternatives_json
+                timing_source, timing_status, rejected_alternatives_json,
+                runtime_rendered_dj_mixer, runtime_renderer_status, runtime_renderer_reason
          FROM dj_transition_events
          WHERE from_media_ref_kind = ?1
            AND from_media_ref_id = ?2
@@ -1502,6 +1518,9 @@ fn latest_open_transition_for_pair(
                     planned_start_ms,
                     timing_status.as_deref(),
                 ),
+                runtime_rendered_dj_mixer: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+                runtime_renderer_status: row.get(11)?,
+                runtime_renderer_reason: row.get(12)?,
                 rejected_alternatives: decode_rejected_alternatives(row.get(9)?),
             })
         },
@@ -1522,7 +1541,8 @@ fn latest_dj_transition_timing_history(
                 COALESCE(to_artist.name, to_tidal_artist.name, to_queue_artist.name, to_queue.pending_artist),
                 e.template, e.program_json, e.fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status, e.started_at, e.rejected_alternatives_json
+                timing_source, timing_status, e.started_at, e.rejected_alternatives_json,
+                e.runtime_rendered_dj_mixer, e.runtime_renderer_status, e.runtime_renderer_reason
          FROM dj_transition_events e
          LEFT JOIN tracks from_track ON from_track.id = e.from_track_id
          LEFT JOIN artists from_artist ON from_artist.id = from_track.artist_id
@@ -1568,6 +1588,7 @@ fn latest_dj_transition_timing_history(
         let timing_delta_ms: Option<i64> = row.get(10)?;
         let timing_status: Option<String> = row.get(12)?;
         let rejected_json: Option<String> = row.get(14)?;
+        let runtime_rendered_dj_mixer = row.get::<_, Option<i64>>(15)?.map(|value| value != 0);
         Ok(DjTimingHistoryEvent {
             event_id: row.get(0)?,
             from_title: row.get(1)?,
@@ -1585,6 +1606,9 @@ fn latest_dj_transition_timing_history(
             timing_quality: timing_quality(timing_status.as_deref(), timing_delta_ms).to_string(),
             timing_direction: timing_direction(timing_status.as_deref(), timing_delta_ms)
                 .to_string(),
+            runtime_rendered_dj_mixer,
+            runtime_renderer_status: row.get(16)?,
+            runtime_renderer_reason: row.get(17)?,
             started_at: row.get(13)?,
             rejected_alternatives: decode_rejected_alternatives(rejected_json),
         })
@@ -1774,6 +1798,9 @@ fn open_transition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenTra
             planned_start_ms,
             timing_status.as_deref(),
         ),
+        runtime_rendered_dj_mixer: row.get::<_, Option<i64>>(9)?.map(|value| value != 0),
+        runtime_renderer_status: row.get(10)?,
+        runtime_renderer_reason: row.get(11)?,
         rejected_alternatives: Vec::new(),
     })
 }
@@ -1785,7 +1812,8 @@ fn latest_completed_timing_transition(
     conn.query_row(
         "SELECT id, template, program_json, fallback_reason,
                 planned_start_ms, actual_start_ms, timing_delta_ms,
-                timing_source, timing_status
+                timing_source, timing_status, runtime_rendered_dj_mixer,
+                runtime_renderer_status, runtime_renderer_reason
          FROM dj_transition_events
          WHERE timing_status IN ('fired', 'late', 'missed')
          ORDER BY started_at DESC, id DESC
@@ -1813,6 +1841,9 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: None,
             timing_quality: "unknown".to_string(),
             timing_direction: "unknown".to_string(),
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             overlay_details: None,
             rejected_alternatives: Vec::new(),
         };
@@ -1854,6 +1885,9 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
             timing_status: transition.timing_status.clone(),
             timing_quality: quality,
             timing_direction: direction,
+            runtime_rendered_dj_mixer: transition.runtime_rendered_dj_mixer,
+            runtime_renderer_status: transition.runtime_renderer_status.clone(),
+            runtime_renderer_reason: transition.runtime_renderer_reason.clone(),
             overlay_details: if transition.renderer_template.as_deref() == Some("DropTease16") {
                 transition.overlay_details.clone()
             } else {
@@ -1887,6 +1921,9 @@ fn renderer_status_for_transition(transition: Option<&OpenTransition>) -> Render
         timing_status: transition.timing_status.clone(),
         timing_quality: quality,
         timing_direction: direction,
+        runtime_rendered_dj_mixer: transition.runtime_rendered_dj_mixer,
+        runtime_renderer_status: transition.runtime_renderer_status.clone(),
+        runtime_renderer_reason: transition.runtime_renderer_reason.clone(),
         overlay_details: None,
         rejected_alternatives: transition.rejected_alternatives.clone(),
     }
@@ -2121,6 +2158,9 @@ mod tests {
             timing_source: None,
             timing_status: None,
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2153,6 +2193,9 @@ mod tests {
                 deck_b_start_frame: 384_000,
                 drop_source: "program_json".to_string(),
             }),
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2186,6 +2229,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2209,6 +2255,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2232,6 +2281,9 @@ mod tests {
                 timing_source: Some("downbeat_sync".to_string()),
                 timing_status: Some("fired".to_string()),
                 overlay_details: None,
+                runtime_rendered_dj_mixer: None,
+                runtime_renderer_status: None,
+                runtime_renderer_reason: None,
                 rejected_alternatives: Vec::new(),
             }));
 
@@ -2321,6 +2373,9 @@ mod tests {
             timing_source: None,
             timing_status: None,
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2346,6 +2401,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: Some(true),
+            runtime_renderer_status: Some("rendered_handoff".to_string()),
+            runtime_renderer_reason: Some("none".to_string()),
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2362,6 +2420,12 @@ mod tests {
         assert_eq!(status.timing_delta_ms, Some(144));
         assert_eq!(status.timing_source.as_deref(), Some("downbeat_sync"));
         assert_eq!(status.timing_status.as_deref(), Some("fired"));
+        assert_eq!(status.runtime_rendered_dj_mixer, Some(true));
+        assert_eq!(
+            status.runtime_renderer_status.as_deref(),
+            Some("rendered_handoff")
+        );
+        assert_eq!(status.runtime_renderer_reason.as_deref(), Some("none"));
     }
 
     #[test]
@@ -2377,6 +2441,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2403,6 +2470,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("fired".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: Some(false),
+            runtime_renderer_status: Some("legacy_overlap".to_string()),
+            runtime_renderer_reason: Some("prepared_mixer_missing".to_string()),
             rejected_alternatives: Vec::new(),
         }));
 
@@ -2410,6 +2480,15 @@ mod tests {
         assert_eq!(status.renderer_template.as_deref(), Some("SafeCrossfade"));
         assert_eq!(status.downgrade_reason.as_deref(), Some("timing_unstable"));
         assert_eq!(status.planning_reason, None);
+        assert_eq!(status.runtime_rendered_dj_mixer, Some(false));
+        assert_eq!(
+            status.runtime_renderer_status.as_deref(),
+            Some("legacy_overlap")
+        );
+        assert_eq!(
+            status.runtime_renderer_reason.as_deref(),
+            Some("prepared_mixer_missing")
+        );
     }
 
     #[test]
@@ -2693,6 +2772,9 @@ mod tests {
                 timing_status: Some("fired".to_string()),
                 timing_quality: "tight".to_string(),
                 timing_direction: "on_time".to_string(),
+                runtime_rendered_dj_mixer: Some(true),
+                runtime_renderer_status: Some("rendered_handoff".to_string()),
+                runtime_renderer_reason: Some("none".to_string()),
                 started_at: "now".to_string(),
                 rejected_alternatives: Vec::new(),
             },
@@ -2712,6 +2794,9 @@ mod tests {
                 timing_status: Some("late".to_string()),
                 timing_quality: "loose".to_string(),
                 timing_direction: "late".to_string(),
+                runtime_rendered_dj_mixer: Some(false),
+                runtime_renderer_status: Some("legacy_overlap".to_string()),
+                runtime_renderer_reason: Some("next_deck_not_decoded".to_string()),
                 started_at: "now".to_string(),
                 rejected_alternatives: Vec::new(),
             },
@@ -2731,6 +2816,9 @@ mod tests {
                 timing_status: Some("missed".to_string()),
                 timing_quality: "bad".to_string(),
                 timing_direction: "missed".to_string(),
+                runtime_rendered_dj_mixer: None,
+                runtime_renderer_status: None,
+                runtime_renderer_reason: None,
                 started_at: "now".to_string(),
                 rejected_alternatives: Vec::new(),
             },
@@ -2830,6 +2918,9 @@ mod tests {
             timing_source: Some("downbeat_sync".to_string()),
             timing_status: Some("armed".to_string()),
             overlay_details: None,
+            runtime_rendered_dj_mixer: None,
+            runtime_renderer_status: None,
+            runtime_renderer_reason: None,
             rejected_alternatives: Vec::new(),
         };
 
