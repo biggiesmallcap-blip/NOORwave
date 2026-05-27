@@ -549,7 +549,9 @@ async fn get_status(
     Ok(Json(response))
 }
 
-async fn queue_missing_dj_profiles_for_current_pair(state: SharedState) -> Result<(), StatusCode> {
+pub(super) async fn queue_missing_dj_profiles_for_current_pair(
+    state: SharedState,
+) -> Result<(), StatusCode> {
     let missing_profile_refs = {
         let state_guard = state.read().await;
         let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state_guard);

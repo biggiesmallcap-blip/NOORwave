@@ -57,6 +57,15 @@ const EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT: usize = 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
 
+async fn queue_missing_dj_profiles_after_pair_change(state: SharedState, context: &'static str) {
+    if let Err(status) = dj_routes::queue_missing_dj_profiles_for_current_pair(state).await {
+        warn!(
+            ?status,
+            context, "DJ profile queueing failed after pair change"
+        );
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     sort_by: Option<String>,
@@ -10744,6 +10753,8 @@ async fn start_ephemeral_tidal_playback(
         };
         if let Some(lookahead) = lookahead {
             let _ = lookahead.dispatch(&runtime_handle);
+            queue_missing_dj_profiles_after_pair_change(state.clone(), "ephemeral_tidal_mix_start")
+                .await;
         }
     }
 
@@ -11474,6 +11485,10 @@ async fn handle_ephemeral_tidal_near_end(
     .context("ephemeral TIDAL mix pair unavailable")?;
     let lookahead_start =
         player::dj_lookahead_start_from_pair(pair.clone(), EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES);
+    if lookahead_start.is_some() {
+        queue_missing_dj_profiles_after_pair_change(state.clone(), "ephemeral_tidal_mix_prebuffer")
+            .await;
+    }
     let effective_crossfade = current_crossfade_ms(&state).await;
     let mut job = player::build_playback_preparation(
         &synthetic,
@@ -11829,6 +11844,8 @@ async fn handle_near_end_prebuffer_next(
         && let Some(start) = lookahead_start
     {
         let _ = start.dispatch(&handle);
+        queue_missing_dj_profiles_after_pair_change(state.clone(), "prepared_next_transition")
+            .await;
     }
     let _ = handle.prepare_next(job);
     if let Some(ref si) = stream_info {
