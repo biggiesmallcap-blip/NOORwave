@@ -7293,6 +7293,9 @@ async fn play_track(
             ));
         }
     };
+    if !playback_generation_is_current(&state, playback_generation).await {
+        return current_playback_snapshot_json(&state).await;
+    }
     tracing::info!(
         target: "noor.playback.tidal",
         event = "playback_stream_ready",
@@ -7601,6 +7604,8 @@ fn tidal_playback_error_response(
 }
 
 async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let _playback_generation = bump_playback_generation(&state).await;
+
     if let Some(runtime_handle) = current_playback_runtime(&state).await
         && let Err(error) = runtime_handle.pause()
     {
@@ -7637,6 +7642,8 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
 }
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+    let _playback_generation = bump_playback_generation(&state).await;
+
     if let Some(runtime_handle) = current_playback_runtime(&state).await
         && let Err(error) = runtime_handle.resume()
     {
@@ -8199,6 +8206,10 @@ async fn next_track(
             resolved
         };
 
+    if !playback_generation_is_current(&state, playback_generation).await {
+        return current_playback_snapshot_json(&state).await;
+    }
+
     record_transition_if_changed(&state, previous_track_id, &snapshot, "queue", true).await;
 
     // When "Include New" is enabled, search TIDAL for genre/artist-matched tracks and
@@ -8246,6 +8257,9 @@ async fn next_track(
                     "TIDAL stream could not be resolved while advancing playback.",
                 )
             })?;
+        if !playback_generation_is_current(&state, playback_generation).await {
+            return current_playback_snapshot_json(&state).await;
+        }
         let runtime_handle = ensure_playback_runtime_for_track(&state, track)
             .await
             .map_err(|_| {
@@ -8353,6 +8367,10 @@ async fn previous_track(
             resolved
         };
 
+    if !playback_generation_is_current(&state, playback_generation).await {
+        return current_playback_snapshot_json(&state).await;
+    }
+
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
@@ -8387,6 +8405,9 @@ async fn previous_track(
                     "TIDAL stream could not be resolved while moving to the previous track.",
                 )
             })?;
+        if !playback_generation_is_current(&state, playback_generation).await {
+            return current_playback_snapshot_json(&state).await;
+        }
         let runtime_handle = ensure_playback_runtime_for_track(&state, track)
             .await
             .map_err(|_| {
@@ -11023,6 +11044,36 @@ async fn bump_playback_generation(state: &SharedState) -> u64 {
         + 1
 }
 
+async fn playback_generation_is_current(state: &SharedState, generation: u64) -> bool {
+    let state_guard = state.read().await;
+    current_playback_generation(&state_guard) == generation
+}
+
+async fn current_playback_snapshot_json(
+    state: &SharedState,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(player::load_snapshot)
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "playback_state_load_failed",
+                        "message": "Failed to load the current playback state.",
+                    })),
+                )
+            })?
+    };
+    let snapshot = overlay_snapshot_with_external_track(state, snapshot).await;
+    Ok(Json(json!({
+        "state": snapshot.state,
+        "queue": snapshot.queue,
+    })))
+}
+
 async fn ensure_playback_runtime_for_track(
     state: &SharedState,
     track: &crate::db::models::Track,
@@ -13561,6 +13612,55 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["status"], "manifest_decode_failed");
         assert_eq!(body["track_id"], 7);
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_playback_invalidate_inflight_generation() {
+        let (db, db_path) = fresh_migrated_db();
+        let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+        let app = api_routes(state.clone());
+
+        let initial = {
+            let guard = state.read().await;
+            current_playback_generation(&guard)
+        };
+
+        let pause_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause_response.status(), StatusCode::OK);
+        let after_pause = {
+            let guard = state.read().await;
+            current_playback_generation(&guard)
+        };
+        assert!(after_pause > initial);
+
+        let resume_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playback/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resume_response.status(), StatusCode::OK);
+        let after_resume = {
+            let guard = state.read().await;
+            current_playback_generation(&guard)
+        };
+        assert!(after_resume > after_pause);
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
