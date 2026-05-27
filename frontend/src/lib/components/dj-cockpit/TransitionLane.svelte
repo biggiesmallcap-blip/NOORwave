@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { DjStatusResponse } from '$lib/api/client';
+	import TransitionWaveform from './TransitionWaveform.svelte';
 
 	let {
 		status,
@@ -245,6 +246,8 @@
 	{:else}
 		<p class:pending={!transitionArmed} class:success={transitionArmed} role="status">{laneCopy}</p>
 	{/if}
+
+	<TransitionWaveform current={status?.current} next={status?.next} {status} />
 
 	<div class="lane-actions" aria-label="Transition feedback">
 		<button type="button" disabled={!transitionId} onclick={() => onFeedback('good')}>Good</button>

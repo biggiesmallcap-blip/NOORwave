@@ -48,6 +48,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_044,
     MIGRATION_045,
     MIGRATION_046,
+    MIGRATION_047,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1298,6 +1299,10 @@ const MIGRATION_046: &str = r#"
 ALTER TABLE dj_transition_events ADD COLUMN runtime_rendered_dj_mixer INTEGER;
 ALTER TABLE dj_transition_events ADD COLUMN runtime_renderer_status TEXT;
 ALTER TABLE dj_transition_events ADD COLUMN runtime_renderer_reason TEXT;
+"#;
+
+const MIGRATION_047: &str = r#"
+ALTER TABLE audio_dj_profiles ADD COLUMN waveform_peaks_blob BLOB NOT NULL DEFAULT X'';
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

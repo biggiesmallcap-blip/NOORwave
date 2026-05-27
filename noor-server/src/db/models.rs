@@ -747,6 +747,7 @@ pub struct AudioDjProfileRow {
     pub energy_contour_blob: Vec<u8>,
     pub vocal_presence_blob: Vec<u8>,
     pub vocal_density_blob: Vec<u8>,
+    pub waveform_peaks_blob: Vec<u8>,
     pub lufs_loud_body: Option<f64>,
     pub true_peak_dbtp: Option<f64>,
     pub beat_confidence: Option<f64>,

@@ -32,6 +32,15 @@
 	let notes = $state('');
 
 	let selectedDeck = $derived(selectedRef === 'current' ? current : next);
+	let effectiveResult = $derived(
+		safeOnly
+			? 'Forces SafeCrossfade'
+			: speedBias === 'faster'
+				? 'Requests faster handoff'
+				: transitionArmed
+					? 'Applies to next transition'
+					: 'Updates the next eligible plan',
+	);
 
 	function mediaRef(deck?: DjDeckStatus) {
 		if (!deck) return null;
@@ -60,13 +69,14 @@
 	<header>
 		<div>
 			<p class="eyebrow">Corrections</p>
-			<h2 id="dj-corrections-heading">Profile overrides</h2>
+			<h2 id="dj-corrections-heading">Transition rules</h2>
 		</div>
 	</header>
 
 	{#if transitionArmed}
 		<p class="armed-note">Changes apply to the next transition.</p>
 	{/if}
+	<p class="rules-note">Rules change planning. They do not fire a transition now.</p>
 
 	<div class="target-tabs" role="group" aria-label="Correction target">
 		<button type="button" class:active={selectedRef === 'current'} onclick={() => { selectedRef = 'current'; }}>
@@ -79,6 +89,7 @@
 
 	{#if selectedDeck}
 		<p class="target-label" title={selectedDeck.title}>{selectedDeck.title}</p>
+		<p class="effective-result">{effectiveResult}</p>
 		<div class="field-grid">
 			<label>
 				<span>BPM multiplier</span>
@@ -148,13 +159,19 @@
 		line-height: var(--line-height-tight);
 	}
 
-	.armed-note {
+	.armed-note,
+	.rules-note {
 		padding: var(--space-2) var(--space-3);
 		border: 1px solid color-mix(in srgb, var(--state-warning) 34%, transparent);
 		border-radius: var(--radius-sm);
 		color: var(--state-warning);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-snug);
+	}
+
+	.rules-note {
+		border-color: var(--border-subtle);
+		color: var(--text-secondary);
 	}
 
 	.target-tabs,
@@ -202,6 +219,17 @@
 		font-size: var(--font-size-sm);
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.effective-result {
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--accent-line);
+		border-radius: var(--radius-sm);
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-snug);
 	}
 
 	.field-grid {

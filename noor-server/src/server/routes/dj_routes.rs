@@ -26,7 +26,7 @@ use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::{
-    DJ_PROFILE_VERSION, decode_f32_blob, decode_u32_blob,
+    DJ_PROFILE_VERSION, DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob,
 };
 use crate::services::tidal::stream as tidal_stream;
 
@@ -189,6 +189,13 @@ struct DjDeckStatus {
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
     phrase_count: Option<usize>,
+    waveform_status: String,
+    waveform_peaks: Vec<f32>,
+    beat_markers_ms: Vec<i64>,
+    downbeat_markers_ms: Vec<i64>,
+    phrase_markers_ms: Vec<i64>,
+    mix_in_markers_ms: Vec<i64>,
+    mix_out_markers_ms: Vec<i64>,
     passive_analysis_status: Option<String>,
     passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
@@ -1459,17 +1466,51 @@ fn deck_status(
     let passive_analysis = media_ref
         .track_id()
         .and_then(crate::services::audio_analysis::queue_prescanner::prescan_status_for_track);
-    let (beat_count, downbeat_count, phrase_count, profile_confidence) =
-        if let Some(profile) = profile.as_ref() {
-            (
-                decode_f32_blob(&profile.beat_grid_blob).map(|values| values.len()),
-                decode_f32_blob(&profile.downbeats_blob).map(|values| values.len()),
-                decode_u32_blob(&profile.phrase_boundaries_blob).map(|values| values.len()),
-                Some(profile.profile_confidence),
-            )
-        } else {
-            (None, None, None, None)
-        };
+    let (
+        beat_count,
+        downbeat_count,
+        phrase_count,
+        profile_confidence,
+        waveform_peaks,
+        beat_markers_ms,
+        downbeat_markers_ms,
+        phrase_markers_ms,
+        mix_in_markers_ms,
+        mix_out_markers_ms,
+    ) = if let Some(profile) = profile.as_ref() {
+        let beat_markers = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
+        let downbeat_markers = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
+        let phrase_markers = phrase_markers_ms(
+            &decode_u32_blob(&profile.phrase_boundaries_blob).unwrap_or_default(),
+            &downbeat_markers,
+        );
+        (
+            Some(beat_markers.len()),
+            Some(downbeat_markers.len()),
+            decode_u32_blob(&profile.phrase_boundaries_blob).map(|values| values.len()),
+            Some(profile.profile_confidence),
+            capped_waveform_peaks(&profile.waveform_peaks_blob),
+            seconds_markers_ms(&beat_markers),
+            seconds_markers_ms(&downbeat_markers),
+            phrase_markers,
+            seconds_markers_ms(&decode_f32_blob(&profile.mix_in_blob).unwrap_or_default()),
+            seconds_markers_ms(&decode_f32_blob(&profile.mix_out_blob).unwrap_or_default()),
+        )
+    } else {
+        (
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    let waveform_status = waveform_status(&profile_status, &waveform_peaks);
     Ok(DjDeckStatus {
         media_ref_kind: key.media_ref_kind,
         media_ref_id: key.media_ref_id,
@@ -1482,6 +1523,13 @@ fn deck_status(
         beat_count,
         downbeat_count,
         phrase_count,
+        waveform_status,
+        waveform_peaks,
+        beat_markers_ms,
+        downbeat_markers_ms,
+        phrase_markers_ms,
+        mix_in_markers_ms,
+        mix_out_markers_ms,
         passive_analysis_status: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.status.to_string()),
@@ -1490,6 +1538,42 @@ fn deck_status(
             .map(|snapshot| snapshot.reason.to_string()),
         safe_crossfade_only: correction.is_some_and(|row| row.safe_crossfade_only),
     })
+}
+
+fn capped_waveform_peaks(blob: &[u8]) -> Vec<f32> {
+    decode_f32_blob(blob)
+        .unwrap_or_default()
+        .into_iter()
+        .take(DJ_WAVEFORM_PEAK_COUNT)
+        .map(|peak| peak.clamp(0.0, 1.0))
+        .collect()
+}
+
+fn waveform_status(profile_status: &str, peaks: &[f32]) -> String {
+    if !peaks.is_empty() {
+        "ready".to_string()
+    } else if profile_status == "analyzing" || profile_status == "retrying" {
+        "analyzing".to_string()
+    } else {
+        "missing".to_string()
+    }
+}
+
+fn seconds_markers_ms(values: &[f32]) -> Vec<i64> {
+    values
+        .iter()
+        .filter(|value| value.is_finite() && **value >= 0.0)
+        .map(|value| (*value as f64 * 1000.0).round() as i64)
+        .collect()
+}
+
+fn phrase_markers_ms(phrases: &[u32], downbeats: &[f32]) -> Vec<i64> {
+    phrases
+        .iter()
+        .filter_map(|index| downbeats.get(*index as usize))
+        .filter(|value| value.is_finite() && **value >= 0.0)
+        .map(|value| (*value as f64 * 1000.0).round() as i64)
+        .collect()
 }
 
 fn latest_open_transition_for_pair(
@@ -2090,6 +2174,7 @@ fn feedback_rating(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::audio_analysis::dj_profile::encode_f32_blob;
 
     fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
         AudioDjProfileRow {
@@ -2112,6 +2197,7 @@ mod tests {
             energy_contour_blob: vec![12],
             vocal_presence_blob: vec![13],
             vocal_density_blob: vec![14],
+            waveform_peaks_blob: encode_f32_blob(&[0.0, 0.5, 1.0]),
             lufs_loud_body: Some(-12.0),
             true_peak_dbtp: Some(-1.0),
             beat_confidence: Some(0.9),
@@ -2136,6 +2222,17 @@ mod tests {
             beat_count: profile_ready.then_some(128),
             downbeat_count: profile_ready.then_some(32),
             phrase_count: profile_ready.then_some(8),
+            waveform_status: if profile_ready { "ready" } else { "missing" }.to_string(),
+            waveform_peaks: if profile_ready {
+                vec![0.0, 0.5, 1.0]
+            } else {
+                Vec::new()
+            },
+            beat_markers_ms: Vec::new(),
+            downbeat_markers_ms: Vec::new(),
+            phrase_markers_ms: Vec::new(),
+            mix_in_markers_ms: Vec::new(),
+            mix_out_markers_ms: Vec::new(),
             passive_analysis_status: None,
             passive_analysis_reason: None,
             safe_crossfade_only: false,
@@ -2159,6 +2256,61 @@ mod tests {
             .expect("current profile");
 
         assert!(dj_profile_is_current_version(&conn, &key).expect("current"));
+    }
+
+    #[test]
+    fn deck_status_exposes_capped_waveform_peaks() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let key = AudioDjProfileKey {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+        };
+        let mut row = test_profile_row(&key, DJ_PROFILE_VERSION);
+        row.waveform_peaks_blob = encode_f32_blob(&vec![0.75; DJ_WAVEFORM_PEAK_COUNT + 4]);
+        queries::upsert_audio_dj_profile(&conn, &row).expect("profile");
+
+        let deck = deck_status(
+            &conn,
+            &DjMediaRef::TidalTrack {
+                tidal_id: 123,
+                track_id: None,
+            },
+            Some(&("Track".to_string(), Some("Artist".to_string()))),
+            false,
+        )
+        .expect("deck status");
+
+        assert_eq!(deck.waveform_status, "ready");
+        assert_eq!(deck.waveform_peaks.len(), DJ_WAVEFORM_PEAK_COUNT);
+        assert!(deck.waveform_peaks.iter().all(|peak| *peak == 0.75));
+    }
+
+    #[test]
+    fn deck_status_marks_missing_waveform() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let key = AudioDjProfileKey {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+        };
+        let mut row = test_profile_row(&key, DJ_PROFILE_VERSION);
+        row.waveform_peaks_blob = encode_f32_blob(&[]);
+        queries::upsert_audio_dj_profile(&conn, &row).expect("profile");
+
+        let deck = deck_status(
+            &conn,
+            &DjMediaRef::TidalTrack {
+                tidal_id: 123,
+                track_id: None,
+            },
+            Some(&("Track".to_string(), Some("Artist".to_string()))),
+            false,
+        )
+        .expect("deck status");
+
+        assert_eq!(deck.waveform_status, "missing");
+        assert!(deck.waveform_peaks.is_empty());
     }
 
     #[test]
