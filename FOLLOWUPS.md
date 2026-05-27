@@ -16,10 +16,13 @@ Phase 1 ships beat-phase sync with the existing `PlaybackRate` cap of
 `0.97..1.03`. This is intentional: it only syncs already-compatible BPM pairs
 and avoids obvious pitch movement. The offline metric harness and optional
 `signalsmith-eval` renderer now exist in `noor-mix::stretch_eval`; the feature
-compile gate is currently blocked until `libclang.dll` is available and
-`LIBCLANG_PATH` points at it. After that, run the documented fixture matrix
-before any wider runtime cap ships. Do not use Rubber Band without license
-review.
+compile gate passed after installing LLVM 22.1.6 and setting
+`LIBCLANG_PATH=C:\Program Files\LLVM\bin`. The documented fixture matrix now
+runs, but the debug benchmark fails the current runtime decision gate because
+90s Signalsmith renders take roughly 18 to 24 seconds, far above the 500 ms
+target. Keep runtime at the existing 3 percent nudge until release-mode or
+prepared-buffer evaluation proves the render-time gate. Do not use Rubber Band
+without license review.
 - Spawned by: DJ beat-sync design planning, 2026-05-26
 
 ### refactor(db/signals): extract analytics signals from db/queries.rs

@@ -129,3 +129,34 @@ Unable to find libclang: "couldn't find any valid shared libraries matching: ['c
 ```
 
 Per the hardened plan, do not vendor C++ or switch crates in this slice. The optional `signalsmith-eval` feature can be retried after `libclang.dll` is available and `LIBCLANG_PATH` points at it.
+
+Retried on 2026-05-27 after installing LLVM 22.1.6 with `winget` and setting:
+
+```powershell
+$env:LIBCLANG_PATH='C:\Program Files\LLVM\bin'
+```
+
+Feature gate passed:
+
+```powershell
+cargo test -p noor-mix --features signalsmith-eval stretch_eval
+```
+
+Result: 4 passed, 1 ignored.
+
+Ignored evaluation benchmark also completed:
+
+```powershell
+cargo test -p noor-mix --features signalsmith-eval smart_stretch_evaluation_baseline_benchmark -- --ignored --nocapture
+```
+
+Decision: do not allow runtime prepared-buffer stretch yet. Signalsmith quality metrics were good on the synthetic click fixtures, but render time failed the current gate by a large margin in this debug benchmark.
+
+Key Signalsmith 90s rows:
+
+- `0.950`: `render_ms=20676`, `max_phase_drift_ms=0.771`, `peak=0.917`, `passed=true`
+- `1.050`: `render_ms=18035`, `max_phase_drift_ms=0.750`, `peak=0.869`, `passed=true`
+- `0.920`: `render_ms=23449`, `max_phase_drift_ms=0.833`, `peak=0.922`, `passed=true`
+- `1.080`: `render_ms=17956`, `max_phase_drift_ms=0.896`, `peak=0.864`, `passed=true`
+
+The 5 percent and 8 percent drift gates pass, output is finite, length error is 0 frames, and peaks stay below `0.98`. The 90s render-time gate fails because the target is under `500 ms`.
