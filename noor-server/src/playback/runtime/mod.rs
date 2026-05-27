@@ -276,7 +276,7 @@ impl PlaybackRuntimeHandle {
     /// or failed transitions surface as `Err`.
     pub fn seek(&self, position_ms: i64) -> Result<()> {
         match self.seek_to_segment_aware(position_ms, false) {
-            SeekToOutcome::Dispatched => Ok(()),
+            SeekToOutcome::Dispatched | SeekToOutcome::DispatchedCrossfadeSuppressed => Ok(()),
             SeekToOutcome::RejectedOutOfBuffer => Err(anyhow!("seek target is out of buffer")),
             SeekToOutcome::Failed => Err(anyhow!("seek dispatch failed")),
         }
@@ -577,6 +577,7 @@ enum DjRuntimeRendererReason {
     NextDeckMissingAtFire,
     TransitionPlanMissingAtFire,
     SyncWindowNotSignaled,
+    ManualSeekSuppressed,
 }
 
 impl DjRuntimeRendererReason {
@@ -598,6 +599,7 @@ impl DjRuntimeRendererReason {
             Self::NextDeckMissingAtFire => "next_deck_missing_at_fire",
             Self::TransitionPlanMissingAtFire => "transition_plan_missing_at_fire",
             Self::SyncWindowNotSignaled => "sync_window_not_signaled",
+            Self::ManualSeekSuppressed => "manual_seek_suppressed",
         }
     }
 }
@@ -717,6 +719,9 @@ fn runtime_renderer_fire_block_reason(
 fn runtime_renderer_boundary_fallback_reason(
     state: &PlaybackRuntimeLoopState,
 ) -> DjRuntimeRendererReason {
+    if active_engine_suppresses_crossfade_after_seek(state) {
+        return DjRuntimeRendererReason::ManualSeekSuppressed;
+    }
     let reason =
         runtime_renderer_failure_reason(state, DjRuntimeRendererReason::PreparedMixerMissing);
     if reason != DjRuntimeRendererReason::PreparedMixerMissing {
@@ -1527,12 +1532,13 @@ fn run_runtime_loop(
                     // Phase 2: act on the decision under a mutable borrow.
                     match decision {
                         SeekHandling::InBuffer { target_samples } => {
+                            let mut suppressed = false;
                             if let Some(engine) = state.engine.as_ref() {
                                 engine
                                     .shared
                                     .seek_target_samples
                                     .store(target_samples, Ordering::Relaxed);
-                                engine
+                                suppressed = engine
                                     .shared
                                     .set_manual_seek_crossfade_suppression(target_samples);
                                 // Reset fire-once guards so NearEnd /
@@ -1546,7 +1552,12 @@ fn run_runtime_loop(
                                     .crossfade_start_signaled
                                     .store(false, Ordering::Relaxed);
                             }
-                            let _ = respond_to.send(SeekToOutcome::Dispatched);
+                            let outcome = if suppressed {
+                                SeekToOutcome::DispatchedCrossfadeSuppressed
+                            } else {
+                                SeekToOutcome::Dispatched
+                            };
+                            let _ = respond_to.send(outcome);
                         }
                         SeekHandling::Reject => {
                             let _ = respond_to.send(SeekToOutcome::RejectedOutOfBuffer);
@@ -1569,16 +1580,22 @@ fn run_runtime_loop(
                                 true, // force_restart - bypass switch_is_noop
                             ) {
                                 Ok(()) => {
+                                    let mut suppressed = false;
                                     if let Some(engine) = state.engine.as_ref() {
                                         let target_samples = (target_ms.max(0) as u64)
                                             .saturating_mul(rate)
                                             .saturating_mul(channels)
                                             / 1000;
-                                        engine
+                                        suppressed = engine
                                             .shared
                                             .set_manual_seek_crossfade_suppression(target_samples);
                                     }
-                                    let _ = respond_to.send(SeekToOutcome::Dispatched);
+                                    let outcome = if suppressed {
+                                        SeekToOutcome::DispatchedCrossfadeSuppressed
+                                    } else {
+                                        SeekToOutcome::Dispatched
+                                    };
+                                    let _ = respond_to.send(outcome);
                                 }
                                 Err(error) => {
                                     warn!(
@@ -4109,6 +4126,51 @@ mod tests {
                 assert_eq!(generation, 20);
             }
             other => panic!("expected finished event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boundary_fallback_after_manual_seek_reports_seek_suppression() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(480_000, Ordering::Relaxed);
+        active
+            .shared
+            .suppress_crossfade_after_seek
+            .store(true, Ordering::Relaxed);
+        let mut next = test_engine_with_shared(2, 20);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(79);
+        next.job = PreparedPlaybackJob::test_fixture(2, 20).with_prepared_transition(transition);
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_prepared_at_boundary(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+        );
+
+        match event_rx.try_recv().expect("timing event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                runtime_renderer_status,
+                runtime_renderer_reason,
+                ..
+            } => {
+                assert_eq!(runtime_renderer_status, "boundary_fallback");
+                assert_eq!(runtime_renderer_reason, "manual_seek_suppressed");
+            }
+            other => panic!("expected timing event, got {other:?}"),
         }
     }
 

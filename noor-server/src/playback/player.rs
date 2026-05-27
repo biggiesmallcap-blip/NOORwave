@@ -512,37 +512,33 @@ const DJ_SLAM_CUT_RENDER_MS: u32 = 200;
 const DJ_LONG_HARMONIC_BLEND_RENDER_MS: u32 = 16_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
-    let mut stmt = conn.prepare(
-        "SELECT timing_delta_ms
-         FROM dj_transition_events
-         WHERE timing_status = 'fired'
-           AND timing_delta_ms IS NOT NULL
-         ORDER BY started_at DESC, id DESC
-         LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([DJ_FIRE_AHEAD_WINDOW], |row| row.get::<_, i64>(0))?;
-    let mut deltas = Vec::new();
-    for row in rows {
-        deltas.push(row?);
-    }
+    let deltas = dj_timing_calibration_deltas(conn, DJ_FIRE_AHEAD_WINDOW)?;
     Ok(fire_ahead_ms_from_deltas(&deltas))
 }
 
 fn render_timing_unstable(conn: &Connection) -> Result<bool> {
+    let deltas = dj_timing_calibration_deltas(conn, DJ_FILTER_SWEEP_TIMING_WINDOW)?;
+    Ok(render_timing_unstable_from_deltas(&deltas))
+}
+
+fn dj_timing_calibration_deltas(conn: &Connection, limit: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT timing_delta_ms
          FROM dj_transition_events
          WHERE timing_status = 'fired'
            AND timing_delta_ms IS NOT NULL
+           AND runtime_rendered_dj_mixer = 1
+           AND runtime_renderer_status IN ('rendered_handoff', 'rendered_overlay')
+           AND COALESCE(runtime_renderer_reason, 'none') = 'none'
          ORDER BY started_at DESC, id DESC
          LIMIT ?1",
     )?;
-    let rows = stmt.query_map([DJ_FILTER_SWEEP_TIMING_WINDOW], |row| row.get::<_, i64>(0))?;
+    let rows = stmt.query_map([limit], |row| row.get::<_, i64>(0))?;
     let mut deltas = Vec::new();
     for row in rows {
         deltas.push(row?);
     }
-    Ok(render_timing_unstable_from_deltas(&deltas))
+    Ok(deltas)
 }
 
 fn render_timing_unstable_from_deltas(deltas: &[i64]) -> bool {
@@ -2509,6 +2505,33 @@ mod tests {
             .expect("count")
         }
 
+        fn insert_timing_sample(
+            conn: &Connection,
+            delta_ms: i64,
+            runtime_rendered_dj_mixer: bool,
+            runtime_renderer_status: &str,
+            runtime_renderer_reason: &str,
+        ) -> Result<()> {
+            conn.execute(
+                "INSERT INTO dj_transition_events (
+                    from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                    template, program_json, planner_version, timing_delta_ms, timing_status,
+                    runtime_rendered_dj_mixer, runtime_renderer_status, runtime_renderer_reason
+                 ) VALUES (
+                    'tidal_track', '1', 'tidal_track', '2',
+                    'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                    ?1, 'fired', ?2, ?3, ?4
+                 )",
+                params![
+                    delta_ms,
+                    if runtime_rendered_dj_mixer { 1 } else { 0 },
+                    runtime_renderer_status,
+                    runtime_renderer_reason,
+                ],
+            )?;
+            Ok(())
+        }
+
         fn make_pair_drop_tease_ready(db: &Database) {
             db.with_conn(|conn| {
                 queries::set_dj_global_policy(conn, "bold", "neutral")?;
@@ -3017,6 +3040,71 @@ mod tests {
             assert!(render_timing_unstable_from_deltas(&[549, -399, 303, -375]));
             assert!(!render_timing_unstable_from_deltas(&[140, -130, 75, -90]));
             assert!(!render_timing_unstable_from_deltas(&[549, -399, 303]));
+        }
+
+        #[test]
+        fn timing_calibration_ignores_decode_fallback_rows() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM dj_transition_events", [])?;
+                for delta_ms in [549, -399, 303, -375] {
+                    insert_timing_sample(
+                        conn,
+                        delta_ms,
+                        false,
+                        "legacy_overlap",
+                        "active_deck_not_decoded",
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed fallback timing");
+
+            let unstable = db.with_conn(render_timing_unstable).expect("gate");
+
+            assert!(!unstable);
+        }
+
+        #[test]
+        fn timing_calibration_uses_successful_dj_mixer_rows() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM dj_transition_events", [])?;
+                for delta_ms in [549, -399, 303, -375] {
+                    insert_timing_sample(conn, delta_ms, true, "rendered_handoff", "none")?;
+                }
+                Ok(())
+            })
+            .expect("seed rendered timing");
+
+            let unstable = db.with_conn(render_timing_unstable).expect("gate");
+
+            assert!(unstable);
+        }
+
+        #[test]
+        fn fire_ahead_ignores_fallback_timing_rows() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM dj_transition_events", [])?;
+                for _ in 0..20 {
+                    insert_timing_sample(
+                        conn,
+                        500,
+                        false,
+                        "legacy_overlap",
+                        "next_deck_not_decoded",
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed fallback timing");
+
+            let fire_ahead_ms = db
+                .with_conn(dj_transition_fire_ahead_ms)
+                .expect("fire ahead");
+
+            assert_eq!(fire_ahead_ms, 0);
         }
 
         #[test]

@@ -1673,6 +1673,7 @@ fn latest_dj_transition_timing_history(
          LEFT JOIN tracks to_queue_track ON to_queue_track.id = to_queue.track_id
          LEFT JOIN artists to_queue_artist ON to_queue_artist.id = to_queue_track.artist_id
          WHERE e.timing_status IN ('fired', 'late', 'missed')
+           AND COALESCE(e.runtime_renderer_reason, '') <> 'manual_seek_suppressed'
            AND NOT (
              e.timing_status = 'missed'
              AND EXISTS (
@@ -2822,6 +2823,48 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].timing_status.as_deref(), Some("missed"));
         assert_eq!(history[1].timing_status.as_deref(), Some("fired"));
+    }
+
+    #[test]
+    fn timing_history_filters_manual_seek_suppressed_boundary_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status,
+                runtime_rendered_dj_mixer, runtime_renderer_status, runtime_renderer_reason
+             ) VALUES (
+                'tidal_track', '1', 'tidal_track', '2',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                222000, 240000, 18000, 'downbeat_sync', 'late',
+                0, 'boundary_fallback', 'manual_seek_suppressed'
+             )",
+            [],
+        )
+        .expect("insert manual seek row");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status,
+                runtime_rendered_dj_mixer, runtime_renderer_status, runtime_renderer_reason
+             ) VALUES (
+                'tidal_track', '2', 'tidal_track', '3',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                222000, 222040, 40, 'downbeat_sync', 'fired',
+                1, 'rendered_handoff', 'none'
+             )",
+            [],
+        )
+        .expect("insert rendered row");
+
+        let history = latest_dj_transition_timing_history(&conn, 5).expect("history");
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].timing_delta_ms, Some(40));
+        assert_eq!(history[0].runtime_renderer_reason.as_deref(), Some("none"));
     }
 
     #[test]

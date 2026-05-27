@@ -7534,6 +7534,7 @@ fn validate_dj_runtime_renderer_reason(reason: Option<&str>) -> Result<()> {
                 | "next_deck_missing_at_fire"
                 | "transition_plan_missing_at_fire"
                 | "sync_window_not_signaled"
+                | "manual_seek_suppressed"
         )
     {
         bail!("unknown DJ runtime renderer reason: {reason}");
@@ -7747,6 +7748,46 @@ pub fn mark_dj_transition_timing_status_for_pair(
             to_media_ref_kind,
             to_media_ref_id,
             timing_status,
+        ],
+    )
+    .map_err(Into::into)
+}
+
+pub fn mark_dj_transition_manual_seek_suppressed_for_pair(
+    conn: &Connection,
+    from_media_ref_kind: &str,
+    from_media_ref_id: &str,
+    to_media_ref_kind: &str,
+    to_media_ref_id: &str,
+) -> Result<usize> {
+    validate_dj_timing_status(Some("missed"))?;
+    validate_dj_runtime_renderer_status(Some("boundary_fallback"))?;
+    validate_dj_runtime_renderer_reason(Some("manual_seek_suppressed"))?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET timing_status = 'missed',
+             outcome = COALESCE(outcome, 'manual_seek_suppressed'),
+             outcome_at = COALESCE(outcome_at, datetime('now')),
+             runtime_rendered_dj_mixer = 0,
+             runtime_renderer_status = 'boundary_fallback',
+             runtime_renderer_reason = 'manual_seek_suppressed'
+         WHERE id = (
+             SELECT id
+             FROM dj_transition_events
+             WHERE from_media_ref_kind = ?1
+               AND from_media_ref_id = ?2
+               AND to_media_ref_kind = ?3
+               AND to_media_ref_id = ?4
+               AND outcome IS NULL
+               AND timing_status = 'armed'
+              ORDER BY started_at DESC, id DESC
+              LIMIT 1
+         )",
+        params![
+            from_media_ref_kind,
+            from_media_ref_id,
+            to_media_ref_kind,
+            to_media_ref_id,
         ],
     )
     .map_err(Into::into)
@@ -8202,6 +8243,32 @@ mod tests {
         }
 
         #[test]
+        fn update_dj_transition_fire_timing_accepts_manual_seek_reason() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            update_dj_transition_fire_timing(
+                &conn,
+                id,
+                180_000,
+                "late",
+                false,
+                "boundary_fallback",
+                "manual_seek_suppressed",
+            )
+            .expect("manual seek timing");
+
+            let reason: Option<String> = conn
+                .query_row(
+                    "SELECT runtime_renderer_reason FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("reason");
+            assert_eq!(reason.as_deref(), Some("manual_seek_suppressed"));
+        }
+
+        #[test]
         fn update_dj_transition_fire_timing_closes_duplicate_armed_pair_rows() {
             let conn = setup_conn();
             let older_id = insert_event(&conn);
@@ -8273,6 +8340,56 @@ mod tests {
                 )
                 .expect("status");
             assert_eq!(status.as_deref(), Some("missed"));
+        }
+
+        #[test]
+        fn mark_dj_transition_manual_seek_suppressed_closes_armed_pair() {
+            let conn = setup_conn();
+            let id = insert_event(&conn);
+
+            let updated = mark_dj_transition_manual_seek_suppressed_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+            )
+            .expect("mark manual seek suppressed");
+            assert_eq!(updated, 1);
+
+            let row = conn
+                .query_row(
+                    "SELECT timing_status, outcome, runtime_rendered_dj_mixer,
+                            runtime_renderer_status, runtime_renderer_reason
+                     FROM dj_transition_events WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .expect("manual seek row");
+
+            assert_eq!(row.0.as_deref(), Some("missed"));
+            assert_eq!(row.1.as_deref(), Some("manual_seek_suppressed"));
+            assert_eq!(row.2, Some(0));
+            assert_eq!(row.3.as_deref(), Some("boundary_fallback"));
+            assert_eq!(row.4.as_deref(), Some("manual_seek_suppressed"));
+
+            let second = mark_dj_transition_manual_seek_suppressed_for_pair(
+                &conn,
+                "library_track",
+                "1",
+                "tidal_track",
+                "200",
+            )
+            .expect("mark manual seek suppressed again");
+            assert_eq!(second, 0);
         }
 
         #[test]

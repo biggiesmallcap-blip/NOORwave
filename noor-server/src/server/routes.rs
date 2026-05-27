@@ -99,6 +99,21 @@ async fn start_dj_lookahead_and_queue_profiles_after_pair_change(
     queue_missing_dj_profiles_after_pair_change(state, context).await;
 }
 
+async fn refresh_dj_after_queue_change(state: SharedState, context: &'static str) {
+    let runtime = {
+        let state_guard = state.read().await;
+        state_guard
+            .playback_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle.clone())
+    };
+    if let Some(runtime) = runtime {
+        start_dj_lookahead_and_queue_profiles_after_pair_change(state, runtime, context).await;
+    } else {
+        queue_missing_dj_profiles_after_pair_change(state, context).await;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     sort_by: Option<String>,
@@ -5461,9 +5476,12 @@ async fn spawn_pending_resolvers_for_queue_items(
             let tok = tokens.clone();
             let tx = event_tx.clone();
             let http = tidal_http_client.clone();
+            let state_bg = state.clone();
             tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
-                resolve_pending_row(db_bg, tok, item_id, tx, http).await;
+                if resolve_pending_row(db_bg, tok, item_id, tx, http).await {
+                    refresh_dj_after_queue_change(state_bg, context).await;
+                }
             });
         }
     } else {
@@ -5734,9 +5752,13 @@ async fn radio_start(
                 let tok = tokens.clone();
                 let tx = event_tx.clone();
                 let http = tidal_http_client.clone();
+                let state_bg = state.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    resolve_pending_row(db_bg, tok, item_id, tx, http).await;
+                    if resolve_pending_row(db_bg, tok, item_id, tx, http).await {
+                        refresh_dj_after_queue_change(state_bg, "radio_start_pending_resolved")
+                            .await;
+                    }
                 });
             }
         } else {
@@ -7859,21 +7881,21 @@ async fn resolve_pending_row(
     queue_item_id: i64,
     event_tx: tokio::sync::broadcast::Sender<AppEvent>,
     http: reqwest::Client,
-) {
+) -> bool {
     let row = db
         .with_conn(move |conn| pending::read_identity(conn, queue_item_id))
         .unwrap_or(None);
 
     let (pending_artist, pending_title, tidal_id_hint) = match row {
         Some(r) => r,
-        None => return,
+        None => return false,
     };
 
     let claimed = db
         .with_conn(move |conn| pending::try_claim(conn, queue_item_id))
         .unwrap_or(false);
     if !claimed {
-        return;
+        return false;
     }
 
     let release = |db: &crate::db::Database, qid: i64| {
@@ -7900,7 +7922,7 @@ async fn resolve_pending_row(
         Err(e) => {
             tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
             release(&db, queue_item_id);
-            return;
+            return false;
         }
     };
 
@@ -7914,7 +7936,7 @@ async fn resolve_pending_row(
                 "background resolver: no match above threshold"
             );
             release(&db, queue_item_id);
-            return;
+            return false;
         }
     };
 
@@ -7926,7 +7948,7 @@ async fn resolve_pending_row(
         Err(e) => {
             tracing::warn!(queue_item_id, error = %e, "background resolver: import failed");
             release(&db, queue_item_id);
-            return;
+            return false;
         }
     };
 
@@ -7962,6 +7984,7 @@ async fn resolve_pending_row(
             "background resolver: promoted pending row"
         );
     }
+    promoted
 }
 
 /// Attempts to resolve the current pending queue item to a Tidal track.
@@ -8558,6 +8581,17 @@ async fn set_playback_position(
     };
 
     match outcome {
+        playback_runtime::SeekToOutcome::DispatchedCrossfadeSuppressed => {
+            if let Err(error) =
+                mark_armed_dj_transition_manual_seek_suppressed_if_needed(&state).await
+            {
+                warn!("Failed to suppress armed DJ transition after seek: {error}");
+            }
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({ "state": snapshot.state })),
+            ))
+        }
         playback_runtime::SeekToOutcome::Dispatched => Ok((
             StatusCode::ACCEPTED,
             Json(json!({ "state": snapshot.state })),
@@ -8681,19 +8715,23 @@ async fn add_queue_track(
     State(state): State<SharedState>,
     Json(payload): Json<PlaybackTrackRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    // User-driven enqueue; clear the post-clear suppression window.
-    state
-        .user_cleared_at
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-    state
-        .db
-        .with_conn(|conn| {
-            let queue = player::enqueue_track(conn, payload.track_id, "user")?;
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": queue })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let response = {
+        let state_guard = state.read().await;
+        // User-driven enqueue; clear the post-clear suppression window.
+        state_guard
+            .user_cleared_at
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        state_guard
+            .db
+            .with_conn(|conn| {
+                let queue = player::enqueue_track(conn, payload.track_id, "user")?;
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+                Ok(Json(json!({ "queue": queue })))
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    refresh_dj_after_queue_change(state, "add_queue_track").await;
+    Ok(response)
 }
 
 fn queue_external_insert<'a>(
@@ -8793,8 +8831,11 @@ async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
             s.tidal_http_client.clone(),
         )
     };
+    let state = state.clone();
     tokio::spawn(async move {
-        resolve_pending_row(db, tokens, queue_item_id, event_tx, tidal_http_client).await;
+        if resolve_pending_row(db, tokens, queue_item_id, event_tx, tidal_http_client).await {
+            refresh_dj_after_queue_change(state, "pending_queue_resolved").await;
+        }
     });
 }
 
@@ -8830,6 +8871,7 @@ async fn queue_append(
     if let queue::InsertResult::Pending { queue_id } = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
+    refresh_dj_after_queue_change(state, "queue_append").await;
 
     Ok(Json(json!({ "queue": queue })))
 }
@@ -8875,6 +8917,7 @@ async fn queue_append_many(
             spawn_pending_queue_resolver(&state, queue_id).await;
         }
     }
+    refresh_dj_after_queue_change(state, "queue_append_many").await;
 
     Ok(Json(json!({ "queue": queue })))
 }
@@ -8914,6 +8957,7 @@ async fn queue_play_next(
     if let queue::InsertResult::Pending { queue_id } = inserted {
         spawn_pending_queue_resolver(&state, queue_id).await;
     }
+    refresh_dj_after_queue_change(state, "queue_play_next").await;
 
     Ok(Json(json!({ "queue": queue })))
 }
@@ -8971,6 +9015,7 @@ async fn queue_play_next_many(
             spawn_pending_queue_resolver(&state, queue_id).await;
         }
     }
+    refresh_dj_after_queue_change(state, "queue_play_next_many").await;
 
     Ok(Json(json!({ "queue": queue })))
 }
@@ -8979,99 +9024,115 @@ async fn replace_playback_queue(
     State(state): State<SharedState>,
     Json(payload): Json<QueueReplaceRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            // Replace with library tracks first.
-            match payload.reasons.as_ref() {
-                Some(reasons) => {
-                    player::replace_queue_with_reasons(conn, &payload.track_ids, reasons, "user")?
+    let response = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
+                // Replace with library tracks first.
+                match payload.reasons.as_ref() {
+                    Some(reasons) => player::replace_queue_with_reasons(
+                        conn,
+                        &payload.track_ids,
+                        reasons,
+                        "user",
+                    )?,
+                    None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
+                };
+                // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
+                if let Some(pending) = &payload.pending_candidates
+                    && !pending.is_empty()
+                {
+                    use crate::playback::queue::{PendingCandidate, append_pending_tracks};
+                    let candidates: Vec<PendingCandidate> = pending
+                        .iter()
+                        .map(|p| PendingCandidate {
+                            artist: p.artist.clone(),
+                            title: p.title.clone(),
+                            reason: p.reason.clone(),
+                        })
+                        .collect();
+                    append_pending_tracks(conn, &candidates)?;
                 }
-                None => player::replace_queue_with_tracks(conn, &payload.track_ids, "user")?,
-            };
-            // Phase 2c-ii-a: append pending (last.fm) candidates after library tracks.
-            if let Some(pending) = &payload.pending_candidates
-                && !pending.is_empty()
-            {
-                use crate::playback::queue::{PendingCandidate, append_pending_tracks};
-                let candidates: Vec<PendingCandidate> = pending
-                    .iter()
-                    .map(|p| PendingCandidate {
-                        artist: p.artist.clone(),
-                        title: p.title.clone(),
-                        reason: p.reason.clone(),
-                    })
-                    .collect();
-                append_pending_tracks(conn, &candidates)?;
-            }
-            let mut shuffle_debug = None;
-            let final_queue = match payload.shuffle_mode.as_deref() {
-                Some(raw_mode) => {
-                    let mode = queue::ShuffleMode::parse(raw_mode);
-                    if mode == queue::ShuffleMode::Off {
-                        crate::playback::queue::load_queue(conn)?
-                    } else {
-                        let seed = crate::playback::shuffle::generate_shuffle_seed();
-                        let result = crate::playback::queue::apply_shuffle_with_seed(
-                            conn,
-                            mode,
-                            None,
-                            seed,
-                            "queue_replace",
-                        )?;
-                        shuffle_debug = result.debug;
-                        result.queue
+                let mut shuffle_debug = None;
+                let final_queue = match payload.shuffle_mode.as_deref() {
+                    Some(raw_mode) => {
+                        let mode = queue::ShuffleMode::parse(raw_mode);
+                        if mode == queue::ShuffleMode::Off {
+                            crate::playback::queue::load_queue(conn)?
+                        } else {
+                            let seed = crate::playback::shuffle::generate_shuffle_seed();
+                            let result = crate::playback::queue::apply_shuffle_with_seed(
+                                conn,
+                                mode,
+                                None,
+                                seed,
+                                "queue_replace",
+                            )?;
+                            shuffle_debug = result.debug;
+                            result.queue
+                        }
                     }
-                }
-                None => crate::playback::queue::load_queue(conn)?,
-            };
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({
-                "queue": final_queue,
-                "shuffle_debug": shuffle_debug
-            })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                    None => crate::playback::queue::load_queue(conn)?,
+                };
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+                Ok(Json(json!({
+                    "queue": final_queue,
+                    "shuffle_debug": shuffle_debug
+                })))
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    refresh_dj_after_queue_change(state, "replace_playback_queue").await;
+    Ok(response)
 }
 
 async fn remove_queue_track(
     State(state): State<SharedState>,
     Json(payload): Json<QueueRemoveRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            queue::remove_queue_item(conn, payload.queue_item_id)?;
-            let queue = queue::load_queue(conn)?;
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": queue })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let response = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
+                queue::remove_queue_item(conn, payload.queue_item_id)?;
+                let queue = queue::load_queue(conn)?;
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+                Ok(Json(json!({ "queue": queue })))
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    refresh_dj_after_queue_change(state, "remove_queue_track").await;
+    Ok(response)
 }
 
 async fn move_queue_track(
     State(state): State<SharedState>,
     Json(payload): Json<QueueMoveRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
-            queue::move_queue_item(conn, payload.item_id, payload.new_pos)?;
-            let queue = queue::load_queue(conn)?;
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
-            Ok(Json(json!({ "queue": queue })))
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let response = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
+                queue::move_queue_item(conn, payload.item_id, payload.new_pos)?;
+                let queue = queue::load_queue(conn)?;
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
+                Ok(Json(json!({ "queue": queue })))
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    refresh_dj_after_queue_change(state, "move_queue_track").await;
+    Ok(response)
 }
 
 async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let state = state.read().await;
-    state
-        .db
-        .with_conn(|conn| {
+    let response = {
+        let state_guard = state.read().await;
+        state_guard
+            .db
+            .with_conn(|conn| {
             let (current_track_id, current_queue_item_id): (Option<i64>, Option<i64>) =
                 conn.query_row(
                     "SELECT current_track_id, current_queue_item_id FROM playback_state WHERE id = 1",
@@ -9091,7 +9152,7 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                     queue::clear_queue(conn)?;
                 }
             }
-            state.pending_tidal_mix_queue.lock().unwrap().clear();
+                state_guard.pending_tidal_mix_queue.lock().unwrap().clear();
             // Return the full PlaybackSnapshot ({state, queue}) so the UI can
             // refresh both at once - additive over the prior `{queue}` shape:
             // existing consumers keep reading `queue`, new ones read
@@ -9105,16 +9166,19 @@ async fn clear_queue_route(State(state): State<SharedState>) -> Result<Json<Valu
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            state
+                state_guard
                 .user_cleared_at
                 .store(now_secs, std::sync::atomic::Ordering::Relaxed);
-            let _ = state.event_tx.send(AppEvent::QueueUpdated);
+                let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
             Ok(Json(json!({
                 "queue": snapshot.queue,
                 "playback_state": snapshot.state,
             })))
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    refresh_dj_after_queue_change(state, "clear_queue_route").await;
+    Ok(response)
 }
 
 fn non_empty_or_default(value: Option<String>, fallback: &str) -> String {
@@ -12443,6 +12507,43 @@ async fn mark_armed_dj_transition_missed_if_needed(state: &SharedState) -> anyho
                 next_key.media_ref_kind.as_str(),
                 next_key.media_ref_id.as_str(),
                 "missed",
+            )
+        })?
+    };
+    if updated > 0 {
+        let state_guard = state.read().await;
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    }
+    Ok(())
+}
+
+async fn mark_armed_dj_transition_manual_seek_suppressed_if_needed(
+    state: &SharedState,
+) -> anyhow::Result<()> {
+    let pair = {
+        let state_guard = state.read().await;
+        if let Some(pair) = active_ephemeral_tidal_mix_dj_pair(&state_guard) {
+            pair
+        } else {
+            state_guard
+                .db
+                .with_conn(crate::playback::dj_lookahead::load_dj_lookahead_pair)?
+        }
+    };
+    let (Some(current), Some(next)) = (pair.current.as_ref(), pair.next.as_ref()) else {
+        return Ok(());
+    };
+    let current_key = current.profile_key();
+    let next_key = next.profile_key();
+    let updated = {
+        let state_guard = state.read().await;
+        state_guard.db.with_conn(|conn| {
+            queries::mark_dj_transition_manual_seek_suppressed_for_pair(
+                conn,
+                current_key.media_ref_kind.as_str(),
+                current_key.media_ref_id.as_str(),
+                next_key.media_ref_kind.as_str(),
+                next_key.media_ref_id.as_str(),
             )
         })?
     };

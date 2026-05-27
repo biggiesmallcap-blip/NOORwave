@@ -403,7 +403,7 @@ impl PlaybackSharedState {
         Arc::clone(&self.stopped)
     }
 
-    pub(crate) fn set_manual_seek_crossfade_suppression(&self, target_samples: u64) {
+    pub(crate) fn set_manual_seek_crossfade_suppression(&self, target_samples: u64) -> bool {
         let total = self.total_samples.load(Ordering::Relaxed);
         let threshold_samples = (NEAR_END_THRESHOLD_MS as u64)
             .saturating_mul(u64::from(self.device_sample_rate))
@@ -416,6 +416,7 @@ impl PlaybackSharedState {
                 || total.saturating_sub(target_samples) <= threshold_samples.max(1));
         self.suppress_crossfade_after_seek
             .store(suppress, Ordering::Relaxed);
+        suppress
     }
 
     /// Audio-thread-safe: publish the current decoded-sample count for
