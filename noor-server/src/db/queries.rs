@@ -7599,6 +7599,51 @@ pub fn update_dj_transition_outcome(
     Ok(())
 }
 
+pub fn replace_armed_dj_transition_event(
+    conn: &Connection,
+    id: i64,
+    template: &str,
+    program_json: &str,
+    rejected_alternatives_json: Option<&str>,
+    planner_version: &str,
+    fallback_reason: Option<&str>,
+    planned_start_ms: Option<i64>,
+    timing_source: Option<&str>,
+) -> Result<()> {
+    validate_dj_fallback_reason(fallback_reason)?;
+    validate_dj_timing_source(timing_source)?;
+    conn.execute(
+        "UPDATE dj_transition_events
+         SET template = ?2,
+             program_json = ?3,
+             rejected_alternatives_json = ?4,
+             planner_version = ?5,
+             fallback_reason = ?6,
+             planned_start_ms = ?7,
+             actual_start_ms = NULL,
+             timing_delta_ms = NULL,
+             timing_source = ?8,
+             runtime_rendered_dj_mixer = NULL,
+             runtime_renderer_status = NULL,
+             runtime_renderer_reason = NULL
+         WHERE id = ?1
+           AND timing_status = 'armed'
+           AND actual_start_ms IS NULL
+           AND outcome IS NULL",
+        params![
+            id,
+            template,
+            program_json,
+            rejected_alternatives_json,
+            planner_version,
+            fallback_reason,
+            planned_start_ms,
+            timing_source,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn update_dj_transition_fire_timing(
     conn: &Connection,
     id: i64,

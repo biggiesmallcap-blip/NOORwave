@@ -354,21 +354,36 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
     {
         return Ok(job);
     }
-    if let Some((existing_event_id, existing_program)) = engine
+    let existing_armed = engine
         .db()
-        .with_conn(|conn| latest_armed_dj_transition_event_for_pair(conn, current, next))?
-    {
-        let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
-        job = job.with_prepared_transition(PreparedTransitionProgram {
-            program: existing_program,
-            transition_event_id: Some(existing_event_id),
-            fire_ahead_ms,
-            queue_generation: pair.queue_generation,
-            current_queue_item_id: pair.current_queue_item_id,
-            next_queue_item_id: Some(next_queue_item_id),
-        });
-        return Ok(job);
-    }
+        .with_conn(|conn| latest_armed_dj_transition_event_for_pair(conn, current, next))?;
+    let replace_armed_event_id = if let Some(existing) = existing_armed.as_ref() {
+        if engine.db().with_conn(|conn| {
+            missing_profile_fallback_resolved(
+                conn,
+                current,
+                next,
+                existing.fallback_reason.as_deref(),
+            )
+        })? {
+            Some(existing.id)
+        } else {
+            let existing_event_id = existing.id;
+            let existing_program = existing.program.clone();
+            let fire_ahead_ms = engine.db().with_conn(dj_transition_fire_ahead_ms)?;
+            job = job.with_prepared_transition(PreparedTransitionProgram {
+                program: existing_program,
+                transition_event_id: Some(existing_event_id),
+                fire_ahead_ms,
+                queue_generation: pair.queue_generation,
+                current_queue_item_id: pair.current_queue_item_id,
+                next_queue_item_id: Some(next_queue_item_id),
+            });
+            return Ok(job);
+        }
+    } else {
+        None
+    };
     if let Some(plan) =
         engine.plan_transition_details(current, next, sample_rate.max(1), channels.max(1))?
     {
@@ -393,6 +408,7 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
         job.gapless = timing_plan.gapless;
         let transition_event_id = log_dj_transition_event(
             engine,
+            replace_armed_event_id,
             current,
             next,
             &planned_template,
@@ -412,16 +428,23 @@ pub fn attach_dj_transition_plan_for_pair_with_current_duration(
     Ok(job)
 }
 
+#[derive(Debug, Clone)]
+struct ArmedDjTransitionEvent {
+    id: i64,
+    program: noor_mix::TransitionProgram,
+    fallback_reason: Option<String>,
+}
+
 fn latest_armed_dj_transition_event_for_pair(
     conn: &Connection,
     current: &DjMediaRef,
     next: &DjMediaRef,
-) -> Result<Option<(i64, noor_mix::TransitionProgram)>> {
+) -> Result<Option<ArmedDjTransitionEvent>> {
     let current_key = current.profile_key();
     let next_key = next.profile_key();
     let row = conn
         .query_row(
-            "SELECT id, program_json
+            "SELECT id, program_json, fallback_reason
          FROM dj_transition_events
          WHERE from_media_ref_kind = ?1
            AND from_media_ref_id = ?2
@@ -438,14 +461,40 @@ fn latest_armed_dj_transition_event_for_pair(
                 next_key.media_ref_kind,
                 next_key.media_ref_id,
             ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((id, program_json)) = row else {
+    let Some((id, program_json, fallback_reason)) = row else {
         return Ok(None);
     };
     let program = serde_json::from_str(&program_json)?;
-    Ok(Some((id, program)))
+    Ok(Some(ArmedDjTransitionEvent {
+        id,
+        program,
+        fallback_reason,
+    }))
+}
+
+fn missing_profile_fallback_resolved(
+    conn: &Connection,
+    current: &DjMediaRef,
+    next: &DjMediaRef,
+    fallback_reason: Option<&str>,
+) -> Result<bool> {
+    let Some(media_ref) = (match fallback_reason {
+        Some("current_profile_missing") => Some(current),
+        Some("next_profile_missing") => Some(next),
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    Ok(queries::get_audio_dj_profile(conn, &media_ref.profile_key())?.is_some())
 }
 
 const DJ_FIRE_AHEAD_WINDOW: i64 = 20;
@@ -870,6 +919,7 @@ fn preserve_planner_sync_fields(
 
 fn log_dj_transition_event(
     engine: &DjEngine,
+    replace_armed_event_id: Option<i64>,
     current: &DjMediaRef,
     next: &DjMediaRef,
     planned_template: &str,
@@ -881,23 +931,38 @@ fn log_dj_transition_event(
     let program_json = serde_json::to_string(&plan.program)?;
     let rejected_json = serde_json::to_string(&plan.rejected_alternatives)?;
     engine.db().with_conn(|conn| {
-        queries::insert_dj_transition_event(
-            conn,
-            current.track_id(),
-            next.track_id(),
-            Some(current_key.media_ref_kind.as_str()),
-            Some(current_key.media_ref_id.as_str()),
-            Some(next_key.media_ref_kind.as_str()),
-            Some(next_key.media_ref_id.as_str()),
-            planned_template,
-            program_json.as_str(),
-            Some(rejected_json.as_str()),
-            plan.planner_version,
-            plan.fallback_reason,
-            timing_plan.planned_start_ms,
-            Some(timing_plan.timing_source),
-            Some("armed"),
-        )
+        if let Some(id) = replace_armed_event_id {
+            queries::replace_armed_dj_transition_event(
+                conn,
+                id,
+                planned_template,
+                program_json.as_str(),
+                Some(rejected_json.as_str()),
+                plan.planner_version,
+                plan.fallback_reason,
+                timing_plan.planned_start_ms,
+                Some(timing_plan.timing_source),
+            )?;
+            Ok(id)
+        } else {
+            queries::insert_dj_transition_event(
+                conn,
+                current.track_id(),
+                next.track_id(),
+                Some(current_key.media_ref_kind.as_str()),
+                Some(current_key.media_ref_id.as_str()),
+                Some(next_key.media_ref_kind.as_str()),
+                Some(next_key.media_ref_id.as_str()),
+                planned_template,
+                program_json.as_str(),
+                Some(rejected_json.as_str()),
+                plan.planner_version,
+                plan.fallback_reason,
+                timing_plan.planned_start_ms,
+                Some(timing_plan.timing_source),
+                Some("armed"),
+            )
+        }
     })
 }
 
@@ -2506,6 +2571,56 @@ mod tests {
 
             assert_eq!(second.transition_event_id, first.transition_event_id);
             assert_eq!(event_count(&db), 1);
+        }
+
+        #[test]
+        fn missing_profile_armed_event_replans_when_profile_arrives() {
+            let db = db_with_pair();
+            db.with_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM audio_dj_profiles
+                     WHERE media_ref_kind = 'tidal_track' AND media_ref_id = '2'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("remove next profile");
+
+            let fallback = plan(&db);
+            let fallback_id = fallback.transition_event_id.expect("fallback event");
+            assert_eq!(fallback.program.template, "SafeCrossfade");
+            let fallback_reason: Option<String> = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT fallback_reason FROM dj_transition_events WHERE id = ?1",
+                        params![fallback_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("fallback reason");
+            assert_eq!(fallback_reason.as_deref(), Some("next_profile_missing"));
+
+            db.with_conn(|conn| seed_profile(conn, "tidal_track", "2", Some(2)))
+                .expect("seed next profile");
+            let replanned = plan(&db);
+
+            assert_eq!(replanned.transition_event_id, Some(fallback_id));
+            assert_eq!(replanned.program.template, "BassSwap16");
+            assert_eq!(event_count(&db), 1);
+            let row: (String, Option<String>) = db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT template, fallback_reason
+                         FROM dj_transition_events WHERE id = ?1",
+                        params![fallback_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .expect("replanned row");
+            assert_eq!(row.0, "BassSwap16");
+            assert_eq!(row.1, None);
         }
 
         #[test]

@@ -166,6 +166,14 @@ impl StreamResolveError {
     pub fn is_stream_rejected(&self) -> bool {
         matches!(self, Self::StreamRejected { .. })
     }
+
+    pub fn is_asset_not_ready(&self) -> bool {
+        match self {
+            Self::StreamRejected { message } => asset_not_ready_body(message),
+            Self::UpstreamHttp { body, .. } => asset_not_ready_body(body),
+            _ => false,
+        }
+    }
 }
 
 fn session_expired_body(body: &str) -> bool {
@@ -969,6 +977,18 @@ mod tests {
         };
         assert!(err.is_stream_rejected());
         assert!(!StreamResolveError::MissingManifest.is_stream_rejected());
+    }
+
+    #[test]
+    fn exposes_asset_not_ready_stream_rejections() {
+        let err = StreamResolveError::StreamRejected {
+            message:
+                r#"TIDAL rejected playback request with 401 Unauthorized: {"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+                    .to_string(),
+        };
+
+        assert!(err.is_stream_rejected());
+        assert!(err.is_asset_not_ready());
     }
 
     #[test]

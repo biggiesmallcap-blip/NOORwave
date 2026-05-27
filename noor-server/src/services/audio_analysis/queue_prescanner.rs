@@ -45,6 +45,7 @@ enum PrescanFailureClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrescanFailureReason {
+    AssetNotReady,
     StreamRejected,
     ResolveOkSegmentTimeout,
     ResolveOkSegmentFetchFailed,
@@ -54,6 +55,7 @@ enum PrescanFailureReason {
 impl PrescanFailureReason {
     fn as_str(self) -> &'static str {
         match self {
+            PrescanFailureReason::AssetNotReady => "asset_not_ready",
             PrescanFailureReason::StreamRejected => "stream_rejected",
             PrescanFailureReason::ResolveOkSegmentTimeout => "resolve_ok_segment_timeout",
             PrescanFailureReason::ResolveOkSegmentFetchFailed => "resolve_ok_segment_fetch_failed",
@@ -97,9 +99,17 @@ fn cache_prescan_failure(track_id: i64, class: PrescanFailureClass, reason: Pres
 
 fn classify_stream_resolve_for_prescan(
     error: &crate::services::tidal::stream::StreamResolveError,
-) -> Option<PrescanFailureClass> {
-    if error.is_stream_rejected() {
-        Some(PrescanFailureClass::PermanentSkip)
+) -> Option<(PrescanFailureClass, PrescanFailureReason)> {
+    if error.is_asset_not_ready() {
+        Some((
+            PrescanFailureClass::TransientFailure,
+            PrescanFailureReason::AssetNotReady,
+        ))
+    } else if error.is_stream_rejected() {
+        Some((
+            PrescanFailureClass::PermanentSkip,
+            PrescanFailureReason::StreamRejected,
+        ))
     } else {
         None
     }
@@ -334,13 +344,14 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
     {
         Ok(stream_info) => stream_info,
         Err(error) => {
-            if let Some(class) = classify_stream_resolve_for_prescan(&error) {
-                cache_prescan_failure(track_id, class, PrescanFailureReason::StreamRejected);
+            if let Some((class, reason)) = classify_stream_resolve_for_prescan(&error) {
+                cache_prescan_failure(track_id, class, reason);
                 tracing::info!(
                     track_id,
                     tidal_id,
+                    reason = reason.as_str(),
                     error = %error,
-                    "prescanner skip: TIDAL stream rejected"
+                    "prescanner skip: TIDAL stream unavailable"
                 );
                 return Ok(false);
             }
@@ -767,14 +778,40 @@ mod tests {
             message: "TIDAL rejected playback request with 401 Unauthorized".to_string(),
         };
 
-        let class = classify_stream_resolve_for_prescan(&error).expect("classified");
-        cache_prescan_failure(31985, class, PrescanFailureReason::StreamRejected);
+        let (class, reason) = classify_stream_resolve_for_prescan(&error).expect("classified");
+        cache_prescan_failure(31985, class, reason);
 
         assert_eq!(class, PrescanFailureClass::PermanentSkip);
+        assert_eq!(reason, PrescanFailureReason::StreamRejected);
         assert!(prescan_negative_cache_contains(31985));
         assert_eq!(
             cached_prescan_failure_class(31985),
             Some(PrescanFailureClass::PermanentSkip)
+        );
+        clear_prescan_negative_cache_for_tests();
+    }
+
+    #[test]
+    fn asset_not_ready_is_cached_as_transient_retrying() {
+        let _guard = prescan_cache_test_guard();
+        clear_prescan_negative_cache_for_tests();
+        let error = StreamResolveError::StreamRejected {
+            message:
+                r#"TIDAL rejected playback request with 401 Unauthorized: {"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+                    .to_string(),
+        };
+
+        let (class, reason) = classify_stream_resolve_for_prescan(&error).expect("classified");
+        cache_prescan_failure(31987, class, reason);
+
+        assert_eq!(class, PrescanFailureClass::TransientFailure);
+        assert_eq!(reason, PrescanFailureReason::AssetNotReady);
+        assert_eq!(
+            prescan_status_for_track(31987),
+            Some(PrescanStatusSnapshot {
+                status: "retrying",
+                reason: "asset_not_ready"
+            })
         );
         clear_prescan_negative_cache_for_tests();
     }

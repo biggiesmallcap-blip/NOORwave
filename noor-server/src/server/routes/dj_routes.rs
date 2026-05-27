@@ -1078,16 +1078,25 @@ fn profile_rebuild_failure_status(error: &anyhow::Error) -> &'static str {
 }
 
 fn profile_rebuild_error_is_retryable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
     message.contains("DASH stream prebuffer failed")
         || message.contains("DASH segment")
-        || message.contains("timed out")
-        || message.contains("request failed")
-        || message.contains("chunk error")
-        || message.contains("returned error status")
+        || lower.contains("asset is not ready for playback")
+        || lower.contains("\"substatus\":4005")
+        || lower.contains("timed out")
+        || lower.contains("request failed")
+        || lower.contains("chunk error")
+        || lower.contains("returned error status")
 }
 
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
     if status == "retrying" {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("asset is not ready for playback")
+            || message.contains("\"substatus\":4005")
+        {
+            return "TIDAL asset is not ready. Retrying analysis.".to_string();
+        }
         return "DASH stream prebuffer failed. Retrying analysis.".to_string();
     }
     let message = error.to_string();
@@ -3035,6 +3044,19 @@ mod tests {
         assert_eq!(
             profile_rebuild_error_message(&error, "retrying"),
             "DASH stream prebuffer failed. Retrying analysis."
+        );
+    }
+
+    #[test]
+    fn asset_not_ready_profile_rebuild_errors_are_retrying() {
+        let error = anyhow::Error::msg(
+            r#"TIDAL playback request was rejected: TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#,
+        );
+
+        assert_eq!(profile_rebuild_failure_status(&error), "retrying");
+        assert_eq!(
+            profile_rebuild_error_message(&error, "retrying"),
+            "TIDAL asset is not ready. Retrying analysis."
         );
     }
 
