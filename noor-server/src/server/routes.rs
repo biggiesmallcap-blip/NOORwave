@@ -66,6 +66,39 @@ async fn queue_missing_dj_profiles_after_pair_change(state: SharedState, context
     }
 }
 
+fn active_dj_lookahead_start_for_state(
+    state: &crate::AppState,
+) -> Option<player::DjLookaheadStart> {
+    active_ephemeral_tidal_mix_dj_pair(state)
+        .and_then(|pair| {
+            player::dj_lookahead_start_from_pair(pair, EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+        })
+        .or_else(|| {
+            state
+                .db
+                .with_conn(|conn| {
+                    player::build_dj_lookahead_start(conn, EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+                })
+                .ok()
+                .flatten()
+        })
+}
+
+async fn start_dj_lookahead_and_queue_profiles_after_pair_change(
+    state: SharedState,
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    context: &'static str,
+) {
+    let lookahead = {
+        let state_guard = state.read().await;
+        active_dj_lookahead_start_for_state(&state_guard)
+    };
+    if let Some(lookahead) = lookahead {
+        let _ = lookahead.dispatch(&handle);
+    }
+    queue_missing_dj_profiles_after_pair_change(state, context).await;
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     sort_by: Option<String>,
@@ -11224,6 +11257,13 @@ fn spawn_playback_runtime_listener(
                         .event_tx
                         .send(AppEvent::TrackChanged { track_id });
                     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                    drop(state_guard);
+                    start_dj_lookahead_and_queue_profiles_after_pair_change(
+                        state.clone(),
+                        handle.clone(),
+                        "playback_started",
+                    )
+                    .await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. })
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. })
@@ -14064,6 +14104,33 @@ mod tests {
         assert_eq!(body["next"]["media_ref_kind"], "tidal_track");
         assert_eq!(body["next"]["media_ref_id"], "77002");
         assert!(next > 0);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn persisted_dj_enabled_builds_current_pair_lookahead_without_toggle() {
+        let (db, db_path) = fresh_migrated_db();
+        seed_dj_queue_pair(&db);
+        db.with_conn(|conn| queries::set_dj_engine_enabled(conn, true))
+            .expect("enable dj");
+        let state = fresh_test_state(db);
+
+        let start = active_dj_lookahead_start_for_state(&state).expect("lookahead start");
+
+        assert_eq!(
+            start.current,
+            Some(crate::playback::dj_lookahead::DjMediaRef::TidalTrack {
+                tidal_id: 77001,
+                track_id: Some(7001),
+            })
+        );
+        assert_eq!(
+            start.next,
+            Some(crate::playback::dj_lookahead::DjMediaRef::TidalTrack {
+                tidal_id: 77002,
+                track_id: Some(7002),
+            })
+        );
         let _ = std::fs::remove_file(db_path);
     }
 
