@@ -6,12 +6,14 @@ describe('library recent tracks contract', () => {
 		const source = readFileSync('src/routes/library/+page.svelte', 'utf8');
 
 		expect(source).toContain("const RECENT_TRACK_LIMIT = 10;");
-		expect(source).toContain('let recentTracks = $state<Track[]>([]);');
+		expect(source).toContain('recentTracks: [] as CachedTrack[],');
+		expect(source).toContain('let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);');
 		expect(source).toContain('async function loadRecentTracks()');
 		expect(source).toContain(
 			"api.getTracks('last_played_at', 'desc', RECENT_TRACK_LIMIT, 0, true, false)",
 		);
 		expect(source).toContain('filter((track) => track.last_played_at)');
+		expect(source).toContain('homePanelCandidateCache.recentTracks = recentTracks;');
 		expect(source).not.toContain('let recentTracks = $derived.by(() =>');
 	});
 
