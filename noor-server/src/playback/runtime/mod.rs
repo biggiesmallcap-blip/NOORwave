@@ -7,6 +7,7 @@ use crate::playback::output::wasapi_exclusive::{
 };
 use crate::playback::player::{PreparedPlaybackJob, PreparedTransitionProgram};
 use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
+use crate::services::tidal::stream::{StreamInfo, StreamRequest};
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -29,12 +30,18 @@ pub(crate) use shared::PlaybackSharedState;
 #[cfg(target_os = "windows")]
 pub(crate) use shared::fill_f32_from_shared;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tracing::{debug, error, info, warn};
 
 const DJ_MIXER_DEFAULT_MAX_BLOCK_FRAMES: usize = 8192;
+
+pub type RuntimeStreamResolver = Arc<
+    dyn Fn(StreamRequest) -> Pin<Box<dyn Future<Output = Result<StreamInfo>> + Send>> + Send + Sync,
+>;
 
 /// Pure decision helper for the SeekTo handler. Moved out of `server::routes`
 /// (r6 fix A: keep the playback runtime free of HTTP-layer dependencies). The
@@ -76,10 +83,11 @@ pub(crate) fn evaluate_seek_decision(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlaybackRuntimeConfig {
     pub http_client: reqwest::Client,
     pub access_token: String,
+    pub stream_resolver: Option<RuntimeStreamResolver>,
     /// Channel to send mono audio samples for passive DSP analysis.
     /// (track_id, mono_samples, sample_rate)
     pub analysis_tx: Option<tokio::sync::mpsc::UnboundedSender<(i64, Vec<f32>, u32)>>,
@@ -97,11 +105,30 @@ impl PlaybackRuntimeConfig {
         Self {
             http_client,
             access_token: access_token.into(),
+            stream_resolver: None,
             analysis_tx,
             dj_analysis_tx: None,
             dj_engine_enabled: false,
             dj_analysis_only: false,
         }
+    }
+
+    pub fn with_stream_resolver(mut self, resolver: RuntimeStreamResolver) -> Self {
+        self.stream_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) async fn resolve_stream(&self, request: StreamRequest) -> Result<StreamInfo> {
+        if let Some(resolver) = self.stream_resolver.as_ref() {
+            return resolver(request).await;
+        }
+        crate::services::tidal::stream::resolve_stream(
+            &self.http_client,
+            &self.access_token,
+            &request,
+        )
+        .await
+        .map_err(anyhow::Error::from)
     }
 
     pub fn with_dj_analysis(
@@ -2887,6 +2914,37 @@ mod tests {
         Arc,
         atomic::{AtomicU32, AtomicU64},
     };
+
+    #[test]
+    fn runtime_stream_resolver_overrides_static_access_token() {
+        let resolver: RuntimeStreamResolver = Arc::new(|request| {
+            Box::pin(async move {
+                Ok(StreamInfo {
+                    url: "https://audio.example.test/init.mp4".to_string(),
+                    segment_urls: vec![],
+                    segment_offsets_ms: vec![],
+                    track_id: request.track_id,
+                    audio_quality: request.audio_quality,
+                    codec: "flac".to_string(),
+                    sample_rate: Some(44_100),
+                    bit_depth: Some(16),
+                })
+            })
+        });
+        let config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "expired-token", None)
+            .with_stream_resolver(resolver);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let info = rt
+            .block_on(config.resolve_stream(StreamRequest::new(42, "LOW")))
+            .expect("stream info");
+
+        assert_eq!(info.track_id, 42);
+        assert_eq!(info.audio_quality, "LOW");
+    }
 
     mod dj_lookahead {
         use super::*;
