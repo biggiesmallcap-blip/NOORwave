@@ -156,9 +156,40 @@ fn rejected_alternatives_for(selected_template: &str) -> Vec<RejectedTransitionA
         .map(|(template, score)| RejectedTransitionAlternative {
             template,
             score,
-            reason: "not_selected",
+            reason: rejected_alternative_reason(selected_template, template),
         })
         .collect()
+}
+
+fn rejected_alternative_reason(
+    selected_template: &str,
+    alternative_template: &str,
+) -> &'static str {
+    match selected_template {
+        "DropTease16" => "drop_tease_selected_for_bold_drop_setup",
+        "FilterSweep" => match alternative_template {
+            "BassSwap32" | "BassSwap16" => "bold_intent_preferred_filter_sweep",
+            "LongHarmonicBlend" => "bold_intent_preferred_energy_transition",
+            _ => "lower_ranked_than_filter_sweep",
+        },
+        "BassSwap32" => match alternative_template {
+            "BassSwap16" => "bassswap32_selected_for_longer_phrase_handoff",
+            "LongHarmonicBlend" => "bass_swap_selected_over_harmonic_blend",
+            _ => "lower_ranked_than_bassswap32",
+        },
+        "BassSwap16" => match alternative_template {
+            "BassSwap32" => "insufficient_phrase_depth_for_bassswap32",
+            "LongHarmonicBlend" => "bass_swap_selected_over_harmonic_blend",
+            _ => "lower_ranked_than_bassswap16",
+        },
+        "LongHarmonicBlend" => match alternative_template {
+            "BassSwap32" | "BassSwap16" => "harmonic_fit_preferred_over_bass_swap",
+            _ => "lower_ranked_than_harmonic_blend",
+        },
+        "SlamCut" => "large_tempo_delta_preferred_slam_cut",
+        "SafeCrossfade" => "safety_fallback_selected",
+        _ => "not_selected",
+    }
 }
 
 fn runtime_safety_decision(outgoing: &DjProfile, incoming: &DjProfile) -> RuntimeSafetyDecision {
@@ -555,6 +586,38 @@ mod tests {
 
         assert_eq!(program.template, "FilterSweep");
         program.validate().expect("valid");
+    }
+
+    #[test]
+    fn bold_policy_rejected_alternatives_explain_filter_sweep_choice() {
+        let db = db();
+        enable(&db);
+        db.with_conn(|conn| queries::set_dj_global_policy(conn, "bold", "neutral"))
+            .expect("set bold policy");
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        let engine = DjEngine::new(db);
+
+        let plan = engine
+            .plan_transition_details(
+                &ref_for("library_track", 1),
+                &ref_for("library_track", 2),
+                48_000,
+                2,
+            )
+            .expect("plan result")
+            .expect("plan");
+
+        assert_eq!(plan.program.template, "FilterSweep");
+        assert_eq!(plan.rejected_alternatives[0].template, "BassSwap32");
+        assert_eq!(
+            plan.rejected_alternatives[0].reason,
+            "bold_intent_preferred_filter_sweep"
+        );
+        assert_eq!(
+            plan.rejected_alternatives[2].reason,
+            "bold_intent_preferred_energy_transition"
+        );
     }
 
     #[test]

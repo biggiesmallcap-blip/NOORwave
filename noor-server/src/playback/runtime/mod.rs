@@ -627,6 +627,19 @@ impl RuntimeDjLookahead {
     }
 }
 
+fn runtime_renderer_failure_reason(
+    state: &PlaybackRuntimeLoopState,
+    reason: DjRuntimeRendererReason,
+) -> DjRuntimeRendererReason {
+    if reason == DjRuntimeRendererReason::PreparedMixerMissing {
+        state
+            .last_dj_renderer_failure
+            .unwrap_or(DjRuntimeRendererReason::PreparedMixerMissing)
+    } else {
+        reason
+    }
+}
+
 fn start_dj_lookahead_in_state(
     state: &mut PlaybackRuntimeLoopState,
     current: Option<DjMediaRef>,
@@ -1543,8 +1556,10 @@ fn run_runtime_loop(
                                     match install_prepared_handoff_mixer_buffer(&mut state) {
                                         Ok(()) => DjRuntimeRendererOutcome::rendered_handoff(),
                                         Err(reason) => {
-                                            state.last_dj_renderer_failure = Some(reason);
-                                            DjRuntimeRendererOutcome::legacy_overlap(reason)
+                                            let failure =
+                                                runtime_renderer_failure_reason(&state, reason);
+                                            state.last_dj_renderer_failure = Some(failure);
+                                            DjRuntimeRendererOutcome::legacy_overlap(failure)
                                         }
                                     };
                                 promote_next_to_active(
@@ -1603,8 +1618,10 @@ fn run_runtime_loop(
                                     match install_prepared_handoff_mixer_buffer(&mut state) {
                                         Ok(()) => DjRuntimeRendererOutcome::rendered_handoff(),
                                         Err(reason) => {
-                                            state.last_dj_renderer_failure = Some(reason);
-                                            DjRuntimeRendererOutcome::legacy_overlap(reason)
+                                            let failure =
+                                                runtime_renderer_failure_reason(&state, reason);
+                                            state.last_dj_renderer_failure = Some(failure);
+                                            DjRuntimeRendererOutcome::legacy_overlap(failure)
                                         }
                                     };
                                 promote_next_to_active(
@@ -3711,6 +3728,21 @@ mod tests {
             }
             other => panic!("expected finished event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_overlap_uses_last_prepare_failure_when_mixer_missing() {
+        let mut state = test_runtime_loop_state();
+        state.last_dj_renderer_failure = Some(DjRuntimeRendererReason::NextDeckNotDecoded);
+
+        assert_eq!(
+            runtime_renderer_failure_reason(&state, DjRuntimeRendererReason::PreparedMixerMissing),
+            DjRuntimeRendererReason::NextDeckNotDecoded
+        );
+        assert_eq!(
+            runtime_renderer_failure_reason(&state, DjRuntimeRendererReason::BufferLockFailed),
+            DjRuntimeRendererReason::BufferLockFailed
+        );
     }
 
     #[test]
