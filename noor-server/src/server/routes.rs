@@ -7407,6 +7407,60 @@ enum TidalPlaybackError {
     StreamResolve(tidal_stream::StreamResolveError),
 }
 
+fn runtime_stream_resolver(state: SharedState) -> playback_runtime::RuntimeStreamResolver {
+    let state = Arc::downgrade(&state);
+    Arc::new(move |request| {
+        let state = state.clone();
+        Box::pin(async move {
+            let state = state
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("server state is no longer available"))?;
+            resolve_tidal_runtime_stream(&state, request).await
+        })
+    })
+}
+
+async fn resolve_tidal_runtime_stream(
+    state: &SharedState,
+    request: tidal_stream::StreamRequest,
+) -> anyhow::Result<tidal_stream::StreamInfo> {
+    let tokens = {
+        let state_guard = state.read().await;
+        state_guard.tidal_tokens.clone()
+    }
+    .ok_or_else(|| anyhow::anyhow!("TIDAL is not connected."))?;
+
+    let http = {
+        let state_guard = state.read().await;
+        state_guard.http_client.clone()
+    };
+
+    match tidal_stream::resolve_stream(&http, &tokens.access_token, &request).await {
+        Ok(info) => Ok(info),
+        Err(error) if error.is_session_expired() => {
+            tracing::warn!(
+                target: "noor.playback.tidal",
+                event = "runtime_stream_session_expired",
+                track_id = request.track_id,
+                error = %error,
+                "TIDAL session expired in playback decoder; refreshing session"
+            );
+            let refreshed = recover_tidal_session(state, &http, &tokens).await?;
+            match tidal_stream::resolve_stream(&http, &refreshed.access_token, &request).await {
+                Ok(info) => Ok(info),
+                Err(retry_error) if retry_error.is_session_expired() => {
+                    let _ = clear_tidal_session(state).await;
+                    Err(anyhow::anyhow!(
+                        "TIDAL session expired after refresh while resolving runtime stream: {retry_error}"
+                    ))
+                }
+                Err(retry_error) => Err(anyhow::Error::from(retry_error)),
+            }
+        }
+        Err(error) => Err(anyhow::Error::from(error)),
+    }
+}
+
 async fn resolve_tidal_playback_stream(
     state: &SharedState,
     track: &crate::db::models::Track,
@@ -11067,6 +11121,7 @@ async fn ensure_playback_runtime_for_track(
             access_token.clone(),
             state_guard.analysis_tx.clone(),
         )
+        .with_stream_resolver(runtime_stream_resolver(state.clone()))
         .with_dj_analysis(dj_engine_enabled, state_guard.dj_analysis_tx.clone());
         let handle = playback_runtime::spawn_runtime(config).map_err(|error| {
             let message = format!("Failed to start host audio runtime: {error}");

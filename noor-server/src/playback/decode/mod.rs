@@ -11,7 +11,6 @@ use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::DjAnalysisJob;
-use crate::services::tidal::stream::resolve_stream;
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt as _;
 use std::future::Future;
@@ -219,9 +218,7 @@ pub(crate) fn decode_and_buffer_job(
                 return Ok(());
             }
 
-            let stream_info = rt.block_on(async {
-                resolve_stream(&config.http_client, &config.access_token, &request).await
-            })?;
+            let stream_info = rt.block_on(config.resolve_stream(request.clone()))?;
             debug!(
                 "TIDAL runtime stream resolved: track_id={}, quality={}, codec={}, sample_rate={:?}, bit_depth={:?}, dash_segments={}, start_from_segment={}, start_from_offset_ms={}",
                 shared.track_id,
