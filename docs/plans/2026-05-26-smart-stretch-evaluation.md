@@ -160,3 +160,24 @@ Key Signalsmith 90s rows:
 - `1.080`: `render_ms=17956`, `max_phase_drift_ms=0.896`, `peak=0.864`, `passed=true`
 
 The 5 percent and 8 percent drift gates pass, output is finite, length error is 0 frames, and peaks stay below `0.98`. The 90s render-time gate fails because the target is under `500 ms`.
+
+Release-mode benchmark was then run with:
+
+```powershell
+cargo test -p noor-mix --release --features signalsmith-eval smart_stretch_evaluation_baseline_benchmark -- --ignored --nocapture
+```
+
+Release mode is much faster and confirms Signalsmith is still a serious prepared-buffer candidate, but it does not pass the current runtime gate.
+
+Key release-mode Signalsmith rows:
+
+- 30s `1.030`: `render_ms=494`, `max_phase_drift_ms=0.604`, `peak=0.885`, `passed=true`
+- 30s `1.050`: `render_ms=487`, `max_phase_drift_ms=0.750`, `peak=0.869`, `passed=true`
+- 30s `1.080`: `render_ms=467`, `max_phase_drift_ms=0.833`, `peak=0.861`, `passed=true`
+- 90s `0.950`: `render_ms=1571`, `max_phase_drift_ms=0.771`, `peak=0.917`, `passed=true`
+- 90s `1.050`: `render_ms=1448`, `max_phase_drift_ms=0.750`, `peak=0.869`, `passed=true`
+- 90s `0.920`: `render_ms=1621`, `max_phase_drift_ms=0.833`, `peak=0.922`, `passed=true`
+- 90s `1.080`: `render_ms=1390`, `max_phase_drift_ms=0.896`, `peak=0.864`, `passed=true`
+- 180s `1.080`: `render_ms=2753`, `max_phase_drift_ms=0.896`, `peak=0.864`, `passed=true`
+
+Decision after release benchmark: keep runtime playback at the 3 percent direct nudge. Do not wire wider runtime smart stretch yet. A later prepared-buffer plan may use shorter windows, earlier background preparation, or release-only worker timing, but it needs a new gate because the original 90s-under-500ms gate failed by roughly 3x.

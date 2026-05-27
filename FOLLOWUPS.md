@@ -18,11 +18,11 @@ and avoids obvious pitch movement. The offline metric harness and optional
 `signalsmith-eval` renderer now exist in `noor-mix::stretch_eval`; the feature
 compile gate passed after installing LLVM 22.1.6 and setting
 `LIBCLANG_PATH=C:\Program Files\LLVM\bin`. The documented fixture matrix now
-runs, but the debug benchmark fails the current runtime decision gate because
-90s Signalsmith renders take roughly 18 to 24 seconds, far above the 500 ms
-target. Keep runtime at the existing 3 percent nudge until release-mode or
-prepared-buffer evaluation proves the render-time gate. Do not use Rubber Band
-without license review.
+runs. Release mode brings 90s Signalsmith renders down to roughly 1.4 to 1.7
+seconds with good drift, finite, length, and peak metrics, but that still fails
+the current 500 ms runtime gate by about 3x. Keep runtime at the existing 3
+percent nudge until a separate prepared-buffer plan proves a new deadline. Do
+not use Rubber Band without license review.
 - Spawned by: DJ beat-sync design planning, 2026-05-26
 
 ### refactor(db/signals): extract analytics signals from db/queries.rs
