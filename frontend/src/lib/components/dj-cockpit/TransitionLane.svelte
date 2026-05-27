@@ -184,19 +184,22 @@
 	function formatRejectedAlternative(
 		alternative: DjStatusResponse['rejected_alternatives'][number],
 	) {
-		return `${alternative.template} ${alternative.score.toFixed(2)} - ${formatRejectedReason(alternative.reason)}`;
+		return `${alternative.template} - ${formatRejectedReason(alternative.reason)}`;
 	}
 
 	function formatRejectedReason(reason: string) {
 		const labels: Record<string, string> = {
-			bass_swap_selected_over_harmonic_blend: 'Bass swap fit the energy handoff better',
-			bassswap32_selected_for_longer_phrase_handoff: 'Longer bass swap fit the phrase depth',
-			bold_intent_preferred_energy_transition: 'Bold mode preferred a higher energy move',
-			bold_intent_preferred_filter_sweep: 'Bold mode preferred FilterSweep for this phrase match',
-			drop_tease_selected_for_bold_drop_setup: 'DropTease matched the bold drop setup',
-			harmonic_fit_preferred_over_bass_swap: 'Harmonic blend fit the key match better',
+			bass_swap_selected_over_harmonic_blend: 'Planner selected bass swap over harmonic blend',
+			bassswap32_selected_for_longer_phrase_handoff:
+				'Planner selected BassSwap32 over the shorter bass swap',
+			bold_intent_preferred_energy_transition:
+				'Bold mode selected a higher energy transition',
+			bold_intent_preferred_filter_sweep: 'Bold mode selected FilterSweep',
+			drop_tease_selected_for_bold_drop_setup: 'Bold mode selected DropTease',
+			harmonic_fit_preferred_over_bass_swap:
+				'Planner selected harmonic blend over bass swap',
 			insufficient_phrase_depth_for_bassswap32: 'Not enough phrase depth for BassSwap32',
-			large_tempo_delta_preferred_slam_cut: 'Tempo gap favored SlamCut',
+			large_tempo_delta_preferred_slam_cut: 'Planner selected SlamCut for the tempo gap',
 			lower_ranked_than_bassswap16: 'Lower ranked than BassSwap16',
 			lower_ranked_than_bassswap32: 'Lower ranked than BassSwap32',
 			lower_ranked_than_filter_sweep: 'Lower ranked than FilterSweep',

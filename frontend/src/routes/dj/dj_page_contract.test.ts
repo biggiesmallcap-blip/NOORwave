@@ -113,6 +113,9 @@ describe('dj cockpit page contract', () => {
 		expect(transitionLane).toContain('Decision');
 		expect(transitionLane).toContain('Rejected alternatives');
 		expect(transitionLane).toContain('formatRejectedAlternative');
+		expect(transitionLane).toContain('formatRejectedReason');
+		expect(transitionLane).toContain('Bold mode selected FilterSweep');
+		expect(transitionLane).not.toContain('alternative.score');
 		expect(transitionLane).toContain('Avg delta');
 		expect(transitionLane).toContain('Avg abs');
 		expect(transitionLane).toContain('Missed');
