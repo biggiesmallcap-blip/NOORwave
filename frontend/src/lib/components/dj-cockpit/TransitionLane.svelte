@@ -120,6 +120,59 @@
 		return value ? 'yes' : 'no';
 	}
 
+	function runtimeReasonLabel(reason: string | null | undefined) {
+		switch (reason) {
+			case 'next_decode_late_at_fire':
+				return 'Decode late';
+			case 'next_deck_missing_at_fire':
+				return 'Next deck missing';
+			case 'transition_plan_missing_at_fire':
+				return 'Plan missing';
+			case 'sync_window_not_signaled':
+				return 'Sync missed';
+			case 'prepared_mixer_missing':
+				return 'Prepared mixer missing';
+			case 'lookahead_pair_mismatch':
+				return 'Lookahead pair mismatch';
+			case 'program_not_mixer_renderable':
+				return 'Program not mixer renderable';
+			case 'active_deck_not_decoded':
+				return 'Active deck not decoded';
+			case 'next_deck_not_decoded':
+				return 'Next deck not decoded';
+			case 'mixer_rejected':
+				return 'Mixer rejected';
+			case 'active_track_changed':
+				return 'Active track changed';
+			case 'next_track_changed':
+				return 'Next track changed';
+			case 'render_buffer_failed':
+				return 'Render buffer failed';
+			case 'buffer_lock_failed':
+				return 'Buffer lock failed';
+			case 'dj_disabled':
+				return 'DJ disabled';
+			case 'none':
+			case null:
+			case undefined:
+				return 'none';
+			default:
+				return reason;
+		}
+	}
+
+	function formatRuntimeReason(reason: string | null | undefined) {
+		const label = runtimeReasonLabel(reason);
+		if (!reason || reason === 'none' || label === reason) {
+			return label;
+		}
+		return `${label} (${reason})`;
+	}
+
+	function hasRuntimeCause(reason: string | null | undefined) {
+		return Boolean(reason && reason !== 'none');
+	}
+
 	function formatActualFire(
 		timingStatus: string | null | undefined,
 		actualStartMs: number | null | undefined,
@@ -325,7 +378,7 @@
 				</div>
 				<div>
 					<dt>Runtime reason</dt>
-					<dd>{status?.runtime_renderer_reason ?? 'none'}</dd>
+					<dd>{formatRuntimeReason(status?.runtime_renderer_reason)}</dd>
 				</div>
 				{#if overlayDetails}
 					<div>
@@ -435,6 +488,17 @@
 								<div>
 									<dt>Fire delta</dt>
 									<dd>{formatEventDelta(event)}</dd>
+								</div>
+								<div class="timing-history-cause">
+									<dt>Cause</dt>
+									<dd>
+										<span
+											class="cause-pill"
+											class:cause-pill-alert={hasRuntimeCause(event.runtime_renderer_reason)}
+										>
+											{runtimeReasonLabel(event.runtime_renderer_reason)}
+										</span>
+									</dd>
 								</div>
 							</dl>
 						</li>
@@ -663,10 +727,30 @@
 		text-transform: uppercase;
 	}
 
+	.cause-pill {
+		display: inline-flex;
+		max-width: 100%;
+		align-items: center;
+		padding: 0 var(--space-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-surface) 74%, transparent);
+		color: var(--text-tertiary);
+		font-size: var(--font-size-2xs);
+		line-height: var(--line-height-tight);
+		white-space: normal;
+	}
+
+	.cause-pill-alert {
+		border-color: color-mix(in srgb, var(--state-warning) 56%, var(--border-subtle));
+		background: color-mix(in srgb, var(--state-warning) 12%, var(--bg-surface));
+		color: var(--text-primary);
+	}
+
 	.timing-history-details {
 		display: grid;
 		gap: var(--space-1) var(--space-2);
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(6, minmax(0, 1fr));
 	}
 
 	.timing-history-details div {
@@ -689,6 +773,11 @@
 		white-space: nowrap;
 		text-overflow: ellipsis;
 		overflow: hidden;
+	}
+
+	.timing-history-cause dd {
+		overflow: visible;
+		white-space: normal;
 	}
 
 	.empty-history {

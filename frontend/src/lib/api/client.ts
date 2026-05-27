@@ -950,6 +950,10 @@ export type DjRuntimeRendererReason =
 	| 'render_buffer_failed'
 	| 'buffer_lock_failed'
 	| 'dj_disabled'
+	| 'next_decode_late_at_fire'
+	| 'next_deck_missing_at_fire'
+	| 'transition_plan_missing_at_fire'
+	| 'sync_window_not_signaled'
 	| string;
 
 export type DjStatusResponse = {

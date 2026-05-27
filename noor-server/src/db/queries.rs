@@ -7530,6 +7530,10 @@ fn validate_dj_runtime_renderer_reason(reason: Option<&str>) -> Result<()> {
                 | "render_buffer_failed"
                 | "buffer_lock_failed"
                 | "dj_disabled"
+                | "next_decode_late_at_fire"
+                | "next_deck_missing_at_fire"
+                | "transition_plan_missing_at_fire"
+                | "sync_window_not_signaled"
         )
     {
         bail!("unknown DJ runtime renderer reason: {reason}");
@@ -8162,6 +8166,39 @@ mod tests {
             assert_eq!(row.3, Some(0));
             assert_eq!(row.4.as_deref(), Some("boundary_fallback"));
             assert_eq!(row.5.as_deref(), Some("prepared_mixer_missing"));
+        }
+
+        #[test]
+        fn update_dj_transition_fire_timing_accepts_precise_miss_reasons() {
+            let conn = setup_conn();
+
+            for reason in [
+                "next_decode_late_at_fire",
+                "next_deck_missing_at_fire",
+                "transition_plan_missing_at_fire",
+                "sync_window_not_signaled",
+            ] {
+                let id = insert_event(&conn);
+                update_dj_transition_fire_timing(
+                    &conn,
+                    id,
+                    199_465,
+                    "missed",
+                    false,
+                    "boundary_fallback",
+                    reason,
+                )
+                .expect("timing");
+
+                let stored_reason: Option<String> = conn
+                    .query_row(
+                        "SELECT runtime_renderer_reason FROM dj_transition_events WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .expect("stored reason");
+                assert_eq!(stored_reason.as_deref(), Some(reason));
+            }
         }
 
         #[test]
