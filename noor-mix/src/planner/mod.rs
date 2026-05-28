@@ -128,6 +128,7 @@ fn build_program(
     let mut program = TransitionProgram {
         tier: tier_for_template(template),
         template: template_name(template).to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -149,6 +150,9 @@ fn build_program(
     } else {
         incoming_sync_start_frame(incoming, sample_rate)
     };
+    if matches!(template, TransitionTemplate::DropTease16) {
+        program.drop_source = Some(drop_source_for_profile(incoming).to_string());
+    }
 
     if matches!(
         template,
@@ -202,6 +206,17 @@ fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy
     if outgoing.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
         || incoming.profile_confidence < DROP_TEASE_CONFIDENCE_FLOOR
     {
+        return false;
+    }
+    let Some(camelot_distance) = outgoing
+        .camelot_key
+        .as_deref()
+        .zip(incoming.camelot_key.as_deref())
+        .and_then(|(a, b)| scoring::camelot_distance(a, b))
+    else {
+        return false;
+    };
+    if !matches!(camelot_distance, 0 | 1 | 7) {
         return false;
     }
     if outgoing.downbeat_seconds.is_empty()
@@ -265,6 +280,14 @@ fn drop_candidates(incoming: &DjProfile) -> impl Iterator<Item = &f32> {
     }
 }
 
+fn drop_source_for_profile(incoming: &DjProfile) -> &'static str {
+    if incoming.manual_drop_seconds.is_empty() {
+        "profile_drop_candidate"
+    } else {
+        "manual_drop_cue"
+    }
+}
+
 fn small_tempo_nudge_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
     let outgoing_bpm = outgoing.bpm?.max(1.0);
     let incoming_bpm = incoming.bpm?.max(1.0);
@@ -287,6 +310,7 @@ pub fn bass_swap_16_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "BassSwap16".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -318,6 +342,7 @@ pub fn bass_swap_32_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "BassSwap32".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -344,6 +369,7 @@ pub fn slam_cut_program(sample_rate: u32, channels: u16, duration_ms: u32) -> Tr
     TransitionProgram {
         tier: Tier::SafeCrossfade,
         template: "SlamCut".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -372,6 +398,7 @@ pub fn long_harmonic_blend_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "LongHarmonicBlend".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -411,6 +438,7 @@ pub fn filter_sweep_eq_wash_program(
     let mut program = TransitionProgram {
         tier: Tier::FullBlend,
         template: "FilterSweep".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -442,6 +470,7 @@ pub fn drop_tease_16_program(
     TransitionProgram {
         tier: Tier::FullBlend,
         template: "DropTease16".to_string(),
+        drop_source: None,
         sample_rate,
         channels,
         deck_a_start_frame: 0,
@@ -1470,6 +1499,22 @@ mod tests {
     }
 
     #[test]
+    fn choose_template_drop_tease_requires_harmonic_fit() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("3B"), 4);
+        incoming.manual_drop_seconds = vec![32.0];
+
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &policy),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
     fn choose_template_drop_tease_rejects_unsafe_candidates() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
@@ -1520,6 +1565,10 @@ mod tests {
         let program = Planner::plan(&outgoing, &incoming, &policy);
 
         assert_eq!(program.template, "DropTease16");
+        assert_eq!(
+            program.drop_source.as_deref(),
+            Some("profile_drop_candidate")
+        );
         assert_eq!(program.swap_start, 768_000);
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
@@ -1538,6 +1587,7 @@ mod tests {
         let program = Planner::plan(&outgoing, &incoming, &policy);
 
         assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.drop_source.as_deref(), Some("manual_drop_cue"));
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
 

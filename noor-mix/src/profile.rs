@@ -14,6 +14,7 @@ pub struct DjProfile {
     pub outro_start_seconds: Option<f32>,
     pub breakdown_seconds: Vec<f32>,
     pub drop_seconds: Vec<f32>,
+    #[serde(default)]
     pub manual_drop_seconds: Vec<f32>,
     pub safe_transition_windows: Vec<TransitionWindow>,
     pub vocal_presence_by_bar: Vec<f32>,

@@ -159,6 +159,7 @@ mod tests {
         TransitionProgram {
             tier: Tier::FullBlend,
             template: "SafeCrossfade".to_string(),
+            drop_source: None,
             sample_rate: 48_000,
             channels: 1,
             deck_a_start_frame: 0,

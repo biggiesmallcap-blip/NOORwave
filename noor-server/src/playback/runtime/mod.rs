@@ -3460,6 +3460,7 @@ mod tests {
             noor_mix::TransitionProgram {
                 tier: noor_mix::program::Tier::SafeCrossfade,
                 template: "SafeCrossfade".to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -5163,6 +5164,7 @@ mod tests {
             program: noor_mix::TransitionProgram {
                 tier: noor_mix::program::Tier::SafeCrossfade,
                 template: "SafeCrossfade".to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,

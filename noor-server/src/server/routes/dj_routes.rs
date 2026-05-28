@@ -42,6 +42,7 @@ const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
 const MAX_MANUAL_DROP_MARKERS: usize = 16;
+const MAX_MANUAL_DROP_MARKER_MS: i64 = 30 * 60 * 1_000;
 
 #[cfg(test)]
 type ReadyPairPlanningKey = (i64, u64);
@@ -1400,7 +1401,20 @@ async fn set_profile_correction(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let manual_drop_markers_ms = normalize_manual_drop_markers_ms(payload.manual_drop_markers_ms)?;
+    let key = AudioDjProfileKey {
+        media_ref_kind: payload.media_ref_kind.clone(),
+        media_ref_id: payload.media_ref_id.clone(),
+    };
+    let manual_drop_blob = if let Some(markers) = payload.manual_drop_markers_ms {
+        let manual_drop_markers_ms = normalize_manual_drop_markers_ms(Some(markers))?;
+        encode_marker_ms_blob(&manual_drop_markers_ms)
+    } else {
+        let state = state.read().await;
+        state
+            .db
+            .with_conn(|conn| existing_manual_drop_blob(conn, &key))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
     let now = Utc::now().to_rfc3339();
     let row = AudioDjProfileCorrectionRow {
         media_ref_kind: payload.media_ref_kind,
@@ -1410,7 +1424,7 @@ async fn set_profile_correction(
         phrase_offset_bars: payload.phrase_offset_bars,
         safe_crossfade_only: payload.safe_crossfade_only.unwrap_or(false),
         transition_speed_bias: payload.transition_speed_bias,
-        manual_drop_blob: encode_marker_ms_blob(&manual_drop_markers_ms),
+        manual_drop_blob,
         notes: payload.notes,
         created_at: now.clone(),
         updated_at: now,
@@ -1423,6 +1437,14 @@ async fn set_profile_correction(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     Ok(Json(correction_response(row)))
+}
+
+fn existing_manual_drop_blob(
+    conn: &rusqlite::Connection,
+    key: &AudioDjProfileKey,
+) -> anyhow::Result<Vec<u8>> {
+    queries::get_audio_dj_profile_correction(conn, key)
+        .map(|row| row.map(|row| row.manual_drop_blob).unwrap_or_default())
 }
 
 fn profile_response(track_id: i64, profile: &AudioDjProfileRow) -> ProfileResponse {
@@ -1468,7 +1490,11 @@ fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionR
 
 fn normalize_manual_drop_markers_ms(markers: Option<Vec<i64>>) -> Result<Vec<i64>, StatusCode> {
     let mut markers = markers.unwrap_or_default();
-    if markers.len() > MAX_MANUAL_DROP_MARKERS || markers.iter().any(|marker| *marker < 0) {
+    if markers.len() > MAX_MANUAL_DROP_MARKERS
+        || markers
+            .iter()
+            .any(|marker| *marker < 0 || *marker > MAX_MANUAL_DROP_MARKER_MS)
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     markers.sort_unstable();
@@ -2185,7 +2211,9 @@ fn overlay_details_from_program_json(
         tempo_ratio,
         deck_b_start_frame: program.deck_b_start_frame,
         drop_marker_ms: i64::try_from(drop_marker_ms).ok(),
-        drop_source: "program_json".to_string(),
+        drop_source: program
+            .drop_source
+            .unwrap_or_else(|| "program_json".to_string()),
     })
 }
 
@@ -2194,6 +2222,9 @@ fn annotate_overlay_drop_source(
     incoming: Option<&DjDeckStatus>,
 ) -> Option<DjOverlayDetails> {
     let mut details = details?;
+    if details.drop_source != "program_json" {
+        return Some(details);
+    }
     let Some(drop_marker_ms) = details.drop_marker_ms else {
         return Some(details);
     };
@@ -2373,6 +2404,43 @@ mod tests {
         assert_eq!(
             normalize_manual_drop_markers_ms(Some(vec![-1])),
             Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![MAX_MANUAL_DROP_MARKER_MS + 1])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn omitted_manual_drop_payload_preserves_existing_blob() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let key = AudioDjProfileKey {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+        };
+        let existing_blob = encode_marker_ms_blob(&[32_000]);
+        queries::upsert_audio_dj_profile_correction(
+            &conn,
+            &AudioDjProfileCorrectionRow {
+                media_ref_kind: key.media_ref_kind.clone(),
+                media_ref_id: key.media_ref_id.clone(),
+                bpm_multiplier: None,
+                downbeat_offset_beats: None,
+                phrase_offset_bars: None,
+                safe_crossfade_only: false,
+                transition_speed_bias: None,
+                manual_drop_blob: existing_blob.clone(),
+                notes: None,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+            },
+        )
+        .expect("correction");
+
+        assert_eq!(
+            existing_manual_drop_blob(&conn, &key).expect("existing blob"),
+            existing_blob
         );
     }
 
@@ -2621,6 +2689,7 @@ mod tests {
             let program = noor_mix::TransitionProgram {
                 tier: noor_mix::Tier::FullBlend,
                 template: template.to_string(),
+                drop_source: None,
                 sample_rate: 48_000,
                 channels: 2,
                 deck_a_start_frame: 0,
@@ -2647,6 +2716,7 @@ mod tests {
         let program = noor_mix::TransitionProgram {
             tier: noor_mix::Tier::FullBlend,
             template: "DropTease16".to_string(),
+            drop_source: None,
             sample_rate: 48_000,
             channels: 2,
             deck_a_start_frame: 0,
@@ -2666,10 +2736,10 @@ mod tests {
                 curve: noor_mix::Curve::Linear,
             }],
         };
-        let json = serde_json::to_string(&program).expect("program json");
+        let legacy_json = serde_json::to_string(&program).expect("program json");
 
         assert_eq!(
-            overlay_details_from_program_json(&json, Some(120_000), Some("fired")),
+            overlay_details_from_program_json(&legacy_json, Some(120_000), Some("fired")),
             Some(DjOverlayDetails {
                 overlay_status: "fired".to_string(),
                 overlay_start_ms: Some(120_000),
@@ -2679,6 +2749,19 @@ mod tests {
                 drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             })
+        );
+
+        let manual_program = noor_mix::TransitionProgram {
+            drop_source: Some("manual_drop_cue".to_string()),
+            ..program
+        };
+        let manual_json = serde_json::to_string(&manual_program).expect("manual program json");
+
+        assert_eq!(
+            overlay_details_from_program_json(&manual_json, Some(120_000), Some("fired"))
+                .expect("manual details")
+                .drop_source,
+            "manual_drop_cue"
         );
     }
 
@@ -2707,6 +2790,28 @@ mod tests {
         assert_eq!(
             annotate_overlay_drop_source(details, Some(&incoming))
                 .expect("manual details")
+                .drop_source,
+            "manual_drop_cue"
+        );
+    }
+
+    #[test]
+    fn annotate_overlay_drop_source_preserves_program_source() {
+        let details = Some(DjOverlayDetails {
+            overlay_status: "armed".to_string(),
+            overlay_start_ms: Some(120_000),
+            overlay_end_ms: Some(121_000),
+            tempo_ratio: Some(1.0),
+            deck_b_start_frame: 384_000,
+            drop_marker_ms: Some(32_000),
+            drop_source: "manual_drop_cue".to_string(),
+        });
+        let mut incoming = test_deck_status(true, "ready");
+        incoming.drop_markers_ms = vec![32_000];
+
+        assert_eq!(
+            annotate_overlay_drop_source(details, Some(&incoming))
+                .expect("details")
                 .drop_source,
             "manual_drop_cue"
         );
