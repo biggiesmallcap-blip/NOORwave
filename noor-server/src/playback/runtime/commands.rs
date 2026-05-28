@@ -95,6 +95,10 @@ pub enum SeekToOutcome {
     /// transition. The audible playhead may take up to ~1s to converge as the
     /// new engine primes samples; the frontend's 1 Hz refresher closes the gap.
     Dispatched,
+    /// Seek accepted and it intentionally invalidated the active crossfade
+    /// window. The HTTP layer treats this as success but should not score the
+    /// previously armed DJ timing row as a miss.
+    DispatchedCrossfadeSuppressed,
     /// Target outside `[offset, buffered]` and the caller opted out of the
     /// segment-restart path (`allow_segment_seek=false`). HTTP 409.
     RejectedOutOfBuffer,

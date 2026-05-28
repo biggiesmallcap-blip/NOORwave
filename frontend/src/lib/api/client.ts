@@ -954,6 +954,7 @@ export type DjRuntimeRendererReason =
 	| 'next_deck_missing_at_fire'
 	| 'transition_plan_missing_at_fire'
 	| 'sync_window_not_signaled'
+	| 'manual_seek_suppressed'
 	| string;
 
 export type DjStatusResponse = {
