@@ -76,6 +76,12 @@ impl Planner {
 
         let outgoing_phrases = outgoing.phrase_bar_indices.len();
         let incoming_phrases = incoming.phrase_bar_indices.len();
+        if matches!(policy.transition_speed_bias, TransitionSpeedBias::Slower)
+            && matches!(camelot_distance, 0 | 1 | 7)
+            && bpm_delta <= 3.0
+        {
+            return TransitionTemplate::LongHarmonicBlend;
+        }
         if outgoing_phrases >= 4 && incoming_phrases >= 4 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap32;
         }
@@ -151,6 +157,12 @@ fn build_program(
         program
             .automation
             .extend(bass_swap_eq_handoff(duration_samples));
+    }
+
+    if matches!(template, TransitionTemplate::LongHarmonicBlend) {
+        program
+            .automation
+            .extend(long_harmonic_low_handoff(duration_samples));
     }
 
     if matches!(template, TransitionTemplate::FilterSweep) {
@@ -371,6 +383,9 @@ pub fn long_harmonic_blend_program(
         to: rate.clamp(0.97, 1.03),
         curve: Curve::Linear,
     });
+    program
+        .automation
+        .extend(long_harmonic_low_handoff(duration_samples));
     program
 }
 
@@ -611,6 +626,60 @@ fn bass_swap_eq_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
             start_sample: 0,
             end_sample,
             from: 0.45,
+            to: 1.0,
+            curve: Curve::Cosine,
+        },
+    ]
+}
+
+fn long_harmonic_low_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    if end_sample < 8 {
+        return vec![
+            AutomationEvent {
+                param: Param::LowGain(DeckId::A),
+                start_sample: 0,
+                end_sample,
+                from: 1.0,
+                to: 0.25,
+                curve: Curve::Cosine,
+            },
+            AutomationEvent {
+                param: Param::LowGain(DeckId::B),
+                start_sample: 0,
+                end_sample,
+                from: 0.15,
+                to: 1.0,
+                curve: Curve::Cosine,
+            },
+        ];
+    }
+
+    let swap_point = end_sample / 2;
+    let outgoing_low_start = end_sample / 4;
+    let incoming_low_end = end_sample * 3 / 4;
+    vec![
+        AutomationEvent {
+            param: Param::LowGain(DeckId::A),
+            start_sample: outgoing_low_start,
+            end_sample: swap_point.max(outgoing_low_start + 1),
+            from: 1.0,
+            to: 0.25,
+            curve: Curve::Cosine,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: 0,
+            end_sample: swap_point.max(1),
+            from: 0.15,
+            to: 0.15,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::LowGain(DeckId::B),
+            start_sample: swap_point,
+            end_sample: incoming_low_end.max(swap_point + 1),
+            from: 0.15,
             to: 1.0,
             curve: Curve::Cosine,
         },
@@ -920,6 +989,22 @@ mod tests {
                 &policy
             ),
             TransitionTemplate::BassSwap32
+        );
+    }
+
+    #[test]
+    fn choose_template_slower_bias_prefers_long_harmonic_blend() {
+        let policy = Policy {
+            transition_speed_bias: TransitionSpeedBias::Slower,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(121.0), Some("8A"), 4),
+                &policy
+            ),
+            TransitionTemplate::LongHarmonicBlend
         );
     }
 
@@ -1235,10 +1320,26 @@ mod tests {
             .expect("rate automation")
             .to;
         assert_eq!(rate, 0.985);
-        assert!(program.automation.iter().all(|event| !matches!(
-            event.param,
-            Param::LowGain(_) | Param::MidGain(_) | Param::HighGain(_)
-        )));
+        let outgoing_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::A))
+            .expect("outgoing low handoff");
+        let incoming_low = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::LowGain(DeckId::B) && event.to == 1.0)
+            .expect("incoming low rise");
+        assert_eq!(outgoing_low.end_sample, program.swap_start);
+        assert_eq!(incoming_low.start_sample, program.swap_start);
+        assert_eq!(outgoing_low.to, 0.25);
+        assert_eq!(incoming_low.from, 0.15);
+        assert!(
+            program
+                .automation
+                .iter()
+                .all(|event| !matches!(event.param, Param::MidGain(_) | Param::HighGain(_)))
+        );
     }
 
     #[test]
