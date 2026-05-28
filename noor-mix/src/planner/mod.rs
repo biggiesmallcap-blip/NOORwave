@@ -190,7 +190,10 @@ fn build_program(
 }
 
 fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
-    if !matches!(policy.mix_intent, MixIntent::Bold) {
+    let has_manual_drop = !incoming.manual_drop_seconds.is_empty();
+    if !(matches!(policy.mix_intent, MixIntent::Bold)
+        || (matches!(policy.mix_intent, MixIntent::Balanced) && has_manual_drop))
+    {
         return false;
     }
     if !outgoing.has_full_dj_profile() || !incoming.has_full_dj_profile() {
@@ -248,12 +251,18 @@ fn incoming_drop_tease_start_frame(
 }
 
 fn first_valid_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
-    incoming
-        .drop_seconds
-        .iter()
+    drop_candidates(incoming)
         .copied()
         .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .map(|seconds| (seconds * sample_rate as f32).round() as u64)
+}
+
+fn drop_candidates(incoming: &DjProfile) -> impl Iterator<Item = &f32> {
+    if incoming.manual_drop_seconds.is_empty() {
+        incoming.drop_seconds.iter()
+    } else {
+        incoming.manual_drop_seconds.iter()
+    }
 }
 
 fn small_tempo_nudge_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
@@ -815,6 +824,7 @@ mod tests {
             outro_start_seconds: Some(180.0),
             breakdown_seconds: vec![],
             drop_seconds: vec![],
+            manual_drop_seconds: vec![],
             safe_transition_windows: vec![TransitionWindow {
                 start_seconds: 0.0,
                 end_seconds: 8.0,
@@ -1419,21 +1429,44 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_drop_tease_rejects_safe_and_balanced_intents() {
+    fn choose_template_drop_tease_rejects_safe_and_unverified_balanced_intents() {
         let outgoing = profile(Some(120.0), Some("8A"), 4);
         let mut incoming = profile(Some(121.0), Some("8A"), 4);
         incoming.drop_seconds = vec![32.0];
 
-        for mix_intent in [MixIntent::Safe, MixIntent::Balanced] {
-            let policy = Policy {
-                mix_intent,
-                ..Policy::default()
-            };
-            assert_ne!(
-                Planner::choose_template(&outgoing, &incoming, &policy),
-                TransitionTemplate::DropTease16
-            );
-        }
+        let safe = Policy {
+            mix_intent: MixIntent::Safe,
+            ..Policy::default()
+        };
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &safe),
+            TransitionTemplate::DropTease16
+        );
+
+        let balanced = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        assert_ne!(
+            Planner::choose_template(&outgoing, &incoming, &balanced),
+            TransitionTemplate::DropTease16
+        );
+    }
+
+    #[test]
+    fn choose_template_balanced_selects_drop_tease_for_manual_drop_candidate() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.manual_drop_seconds = vec![32.0];
+
+        assert_eq!(
+            Planner::choose_template(&outgoing, &incoming, &policy),
+            TransitionTemplate::DropTease16
+        );
     }
 
     #[test]
@@ -1488,6 +1521,23 @@ mod tests {
 
         assert_eq!(program.template, "DropTease16");
         assert_eq!(program.swap_start, 768_000);
+        assert_eq!(program.deck_b_start_frame, 768_000);
+    }
+
+    #[test]
+    fn drop_tease_plan_prefers_manual_drop_alignment() {
+        let policy = Policy {
+            mix_intent: MixIntent::Balanced,
+            ..Policy::default()
+        };
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(121.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![40.0];
+        incoming.manual_drop_seconds = vec![32.0];
+
+        let program = Planner::plan(&outgoing, &incoming, &policy);
+
+        assert_eq!(program.template, "DropTease16");
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
 

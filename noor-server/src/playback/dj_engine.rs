@@ -240,6 +240,7 @@ fn fallback_profile() -> DjProfile {
         outro_start_seconds: Some(120.0),
         breakdown_seconds: vec![],
         drop_seconds: vec![],
+        manual_drop_seconds: vec![],
         safe_transition_windows: vec![noor_mix::profile::TransitionWindow {
             start_seconds: 0.0,
             end_seconds: 8.0,
@@ -310,6 +311,10 @@ fn apply_correction(profile: &mut DjProfile, correction: Option<&AudioDjProfileC
     {
         profile.bpm = profile.bpm.map(|bpm| bpm * multiplier as f32);
     }
+    let manual_drop_seconds = decode_f32_blob(&correction.manual_drop_blob).unwrap_or_default();
+    if !manual_drop_seconds.is_empty() {
+        profile.manual_drop_seconds = manual_drop_seconds;
+    }
 }
 
 fn profile_from_row(row: &AudioDjProfileRow) -> DjProfile {
@@ -333,6 +338,7 @@ fn profile_from_row(row: &AudioDjProfileRow) -> DjProfile {
         outro_start_seconds: row.outro_start_seconds.map(|value| value as f32),
         breakdown_seconds: decode_f32_blob(&row.breakdown_blob).unwrap_or_default(),
         drop_seconds: decode_f32_blob(&row.drop_blob).unwrap_or_default(),
+        manual_drop_seconds: vec![],
         safe_transition_windows: safe_transition_windows
             .chunks_exact(3)
             .map(|chunk| noor_mix::profile::TransitionWindow {
@@ -481,6 +487,45 @@ mod tests {
         .expect("seed correction");
     }
 
+    fn make_profiles_phrase_deep(db: &Database) {
+        db.with_conn(|conn| {
+            let phrase_blob = encode_u32_blob(&(0..4).collect::<Vec<_>>());
+            let vocal_blob = encode_f32_blob(&[0.0; 4]);
+            conn.execute(
+                "UPDATE audio_dj_profiles
+                 SET phrase_boundaries_blob = ?1,
+                     vocal_presence_blob = ?2,
+                     vocal_density_blob = ?2
+                 WHERE media_ref_kind = 'library_track'",
+                rusqlite::params![&phrase_blob, &vocal_blob],
+            )?;
+            Ok(())
+        })
+        .expect("phrase-deep profiles");
+    }
+
+    fn seed_manual_drop_correction(db: &Database, key: AudioDjProfileKey, drop_seconds: &[f32]) {
+        db.with_conn(|conn| {
+            queries::upsert_audio_dj_profile_correction(
+                conn,
+                &AudioDjProfileCorrectionRow {
+                    media_ref_kind: key.media_ref_kind,
+                    media_ref_id: key.media_ref_id,
+                    bpm_multiplier: None,
+                    downbeat_offset_beats: None,
+                    phrase_offset_bars: None,
+                    safe_crossfade_only: false,
+                    transition_speed_bias: None,
+                    manual_drop_blob: encode_f32_blob(drop_seconds),
+                    notes: None,
+                    created_at: "now".to_string(),
+                    updated_at: "now".to_string(),
+                },
+            )
+        })
+        .expect("manual drop correction");
+    }
+
     fn plan(db: &Database, from: DjMediaRef, to: DjMediaRef) -> Option<TransitionProgram> {
         DjEngine::new(db.clone())
             .plan_transition(&from, &to, 48_000, 2)
@@ -588,6 +633,26 @@ mod tests {
 
         assert_eq!(program.template, "BassSwap16");
         program.validate().expect("valid");
+    }
+
+    #[test]
+    fn balanced_policy_can_plan_drop_tease_from_manual_drop_cue() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        make_profiles_phrase_deep(&db);
+        seed_manual_drop_correction(&db, key("library_track", "2"), &[32.0]);
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "DropTease16");
+        assert_eq!(program.deck_b_start_frame, 768_000);
     }
 
     #[test]
