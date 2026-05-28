@@ -13,6 +13,22 @@ pub(crate) struct GeneratedCandidate<T> {
     pub(crate) item: T,
     pub(crate) track_id: Option<i64>,
     pub(crate) tidal_id: Option<i64>,
+    pub(crate) policy: GeneratedCandidatePolicy,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GeneratedCandidatePolicy {
+    pub(crate) score_multiplier: f64,
+    pub(crate) reasons: Vec<&'static str>,
+}
+
+impl Default for GeneratedCandidatePolicy {
+    fn default() -> Self {
+        Self {
+            score_multiplier: 1.0,
+            reasons: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,8 +63,8 @@ pub(crate) fn rank_generated_candidates<T>(
             .into_iter()
             .map(|candidate| RankedGeneratedCandidate {
                 item: candidate.item,
-                score: 1.0,
-                reasons: Vec::new(),
+                score: candidate.policy.score_multiplier,
+                reasons: candidate.policy.reasons,
             })
             .collect());
     }
@@ -59,7 +75,9 @@ pub(crate) fn rank_generated_candidates<T>(
         .enumerate()
         .map(|(ordinal, candidate)| {
             let facts = load_facts(conn, candidate.track_id, candidate.tidal_id)?;
-            let (score, reasons) = score_facts(&seed, &facts);
+            let (score, mut reasons) = score_facts(&seed, &facts);
+            let score = score * candidate.policy.score_multiplier;
+            reasons.extend(candidate.policy.reasons);
             Ok(ScoredCandidate {
                 ordinal,
                 ranked: RankedGeneratedCandidate {
@@ -81,6 +99,63 @@ pub(crate) fn rank_generated_candidates<T>(
     });
 
     Ok(scored.into_iter().map(|entry| entry.ranked).collect())
+}
+
+pub(crate) fn rank_generated_candidates_chain<T>(
+    conn: &Connection,
+    seed_track_id: i64,
+    candidates: Vec<GeneratedCandidate<T>>,
+) -> Result<Vec<RankedGeneratedCandidate<T>>> {
+    if candidates.len() <= 1 {
+        return Ok(candidates
+            .into_iter()
+            .map(|candidate| RankedGeneratedCandidate {
+                item: candidate.item,
+                score: candidate.policy.score_multiplier,
+                reasons: candidate.policy.reasons,
+            })
+            .collect());
+    }
+
+    let mut previous = load_facts_for_track(conn, seed_track_id)?;
+    let mut remaining = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, candidate)| {
+            let facts = load_facts(conn, candidate.track_id, candidate.tidal_id)?;
+            Ok((ordinal, candidate.item, facts, candidate.policy))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut ranked = Vec::with_capacity(remaining.len());
+
+    while !remaining.is_empty() {
+        let mut best_index = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+        for (idx, (ordinal, _, facts, policy)) in remaining.iter().enumerate() {
+            let (score, _) = score_facts(&previous, facts);
+            let score = score * policy.score_multiplier;
+            let score_order = score.partial_cmp(&best_score).unwrap_or(Ordering::Equal);
+            let is_better = score_order == Ordering::Greater
+                || (score_order == Ordering::Equal && *ordinal < remaining[best_index].0);
+            if is_better {
+                best_index = idx;
+                best_score = score;
+            }
+        }
+
+        let (_ordinal, item, facts, policy) = remaining.remove(best_index);
+        let (score, mut reasons) = score_facts(&previous, &facts);
+        let score = score * policy.score_multiplier;
+        reasons.extend(policy.reasons);
+        previous = facts;
+        ranked.push(RankedGeneratedCandidate {
+            item,
+            score,
+            reasons,
+        });
+    }
+
+    Ok(ranked)
 }
 
 pub(crate) fn append_dj_reason(existing: &str, score: f64, reasons: &[&'static str]) -> String {
@@ -409,11 +484,13 @@ mod tests {
                     item: "first",
                     track_id: None,
                     tidal_id: None,
+                    policy: Default::default(),
                 },
                 GeneratedCandidate {
                     item: "second",
                     track_id: None,
                     tidal_id: None,
+                    policy: Default::default(),
                 },
             ],
         )
@@ -471,11 +548,13 @@ mod tests {
                     item: "clash",
                     track_id: Some(3),
                     tidal_id: Some(9003),
+                    policy: Default::default(),
                 },
                 GeneratedCandidate {
                     item: "tidal-fit",
                     track_id: None,
                     tidal_id: Some(9002),
+                    policy: Default::default(),
                 },
             ],
         )
@@ -484,5 +563,112 @@ mod tests {
         assert_eq!(ranked[0].item, "tidal-fit");
         assert!(ranked[0].reasons.contains(&"tempo inside 3 percent"));
         assert!(ranked[0].reasons.contains(&"harmonic match"));
+    }
+
+    #[test]
+    fn rank_generated_candidates_chain_scores_each_pick_against_previous_pick() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "
+            CREATE TABLE tracks (id INTEGER PRIMARY KEY, tidal_id INTEGER);
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL,
+                key_signature TEXT,
+                camelot_key TEXT,
+                loudness_lufs REAL,
+                energy REAL,
+                danceability REAL,
+                beat_strength REAL,
+                spectral_centroid REAL,
+                stereo_width REAL,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                analysis_source TEXT NOT NULL DEFAULT 'test',
+                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+                samples_analyzed INTEGER,
+                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                analysis_version TEXT NOT NULL DEFAULT 'test'
+            );
+            ",
+        )
+        .expect("schema");
+        for (track_id, bpm, key) in [
+            (1, 120.0, "1A"),
+            (2, 121.0, "2A"),
+            (3, 122.0, "6A"),
+            (4, 122.0, "3A"),
+        ] {
+            conn.execute(
+                "INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES (?1, ?2, ?3)",
+                params![track_id, bpm, key],
+            )
+            .expect("features");
+        }
+
+        let ranked = rank_generated_candidates_chain(
+            &conn,
+            1,
+            vec![
+                GeneratedCandidate {
+                    item: "first-fit",
+                    track_id: Some(2),
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+                GeneratedCandidate {
+                    item: "seed-favored-clash-after-first",
+                    track_id: Some(3),
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+                GeneratedCandidate {
+                    item: "chain-fit",
+                    track_id: Some(4),
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+            ],
+        )
+        .expect("rank");
+
+        assert_eq!(
+            ranked.into_iter().map(|row| row.item).collect::<Vec<_>>(),
+            vec!["first-fit", "chain-fit", "seed-favored-clash-after-first"]
+        );
+    }
+
+    #[test]
+    fn rank_generated_candidates_chain_keeps_equal_scores_stable() {
+        let conn = Connection::open_in_memory().expect("db");
+        let ranked = rank_generated_candidates_chain(
+            &conn,
+            1,
+            vec![
+                GeneratedCandidate {
+                    item: "first",
+                    track_id: None,
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+                GeneratedCandidate {
+                    item: "second",
+                    track_id: None,
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+                GeneratedCandidate {
+                    item: "third",
+                    track_id: None,
+                    tidal_id: None,
+                    policy: Default::default(),
+                },
+            ],
+        )
+        .expect("rank");
+
+        assert_eq!(
+            ranked.into_iter().map(|row| row.item).collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
     }
 }
