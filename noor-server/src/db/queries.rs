@@ -4730,6 +4730,14 @@ pub struct ExternalTrackCandidateRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedLastfmExternalSightingRow {
+    pub seed_track_id: i64,
+    pub resolved_track_id: i64,
+    pub similarity: f64,
+    pub source_payload_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalTidalResolutionCandidateRow {
     pub id: i64,
     pub title: String,
@@ -5655,14 +5663,29 @@ pub fn get_external_track_candidates_for_training(
         "SELECT id, tidal_id, mbid, dedupe_key, title, artist_name, genre_tags_json,
                 duration_ms, expires_at, updated_at,
                 (
-                    SELECT json_group_array(source)
+                    SELECT json_group_array(tag)
                     FROM (
-                        SELECT DISTINCT source
+                        SELECT DISTINCT source AS tag
                         FROM external_track_candidate_sightings s
                         WHERE s.candidate_id = c.id
                           AND s.expires_at > ?1
-                        ORDER BY source
+                        UNION
+                        SELECT DISTINCT
+                            CASE
+                                WHEN s.source = 'lastfm_similar'
+                                 AND s.source_payload_json LIKE '%\"branch_from\":%'
+                                 AND s.source_payload_json NOT LIKE '%\"branch_from\":null%'
+                                THEN 'lastfm_branch'
+                                WHEN s.source = 'lastfm_similar'
+                                THEN 'lastfm_direct'
+                            END AS tag
+                        FROM external_track_candidate_sightings s
+                        WHERE s.candidate_id = c.id
+                          AND s.expires_at > ?1
+                          AND s.source = 'lastfm_similar'
+                        ORDER BY tag
                     )
+                    WHERE tag IS NOT NULL
                 ) AS source_tags_json,
                 resolved_track_id
          FROM external_track_candidates c
@@ -5686,6 +5709,41 @@ pub fn get_external_track_candidates_for_training(
                 updated_at: row.get(9)?,
                 source_tags_json: row.get(10)?,
                 resolved_track_id: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_resolved_lastfm_external_sightings_for_training(
+    conn: &Connection,
+    now: &str,
+    limit: i64,
+) -> Result<Vec<ResolvedLastfmExternalSightingRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.seed_track_id,
+                c.resolved_track_id,
+                COALESCE(s.similarity, 0.0),
+                s.source_payload_json
+         FROM external_track_candidate_sightings s
+         JOIN external_track_candidates c ON c.id = s.candidate_id
+         WHERE s.source = 'lastfm_similar'
+           AND s.expires_at > ?1
+           AND c.expires_at > ?1
+           AND c.resolved_track_id IS NOT NULL
+           AND c.resolved_track_id <> s.seed_track_id
+         ORDER BY COALESCE(s.similarity, 0.0) DESC,
+                  s.expires_at DESC,
+                  s.candidate_id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![now, limit.max(1)], |row| {
+            Ok(ResolvedLastfmExternalSightingRow {
+                seed_track_id: row.get(0)?,
+                resolved_track_id: row.get(1)?,
+                similarity: row.get(2)?,
+                source_payload_json: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -9654,7 +9712,112 @@ mod tests {
         assert_eq!(rows[0].dedupe_key, "fresh");
         assert_eq!(
             rows[0].source_tags_json.as_deref(),
-            Some(r#"["lastfm_similar"]"#)
+            Some(r#"["lastfm_direct","lastfm_similar"]"#)
+        );
+    }
+
+    #[test]
+    fn external_training_tags_derive_lastfm_branch_from_cached_payload() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1)",
+            [],
+        )
+        .expect("seed track");
+        let candidate = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: None,
+                mbid: None,
+                dedupe_key: "branch-candidate".to_string(),
+                title: "Branch".to_string(),
+                artist_name: "Outside".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(180_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("candidate");
+        upsert_external_candidate_sighting(
+            &conn,
+            &ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: Some(
+                    r#"{"match":0.42,"branch_from":"Parent Artist - Parent Track"}"#.to_string(),
+                ),
+                similarity: Some(0.42),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("sighting");
+
+        let rows = get_external_track_candidates_for_training(&conn, "2026-02-01 00:00:00", 10)
+            .expect("training candidates");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].source_tags_json.as_deref(),
+            Some(r#"["lastfm_branch","lastfm_similar"]"#)
+        );
+    }
+
+    #[test]
+    fn resolved_lastfm_sightings_for_training_include_cached_payload() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("seed artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id)
+             VALUES (1, 'Seed', 1), (2, 'Resolved', 1)",
+            [],
+        )
+        .expect("seed tracks");
+        let candidate = upsert_external_track_candidate(
+            &conn,
+            &ExternalTrackCandidateUpsert {
+                tidal_id: Some(9002),
+                mbid: None,
+                dedupe_key: "resolved-lastfm".to_string(),
+                title: "Resolved".to_string(),
+                artist_name: "Artist".to_string(),
+                genre_tags_json: None,
+                duration_ms: Some(180_000),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("candidate");
+        mark_external_candidate_resolved(&conn, Some(9002), "Resolved", "Artist", 2)
+            .expect("mark resolved");
+        upsert_external_candidate_sighting(
+            &conn,
+            &ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: Some(r#"{"match":0.77}"#.to_string()),
+                similarity: Some(0.77),
+                expires_at: "2026-03-01 00:00:00".to_string(),
+            },
+        )
+        .expect("sighting");
+
+        let rows =
+            get_resolved_lastfm_external_sightings_for_training(&conn, "2026-02-01 00:00:00", 10)
+                .expect("resolved sightings");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].seed_track_id, 1);
+        assert_eq!(rows[0].resolved_track_id, 2);
+        assert_eq!(rows[0].similarity, 0.77);
+        assert_eq!(
+            rows[0].source_payload_json.as_deref(),
+            Some(r#"{"match":0.77}"#)
         );
     }
 
