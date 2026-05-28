@@ -59,7 +59,11 @@ impl Planner {
         else {
             return TransitionTemplate::SafeCrossfade;
         };
-        if camelot_distance > 7 {
+        let harmonic_fit = matches!(camelot_distance, 0 | 1 | 7);
+        if !harmonic_fit {
+            if bold_filter_candidate {
+                return TransitionTemplate::FilterSweep;
+            }
             return TransitionTemplate::SafeCrossfade;
         }
 
@@ -69,7 +73,7 @@ impl Planner {
                 && incoming.has_full_dj_profile()
                 && outgoing.phrase_bar_indices.len() >= 2
                 && incoming.phrase_bar_indices.len() >= 2
-                && matches!(camelot_distance, 0 | 1 | 7))
+                && harmonic_fit)
         {
             return TransitionTemplate::SafeCrossfade;
         }
@@ -82,7 +86,7 @@ impl Planner {
         if outgoing_phrases >= 2 && incoming_phrases >= 2 && bpm_delta <= 3.0 {
             return TransitionTemplate::BassSwap16;
         }
-        if matches!(camelot_distance, 0 | 1 | 7) && bpm_delta <= 3.0 {
+        if harmonic_fit && bpm_delta <= 3.0 {
             return TransitionTemplate::LongHarmonicBlend;
         }
         if bold_filter_candidate {
@@ -888,6 +892,18 @@ mod tests {
                 &Policy::default()
             ),
             TransitionTemplate::LongHarmonicBlend
+        );
+    }
+
+    #[test]
+    fn choose_template_rejects_distant_same_mode_camelot_for_balanced_intent() {
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 4),
+                &profile(Some(121.0), Some("3A"), 4),
+                &Policy::default()
+            ),
+            TransitionTemplate::SafeCrossfade
         );
     }
 

@@ -32,7 +32,7 @@ impl Default for Policy {
         Self {
             max_pitch_shift_pct: 3.0,
             energy_step_max: 0.15,
-            default_crossfade_ms: 8_000,
+            default_crossfade_ms: 12_000,
             transition_speed_bias: TransitionSpeedBias::Neutral,
             mix_intent: MixIntent::Balanced,
             safety_template_override: None,
