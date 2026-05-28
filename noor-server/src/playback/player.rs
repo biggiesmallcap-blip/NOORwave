@@ -505,11 +505,11 @@ const DJ_FILTER_SWEEP_TIMING_WINDOW: i64 = 20;
 const DJ_FILTER_SWEEP_TIMING_MIN_ROWS: usize = 4;
 const DJ_FILTER_SWEEP_MEDIAN_ABS_MAX_MS: i64 = 300;
 const DJ_FILTER_SWEEP_WORST_ABS_MAX_MS: i64 = 750;
-const DJ_FILTER_SWEEP_RENDER_MS: u32 = 12_000;
-const DJ_BASS_SWAP_16_RENDER_MS: u32 = 16_000;
-const DJ_BASS_SWAP_32_RENDER_MS: u32 = 32_000;
+const DJ_FILTER_SWEEP_RENDER_MS: u32 = 18_000;
+const DJ_BASS_SWAP_16_RENDER_MS: u32 = 24_000;
+const DJ_BASS_SWAP_32_RENDER_MS: u32 = 28_000;
 const DJ_SLAM_CUT_RENDER_MS: u32 = 200;
-const DJ_LONG_HARMONIC_BLEND_RENDER_MS: u32 = 16_000;
+const DJ_LONG_HARMONIC_BLEND_RENDER_MS: u32 = 24_000;
 
 fn dj_transition_fire_ahead_ms(conn: &Connection) -> Result<u32> {
     let deltas = dj_timing_calibration_deltas(conn, DJ_FIRE_AHEAD_WINDOW)?;
@@ -732,7 +732,7 @@ fn synced_overlap_from_grid_ms(
     sample_rate: u32,
 ) -> Option<i32> {
     const MIN_SYNC_OVERLAP_MS: i64 = 8_000;
-    const MAX_SYNC_OVERLAP_MS: i64 = 16_000;
+    const MAX_SYNC_OVERLAP_MS: i64 = 28_000;
     let preferred_ms = preferred_overlap_ms.max(250) as i64;
     let program_ms = program_samples
         .map(|samples| {
@@ -2398,7 +2398,7 @@ mod tests {
     mod dj_transition_logging {
         use super::*;
         use crate::db::models::{
-            AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow,
+            AudioDjProfileCorrectionRow, AudioDjProfileKey, AudioDjProfileRow, AudioDspFeatures,
         };
         use crate::db::schema;
         use crate::services::audio_analysis::dj_profile::{
@@ -2430,6 +2430,8 @@ mod tests {
                     [],
                 )?;
                 queries::set_dj_engine_enabled(conn, true)?;
+                seed_dsp(conn, 1, "8A")?;
+                seed_dsp(conn, 2, "8A")?;
                 seed_profile(conn, "tidal_track", "1", Some(1))?;
                 seed_profile(conn, "tidal_track", "2", Some(2))?;
                 Ok(())
@@ -2479,6 +2481,30 @@ mod tests {
                 computed_at: "now".to_string(),
             };
             queries::upsert_audio_dj_profile(conn, &row)
+        }
+
+        fn seed_dsp(conn: &Connection, track_id: i64, camelot_key: &str) -> Result<()> {
+            queries::upsert_audio_dsp_features(
+                conn,
+                &AudioDspFeatures {
+                    track_id,
+                    bpm: Some(120.0),
+                    key_signature: None,
+                    camelot_key: Some(camelot_key.to_string()),
+                    loudness_lufs: Some(-12.0),
+                    energy: Some(0.5),
+                    danceability: None,
+                    beat_strength: None,
+                    spectral_centroid: None,
+                    stereo_width: None,
+                    is_instrumental: false,
+                    analysis_source: "test".to_string(),
+                    analysis_offset_ms: 0,
+                    samples_analyzed: None,
+                    analyzed_at: "now".to_string(),
+                    analysis_version: "test".to_string(),
+                },
+            )
         }
 
         fn next_job(db: &Database) -> PlaybackPreparation {
@@ -2749,7 +2775,7 @@ mod tests {
 
             assert_eq!(row.0, "BassSwap16");
             assert_eq!(renderer_program.template, "BassSwap16");
-            assert_eq!(renderer_program.resolve_at, 768_000);
+            assert_eq!(renderer_program.resolve_at, 1_152_000);
             assert_eq!(row.2, None);
         }
 
@@ -2820,7 +2846,7 @@ mod tests {
 
             assert_eq!(row.0, "FilterSweep");
             assert_eq!(renderer_program.template, "FilterSweep");
-            assert_eq!(renderer_program.resolve_at, 576_000);
+            assert_eq!(renderer_program.resolve_at, 864_000);
             assert_eq!(row.2, None);
         }
 
@@ -2831,7 +2857,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "FilterSweep");
-            assert_eq!(program.resolve_at, 576_000);
+            assert_eq!(program.resolve_at, 864_000);
             assert_eq!(reason, None);
             assert!(
                 program
@@ -2857,7 +2883,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "BassSwap16");
-            assert_eq!(program.resolve_at, 768_000);
+            assert_eq!(program.resolve_at, 1_152_000);
             assert_eq!(program.deck_b_start_frame, 384_000);
             assert_eq!(reason, None);
             let rate = program
@@ -2880,7 +2906,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "BassSwap32");
-            assert_eq!(program.resolve_at, 1_536_000);
+            assert_eq!(program.resolve_at, 1_344_000);
             assert_eq!(reason, None);
             assert!(program.automation.iter().any(|event| event.param
                 == noor_mix::Param::LowGain(noor_mix::DeckId::B)
@@ -2913,7 +2939,7 @@ mod tests {
             let (program, reason) = v1_renderable_program(&input, 48_000, 2, false);
 
             assert_eq!(program.template, "LongHarmonicBlend");
-            assert_eq!(program.resolve_at, 768_000);
+            assert_eq!(program.resolve_at, 1_152_000);
             assert_eq!(reason, None);
             let rate = program
                 .automation
@@ -3006,12 +3032,12 @@ mod tests {
             let bass_swap_32 =
                 noor_mix::planner::bass_swap_32_program(48_000, 2, DJ_BASS_SWAP_32_RENDER_MS);
 
-            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 8_000);
-            assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 12_000);
-            assert_eq!(dj_gapless_plan_from_program(&bass_swap).overlap_ms, 16_000);
+            assert_eq!(dj_gapless_plan_from_program(&safe).overlap_ms, 12_000);
+            assert_eq!(dj_gapless_plan_from_program(&filter).overlap_ms, 18_000);
+            assert_eq!(dj_gapless_plan_from_program(&bass_swap).overlap_ms, 24_000);
             assert_eq!(
                 dj_gapless_plan_from_program(&bass_swap_32).overlap_ms,
-                32_000
+                28_000
             );
         }
 
@@ -3653,6 +3679,20 @@ mod tests {
                 .expect("overlap");
 
         assert_eq!(overlap_ms, 9_000);
+    }
+
+    #[test]
+    fn synced_overlap_allows_longer_dj_handoff_windows() {
+        let overlap_ms = synced_overlap_from_grid_ms(
+            180_000,
+            &[0.0, 2.0, 4.0],
+            24_000,
+            Some(24_000 * 48),
+            48_000,
+        )
+        .expect("overlap");
+
+        assert_eq!(overlap_ms, 24_000);
     }
 
     #[test]
