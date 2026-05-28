@@ -10,8 +10,8 @@
 	} from '$lib/stores/tidal-moods-cache';
 
 	const PREVIEW_LIMIT = 8;
-	const LOAD_ARM_DELAY_MS = 2500;
-	const FALLBACK_LOAD_DELAY_MS = 10000;
+	const LOAD_ARM_DELAY_MS = 0;
+	const FALLBACK_LOAD_DELAY_MS = 3000;
 
 	// Sync-read the shared moods cache on script init so a second visit
 	// within the 6h TTL renders instantly without a network round-trip.

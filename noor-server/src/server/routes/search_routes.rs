@@ -1,5 +1,6 @@
 use crate::SharedState;
 use crate::db::queries;
+use anyhow::Context;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -119,7 +120,7 @@ async fn fetch_spotify_playlist_search_compact(
         return Ok(Vec::new());
     }
 
-    let results = cached_search(
+    let results = match cached_search(
         client,
         db,
         cfg,
@@ -128,7 +129,18 @@ async fn fetch_spotify_playlist_search_compact(
         limit,
         0,
     )
-    .await?;
+    .await
+    {
+        Ok(results) if !results.playlists.is_empty() => results,
+        Ok(results) => results,
+        Err(primary_error) => {
+            crate::services::spotify::catalog::search_playlists_from_saved_credentials(
+                db, query, limit, 0,
+            )
+            .await
+            .with_context(|| format!("sportify playlist search failed: {primary_error}"))?
+        }
+    };
 
     Ok(results
         .playlists

@@ -23,6 +23,7 @@ use super::models::{
 #[derive(Debug, Clone)]
 pub struct SportifyClientConfig {
     pub base_url: String,
+    pub fallback_base_urls: Vec<String>,
     pub user_agent: String,
 }
 
@@ -70,12 +71,34 @@ mod tests {
         assert_eq!(items.as_array().unwrap().len(), 1);
         assert_eq!(items[0]["id"], "spotify-playlist-3");
     }
+
+    #[test]
+    fn client_config_collects_fallback_base_urls() {
+        let client = SportifyClient::new(SportifyClientConfig {
+            base_url: "https://primary.example/".to_string(),
+            fallback_base_urls: vec![
+                "https://fallback.example/".to_string(),
+                "https://primary.example".to_string(),
+            ],
+            user_agent: "noor-test".to_string(),
+        })
+        .expect("client");
+
+        assert_eq!(
+            client.base_urls,
+            vec![
+                "https://primary.example".to_string(),
+                "https://fallback.example".to_string()
+            ]
+        );
+    }
 }
 
 impl Default for SportifyClientConfig {
     fn default() -> Self {
         Self {
             base_url: "https://sportify.xcasper.space".to_string(),
+            fallback_base_urls: Vec::new(),
             user_agent: "noor-server/sportify".to_string(),
         }
     }
@@ -112,7 +135,7 @@ impl SportifySearchKind {
 #[derive(Clone)]
 pub struct SportifyClient {
     http: reqwest::Client,
-    base_url: String,
+    base_urls: Vec<String>,
 }
 
 impl SportifyClient {
@@ -128,16 +151,47 @@ impl SportifyClient {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context("build sportify reqwest client")?;
-        Ok(Self {
-            http,
-            base_url: config.base_url.trim_end_matches('/').to_string(),
-        })
+        let mut base_urls = Vec::new();
+        for raw in std::iter::once(config.base_url).chain(config.fallback_base_urls) {
+            let normalized = raw.trim().trim_end_matches('/').to_string();
+            if !normalized.is_empty() && !base_urls.iter().any(|u| u == &normalized) {
+                base_urls.push(normalized);
+            }
+        }
+        if base_urls.is_empty() {
+            return Err(anyhow!("no sportify base URL configured"));
+        }
+        Ok(Self { http, base_urls })
     }
 
     /// Issue a GET, validate the standard envelope, and return the raw body
     /// JSON (envelope fields included). Callers extract the resource field.
     async fn fetch_raw(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, path);
+        let mut errors = Vec::new();
+        for base_url in &self.base_urls {
+            match self.fetch_raw_from_base(base_url, path, query).await {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    tracing::debug!("sportify {} via {} failed: {}", path, base_url, e);
+                    errors.push(format!("{}: {}", base_url, e));
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "all sportify proxies failed for {}: {}",
+            path,
+            errors.join("; ")
+        ))
+    }
+
+    async fn fetch_raw_from_base(
+        &self,
+        base_url: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Value> {
+        let url = format!("{}{}", base_url, path);
         let resp = self
             .http
             .get(&url)
@@ -196,39 +250,43 @@ impl SportifyClient {
         offset: u32,
     ) -> Result<SportifySearchResults> {
         let limit = limit.clamp(1, 50);
-        let value = self
-            .fetch_raw(
-                "/api/search",
-                &[
-                    ("q", query.to_string()),
-                    ("type", kind.as_str().to_string()),
-                    ("limit", limit.to_string()),
-                    ("offset", offset.to_string()),
-                ],
-            )
-            .await?;
-
-        // Sportify search usually returns `{ results: [...] }`, but has also
-        // shipped nested `{ results: { items: [...] } }` and typed buckets.
-        // Normalize all of those into the requested result bucket.
-        let mut out = SportifySearchResults::default();
-        let array = extract_search_items(&value, kind);
-
-        match kind {
-            SportifySearchKind::Track => {
-                out.tracks = serde_json::from_value(array).unwrap_or_default();
-            }
-            SportifySearchKind::Album => {
-                out.albums = serde_json::from_value(array).unwrap_or_default();
-            }
-            SportifySearchKind::Artist => {
-                out.artists = serde_json::from_value(array).unwrap_or_default();
-            }
-            SportifySearchKind::Playlist => {
-                out.playlists = serde_json::from_value(array).unwrap_or_default();
+        let query_params = [
+            ("q", query.to_string()),
+            ("type", kind.as_str().to_string()),
+            ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
+        ];
+        let mut errors = Vec::new();
+        for (idx, base_url) in self.base_urls.iter().enumerate() {
+            match self
+                .fetch_raw_from_base(base_url, "/api/search", &query_params)
+                .await
+            {
+                Ok(value) => {
+                    let out = search_results_from_value(&value, kind);
+                    if matches!(kind, SportifySearchKind::Playlist)
+                        && out.playlists.is_empty()
+                        && idx + 1 < self.base_urls.len()
+                    {
+                        tracing::debug!(
+                            "sportify playlist search via {} returned no playlist rows",
+                            base_url
+                        );
+                        continue;
+                    }
+                    return Ok(out);
+                }
+                Err(e) => {
+                    tracing::debug!("sportify /api/search via {} failed: {}", base_url, e);
+                    errors.push(format!("{}: {}", base_url, e));
+                }
             }
         }
-        Ok(out)
+
+        Err(anyhow!(
+            "all sportify proxies failed for /api/search: {}",
+            errors.join("; ")
+        ))
     }
 
     pub async fn track(&self, spotify_id: &str) -> Result<SportifyTrack> {
@@ -296,6 +354,30 @@ fn extract_search_items(value: &Value, kind: SportifySearchKind) -> Value {
                 .and_then(|v| unwrap_items(v, kind))
         })
         .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn search_results_from_value(value: &Value, kind: SportifySearchKind) -> SportifySearchResults {
+    // Sportify search usually returns `{ results: [...] }`, but has also
+    // shipped nested `{ results: { items: [...] } }` and typed buckets.
+    // Normalize all of those into the requested result bucket.
+    let mut out = SportifySearchResults::default();
+    let array = extract_search_items(value, kind);
+
+    match kind {
+        SportifySearchKind::Track => {
+            out.tracks = serde_json::from_value(array).unwrap_or_default();
+        }
+        SportifySearchKind::Album => {
+            out.albums = serde_json::from_value(array).unwrap_or_default();
+        }
+        SportifySearchKind::Artist => {
+            out.artists = serde_json::from_value(array).unwrap_or_default();
+        }
+        SportifySearchKind::Playlist => {
+            out.playlists = serde_json::from_value(array).unwrap_or_default();
+        }
+    }
+    out
 }
 
 fn truncate_for_log(s: &str) -> String {
