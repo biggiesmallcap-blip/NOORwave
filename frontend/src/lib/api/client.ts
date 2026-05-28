@@ -3173,7 +3173,7 @@ export const api = {
 	// Workout, Focus, etc). Each entry has a slug that can be fed to
 	// getTidalMoodPage for the drill-down content.
 	getTidalMoods() {
-		return fetchApi<{ categories: TidalMoodCategory[]; source: string }>(
+		return fetchApi<{ categories: TidalMoodCategory[]; source: string; fallback?: boolean }>(
 			'/api/tidal/moods',
 		);
 	},

@@ -607,22 +607,38 @@ async fn main() -> Result<()> {
         info!("Last.fm scrobbling disabled (set LASTFM_API_SECRET to enable)");
     }
 
-    // Sportify (anonymous Spotify metadata proxy) — powers /discover. Default
-    // base URL ships in code; env var lets ops point at a self-hosted mirror.
-    let sportify_base_url = std::env::var("SPORTIFY_API_BASE_URL")
+    // Sportify (anonymous Spotify metadata proxy) powers /discover. Default
+    // base URL ships in code; env vars let ops point at a self-hosted mirror.
+    let configured_sportify_base_url = std::env::var("SPORTIFY_API_BASE_URL")
         .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "https://sportify.xcasper.space".to_string());
+        .filter(|s| !s.trim().is_empty());
+    let sportify_base_url = configured_sportify_base_url
+        .clone()
+        .unwrap_or_else(|| "https://spotify.xwolf.space".to_string());
+    let sportify_fallback_base_urls = if configured_sportify_base_url.is_some() {
+        Vec::new()
+    } else {
+        vec!["https://sportify.xcasper.space".to_string()]
+    };
     let sportify_client =
         match services::sportify::SportifyClient::new(services::sportify::SportifyClientConfig {
             base_url: sportify_base_url.clone(),
+            fallback_base_urls: sportify_fallback_base_urls.clone(),
             user_agent: format!(
                 "noor-server/{} (sportify discovery)",
                 env!("CARGO_PKG_VERSION")
             ),
         }) {
             Ok(client) => {
-                info!("Sportify discovery client ready ({})", sportify_base_url);
+                if sportify_fallback_base_urls.is_empty() {
+                    info!("Sportify discovery client ready ({})", sportify_base_url);
+                } else {
+                    info!(
+                        "Sportify discovery client ready ({} with fallback {})",
+                        sportify_base_url,
+                        sportify_fallback_base_urls.join(", ")
+                    );
+                }
                 Some(Arc::new(client))
             }
             Err(e) => {
