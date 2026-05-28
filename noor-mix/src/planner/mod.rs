@@ -40,14 +40,14 @@ impl Planner {
         if drop_tease_candidate_ready(outgoing, incoming, policy) {
             return TransitionTemplate::DropTease16;
         }
-        if matches!(policy.mix_intent, MixIntent::Bold)
+        let bold_filter_candidate = matches!(policy.mix_intent, MixIntent::Bold)
             && !outgoing.phrase_bar_indices.is_empty()
-            && !incoming.phrase_bar_indices.is_empty()
-        {
-            return TransitionTemplate::FilterSweep;
-        }
+            && !incoming.phrase_bar_indices.is_empty();
 
         if bpm_delta > 8.0 {
+            if bold_filter_candidate {
+                return TransitionTemplate::FilterSweep;
+            }
             return TransitionTemplate::SlamCut;
         }
 
@@ -84,6 +84,9 @@ impl Planner {
         }
         if matches!(camelot_distance, 0 | 1 | 7) && bpm_delta <= 3.0 {
             return TransitionTemplate::LongHarmonicBlend;
+        }
+        if bold_filter_candidate {
+            return TransitionTemplate::FilterSweep;
         }
         TransitionTemplate::FilterSweep
     }
@@ -905,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_bold_prefers_filter_sweep_for_compatible_profiles() {
+    fn choose_template_bold_preserves_bass_swap_32_for_compatible_profiles() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
@@ -916,7 +919,39 @@ mod tests {
                 &profile(Some(121.0), Some("8A"), 32),
                 &policy
             ),
-            TransitionTemplate::FilterSweep
+            TransitionTemplate::BassSwap32
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_preserves_bass_swap_16_for_medium_phrases() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 2),
+                &profile(Some(121.0), Some("8A"), 2),
+                &policy
+            ),
+            TransitionTemplate::BassSwap16
+        );
+    }
+
+    #[test]
+    fn choose_template_bold_preserves_long_harmonic_blend_for_short_compatible_profiles() {
+        let policy = Policy {
+            mix_intent: MixIntent::Bold,
+            ..Policy::default()
+        };
+        assert_eq!(
+            Planner::choose_template(
+                &profile(Some(120.0), Some("8A"), 1),
+                &profile(Some(121.0), Some("9A"), 1),
+                &policy
+            ),
+            TransitionTemplate::LongHarmonicBlend
         );
     }
 
@@ -1366,7 +1401,7 @@ mod tests {
             &profile(Some(121.0), Some("8A"), 4),
             &bold,
         );
-        assert_eq!(selected, TransitionTemplate::FilterSweep);
+        assert_eq!(selected, TransitionTemplate::BassSwap32);
 
         let policy = Policy {
             safety_template_override: Some(TransitionTemplate::DropTease16),
