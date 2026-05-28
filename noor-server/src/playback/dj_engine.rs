@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn bold_policy_prefers_filter_sweep_for_compatible_profiles() {
+    fn bold_policy_preserves_bass_swap_for_compatible_profiles() {
         let db = db();
         enable(&db);
         db.with_conn(|conn| queries::set_dj_global_policy(conn, "bold", "neutral"))
@@ -585,7 +585,7 @@ mod tests {
         )
         .expect("program");
 
-        assert_eq!(program.template, "FilterSweep");
+        assert_eq!(program.template, "BassSwap16");
         program.validate().expect("valid");
     }
 
@@ -597,6 +597,24 @@ mod tests {
             .expect("set bold policy");
         seed_profile(&db, "library_track", 1, 0.9);
         seed_profile(&db, "library_track", 2, 0.9);
+        db.with_conn(|conn| {
+            queries::upsert_audio_dj_profile_correction(
+                conn,
+                &AudioDjProfileCorrectionRow {
+                    media_ref_kind: "library_track".to_string(),
+                    media_ref_id: "2".to_string(),
+                    bpm_multiplier: Some(1.05),
+                    downbeat_offset_beats: None,
+                    phrase_offset_bars: None,
+                    safe_crossfade_only: false,
+                    transition_speed_bias: None,
+                    notes: None,
+                    created_at: "now".to_string(),
+                    updated_at: "now".to_string(),
+                },
+            )
+        })
+        .expect("tempo correction");
         let engine = DjEngine::new(db);
 
         let plan = engine
