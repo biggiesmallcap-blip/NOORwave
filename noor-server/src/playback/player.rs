@@ -1865,6 +1865,7 @@ mod tests {
     use super::*;
     use crate::playback::automix::{
         automix_score, automix_scored_reason, build_automix_extension_with_reasons,
+        evaluate_automix_for_seed,
     };
 
     fn conn() -> Connection {
@@ -4504,6 +4505,248 @@ mod tests {
             !extension.is_empty(),
             "expected non-empty extension once a similarity row exists"
         );
+    }
+
+    #[test]
+    fn learned_automix_builds_chain_aware_order_from_overfetched_neighbors() {
+        let conn = conn();
+        conn.execute_batch(
+            "
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                behavioral_score REAL DEFAULT 0,
+                audio_score REAL DEFAULT 0,
+                metadata_score REAL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                primary_reason TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree_percentile REAL NOT NULL DEFAULT 0,
+                play_count_seed INTEGER NOT NULL DEFAULT 0,
+                play_count_candidate INTEGER NOT NULL DEFAULT 0,
+                support_transition REAL NOT NULL DEFAULT 0,
+                support_colisten REAL NOT NULL DEFAULT 0,
+                support_structure REAL NOT NULL DEFAULT 0,
+                support_metadata REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, neighbor_track_id, model_id)
+            );
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL,
+                key_signature TEXT,
+                camelot_key TEXT,
+                loudness_lufs REAL,
+                energy REAL,
+                danceability REAL,
+                beat_strength REAL,
+                spectral_centroid REAL,
+                stereo_width REAL,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                analysis_source TEXT NOT NULL DEFAULT 'test',
+                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+                samples_analyzed INTEGER,
+                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                analysis_version TEXT NOT NULL DEFAULT 'test'
+            );
+            INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            INSERT INTO embedding_models (
+                id, model_key, family, dimension, status, is_active, trained_at, created_at
+            ) VALUES (
+                1, 'test-chain', 'discovery-fusion-v2', 3, 'ready', 1,
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+            );
+            INSERT INTO track_neighbors (
+                track_id, neighbor_track_id, model_id, rank, score, audio_score, primary_reason
+            ) VALUES
+                (1, 2, 1, 1, 0.90, 0.90, 'audio_texture'),
+                (1, 3, 1, 2, 0.89, 0.89, 'audio_texture'),
+                (1, 4, 1, 3, 0.88, 0.88, 'audio_texture');
+            INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES
+                (1, 120.0, '1A'),
+                (2, 120.0, '2A'),
+                (3, 120.0, '12A'),
+                (4, 120.0, '3A');
+            ",
+        )
+        .expect("schema");
+        let seed = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+
+        let extension =
+            extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 3, true).expect("extension call");
+
+        assert_eq!(
+            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![2, 4, 3]
+        );
+    }
+
+    #[test]
+    fn learned_automix_smoke_prefers_next_track_fit_over_vague_similarity() {
+        let conn = conn();
+        conn.execute_batch(
+            "
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                behavioral_score REAL DEFAULT 0,
+                audio_score REAL DEFAULT 0,
+                metadata_score REAL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                primary_reason TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree_percentile REAL NOT NULL DEFAULT 0,
+                play_count_seed INTEGER NOT NULL DEFAULT 0,
+                play_count_candidate INTEGER NOT NULL DEFAULT 0,
+                support_transition REAL NOT NULL DEFAULT 0,
+                support_colisten REAL NOT NULL DEFAULT 0,
+                support_structure REAL NOT NULL DEFAULT 0,
+                support_metadata REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, neighbor_track_id, model_id)
+            );
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL,
+                key_signature TEXT,
+                camelot_key TEXT,
+                loudness_lufs REAL,
+                energy REAL,
+                danceability REAL,
+                beat_strength REAL,
+                spectral_centroid REAL,
+                stereo_width REAL,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                analysis_source TEXT NOT NULL DEFAULT 'test',
+                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+                samples_analyzed INTEGER,
+                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                analysis_version TEXT NOT NULL DEFAULT 'test'
+            );
+            INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            INSERT INTO embedding_models (
+                id, model_key, family, dimension, status, is_active, trained_at, created_at
+            ) VALUES (
+                1, 'test-smoke', 'discovery-fusion-v2', 3, 'ready', 1,
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+            );
+            INSERT INTO track_neighbors (
+                track_id, neighbor_track_id, model_id, rank, score, behavioral_score,
+                audio_score, metadata_score, reason_json, primary_reason, support_colisten
+            ) VALUES
+                (1, 2, 1, 1, 0.99, 0.80, 0.10, 0.10, '[{\"key\":\"behavioral\"}]', 'behavioral', 1.0),
+                (1, 3, 1, 2, 0.98, 0.00, 0.98, 0.00, '[{\"key\":\"audio_texture\"}]', 'audio_texture', 0.0),
+                (1, 4, 1, 3, 0.97, 0.00, 0.10, 0.00, '[{\"key\":\"lastfm_direct\"}]', 'lastfm_direct', 0.0),
+                (1, 5, 1, 4, 0.96, 0.00, 0.10, 0.00, '[{\"key\":\"lastfm_branch\"}]', 'lastfm_branch', 0.0),
+                (1, 6, 1, 5, 0.70, 0.00, 0.20, 0.30, '[{\"key\":\"bpm_match\"},{\"key\":\"harmonic_match\"}]', 'bpm_match', 0.0);
+            INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES
+                (1, 120.0, '1A'),
+                (2, 150.0, '6B'),
+                (3, 120.0, '1A'),
+                (4, 145.0, '6B'),
+                (5, 120.0, '1A'),
+                (6, 120.0, '1A');
+            ",
+        )
+        .expect("schema");
+        let seed = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+
+        let extension =
+            extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 5, true).expect("extension call");
+
+        assert_eq!(extension.first().map(|track| track.id), Some(6));
+        assert_eq!(
+            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![6, 5, 3, 4, 2]
+        );
+    }
+
+    #[test]
+    fn automix_evaluator_reports_before_after_without_queue_insert() {
+        let conn = conn();
+        conn.execute_batch(
+            "
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                behavioral_score REAL DEFAULT 0,
+                audio_score REAL DEFAULT 0,
+                metadata_score REAL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                primary_reason TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree_percentile REAL NOT NULL DEFAULT 0,
+                play_count_seed INTEGER NOT NULL DEFAULT 0,
+                play_count_candidate INTEGER NOT NULL DEFAULT 0,
+                support_transition REAL NOT NULL DEFAULT 0,
+                support_colisten REAL NOT NULL DEFAULT 0,
+                support_structure REAL NOT NULL DEFAULT 0,
+                support_metadata REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, neighbor_track_id, model_id)
+            );
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL,
+                key_signature TEXT,
+                camelot_key TEXT,
+                loudness_lufs REAL,
+                energy REAL,
+                danceability REAL,
+                beat_strength REAL,
+                spectral_centroid REAL,
+                stereo_width REAL,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                analysis_source TEXT NOT NULL DEFAULT 'test',
+                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+                samples_analyzed INTEGER,
+                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                analysis_version TEXT NOT NULL DEFAULT 'test'
+            );
+            INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            INSERT INTO embedding_models (
+                id, model_key, family, dimension, status, is_active, trained_at, created_at
+            ) VALUES (
+                1, 'test-evaluator', 'discovery-fusion-v2', 3, 'ready', 1,
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+            );
+            INSERT INTO track_neighbors (
+                track_id, neighbor_track_id, model_id, rank, score, audio_score,
+                metadata_score, reason_json, primary_reason
+            ) VALUES
+                (1, 2, 1, 1, 0.90, 0.40, 0.20, '[{\"key\":\"bpm_match\"}]', 'bpm_match');
+            INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES
+                (1, 120.0, '1A'),
+                (2, 120.5, '1A');
+            ",
+        )
+        .expect("schema");
+
+        let report = evaluate_automix_for_seed(&conn, 1, 1).expect("evaluate");
+
+        assert_eq!(report.queue_len_before, report.queue_len_after);
+        assert_eq!(report.before.len(), 1);
+        assert_eq!(report.after.len(), 1);
+        assert_eq!(report.before[0].track_id, 2);
+        assert_eq!(report.after[0].track_id, 2);
+        assert_eq!(report.after[0].bpm, Some(120.5));
+        assert_eq!(report.after[0].camelot_key.as_deref(), Some("1A"));
+        assert!(report.after[0].final_score.is_some());
     }
 
     /// Metadata fallback: seed has no embedding/similarity signal but the
