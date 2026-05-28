@@ -1,10 +1,10 @@
 use anyhow::Result;
 use noor_mix::planner::{DJ_PLANNER_VERSION, MixIntent, TransitionSpeedBias, TransitionTemplate};
 use noor_mix::{DjProfile, Planner, Policy, TransitionProgram};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
-use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileRow};
+use crate::db::models::{AudioDjProfileCorrectionRow, AudioDjProfileRow, AudioDspFeatures};
 use crate::db::{Database, queries};
 use crate::playback::dj_lookahead::DjMediaRef;
 use crate::services::audio_analysis::dj_profile::{decode_f32_blob, decode_u32_blob};
@@ -92,8 +92,8 @@ impl DjEngine {
                 )));
             }
 
-            let mut outgoing = profile_from_row(from_profile.as_ref().expect("checked"));
-            let mut incoming = profile_from_row(to_profile.as_ref().expect("checked"));
+            let mut outgoing = profile_from_row(conn, from_profile.as_ref().expect("checked"))?;
+            let mut incoming = profile_from_row(conn, to_profile.as_ref().expect("checked"))?;
             apply_correction(&mut outgoing, from_correction.as_ref());
             apply_correction(&mut incoming, to_correction.as_ref());
 
@@ -312,7 +312,7 @@ fn apply_correction(profile: &mut DjProfile, correction: Option<&AudioDjProfileC
     }
 }
 
-fn profile_from_row(row: &AudioDjProfileRow) -> DjProfile {
+fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProfile> {
     let beat_grid_seconds = decode_f32_blob(&row.beat_grid_blob).unwrap_or_default();
     let downbeat_seconds = decode_f32_blob(&row.downbeats_blob).unwrap_or_default();
     let phrase_bar_indices = decode_u32_blob(&row.phrase_boundaries_blob).unwrap_or_default();
@@ -320,10 +320,16 @@ fn profile_from_row(row: &AudioDjProfileRow) -> DjProfile {
     let mix_out_seconds = decode_f32_blob(&row.mix_out_blob).unwrap_or_default();
     let safe_transition_windows =
         decode_f32_blob(&row.safe_transition_windows_blob).unwrap_or_default();
-    DjProfile {
+    let dsp = dsp_features_for_profile(conn, row)?;
+    let energy = dsp
+        .as_ref()
+        .and_then(|features| features.energy)
+        .map(|value| value as f32)
+        .or_else(|| average_energy_contour(&row.energy_contour_blob));
+    Ok(DjProfile {
         bpm: estimate_bpm(&beat_grid_seconds),
-        camelot_key: Some("8A".to_string()),
-        energy: None,
+        camelot_key: dsp.and_then(|features| features.camelot_key),
+        energy,
         beat_grid_seconds,
         downbeat_seconds,
         phrase_bar_indices,
@@ -348,7 +354,40 @@ fn profile_from_row(row: &AudioDjProfileRow) -> DjProfile {
         profile_confidence: row.profile_confidence as f32,
         safe_crossfade_only: false,
         profile_version: row.profile_version.clone(),
+    })
+}
+
+fn dsp_features_for_profile(
+    conn: &Connection,
+    row: &AudioDjProfileRow,
+) -> Result<Option<AudioDspFeatures>> {
+    if let Some(track_id) = row.track_id {
+        return queries::get_audio_dsp_features(conn, track_id);
     }
+    let Some(tidal_id) = row.tidal_id else {
+        return Ok(None);
+    };
+    let track_id = conn
+        .query_row(
+            "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+            rusqlite::params![tidal_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    track_id
+        .map(|track_id| queries::get_audio_dsp_features(conn, track_id))
+        .unwrap_or(Ok(None))
+}
+
+fn average_energy_contour(blob: &[u8]) -> Option<f32> {
+    let contour = decode_f32_blob(blob)?;
+    let mut sum = 0.0_f32;
+    let mut count = 0_u32;
+    for value in contour.into_iter().filter(|value| value.is_finite()) {
+        sum += value.clamp(0.0, 1.0);
+        count += 1;
+    }
+    (count > 0).then_some(sum / count as f32)
 }
 
 fn estimate_bpm(beats: &[f32]) -> Option<f32> {
@@ -416,6 +455,19 @@ mod tests {
                     "INSERT OR IGNORE INTO tracks (id, title, artist_id) VALUES (?1, ?2, 1)",
                     rusqlite::params![id, format!("Track {id}")],
                 )?;
+                seed_dsp(conn, id, "8A", 0.5)?;
+            }
+            if kind == "tidal_track" {
+                let track_id = 100_000 + id;
+                conn.execute(
+                    "INSERT OR IGNORE INTO artists (id, name) VALUES (1, 'Artist')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO tracks (id, title, artist_id, tidal_id) VALUES (?1, ?2, 1, ?3)",
+                    rusqlite::params![track_id, format!("Tidal Track {id}"), id],
+                )?;
+                seed_dsp(conn, track_id, "8A", 0.5)?;
             }
             if kind == "queue_item" {
                 conn.execute(
@@ -457,6 +509,30 @@ mod tests {
             queries::upsert_audio_dj_profile(conn, &row)
         })
         .expect("seed profile");
+    }
+
+    fn seed_dsp(conn: &Connection, track_id: i64, camelot_key: &str, energy: f64) -> Result<()> {
+        queries::upsert_audio_dsp_features(
+            conn,
+            &AudioDspFeatures {
+                track_id,
+                bpm: Some(120.0),
+                key_signature: None,
+                camelot_key: Some(camelot_key.to_string()),
+                loudness_lufs: Some(-12.0),
+                energy: Some(energy),
+                danceability: None,
+                beat_strength: None,
+                spectral_centroid: None,
+                stereo_width: None,
+                is_instrumental: false,
+                analysis_source: "test".to_string(),
+                analysis_offset_ms: 0,
+                samples_analyzed: None,
+                analyzed_at: "now".to_string(),
+                analysis_version: "test".to_string(),
+            },
+        )
     }
 
     fn seed_correction(db: &Database, key: AudioDjProfileKey, safe: bool, speed: Option<&str>) {
@@ -672,6 +748,54 @@ mod tests {
         .expect("program");
 
         assert_eq!(program.template, "FilterSweep");
+    }
+
+    #[test]
+    fn missing_dsp_camelot_uses_safe_crossfade_not_fake_harmonic_match() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        db.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM audio_dsp_features WHERE track_id IN (1, 2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("remove dsp features");
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "SafeCrossfade");
+    }
+
+    #[test]
+    fn distant_camelot_keys_use_safe_crossfade() {
+        let db = db();
+        enable(&db);
+        seed_profile(&db, "library_track", 1, 0.9);
+        seed_profile(&db, "library_track", 2, 0.9);
+        db.with_conn(|conn| {
+            seed_dsp(conn, 1, "8A", 0.5)?;
+            seed_dsp(conn, 2, "3A", 0.5)?;
+            Ok(())
+        })
+        .expect("seed clashing dsp features");
+
+        let program = plan(
+            &db,
+            ref_for("library_track", 1),
+            ref_for("library_track", 2),
+        )
+        .expect("program");
+
+        assert_eq!(program.template, "SafeCrossfade");
     }
 
     #[test]
