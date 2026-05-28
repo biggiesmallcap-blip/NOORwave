@@ -929,6 +929,7 @@ export type DjOverlayDetails = {
 	overlay_end_ms?: number;
 	tempo_ratio?: number;
 	deck_b_start_frame: number;
+	drop_marker_ms?: number;
 	drop_source: 'program_json' | string;
 };
 

@@ -245,6 +245,7 @@ struct DjOverlayDetails {
     overlay_end_ms: Option<i64>,
     tempo_ratio: Option<f64>,
     deck_b_start_frame: u64,
+    drop_marker_ms: Option<i64>,
     drop_source: String,
 }
 
@@ -522,7 +523,10 @@ async fn get_status(
                 let tuning_deltas = latest_fired_dj_timing_deltas(conn, 20)?;
                 let timing_history_summary =
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
-                let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
+                let mut renderer_status =
+                    renderer_status_for_transition(latest_transition.as_ref());
+                renderer_status.overlay_details =
+                    annotate_overlay_drop_source(renderer_status.overlay_details, next.as_ref());
                 Ok(DjStatusResponse {
                     enabled,
                     current,
@@ -2162,6 +2166,13 @@ fn overlay_details_from_program_json(
     let overlay_end_ms = planned_start_ms
         .zip(i64::try_from(resolve_ms).ok())
         .and_then(|(start_ms, duration_ms)| start_ms.checked_add(duration_ms));
+    let drop_marker_ms = ((u128::from(
+        program
+            .deck_b_start_frame
+            .saturating_add(program.swap_start),
+    ) * 1_000)
+        + (u128::from(program.sample_rate) / 2))
+        / u128::from(program.sample_rate);
     let tempo_ratio = program
         .automation
         .iter()
@@ -2173,8 +2184,34 @@ fn overlay_details_from_program_json(
         overlay_end_ms,
         tempo_ratio,
         deck_b_start_frame: program.deck_b_start_frame,
+        drop_marker_ms: i64::try_from(drop_marker_ms).ok(),
         drop_source: "program_json".to_string(),
     })
+}
+
+fn annotate_overlay_drop_source(
+    details: Option<DjOverlayDetails>,
+    incoming: Option<&DjDeckStatus>,
+) -> Option<DjOverlayDetails> {
+    let mut details = details?;
+    let Some(drop_marker_ms) = details.drop_marker_ms else {
+        return Some(details);
+    };
+    let Some(incoming) = incoming else {
+        return Some(details);
+    };
+    if marker_matches(&incoming.manual_drop_markers_ms, drop_marker_ms) {
+        details.drop_source = "manual_drop_cue".to_string();
+    } else if marker_matches(&incoming.drop_markers_ms, drop_marker_ms) {
+        details.drop_source = "profile_drop_candidate".to_string();
+    }
+    Some(details)
+}
+
+fn marker_matches(markers_ms: &[i64], target_ms: i64) -> bool {
+    markers_ms
+        .iter()
+        .any(|marker| marker.abs_diff(target_ms) <= 25)
 }
 
 fn media_ref_label(
@@ -2473,6 +2510,7 @@ mod tests {
                 overlay_end_ms: Some(151_000),
                 tempo_ratio: Some(1.02),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             }),
             runtime_rendered_dj_mixer: None,
@@ -2493,6 +2531,7 @@ mod tests {
                 overlay_end_ms: Some(151_000),
                 tempo_ratio: Some(1.02),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             })
         );
@@ -2637,8 +2676,39 @@ mod tests {
                 overlay_end_ms: Some(121_000),
                 tempo_ratio: Some(1.0199999809265137),
                 deck_b_start_frame: 384_000,
+                drop_marker_ms: Some(8_500),
                 drop_source: "program_json".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn overlay_details_source_labels_manual_and_profile_drop_markers() {
+        let details = Some(DjOverlayDetails {
+            overlay_status: "armed".to_string(),
+            overlay_start_ms: Some(120_000),
+            overlay_end_ms: Some(121_000),
+            tempo_ratio: Some(1.0),
+            deck_b_start_frame: 384_000,
+            drop_marker_ms: Some(32_000),
+            drop_source: "program_json".to_string(),
+        });
+        let mut incoming = test_deck_status(true, "ready");
+        incoming.drop_markers_ms = vec![32_000];
+
+        assert_eq!(
+            annotate_overlay_drop_source(details.clone(), Some(&incoming))
+                .expect("profile details")
+                .drop_source,
+            "profile_drop_candidate"
+        );
+
+        incoming.manual_drop_markers_ms = vec![32_000];
+        assert_eq!(
+            annotate_overlay_drop_source(details, Some(&incoming))
+                .expect("manual details")
+                .drop_source,
+            "manual_drop_cue"
         );
     }
 
