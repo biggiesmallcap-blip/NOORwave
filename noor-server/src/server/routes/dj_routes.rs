@@ -27,6 +27,7 @@ use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::{
     DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob, dj_profile_row_is_current,
+    encode_f32_blob,
 };
 use crate::services::tidal::stream as tidal_stream;
 
@@ -40,6 +41,7 @@ const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
 const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
+const MAX_MANUAL_DROP_MARKERS: usize = 16;
 
 #[cfg(test)]
 type ReadyPairPlanningKey = (i64, u64);
@@ -115,6 +117,7 @@ struct DjProfileCorrectionRequest {
     phrase_offset_bars: Option<i64>,
     safe_crossfade_only: Option<bool>,
     transition_speed_bias: Option<String>,
+    manual_drop_markers_ms: Option<Vec<i64>>,
     notes: Option<String>,
 }
 
@@ -127,6 +130,7 @@ struct DjProfileCorrectionResponse {
     phrase_offset_bars: Option<i64>,
     safe_crossfade_only: bool,
     transition_speed_bias: Option<String>,
+    manual_drop_markers_ms: Vec<i64>,
     notes: Option<String>,
     applies: String,
 }
@@ -194,6 +198,8 @@ struct DjDeckStatus {
     beat_markers_ms: Vec<i64>,
     downbeat_markers_ms: Vec<i64>,
     phrase_markers_ms: Vec<i64>,
+    drop_markers_ms: Vec<i64>,
+    manual_drop_markers_ms: Vec<i64>,
     mix_in_markers_ms: Vec<i64>,
     mix_out_markers_ms: Vec<i64>,
     passive_analysis_status: Option<String>,
@@ -1390,6 +1396,7 @@ async fn set_profile_correction(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let manual_drop_markers_ms = normalize_manual_drop_markers_ms(payload.manual_drop_markers_ms)?;
     let now = Utc::now().to_rfc3339();
     let row = AudioDjProfileCorrectionRow {
         media_ref_kind: payload.media_ref_kind,
@@ -1399,6 +1406,7 @@ async fn set_profile_correction(
         phrase_offset_bars: payload.phrase_offset_bars,
         safe_crossfade_only: payload.safe_crossfade_only.unwrap_or(false),
         transition_speed_bias: payload.transition_speed_bias,
+        manual_drop_blob: encode_marker_ms_blob(&manual_drop_markers_ms),
         notes: payload.notes,
         created_at: now.clone(),
         updated_at: now,
@@ -1448,9 +1456,34 @@ fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionR
         phrase_offset_bars: row.phrase_offset_bars,
         safe_crossfade_only: row.safe_crossfade_only,
         transition_speed_bias: row.transition_speed_bias,
+        manual_drop_markers_ms: decode_marker_blob_ms(&row.manual_drop_blob),
         notes: row.notes,
         applies: "next_transition".to_string(),
     }
+}
+
+fn normalize_manual_drop_markers_ms(markers: Option<Vec<i64>>) -> Result<Vec<i64>, StatusCode> {
+    let mut markers = markers.unwrap_or_default();
+    if markers.len() > MAX_MANUAL_DROP_MARKERS || markers.iter().any(|marker| *marker < 0) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    markers.sort_unstable();
+    markers.dedup();
+    Ok(markers)
+}
+
+fn encode_marker_ms_blob(markers_ms: &[i64]) -> Vec<u8> {
+    let seconds: Vec<f32> = markers_ms
+        .iter()
+        .map(|marker| *marker as f32 / 1000.0)
+        .collect();
+    encode_f32_blob(&seconds)
+}
+
+fn decode_marker_blob_ms(blob: &[u8]) -> Vec<i64> {
+    decode_f32_blob(blob)
+        .map(|values| seconds_markers_ms(&values))
+        .unwrap_or_default()
 }
 
 fn deck_status(
@@ -1495,6 +1528,7 @@ fn deck_status(
         beat_markers_ms,
         downbeat_markers_ms,
         phrase_markers_ms,
+        drop_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
     ) = if let Some(profile) = profile.as_ref() {
@@ -1513,6 +1547,7 @@ fn deck_status(
             seconds_markers_ms(&beat_markers),
             seconds_markers_ms(&downbeat_markers),
             phrase_markers,
+            seconds_markers_ms(&decode_f32_blob(&profile.drop_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_in_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_out_blob).unwrap_or_default()),
         )
@@ -1528,8 +1563,13 @@ fn deck_status(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     };
+    let manual_drop_markers_ms = correction
+        .as_ref()
+        .map(|row| decode_marker_blob_ms(&row.manual_drop_blob))
+        .unwrap_or_default();
     let waveform_status = waveform_status(&profile_status, &waveform_peaks);
     Ok(DjDeckStatus {
         media_ref_kind: key.media_ref_kind,
@@ -1548,6 +1588,8 @@ fn deck_status(
         beat_markers_ms,
         downbeat_markers_ms,
         phrase_markers_ms,
+        drop_markers_ms,
+        manual_drop_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
         passive_analysis_status: passive_analysis
@@ -1556,7 +1598,9 @@ fn deck_status(
         passive_analysis_reason: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.reason.to_string()),
-        safe_crossfade_only: correction.is_some_and(|row| row.safe_crossfade_only),
+        safe_crossfade_only: correction
+            .as_ref()
+            .is_some_and(|row| row.safe_crossfade_only),
     })
 }
 
@@ -2252,12 +2296,47 @@ mod tests {
             beat_markers_ms: Vec::new(),
             downbeat_markers_ms: Vec::new(),
             phrase_markers_ms: Vec::new(),
+            drop_markers_ms: Vec::new(),
+            manual_drop_markers_ms: Vec::new(),
             mix_in_markers_ms: Vec::new(),
             mix_out_markers_ms: Vec::new(),
             passive_analysis_status: None,
             passive_analysis_reason: None,
             safe_crossfade_only: false,
         }
+    }
+
+    #[test]
+    fn correction_response_round_trips_manual_drop_markers() {
+        let row = AudioDjProfileCorrectionRow {
+            media_ref_kind: "tidal_track".to_string(),
+            media_ref_id: "123".to_string(),
+            bpm_multiplier: None,
+            downbeat_offset_beats: None,
+            phrase_offset_bars: None,
+            safe_crossfade_only: false,
+            transition_speed_bias: None,
+            manual_drop_blob: encode_marker_ms_blob(&[64_000, 32_000]),
+            notes: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let response = correction_response(row);
+
+        assert_eq!(response.manual_drop_markers_ms, vec![64_000, 32_000]);
+    }
+
+    #[test]
+    fn manual_drop_marker_payload_is_sorted_deduped_and_non_negative() {
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![64_000, 32_000, 32_000])).expect("markers"),
+            vec![32_000, 64_000]
+        );
+        assert_eq!(
+            normalize_manual_drop_markers_ms(Some(vec![-1])),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[test]

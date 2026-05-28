@@ -100,6 +100,7 @@
 			phrase_offset_bars: undefined,
 			safe_crossfade_only: false,
 			transition_speed_bias: undefined,
+			manual_drop_markers_ms: [],
 			notes: undefined,
 		});
 	}

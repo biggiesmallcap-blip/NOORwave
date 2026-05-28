@@ -49,6 +49,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_045,
     MIGRATION_046,
     MIGRATION_047,
+    MIGRATION_048,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1305,6 +1306,11 @@ const MIGRATION_047: &str = r#"
 ALTER TABLE audio_dj_profiles ADD COLUMN waveform_peaks_blob BLOB NOT NULL DEFAULT X'';
 "#;
 
+const MIGRATION_048: &str = r#"
+ALTER TABLE audio_dj_profile_corrections
+    ADD COLUMN manual_drop_blob BLOB NOT NULL DEFAULT X'';
+"#;
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table if not exists
     conn.execute_batch(
@@ -1504,5 +1510,24 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1, "missing {column}");
         }
+    }
+
+    #[test]
+    fn migration_048_adds_manual_drop_correction_blob() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        apply_migrations_up_to(&conn, MIGRATIONS.len()).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM pragma_table_info('audio_dj_profile_corrections')
+                 WHERE name = 'manual_drop_blob'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 }

@@ -7340,8 +7340,8 @@ pub fn upsert_audio_dj_profile_correction(
         "INSERT INTO audio_dj_profile_corrections (
             media_ref_kind, media_ref_id, bpm_multiplier, downbeat_offset_beats,
             phrase_offset_bars, safe_crossfade_only, transition_speed_bias, notes,
-            created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            manual_drop_blob, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(media_ref_kind, media_ref_id) DO UPDATE SET
             bpm_multiplier = excluded.bpm_multiplier,
             downbeat_offset_beats = excluded.downbeat_offset_beats,
@@ -7349,6 +7349,7 @@ pub fn upsert_audio_dj_profile_correction(
             safe_crossfade_only = excluded.safe_crossfade_only,
             transition_speed_bias = excluded.transition_speed_bias,
             notes = excluded.notes,
+            manual_drop_blob = excluded.manual_drop_blob,
             updated_at = excluded.updated_at",
         params![
             row.media_ref_kind,
@@ -7359,6 +7360,7 @@ pub fn upsert_audio_dj_profile_correction(
             if row.safe_crossfade_only { 1 } else { 0 },
             row.transition_speed_bias,
             row.notes,
+            row.manual_drop_blob,
             row.created_at,
             row.updated_at,
         ],
@@ -7373,7 +7375,7 @@ pub fn get_audio_dj_profile_correction(
     conn.query_row(
         "SELECT media_ref_kind, media_ref_id, bpm_multiplier, downbeat_offset_beats,
             phrase_offset_bars, safe_crossfade_only, transition_speed_bias, notes,
-            created_at, updated_at
+            manual_drop_blob, created_at, updated_at
          FROM audio_dj_profile_corrections
          WHERE media_ref_kind = ?1 AND media_ref_id = ?2",
         params![key.media_ref_kind, key.media_ref_id],
@@ -7387,8 +7389,9 @@ pub fn get_audio_dj_profile_correction(
                 safe_crossfade_only: row.get::<_, i64>(5)? != 0,
                 transition_speed_bias: row.get(6)?,
                 notes: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                manual_drop_blob: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         },
     )
@@ -8502,6 +8505,7 @@ mod tests {
                 phrase_offset_bars: Some(-2),
                 safe_crossfade_only: true,
                 transition_speed_bias: Some("faster".to_string()),
+                manual_drop_blob: vec![20, 21, 22],
                 notes: Some("user correction".to_string()),
                 created_at: "2026-05-21T00:00:00Z".to_string(),
                 updated_at: "2026-05-21T00:00:01Z".to_string(),
@@ -8674,6 +8678,7 @@ mod tests {
             assert_eq!(loaded.phrase_offset_bars, Some(-2));
             assert!(loaded.safe_crossfade_only);
             assert_eq!(loaded.transition_speed_bias.as_deref(), Some("faster"));
+            assert_eq!(loaded.manual_drop_blob, vec![20, 21, 22]);
         }
 
         #[test]

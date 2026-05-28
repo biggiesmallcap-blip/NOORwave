@@ -767,6 +767,7 @@ pub struct AudioDjProfileCorrectionRow {
     pub phrase_offset_bars: Option<i64>,
     pub safe_crossfade_only: bool,
     pub transition_speed_bias: Option<String>,
+    pub manual_drop_blob: Vec<u8>,
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,

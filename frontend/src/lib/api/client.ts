@@ -914,6 +914,8 @@ export type DjDeckStatus = {
 	beat_markers_ms: number[];
 	downbeat_markers_ms: number[];
 	phrase_markers_ms: number[];
+	drop_markers_ms: number[];
+	manual_drop_markers_ms: number[];
 	mix_in_markers_ms: number[];
 	mix_out_markers_ms: number[];
 	passive_analysis_status?: 'ready' | 'missing' | 'retrying' | 'skipped' | string;
@@ -1051,6 +1053,7 @@ export type DjProfileCorrectionRequest = {
 	phrase_offset_bars?: number;
 	safe_crossfade_only?: boolean;
 	transition_speed_bias?: DjTransitionSpeedBias;
+	manual_drop_markers_ms?: number[];
 	notes?: string;
 };
 
