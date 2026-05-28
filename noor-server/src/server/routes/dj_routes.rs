@@ -26,7 +26,7 @@ use crate::playback::runtime::PlaybackRuntimeConfig;
 use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::PlaybackSharedState;
 use crate::services::audio_analysis::dj_profile::{
-    DJ_PROFILE_VERSION, DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob,
+    DJ_WAVEFORM_PEAK_COUNT, decode_f32_blob, decode_u32_blob, dj_profile_row_is_current,
 };
 use crate::services::tidal::stream as tidal_stream;
 
@@ -571,6 +571,10 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
                 if !queries::is_dj_engine_enabled(conn)? {
                     return Ok(Vec::new());
                 }
+                if foreground_playback_is_buffering(conn, &state_guard)? {
+                    tracing::debug!("Deferring DJ profile rebuilds while playback is buffering");
+                    return Ok(Vec::new());
+                }
                 let pair = match ephemeral_pair {
                     Some(pair) => pair,
                     None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
@@ -946,7 +950,6 @@ async fn queue_tidal_profile_rebuild(
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         } else {
-            clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
             clear_dj_profile_rebuild_failure(&failure_key);
             tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
         }
@@ -998,8 +1001,23 @@ fn dj_profile_inflight_key(key: &AudioDjProfileKey) -> String {
     format!("{}:{}", key.media_ref_kind, key.media_ref_id)
 }
 
+fn foreground_playback_is_buffering(
+    conn: &rusqlite::Connection,
+    state: &crate::AppState,
+) -> anyhow::Result<bool> {
+    if state
+        .audio_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+        || state.playback_runtime.is_none()
+    {
+        return Ok(false);
+    }
+    Ok(player::load_state(conn)?.is_playing)
+}
+
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
-    !deck.profile_ready && matches!(deck.profile_status.as_str(), "missing" | "retrying")
+    (!deck.profile_ready && matches!(deck.profile_status.as_str(), "missing" | "retrying"))
+        || (deck.profile_ready && deck.waveform_status == "missing")
 }
 
 #[cfg(test)]
@@ -1415,8 +1433,10 @@ fn dj_profile_is_current_version(
     conn: &rusqlite::Connection,
     key: &AudioDjProfileKey,
 ) -> anyhow::Result<bool> {
-    Ok(queries::get_audio_dj_profile(conn, key)?
-        .is_some_and(|row| row.profile_version == DJ_PROFILE_VERSION))
+    Ok(
+        queries::get_audio_dj_profile(conn, key)?
+            .is_some_and(|row| dj_profile_row_is_current(&row)),
+    )
 }
 
 fn correction_response(row: AudioDjProfileCorrectionRow) -> DjProfileCorrectionResponse {
@@ -2175,7 +2195,7 @@ fn feedback_rating(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::audio_analysis::dj_profile::encode_f32_blob;
+    use crate::services::audio_analysis::dj_profile::{DJ_PROFILE_VERSION, encode_f32_blob};
 
     fn test_profile_row(key: &AudioDjProfileKey, version: &str) -> AudioDjProfileRow {
         AudioDjProfileRow {
@@ -2257,6 +2277,11 @@ mod tests {
             .expect("current profile");
 
         assert!(dj_profile_is_current_version(&conn, &key).expect("current"));
+        let mut current_without_waveform = test_profile_row(&key, DJ_PROFILE_VERSION);
+        current_without_waveform.waveform_peaks_blob = encode_f32_blob(&[]);
+        queries::upsert_audio_dj_profile(&conn, &current_without_waveform)
+            .expect("profile missing waveform");
+        assert!(!dj_profile_is_current_version(&conn, &key).expect("missing waveform"));
     }
 
     #[test]
@@ -2312,6 +2337,7 @@ mod tests {
 
         assert_eq!(deck.waveform_status, "missing");
         assert!(deck.waveform_peaks.is_empty());
+        assert!(deck_needs_profile_rebuild(&deck));
     }
 
     #[test]
