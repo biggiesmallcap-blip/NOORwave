@@ -77,7 +77,7 @@
 		TIDAL_PKCE_RELOGIN_DISMISSED_KEY,
 		shouldShowLegacyReloginNotice,
 	} from '$lib/tidal/login';
-	import { paletteById } from '$lib/components/wallpaper/palettes';
+	import { paletteById, rgbaCss } from '$lib/components/wallpaper/palettes';
 	import {
 		MOBILE_MORE_ROUTES,
 		MOBILE_TAB_ROUTES,
@@ -583,6 +583,9 @@
 		root.setProperty('--accent-soft', p.ui.accentSoft);
 		root.setProperty('--accent-line', p.ui.accentLine);
 		root.setProperty('--accent-glow', p.ui.accentGlow);
+		root.setProperty('--atlas-haze-a', rgbaCss(p.shader.c2, 0.18));
+		root.setProperty('--atlas-haze-b', rgbaCss(p.shader.c3, 0.13));
+		root.setProperty('--atlas-haze-c', rgbaCss(p.shader.c4, 0.10));
 	}
 
 	function toggleTheme() {

@@ -66,7 +66,7 @@
 		WALLPAPER_FPS_MAX,
 		WALLPAPER_FPS_MIN
 	} from '$lib/stores/wallpaper';
-	import { PALETTES, type PaletteId } from '$lib/components/wallpaper/palettes';
+	import { PALETTES, rgbCss, type Palette, type PaletteId } from '$lib/components/wallpaper/palettes';
 	import { palette, setPalette } from '$lib/stores/palette';
 	import { uiZoom, setZoom, zoomIn, zoomOut, resetZoom, MIN as ZOOM_MIN, MAX as ZOOM_MAX, WHEEL_STEP as ZOOM_STEP } from '$lib/stores/uiZoom';
 	import { audioSettings } from '$lib/stores/audio_settings';
@@ -1501,10 +1501,6 @@
 		visibleSettingsCategories.find((category) => category.id === activeCategory) ?? visibleSettingsCategories[0]
 	);
 
-	function rgbCss(c: [number, number, number]): string {
-		return `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`;
-	}
-
 	let activePalette = $derived(PALETTES.find((p) => p.id === $palette) ?? PALETTES[0]);
 	let activeSwatches = $derived([
 		activePalette.shader.c1,
@@ -1513,6 +1509,34 @@
 		activePalette.shader.c4
 	]);
 	let extendedWallpaperCount = $derived(WALLPAPERS.filter((option) => option.extended).length);
+	let paletteMenuOpen = $state(false);
+
+	function paletteSwatchesFor(p: Palette) {
+		return [p.shader.c1, p.shader.c2, p.shader.c3, p.shader.c4];
+	}
+
+	function choosePalette(id: PaletteId) {
+		setPalette(id);
+		paletteMenuOpen = false;
+	}
+
+	function closePaletteMenuOnFocusOut(e: FocusEvent) {
+		const current = e.currentTarget;
+		const next = e.relatedTarget;
+		if (!(current instanceof HTMLElement)) return;
+		if (next instanceof Node && current.contains(next)) return;
+		paletteMenuOpen = false;
+	}
+
+	function onPaletteTriggerKeydown(e: KeyboardEvent) {
+		if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			paletteMenuOpen = true;
+		}
+		if (e.key === 'Escape') {
+			paletteMenuOpen = false;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -1608,18 +1632,71 @@
 	>
 		<div class="settings-main">
 			{#if activeCategory === 'appearance'}
-			<section class="glass-panel section-panel">
-				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent and wallpaper colors." />
+			<section class="glass-panel section-panel palette-section" class:palette-section-open={paletteMenuOpen}>
+				<SectionHeader eyebrow="Palette" title="Colour scheme" subtitle="UI accent, wallpaper, and no-wallpaper colours." />
 				<div class="palette-row">
-					<select
-						class="palette-select"
-						value={$palette}
-						onchange={(e) => setPalette((e.currentTarget as HTMLSelectElement).value as PaletteId)}
+					<div
+						class="palette-picker"
+						onfocusout={closePaletteMenuOnFocusOut}
 					>
-						{#each PALETTES as p (p.id)}
-							<option value={p.id}>{p.label} — {p.sublabel}</option>
-						{/each}
-					</select>
+						<button
+							type="button"
+							class="palette-trigger"
+							aria-haspopup="listbox"
+							aria-expanded={paletteMenuOpen}
+							onclick={() => (paletteMenuOpen = !paletteMenuOpen)}
+							onkeydown={onPaletteTriggerKeydown}
+						>
+							<span class="palette-band" aria-hidden="true">
+								<svg viewBox="0 0 96 16" preserveAspectRatio="none">
+									<defs>
+										<linearGradient id="active-palette-band" x1="0" x2="1" y1="0" y2="0">
+											{#each activeSwatches as c, i (i)}
+												<stop offset={`${(i / (activeSwatches.length - 1)) * 100}%`} stop-color={rgbCss(c)} />
+											{/each}
+										</linearGradient>
+									</defs>
+									<rect width="96" height="16" rx="3" fill="url(#active-palette-band)" />
+								</svg>
+							</span>
+							<span class="palette-trigger-copy">
+								<strong>{activePalette.label}</strong>
+								<small>{activePalette.sublabel}</small>
+							</span>
+							<span class="palette-trigger-caret" aria-hidden="true">▾</span>
+						</button>
+						{#if paletteMenuOpen}
+							<div class="palette-menu" role="listbox" aria-label="Colour scheme">
+								{#each PALETTES as p (p.id)}
+									<button
+										type="button"
+										class="palette-option"
+										class:active={$palette === p.id}
+										role="option"
+										aria-selected={$palette === p.id}
+										onclick={() => choosePalette(p.id)}
+									>
+										<span class="palette-band" aria-hidden="true">
+											<svg viewBox="0 0 96 16" preserveAspectRatio="none">
+												<defs>
+													<linearGradient id={`palette-band-${p.id}`} x1="0" x2="1" y1="0" y2="0">
+														{#each paletteSwatchesFor(p) as c, i (i)}
+															<stop offset={`${(i / 3) * 100}%`} stop-color={rgbCss(c)} />
+														{/each}
+													</linearGradient>
+												</defs>
+												<rect width="96" height="16" rx="3" fill={`url(#palette-band-${p.id})`} />
+											</svg>
+										</span>
+										<span class="palette-option-copy">
+											<strong>{p.label}</strong>
+											<small>{p.sublabel}</small>
+										</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
 					<div class="palette-swatches" aria-hidden="true">
 						{#each activeSwatches as c, i (i)}
 							<span class="palette-swatch" style={`background: ${rgbCss(c)}`}></span>
@@ -1675,9 +1752,9 @@
 				<div class="wallpaper-big-preview">
 					{#if previewShader}
 						<ShaderWallpaper shader={previewShader} maxDpr={1} targetFps={$wallpaperFps} interactive={true} />
-					{:else if !previewShader && $wallpaper !== 'none'}
-						<div class="wallpaper-big-preview-hint">
-							<span>Hover a tile to preview</span>
+					{:else if previewTileId === 'none' || $wallpaper === 'none'}
+						<div class="wallpaper-none-preview">
+							<span>No wallpaper</span>
 						</div>
 					{:else}
 						<div class="wallpaper-big-preview-hint">
@@ -3422,9 +3499,113 @@
 		flex-wrap: wrap;
 	}
 
-	.palette-select {
+	.palette-picker {
+		position: relative;
 		flex: 1;
 		min-width: 220px;
+	}
+
+	.palette-trigger,
+	.palette-option {
+		width: 100%;
+		display: grid;
+		grid-template-columns: minmax(76px, 96px) minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 10px;
+		text-align: left;
+		border: 1px solid var(--border-subtle);
+		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
+		color: var(--text-primary);
+		cursor: pointer;
+	}
+
+	.palette-trigger {
+		min-height: 46px;
+		padding: 8px 10px;
+		border-radius: var(--radius-sm);
+	}
+
+	.palette-trigger:hover,
+	.palette-trigger:focus-visible,
+	.palette-option:hover,
+	.palette-option:focus-visible,
+	.palette-option.active {
+		border-color: color-mix(in srgb, var(--accent-strong) 48%, transparent);
+		background: color-mix(in srgb, var(--accent-soft) 56%, var(--instrument-surface));
+		outline: none;
+	}
+
+	.palette-band {
+		display: block;
+		min-width: 0;
+		height: 16px;
+		border-radius: 4px;
+		overflow: hidden;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		background: var(--bg-raised);
+		box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.24) inset;
+	}
+
+	.palette-band svg {
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+
+	.palette-trigger-copy,
+	.palette-option-copy {
+		min-width: 0;
+		display: grid;
+		gap: 2px;
+	}
+
+	.palette-trigger-copy strong,
+	.palette-option-copy strong {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.palette-trigger-copy small,
+	.palette-option-copy small {
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.palette-trigger-caret {
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+		line-height: 1;
+	}
+
+	.palette-menu {
+		position: absolute;
+		inset-inline: 0;
+		top: calc(100% + 6px);
+		z-index: var(--z-overlay);
+		max-height: min(420px, 58vh);
+		overflow-y: auto;
+		display: grid;
+		gap: 4px;
+		padding: 6px;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--border-strong);
+		background: rgba(10, 10, 14, 0.97);
+		backdrop-filter: var(--blur-modal);
+		-webkit-backdrop-filter: var(--blur-modal);
+		box-shadow: var(--panel-shadow);
+	}
+
+	.palette-option {
+		grid-template-columns: minmax(68px, 88px) minmax(0, 1fr);
+		padding: 8px;
+		border-radius: var(--radius-xs);
 	}
 
 	.palette-swatches {
@@ -3484,6 +3665,32 @@
 		align-items: center;
 		justify-content: center;
 	}
+
+	.wallpaper-none-preview {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background:
+			radial-gradient(circle at 14% 12%, var(--atlas-haze-a), transparent 34%),
+			radial-gradient(circle at 88% 16%, var(--atlas-haze-b), transparent 32%),
+			radial-gradient(circle at 72% 88%, var(--atlas-haze-c), transparent 34%),
+			var(--atlas-bg);
+	}
+
+	.wallpaper-none-preview span {
+		padding: 5px 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border-subtle);
+		background: color-mix(in srgb, var(--bg-base) 68%, transparent);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
 	.wallpaper-big-preview-hint span {
 		font-size: var(--font-size-xs);
 		letter-spacing: 0.08em;
@@ -3588,9 +3795,9 @@
 
 	.wallpaper-tile-swatch-none {
 		background:
-			radial-gradient(circle at 30% 30%, rgba(151, 126, 255, 0.35), transparent 60%),
-			radial-gradient(circle at 70% 70%, rgba(120, 160, 255, 0.25), transparent 60%),
-			#0a0a0e;
+			radial-gradient(circle at 28% 28%, var(--atlas-haze-a), transparent 64%),
+			radial-gradient(circle at 76% 72%, var(--atlas-haze-b), transparent 62%),
+			var(--atlas-bg);
 	}
 
 	.wallpaper-tile-label {
@@ -3665,6 +3872,11 @@
 		flex-direction: column;
 		gap: 14px;
 		border-radius: var(--radius-md);
+	}
+
+	.palette-section-open {
+		position: relative;
+		z-index: calc(var(--z-overlay) + 1);
 	}
 
 	.settings-grid.single-column .settings-main {
