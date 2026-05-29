@@ -23,6 +23,15 @@ pub enum PlaybackRuntimeCommand {
     },
     /// Pre-decode the next track in background so it can start gaplessly.
     PrepareNext(PreparedPlaybackJob),
+    /// Pre-decode an incoming deck for a mid-song drop preview overlay.
+    PrepareDropPreview(PreparedPlaybackJob),
+    /// Arm the active deck to start the prepared drop preview at an absolute
+    /// active-track sample position.
+    ArmDropPreview {
+        track_id: i64,
+        generation: u64,
+        trigger_position_samples: u64,
+    },
     /// Update the runtime's in-memory DJ gate after the persisted feature flag changes.
     SetDjEngineEnabled {
         enabled: bool,
@@ -45,6 +54,11 @@ pub enum PlaybackRuntimeCommand {
     /// Sent by the CPAL callback when the current track is within `crossfade_ms` of its end.
     /// If a pre-decoded next engine is ready, its stream is unpaused so both mix via the OS.
     CrossfadeStart {
+        track_id: i64,
+        generation: u64,
+        trigger_position_samples: u64,
+    },
+    DropPreviewStart {
         track_id: i64,
         generation: u64,
         trigger_position_samples: u64,
@@ -150,6 +164,11 @@ pub enum PlaybackRuntimeEvent {
         runtime_rendered_dj_mixer: bool,
         runtime_renderer_status: String,
         runtime_renderer_reason: String,
+    },
+    DropPreviewStarted {
+        track_id: i64,
+        generation: u64,
+        actual_start_ms: i64,
     },
     /// Fired when the current track is within `NEAR_END_THRESHOLD_MS` of its end.
     /// The listener should peek the next track and send `PrepareNext` to pre-buffer it.
