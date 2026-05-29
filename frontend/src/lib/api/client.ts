@@ -916,9 +916,20 @@ export type DjDeckStatus = {
 	phrase_markers_ms: number[];
 	mix_in_markers_ms: number[];
 	mix_out_markers_ms: number[];
+	drop_markers_ms: number[];
+	manual_drop_markers_ms: number[];
 	passive_analysis_status?: 'ready' | 'missing' | 'retrying' | 'skipped' | string;
 	passive_analysis_reason?: string;
 	safe_crossfade_only: boolean;
+};
+
+export type DjDropPreviewStatus = {
+	status: 'armed' | 'fired' | 'skipped' | string;
+	planned_fire_ms?: number;
+	actual_fire_ms?: number;
+	incoming_drop_ms?: number;
+	source?: 'manual' | 'profile' | string;
+	reason?: string;
 };
 
 export type DjOverlayDetails = {
@@ -1000,6 +1011,7 @@ export type DjStatusResponse = {
 		media_ref_id: string;
 		bad_feedback_count: number;
 	};
+	drop_preview: DjDropPreviewStatus;
 };
 
 export type DjTimingHistoryEvent = {
