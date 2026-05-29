@@ -37,6 +37,8 @@ const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 const DJ_TIMING_SANITY_MAX_DELTA_MS: i64 = 30_000;
+const DROP_PREVIEW_MIN_POSITION_MS: i64 = 60_000;
+const DROP_PREVIEW_FINAL_WINDOW_GUARD_MS: i64 = 45_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
@@ -175,6 +177,7 @@ struct DjStatusResponse {
     recent_timing_events: Vec<DjTimingHistoryEvent>,
     timing_history_summary: DjTimingHistorySummary,
     safe_crossfade_suggestion: Option<DjSafeSuggestion>,
+    drop_preview: DjDropPreviewStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,9 +200,21 @@ struct DjDeckStatus {
     phrase_markers_ms: Vec<i64>,
     mix_in_markers_ms: Vec<i64>,
     mix_out_markers_ms: Vec<i64>,
+    drop_markers_ms: Vec<i64>,
+    manual_drop_markers_ms: Vec<i64>,
     passive_analysis_status: Option<String>,
     passive_analysis_reason: Option<String>,
     safe_crossfade_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DjDropPreviewStatus {
+    status: String,
+    planned_fire_ms: Option<i64>,
+    actual_fire_ms: Option<i64>,
+    incoming_drop_ms: Option<i64>,
+    source: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -518,6 +533,17 @@ async fn get_status(
                 let timing_history_summary =
                     summarize_timing_history(&recent_timing_events, &tuning_deltas);
                 let renderer_status = renderer_status_for_transition(latest_transition.as_ref());
+                let drop_preview = drop_preview_status(
+                    conn,
+                    enabled,
+                    current_ref.as_ref(),
+                    next_ref.as_ref(),
+                    current.as_ref(),
+                    next.as_ref(),
+                    active_track_id.and_then(|track_id| {
+                        current_track_duration_ms(conn, track_id).ok().flatten()
+                    }),
+                )?;
                 Ok(DjStatusResponse {
                     enabled,
                     current,
@@ -552,6 +578,7 @@ async fn get_status(
                     recent_timing_events,
                     timing_history_summary,
                     safe_crossfade_suggestion,
+                    drop_preview,
                 })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1498,6 +1525,8 @@ fn deck_status(
         phrase_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
+        drop_markers_ms,
+        manual_drop_markers_ms,
     ) = if let Some(profile) = profile.as_ref() {
         let beat_markers = decode_f32_blob(&profile.beat_grid_blob).unwrap_or_default();
         let downbeat_markers = decode_f32_blob(&profile.downbeats_blob).unwrap_or_default();
@@ -1516,6 +1545,8 @@ fn deck_status(
             phrase_markers,
             seconds_markers_ms(&decode_f32_blob(&profile.mix_in_blob).unwrap_or_default()),
             seconds_markers_ms(&decode_f32_blob(&profile.mix_out_blob).unwrap_or_default()),
+            seconds_markers_ms(&decode_f32_blob(&profile.drop_blob).unwrap_or_default()),
+            Vec::new(),
         )
     } else {
         (
@@ -1523,6 +1554,8 @@ fn deck_status(
             None,
             None,
             None,
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1551,6 +1584,8 @@ fn deck_status(
         phrase_markers_ms,
         mix_in_markers_ms,
         mix_out_markers_ms,
+        drop_markers_ms,
+        manual_drop_markers_ms,
         passive_analysis_status: passive_analysis
             .as_ref()
             .map(|snapshot| snapshot.status.to_string()),
@@ -1595,6 +1630,154 @@ fn phrase_markers_ms(phrases: &[u32], downbeats: &[f32]) -> Vec<i64> {
         .filter(|value| value.is_finite() && **value >= 0.0)
         .map(|value| (*value as f64 * 1000.0).round() as i64)
         .collect()
+}
+
+fn drop_preview_status(
+    conn: &rusqlite::Connection,
+    enabled: bool,
+    current_ref: Option<&DjMediaRef>,
+    next_ref: Option<&DjMediaRef>,
+    current: Option<&DjDeckStatus>,
+    next: Option<&DjDeckStatus>,
+    current_duration_ms: Option<i64>,
+) -> anyhow::Result<DjDropPreviewStatus> {
+    let skipped = |reason: &'static str| DjDropPreviewStatus {
+        status: "skipped".to_string(),
+        planned_fire_ms: None,
+        actual_fire_ms: None,
+        incoming_drop_ms: incoming_drop_marker(next).map(|marker| marker.0),
+        source: incoming_drop_marker(next).map(|marker| marker.1.to_string()),
+        reason: Some(reason.to_string()),
+    };
+
+    if !enabled {
+        return Ok(skipped("disabled"));
+    }
+    let (Some(current_ref), Some(next_ref), Some(current), Some(next)) =
+        (current_ref, next_ref, current, next)
+    else {
+        return Ok(skipped("pair_missing"));
+    };
+    if !current.profile_ready || !next.profile_ready {
+        return Ok(skipped("profiles_missing"));
+    }
+    if current.safe_crossfade_only || next.safe_crossfade_only {
+        return Ok(skipped("safe_crossfade_only"));
+    }
+    if current
+        .profile_confidence
+        .is_some_and(|value| value < DJ_PROFILE_CONFIDENCE_FLOOR)
+        || next
+            .profile_confidence
+            .is_some_and(|value| value < DJ_PROFILE_CONFIDENCE_FLOOR)
+    {
+        return Ok(skipped("profile_low_confidence"));
+    }
+    if !drop_preview_pair_harmonic_compatible(conn, current_ref, next_ref)? {
+        return Ok(skipped("harmonic_incompatible"));
+    }
+    let Some((incoming_drop_ms, source)) = incoming_drop_marker(Some(next)) else {
+        return Ok(skipped("missing_incoming_drop"));
+    };
+    let Some(planned_fire_ms) = select_drop_preview_fire_ms(current, current_duration_ms) else {
+        return Ok(DjDropPreviewStatus {
+            status: "skipped".to_string(),
+            planned_fire_ms: None,
+            actual_fire_ms: None,
+            incoming_drop_ms: Some(incoming_drop_ms),
+            source: Some(source.to_string()),
+            reason: Some("no_safe_mid_song_marker".to_string()),
+        });
+    };
+    Ok(DjDropPreviewStatus {
+        status: "armed".to_string(),
+        planned_fire_ms: Some(planned_fire_ms),
+        actual_fire_ms: None,
+        incoming_drop_ms: Some(incoming_drop_ms),
+        source: Some(source.to_string()),
+        reason: None,
+    })
+}
+
+fn incoming_drop_marker(next: Option<&DjDeckStatus>) -> Option<(i64, &'static str)> {
+    let next = next?;
+    next.manual_drop_markers_ms
+        .iter()
+        .copied()
+        .find(|marker| *marker >= 0)
+        .map(|marker| (marker, "manual"))
+        .or_else(|| {
+            next.drop_markers_ms
+                .iter()
+                .copied()
+                .find(|marker| *marker >= 0)
+                .map(|marker| (marker, "profile"))
+        })
+}
+
+fn select_drop_preview_fire_ms(current: &DjDeckStatus, duration_ms: Option<i64>) -> Option<i64> {
+    let duration_ms = duration_ms.filter(|duration| *duration > 0)?;
+    let min_ms = DROP_PREVIEW_MIN_POSITION_MS.max(duration_ms * 45 / 100);
+    let max_ms = (duration_ms * 65 / 100)
+        .min(duration_ms - DJ_READY_PAIR_TRANSITION_WINDOW_MS - DROP_PREVIEW_FINAL_WINDOW_GUARD_MS);
+    if max_ms < min_ms {
+        return None;
+    }
+    let target_ms = duration_ms * 55 / 100;
+    current
+        .phrase_markers_ms
+        .iter()
+        .chain(current.downbeat_markers_ms.iter())
+        .copied()
+        .filter(|marker| (min_ms..=max_ms).contains(marker))
+        .min_by_key(|marker| (*marker - target_ms).abs())
+}
+
+fn drop_preview_pair_harmonic_compatible(
+    conn: &rusqlite::Connection,
+    current_ref: &DjMediaRef,
+    next_ref: &DjMediaRef,
+) -> anyhow::Result<bool> {
+    let current_key = media_ref_camelot_key(conn, current_ref)?;
+    let next_key = media_ref_camelot_key(conn, next_ref)?;
+    Ok(match (current_key.as_deref(), next_key.as_deref()) {
+        (Some(current), Some(next)) => noor_mix::planner::scoring::camelot_distance(current, next)
+            .is_some_and(|distance| matches!(distance, 0 | 1 | 7)),
+        _ => false,
+    })
+}
+
+fn media_ref_camelot_key(
+    conn: &rusqlite::Connection,
+    media_ref: &DjMediaRef,
+) -> anyhow::Result<Option<String>> {
+    let key = media_ref.profile_key();
+    let profile = queries::get_audio_dj_profile(conn, &key)?;
+    let track_id = media_ref
+        .track_id()
+        .or_else(|| profile.as_ref().and_then(|profile| profile.track_id))
+        .or_else(|| {
+            media_ref
+                .tidal_id()
+                .and_then(|tidal_id| track_id_for_tidal_id(conn, tidal_id).ok().flatten())
+        });
+    let Some(track_id) = track_id else {
+        return Ok(None);
+    };
+    Ok(queries::get_audio_dsp_features(conn, track_id)?.and_then(|features| features.camelot_key))
+}
+
+fn track_id_for_tidal_id(
+    conn: &rusqlite::Connection,
+    tidal_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM tracks WHERE tidal_id = ?1 LIMIT 1",
+        [tidal_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
 }
 
 fn latest_open_transition_for_pair(
@@ -2267,10 +2450,48 @@ mod tests {
             phrase_markers_ms: Vec::new(),
             mix_in_markers_ms: Vec::new(),
             mix_out_markers_ms: Vec::new(),
+            drop_markers_ms: Vec::new(),
+            manual_drop_markers_ms: Vec::new(),
             passive_analysis_status: None,
             passive_analysis_reason: None,
             safe_crossfade_only: false,
         }
+    }
+
+    fn seed_dsp_key(conn: &rusqlite::Connection, track_id: i64, camelot_key: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO artists (id, name) VALUES (1, 'Test Artist')",
+            [],
+        )
+        .expect("artist");
+        conn.execute(
+            "INSERT OR IGNORE INTO tracks (id, title, artist_id, source)
+             VALUES (?1, ?2, 1, 'tidal')",
+            params![track_id, format!("Track {track_id}")],
+        )
+        .expect("track");
+        queries::upsert_audio_dsp_features(
+            conn,
+            &crate::db::models::AudioDspFeatures {
+                track_id,
+                bpm: Some(120.0),
+                key_signature: None,
+                camelot_key: Some(camelot_key.to_string()),
+                loudness_lufs: Some(-12.0),
+                energy: Some(0.7),
+                danceability: Some(0.7),
+                beat_strength: Some(0.7),
+                spectral_centroid: None,
+                stereo_width: None,
+                is_instrumental: false,
+                analysis_source: "test".to_string(),
+                analysis_offset_ms: 0,
+                samples_analyzed: None,
+                analyzed_at: "now".to_string(),
+                analysis_version: "test".to_string(),
+            },
+        )
+        .expect("dsp features");
     }
 
     #[test]
@@ -3215,6 +3436,113 @@ mod tests {
         assert!(ready_pair_transition_due(151_000, Some(180_000)));
         assert!(ready_pair_transition_due(180_000, Some(180_000)));
         assert!(!ready_pair_transition_due(151_000, None));
+    }
+
+    #[test]
+    fn drop_preview_selects_nearest_safe_mid_song_marker() {
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![40_000, 120_000];
+        current.downbeat_markers_ms = vec![132_000, 190_000];
+
+        assert_eq!(
+            select_drop_preview_fire_ms(&current, Some(240_000)),
+            Some(132_000)
+        );
+    }
+
+    #[test]
+    fn drop_preview_rejects_unsafe_mid_song_window() {
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![40_000, 190_000];
+        current.downbeat_markers_ms = vec![59_000];
+
+        assert_eq!(select_drop_preview_fire_ms(&current, Some(240_000)), None);
+    }
+
+    #[test]
+    fn drop_preview_prefers_manual_drop_marker() {
+        let mut next = test_deck_status(true, "ready");
+        next.drop_markers_ms = vec![32_000];
+        next.manual_drop_markers_ms = vec![24_000];
+
+        assert_eq!(incoming_drop_marker(Some(&next)), Some((24_000, "manual")));
+    }
+
+    #[test]
+    fn drop_preview_status_arms_compatible_ready_pair() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        seed_dsp_key(&conn, 1, "8A");
+        seed_dsp_key(&conn, 2, "8B");
+        let current_ref = DjMediaRef::TidalTrack {
+            tidal_id: 111,
+            track_id: Some(1),
+        };
+        let next_ref = DjMediaRef::TidalTrack {
+            tidal_id: 222,
+            track_id: Some(2),
+        };
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![128_000];
+        let mut next = test_deck_status(true, "ready");
+        next.drop_markers_ms = vec![32_000];
+
+        let status = drop_preview_status(
+            &conn,
+            true,
+            Some(&current_ref),
+            Some(&next_ref),
+            Some(&current),
+            Some(&next),
+            Some(240_000),
+        )
+        .expect("preview status");
+
+        assert_eq!(
+            status,
+            DjDropPreviewStatus {
+                status: "armed".to_string(),
+                planned_fire_ms: Some(128_000),
+                actual_fire_ms: None,
+                incoming_drop_ms: Some(32_000),
+                source: Some("profile".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn drop_preview_status_skips_harmonic_mismatch() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        seed_dsp_key(&conn, 1, "8A");
+        seed_dsp_key(&conn, 2, "2B");
+        let current_ref = DjMediaRef::TidalTrack {
+            tidal_id: 111,
+            track_id: Some(1),
+        };
+        let next_ref = DjMediaRef::TidalTrack {
+            tidal_id: 222,
+            track_id: Some(2),
+        };
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![128_000];
+        let mut next = test_deck_status(true, "ready");
+        next.drop_markers_ms = vec![32_000];
+
+        let status = drop_preview_status(
+            &conn,
+            true,
+            Some(&current_ref),
+            Some(&next_ref),
+            Some(&current),
+            Some(&next),
+            Some(240_000),
+        )
+        .expect("preview status");
+
+        assert_eq!(status.status, "skipped");
+        assert_eq!(status.reason.as_deref(), Some("harmonic_incompatible"));
     }
 
     #[test]
