@@ -71,6 +71,13 @@ pub struct NextPrebufferKey {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DropPreviewRuntimeState {
+    pub track_id: i64,
+    pub generation: u64,
+    pub actual_fire_ms: i64,
+}
+
 /// Shared application state accessible by all modules
 pub struct AppState {
     pub db: db::Database,
@@ -123,6 +130,7 @@ pub struct AppState {
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
     pub next_prebuffer_inflight: Option<NextPrebufferKey>,
+    pub last_drop_preview: Option<DropPreviewRuntimeState>,
     pub active_listen_session: Option<playback::player::ActiveListenSession>,
     pub live_listen_session: Option<playback::player::LiveListenSession>,
     pub external_playback_track: Option<db::models::Track>,
@@ -751,6 +759,7 @@ async fn main() -> Result<()> {
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,
+        last_drop_preview: None,
         active_listen_session: None,
         live_listen_session: None,
         external_playback_track: None,

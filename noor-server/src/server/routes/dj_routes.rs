@@ -443,6 +443,11 @@ async fn get_status(
             .playback_runtime_info
             .as_ref()
             .and_then(|info| info.active_track_id);
+        let active_generation = super::current_playback_generation(&state);
+        let drop_preview_actual_fire_ms = state.last_drop_preview.and_then(|preview| {
+            (Some(preview.track_id) == active_track_id && preview.generation == active_generation)
+                .then_some(preview.actual_fire_ms)
+        });
         state
             .db
             .with_conn(|conn| {
@@ -550,6 +555,7 @@ async fn get_status(
                     active_track_id.and_then(|track_id| {
                         current_track_duration_ms(conn, track_id).ok().flatten()
                     }),
+                    drop_preview_actual_fire_ms,
                 )?;
                 Ok(DjStatusResponse {
                     enabled,
@@ -1647,6 +1653,7 @@ fn drop_preview_status(
     current: Option<&DjDeckStatus>,
     next: Option<&DjDeckStatus>,
     current_duration_ms: Option<i64>,
+    actual_fire_ms: Option<i64>,
 ) -> anyhow::Result<DjDropPreviewStatus> {
     let skipped = |reason: &'static str| DjDropPreviewStatus {
         status: "skipped".to_string(),
@@ -1697,9 +1704,13 @@ fn drop_preview_status(
         });
     };
     Ok(DjDropPreviewStatus {
-        status: "armed".to_string(),
+        status: if actual_fire_ms.is_some() {
+            "fired".to_string()
+        } else {
+            "armed".to_string()
+        },
         planned_fire_ms: Some(planned_fire_ms),
-        actual_fire_ms: None,
+        actual_fire_ms,
         incoming_drop_ms: Some(incoming_drop_ms),
         source: Some(source.to_string()),
         reason: None,
@@ -1723,6 +1734,7 @@ pub(crate) fn drop_preview_plan_for_pair(
         Some(&current),
         Some(&next),
         current_duration_ms,
+        None,
     )?;
     Ok(
         match (
@@ -3539,6 +3551,7 @@ mod tests {
             Some(&current),
             Some(&next),
             Some(240_000),
+            None,
         )
         .expect("preview status");
 
@@ -3553,6 +3566,42 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn drop_preview_status_reports_actual_fire() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        seed_dsp_key(&conn, 1, "8A");
+        seed_dsp_key(&conn, 2, "8B");
+        let current_ref = DjMediaRef::TidalTrack {
+            tidal_id: 111,
+            track_id: Some(1),
+        };
+        let next_ref = DjMediaRef::TidalTrack {
+            tidal_id: 222,
+            track_id: Some(2),
+        };
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![128_000];
+        let mut next = test_deck_status(true, "ready");
+        next.drop_markers_ms = vec![32_000];
+
+        let status = drop_preview_status(
+            &conn,
+            true,
+            Some(&current_ref),
+            Some(&next_ref),
+            Some(&current),
+            Some(&next),
+            Some(240_000),
+            Some(128_008),
+        )
+        .expect("preview status");
+
+        assert_eq!(status.status, "fired");
+        assert_eq!(status.planned_fire_ms, Some(128_000));
+        assert_eq!(status.actual_fire_ms, Some(128_008));
     }
 
     #[test]
@@ -3582,6 +3631,7 @@ mod tests {
             Some(&current),
             Some(&next),
             Some(240_000),
+            None,
         )
         .expect("preview status");
 
