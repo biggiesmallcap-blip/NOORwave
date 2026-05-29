@@ -13,6 +13,7 @@ const SMALL_TEMPO_NUDGE_MIN: f32 = 0.97;
 const SMALL_TEMPO_NUDGE_MAX: f32 = 1.03;
 const PLAYBACK_RATE_EPSILON: f32 = 0.0001;
 const DROP_TEASE_CONFIDENCE_FLOOR: f32 = 0.65;
+const DROP_PREVIEW_GAIN: f32 = 0.65;
 const PLANNER_SAMPLE_RATE: u32 = 48_000;
 
 pub struct Planner;
@@ -37,9 +38,6 @@ impl Planner {
         };
         let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
         let bpm_delta = scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm);
-        if drop_tease_candidate_ready(outgoing, incoming, policy) {
-            return TransitionTemplate::DropTease16;
-        }
         let bold_filter_candidate = matches!(policy.mix_intent, MixIntent::Bold)
             && !outgoing.phrase_bar_indices.is_empty()
             && !incoming.phrase_bar_indices.is_empty();
@@ -181,6 +179,7 @@ fn build_program(
     program
 }
 
+#[allow(dead_code)]
 fn drop_tease_candidate_ready(outgoing: &DjProfile, incoming: &DjProfile, policy: &Policy) -> bool {
     if !matches!(policy.mix_intent, MixIntent::Bold) {
         return false;
@@ -436,6 +435,35 @@ pub fn drop_tease_16_program(
     }
 }
 
+pub fn drop_preview_16_program(
+    sample_rate: u32,
+    channels: u16,
+    duration_ms: u32,
+    incoming: &DjProfile,
+) -> Option<TransitionProgram> {
+    let sample_rate = sample_rate.max(1);
+    let channels = channels.max(1);
+    let duration_samples =
+        (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
+    let swap_start = duration_samples / 2;
+    let drop_frame = first_valid_preview_drop_frame(incoming, sample_rate)?;
+    Some(TransitionProgram {
+        tier: Tier::FullBlend,
+        template: "DropPreview16".to_string(),
+        sample_rate,
+        channels,
+        deck_a_start_frame: 0,
+        deck_b_start_frame: drop_frame.saturating_sub(swap_start),
+        sync_start: 0,
+        intro_start: 0,
+        swap_start,
+        fade_start: swap_start,
+        resolve_at: duration_samples,
+        loops: vec![],
+        automation: drop_preview_overlay_automation(duration_samples),
+    })
+}
+
 fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: u64) -> u64 {
     match template {
         TransitionTemplate::BassSwap32 => bar_samples * 32,
@@ -533,6 +561,56 @@ fn drop_tease_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> 
             curve: Curve::EqualPowerIn,
         },
     ]
+}
+
+fn drop_preview_overlay_automation(duration_samples: u64) -> Vec<AutomationEvent> {
+    let end_sample = duration_samples.max(1);
+    let fade_in_end = (end_sample / 4).max(1);
+    let fade_out_start = (end_sample * 3 / 4).max(fade_in_end);
+    vec![
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::A),
+            start_sample: 0,
+            end_sample,
+            from: 0.0,
+            to: 0.0,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: 0,
+            end_sample: fade_in_end,
+            from: 0.0,
+            to: DROP_PREVIEW_GAIN,
+            curve: Curve::EqualPowerIn,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_in_end,
+            end_sample: fade_out_start.max(fade_in_end + 1),
+            from: DROP_PREVIEW_GAIN,
+            to: DROP_PREVIEW_GAIN,
+            curve: Curve::Linear,
+        },
+        AutomationEvent {
+            param: Param::DeckGain(DeckId::B),
+            start_sample: fade_out_start,
+            end_sample,
+            from: DROP_PREVIEW_GAIN,
+            to: 0.0,
+            curve: Curve::EqualPowerIn,
+        },
+    ]
+}
+
+fn first_valid_preview_drop_frame(incoming: &DjProfile, sample_rate: u32) -> Option<u64> {
+    incoming
+        .manual_drop_seconds
+        .iter()
+        .chain(incoming.drop_seconds.iter())
+        .copied()
+        .find(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * sample_rate as f32).round() as u64)
 }
 
 fn bass_swap_eq_handoff(duration_samples: u64) -> Vec<AutomationEvent> {
@@ -750,6 +828,7 @@ mod tests {
             outro_start_seconds: Some(180.0),
             breakdown_seconds: vec![],
             drop_seconds: vec![],
+            manual_drop_seconds: vec![],
             safe_transition_windows: vec![TransitionWindow {
                 start_seconds: 0.0,
                 end_seconds: 8.0,
@@ -1318,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_template_bold_selects_drop_tease_for_confident_drop_candidate() {
+    fn choose_template_bold_keeps_drop_tease_out_of_end_transition() {
         let policy = Policy {
             mix_intent: MixIntent::Bold,
             ..Policy::default()
@@ -1329,7 +1408,7 @@ mod tests {
 
         assert_eq!(
             Planner::choose_template(&outgoing, &incoming, &policy),
-            TransitionTemplate::DropTease16
+            TransitionTemplate::BassSwap32
         );
     }
 
@@ -1392,7 +1471,7 @@ mod tests {
     #[test]
     fn drop_tease_plan_aligns_incoming_drop_to_overlay_swap() {
         let policy = Policy {
-            mix_intent: MixIntent::Bold,
+            safety_template_override: Some(TransitionTemplate::DropTease16),
             ..Policy::default()
         };
         let outgoing = profile(Some(120.0), Some("8A"), 4);

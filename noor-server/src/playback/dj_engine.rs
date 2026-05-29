@@ -240,6 +240,7 @@ fn fallback_profile() -> DjProfile {
         outro_start_seconds: Some(120.0),
         breakdown_seconds: vec![],
         drop_seconds: vec![],
+        manual_drop_seconds: vec![],
         safe_transition_windows: vec![noor_mix::profile::TransitionWindow {
             start_seconds: 0.0,
             end_seconds: 8.0,
@@ -339,6 +340,7 @@ fn profile_from_row(conn: &Connection, row: &AudioDjProfileRow) -> Result<DjProf
         outro_start_seconds: row.outro_start_seconds.map(|value| value as f32),
         breakdown_seconds: decode_f32_blob(&row.breakdown_blob).unwrap_or_default(),
         drop_seconds: decode_f32_blob(&row.drop_blob).unwrap_or_default(),
+        manual_drop_seconds: vec![],
         safe_transition_windows: safe_transition_windows
             .chunks_exact(3)
             .map(|chunk| noor_mix::profile::TransitionWindow {

@@ -2780,12 +2780,12 @@ mod tests {
         }
 
         #[test]
-        fn v1_planner_logs_and_prepares_drop_tease_overlay_when_candidate_matches() {
+        fn v1_planner_keeps_drop_tease_overlay_out_of_end_transition() {
             let db = db_with_pair();
             make_pair_drop_tease_ready(&db);
             let transition = plan(&db);
 
-            assert_eq!(transition.program.template, "DropTease16");
+            assert_eq!(transition.program.template, "BassSwap32");
             let row: (String, String, Option<String>) = db
                 .with_conn(|conn| {
                     conn.query_row(
@@ -2800,9 +2800,8 @@ mod tests {
             let renderer_program: noor_mix::TransitionProgram =
                 serde_json::from_str(&row.1).expect("program");
 
-            assert_eq!(row.0, "DropTease16");
-            assert_eq!(renderer_program.template, "DropTease16");
-            assert_eq!(renderer_program.deck_b_start_frame, 768_000);
+            assert_eq!(row.0, "BassSwap32");
+            assert_eq!(renderer_program.template, "BassSwap32");
             assert_eq!(row.2, None);
         }
 
