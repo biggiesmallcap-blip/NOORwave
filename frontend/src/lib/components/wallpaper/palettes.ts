@@ -3,7 +3,8 @@
 export type PaletteId = 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mono'
                       | 'ember' | 'arctic' | 'sakura' | 'abyss' | 'citrus'
                       | 'slate' | 'paper' | 'moss' | 'plum' | 'acid' | 'neon'
-                      | 'futuro' | 'constr';
+                      | 'futuro' | 'constr' | 'obsidian' | 'carbon' | 'blackout'
+                      | 'nocturne';
 
 export type Rgb = [number, number, number];
 
@@ -356,6 +357,78 @@ export const PALETTES: Palette[] = [
 			c3: [0.05, 0.05, 0.08],
 			c4: [0.32, 0.26, 0.20]
 		}
+	},
+	{
+		id: 'obsidian',
+		label: 'Obsidian',
+		sublabel: 'Black glass / graphite / frost',
+		ui: {
+			accent: '#9aa4b2',
+			accentStrong: '#d7dce4',
+			accentSoft: 'rgba(154, 164, 178, 0.12)',
+			accentLine: 'rgba(154, 164, 178, 0.26)',
+			accentGlow: 'rgba(154, 164, 178, 0.18)'
+		},
+		shader: {
+			c1: [0.00, 0.00, 0.01],
+			c2: [0.08, 0.09, 0.11],
+			c3: [0.38, 0.42, 0.48],
+			c4: [0.84, 0.87, 0.92]
+		}
+	},
+	{
+		id: 'carbon',
+		label: 'Carbon',
+		sublabel: 'Pitch black / nickel / signal amber',
+		ui: {
+			accent: '#f0a83a',
+			accentStrong: '#ffd18a',
+			accentSoft: 'rgba(240, 168, 58, 0.12)',
+			accentLine: 'rgba(240, 168, 58, 0.25)',
+			accentGlow: 'rgba(240, 168, 58, 0.18)'
+		},
+		shader: {
+			c1: [0.00, 0.00, 0.00],
+			c2: [0.05, 0.05, 0.06],
+			c3: [0.34, 0.35, 0.36],
+			c4: [0.94, 0.58, 0.18]
+		}
+	},
+	{
+		id: 'blackout',
+		label: 'Blackout',
+		sublabel: 'Near black / cyan / ultraviolet',
+		ui: {
+			accent: '#36d9ff',
+			accentStrong: '#9beeff',
+			accentSoft: 'rgba(54, 217, 255, 0.12)',
+			accentLine: 'rgba(54, 217, 255, 0.27)',
+			accentGlow: 'rgba(54, 217, 255, 0.19)'
+		},
+		shader: {
+			c1: [0.00, 0.00, 0.02],
+			c2: [0.01, 0.03, 0.07],
+			c3: [0.12, 0.80, 1.00],
+			c4: [0.44, 0.18, 0.92]
+		}
+	},
+	{
+		id: 'nocturne',
+		label: 'Nocturne',
+		sublabel: 'Ink black / wine / blue flame',
+		ui: {
+			accent: '#8aa8ff',
+			accentStrong: '#c0ceff',
+			accentSoft: 'rgba(138, 168, 255, 0.12)',
+			accentLine: 'rgba(138, 168, 255, 0.27)',
+			accentGlow: 'rgba(138, 168, 255, 0.19)'
+		},
+		shader: {
+			c1: [0.01, 0.00, 0.02],
+			c2: [0.08, 0.02, 0.07],
+			c3: [0.44, 0.07, 0.20],
+			c4: [0.18, 0.36, 0.95]
+		}
 	}
 ];
 
@@ -363,4 +436,12 @@ export const DEFAULT_PALETTE: PaletteId = 'futuro';
 
 export function paletteById(id: PaletteId): Palette {
 	return PALETTES.find((p) => p.id === id) ?? PALETTES[0];
+}
+
+export function rgbCss(c: Rgb): string {
+	return `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`;
+}
+
+export function rgbaCss(c: Rgb, alpha: number): string {
+	return `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)}, ${alpha})`;
 }
