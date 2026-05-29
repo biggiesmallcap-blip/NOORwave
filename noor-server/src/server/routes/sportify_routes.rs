@@ -69,19 +69,47 @@ pub(super) async fn sportify_discovery_search(
     let cached = db
         .with_conn(|conn| sp_cache::get_search(conn, &cache_cfg, q, kind, limit, offset))
         .map_err(super::internal)?;
+    let cached = cached.filter(|p| {
+        !(matches!(
+            kind,
+            crate::services::sportify::client::SportifySearchKind::Playlist
+        ) && p.playlists.is_empty())
+    });
 
     let payload = match cached {
         Some(p) => p,
         None => {
-            let fetched = sportify_client
-                .search(q, kind, limit, offset)
-                .await
-                .map_err(|e| {
-                    (
+            let primary = sportify_client.search(q, kind, limit, offset).await;
+            let fetched = match primary {
+                Ok(fetched) => fetched,
+                Err(primary_error)
+                    if matches!(
+                        kind,
+                        crate::services::sportify::client::SportifySearchKind::Playlist
+                    ) =>
+                {
+                    crate::services::spotify::catalog::search_playlists_from_saved_credentials(
+                        &db, q, limit, offset,
+                    )
+                    .await
+                    .map_err(|fallback_error| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "error": format!(
+                                    "sportify_search: {primary_error}; spotify_fallback: {fallback_error}"
+                                )
+                            })),
+                        )
+                    })?
+                }
+                Err(e) => {
+                    return Err((
                         StatusCode::BAD_GATEWAY,
                         Json(json!({ "error": format!("sportify_search: {e}") })),
-                    )
-                })?;
+                    ));
+                }
+            };
             db.with_conn(|conn| sp_cache::put_search(conn, q, kind, limit, offset, &fetched))
                 .map_err(super::internal)?;
             fetched
@@ -271,12 +299,23 @@ pub(super) async fn sportify_discovery_playlist(
     {
         Some(p) => p,
         None => {
-            let fetched = sportify_client.playlist(id).await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("sportify_playlist_fetch: {e}") })),
-                )
-            })?;
+            let fetched = match sportify_client.playlist(id).await {
+                Ok(fetched) => fetched,
+                Err(primary_error) => {
+                    crate::services::spotify::catalog::playlist_from_saved_credentials(&db, id)
+                        .await
+                        .map_err(|fallback_error| {
+                            (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": format!(
+                                        "sportify_playlist_fetch: {primary_error}; spotify_fallback: {fallback_error}"
+                                    )
+                                })),
+                            )
+                        })?
+                }
+            };
             db.with_conn(|conn| {
                 sp_cache::put_playlist_meta(conn, id, &fetched)?;
                 Ok::<_, anyhow::Error>(())

@@ -19,6 +19,17 @@ const MOOD_THUMBNAIL_FETCH_CONCURRENCY: usize = 4;
 const MOOD_THUMBNAIL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const TIDAL_HOME_MODULES_PAGE_PATH: &str = "pages/home";
 const ROUTE_TIMING_INFO_THRESHOLD_MS: u128 = 500;
+const DEFAULT_TIDAL_MOOD_CATEGORIES: &[(&str, &str)] = &[
+    ("mood_party", "Party"),
+    ("mood_workout", "Workout"),
+    ("mood_focus", "Focus"),
+    ("mood_relax", "Relax"),
+    ("mood_sleep", "Sleep"),
+    ("mood_love", "Love"),
+    ("m_happy", "Happy"),
+    ("m_celebration", "Celebration"),
+    ("mood_djselector", "DJ Selector"),
+];
 
 enum MoodProbeOutcome {
     Modules {
@@ -446,7 +457,7 @@ fn resolve_page_path(section: &str, id: Option<&str>) -> Result<String, StatusCo
     // (verified live: all 404 with subStatus 2001 "Not found"). `moods` now
     // has its own dedicated route at /api/tidal/moods + /api/tidal/mood-page/{slug}
     // because its modules are PAGE_LINKS, not the usual TRACK_LIST/etc shape.
-    // Empty top-level whitelist for now — this generic route is kept for
+    // Empty top-level whitelist for now. This generic route is kept for
     // future slugs (pages/explore, pages/hires, pages/videos, etc).
     let allowed_top = matches!(section, "");
     let allowed_with_id = matches!(section, "mood" | "genre");
@@ -652,38 +663,32 @@ pub(super) async fn get_tidal_moods(
             json!({ "categories": cached, "source": "tidal", "cached": true }),
         ));
     }
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-    let raw = match client.get_page_raw("pages/moods").await {
-        Ok(r) => r,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let refreshed = super::recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            let retry = TidalClient::with_http(
-                tidal_http_client.clone(),
-                refreshed.access_token.clone(),
-                refreshed.country_code.clone(),
-            );
-            retry.get_page_raw("pages/moods").await.map_err(|e| {
-                tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
-        Err(e) => {
-            tracing::warn!("TIDAL get_tidal_moods failed: {e}");
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
-    let categories = extract_page_links(&raw);
+    let categories = default_tidal_mood_categories();
     let (response_categories, pending_probe_slugs, cached_probe_hits) =
         apply_cached_mood_category_probes(categories, &tokens.country_code, &page_modules_cache);
     let pending_probe_count = pending_probe_slugs.len();
 
     put_cached_tidal_mood_categories(&mood_cache, response_categories.clone());
+
+    {
+        let state_bg = state.clone();
+        let mood_cache_bg = mood_cache.clone();
+        let page_modules_cache_bg = page_modules_cache.clone();
+        let tokens_bg = tokens.clone();
+        let http_client_bg = http_client;
+        let tidal_http_client_bg = tidal_http_client.clone();
+        tokio::spawn(async move {
+            refresh_tidal_moods_cache(
+                state_bg,
+                mood_cache_bg,
+                page_modules_cache_bg,
+                tokens_bg,
+                http_client_bg,
+                tidal_http_client_bg,
+            )
+            .await;
+        });
+    }
 
     if !pending_probe_slugs.is_empty() {
         let mood_cache_bg = mood_cache.clone();
@@ -731,8 +736,88 @@ pub(super) async fn get_tidal_moods(
         );
     }
     Ok(Json(
-        json!({ "categories": response_categories, "source": "tidal" }),
+        json!({ "categories": response_categories, "source": "tidal", "fallback": true }),
     ))
+}
+
+async fn refresh_tidal_moods_cache(
+    state: SharedState,
+    mood_cache: TidalMoodCategoriesCache,
+    page_modules_cache: TidalPageModulesCache,
+    tokens: crate::services::tidal::auth::TidalTokens,
+    http_client: reqwest::Client,
+    tidal_http_client: reqwest::Client,
+) {
+    let started_at = Instant::now();
+    let client = TidalClient::with_http(
+        tidal_http_client.clone(),
+        tokens.access_token.clone(),
+        tokens.country_code.clone(),
+    );
+    let raw = match client.get_page_raw("pages/moods").await {
+        Ok(r) => r,
+        Err(e) if super::error_looks_like_auth(&e) => {
+            let Ok(refreshed) = super::recover_tidal_session(&state, &http_client, &tokens).await
+            else {
+                tracing::warn!("TIDAL get_tidal_moods refresh failed");
+                return;
+            };
+            let retry = TidalClient::with_http(
+                tidal_http_client.clone(),
+                refreshed.access_token.clone(),
+                refreshed.country_code.clone(),
+            );
+            match retry.get_page_raw("pages/moods").await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("TIDAL get_tidal_moods failed: {e}");
+            return;
+        }
+    };
+    let live_categories = extract_page_links(&raw);
+    if live_categories.is_empty() {
+        tracing::warn!("TIDAL get_tidal_moods returned no PAGE_LINKS categories");
+        return;
+    }
+
+    let (response_categories, pending_probe_slugs, cached_probe_hits) =
+        apply_cached_mood_category_probes(
+            live_categories,
+            &tokens.country_code,
+            &page_modules_cache,
+        );
+    put_cached_tidal_mood_categories(&mood_cache, response_categories.clone());
+
+    if !pending_probe_slugs.is_empty() {
+        let probe_client = TidalClient::with_http(
+            tidal_http_client,
+            tokens.access_token.clone(),
+            tokens.country_code.clone(),
+        );
+        run_mood_thumbnail_probe_refresh(
+            mood_cache.clone(),
+            page_modules_cache,
+            probe_client,
+            tokens.country_code.clone(),
+            response_categories.clone(),
+            pending_probe_slugs,
+        )
+        .await;
+    }
+
+    tracing::info!(
+        route = "tidal_moods_refresh",
+        elapsed_ms = started_at.elapsed().as_millis(),
+        cached_probe_hits,
+        category_count = response_categories.len(),
+        "TIDAL moods background refresh complete"
+    );
 }
 
 fn apply_cached_mood_category_probes(
@@ -784,6 +869,21 @@ fn apply_mood_probe_results(
                 }
             }
             Some(category)
+        })
+        .collect()
+}
+
+fn default_tidal_mood_categories() -> Vec<Value> {
+    DEFAULT_TIDAL_MOOD_CATEGORIES
+        .iter()
+        .map(|(slug, title)| {
+            json!({
+                "slug": slug,
+                "title": title,
+                "icon": null,
+                "imageId": null,
+                "thumbnail": null,
+            })
         })
         .collect()
 }

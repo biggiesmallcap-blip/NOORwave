@@ -182,7 +182,9 @@ pub async fn cached_search(
     offset: u32,
 ) -> Result<SportifySearchResults> {
     if let Some(s) = db.with_conn(|conn| sp_cache::get_search(conn, cfg, q, kind, limit, offset))? {
-        return Ok(s);
+        if !(matches!(kind, SportifySearchKind::Playlist) && s.playlists.is_empty()) {
+            return Ok(s);
+        }
     }
     let fetched = client.search(q, kind, limit, offset).await?;
     db.with_conn(|conn| sp_cache::put_search(conn, q, kind, limit, offset, &fetched))?;
@@ -446,6 +448,7 @@ mod tests {
     fn test_client() -> SportifyClient {
         SportifyClient::new(SportifyClientConfig {
             base_url: "http://127.0.0.1:9".to_string(),
+            fallback_base_urls: Vec::new(),
             user_agent: "noor-test".to_string(),
         })
         .expect("sportify client")
