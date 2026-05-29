@@ -33,6 +33,14 @@ export function putCachedMoodCategories(categories: TidalMoodCategory[]): void {
 	landing = { categories, insertedAt: Date.now() };
 }
 
+export function moodCategoriesNeedThumbnails(categories: TidalMoodCategory[]): boolean {
+	return categories.length > 0 && categories.some((category) => !category.thumbnail);
+}
+
+export function putCompleteMoodCategories(categories: TidalMoodCategory[]): void {
+	if (!moodCategoriesNeedThumbnails(categories)) putCachedMoodCategories(categories);
+}
+
 export function getCachedMoodPage(slug: string): TidalHomeModule[] | null {
 	const e = drilldown.get(slug);
 	if (!e) return null;

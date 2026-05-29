@@ -2,16 +2,20 @@
 	import { onMount } from 'svelte';
 	import { api, type TidalMoodCategory } from '$lib/api/client';
 	import { wheelToHorizontal } from '$lib/actions/wheel-to-horizontal';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { goto } from '$app/navigation';
 	import {
 		getCachedMoodCategories,
-		putCachedMoodCategories,
+		moodCategoriesNeedThumbnails,
+		putCompleteMoodCategories,
 	} from '$lib/stores/tidal-moods-cache';
 
 	const PREVIEW_LIMIT = 8;
 	const LOAD_ARM_DELAY_MS = 0;
 	const FALLBACK_LOAD_DELAY_MS = 3000;
+	const THUMBNAIL_REFRESH_DELAY_MS = 1800;
+	const MAX_THUMBNAIL_REFRESH_ATTEMPTS = 3;
 
 	// Sync-read the shared moods cache on script init so a second visit
 	// within the 6h TTL renders instantly without a network round-trip.
@@ -24,24 +28,32 @@
 	let loading = $state(!cachedOnMount);
 	let errored = $state(false);
 	let sectionEl = $state<HTMLElement | null>(null);
-	let loadStarted = false;
+	let inFlight = false;
+	let thumbnailRefreshAttempts = 0;
+	let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 	async function loadMoods() {
-		if (loadStarted) return;
-		loadStarted = true;
+		if (inFlight) return;
+		inFlight = true;
 		try {
 			const data = await api.getTidalMoods();
 			const all = data.categories ?? [];
-			if (all.length > 0) putCachedMoodCategories(all);
+			if (all.length > 0) putCompleteMoodCategories(all);
 			categories = all.slice(0, PREVIEW_LIMIT);
+			scheduleThumbnailRefresh(all);
 		} catch {
 			errored = true;
 		} finally {
 			loading = false;
+			inFlight = false;
 		}
 	}
 
 	onMount(() => {
+		if (cachedOnMount && moodCategoriesNeedThumbnails(cachedOnMount)) {
+			scheduleThumbnailRefresh(cachedOnMount);
+			return () => clearThumbnailRefresh();
+		}
 		if (cachedOnMount) return;
 
 		let observer: IntersectionObserver | null = null;
@@ -68,9 +80,27 @@
 		return () => {
 			clearTimeout(armTimer);
 			if (fallbackTimer) clearTimeout(fallbackTimer);
+			clearThumbnailRefresh();
 			observer?.disconnect();
 		};
 	});
+
+	function clearThumbnailRefresh() {
+		if (!thumbnailRefreshTimer) return;
+		clearTimeout(thumbnailRefreshTimer);
+		thumbnailRefreshTimer = null;
+	}
+
+	function scheduleThumbnailRefresh(nextCategories: TidalMoodCategory[]) {
+		clearThumbnailRefresh();
+		if (!moodCategoriesNeedThumbnails(nextCategories)) {
+			thumbnailRefreshAttempts = 0;
+			return;
+		}
+		if (thumbnailRefreshAttempts >= MAX_THUMBNAIL_REFRESH_ATTEMPTS) return;
+		thumbnailRefreshAttempts += 1;
+		thumbnailRefreshTimer = setTimeout(() => void loadMoods(), THUMBNAIL_REFRESH_DELAY_MS);
+	}
 
 	function menu(slug: string, title: string) {
 		return [{ label: `Open ${title}`, onSelect: () => void goto(`/moods/${slug}`) }];
@@ -95,11 +125,13 @@
 						oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, menu(c.slug, c.title), c.title); }}
 					>
 						<div class="art-wrap">
-							{#if c.thumbnail}
-								<div class="art" style="background-image:url('{c.thumbnail}')"></div>
-							{:else}
-								<div class="art fallback">~</div>
-							{/if}
+							<ArtworkImage
+								className="mood-art"
+								src={c.thumbnail}
+								alt={c.title}
+								size={320}
+								fallbackText="~"
+							/>
 						</div>
 						<p class="card-title">{c.title}</p>
 					</a>
@@ -164,9 +196,10 @@
 	.card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
 	.card:focus-visible { border-color: var(--accent-line); }
 	.art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-	.art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base); }
-	.card:hover .art { transform: scale(1.05); }
-	.art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+	:global(.mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform var(--motion-base); }
+	:global(.mood-art.fallback) { display: flex; align-items: center; justify-content: center; background: var(--bg-hover); }
+	:global(.mood-art.fallback span) { font-size: var(--font-size-4xl); color: var(--text-muted); }
+	.card:hover :global(.mood-art) { transform: scale(1.05); }
 	.card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
 
 	.card.skeleton { cursor: default; pointer-events: none; }
