@@ -11,11 +11,14 @@ const chartsPage = readFileSync(
 );
 
 describe('daily chart shelf contract', () => {
-	test('loads the additive snapshot endpoint without replacing trending or playlists', () => {
+	test('loads chart snapshots and the provider matrix without replacing trending or playlists', () => {
 		expect(source).toContain('api.getChartSnapshot');
 		expect(source).toContain('api.getChartMatrix');
 		expect(source).toContain('api.refreshChartMatrix');
 		expect(source).toContain("let selectedSource = $state('spotify_daily')");
+		expect(source).toContain('const LIMIT = 20');
+		expect(source).toContain('snapshotRefreshAttempted');
+		expect(source).toContain('next.entries.length < Math.min(10, LIMIT)');
 
 		const trendingIndex = chartsPage.indexOf('<TrendingShelf limit={12} />');
 		const dailyIndex = chartsPage.indexOf('<DailyChartShelf />');
@@ -28,10 +31,9 @@ describe('daily chart shelf contract', () => {
 
 	test('keeps empty and restart states visible when refresh cannot populate data', () => {
 		expect(source).toContain('No market snapshot yet');
-		expect(source).toContain('No Spotify daily list for');
+		expect(source).toContain('No provider leaders for');
 		expect(source).toContain('Global data is available above');
 		expect(source).toContain('NOOR tried to refresh the provider matrix');
-		expect(source).toContain('Daily snapshots unavailable');
 		expect(source).toContain('Restart the NOOR server');
 	});
 
@@ -43,20 +45,23 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('regionHasMatrixData(selectedRegion)');
 	});
 
-	test('makes region tabs and provider cards change the active provider snapshot', () => {
-		expect(source).toContain('selectedRegionCells()');
+	test('uses provider chips and a top 20 mural instead of duplicate leader cards', () => {
+		expect(source).toContain('source-tabs');
+		expect(source).toContain('chart-mural-card');
+		expect(source).toContain('chartEntries as entry');
+		expect(source).toContain('currentEntry');
 		expect(source).toContain('pickProvider(selectedRegion, provider.source_key)');
-		expect(source).toContain('loadSnapshot(region, source)');
-		expect(source).toContain('Provider snapshot');
+		expect(source).not.toContain('provider-card');
+		expect(source).not.toContain('Provider snapshot');
 	});
 
-	test('resolves visible provider leaders against TIDAL for artwork and playback', () => {
+	test('resolves visible chart entries against TIDAL for artwork and playback', () => {
 		expect(source).toContain('api.searchTidal(query, 1)');
 		expect(source).toContain('resolvedTracks');
 		expect(source).toContain('playTidalTrackNow');
 		expect(source).toContain('TIDAL ready');
-		expect(source).toContain('provider-card-art');
-		expect(source).toContain('resolveVisibleEntries(entries)');
-		expect(source).toContain('entryStatusLabel(entry)');
+		expect(source).toContain('chart-mural-art');
+		expect(source).toContain('async function resolveVisibleEntries(entries');
+		expect(source).toContain('async function playEntry(entry');
 	});
 });
