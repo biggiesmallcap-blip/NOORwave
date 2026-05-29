@@ -23,6 +23,7 @@
 
 	const PERIOD = 'daily';
 	const LIMIT = 20;
+	const ROTATE_MS = 8000;
 
 	let selectedRegion = $state('global');
 	let selectedSource = $state('spotify_daily');
@@ -30,13 +31,20 @@
 	let data = $state<ChartSnapshotResponse | null>(null);
 	let resolvedTracks = $state<Record<number, TidalSearchTrack | null>>({});
 	let resolvingEntries = $state<Record<number, boolean>>({});
-	let loading = $state(true);
 	let matrixLoading = $state(true);
+	let loading = $state(true);
 	let refreshingMatrix = $state(false);
-	let error = $state(false);
 	let matrixError = $state(false);
+	let error = $state(false);
 	let requestToken = 0;
 	let refreshAttempted = false;
+	let snapshotRefreshAttempted = false;
+	let currentEntryIndex = $state(0);
+	let carouselPaused = $state(false);
+	let carouselTimer: ReturnType<typeof setInterval> | undefined;
+
+	let chartEntries = $derived(data?.entries ?? []);
+	let currentEntry = $derived(chartEntries[currentEntryIndex] ?? chartEntries[0] ?? null);
 
 	onMount(() => {
 		void loadMatrix();
@@ -44,15 +52,21 @@
 	});
 
 	$effect(() => {
-		const cells = selectedRegionCells();
-		if (cells.length === 0) return;
-		void resolveVisibleCells(cells);
+		if (chartEntries.length === 0) return;
+		void resolveVisibleEntries(chartEntries);
 	});
 
 	$effect(() => {
-		const entries = data?.entries ?? [];
-		if (entries.length === 0) return;
-		void resolveVisibleEntries(entries);
+		if (currentEntryIndex >= chartEntries.length) currentEntryIndex = 0;
+	});
+
+	$effect(() => {
+		stopCarousel();
+		if (chartEntries.length <= 1) return;
+		carouselTimer = setInterval(() => {
+			if (!carouselPaused) jumpEntry(1);
+		}, ROTATE_MS);
+		return stopCarousel;
 	});
 
 	async function loadMatrix() {
@@ -100,6 +114,16 @@
 			});
 			if (token !== requestToken) return;
 			data = next;
+			currentEntryIndex = 0;
+			if (
+				!snapshotRefreshAttempted &&
+				!refreshingMatrix &&
+				next.entries.length > 0 &&
+				next.entries.length < Math.min(10, LIMIT)
+			) {
+				snapshotRefreshAttempted = true;
+				void refreshMatrix();
+			}
 		} catch (e) {
 			console.error('[daily-charts] snapshot fetch failed', e);
 			if (token !== requestToken) return;
@@ -120,18 +144,6 @@
 		selectedRegion = region;
 		selectedSource = source;
 		void loadSnapshot(region, source);
-	}
-
-	function rankDeltaLabel(delta: number | null): string {
-		if (delta == null || delta === 0) return 'steady';
-		return delta > 0 ? `up ${delta}` : `down ${Math.abs(delta)}`;
-	}
-
-	function formatMetric(entry: ChartSnapshotEntry): string {
-		if (entry.streams != null) return `${entry.streams.toLocaleString()} streams`;
-		if (entry.views != null) return `${entry.views.toLocaleString()} views`;
-		if (entry.points != null) return `${entry.points.toLocaleString()} pts`;
-		return entryStatusLabel(entry);
 	}
 
 	function cellMetric(cell: ChartMatrixCell): string {
@@ -161,14 +173,6 @@
 		return REGIONS.find((region) => region.code === selectedRegion)?.label ?? selectedRegion;
 	}
 
-	function selectedRegionCells(): ChartMatrixCell[] {
-		const row = matrix?.rows.find((item) => item.region === selectedRegion);
-		if (!row || !matrix) return [];
-		return matrix.providers
-			.map((provider) => row.cells[provider.source_key])
-			.filter((cell): cell is ChartMatrixCell => Boolean(cell));
-	}
-
 	function selectedProviderLabel(): string {
 		return (
 			matrix?.providers.find((provider) => provider.source_key === selectedSource)?.label ??
@@ -176,16 +180,29 @@
 		);
 	}
 
-	async function resolveVisibleCells(cells: ChartMatrixCell[]) {
-		await Promise.all(cells.slice(0, 6).map((cell) => resolveCell(cell)));
+	function stopCarousel() {
+		if (carouselTimer) clearInterval(carouselTimer);
+		carouselTimer = undefined;
+	}
+
+	function selectEntry(entryId: number) {
+		const nextIndex = chartEntries.findIndex((entry) => entry.id === entryId);
+		if (nextIndex >= 0) currentEntryIndex = nextIndex;
+	}
+
+	function jumpEntry(delta: number) {
+		if (chartEntries.length === 0) return;
+		currentEntryIndex = (currentEntryIndex + delta + chartEntries.length) % chartEntries.length;
+	}
+
+	function rankDeltaLabel(delta: number | null): string {
+		if (delta == null || delta === 0) return 'Steady';
+		if (delta < 0) return `Up ${Math.abs(delta)}`;
+		return `Down ${delta}`;
 	}
 
 	async function resolveVisibleEntries(entries: ChartSnapshotEntry[]) {
-		await Promise.all(entries.slice(0, 12).map((entry) => resolveEntry(entry)));
-	}
-
-	async function resolveCell(cell: ChartMatrixCell): Promise<TidalSearchTrack | null> {
-		return resolveChartItem(cell.entry_id, cell.artist, cell.title, cell.entity_type, cell.tidal_id);
+		await Promise.all(entries.slice(0, LIMIT).map((entry) => resolveEntry(entry)));
 	}
 
 	async function resolveEntry(entry: ChartSnapshotEntry): Promise<TidalSearchTrack | null> {
@@ -220,8 +237,8 @@
 		}
 	}
 
-	async function playCell(cell: ChartMatrixCell) {
-		const hit = resolvedTracks[cell.entry_id] ?? (await resolveCell(cell));
+	async function playEntry(entry: ChartSnapshotEntry) {
+		const hit = resolvedTracks[entry.id] ?? (await resolveEntry(entry));
 		if (!hit) {
 			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
 			return;
@@ -231,19 +248,19 @@
 			title: hit.title,
 			artist_name: hit.artist_name,
 			album_title: hit.album_title,
-			artwork_url: hit.artwork_url ?? cell.artwork_url,
+			artwork_url: hit.artwork_url ?? entry.artwork_url,
 			duration_ms: hit.duration_ms,
 			artist_tidal_id: hit.artist_id,
 			album_tidal_id: hit.album_tidal_id,
 		});
 	}
 
-	function cellArtwork(cell: ChartMatrixCell): string | null {
-		return resolvedTracks[cell.entry_id]?.artwork_url ?? cell.artwork_url;
-	}
-
 	function entryArtwork(entry: ChartSnapshotEntry): string | null {
 		return resolvedTracks[entry.id]?.artwork_url ?? entry.artwork_url;
+	}
+
+	function entryFallbackText(entry: ChartSnapshotEntry): string {
+		return (entry.title.trim()[0] ?? 'N').toUpperCase();
 	}
 
 	function entryStatusLabel(entry: ChartSnapshotEntry): string {
@@ -254,19 +271,22 @@
 		return entry.resolution_status;
 	}
 
-	function cellFallbackText(cell: ChartMatrixCell): string {
-		return (cell.title.trim()[0] ?? 'N').toUpperCase();
+	function entryMetric(entry: ChartSnapshotEntry): string {
+		if (entry.streams != null) return `${entry.streams.toLocaleString()} streams`;
+		if (entry.views != null) return `${entry.views.toLocaleString()} views`;
+		if (entry.points != null) return `${entry.points.toLocaleString()} pts`;
+		return entryStatusLabel(entry);
 	}
 
-	function fallbackText(entry: ChartSnapshotEntry): string {
-		return (entry.title.trim()[0] ?? 'N').toUpperCase();
+	function entrySubtitle(entry: ChartSnapshotEntry): string {
+		return `#${entry.rank} ${rankDeltaLabel(entry.rank_delta)} - ${entry.artist}`;
 	}
 </script>
 
 <section class="daily-chart-shelf">
 	<div class="section-header">
 		<div class="section-title-group">
-			<p class="eyebrow">Charts · Provider matrix</p>
+			<p class="eyebrow">Charts - Provider matrix</p>
 			<h2>Market pulse</h2>
 		</div>
 		<div class="region-tabs" role="tablist" aria-label="Daily chart region">
@@ -286,54 +306,97 @@
 	</div>
 
 	{#if matrix?.providers.length}
-		<div class="region-pulse" aria-label={`${selectedRegionLabel()} provider leaders`}>
-			<div class="region-pulse-copy">
-				<p>{selectedRegionLabel()} chart leaders</p>
-				<h3>{selectedProviderLabel()}</h3>
-			</div>
-			<div class="provider-card-row">
-				{#each matrix.providers as provider (provider.source_key)}
-					{@const row = matrix.rows.find((item) => item.region === selectedRegion)}
-					{@const cell = row?.cells[provider.source_key] ?? null}
+		<div class="source-tabs" role="tablist" aria-label="Daily chart provider">
+			{#each matrix.providers as provider (provider.source_key)}
+				<button
+					type="button"
+					class="source-chip"
+					class:active={provider.source_key === selectedSource}
+					role="tab"
+					aria-selected={provider.source_key === selectedSource}
+					onclick={() => pickProvider(selectedRegion, provider.source_key)}
+				>
+					{provider.label}
+				</button>
+			{/each}
+		</div>
+	{/if}
+
+	{#if chartEntries.length > 0 && currentEntry}
+		<div
+			class="chart-mural-card"
+			onmouseenter={() => carouselPaused = true}
+			onmouseleave={() => carouselPaused = false}
+			role="region"
+			aria-label={`${selectedProviderLabel()} ${selectedRegionLabel()} top ${chartEntries.length}`}
+		>
+			<div class="chart-mural-bg" aria-hidden="true">
+				{#each chartEntries as entry (entry.id)}
 					<button
+						class="chart-mural-tile"
+						class:chart-mural-tile--featured={currentEntry.id === entry.id}
 						type="button"
-						class="provider-card"
-						class:active={selectedSource === provider.source_key}
-						class:empty={!cell}
-						onclick={() => {
-							if (cell) {
-								pickProvider(selectedRegion, provider.source_key);
-								void playCell(cell);
-							}
-						}}
-						aria-label={`${provider.label} ${selectedRegionLabel()} leader`}
+						onclick={() => selectEntry(entry.id)}
+						aria-label={`Select ${entry.title}`}
+						title={`${entry.rank}. ${entry.title} - ${entry.artist}`}
 					>
-						<span class="provider-name">{provider.label}</span>
-						{#if cell}
-							<div class="provider-art">
-								<ArtworkImage
-									src={cellArtwork(cell)}
-									size={320}
-									className="provider-card-art"
-									fallbackText={cellFallbackText(cell)}
-									decorative
-								/>
-							</div>
-							<strong>{cell.title}</strong>
-							<span>{cell.artist}</span>
-							<small>{cellMetric(cell)}</small>
-						{:else}
-							<div class="provider-art empty-art"></div>
-							<strong>No data</strong>
-							<span>{selectedRegionLabel()}</span>
-							<small>Provider missing</small>
-						{/if}
+						<ArtworkImage
+							src={entryArtwork(entry)}
+							size={320}
+							className="chart-mural-art"
+							fallbackText={entryFallbackText(entry)}
+							decorative
+						/>
 					</button>
 				{/each}
 			</div>
+			<div class="chart-mural-shade"></div>
+			<div class="chart-mural-content">
+				<div class="chart-mural-meta">
+					<span class="chart-mural-kind">
+						{selectedProviderLabel()} top {chartEntries.length} - {selectedRegionLabel()}
+					</span>
+					<h3 class="chart-mural-title">{currentEntry.title}</h3>
+					<p class="chart-mural-sub">{entrySubtitle(currentEntry)}</p>
+					<div class="chart-mural-actions">
+						<button class="btn btn-primary chart-mural-play" type="button" onclick={() => void playEntry(currentEntry)}>
+							<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+								<path d="M3 2.5l10 5.5-10 5.5V2.5z"/>
+							</svg>
+							Play
+						</button>
+						<span>{entryMetric(currentEntry)}</span>
+					</div>
+				</div>
+			</div>
+			{#if chartEntries.length > 1}
+				<button class="chart-nav chart-nav--prev" type="button" onclick={() => jumpEntry(-1)} aria-label="Previous chart entry">&lsaquo;</button>
+				<button class="chart-nav chart-nav--next" type="button" onclick={() => jumpEntry(1)} aria-label="Next chart entry">&rsaquo;</button>
+			{/if}
 		</div>
+	{:else if loading}
+		<div class="chart-mural-loading">Loading chart mural</div>
+	{:else if error}
+		<EmptyState
+			title="Daily chart unavailable"
+			copy="Restart the NOOR server if this update just landed."
+		/>
+	{:else if !matrixLoading}
+		<EmptyState
+			title={`No ${selectedProviderLabel()} top list for ${selectedRegionLabel()}`}
+			copy="Try another provider or region."
+		/>
+	{/if}
 
+	{#if matrix?.providers.length}
 		<div class="matrix-shell" aria-label="Market pulse provider matrix">
+			<div class="matrix-heading">
+				<div>
+					<p>Provider comparison</p>
+					<h3>All markets</h3>
+				</div>
+				<span>{selectedRegionLabel()} focus</span>
+			</div>
 			<div class="matrix-grid">
 				<div class="matrix-head region-head">Region</div>
 				{#each matrix.providers as provider (provider.source_key)}
@@ -386,58 +449,13 @@
 		/>
 	{/if}
 
-	{#if data?.snapshot && data.entries.length > 0}
-		<div class="chart-list" aria-label="Daily chart entries">
-			<div class="list-heading">
-				<p>{selectedRegionLabel()} · {selectedProviderLabel()}</p>
-				<h3>Provider snapshot</h3>
-			</div>
-			{#each data.entries as entry (entry.id)}
-				<div class="chart-row">
-					<div class="rank">
-						<span>{entry.rank}</span>
-						<small>{rankDeltaLabel(entry.rank_delta)}</small>
-					</div>
-					<div class="art-cell">
-						<ArtworkImage
-							src={entryArtwork(entry)}
-							size={320}
-							className="daily-chart-art"
-							fallbackText={fallbackText(entry)}
-							decorative
-						/>
-					</div>
-					<div class="track-meta">
-						<strong>{entry.title}</strong>
-						<span>{entry.artist}</span>
-					</div>
-					<div class="metric">{formatMetric(entry)}</div>
-					<div class="status" data-status={entry.resolution_status}>
-						{entryStatusLabel(entry)}
-					</div>
-				</div>
-			{/each}
-		</div>
-	{:else if loading}
-		<div class="chart-list" aria-label="Loading daily chart">
-			{#each Array.from({ length: 6 }) as _, i (i)}
-				<div class="chart-row skeleton" aria-hidden="true"></div>
-			{/each}
-		</div>
-	{:else if error}
-		<EmptyState
-			title="Daily snapshots unavailable"
-			copy="Restart the NOOR server if this update just landed."
-		/>
-	{:else}
+	{#if !matrixLoading && !matrixError && !regionHasMatrixData(selectedRegion)}
 		<EmptyState
 			title={matrixHasData(matrix)
-				? `No Spotify daily list for ${selectedRegionLabel()}`
+				? `No provider leaders for ${selectedRegionLabel()}`
 				: 'No market snapshot yet'}
 			copy={matrixHasData(matrix)
-				? regionHasMatrixData(selectedRegion)
-					? `This region has provider leaders, but no ${selectedProviderLabel()} detail list yet.`
-					: 'This region has no provider snapshot yet. Global data is available above.'
+				? 'This region has no provider leaders yet. Global data is available above.'
 				: 'NOOR tried to refresh the provider matrix, but there is no stored chart data yet.'}
 		/>
 	{/if}
@@ -515,140 +533,299 @@
 		opacity: 0.55;
 	}
 
-	.region-pulse {
-		display: grid;
-		gap: var(--space-3);
-	}
-
-	.region-pulse-copy {
+	.source-tabs {
 		display: flex;
-		align-items: end;
-		justify-content: space-between;
-		gap: var(--gap-sm);
-	}
-
-	.region-pulse-copy p,
-	.region-pulse-copy h3 {
-		margin: 0;
-	}
-
-	.region-pulse-copy p {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
-
-	.region-pulse-copy h3 {
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.provider-card-row {
-		display: grid;
-		grid-template-columns: repeat(6, minmax(132px, 1fr));
-		gap: var(--space-2);
+		align-items: center;
+		gap: var(--space-1);
 		overflow-x: auto;
 		padding-bottom: var(--space-1);
 	}
 
-	.provider-card {
-		position: relative;
-		display: grid;
-		grid-template-rows: auto auto auto auto auto;
-		align-content: start;
-		gap: var(--space-1);
-		min-width: 132px;
-		min-height: clamp(210px, 19vw, 260px);
-		padding: var(--space-2);
+	.source-chip {
 		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-sm);
+		border-radius: 999px;
 		background: var(--panel-bg);
-		color: var(--text-secondary);
-		text-align: left;
+		color: var(--text-muted);
 		cursor: pointer;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: 1;
+		padding: var(--space-2) var(--space-3);
+		white-space: nowrap;
 		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
 	}
 
-	.provider-card:hover,
-	.provider-card:focus-visible,
-	.provider-card.active {
-		border-color: var(--accent-line);
+	.source-chip:hover,
+	.source-chip:focus-visible,
+	.source-chip.active {
 		background: var(--bg-hover);
+		border-color: var(--accent-line);
 		color: var(--text-primary);
 		outline: none;
 	}
 
-	.provider-card.empty {
-		cursor: default;
-		opacity: 0.62;
-	}
-
-	.provider-name {
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-bold);
-		color: var(--service-spotify);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
-
-	.provider-art {
-		width: 100%;
-		aspect-ratio: 1 / 1;
-		border-radius: var(--radius-xs);
+	.chart-mural-card {
+		position: relative;
+		min-height: clamp(220px, 24vw, 360px);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: var(--bg-raised);
+		background: var(--panel-bg);
 	}
 
-	:global(.provider-card-art) {
+	.chart-mural-bg {
+		position: absolute;
+		inset: -7%;
+		z-index: 0;
+		display: grid;
+		grid-template-columns: repeat(10, minmax(0, 1fr));
+		grid-template-rows: repeat(2, minmax(0, 1fr));
+		background: linear-gradient(120deg, var(--panel-bg), color-mix(in srgb, var(--accent-soft) 24%, transparent));
+	}
+
+	.chart-mural-bg::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background:
+			radial-gradient(circle at 78% 42%, rgba(255,255,255,0.2), transparent 30%),
+			linear-gradient(90deg, rgba(0,0,0,0.06), transparent 42%, rgba(0,0,0,0.02));
+		pointer-events: none;
+	}
+
+	.chart-mural-tile {
+		appearance: none;
+		position: relative;
+		min-width: 0;
+		min-height: 0;
+		padding: 0;
+		border: 0;
+		background: var(--bg-raised);
+		color: var(--text-primary);
+		cursor: pointer;
+		overflow: hidden;
+		opacity: 0.96;
+		filter: saturate(1.18) brightness(1.16);
+		transform: skewX(-7deg) scaleX(1.08);
+		transform-origin: center;
+		transition:
+			filter var(--motion-fast),
+			opacity var(--motion-fast),
+			transform var(--motion-base),
+			box-shadow var(--motion-base);
+	}
+
+	.chart-mural-tile::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(90deg, rgba(0,0,0,0.18), transparent 48%, rgba(0,0,0,0.2));
+		opacity: 0.18;
+		pointer-events: none;
+	}
+
+	.chart-mural-tile:hover,
+	.chart-mural-tile:focus-visible,
+	.chart-mural-tile--featured {
+		z-index: var(--z-raised);
+		opacity: 1;
+		filter: saturate(1.8) brightness(1.42);
+		transform: skewX(-7deg) scaleX(1.08) scale(1.045);
+		box-shadow:
+			0 0 0 1px rgba(255,255,255,0.32),
+			0 14px 30px rgba(0,0,0,0.32),
+			0 0 24px color-mix(in srgb, var(--accent) 38%, transparent);
+		outline: none;
+	}
+
+	:global(.chart-mural-art),
+	:global(.chart-mural-art.fallback) {
+		display: block;
 		width: 100%;
 		height: 100%;
-		object-fit: cover;
-		display: block;
 	}
 
-	:global(.provider-card-art.fallback),
-	.empty-art {
+	:global(.chart-mural-art) {
+		object-fit: cover;
+		transform: skewX(7deg) scale(1.24);
+		transition: transform var(--motion-base);
+	}
+
+	.chart-mural-tile:hover :global(.chart-mural-art),
+	.chart-mural-tile:focus-visible :global(.chart-mural-art),
+	.chart-mural-tile--featured :global(.chart-mural-art) {
+		transform: skewX(7deg) scale(1.34);
+	}
+
+	:global(.chart-mural-art.fallback) {
 		display: grid;
 		place-items: center;
-		background: linear-gradient(135deg, var(--bg-raised), var(--panel-bg));
-		color: var(--text-muted);
-		font-size: var(--font-size-2xl);
+		background: linear-gradient(135deg, var(--bg-raised), color-mix(in srgb, var(--accent-soft) 28%, var(--bg-surface)));
+		color: rgba(255,255,255,0.78);
+		font-size: var(--font-size-xl);
 		font-weight: var(--font-weight-bold);
 	}
 
-	.provider-card strong,
-	.provider-card span,
-	.provider-card small {
-		min-width: 0;
-		max-width: 100%;
+	.chart-mural-shade {
+		position: absolute;
+		inset: 0;
+		z-index: var(--z-base);
+		background: linear-gradient(90deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.34) 42%, rgba(0,0,0,0.06) 78%, transparent 100%);
+		pointer-events: none;
+	}
+
+	.chart-mural-content {
+		position: relative;
+		z-index: calc(var(--z-base) + 1);
+		display: grid;
+		align-items: center;
+		min-height: inherit;
+		padding: var(--space-5);
+		pointer-events: none;
+	}
+
+	.chart-mural-meta {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		max-width: min(42rem, 58vw);
+		text-shadow: 0 2px 18px rgba(0,0,0,0.62);
+	}
+
+	.chart-mural-kind {
+		color: var(--accent);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0;
+		text-transform: uppercase;
+	}
+
+	.chart-mural-title {
+		margin: 0;
+		color: var(--text-primary);
+		font-size: var(--font-size-4xl);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.provider-card strong {
-		color: var(--text-primary);
+	.chart-mural-sub {
+		margin: 0 0 var(--space-2);
+		color: var(--text-secondary);
+		font-size: var(--font-size-sm);
+	}
+
+	.chart-mural-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		pointer-events: auto;
+	}
+
+	.chart-mural-actions span {
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.chart-mural-play {
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
 	}
 
-	.provider-card span:not(.provider-name) {
-		font-size: var(--font-size-xs);
+	.chart-nav {
+		position: absolute;
+		top: 50%;
+		z-index: var(--z-raised);
+		display: grid;
+		place-items: center;
+		width: clamp(32px, 3vw, 40px);
+		aspect-ratio: 1 / 1;
+		border: 1px solid var(--panel-border);
+		border-radius: 50%;
+		background: rgba(0,0,0,0.5);
+		color: var(--text-primary);
+		cursor: pointer;
+		font-size: var(--font-size-xl);
+		line-height: 1;
+		opacity: 0;
+		transform: translateY(-50%);
+		transition: opacity var(--motion-fast), background var(--motion-fast);
+	}
+
+	.chart-mural-card:hover .chart-nav,
+	.chart-nav:focus-visible {
+		opacity: 1;
+		outline: none;
+	}
+
+	.chart-nav:hover {
+		background: rgba(0,0,0,0.75);
+	}
+
+	.chart-nav--prev {
+		left: var(--space-3);
+	}
+
+	.chart-nav--next {
+		right: var(--space-3);
+	}
+
+	.chart-mural-loading {
+		display: grid;
+		place-items: center;
+		min-height: clamp(180px, 20vw, 280px);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-md);
+		background: var(--panel-bg);
 		color: var(--text-secondary);
-	}
-
-	.provider-card small {
-		font-size: var(--font-size-2xs);
-		color: var(--text-muted);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.matrix-shell {
+		display: grid;
+		gap: var(--space-2);
 		overflow-x: auto;
 		padding-bottom: var(--space-1);
+	}
+
+	.matrix-heading {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: var(--gap-sm);
+		min-width: 920px;
+	}
+
+	.matrix-heading p,
+	.matrix-heading h3 {
+		margin: 0;
+	}
+
+	.matrix-heading p {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0;
+	}
+
+	.matrix-heading h3 {
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+	}
+
+	.matrix-heading span {
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.matrix-grid {
@@ -772,162 +949,22 @@
 		color: var(--text-primary);
 	}
 
-	.chart-list {
-		display: grid;
-		gap: var(--space-1);
-	}
-
-	.list-heading {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: var(--gap-sm);
-		padding-top: var(--space-1);
-	}
-
-	.list-heading p,
-	.list-heading h3 {
-		margin: 0;
-	}
-
-	.list-heading p {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
-
-	.list-heading h3 {
-		font-size: var(--font-size-md);
-		font-weight: var(--font-weight-bold);
-		line-height: var(--line-height-tight);
-	}
-
-	.chart-row {
-		display: grid;
-		grid-template-columns: clamp(44px, 5vw, 64px) clamp(42px, 4vw, 52px) minmax(0, 1fr) auto auto;
-		align-items: center;
-		gap: var(--space-3);
-		min-height: clamp(56px, 6vw, 68px);
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--panel-border);
-		border-radius: var(--radius-sm);
-		background: var(--panel-bg);
-	}
-
-	.rank {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		line-height: var(--line-height-tight);
-	}
-
-	.rank span {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-	}
-
-	.rank small {
-		font-size: var(--font-size-2xs);
-		color: var(--text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0;
-	}
-
-	.art-cell {
-		width: clamp(42px, 4vw, 52px);
-		aspect-ratio: 1 / 1;
-		border-radius: var(--radius-xs);
-		overflow: hidden;
-		background: var(--bg-raised);
-	}
-
-	:global(.daily-chart-art) {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
-	}
-
-	:global(.daily-chart-art.fallback) {
-		display: grid;
-		place-items: center;
-		color: var(--text-muted);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.track-meta {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-
-	.track-meta strong,
-	.track-meta span {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.track-meta strong {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		line-height: var(--line-height-snug);
-	}
-
-	.track-meta span {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-	}
-
-	.metric,
-	.status {
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-secondary);
-		white-space: nowrap;
-	}
-
-	.status {
-		border-radius: 999px;
-		padding: var(--space-1) var(--space-2);
-		background: var(--bg-hover);
-		color: var(--text-muted);
-		text-transform: capitalize;
-	}
-
-	.status[data-status='local'],
-	.status[data-status='tidal'] {
-		color: var(--text-primary);
-	}
-
-	.skeleton {
-		min-height: clamp(56px, 6vw, 68px);
-		background: linear-gradient(90deg, var(--panel-bg), var(--bg-hover), var(--panel-bg));
-		background-size: 200% 100%;
-		animation: pulse 1.2s linear infinite;
-	}
-
-	@keyframes pulse {
-		from { background-position: 200% 0; }
-		to { background-position: -200% 0; }
-	}
-
 	@media (max-width: 760px) {
-		.provider-card-row {
-			grid-template-columns: repeat(6, minmax(118px, 38vw));
+		.chart-mural-bg {
+			grid-template-columns: repeat(5, minmax(0, 1fr));
+			grid-template-rows: repeat(4, minmax(0, 1fr));
 		}
 
-		.chart-row {
-			grid-template-columns: clamp(36px, 10vw, 48px) clamp(42px, 12vw, 52px) minmax(0, 1fr);
+		.chart-mural-content {
+			padding: var(--space-4);
 		}
 
-		.metric,
-		.status {
-			grid-column: 3;
+		.chart-mural-meta {
+			max-width: 100%;
+		}
+
+		.chart-mural-title {
+			font-size: var(--font-size-3xl);
 		}
 	}
 </style>

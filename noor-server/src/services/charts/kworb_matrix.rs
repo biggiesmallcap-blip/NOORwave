@@ -15,6 +15,7 @@ const KWORB_COUNTRY_INDEX_URLS: &[&str] = &[
     "https://kworb.net/charts/index_n.html",
     "https://kworb.net/charts/index_u.html",
 ];
+const MAX_KWORB_DETAIL_ROWS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KworbMatrixCell {
@@ -26,11 +27,33 @@ pub struct KworbMatrixCell {
     pub external_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KworbChartEntry {
+    pub rank: i64,
+    pub rank_delta: Option<i64>,
+    pub artist: String,
+    pub title: String,
+    pub external_url: Option<String>,
+    pub streams: Option<i64>,
+    pub views: Option<i64>,
+    pub points: Option<i64>,
+    pub seven_day_streams: Option<i64>,
+    pub total_streams: Option<i64>,
+    pub days_on_chart: Option<i64>,
+    pub peak_rank: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct KworbMatrixIngestReport {
     pub rows_seen: usize,
     pub entries_written: usize,
     pub snapshots_written: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct KworbChartPages {
+    pub matrix_html: String,
+    pub detail_pages: BTreeMap<String, String>,
 }
 
 pub async fn fetch_kworb_matrix_html(client: &reqwest::Client) -> Result<String> {
@@ -45,6 +68,30 @@ pub async fn fetch_kworb_matrix_html(client: &reqwest::Client) -> Result<String>
         }
     }
     Ok(html)
+}
+
+pub async fn fetch_kworb_chart_pages(client: &reqwest::Client) -> Result<KworbChartPages> {
+    let matrix_html = fetch_kworb_matrix_html(client).await?;
+    let detail_urls = kworb_detail_urls_for_matrix_html(&matrix_html).unwrap_or_default();
+    let mut detail_pages = BTreeMap::new();
+    let detail_fetches = detail_urls.into_iter().map(|url| async move {
+        let result = fetch_kworb_page(client, &url).await;
+        (url, result)
+    });
+
+    for (url, result) in futures::future::join_all(detail_fetches).await {
+        match result {
+            Ok(page) => {
+                detail_pages.insert(url, page);
+            }
+            Err(err) => warn!(%url, error = %err, "kworb chart detail page fetch failed"),
+        }
+    }
+
+    Ok(KworbChartPages {
+        matrix_html,
+        detail_pages,
+    })
 }
 
 async fn fetch_kworb_page(client: &reqwest::Client, url: &str) -> Result<String> {
@@ -201,11 +248,147 @@ fn parse_kworb_line_cells(input: &str) -> Vec<KworbMatrixCell> {
     cells
 }
 
+pub fn parse_kworb_detail_html(source_key: &str, input: &str) -> Result<Vec<KworbChartEntry>> {
+    let mut entries = parse_kworb_detail_table_entries(source_key, input);
+
+    let mut seen = BTreeSet::new();
+    entries.retain(|entry| {
+        seen.insert((
+            entry.rank,
+            entry.artist.to_ascii_lowercase(),
+            entry.title.to_ascii_lowercase(),
+        ))
+    });
+    entries.sort_by_key(|entry| entry.rank);
+
+    if entries.is_empty() {
+        return Err(anyhow!("kworb chart detail rows not found"));
+    }
+
+    Ok(entries)
+}
+
+fn parse_kworb_detail_table_entries(source_key: &str, input: &str) -> Vec<KworbChartEntry> {
+    let mut entries = Vec::new();
+    let mut headers: Vec<String> = Vec::new();
+
+    for row in table_rows(input) {
+        let row_cells = table_cells(&row);
+        if row_cells.len() < 2 {
+            continue;
+        }
+
+        let values = row_cells
+            .iter()
+            .map(|cell| plain_text(&cell.html))
+            .collect::<Vec<_>>();
+        if values.iter().any(|value| {
+            let normalized = normalize_label(value);
+            normalized == "artistandtitle" || normalized == "artisttitle"
+        }) {
+            headers = values.iter().map(|value| normalize_label(value)).collect();
+            continue;
+        }
+
+        let Some((rank_index, rank)) = values
+            .iter()
+            .enumerate()
+            .find_map(|(index, value)| parse_rank(value).map(|rank| (index, rank)))
+        else {
+            continue;
+        };
+
+        let Some(title_index) = detail_title_cell_index(&values, rank_index) else {
+            continue;
+        };
+        let (artist, title) = split_artist_title(&values[title_index]);
+        if title.is_empty() {
+            continue;
+        }
+
+        let rank_delta = metric_by_header(&headers, &values, &["p"])
+            .and_then(|value| parse_rank_delta(&value))
+            .or_else(|| {
+                values
+                    .get(rank_index + 1)
+                    .and_then(|value| parse_rank_delta(value))
+            });
+        let streams = if source_key == "spotify_daily" {
+            metric_by_header(&headers, &values, &["streams"])
+                .and_then(|value| parse_integer_metric(&value))
+        } else {
+            None
+        };
+        let views = if source_key == "youtube_daily" {
+            metric_by_header(&headers, &values, &["views"])
+                .and_then(|value| parse_integer_metric(&value))
+        } else {
+            None
+        };
+        let points = if source_key != "spotify_daily" && source_key != "youtube_daily" {
+            metric_by_header(&headers, &values, &["points", "streams", "views"])
+                .and_then(|value| parse_integer_metric(&value))
+        } else {
+            None
+        };
+        let seven_day_streams = metric_by_header(&headers, &values, &["7day"])
+            .and_then(|value| parse_integer_metric(&value));
+        let total_streams = metric_by_header(&headers, &values, &["total"])
+            .and_then(|value| parse_integer_metric(&value));
+        let days_on_chart = metric_by_header(&headers, &values, &["days"])
+            .and_then(|value| parse_integer_metric(&value));
+        let peak_rank = metric_by_header(&headers, &values, &["pk", "peak"])
+            .and_then(|value| parse_rank(&value));
+
+        entries.push(KworbChartEntry {
+            rank,
+            rank_delta,
+            artist,
+            title,
+            external_url: first_href(&row_cells[title_index].html).or_else(|| first_href(&row)),
+            streams,
+            views,
+            points,
+            seven_day_streams,
+            total_streams,
+            days_on_chart,
+            peak_rank,
+        });
+    }
+
+    entries
+}
+
 pub fn ingest_kworb_matrix_html(
     conn: &Connection,
     chart_date: &str,
     fetched_at: i64,
     input: &str,
+) -> Result<KworbMatrixIngestReport> {
+    ingest_kworb_matrix_html_with_details(conn, chart_date, fetched_at, input, &BTreeMap::new())
+}
+
+pub fn ingest_kworb_chart_pages(
+    conn: &Connection,
+    chart_date: &str,
+    fetched_at: i64,
+    pages: &KworbChartPages,
+) -> Result<KworbMatrixIngestReport> {
+    ingest_kworb_matrix_html_with_details(
+        conn,
+        chart_date,
+        fetched_at,
+        &pages.matrix_html,
+        &pages.detail_pages,
+    )
+}
+
+pub fn ingest_kworb_matrix_html_with_details(
+    conn: &Connection,
+    chart_date: &str,
+    fetched_at: i64,
+    input: &str,
+    detail_pages: &BTreeMap<String, String>,
 ) -> Result<KworbMatrixIngestReport> {
     let cells = parse_kworb_matrix_html(input)?;
     let mut grouped: BTreeMap<(String, String), Vec<KworbMatrixCell>> = BTreeMap::new();
@@ -229,18 +412,50 @@ pub fn ingest_kworb_matrix_html(
             content_hash: None,
             status: "ok",
         };
-        let entries = cells
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| ChartEntrySeed {
-                external_url: cell.external_url.as_deref(),
-                raw_json: Some(json!({
-                    "provider": cell.provider_label,
-                    "source": "kworb",
-                })),
-                ..ChartEntrySeed::track((index + 1) as i64, &cell.artist, &cell.title)
-            })
-            .collect::<Vec<_>>();
+        let detail_url = cells.iter().find_map(|cell| cell.external_url.as_deref());
+        let detail_entries = detail_url
+            .and_then(|url| detail_pages.get(url).map(|html| (url, html)))
+            .and_then(|(url, html)| {
+                parse_kworb_detail_html(source_key, html)
+                    .ok()
+                    .map(|rows| (url, rows))
+            });
+        let entries = match detail_entries.as_ref() {
+            Some((url, rows)) if !rows.is_empty() => rows
+                .iter()
+                .take(MAX_KWORB_DETAIL_ROWS)
+                .map(|entry| {
+                    let mut seed = ChartEntrySeed::track(entry.rank, &entry.artist, &entry.title);
+                    seed.rank_delta = entry.rank_delta;
+                    seed.external_url = entry.external_url.as_deref();
+                    seed.streams = entry.streams;
+                    seed.views = entry.views;
+                    seed.points = entry.points.map(|value| value as f64);
+                    seed.seven_day_streams = entry.seven_day_streams;
+                    seed.total_streams = entry.total_streams;
+                    seed.days_on_chart = entry.days_on_chart;
+                    seed.peak_rank = entry.peak_rank;
+                    seed.raw_json = Some(json!({
+                        "provider": cells[0].provider_label,
+                        "source": "kworb",
+                        "detail_url": *url,
+                    }));
+                    seed
+                })
+                .collect::<Vec<_>>(),
+            _ => cells
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| ChartEntrySeed {
+                    external_url: cell.external_url.as_deref(),
+                    raw_json: Some(json!({
+                        "provider": cell.provider_label,
+                        "source": "kworb",
+                    })),
+                    ..ChartEntrySeed::track((index + 1) as i64, &cell.artist, &cell.title)
+                })
+                .collect::<Vec<_>>(),
+        };
         upsert_chart_snapshot(conn, &snapshot, &entries)?;
         entries_written += entries.len();
         snapshots_written += 1;
@@ -374,6 +589,15 @@ fn providers_from_header(line: &str) -> Option<Vec<(&'static str, &'static str)>
     }
 }
 
+fn kworb_detail_urls_for_matrix_html(input: &str) -> Result<BTreeSet<String>> {
+    let cells = parse_kworb_matrix_html(input)?;
+    Ok(cells
+        .into_iter()
+        .filter_map(|cell| cell.external_url)
+        .filter(|url| url.starts_with("https://kworb.net/"))
+        .collect())
+}
+
 fn region_for_country(label: &str) -> Option<&'static str> {
     match normalize_label(label).as_str() {
         "worldwide" | "global" => Some("global"),
@@ -399,6 +623,80 @@ fn split_artist_title(text: &str) -> (String, String) {
         return (artist.trim().to_string(), title.trim().to_string());
     }
     ("Unknown artist".to_string(), text.trim().to_string())
+}
+
+fn detail_title_cell_index(values: &[String], rank_index: usize) -> Option<usize> {
+    values
+        .iter()
+        .enumerate()
+        .skip(rank_index + 1)
+        .find(|(_, value)| value.contains(" - "))
+        .map(|(index, _)| index)
+        .or_else(|| {
+            values
+                .iter()
+                .enumerate()
+                .skip(rank_index + 1)
+                .find(|(_, value)| {
+                    let normalized = normalize_label(value);
+                    !value.is_empty()
+                        && !is_metric_like(value)
+                        && normalized != "re"
+                        && normalized != "new"
+                        && normalized != "steady"
+                })
+                .map(|(index, _)| index)
+        })
+}
+
+fn metric_by_header(headers: &[String], values: &[String], names: &[&str]) -> Option<String> {
+    headers
+        .iter()
+        .enumerate()
+        .find(|(_, header)| names.iter().any(|name| header == name))
+        .and_then(|(index, _)| values.get(index).cloned())
+}
+
+fn parse_rank(value: &str) -> Option<i64> {
+    let digits = value
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<i64>().ok()
+    }
+}
+
+fn parse_rank_delta(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if trimmed == "=" {
+        return Some(0);
+    }
+    if trimmed.eq_ignore_ascii_case("RE") || trimmed.eq_ignore_ascii_case("NEW") {
+        return None;
+    }
+    let signed = trimmed.replace(',', "");
+    let parsed = signed.parse::<i64>().ok()?;
+    Some(-parsed)
+}
+
+fn parse_integer_metric(value: &str) -> Option<i64> {
+    let normalized = value.trim().trim_start_matches('+').replace(',', "");
+    normalized.parse::<i64>().ok()
+}
+
+fn is_metric_like(value: &str) -> bool {
+    let value = value.trim();
+    value == "="
+        || value.eq_ignore_ascii_case("RE")
+        || value.eq_ignore_ascii_case("NEW")
+        || value
+            .trim_start_matches(['+', '-'])
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == ',' || ch == '.')
 }
 
 fn tr_start_regex() -> &'static Regex {
@@ -432,6 +730,85 @@ fn line_break_regex() -> &'static Regex {
 mod tests {
     use super::*;
     use crate::db::{queries, schema};
+
+    #[test]
+    fn kworb_detail_parser_reads_ranked_track_rows() {
+        let html = r#"
+<table>
+  <tr><th>Pos</th><th>P+</th><th>Artist and Title</th><th>Days</th><th>Pk</th><th>Streams</th><th>7Day</th><th>Total</th></tr>
+  <tr><td>1</td><td>=</td><td><a href="/spotify/track/a.html">Justin Bieber - Beauty And A Beat (feat. Nicki Minaj)</a></td><td>24</td><td>1</td><td>1,234,567</td><td>7,654,321</td><td>45,000,000</td></tr>
+  <tr><td>2</td><td>+3</td><td><a href="/spotify/track/b.html">Drake - ICEMAN</a></td><td>3</td><td>2</td><td>999,999</td><td>2,000,000</td><td>3,000,000</td></tr>
+</table>
+"#;
+
+        let entries = parse_kworb_detail_html("spotify_daily", html).expect("parse detail rows");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].rank, 1);
+        assert_eq!(entries[0].artist, "Justin Bieber");
+        assert_eq!(entries[0].title, "Beauty And A Beat (feat. Nicki Minaj)");
+        assert_eq!(entries[0].streams, Some(1_234_567));
+        assert_eq!(entries[0].seven_day_streams, Some(7_654_321));
+        assert_eq!(entries[0].total_streams, Some(45_000_000));
+        assert_eq!(entries[0].days_on_chart, Some(24));
+        assert_eq!(entries[0].peak_rank, Some(1));
+        assert_eq!(entries[0].rank_delta, Some(0));
+        assert_eq!(entries[1].rank_delta, Some(-3));
+        assert_eq!(
+            entries[1].external_url.as_deref(),
+            Some("https://kworb.net/spotify/track/b.html")
+        );
+    }
+
+    #[test]
+    fn kworb_matrix_ingest_prefers_detail_rows_for_chart_snapshots() {
+        let conn = Connection::open_in_memory().expect("open memory db");
+        schema::run_migrations(&conn).expect("run migrations");
+        let index_html = r#"
+<table>
+  <tr><th>Country</th><th>Spotify</th></tr>
+  <tr><td>Worldwide</td><td><a href="/spotify/country/global_daily.html">Justin Bieber - Beauty And A Beat (feat. Nicki Minaj)</a></td></tr>
+</table>
+"#;
+        let detail_html = r#"
+<table>
+  <tr><th>Pos</th><th>P+</th><th>Artist and Title</th><th>Streams</th></tr>
+  <tr><td>1</td><td>=</td><td><a href="/spotify/track/a.html">Justin Bieber - Beauty And A Beat (feat. Nicki Minaj)</a></td><td>1,234,567</td></tr>
+  <tr><td>2</td><td>-1</td><td><a href="/spotify/track/b.html">Drake - ICEMAN</a></td><td>999,999</td></tr>
+  <tr><td>3</td><td>+4</td><td><a href="/spotify/track/c.html">Olivia Rodrigo - the cure</a></td><td>888,888</td></tr>
+</table>
+"#;
+        let detail_pages = BTreeMap::from([(
+            "https://kworb.net/spotify/country/global_daily.html".to_string(),
+            detail_html.to_string(),
+        )]);
+
+        let report = ingest_kworb_matrix_html_with_details(
+            &conn,
+            "2026-05-29",
+            1234,
+            index_html,
+            &detail_pages,
+        )
+        .expect("ingest detail snapshot");
+
+        assert_eq!(report.entries_written, 3);
+        assert_eq!(report.snapshots_written, 1);
+        let snapshot =
+            queries::get_latest_chart_snapshot(&conn, "spotify_daily", "global", "daily", 20)
+                .expect("read snapshot")
+                .expect("snapshot exists");
+        assert_eq!(snapshot.entries.len(), 3);
+        assert_eq!(snapshot.entries[1].title, "ICEMAN");
+        assert_eq!(snapshot.entries[2].rank, 3);
+        assert_eq!(snapshot.entries[2].streams, Some(888_888));
+        let matrix = queries::get_chart_matrix(&conn, &["global"], &["spotify_daily"], "daily")
+            .expect("read matrix");
+        assert_eq!(
+            matrix[0].cells["spotify_daily"].as_ref().unwrap().title,
+            "Beauty And A Beat (feat. Nicki Minaj)"
+        );
+    }
 
     #[test]
     fn kworb_matrix_ingest_writes_provider_snapshots_for_supported_regions() {

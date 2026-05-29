@@ -459,7 +459,7 @@ pub(super) async fn refresh_chart_matrix(
         (s.http_client.clone(), s.db.clone())
     };
 
-    let html = crate::services::charts::kworb_matrix::fetch_kworb_matrix_html(&http)
+    let pages = crate::services::charts::kworb_matrix::fetch_kworb_chart_pages(&http)
         .await
         .map_err(|e| {
             (
@@ -472,11 +472,11 @@ pub(super) async fn refresh_chart_matrix(
     let fetched_at = now.timestamp();
     let report = db
         .with_conn(|conn| {
-            crate::services::charts::kworb_matrix::ingest_kworb_matrix_html(
+            crate::services::charts::kworb_matrix::ingest_kworb_chart_pages(
                 conn,
                 &chart_date,
                 fetched_at,
-                &html,
+                &pages,
             )
         })
         .map_err(|e| {
