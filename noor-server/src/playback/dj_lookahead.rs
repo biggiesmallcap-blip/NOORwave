@@ -108,6 +108,28 @@ pub fn build_ephemeral_tidal_mix_pair(
     })
 }
 
+pub fn build_external_current_queue_pair(
+    conn: &Connection,
+    current: &Track,
+) -> Result<Option<DjLookaheadPair>> {
+    let current_ref = tidal_media_ref_for_track(current).or_else(|| {
+        (current.id > 0).then_some(DjMediaRef::LibraryTrack {
+            track_id: current.id,
+        })
+    });
+    let Some(current_ref) = current_ref else {
+        return Ok(None);
+    };
+    let next_row = load_first_queue_ref(conn)?;
+    Ok(Some(DjLookaheadPair {
+        current: Some(current_ref.clone()),
+        next: next_row.as_ref().map(|row| row.media_ref.clone()),
+        current_queue_item_id: None,
+        next_queue_item_id: next_row.as_ref().map(|row| row.queue_item_id),
+        queue_generation: compute_external_current_queue_generation(conn, &current_ref)?,
+    }))
+}
+
 fn compute_ephemeral_tidal_mix_generation(
     current: &Track,
     pending: &[PendingEphemeralTidalTrack],
@@ -122,6 +144,19 @@ fn compute_ephemeral_tidal_mix_generation(
         track.artist_name.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn compute_external_current_queue_generation(
+    conn: &Connection,
+    current_ref: &DjMediaRef,
+) -> Result<u64> {
+    let mut hasher = DefaultHasher::new();
+    "external_current_queue".hash(&mut hasher);
+    let key = current_ref.profile_key();
+    key.media_ref_kind.hash(&mut hasher);
+    key.media_ref_id.hash(&mut hasher);
+    compute_queue_generation(conn)?.hash(&mut hasher);
+    Ok(hasher.finish())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +456,53 @@ mod tests {
         .queue_generation;
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn external_current_queue_pair_uses_first_persisted_queue_item() {
+        let conn = conn();
+        seed_track(&conn, 2, Some(202));
+        let next = seed_queue_track(&conn, 0, 2);
+        let current = ephemeral_track(-101, 101);
+
+        let pair = build_external_current_queue_pair(&conn, &current)
+            .unwrap()
+            .expect("pair");
+
+        assert_eq!(
+            pair.current,
+            Some(DjMediaRef::TidalTrack {
+                tidal_id: 101,
+                track_id: None
+            })
+        );
+        assert_eq!(
+            pair.next,
+            Some(DjMediaRef::TidalTrack {
+                tidal_id: 202,
+                track_id: Some(2)
+            })
+        );
+        assert_eq!(pair.current_queue_item_id, None);
+        assert_eq!(pair.next_queue_item_id, Some(next));
+    }
+
+    #[test]
+    fn external_current_queue_generation_includes_current_ref() {
+        let conn = conn();
+        seed_track(&conn, 2, Some(202));
+        seed_queue_track(&conn, 0, 2);
+
+        let first = build_external_current_queue_pair(&conn, &ephemeral_track(-101, 101))
+            .unwrap()
+            .expect("first")
+            .queue_generation;
+        let second = build_external_current_queue_pair(&conn, &ephemeral_track(-303, 303))
+            .unwrap()
+            .expect("second")
+            .queue_generation;
+
+        assert_ne!(first, second);
     }
 
     #[test]
