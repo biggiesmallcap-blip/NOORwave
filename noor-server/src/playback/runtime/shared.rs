@@ -279,6 +279,23 @@ fn write_output_buffer<T>(
             }
         }
     }
+
+    if !shared.drop_preview_start_signaled.load(Ordering::Relaxed) {
+        let trigger = shared.drop_preview_trigger_samples.load(Ordering::Relaxed);
+        if trigger != u64::MAX {
+            let pos = shared.position_samples.load(Ordering::Relaxed);
+            if pos >= trigger {
+                shared
+                    .drop_preview_start_signaled
+                    .store(true, Ordering::Relaxed);
+                let _ = command_tx.send(PlaybackRuntimeCommand::DropPreviewStart {
+                    track_id: shared.track_id,
+                    generation: shared.generation,
+                    trigger_position_samples: pos,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -326,6 +343,8 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) crossfade_samples: AtomicU64,
     pub(crate) crossfade_start_signaled: AtomicBool,
     pub(crate) suppress_crossfade_after_seek: AtomicBool,
+    pub(crate) drop_preview_trigger_samples: AtomicU64,
+    pub(crate) drop_preview_start_signaled: AtomicBool,
     pub(crate) fadein_start_samples: AtomicU64,
     pub(crate) device_sample_rate: u32,
     pub(crate) device_channels: u16,
@@ -378,6 +397,8 @@ impl PlaybackSharedState {
             crossfade_samples: AtomicU64::new(crossfade_samples),
             crossfade_start_signaled: AtomicBool::new(false),
             suppress_crossfade_after_seek: AtomicBool::new(false),
+            drop_preview_trigger_samples: AtomicU64::new(u64::MAX),
+            drop_preview_start_signaled: AtomicBool::new(false),
             fadein_start_samples: AtomicU64::new(u64::MAX),
             device_sample_rate,
             device_channels,
@@ -872,6 +893,42 @@ mod tests {
                 assert_eq!(trigger_position_samples, 9_604);
             }
             other => panic!("expected CrossfadeStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drop_preview_start_command_uses_absolute_trigger_without_crossfade() {
+        let shared = test_shared_state();
+        shared.total_samples.store(100_000, Ordering::Relaxed);
+        shared.position_samples.store(48_000, Ordering::Relaxed);
+        shared
+            .drop_preview_trigger_samples
+            .store(48_000, Ordering::Relaxed);
+        shared
+            .drop_preview_start_signaled
+            .store(false, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+        }
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        assert_eq!(shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        match command_rx.try_recv().expect("drop preview command") {
+            PlaybackRuntimeCommand::DropPreviewStart {
+                track_id,
+                generation,
+                trigger_position_samples,
+            } => {
+                assert_eq!(track_id, shared.track_id);
+                assert_eq!(generation, shared.generation);
+                assert_eq!(trigger_position_samples, 48_004);
+            }
+            other => panic!("expected DropPreviewStart, got {other:?}"),
         }
     }
 
