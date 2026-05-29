@@ -4,6 +4,12 @@
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import TrendingShelf from '$lib/components/charts/TrendingShelf.svelte';
+  import DailyChartShelf from '$lib/components/charts/DailyChartShelf.svelte';
+  import {
+    getCachedSpotifyChartMetaMap,
+    putCachedSpotifyChartMeta,
+    type SpotifyChartMeta,
+  } from '$lib/stores/spotify-chart-meta-cache';
 
   // Editorial Spotify chart playlists. Stable IDs that change daily/weekly
   // server-side but the playlist identity is fixed. Click navigates to the
@@ -27,14 +33,19 @@
 
   // Best-effort cover fetch. The playlist endpoint also returns tracks and
   // TIDAL resolution state, so keep these requests away from first paint.
-  let meta = $state<Record<string, { thumbnail: string | null; title: string | null }>>({});
+  let meta = $state<Record<string, SpotifyChartMeta>>({});
   let metaTimer: ReturnType<typeof setTimeout> | null = null;
   let metaAbort: AbortController | null = null;
 
   onMount(() => {
+    const cached = getCachedSpotifyChartMetaMap(CHARTS.map((chart) => chart.id));
+    meta = cached;
+    const missing = CHARTS.filter((chart) => !cached[chart.id]);
+    if (missing.length === 0) return;
+
     metaAbort = new AbortController();
     metaTimer = setTimeout(() => {
-      void loadPlaylistMeta(metaAbort?.signal);
+      void loadPlaylistMeta(missing, metaAbort?.signal);
     }, 1600);
   });
 
@@ -43,14 +54,15 @@
     metaAbort?.abort();
   });
 
-  async function loadPlaylistMeta(signal: AbortSignal | undefined) {
-    const queue = [...CHARTS];
+  async function loadPlaylistMeta(charts: typeof CHARTS, signal: AbortSignal | undefined) {
+    const queue = [...charts];
     const workers = Array.from({ length: 2 }, async () => {
       while (queue.length > 0 && !signal?.aborted) {
         const c = queue.shift();
         if (!c) return;
         try {
           const { playlist } = await api.getSpotifyPlaylist(c.id, signal);
+          putCachedSpotifyChartMeta(c.id, playlist);
           meta[c.id] = { thumbnail: playlist.thumbnail, title: playlist.title };
         } catch {
           // Quiet: proxy outage just keeps the fallback glyph + hardcoded title.
@@ -78,6 +90,10 @@
 
   <section class="trending-block">
     <TrendingShelf limit={12} />
+  </section>
+
+  <section class="daily-block">
+    <DailyChartShelf />
   </section>
 
   <section>

@@ -30,6 +30,20 @@ pub(super) struct ChartParams {
     tag: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct ChartSnapshotParams {
+    source: Option<String>,
+    period: Option<String>,
+    region: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SpotifyDailyImportParams {
+    region: Option<String>,
+    date: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ChartTidalPlayable {
     tidal_id: i64,
@@ -119,6 +133,17 @@ struct ChartCacheEntry {
     inserted_at: Instant,
     payload: serde_json::Value,
 }
+
+const MATRIX_PROVIDERS: [(&str, &str); 6] = [
+    ("itunes_daily", "iTunes"),
+    ("spotify_daily", "Spotify"),
+    ("apple_music_daily", "Apple Music"),
+    ("youtube_daily", "YouTube"),
+    ("shazam_daily", "Shazam"),
+    ("deezer_daily", "Deezer"),
+];
+
+const MAIN_MATRIX_REGIONS: [&str; 6] = ["global", "US", "UK", "AU", "CA", "NZ"];
 
 fn chart_cache() -> &'static StdMutex<HashMap<String, ChartCacheEntry>> {
     static CACHE: OnceLock<StdMutex<HashMap<String, ChartCacheEntry>>> = OnceLock::new();
@@ -267,6 +292,220 @@ pub(super) async fn get_charts(
     });
     chart_cache_put(cache_key, payload.clone());
     Ok(Json(payload))
+}
+
+pub(super) async fn get_chart_snapshots(
+    State(state): State<SharedState>,
+    Query(params): Query<ChartSnapshotParams>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let source_key = params
+        .source
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "spotify_daily".to_string());
+    let period = params
+        .period
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "daily".to_string());
+    let region = params
+        .region
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("global") {
+                "global".to_string()
+            } else {
+                s.to_ascii_uppercase()
+            }
+        })
+        .unwrap_or_else(|| "global".to_string());
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let snapshot = db
+        .with_conn(|conn| {
+            queries::get_latest_chart_snapshot(conn, &source_key, &region, &period, limit)
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("chart snapshots: {e}") })),
+            )
+        })?;
+
+    match snapshot {
+        Some(snapshot) => Ok(Json(json!({
+            "source": source_key,
+            "period": period,
+            "region": region,
+            "limit": limit,
+            "snapshot": snapshot.snapshot,
+            "entries": snapshot.entries,
+        }))),
+        None => Ok(Json(json!({
+            "source": source_key,
+            "period": period,
+            "region": region,
+            "limit": limit,
+            "snapshot": Value::Null,
+            "entries": [],
+        }))),
+    }
+}
+
+pub(super) async fn import_spotify_daily_snapshot(
+    State(state): State<SharedState>,
+    Query(params): Query<SpotifyDailyImportParams>,
+    body: String,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let region = normalize_chart_region(params.region.as_deref());
+    let now = chrono::Utc::now();
+    let chart_date = params
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| now.date_naive().to_string());
+    let fetched_at = now.timestamp();
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let snapshot_id = db
+        .with_conn(|conn| {
+            crate::services::charts::spotify_daily::ingest_spotify_daily_csv(
+                conn,
+                &region,
+                &chart_date,
+                fetched_at,
+                &body,
+            )
+        })
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("spotify daily import: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "source": "spotify_daily",
+        "period": "daily",
+        "region": region,
+        "chart_date": chart_date,
+        "snapshot_id": snapshot_id,
+    })))
+}
+
+pub(super) async fn get_chart_matrix(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let region_group = params
+        .get("region_group")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+
+    if region_group != "main" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unknown_region_group" })),
+        ));
+    }
+
+    let provider_keys: Vec<&str> = MATRIX_PROVIDERS.iter().map(|(key, _)| *key).collect();
+    let providers: Vec<_> = MATRIX_PROVIDERS
+        .iter()
+        .map(|(source_key, label)| json!({ "source_key": source_key, "label": label }))
+        .collect();
+
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let rows = db
+        .with_conn(|conn| {
+            queries::get_chart_matrix(conn, &MAIN_MATRIX_REGIONS, &provider_keys, "daily")
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("chart matrix: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "region_group": region_group,
+        "period": "daily",
+        "providers": providers,
+        "rows": rows,
+    })))
+}
+
+pub(super) async fn refresh_chart_matrix(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (http, db) = {
+        let s = state.read().await;
+        (s.http_client.clone(), s.db.clone())
+    };
+
+    let html = crate::services::charts::kworb_matrix::fetch_kworb_matrix_html(&http)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("kworb matrix fetch: {e}") })),
+            )
+        })?;
+    let now = chrono::Utc::now();
+    let chart_date = now.date_naive().to_string();
+    let fetched_at = now.timestamp();
+    let report = db
+        .with_conn(|conn| {
+            crate::services::charts::kworb_matrix::ingest_kworb_matrix_html(
+                conn,
+                &chart_date,
+                fetched_at,
+                &html,
+            )
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("kworb matrix ingest: {e}") })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "source": "kworb",
+        "chart_date": chart_date,
+        "fetched_at": fetched_at,
+        "report": report,
+    })))
+}
+
+fn normalize_chart_region(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("global") {
+                "global".to_string()
+            } else {
+                s.to_ascii_uppercase()
+            }
+        })
+        .unwrap_or_else(|| "global".to_string())
 }
 
 pub(super) async fn list_lastfm_genres() -> Json<Value> {

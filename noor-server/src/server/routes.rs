@@ -1058,6 +1058,19 @@ pub fn api_routes(state: SharedState) -> Router {
         // Trending / charts (Phase 5)
         .route("/api/charts", get(chart_routes::get_charts))
         .route(
+            "/api/charts/snapshots",
+            get(chart_routes::get_chart_snapshots),
+        )
+        .route(
+            "/api/charts/spotify/daily/import",
+            post(chart_routes::import_spotify_daily_snapshot),
+        )
+        .route("/api/charts/matrix", get(chart_routes::get_chart_matrix))
+        .route(
+            "/api/charts/matrix/refresh",
+            post(chart_routes::refresh_chart_matrix),
+        )
+        .route(
             "/api/charts/lastfm/genres",
             get(chart_routes::list_lastfm_genres),
         )
@@ -14581,6 +14594,236 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chart_snapshots_return_latest_ranked_entries_without_zero_tidal_id() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO chart_snapshots
+                    (id, source_key, region, period, chart_date, fetched_at, status)
+                 VALUES
+                    (1, 'spotify_daily', 'AU', 'daily', '2026-05-27', 100, 'ok'),
+                    (2, 'spotify_daily', 'AU', 'daily', '2026-05-28', 200, 'ok')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO chart_entries
+                    (id, snapshot_id, rank, rank_delta, artist, title, entity_type, streams)
+                 VALUES
+                    (10, 1, 1, 0, 'Old Artist', 'Old Track', 'track', 10),
+                    (20, 2, 2, -1, 'Second Artist', 'Second Track', 'track', 200),
+                    (21, 2, 1, 1, 'Top Artist', 'Top Track', 'track', 300)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO chart_entry_resolutions
+                    (entry_id, status, tidal_id)
+                 VALUES
+                    (20, 'unresolved', NULL),
+                    (21, 'tidal', 4242)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed chart snapshots");
+
+        let response = json_request(
+            app_for_db(db),
+            "GET",
+            "/api/charts/snapshots?source=spotify_daily&period=daily&region=AU&limit=2",
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+
+        assert_eq!(body["snapshot"]["chart_date"], "2026-05-28");
+        assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(body["entries"][0]["rank"], 1);
+        assert_eq!(body["entries"][0]["title"], "Top Track");
+        assert_eq!(body["entries"][0]["resolution_status"], "tidal");
+        assert_eq!(body["entries"][0]["tidal_id"], 4242);
+        assert_eq!(body["entries"][1]["rank"], 2);
+        assert_eq!(body["entries"][1]["title"], "Second Track");
+        assert_eq!(body["entries"][1]["resolution_status"], "unresolved");
+        assert!(body["entries"][1]["tidal_id"].is_null());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn chart_matrix_returns_provider_cells_and_explicit_missing_cells() {
+        let (db, db_path) = fresh_migrated_db();
+        db.with_conn(|conn| {
+            queries::upsert_chart_snapshot(
+                conn,
+                &queries::ChartSnapshotSeed {
+                    source_key: "spotify_daily",
+                    region: "global",
+                    period: "daily",
+                    chart_date: "2026-05-27",
+                    fetched_at: 100,
+                    etag: None,
+                    content_hash: None,
+                    status: "ok",
+                },
+                &[queries::ChartEntrySeed {
+                    streams: Some(10),
+                    ..queries::ChartEntrySeed::track(1, "Old Artist", "Old Song")
+                }],
+            )?;
+            queries::upsert_chart_snapshot(
+                conn,
+                &queries::ChartSnapshotSeed {
+                    source_key: "spotify_daily",
+                    region: "global",
+                    period: "daily",
+                    chart_date: "2026-05-28",
+                    fetched_at: 200,
+                    etag: None,
+                    content_hash: None,
+                    status: "ok",
+                },
+                &[
+                    queries::ChartEntrySeed {
+                        streams: Some(500),
+                        tidal_id: Some(5001),
+                        resolution_status: Some("tidal"),
+                        ..queries::ChartEntrySeed::track(1, "Top Artist", "Top Song")
+                    },
+                    queries::ChartEntrySeed {
+                        streams: Some(400),
+                        ..queries::ChartEntrySeed::track(2, "Ignored Artist", "Ignored Song")
+                    },
+                ],
+            )?;
+            queries::upsert_chart_snapshot(
+                conn,
+                &queries::ChartSnapshotSeed {
+                    source_key: "spotify_daily",
+                    region: "global",
+                    period: "daily",
+                    chart_date: "2026-05-28",
+                    fetched_at: 205,
+                    etag: None,
+                    content_hash: Some("same-day-refresh"),
+                    status: "ok",
+                },
+                &[queries::ChartEntrySeed {
+                    streams: Some(550),
+                    tidal_id: Some(5001),
+                    resolution_status: Some("tidal"),
+                    ..queries::ChartEntrySeed::track(1, "Top Artist", "Top Song")
+                }],
+            )?;
+            queries::upsert_chart_snapshot(
+                conn,
+                &queries::ChartSnapshotSeed {
+                    source_key: "youtube_daily",
+                    region: "global",
+                    period: "daily",
+                    chart_date: "2026-05-28",
+                    fetched_at: 210,
+                    etag: None,
+                    content_hash: None,
+                    status: "ok",
+                },
+                &[queries::ChartEntrySeed {
+                    entity_type: "video",
+                    views: Some(900),
+                    resolution_status: Some("not_playable"),
+                    ..queries::ChartEntrySeed::track(1, "Video Artist", "Top Video")
+                }],
+            )?;
+            queries::upsert_chart_snapshot(
+                conn,
+                &queries::ChartSnapshotSeed {
+                    source_key: "shazam_daily",
+                    region: "AU",
+                    period: "daily",
+                    chart_date: "2026-05-28",
+                    fetched_at: 220,
+                    etag: None,
+                    content_hash: None,
+                    status: "ok",
+                },
+                &[queries::ChartEntrySeed::track(1, "AU Artist", "AU Shazam")],
+            )?;
+            Ok(())
+        })
+        .expect("seed chart matrix");
+
+        let response = json_request(app_for_db(db), "GET", "/api/charts/matrix", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+
+        let providers = body["providers"].as_array().expect("providers");
+        assert_eq!(providers.len(), 6);
+        assert_eq!(providers[0]["source_key"], "itunes_daily");
+        assert_eq!(providers[1]["source_key"], "spotify_daily");
+        assert_eq!(providers[2]["source_key"], "apple_music_daily");
+        assert_eq!(providers[3]["source_key"], "youtube_daily");
+        assert_eq!(providers[4]["source_key"], "shazam_daily");
+        assert_eq!(providers[5]["source_key"], "deezer_daily");
+
+        let rows = body["rows"].as_array().expect("rows");
+        let global = rows
+            .iter()
+            .find(|row| row["region"] == "global")
+            .expect("global row");
+        assert_eq!(global["cells"]["spotify_daily"]["title"], "Top Song");
+        assert_eq!(global["cells"]["spotify_daily"]["tidal_id"], 5001);
+        assert_eq!(global["cells"]["spotify_daily"]["streams"], 550);
+        assert_eq!(global["cells"]["spotify_daily"]["chart_date"], "2026-05-28");
+        assert_eq!(global["cells"]["youtube_daily"]["title"], "Top Video");
+        assert!(global["cells"]["itunes_daily"].is_null());
+        assert!(global["cells"]["deezer_daily"].is_null());
+
+        let au = rows
+            .iter()
+            .find(|row| row["region"] == "AU")
+            .expect("AU row");
+        assert_eq!(au["cells"]["shazam_daily"]["title"], "AU Shazam");
+        assert!(au["cells"]["shazam_daily"]["tidal_id"].is_null());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn spotify_daily_import_endpoint_persists_snapshot_for_matrix() {
+        let (db, db_path) = fresh_migrated_db();
+        let csv = r#"rank,uri,artist_names,track_name,peak_rank,previous_rank,days_on_chart,streams
+1,spotify:track:imported,"Import Artist","Import Track",1,2,3,12345
+"#;
+
+        let response = json_request(
+            app_for_db(db.clone()),
+            "POST",
+            "/api/charts/spotify/daily/import?region=AU&date=2026-05-28",
+            csv,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["source"], "spotify_daily");
+        assert_eq!(body["region"], "AU");
+        assert_eq!(body["chart_date"], "2026-05-28");
+
+        let response = json_request(app_for_db(db), "GET", "/api/charts/matrix", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let au = body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["region"] == "AU")
+            .expect("AU row");
+        assert_eq!(au["cells"]["spotify_daily"]["title"], "Import Track");
+        assert_eq!(au["cells"]["spotify_daily"]["streams"], 12345);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn dj_enabled_true_starts_current_pair_lookahead() {
         let (db, db_path) = fresh_migrated_db();
         let (_current, next) = seed_dj_queue_pair(&db);
@@ -16999,6 +17242,10 @@ mod tests {
             ("GET", "/api/tidal/moods"),
             ("GET", "/api/tidal/mood-page/mood_party"),
             ("GET", "/api/charts"),
+            ("GET", "/api/charts/snapshots"),
+            ("POST", "/api/charts/spotify/daily/import"),
+            ("GET", "/api/charts/matrix"),
+            ("POST", "/api/charts/matrix/refresh"),
             ("GET", "/api/charts/lastfm/genres"),
             ("GET", "/api/charts/lastfm/countries"),
             ("GET", "/api/server/token"),
