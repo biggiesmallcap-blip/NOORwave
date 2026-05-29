@@ -1,0 +1,576 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import {
+		api,
+		type ChartMatrixCell,
+		type ChartMatrixResponse,
+		type ChartSnapshotEntry,
+		type ChartSnapshotResponse,
+	} from '$lib/api/client';
+	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+
+	const REGIONS = [
+		{ code: 'global', label: 'Global' },
+		{ code: 'US', label: 'US' },
+		{ code: 'UK', label: 'UK' },
+		{ code: 'AU', label: 'AU' },
+		{ code: 'CA', label: 'CA' },
+		{ code: 'NZ', label: 'NZ' },
+	];
+
+	const SOURCE = 'spotify_daily';
+	const PERIOD = 'daily';
+	const LIMIT = 20;
+
+	let selectedRegion = $state('global');
+	let matrix = $state<ChartMatrixResponse | null>(null);
+	let data = $state<ChartSnapshotResponse | null>(null);
+	let loading = $state(true);
+	let matrixLoading = $state(true);
+	let refreshingMatrix = $state(false);
+	let error = $state(false);
+	let matrixError = $state(false);
+	let requestToken = 0;
+	let refreshAttempted = false;
+
+	onMount(() => {
+		void loadMatrix();
+		void loadSnapshot(selectedRegion);
+	});
+
+	async function loadMatrix() {
+		matrixLoading = true;
+		matrixError = false;
+		try {
+			const next = await api.getChartMatrix();
+			matrix = next;
+			if (!refreshAttempted && !matrixHasData(next)) {
+				refreshAttempted = true;
+				await refreshMatrix();
+			}
+		} catch (e) {
+			console.error('[daily-charts] matrix fetch failed', e);
+			matrix = null;
+			matrixError = true;
+		} finally {
+			matrixLoading = false;
+		}
+	}
+
+	async function refreshMatrix() {
+		refreshingMatrix = true;
+		try {
+			await api.refreshChartMatrix();
+			matrix = await api.getChartMatrix();
+			void loadSnapshot(selectedRegion);
+		} catch (e) {
+			console.error('[daily-charts] matrix refresh failed', e);
+		} finally {
+			refreshingMatrix = false;
+		}
+	}
+
+	async function loadSnapshot(region: string) {
+		const token = ++requestToken;
+		loading = true;
+		error = false;
+		try {
+			const next = await api.getChartSnapshot({
+				source: SOURCE,
+				period: PERIOD,
+				region,
+				limit: LIMIT,
+			});
+			if (token !== requestToken) return;
+			data = next;
+		} catch (e) {
+			console.error('[daily-charts] snapshot fetch failed', e);
+			if (token !== requestToken) return;
+			data = null;
+			error = true;
+		} finally {
+			if (token === requestToken) loading = false;
+		}
+	}
+
+	function pickRegion(region: string) {
+		if (region === selectedRegion) return;
+		selectedRegion = region;
+		void loadSnapshot(region);
+	}
+
+	function rankDeltaLabel(delta: number | null): string {
+		if (delta == null || delta === 0) return 'steady';
+		return delta > 0 ? `up ${delta}` : `down ${Math.abs(delta)}`;
+	}
+
+	function formatMetric(entry: ChartSnapshotEntry): string {
+		if (entry.streams != null) return `${entry.streams.toLocaleString()} streams`;
+		if (entry.views != null) return `${entry.views.toLocaleString()} views`;
+		if (entry.points != null) return `${entry.points.toLocaleString()} pts`;
+		return entry.resolution_status;
+	}
+
+	function cellMetric(cell: ChartMatrixCell): string {
+		if (cell.streams != null) return `${cell.streams.toLocaleString()} streams`;
+		if (cell.views != null) return `${cell.views.toLocaleString()} views`;
+		if (cell.points != null) return `${cell.points.toLocaleString()} pts`;
+		return cell.resolution_status;
+	}
+
+	function matrixHasData(next: ChartMatrixResponse): boolean {
+		return next.rows.some((row) =>
+			next.providers.some((provider) => Boolean(row.cells[provider.source_key])),
+		);
+	}
+
+	function fallbackText(entry: ChartSnapshotEntry): string {
+		return (entry.title.trim()[0] ?? 'N').toUpperCase();
+	}
+</script>
+
+<section class="daily-chart-shelf">
+	<div class="section-header">
+		<div class="section-title-group">
+			<p class="eyebrow">Charts · Provider matrix</p>
+			<h2>Market pulse</h2>
+		</div>
+		<div class="region-tabs" role="tablist" aria-label="Daily chart region">
+			{#each REGIONS as region (region.code)}
+				<button
+					type="button"
+					class="chip"
+					class:active={region.code === selectedRegion}
+					role="tab"
+					aria-selected={region.code === selectedRegion}
+					onclick={() => pickRegion(region.code)}
+				>
+					{region.label}
+				</button>
+			{/each}
+		</div>
+	</div>
+
+	{#if matrix?.providers.length}
+		<div class="matrix-shell" aria-label="Market pulse provider matrix">
+			<div class="matrix-grid">
+				<div class="matrix-head region-head">Region</div>
+				{#each matrix.providers as provider (provider.source_key)}
+					<div class="matrix-head">{provider.label}</div>
+				{/each}
+				{#each matrix.rows as row (row.region)}
+					<button
+						type="button"
+						class="matrix-region"
+						class:active={row.region === selectedRegion}
+						onclick={() => pickRegion(row.region)}
+					>
+						{row.region === 'global' ? 'Global' : row.region}
+					</button>
+					{#each matrix.providers as provider (provider.source_key)}
+						{@const cell = row.cells[provider.source_key]}
+						<button
+							type="button"
+							class="matrix-cell"
+							class:filled={Boolean(cell)}
+							onclick={() => pickRegion(row.region)}
+							aria-label={`${provider.label} ${row.region}`}
+						>
+							{#if cell}
+								<strong>{cell.title}</strong>
+								<span>{cell.artist}</span>
+								<small>{cellMetric(cell)}</small>
+							{:else}
+								<span>No data</span>
+							{/if}
+						</button>
+					{/each}
+				{/each}
+			</div>
+		</div>
+	{:else if matrixLoading}
+		<div class="provider-strip" aria-label="Loading chart providers">
+			{#each Array.from({ length: 6 }) as _, i (i)}
+				<span class="provider-skeleton">{refreshingMatrix ? 'Refreshing' : 'Loading'}</span>
+			{/each}
+		</div>
+	{:else if matrixError}
+		<EmptyState
+			title="Market matrix unavailable"
+			copy="Restart the NOOR server if this update just landed."
+		/>
+	{/if}
+
+	{#if data?.snapshot && data.entries.length > 0}
+		<div class="chart-list" aria-label="Daily chart entries">
+			{#each data.entries as entry (entry.id)}
+				<div class="chart-row">
+					<div class="rank">
+						<span>{entry.rank}</span>
+						<small>{rankDeltaLabel(entry.rank_delta)}</small>
+					</div>
+					<div class="art-cell">
+						<ArtworkImage
+							src={entry.artwork_url}
+							size={320}
+							className="daily-chart-art"
+							fallbackText={fallbackText(entry)}
+							decorative
+						/>
+					</div>
+					<div class="track-meta">
+						<strong>{entry.title}</strong>
+						<span>{entry.artist}</span>
+					</div>
+					<div class="metric">{formatMetric(entry)}</div>
+					<div class="status" data-status={entry.resolution_status}>
+						{entry.resolution_status}
+					</div>
+				</div>
+			{/each}
+		</div>
+	{:else if loading}
+		<div class="chart-list" aria-label="Loading daily chart">
+			{#each Array.from({ length: 6 }) as _, i (i)}
+				<div class="chart-row skeleton" aria-hidden="true"></div>
+			{/each}
+		</div>
+	{:else if error}
+		<EmptyState
+			title="Daily snapshots unavailable"
+			copy="Restart the NOOR server if this update just landed."
+		/>
+	{:else}
+		<EmptyState
+			title="No market snapshot yet"
+			copy="NOOR tried to refresh the provider matrix, but there is no stored chart data yet."
+		/>
+	{/if}
+</section>
+
+<style>
+	.daily-chart-shelf {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--gap-sm);
+		flex-wrap: wrap;
+	}
+
+	.section-title-group {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+	}
+
+	.eyebrow {
+		margin: 0;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 0;
+		color: var(--service-spotify);
+	}
+
+	h2 {
+		margin: 0;
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+		line-height: var(--line-height-tight);
+	}
+
+	.region-tabs {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1);
+		padding: var(--space-1);
+		border: 1px solid var(--panel-border);
+		border-radius: 999px;
+		background: var(--panel-bg);
+		overflow-x: auto;
+		max-width: 100%;
+	}
+
+	.provider-strip {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(112px, 100%), 1fr));
+		gap: var(--space-1);
+	}
+
+	.provider-strip span {
+		border: 1px solid var(--panel-border);
+		border-radius: 999px;
+		background: var(--panel-bg);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: 1;
+		padding: var(--space-2) var(--space-3);
+		text-align: center;
+		white-space: nowrap;
+	}
+
+	.provider-skeleton {
+		opacity: 0.55;
+	}
+
+	.matrix-shell {
+		overflow-x: auto;
+		padding-bottom: var(--space-1);
+	}
+
+	.matrix-grid {
+		display: grid;
+		grid-template-columns: clamp(72px, 8vw, 96px) repeat(6, minmax(136px, 1fr));
+		gap: var(--space-1);
+		min-width: 920px;
+	}
+
+	.matrix-head,
+	.matrix-region,
+	.matrix-cell {
+		border: 1px solid var(--panel-border);
+		background: var(--panel-bg);
+		color: var(--text-secondary);
+		border-radius: var(--radius-xs);
+	}
+
+	.matrix-head {
+		padding: var(--space-2) var(--space-3);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-bold);
+		line-height: 1;
+		text-align: left;
+	}
+
+	.region-head {
+		color: var(--text-muted);
+	}
+
+	.matrix-region,
+	.matrix-cell {
+		min-height: clamp(58px, 6vw, 74px);
+		padding: var(--space-2) var(--space-3);
+		cursor: pointer;
+		transition: background var(--motion-base), border-color var(--motion-base), color var(--motion-base);
+	}
+
+	.matrix-region {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-bold);
+		text-align: left;
+	}
+
+	.matrix-region.active,
+	.matrix-region:hover,
+	.matrix-cell:hover,
+	.matrix-cell:focus-visible,
+	.matrix-region:focus-visible {
+		background: var(--bg-hover);
+		border-color: var(--accent-line);
+		color: var(--text-primary);
+		outline: none;
+	}
+
+	.matrix-cell {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		justify-content: center;
+		gap: var(--space-1);
+		text-align: left;
+		min-width: 0;
+	}
+
+	.matrix-cell strong,
+	.matrix-cell span,
+	.matrix-cell small {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.matrix-cell strong {
+		color: var(--text-primary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-snug);
+	}
+
+	.matrix-cell span {
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+	}
+
+	.matrix-cell small {
+		font-size: var(--font-size-2xs);
+		color: var(--text-muted);
+		line-height: 1;
+	}
+
+	.matrix-cell:not(.filled) {
+		color: var(--text-muted);
+		opacity: 0.72;
+	}
+
+	.chip {
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--text-muted);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		line-height: 1;
+		padding: var(--space-2) var(--space-3);
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background var(--motion-base), color var(--motion-base);
+	}
+
+	.chip:hover,
+	.chip:focus-visible {
+		color: var(--text-primary);
+		outline: none;
+	}
+
+	.chip.active {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.chart-list {
+		display: grid;
+		gap: var(--space-1);
+	}
+
+	.chart-row {
+		display: grid;
+		grid-template-columns: clamp(44px, 5vw, 64px) clamp(42px, 4vw, 52px) minmax(0, 1fr) auto auto;
+		align-items: center;
+		gap: var(--space-3);
+		min-height: clamp(56px, 6vw, 68px);
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--panel-border);
+		border-radius: var(--radius-sm);
+		background: var(--panel-bg);
+	}
+
+	.rank {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		line-height: var(--line-height-tight);
+	}
+
+	.rank span {
+		font-size: var(--font-size-lg);
+		font-weight: var(--font-weight-bold);
+	}
+
+	.rank small {
+		font-size: var(--font-size-2xs);
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0;
+	}
+
+	.art-cell {
+		width: clamp(42px, 4vw, 52px);
+		aspect-ratio: 1 / 1;
+		border-radius: var(--radius-xs);
+		overflow: hidden;
+		background: var(--bg-raised);
+	}
+
+	:global(.daily-chart-art) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	:global(.daily-chart-art.fallback) {
+		display: grid;
+		place-items: center;
+		color: var(--text-muted);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.track-meta {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+	}
+
+	.track-meta strong,
+	.track-meta span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.track-meta strong {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		line-height: var(--line-height-snug);
+	}
+
+	.track-meta span {
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
+	}
+
+	.metric,
+	.status {
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-secondary);
+		white-space: nowrap;
+	}
+
+	.status {
+		border-radius: 999px;
+		padding: var(--space-1) var(--space-2);
+		background: var(--bg-hover);
+		color: var(--text-muted);
+		text-transform: capitalize;
+	}
+
+	.status[data-status='local'],
+	.status[data-status='tidal'] {
+		color: var(--text-primary);
+	}
+
+	.skeleton {
+		min-height: clamp(56px, 6vw, 68px);
+		background: linear-gradient(90deg, var(--panel-bg), var(--bg-hover), var(--panel-bg));
+		background-size: 200% 100%;
+		animation: pulse 1.2s linear infinite;
+	}
+
+	@keyframes pulse {
+		from { background-position: 200% 0; }
+		to { background-position: -200% 0; }
+	}
+
+	@media (max-width: 760px) {
+		.chart-row {
+			grid-template-columns: clamp(36px, 10vw, 48px) clamp(42px, 12vw, 52px) minmax(0, 1fr);
+		}
+
+		.metric,
+		.status {
+			grid-column: 3;
+		}
+	}
+</style>

@@ -49,6 +49,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_045,
     MIGRATION_046,
     MIGRATION_047,
+    MIGRATION_048,
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1303,6 +1304,85 @@ ALTER TABLE dj_transition_events ADD COLUMN runtime_renderer_reason TEXT;
 
 const MIGRATION_047: &str = r#"
 ALTER TABLE audio_dj_profiles ADD COLUMN waveform_peaks_blob BLOB NOT NULL DEFAULT X'';
+"#;
+
+const MIGRATION_048: &str = r#"
+CREATE TABLE IF NOT EXISTS chart_sources (
+    id INTEGER PRIMARY KEY,
+    source_key TEXT UNIQUE NOT NULL,
+    display_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    default_region TEXT,
+    refresh_interval_hours INTEGER NOT NULL DEFAULT 24,
+    last_success_at INTEGER,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chart_snapshots (
+    id INTEGER PRIMARY KEY,
+    source_key TEXT NOT NULL,
+    region TEXT NOT NULL,
+    period TEXT NOT NULL,
+    chart_date TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    etag TEXT,
+    content_hash TEXT,
+    status TEXT NOT NULL,
+    UNIQUE (source_key, region, period, chart_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chart_snapshots_latest
+    ON chart_snapshots(source_key, region, period, chart_date DESC, fetched_at DESC);
+
+CREATE TABLE IF NOT EXISTS chart_entries (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES chart_snapshots(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL,
+    rank_delta INTEGER,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT 'track',
+    album TEXT,
+    artwork_url TEXT,
+    external_track_id TEXT,
+    external_artist_id TEXT,
+    external_video_id TEXT,
+    external_url TEXT,
+    streams INTEGER,
+    stream_delta INTEGER,
+    views INTEGER,
+    likes INTEGER,
+    audience REAL,
+    audience_delta REAL,
+    points REAL,
+    points_delta REAL,
+    seven_day_streams INTEGER,
+    total_streams INTEGER,
+    days_on_chart INTEGER,
+    peak_rank INTEGER,
+    provider_positions_json TEXT,
+    raw_json TEXT,
+    UNIQUE (snapshot_id, rank)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chart_entries_snapshot_rank
+    ON chart_entries(snapshot_id, rank);
+
+CREATE TABLE IF NOT EXISTS chart_entry_resolutions (
+    entry_id INTEGER PRIMARY KEY REFERENCES chart_entries(id) ON DELETE CASCADE,
+    external_candidate_id INTEGER REFERENCES external_track_candidates(id) ON DELETE SET NULL,
+    local_track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    tidal_id INTEGER,
+    status TEXT NOT NULL,
+    score REAL,
+    resolved_at INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chart_entry_resolutions_status
+    ON chart_entry_resolutions(status, resolved_at);
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
