@@ -11658,8 +11658,20 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. })
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. })
-                | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. })
-                | Ok(playback_runtime::PlaybackRuntimeEvent::DropPreviewStarted { .. }) => {}
+                | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
+                Ok(playback_runtime::PlaybackRuntimeEvent::DropPreviewStarted {
+                    track_id,
+                    generation,
+                    actual_start_ms,
+                }) => {
+                    let mut state_guard = state.write().await;
+                    state_guard.last_drop_preview = Some(crate::DropPreviewRuntimeState {
+                        track_id,
+                        generation,
+                        actual_fire_ms: actual_start_ms,
+                    });
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stopped) => {
                     let mut state_guard = state.write().await;
                     state_guard
@@ -11674,6 +11686,7 @@ fn spawn_playback_runtime_listener(
                     state_guard.current_stream_display = None;
                     state_guard.pending_stream_display = None;
                     state_guard.next_prebuffer_inflight = None;
+                    state_guard.last_drop_preview = None;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::NearEnd {
                     track_id,
@@ -14401,6 +14414,7 @@ mod tests {
             current_stream_display: None,
             pending_stream_display: None,
             next_prebuffer_inflight: None,
+            last_drop_preview: None,
             active_listen_session: None,
             live_listen_session: None,
             external_playback_track: None,
