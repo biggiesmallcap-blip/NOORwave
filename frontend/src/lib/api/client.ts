@@ -905,6 +905,8 @@ export type DjDeckStatus = {
 	profile_ready: boolean;
 	profile_status: 'ready' | 'missing' | 'analyzing' | 'retrying' | 'decode_failed' | string;
 	profile_error?: string;
+	profile_retry_after_ms?: number;
+	profile_retry_reason?: string;
 	profile_confidence?: number;
 	beat_count?: number;
 	downbeat_count?: number;
