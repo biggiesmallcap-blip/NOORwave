@@ -1658,7 +1658,7 @@ pub fn peek_next_track(conn: &Connection, recently_cleared: bool) -> Result<Opti
         _ => current_index
             .and_then(|idx| queue_items.get(idx + 1))
             .or_else(|| {
-                if repeat_mode == "all" {
+                if current_index.is_none() || repeat_mode == "all" {
                     queue_items.first()
                 } else {
                     None
@@ -3817,6 +3817,24 @@ mod tests {
         let next = peek_next_track(&conn, false).unwrap().expect("next track");
 
         assert_eq!(next.id, 3);
+    }
+
+    #[test]
+    fn peek_next_track_returns_first_queue_item_when_unanchored() {
+        let conn = conn();
+        let tracks = load_tracks(&conn, &[1, 2]);
+        queue::replace_queue(&conn, &tracks, "test").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, current_queue_item_id = NULL, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let next = peek_next_track(&conn, false).unwrap().expect("first track");
+
+        assert_eq!(next.id, 1);
     }
 
     #[test]

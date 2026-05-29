@@ -390,25 +390,21 @@ async fn set_enabled(
 ) -> Result<Json<EnabledResponse>, StatusCode> {
     let (runtime, lookahead) = {
         let state_guard = state.write().await;
-        let ephemeral_lookahead = if payload.enabled {
-            super::active_ephemeral_tidal_mix_dj_pair(&state_guard).and_then(|pair| {
-                player::dj_lookahead_start_from_pair(pair, DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
-            })
-        } else {
-            None
-        };
         let lookahead = state_guard
             .db
             .with_conn(|conn| {
                 queries::set_dj_engine_enabled(conn, payload.enabled)?;
                 if payload.enabled {
-                    player::build_dj_lookahead_start(conn, DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES)
+                    let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
+                    Ok(player::dj_lookahead_start_from_pair(
+                        pair,
+                        DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES,
+                    ))
                 } else {
                     Ok(None)
                 }
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let lookahead = ephemeral_lookahead.or(lookahead);
         (
             state_guard
                 .playback_runtime
@@ -442,7 +438,6 @@ async fn get_status(
 ) -> Result<Json<DjStatusResponse>, StatusCode> {
     let response = {
         let state = state.read().await;
-        let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state);
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state);
         let active_track_id = state
             .playback_runtime_info
@@ -457,10 +452,7 @@ async fn get_status(
             .db
             .with_conn(|conn| {
                 let enabled = queries::is_dj_engine_enabled(conn)?;
-                let pair = match ephemeral_pair.clone() {
-                    Some(pair) => pair,
-                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
-                };
+                let pair = super::active_dj_pair_for_state_and_conn(&state, conn)?;
                 let current_ref = pair.current.clone();
                 let next_ref = pair.next.clone();
                 let current = match pair.current {
@@ -609,7 +601,6 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
 ) -> Result<(), StatusCode> {
     let missing_profile_refs = {
         let state_guard = state.read().await;
-        let ephemeral_pair = super::active_ephemeral_tidal_mix_dj_pair(&state_guard);
         let ephemeral_labels = super::active_ephemeral_tidal_mix_dj_labels(&state_guard);
         state_guard
             .db
@@ -621,10 +612,7 @@ pub(super) async fn queue_missing_dj_profiles_for_current_pair(
                     tracing::debug!("Deferring DJ profile rebuilds while playback is buffering");
                     return Ok(Vec::new());
                 }
-                let pair = match ephemeral_pair {
-                    Some(pair) => pair,
-                    None => crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
-                };
+                let pair = super::active_dj_pair_for_state_and_conn(&state_guard, conn)?;
                 let mut missing = Vec::new();
                 for media_ref in [pair.current, pair.next].into_iter().flatten() {
                     let key = media_ref.profile_key();
