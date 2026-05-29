@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { api } from '$lib/api/client';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
@@ -25,24 +25,40 @@
     { id: '37i9dQZF1DX4dyzvuaRJ0n', title: 'mint', sub: 'Editorial' },
   ];
 
-  // Best-effort cover fetch. The existing playlist endpoint also returns
-  // tracks + does TIDAL resolution server-side, so this is heavier than it
-  // needs to be -- see FOLLOWUPS for a lightweight metadata endpoint. When
-  // the sportify proxy is slow or down, cards just fall back to the glyph.
+  // Best-effort cover fetch. The playlist endpoint also returns tracks and
+  // TIDAL resolution state, so keep these requests away from first paint.
   let meta = $state<Record<string, { thumbnail: string | null; title: string | null }>>({});
+  let metaTimer: ReturnType<typeof setTimeout> | null = null;
+  let metaAbort: AbortController | null = null;
 
   onMount(() => {
-    void Promise.allSettled(
-      CHARTS.map(async (c) => {
+    metaAbort = new AbortController();
+    metaTimer = setTimeout(() => {
+      void loadPlaylistMeta(metaAbort?.signal);
+    }, 1600);
+  });
+
+  onDestroy(() => {
+    if (metaTimer) clearTimeout(metaTimer);
+    metaAbort?.abort();
+  });
+
+  async function loadPlaylistMeta(signal: AbortSignal | undefined) {
+    const queue = [...CHARTS];
+    const workers = Array.from({ length: 2 }, async () => {
+      while (queue.length > 0 && !signal?.aborted) {
+        const c = queue.shift();
+        if (!c) return;
         try {
-          const { playlist } = await api.getSpotifyPlaylist(c.id);
+          const { playlist } = await api.getSpotifyPlaylist(c.id, signal);
           meta[c.id] = { thumbnail: playlist.thumbnail, title: playlist.title };
         } catch {
           // Quiet: proxy outage just keeps the fallback glyph + hardcoded title.
         }
-      }),
-    );
-  });
+      }
+    });
+    await Promise.allSettled(workers);
+  }
 
   function chartMenu(id: string, title: string) {
     return [

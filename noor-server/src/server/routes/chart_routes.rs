@@ -69,116 +69,6 @@ const CHART_TRACK_SELECT_COLUMNS: &str =
     LEFT JOIN artists a ON t.artist_id = a.id
     LEFT JOIN albums al ON t.album_id = al.id";
 
-/// Fill in missing artwork for chart entries by searching Tidal for the
-/// (artist, title) pair. Updates `image_url` (top-level fallback) and the
-/// nested `tidal_playable.artwork_url` so the frontend's preference chain
-/// always lands on something usable.
-async fn enrich_chart_artwork(state: &SharedState, entries: &mut Vec<ChartEntryDto>) {
-    use futures::stream::{FuturesUnordered, StreamExt};
-
-    /// Last.fm's blank-star fallback. We never want to surface this: both the
-    /// usable-art check below and the replace-on-enrich path treat it as empty.
-    const LASTFM_PLACEHOLDER: &str = "2a96cbd8b46e442fc41c2b86b821562f";
-
-    fn is_unusable(url: Option<&str>) -> bool {
-        let Some(url) = url else { return true };
-        let trimmed = url.trim();
-        trimmed.is_empty() || trimmed.contains(LASTFM_PLACEHOLDER)
-    }
-
-    fn has_usable_art(e: &ChartEntryDto) -> bool {
-        let local_ok = !is_unusable(
-            e.local_track
-                .as_ref()
-                .and_then(|t| t.artwork_url.as_deref()),
-        );
-        let tp_ok = !is_unusable(
-            e.tidal_playable
-                .as_ref()
-                .and_then(|tp| tp.artwork_url.as_deref()),
-        );
-        let img_ok = !is_unusable(e.image_url.as_deref());
-        local_ok || tp_ok || img_ok
-    }
-
-    let needs: Vec<(usize, String, String)> = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, e)| {
-            if has_usable_art(e) {
-                return None;
-            }
-            let title = e
-                .local_track
-                .as_ref()
-                .map(|t| t.title.clone())
-                .or_else(|| e.tidal_playable.as_ref().map(|tp| tp.title.clone()))?;
-            let artist = e
-                .local_track
-                .as_ref()
-                .and_then(|t| t.artist_name.clone())
-                .or_else(|| {
-                    e.tidal_playable
-                        .as_ref()
-                        .and_then(|tp| tp.artist_name.clone())
-                })?;
-            Some((idx, artist, title))
-        })
-        .collect();
-
-    if needs.is_empty() {
-        return;
-    }
-
-    let (tokens, tidal_http_client) = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
-    };
-    let tokens = match tokens {
-        Some(t) => Some(t),
-        None => super::load_persisted_tidal_tokens(state)
-            .await
-            .ok()
-            .flatten(),
-    };
-    let Some(tokens) = tokens else {
-        return;
-    };
-
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
-
-    let mut tasks = FuturesUnordered::new();
-    for (idx, artist, title) in needs {
-        let client = client.clone();
-        tasks.push(async move {
-            let q = format!("{artist} {title}");
-            let result = client.search(&q, 1).await.ok();
-            let url = result
-                .and_then(|r| r.into_iter().next())
-                .and_then(|t| t.artwork_url);
-            (idx, url)
-        });
-    }
-
-    while let Some((idx, url)) = tasks.next().await {
-        let Some(url) = url else { continue };
-        if let Some(entry) = entries.get_mut(idx) {
-            if is_unusable(entry.image_url.as_deref()) {
-                entry.image_url = Some(url.clone());
-            }
-            if let Some(tp) = entry.tidal_playable.as_mut()
-                && is_unusable(tp.artwork_url.as_deref())
-            {
-                tp.artwork_url = Some(url);
-            }
-        }
-    }
-}
-
 /// Look up the most-confident genre name for each track id in a single query.
 /// Returns a map keyed by track_id; tracks with no genre rows are absent.
 fn fetch_top_genres_for_tracks(
@@ -351,7 +241,7 @@ pub(super) async fn get_charts(
         return Ok(Json(cached));
     }
 
-    let mut entries: Vec<ChartEntryDto> = match source.as_str() {
+    let entries: Vec<ChartEntryDto> = match source.as_str() {
         "tidal" => fetch_tidal_chart(&state, limit as i32).await.map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -367,12 +257,6 @@ pub(super) async fn get_charts(
                 )
             })?,
     };
-
-    // Backfill missing artwork via Tidal search. Last.fm's chart.getTopTracks
-    // mostly returns a generic placeholder image, and many older library albums
-    // have NULL artwork_url, so this is the difference between blank tiles and
-    // real covers on the trending shelf.
-    enrich_chart_artwork(&state, &mut entries).await;
 
     let payload = json!({
         "source": source,
