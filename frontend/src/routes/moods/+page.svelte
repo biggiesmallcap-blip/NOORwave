@@ -1,16 +1,20 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { ApiError, api, type TidalMoodCategory } from '$lib/api/client';
+  import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
   import { tidalStatus } from '$lib/stores/tidal';
   import { openContextMenu } from '$lib/stores/context_menu';
   import { goto } from '$app/navigation';
   import {
     getCachedMoodCategories,
-    putCachedMoodCategories,
+    moodCategoriesNeedThumbnails,
+    putCompleteMoodCategories,
     clearCachedMoods,
   } from '$lib/stores/tidal-moods-cache';
 
   type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
+  const THUMBNAIL_REFRESH_DELAY_MS = 1800;
+  const MAX_THUMBNAIL_REFRESH_ATTEMPTS = 3;
 
   // Sync-read the cache on script init so revisiting /moods within the
   // 6h TTL renders instantly without a skeleton flash. Mirrors the
@@ -20,10 +24,17 @@
   let viewState = $state<State>(
     cachedOnMount && cachedOnMount.length > 0 ? 'ready' : 'loading'
   );
+  let inFlight = false;
+  let thumbnailRefreshAttempts = 0;
+  let thumbnailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
-    if (cachedOnMount && cachedOnMount.length > 0) return;
+    if (cachedOnMount && cachedOnMount.length > 0) {
+      if (moodCategoriesNeedThumbnails(cachedOnMount)) scheduleThumbnailRefresh(cachedOnMount);
+      return () => clearThumbnailRefresh();
+    }
     void load();
+    return () => clearThumbnailRefresh();
   });
 
   $effect(() => {
@@ -33,12 +44,15 @@
   });
 
   async function load() {
-    viewState = 'loading';
+    if (inFlight) return;
+    inFlight = true;
+    if (categories.length === 0) viewState = 'loading';
     try {
       const data = await api.getTidalMoods();
       categories = data.categories ?? [];
-      if (categories.length > 0) putCachedMoodCategories(categories);
+      if (categories.length > 0) putCompleteMoodCategories(categories);
       viewState = categories.length > 0 ? 'ready' : 'empty';
+      scheduleThumbnailRefresh(categories);
     } catch (e) {
       if (e instanceof ApiError && e.status === 503) {
         clearCachedMoods();
@@ -46,7 +60,26 @@
       } else {
         viewState = 'error';
       }
+    } finally {
+      inFlight = false;
     }
+  }
+
+  function clearThumbnailRefresh() {
+    if (!thumbnailRefreshTimer) return;
+    clearTimeout(thumbnailRefreshTimer);
+    thumbnailRefreshTimer = null;
+  }
+
+  function scheduleThumbnailRefresh(nextCategories: TidalMoodCategory[]) {
+    clearThumbnailRefresh();
+    if (!moodCategoriesNeedThumbnails(nextCategories)) {
+      thumbnailRefreshAttempts = 0;
+      return;
+    }
+    if (thumbnailRefreshAttempts >= MAX_THUMBNAIL_REFRESH_ATTEMPTS) return;
+    thumbnailRefreshAttempts += 1;
+    thumbnailRefreshTimer = setTimeout(() => void load(), THUMBNAIL_REFRESH_DELAY_MS);
   }
 
   function buildMenu(slug: string, title: string) {
@@ -74,11 +107,13 @@
           oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, buildMenu(c.slug, c.title), c.title); }}
         >
           <div class="art-wrap">
-            {#if c.thumbnail}
-              <div class="art" style="background-image:url('{c.thumbnail}')"></div>
-            {:else}
-              <div class="art fallback">~</div>
-            {/if}
+            <ArtworkImage
+              className="mood-art"
+              src={c.thumbnail}
+              alt={c.title}
+              size={320}
+              fallbackText="~"
+            />
           </div>
           <p class="card-title">{c.title}</p>
         </a>
@@ -120,8 +155,9 @@
   .card:hover, .card:focus-visible { background: var(--bg-hover); border-color: var(--panel-border); outline: none; }
   .card:focus-visible { border-color: var(--accent-line); }
   .art-wrap { position: relative; aspect-ratio: 1 / 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
-  .art { width: 100%; height: 100%; background-size: cover; background-position: center; transition: transform var(--motion-base); }
-  .card:hover .art { transform: scale(1.05); }
-  .art.fallback { display: flex; align-items: center; justify-content: center; font-size: var(--font-size-4xl); color: var(--text-muted); }
+  :global(.mood-art) { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform var(--motion-base); }
+  :global(.mood-art.fallback) { display: flex; align-items: center; justify-content: center; background: var(--bg-hover); }
+  :global(.mood-art.fallback span) { font-size: var(--font-size-4xl); color: var(--text-muted); }
+  .card:hover :global(.mood-art) { transform: scale(1.05); }
   .card-title { margin: 0; font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: var(--line-height-snug); }
 </style>
