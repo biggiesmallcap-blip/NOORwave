@@ -34,6 +34,7 @@ const DEFAULT_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
 const DJ_PROFILE_CONFIDENCE_FLOOR: f64 = 0.65;
 const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
+const DJ_PROFILE_TRANSIENT_RETRY_SECS: u64 = 25;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 const DJ_TIMING_SANITY_MAX_DELTA_MS: i64 = 30_000;
@@ -1006,7 +1007,7 @@ async fn queue_tidal_profile_rebuild(
                 schedule_dj_profile_retry(
                     &runtime_handle,
                     retry_state,
-                    Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
+                    Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS),
                 );
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
@@ -1152,7 +1153,7 @@ fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) {
         let retry_reason = profile_rebuild_retry_reason(status, &message);
         let next_retry_at = retry_reason
             .as_ref()
-            .map(|_| Instant::now() + Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS));
+            .map(|_| Instant::now() + Duration::from_secs(DJ_PROFILE_TRANSIENT_RETRY_SECS));
         guard.insert(
             key.to_string(),
             DjProfileRebuildFailure {
@@ -4011,6 +4012,7 @@ mod tests {
             Some("DASH stream prebuffer failed. Retrying analysis.")
         );
         assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
+        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms <= 25_000));
         assert_eq!(deck.profile_retry_reason.as_deref(), Some("dash_prebuffer"));
         assert!(!deck_needs_profile_rebuild(&deck));
 
@@ -4050,6 +4052,7 @@ mod tests {
             Some("asset_not_ready")
         );
         assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
+        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms <= 25_000));
 
         clear_dj_profile_rebuild_failure(&rebuild_key);
     }
