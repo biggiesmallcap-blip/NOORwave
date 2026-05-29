@@ -30,6 +30,7 @@ const SEGMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const MIN_PARTIAL_BYTES: usize = 32 * 1024;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DASH_MEDIA_SEGMENTS: usize = 12;
+const PRESCAN_TIDAL_QUALITIES: [&str; 2] = ["LOW", "LOSSLESS"];
 const STREAM_REJECTED_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const TRANSIENT_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_TRANSIENT_FAILURES_PER_BATCH: usize = LOOKAHEAD;
@@ -209,6 +210,55 @@ fn segment_fetch_failure_reason(error_summary: &str) -> PrescanFailureReason {
     }
 }
 
+fn next_prescan_quality_after_error(
+    attempt_index: usize,
+    error: &crate::services::tidal::stream::StreamResolveError,
+) -> Option<&'static str> {
+    if !error.is_asset_not_ready() {
+        return None;
+    }
+    PRESCAN_TIDAL_QUALITIES.get(attempt_index + 1).copied()
+}
+
+async fn resolve_prescan_stream(
+    http_client: &reqwest::Client,
+    access_token: &str,
+    track_id: i64,
+    tidal_id: i64,
+) -> std::result::Result<
+    crate::services::tidal::stream::StreamInfo,
+    crate::services::tidal::stream::StreamResolveError,
+> {
+    for (attempt_index, quality) in PRESCAN_TIDAL_QUALITIES.iter().enumerate() {
+        match crate::services::tidal::stream::get_stream_url(
+            http_client,
+            access_token,
+            tidal_id,
+            quality,
+        )
+        .await
+        {
+            Ok(stream_info) => return Ok(stream_info),
+            Err(error) => {
+                if let Some(next_quality) = next_prescan_quality_after_error(attempt_index, &error)
+                {
+                    tracing::info!(
+                        track_id,
+                        tidal_id,
+                        quality,
+                        next_quality,
+                        error = %error,
+                        "prescanner: TIDAL quality unavailable, trying fallback"
+                    );
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+    unreachable!("prescan quality list is non-empty")
+}
+
 /// One row of queue state, projected for the pure selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrescanCandidate {
@@ -334,11 +384,11 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
 
     tracing::info!(track_id, tidal_id, "prescanner: starting analysis");
 
-    let stream_info = match crate::services::tidal::stream::get_stream_url(
+    let stream_info = match resolve_prescan_stream(
         &http_client,
         &tokens.access_token,
+        track_id,
         tidal_id,
-        "LOW",
     )
     .await
     {
@@ -838,6 +888,30 @@ mod tests {
             })
         );
         clear_prescan_negative_cache_for_tests();
+    }
+
+    #[test]
+    fn asset_not_ready_tries_lossless_before_prescan_cache() {
+        let error = StreamResolveError::StreamRejected {
+            message:
+                r#"TIDAL rejected playback request with 401 Unauthorized: {"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+                    .to_string(),
+        };
+
+        assert_eq!(
+            next_prescan_quality_after_error(0, &error),
+            Some("LOSSLESS")
+        );
+        assert_eq!(next_prescan_quality_after_error(1, &error), None);
+    }
+
+    #[test]
+    fn non_asset_prescan_rejection_does_not_try_quality_fallback() {
+        let error = StreamResolveError::StreamRejected {
+            message: "TIDAL rejected playback request with 401 Unauthorized".to_string(),
+        };
+
+        assert_eq!(next_prescan_quality_after_error(0, &error), None);
     }
 
     #[test]

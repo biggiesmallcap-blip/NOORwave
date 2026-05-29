@@ -40,7 +40,7 @@ const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
-const DJ_PROFILE_ANALYSIS_TIDAL_QUALITY: &str = "LOW";
+const DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES: [&str; 2] = ["LOW", "LOSSLESS"];
 const MAX_MANUAL_DROP_MARKERS: usize = 16;
 const MAX_MANUAL_DROP_MARKER_MS: i64 = 30 * 60 * 1_000;
 
@@ -912,7 +912,7 @@ async fn queue_tidal_profile_rebuild(
         });
     };
 
-    let request = dj_profile_analysis_stream_request(tidal_id);
+    let requests = dj_profile_analysis_stream_requests(tidal_id);
     let track = rebuild_track_for_tidal_ref(&state, tidal_id).await;
     let (http_client, generation) = {
         let state_guard = state.read().await;
@@ -926,16 +926,91 @@ async fn queue_tidal_profile_rebuild(
     let config = PlaybackRuntimeConfig::new(http_client, tokens.access_token, None)
         .with_dj_analysis(true, Some(dj_analysis_tx))
         .for_dj_analysis_only();
-    let job = player::PreparedPlaybackJob::new(
-        track.clone(),
-        PlaybackSourceRequest::TidalStream(request),
-        GaplessPlan::disabled(),
-    )
-    .with_generation(generation)
-    .with_dj_media_ref(media_ref);
+
+    let inflight_for_decode = inflight.clone();
+    let inflight_key_for_decode = inflight_key.clone();
+    let failure_key = inflight_key.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut last_error = None;
+        let mut decoded = false;
+        for (attempt_index, request) in requests.into_iter().enumerate() {
+            let quality = request.audio_quality.clone();
+            let job = player::PreparedPlaybackJob::new(
+                track.clone(),
+                PlaybackSourceRequest::TidalStream(request),
+                GaplessPlan::disabled(),
+            )
+            .with_generation(generation)
+            .with_dj_media_ref(media_ref.clone());
+            let shared = dj_profile_rebuild_shared(track.id, generation);
+            match decode_and_buffer_job(config.clone(), job, shared, 48_000, 2) {
+                Ok(()) => {
+                    decoded = true;
+                    break;
+                }
+                Err(error) => {
+                    if let Some(next_quality) =
+                        next_dj_profile_analysis_quality(attempt_index, &error)
+                    {
+                        tracing::info!(
+                            tidal_id,
+                            quality,
+                            next_quality,
+                            error = %error,
+                            "DJ profile rebuild retrying with fallback TIDAL quality"
+                        );
+                        last_error = Some(error);
+                    } else {
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if decoded {
+            clear_dj_profile_rebuild_failure(&failure_key);
+            tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
+        } else if let Some(error) = last_error {
+            let status = profile_rebuild_failure_status(&error);
+            let message = profile_rebuild_error_message(&error, status);
+            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
+            if status != "retrying" {
+                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            }
+            tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
+        }
+    });
+
+    Ok(RebuildDjProfileResponse {
+        accepted: true,
+        status: "accepted".to_string(),
+    })
+}
+
+fn dj_profile_analysis_stream_requests(tidal_id: i64) -> Vec<tidal_stream::StreamRequest> {
+    DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
+        .iter()
+        .map(|quality| tidal_stream::StreamRequest::new(tidal_id, *quality))
+        .collect()
+}
+
+fn next_dj_profile_analysis_quality(
+    attempt_index: usize,
+    error: &anyhow::Error,
+) -> Option<&'static str> {
+    if !profile_rebuild_error_is_asset_not_ready(&error.to_string()) {
+        return None;
+    }
+    DJ_PROFILE_ANALYSIS_TIDAL_QUALITIES
+        .get(attempt_index + 1)
+        .copied()
+}
+
+fn dj_profile_rebuild_shared(track_id: i64, generation: u64) -> Arc<PlaybackSharedState> {
     let (command_tx, _command_rx) = std::sync::mpsc::channel::<PlaybackRuntimeCommand>();
-    let shared = Arc::new(PlaybackSharedState::new(
-        track.id,
+    Arc::new(PlaybackSharedState::new(
+        track_id,
         generation,
         PlaybackSourceKind::TidalStream,
         GaplessPlan::disabled(),
@@ -946,34 +1021,7 @@ async fn queue_tidal_profile_rebuild(
         Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         Arc::new(AtomicU64::new(0)),
         Arc::new(AtomicU64::new(0)),
-    ));
-
-    let inflight_for_decode = inflight.clone();
-    let inflight_key_for_decode = inflight_key.clone();
-    let failure_key = inflight_key.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
-            let status = profile_rebuild_failure_status(&error);
-            let message = profile_rebuild_error_message(&error, status);
-            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
-            if status != "retrying" {
-                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
-            }
-            tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
-        } else {
-            clear_dj_profile_rebuild_failure(&failure_key);
-            tracing::info!(tidal_id, "DJ profile rebuild decode queued analysis");
-        }
-    });
-
-    Ok(RebuildDjProfileResponse {
-        accepted: true,
-        status: "accepted".to_string(),
-    })
-}
-
-fn dj_profile_analysis_stream_request(tidal_id: i64) -> tidal_stream::StreamRequest {
-    tidal_stream::StreamRequest::new(tidal_id, DJ_PROFILE_ANALYSIS_TIDAL_QUALITY)
+    ))
 }
 
 async fn queue_tidal_profile_rebuild_if_idle(
@@ -1117,20 +1165,22 @@ fn profile_rebuild_error_is_retryable(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     message.contains("DASH stream prebuffer failed")
         || message.contains("DASH segment")
-        || lower.contains("asset is not ready for playback")
-        || lower.contains("\"substatus\":4005")
+        || profile_rebuild_error_is_asset_not_ready(message)
         || lower.contains("timed out")
         || lower.contains("request failed")
         || lower.contains("chunk error")
         || lower.contains("returned error status")
 }
 
+fn profile_rebuild_error_is_asset_not_ready(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("asset is not ready for playback") || lower.contains("\"substatus\":4005")
+}
+
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
     if status == "retrying" {
-        let message = error.to_string().to_ascii_lowercase();
-        if message.contains("asset is not ready for playback")
-            || message.contains("\"substatus\":4005")
-        {
+        let message = error.to_string();
+        if profile_rebuild_error_is_asset_not_ready(&message) {
             return "TIDAL asset is not ready. Retrying analysis.".to_string();
         }
         return "DASH stream prebuffer failed. Retrying analysis.".to_string();
@@ -2525,11 +2575,22 @@ mod tests {
     }
 
     #[test]
-    fn dj_profile_rebuild_uses_low_quality_analysis_stream() {
-        let request = dj_profile_analysis_stream_request(28051328);
+    fn dj_profile_rebuild_tries_lossless_after_low_quality_asset_not_ready() {
+        let requests = dj_profile_analysis_stream_requests(28051328);
 
-        assert_eq!(request.track_id, 28051328);
-        assert_eq!(request.audio_quality, "LOW");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.track_id == 28051328));
+        assert_eq!(requests[0].audio_quality, "LOW");
+        assert_eq!(requests[1].audio_quality, "LOSSLESS");
+
+        let error = anyhow::Error::msg(
+            r#"TIDAL playback request was rejected: TIDAL rejected playback request with 401 Unauthorized: {"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#,
+        );
+        assert_eq!(
+            next_dj_profile_analysis_quality(0, &error),
+            Some("LOSSLESS")
+        );
+        assert_eq!(next_dj_profile_analysis_quality(1, &error), None);
     }
 
     #[test]
