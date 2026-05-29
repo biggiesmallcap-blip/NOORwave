@@ -273,6 +273,7 @@ fn write_output_buffer<T>(
                     let _ = command_tx.send(PlaybackRuntimeCommand::CrossfadeStart {
                         track_id: shared.track_id,
                         generation: shared.generation,
+                        trigger_position_samples: pos,
                     });
                 }
             }
@@ -842,6 +843,36 @@ mod tests {
             command_rx.try_recv().is_err(),
             "no CrossfadeStart command should be queued yet"
         );
+    }
+
+    #[test]
+    fn crossfade_start_command_captures_callback_position() {
+        let shared = test_shared_state();
+        shared.total_samples.store(10_000, Ordering::Relaxed);
+        shared.position_samples.store(9_600, Ordering::Relaxed);
+        shared.crossfade_samples.store(500, Ordering::Relaxed);
+        {
+            let mut buffer = shared.buffer.lock().expect("buffer lock");
+            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+        }
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [0.0_f32; 4];
+        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+
+        match command_rx.try_recv().expect("crossfade command") {
+            PlaybackRuntimeCommand::CrossfadeStart {
+                track_id,
+                generation,
+                trigger_position_samples,
+            } => {
+                assert_eq!(track_id, shared.track_id);
+                assert_eq!(generation, shared.generation);
+                assert_eq!(trigger_position_samples, 9_604);
+            }
+            other => panic!("expected CrossfadeStart, got {other:?}"),
+        }
     }
 
     #[test]
