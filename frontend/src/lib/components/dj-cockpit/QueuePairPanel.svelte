@@ -11,11 +11,33 @@
 
 	function confidenceLabel(deck?: DjDeckStatus) {
 		if (deck?.profile_status === 'decode_failed') return 'Analysis failed';
-		if (deck?.profile_status === 'retrying') return 'Retrying analysis';
+		if (deck?.profile_status === 'retrying') return retryLabel(deck);
 		if (deck?.profile_status === 'analyzing') return 'Analyzing';
 		if (!deck?.profile_ready) return 'Profile missing';
 		if (deck.profile_confidence == null) return 'Profile ready';
 		return `${Math.round(deck.profile_confidence * 100)}% confidence`;
+	}
+
+	function retryLabel(deck: DjDeckStatus) {
+		const wait = formatRetryWait(deck.profile_retry_after_ms);
+		if (!wait) return 'Retrying analysis';
+		return `Retrying analysis in ${wait}`;
+	}
+
+	function formatRetryWait(ms?: number) {
+		if (ms == null || ms <= 0) return null;
+		const seconds = Math.ceil(ms / 1000);
+		if (seconds < 60) return `${seconds}s`;
+		const minutes = Math.ceil(seconds / 60);
+		return `${minutes}m`;
+	}
+
+	function retryReasonLabel(deck?: DjDeckStatus) {
+		if (!deck?.profile_retry_reason) return null;
+		if (deck.profile_retry_reason === 'asset_not_ready') return 'TIDAL asset unavailable';
+		if (deck.profile_retry_reason === 'dash_prebuffer') return 'DASH prebuffer retry';
+		if (deck.profile_retry_reason === 'timeout') return 'Analysis timeout';
+		return 'Transient analysis failure';
 	}
 
 	function passiveAnalysisLabel(deck?: DjDeckStatus) {
@@ -55,6 +77,9 @@
 						{/if}
 						{#if item.deck.profile_error}
 							<span class="error-detail" title={item.deck.profile_error}>{item.deck.profile_error}</span>
+						{/if}
+						{#if retryReasonLabel(item.deck)}
+							<span class="error-detail">{retryReasonLabel(item.deck)}</span>
 						{/if}
 						{#if item.deck.passive_analysis_reason}
 							<span class="error-detail" title={item.deck.passive_analysis_reason}>
