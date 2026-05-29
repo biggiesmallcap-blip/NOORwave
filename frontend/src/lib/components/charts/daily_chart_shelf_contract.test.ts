@@ -15,7 +15,7 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('api.getChartSnapshot');
 		expect(source).toContain('api.getChartMatrix');
 		expect(source).toContain('api.refreshChartMatrix');
-		expect(source).toContain("const SOURCE = 'spotify_daily'");
+		expect(source).toContain("let selectedSource = $state('spotify_daily')");
 
 		const trendingIndex = chartsPage.indexOf('<TrendingShelf limit={12} />');
 		const dailyIndex = chartsPage.indexOf('<DailyChartShelf />');
@@ -41,5 +41,22 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('row.cells[provider.source_key]');
 		expect(source).toContain('matrixHasData(next)');
 		expect(source).toContain('regionHasMatrixData(selectedRegion)');
+	});
+
+	test('makes region tabs and provider cards change the active provider snapshot', () => {
+		expect(source).toContain('selectedRegionCells()');
+		expect(source).toContain('pickProvider(selectedRegion, provider.source_key)');
+		expect(source).toContain('loadSnapshot(region, source)');
+		expect(source).toContain('Provider snapshot');
+	});
+
+	test('resolves visible provider leaders against TIDAL for artwork and playback', () => {
+		expect(source).toContain('api.searchTidal(query, 1)');
+		expect(source).toContain('resolvedTracks');
+		expect(source).toContain('playTidalTrackNow');
+		expect(source).toContain('TIDAL ready');
+		expect(source).toContain('provider-card-art');
+		expect(source).toContain('resolveVisibleEntries(entries)');
+		expect(source).toContain('entryStatusLabel(entry)');
 	});
 });
