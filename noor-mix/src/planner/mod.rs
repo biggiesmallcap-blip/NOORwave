@@ -1538,6 +1538,56 @@ mod tests {
     }
 
     #[test]
+    fn drop_preview_16_program_aligns_profile_drop_to_preview_midpoint() {
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+
+        assert_eq!(program.template, "DropPreview16");
+        assert_eq!(program.resolve_at, 768_000);
+        assert_eq!(program.swap_start, 384_000);
+        assert_eq!(program.deck_b_start_frame, 1_152_000);
+        program.validate().expect("drop preview program");
+    }
+
+    #[test]
+    fn drop_preview_16_program_prefers_manual_drop_marker() {
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+        incoming.manual_drop_seconds = vec![24.0];
+
+        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+
+        assert_eq!(program.deck_b_start_frame, 768_000);
+    }
+
+    #[test]
+    fn drop_preview_16_program_rejects_missing_drop_marker() {
+        let incoming = profile(Some(120.0), Some("8A"), 4);
+
+        assert!(drop_preview_16_program(48_000, 2, 16_000, &incoming).is_none());
+    }
+
+    #[test]
+    fn drop_preview_16_program_caps_preview_gain() {
+        let mut incoming = profile(Some(120.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::A) && event.from == 0.0 && event.to == 0.0
+        }));
+        assert!(program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B) && event.from == 0.65 && event.to == 0.65
+        }));
+        assert!(!program.automation.iter().any(|event| {
+            event.param == Param::DeckGain(DeckId::B) && (event.from == 1.0 || event.to == 1.0)
+        }));
+    }
+
+    #[test]
     fn filter_sweep_eq_wash_program_uses_requested_duration() {
         let program = filter_sweep_eq_wash_program(48_000, 2, 10_000);
 
