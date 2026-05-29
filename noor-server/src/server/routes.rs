@@ -31,7 +31,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
@@ -51,11 +51,17 @@ mod tidal_sync_routes;
 pub use tidal_sync_routes::trigger_auto_sync;
 
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
+type DropPreviewArmKey = (i64, i64, u64);
 
 const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const EPHEMERAL_DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
+const DROP_PREVIEW_DURATION_MS: u32 = 16_000;
+const DROP_PREVIEW_ARM_RETRY_SECS: u64 = 60 * 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT: usize = 60;
 const PLAYBACK_FINISH_DB_LOCK_RETRY_DELAY_SECS: u64 = 2;
+
+static DROP_PREVIEW_ARM_ATTEMPTS: OnceLock<Mutex<HashMap<DropPreviewArmKey, Instant>>> =
+    OnceLock::new();
 
 async fn queue_missing_dj_profiles_after_pair_change(state: SharedState, context: &'static str) {
     if let Err(status) = dj_routes::queue_missing_dj_profiles_for_current_pair(state).await {
@@ -95,8 +101,223 @@ async fn start_dj_lookahead_and_queue_profiles_after_pair_change(
     };
     if let Some(lookahead) = lookahead {
         let _ = lookahead.dispatch(&handle);
+        spawn_drop_preview_scheduler(state.clone(), handle, lookahead);
     }
     queue_missing_dj_profiles_after_pair_change(state, context).await;
+}
+
+fn spawn_drop_preview_scheduler(
+    state: SharedState,
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    lookahead: player::DjLookaheadStart,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = schedule_drop_preview_for_pair(state, handle, lookahead).await {
+            warn!("Drop preview scheduling skipped: {error:?}");
+        }
+    });
+}
+
+async fn schedule_drop_preview_for_pair(
+    state: SharedState,
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    lookahead: player::DjLookaheadStart,
+) -> anyhow::Result<()> {
+    let Some(current_ref) = lookahead.current.clone() else {
+        return Ok(());
+    };
+    let Some(next_ref) = lookahead.next.clone() else {
+        return Ok(());
+    };
+    let (Some(current_track_id), Some(next_track_id)) =
+        (current_ref.track_id(), next_ref.track_id())
+    else {
+        return Ok(());
+    };
+    if !claim_drop_preview_arm(current_track_id, next_track_id, lookahead.queue_generation) {
+        return Ok(());
+    }
+
+    let (next, runtime_info, user_quality) = {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        if active_id != Some(current_track_id)
+            || current_playback_generation(&state_guard) != lookahead.queue_generation
+        {
+            return Ok(());
+        }
+        let current = state_guard
+            .db
+            .with_conn(|conn| queue::get_track_by_id(conn, current_track_id))?
+            .context("drop preview current track missing")?;
+        let next = state_guard
+            .db
+            .with_conn(|conn| queue::get_track_by_id(conn, next_track_id))?
+            .context("drop preview next track missing")?;
+        let plan = state_guard.db.with_conn(|conn| {
+            dj_routes::drop_preview_plan_for_pair(
+                conn,
+                &current_ref,
+                &next_ref,
+                current.duration_ms,
+            )
+        })?;
+        let Some(plan) = plan else {
+            return Ok(());
+        };
+        let info = state_guard
+            .playback_runtime_info
+            .clone()
+            .context("playback runtime info missing")?;
+        let position_ms = handle.get_position_ms(info.sample_rate, info.channels);
+        if position_ms >= plan.planned_fire_ms {
+            return Ok(());
+        }
+        (
+            next,
+            (info.sample_rate, info.channels, plan),
+            current_user_audio_quality_locked(&state_guard),
+        )
+    };
+
+    let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
+        Some(request) => request,
+        None => return Ok(()),
+    };
+    let stream_info = match resolve_tidal_playback_stream(&state, &next, &stream_request).await {
+        Ok(info) => Some(info),
+        Err(error) => {
+            warn!(
+                "Skipping drop preview for next track {}: {}",
+                next.id,
+                describe_tidal_playback_error(&error)
+            );
+            return Ok(());
+        }
+    };
+
+    let (sample_rate, channels, plan) = runtime_info;
+    let engine = {
+        let state_guard = state.read().await;
+        crate::playback::dj_engine::DjEngine::new(state_guard.db.clone())
+    };
+    let Some(program) = engine.plan_drop_preview(
+        &current_ref,
+        &next_ref,
+        stream_info
+            .as_ref()
+            .and_then(|info| info.sample_rate_hz())
+            .unwrap_or(sample_rate),
+        channels,
+        DROP_PREVIEW_DURATION_MS,
+    )?
+    else {
+        return Ok(());
+    };
+
+    let mut job = player::build_playback_preparation(&next, stream_info.as_ref(), 0, user_quality)
+        .with_generation(lookahead.queue_generation)
+        .with_dj_media_ref(next_ref.clone())
+        .with_prepared_transition(player::PreparedTransitionProgram {
+            program,
+            transition_event_id: None,
+            fire_ahead_ms: 0,
+            queue_generation: lookahead.queue_generation,
+            current_queue_item_id: lookahead.current_queue_item_id,
+            next_queue_item_id: lookahead.next_queue_item_id,
+        });
+    job.gapless = crate::playback::gapless::GaplessPlan::disabled();
+
+    {
+        let state_guard = state.read().await;
+        let active_id = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id);
+        if active_id != Some(current_track_id)
+            || current_playback_generation(&state_guard) != lookahead.queue_generation
+        {
+            return Ok(());
+        }
+        let info = state_guard
+            .playback_runtime_info
+            .as_ref()
+            .context("playback runtime info missing")?;
+        let position_ms = handle.get_position_ms(info.sample_rate, info.channels);
+        if position_ms >= plan.planned_fire_ms {
+            return Ok(());
+        }
+    }
+
+    let trigger_position_samples =
+        samples_from_ms_for_runtime(plan.planned_fire_ms, sample_rate, channels);
+    handle.prepare_drop_preview(job)?;
+    handle.arm_drop_preview(
+        current_track_id,
+        lookahead.queue_generation,
+        trigger_position_samples,
+    )?;
+    info!(
+        current_track_id,
+        next_track_id = next.id,
+        planned_fire_ms = plan.planned_fire_ms,
+        incoming_drop_ms = plan.incoming_drop_ms,
+        source = %plan.source,
+        "Drop preview armed"
+    );
+    Ok(())
+}
+
+fn current_user_audio_quality_locked(
+    state: &crate::AppState,
+) -> Option<crate::db::audio_settings::AudioQuality> {
+    state
+        .db
+        .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(anyhow::Error::from))
+        .ok()
+        .map(|settings| settings.quality)
+}
+
+fn samples_from_ms_for_runtime(ms: i64, sample_rate: u32, channels: u16) -> u64 {
+    let ms = ms.max(0) as u64;
+    ms.saturating_mul(sample_rate.max(1) as u64)
+        .saturating_mul(channels.max(1) as u64)
+        / 1000
+}
+
+fn claim_drop_preview_arm(current_track_id: i64, next_track_id: i64, generation: u64) -> bool {
+    let attempts = DROP_PREVIEW_ARM_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    let mut attempts = attempts.lock().unwrap_or_else(|error| error.into_inner());
+    claim_drop_preview_arm_at(
+        &mut attempts,
+        current_track_id,
+        next_track_id,
+        generation,
+        now,
+    )
+}
+
+fn claim_drop_preview_arm_at(
+    attempts: &mut HashMap<DropPreviewArmKey, Instant>,
+    current_track_id: i64,
+    next_track_id: i64,
+    generation: u64,
+    now: Instant,
+) -> bool {
+    let retry_after = Duration::from_secs(DROP_PREVIEW_ARM_RETRY_SECS);
+    attempts.retain(|_, last_attempt| now.duration_since(*last_attempt) < retry_after);
+    let key = (current_track_id, next_track_id, generation);
+    if let Some(last_attempt) = attempts.get(&key)
+        && now.duration_since(*last_attempt) < retry_after
+    {
+        return false;
+    }
+    attempts.insert(key, now);
+    true
 }
 
 async fn refresh_dj_after_queue_change(state: SharedState, context: &'static str) {

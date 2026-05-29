@@ -112,6 +112,48 @@ impl DjEngine {
         })
     }
 
+    pub fn plan_drop_preview(
+        &self,
+        from: &DjMediaRef,
+        to: &DjMediaRef,
+        sample_rate: u32,
+        channels: u16,
+        duration_ms: u32,
+    ) -> Result<Option<TransitionProgram>> {
+        self.db.with_conn(|conn| {
+            if !queries::is_dj_engine_enabled(conn)? {
+                return Ok(None);
+            }
+
+            let from_key = from.profile_key();
+            let to_key = to.profile_key();
+            let Some(from_profile) = queries::get_audio_dj_profile(conn, &from_key)? else {
+                return Ok(None);
+            };
+            let Some(to_profile) = queries::get_audio_dj_profile(conn, &to_key)? else {
+                return Ok(None);
+            };
+            let from_correction = queries::get_audio_dj_profile_correction(conn, &from_key)?;
+            let to_correction = queries::get_audio_dj_profile_correction(conn, &to_key)?;
+
+            let mut outgoing = profile_from_row(conn, &from_profile)?;
+            let mut incoming = profile_from_row(conn, &to_profile)?;
+            apply_correction(&mut outgoing, from_correction.as_ref());
+            apply_correction(&mut incoming, to_correction.as_ref());
+            if runtime_safety_decision(&outgoing, &incoming).force_safe_crossfade {
+                return Ok(None);
+            }
+
+            Ok(noor_mix::planner::drop_preview_16_program(
+                sample_rate,
+                channels,
+                duration_ms,
+                &outgoing,
+                &incoming,
+            ))
+        })
+    }
+
     fn recent_bad_feedback_count(&self, media_ref: &DjMediaRef) -> Result<i64> {
         let key = media_ref.profile_key();
         self.db
