@@ -189,6 +189,8 @@ struct DjDeckStatus {
     profile_ready: bool,
     profile_status: String,
     profile_error: Option<String>,
+    profile_retry_after_ms: Option<i64>,
+    profile_retry_reason: Option<String>,
     profile_confidence: Option<f64>,
     beat_count: Option<usize>,
     downbeat_count: Option<usize>,
@@ -358,6 +360,8 @@ enum ProfileRebuildInflightDecision {
 struct DjProfileRebuildFailure {
     status: String,
     message: String,
+    retry_reason: Option<String>,
+    next_retry_at: Option<Instant>,
     recorded_at: Instant,
 }
 
@@ -981,13 +985,29 @@ async fn queue_tidal_profile_rebuild(
     let inflight_for_decode = inflight.clone();
     let inflight_key_for_decode = inflight_key.clone();
     let failure_key = inflight_key.clone();
+    let retry_state = state.clone();
+    let event_tx = {
+        let state_guard = state.read().await;
+        state_guard.event_tx.clone()
+    };
+    let runtime_handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = decode_and_buffer_job(config, job, shared, 48_000, 2) {
             let status = profile_rebuild_failure_status(&error);
             let message = profile_rebuild_error_message(&error, status);
-            record_dj_profile_rebuild_failure(&failure_key, status, message.clone());
-            if status != "retrying" {
-                clear_dj_profile_inflight(&inflight_for_decode, &inflight_key_for_decode);
+            finish_dj_profile_rebuild_failure(
+                &inflight_for_decode,
+                &inflight_key_for_decode,
+                status,
+                message.clone(),
+            );
+            let _ = event_tx.send(crate::AppEvent::PlaybackStateChanged);
+            if status == "retrying" {
+                schedule_dj_profile_retry(
+                    &runtime_handle,
+                    retry_state,
+                    Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
+                );
             }
             tracing::warn!(tidal_id, error = %message, "DJ profile rebuild decode failed");
         } else {
@@ -1057,7 +1077,10 @@ fn foreground_playback_is_buffering(
 }
 
 fn deck_needs_profile_rebuild(deck: &DjDeckStatus) -> bool {
-    (!deck.profile_ready && matches!(deck.profile_status.as_str(), "missing" | "retrying"))
+    (!deck.profile_ready
+        && (deck.profile_status == "missing"
+            || (deck.profile_status == "retrying"
+                && deck.profile_retry_after_ms.unwrap_or(0) <= 0)))
         || (deck.profile_ready && deck.waveform_status == "missing")
 }
 
@@ -1094,17 +1117,49 @@ fn clear_dj_profile_inflight(
     }
 }
 
+fn finish_dj_profile_rebuild_failure(
+    inflight: &Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    key: &str,
+    status: &str,
+    message: String,
+) {
+    record_dj_profile_rebuild_failure(key, status, message);
+    clear_dj_profile_inflight(inflight, key);
+}
+
+fn schedule_dj_profile_retry(
+    runtime: &tokio::runtime::Handle,
+    state: SharedState,
+    delay: Duration,
+) {
+    runtime.spawn(async move {
+        tokio::time::sleep(delay).await;
+        if let Err(status) = queue_missing_dj_profiles_for_current_pair(state).await {
+            tracing::warn!(
+                ?status,
+                "Scheduled DJ profile retry failed to queue current pair"
+            );
+        }
+    });
+}
+
 fn profile_rebuild_failures() -> &'static Mutex<HashMap<String, DjProfileRebuildFailure>> {
     DJ_PROFILE_REBUILD_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn record_dj_profile_rebuild_failure(key: &str, status: &str, message: String) {
     if let Ok(mut guard) = profile_rebuild_failures().lock() {
+        let retry_reason = profile_rebuild_retry_reason(status, &message);
+        let next_retry_at = retry_reason
+            .as_ref()
+            .map(|_| Instant::now() + Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS));
         guard.insert(
             key.to_string(),
             DjProfileRebuildFailure {
                 status: status.to_string(),
                 message,
+                retry_reason,
+                next_retry_at,
                 recorded_at: Instant::now(),
             },
         );
@@ -1153,6 +1208,37 @@ fn profile_rebuild_error_is_retryable(message: &str) -> bool {
         || lower.contains("request failed")
         || lower.contains("chunk error")
         || lower.contains("returned error status")
+}
+
+fn profile_rebuild_retry_reason(status: &str, message: &str) -> Option<String> {
+    if status != "retrying" {
+        return None;
+    }
+    let lower = message.to_ascii_lowercase();
+    let reason = if lower.contains("asset") || lower.contains("substatus") {
+        "asset_not_ready"
+    } else if lower.contains("dash") || lower.contains("prebuffer") {
+        "dash_prebuffer"
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout"
+    } else {
+        "transient_decode"
+    };
+    Some(reason.to_string())
+}
+
+fn profile_rebuild_retry_after_ms(failure: &DjProfileRebuildFailure) -> Option<i64> {
+    let next_retry_at = failure.next_retry_at?;
+    let now = Instant::now();
+    if next_retry_at <= now {
+        return Some(0);
+    }
+    Some(
+        next_retry_at
+            .duration_since(now)
+            .as_millis()
+            .min(i64::MAX as u128) as i64,
+    )
 }
 
 fn profile_rebuild_error_message(error: &anyhow::Error, status: &str) -> String {
@@ -1519,6 +1605,12 @@ fn deck_status(
     } else {
         "missing".to_string()
     };
+    let profile_retry_after_ms = rebuild_failure
+        .as_ref()
+        .and_then(profile_rebuild_retry_after_ms);
+    let profile_retry_reason = rebuild_failure
+        .as_ref()
+        .and_then(|failure| failure.retry_reason.clone());
     let profile_error = rebuild_failure.map(|failure| failure.message);
     let (title, artist) = match label_override {
         Some((title, artist)) => (title.clone(), artist.clone()),
@@ -1586,6 +1678,8 @@ fn deck_status(
         profile_ready: profile.is_some(),
         profile_status,
         profile_error,
+        profile_retry_after_ms,
+        profile_retry_reason,
         profile_confidence,
         beat_count,
         downbeat_count,
@@ -1655,7 +1749,7 @@ fn drop_preview_status(
     current_duration_ms: Option<i64>,
     actual_fire_ms: Option<i64>,
 ) -> anyhow::Result<DjDropPreviewStatus> {
-    let skipped = |reason: &'static str| DjDropPreviewStatus {
+    let skipped = |reason: &str| DjDropPreviewStatus {
         status: "skipped".to_string(),
         planned_fire_ms: None,
         actual_fire_ms: None,
@@ -1672,8 +1766,13 @@ fn drop_preview_status(
     else {
         return Ok(skipped("pair_missing"));
     };
-    if !current.profile_ready || !next.profile_ready {
-        return Ok(skipped("profiles_missing"));
+    if !current.profile_ready {
+        return Ok(skipped(&deck_profile_unavailable_reason(
+            "current", current,
+        )));
+    }
+    if !next.profile_ready {
+        return Ok(skipped(&deck_profile_unavailable_reason("next", next)));
     }
     if current.safe_crossfade_only || next.safe_crossfade_only {
         return Ok(skipped("safe_crossfade_only"));
@@ -1715,6 +1814,16 @@ fn drop_preview_status(
         source: Some(source.to_string()),
         reason: None,
     })
+}
+
+fn deck_profile_unavailable_reason(prefix: &str, deck: &DjDeckStatus) -> String {
+    if deck.profile_status == "retrying" {
+        if let Some(reason) = deck.profile_retry_reason.as_deref() {
+            return format!("{prefix}_profile_retrying_{reason}");
+        }
+        return format!("{prefix}_profile_retrying");
+    }
+    format!("{prefix}_profile_missing")
 }
 
 pub(crate) fn drop_preview_plan_for_pair(
@@ -2491,6 +2600,8 @@ mod tests {
             profile_ready,
             profile_status: profile_status.to_string(),
             profile_error: None,
+            profile_retry_after_ms: None,
+            profile_retry_reason: None,
             profile_confidence: profile_ready.then_some(0.85),
             beat_count: profile_ready.then_some(128),
             downbeat_count: profile_ready.then_some(32),
@@ -3640,6 +3751,42 @@ mod tests {
     }
 
     #[test]
+    fn drop_preview_status_reports_retrying_asset_unavailable() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let current_ref = DjMediaRef::TidalTrack {
+            tidal_id: 111,
+            track_id: Some(1),
+        };
+        let next_ref = DjMediaRef::TidalTrack {
+            tidal_id: 222,
+            track_id: Some(2),
+        };
+        let mut current = test_deck_status(true, "ready");
+        current.phrase_markers_ms = vec![128_000];
+        let mut next = test_deck_status(false, "retrying");
+        next.profile_retry_reason = Some("asset_not_ready".to_string());
+
+        let status = drop_preview_status(
+            &conn,
+            true,
+            Some(&current_ref),
+            Some(&next_ref),
+            Some(&current),
+            Some(&next),
+            Some(240_000),
+            None,
+        )
+        .expect("preview status");
+
+        assert_eq!(status.status, "skipped");
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("next_profile_retrying_asset_not_ready")
+        );
+    }
+
+    #[test]
     fn ready_pair_transition_planning_cooldown_suppresses_same_generation() {
         let mut attempts = HashMap::new();
         let now = Instant::now();
@@ -3863,9 +4010,78 @@ mod tests {
             deck.profile_error.as_deref(),
             Some("DASH stream prebuffer failed. Retrying analysis.")
         );
-        assert!(deck_needs_profile_rebuild(&deck));
+        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
+        assert_eq!(deck.profile_retry_reason.as_deref(), Some("dash_prebuffer"));
+        assert!(!deck_needs_profile_rebuild(&deck));
 
         clear_dj_profile_rebuild_failure(&rebuild_key);
+    }
+
+    #[test]
+    fn due_retrying_profile_failure_needs_rebuild() {
+        let mut deck = test_deck_status(false, "retrying");
+        deck.profile_retry_after_ms = Some(0);
+
+        assert!(deck_needs_profile_rebuild(&deck));
+    }
+
+    #[test]
+    fn asset_not_ready_retrying_profile_reports_retry_reason() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        let media_ref = DjMediaRef::TidalTrack {
+            tidal_id: 12198476,
+            track_id: None,
+        };
+        let key = media_ref.profile_key();
+        let rebuild_key = dj_profile_inflight_key(&key);
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+        record_dj_profile_rebuild_failure(
+            &rebuild_key,
+            "retrying",
+            "TIDAL asset is not ready. Retrying analysis.".to_string(),
+        );
+
+        let deck = deck_status(&conn, &media_ref, None, false).expect("deck status");
+
+        assert_eq!(deck.profile_status, "retrying");
+        assert_eq!(
+            deck.profile_retry_reason.as_deref(),
+            Some("asset_not_ready")
+        );
+        assert!(deck.profile_retry_after_ms.is_some_and(|ms| ms > 0));
+
+        clear_dj_profile_rebuild_failure(&rebuild_key);
+    }
+
+    #[test]
+    fn retryable_profile_rebuild_failure_clears_inflight() {
+        let inflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let key = "tidal_track:250295729";
+        let first = mark_dj_profile_rebuild_inflight(
+            &inflight,
+            key,
+            std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
+        )
+        .expect("first mark");
+
+        finish_dj_profile_rebuild_failure(
+            &inflight,
+            key,
+            "retrying",
+            "TIDAL asset is not ready. Retrying analysis.".to_string(),
+        );
+
+        let second = mark_dj_profile_rebuild_inflight(
+            &inflight,
+            key,
+            std::time::Duration::from_secs(DJ_PROFILE_AUTO_REBUILD_RETRY_SECS),
+        )
+        .expect("second mark");
+
+        assert_eq!(first, ProfileRebuildInflightDecision::Start);
+        assert_eq!(second, ProfileRebuildInflightDecision::Start);
+        clear_dj_profile_rebuild_failure(key);
     }
 
     #[test]
