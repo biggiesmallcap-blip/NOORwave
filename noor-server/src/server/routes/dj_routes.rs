@@ -36,6 +36,7 @@ const SAFE_SUGGESTION_BAD_COUNT: i64 = 3;
 const DJ_PROFILE_AUTO_REBUILD_RETRY_SECS: u64 = 300;
 const DJ_TIMING_HISTORY_LIMIT: i64 = 5;
 const DJ_READY_PAIR_TRANSITION_WINDOW_MS: i64 = 30_000;
+const DJ_TIMING_SANITY_MAX_DELTA_MS: i64 = 30_000;
 #[cfg(test)]
 const DJ_READY_PAIR_PLANNING_RETRY_SECS: u64 = 15;
 const DJ_PROFILE_REBUILD_FAILURE_TTL_SECS: u64 = 300;
@@ -1796,10 +1797,15 @@ fn latest_fired_dj_timing_deltas(
          FROM dj_transition_events
          WHERE timing_status = 'fired'
            AND timing_delta_ms IS NOT NULL
+           AND ABS(timing_delta_ms) <= ?2
+           AND template != 'DropPreview16'
          ORDER BY started_at DESC, id DESC
          LIMIT ?1",
     )?;
-    let rows = stmt.query_map([limit.max(0)], |row| row.get::<_, i64>(0))?;
+    let rows = stmt.query_map(
+        params![limit.max(0), DJ_TIMING_SANITY_MAX_DELTA_MS],
+        |row| row.get::<_, i64>(0),
+    )?;
     let mut deltas = Vec::new();
     for row in rows {
         deltas.push(row?);
@@ -1834,7 +1840,10 @@ fn summarize_timing_history(
         if event.timing_status.as_deref() == Some("missed") {
             missed_count += 1;
         }
-        if let Some(delta_ms) = event.timing_delta_ms {
+        if let Some(delta_ms) = event
+            .timing_delta_ms
+            .filter(|delta| timing_delta_is_sane(*delta))
+        {
             delta_sum += delta_ms;
             abs_delta_sum += delta_ms.abs();
             delta_count += 1;
@@ -1862,6 +1871,10 @@ fn summarize_timing_history(
         late_count,
         missed_count,
     }
+}
+
+fn timing_delta_is_sane(delta_ms: i64) -> bool {
+    delta_ms.abs() <= DJ_TIMING_SANITY_MAX_DELTA_MS
 }
 
 fn median_abs_delta(deltas: &[i64]) -> Option<i64> {
@@ -2894,6 +2907,40 @@ mod tests {
     }
 
     #[test]
+    fn latest_fired_timing_deltas_exclude_impossible_and_preview_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        crate::db::schema::run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO dj_transition_events (
+                from_media_ref_kind, from_media_ref_id, to_media_ref_kind, to_media_ref_id,
+                template, program_json, planner_version, planned_start_ms,
+                actual_start_ms, timing_delta_ms, timing_source, timing_status
+             ) VALUES
+             (
+                'tidal_track', '1', 'tidal_track', '2',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                100000, 100120, 120, 'downbeat_sync', 'fired'
+             ),
+             (
+                'tidal_track', '2', 'tidal_track', '3',
+                'SafeCrossfade', '{\"template\":\"SafeCrossfade\"}', 'dj-v1',
+                100000, 140001, 40001, 'downbeat_sync', 'fired'
+             ),
+             (
+                'tidal_track', '3', 'tidal_track', '4',
+                'DropPreview16', '{\"template\":\"DropPreview16\"}', 'dj-v1',
+                100000, 100240, 240, 'drop_preview', 'fired'
+             )",
+            [],
+        )
+        .expect("insert timing rows");
+
+        let deltas = latest_fired_dj_timing_deltas(&conn, 20).expect("deltas");
+
+        assert_eq!(deltas, vec![120]);
+    }
+
+    #[test]
     fn timing_history_includes_track_pair_labels() {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         crate::db::schema::run_migrations(&conn).expect("migrations");
@@ -3081,6 +3128,64 @@ mod tests {
         assert_eq!(summary.bad_count, 1);
         assert_eq!(summary.late_count, 1);
         assert_eq!(summary.missed_count, 1);
+    }
+
+    #[test]
+    fn timing_history_summary_excludes_impossible_deltas_from_averages() {
+        let events = vec![
+            DjTimingHistoryEvent {
+                event_id: 1,
+                from_title: None,
+                from_artist: None,
+                to_title: None,
+                to_artist: None,
+                planned_template: "SafeCrossfade".to_string(),
+                renderer_template: Some("SafeCrossfade".to_string()),
+                planning_reason: None,
+                planned_start_ms: Some(10_000),
+                actual_start_ms: Some(10_100),
+                timing_delta_ms: Some(100),
+                timing_source: Some("downbeat_sync".to_string()),
+                timing_status: Some("fired".to_string()),
+                timing_quality: "tight".to_string(),
+                timing_direction: "on_time".to_string(),
+                runtime_rendered_dj_mixer: Some(true),
+                runtime_renderer_status: Some("rendered_handoff".to_string()),
+                runtime_renderer_reason: Some("none".to_string()),
+                started_at: "now".to_string(),
+                rejected_alternatives: Vec::new(),
+            },
+            DjTimingHistoryEvent {
+                event_id: 2,
+                from_title: None,
+                from_artist: None,
+                to_title: None,
+                to_artist: None,
+                planned_template: "SafeCrossfade".to_string(),
+                renderer_template: Some("SafeCrossfade".to_string()),
+                planning_reason: None,
+                planned_start_ms: Some(10_000),
+                actual_start_ms: Some(50_001),
+                timing_delta_ms: Some(40_001),
+                timing_source: Some("downbeat_sync".to_string()),
+                timing_status: Some("fired".to_string()),
+                timing_quality: "bad".to_string(),
+                timing_direction: "late".to_string(),
+                runtime_rendered_dj_mixer: Some(true),
+                runtime_renderer_status: Some("rendered_handoff".to_string()),
+                runtime_renderer_reason: Some("none".to_string()),
+                started_at: "now".to_string(),
+                rejected_alternatives: Vec::new(),
+            },
+        ];
+
+        let summary = summarize_timing_history(&events, &[100]);
+
+        assert_eq!(summary.event_count, 2);
+        assert_eq!(summary.average_delta_ms, Some(100));
+        assert_eq!(summary.average_abs_delta_ms, Some(100));
+        assert_eq!(summary.tight_count, 1);
+        assert_eq!(summary.bad_count, 1);
     }
 
     #[test]

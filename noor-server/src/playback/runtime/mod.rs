@@ -1298,6 +1298,7 @@ fn start_prepared_overlay(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     timing_status: &'static str,
     runtime_renderer_reason: DjRuntimeRendererReason,
+    actual_start_ms_override: Option<i64>,
     device_sample_rate: u32,
     device_channels: u16,
 ) -> Result<(), DjRuntimeRendererReason> {
@@ -1311,7 +1312,8 @@ fn start_prepared_overlay(
     };
     let outgoing_track_id = active.track_id;
     let outgoing_generation = active.generation;
-    let actual_start_ms = track_position_ms(&active.shared, device_sample_rate, device_channels);
+    let actual_start_ms = actual_start_ms_override
+        .unwrap_or_else(|| track_position_ms(&active.shared, device_sample_rate, device_channels));
     active.shared.crossfade_samples.store(0, Ordering::Relaxed);
 
     install_prepared_overlay_mixer_buffer(state)?;
@@ -1776,6 +1778,7 @@ fn run_runtime_loop(
                 PlaybackRuntimeCommand::CrossfadeStart {
                     track_id,
                     generation,
+                    trigger_position_samples,
                 } => {
                     // The OUTGOING engine just entered its fade-out window and is asking
                     // us to start the pre-decoded next engine, if one is ready.
@@ -1788,6 +1791,11 @@ fn run_runtime_loop(
                             .and_then(|e| e.shared.buffer.lock().ok().map(|g| g.is_ready()))
                             .unwrap_or(false);
                         if next_ready && !active_engine_suppresses_crossfade_after_seek(&state) {
+                            let trigger_actual_start_ms = samples_to_ms(
+                                trigger_position_samples,
+                                state.device_sample_rate,
+                                state.device_channels,
+                            );
                             let _ = prepare_dj_mixer_for_pair(
                                 &mut state,
                                 dj_mixer_max_block_samples(&output_config),
@@ -1800,6 +1808,7 @@ fn run_runtime_loop(
                                     &event_tx,
                                     "fired",
                                     DjRuntimeRendererReason::None,
+                                    Some(trigger_actual_start_ms),
                                     device_sample_rate,
                                     device_channels,
                                 ) {
@@ -1825,6 +1834,7 @@ fn run_runtime_loop(
                                     &buffered_source,
                                     &offset_source,
                                     "fired",
+                                    Some(trigger_actual_start_ms),
                                     runtime_renderer,
                                 );
                             }
@@ -1873,6 +1883,7 @@ fn run_runtime_loop(
                                     &event_tx,
                                     "late",
                                     late_fire_reason,
+                                    None,
                                     device_sample_rate,
                                     device_channels,
                                 ) {
@@ -1902,6 +1913,7 @@ fn run_runtime_loop(
                                     &buffered_source,
                                     &offset_source,
                                     "late",
+                                    None,
                                     runtime_renderer,
                                 );
                             }
@@ -2785,6 +2797,7 @@ fn promote_next_to_active(
     buffered_source: &Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
     timing_status: &'static str,
+    actual_start_ms_override: Option<i64>,
     runtime_renderer: DjRuntimeRendererOutcome,
 ) {
     state.prepared_dj_mixer = None;
@@ -2833,11 +2846,13 @@ fn promote_next_to_active(
     if let Some(mut outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
-        let actual_start_ms = track_position_ms(
-            &outgoing.shared,
-            state.device_sample_rate,
-            state.device_channels,
-        );
+        let actual_start_ms = actual_start_ms_override.unwrap_or_else(|| {
+            track_position_ms(
+                &outgoing.shared,
+                state.device_sample_rate,
+                state.device_channels,
+            )
+        });
         if runtime_renderer.rendered {
             outgoing.stop();
         } else {
@@ -2880,10 +2895,14 @@ fn promote_next_to_active(
 }
 
 fn track_position_ms(shared: &PlaybackSharedState, sample_rate: u32, channels: u16) -> i64 {
+    let samples = shared.position_samples.load(Ordering::Relaxed);
+    samples_to_ms(samples, sample_rate, channels)
+}
+
+fn samples_to_ms(samples: u64, sample_rate: u32, channels: u16) -> i64 {
     if sample_rate == 0 || channels == 0 {
         return 0;
     }
-    let samples = shared.position_samples.load(Ordering::Relaxed);
     (samples.saturating_mul(1000) / (u64::from(sample_rate) * u64::from(channels))) as i64
 }
 
@@ -3922,6 +3941,7 @@ mod tests {
                 &event_tx,
                 "fired",
                 DjRuntimeRendererReason::None,
+                None,
                 48_000,
                 2
             )
@@ -3954,6 +3974,80 @@ mod tests {
                 assert!(runtime_rendered_dj_mixer);
                 assert_eq!(runtime_renderer_status, "rendered_overlay");
                 assert_eq!(runtime_renderer_reason, "none");
+            }
+            other => panic!("expected overlay event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepared_overlay_reports_captured_fire_position() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(100);
+        transition.program.template = "DropTease16".to_string();
+        transition.program.automation = vec![
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::A),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 0.0,
+                to: 0.0,
+                curve: noor_mix::Curve::Linear,
+            },
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 1.0,
+                to: 1.0,
+                curve: noor_mix::Curve::Linear,
+            },
+        ];
+
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&next, &[0.0, 0.0, 0.4, 0.4]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+        assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        assert!(
+            start_prepared_overlay(
+                &mut state,
+                &event_tx,
+                "fired",
+                DjRuntimeRendererReason::None,
+                Some(2_500),
+                48_000,
+                2
+            )
+            .is_ok()
+        );
+
+        match event_rx.try_recv().expect("overlay event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                actual_start_ms, ..
+            } => {
+                assert_eq!(actual_start_ms, 2_500);
             }
             other => panic!("expected overlay event, got {other:?}"),
         }
@@ -4003,6 +4097,7 @@ mod tests {
             &buffered_source,
             &offset_source,
             "fired",
+            None,
             DjRuntimeRendererOutcome::rendered_handoff(),
         );
 
@@ -4025,6 +4120,58 @@ mod tests {
                 assert!(runtime_rendered_dj_mixer);
                 assert_eq!(runtime_renderer_status, "rendered_handoff");
                 assert_eq!(runtime_renderer_reason, "none");
+            }
+            other => panic!("expected timing event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixer_promotion_reports_captured_fire_position() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.transition_event_id = Some(101);
+        let mut next = test_engine_with_shared(2, 21);
+        next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+
+        state.engine = Some(active);
+        state.next_engine = Some(next);
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let position_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let buffered_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let offset_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+
+        promote_next_to_active(
+            &mut state,
+            &event_tx,
+            &position_source,
+            &buffered_source,
+            &offset_source,
+            "fired",
+            Some(2_750),
+            DjRuntimeRendererOutcome::legacy_overlap(DjRuntimeRendererReason::PreparedMixerMissing),
+        );
+
+        match event_rx.try_recv().expect("timing event") {
+            PlaybackRuntimeEvent::DjTransitionPromoted {
+                actual_start_ms, ..
+            } => {
+                assert_eq!(actual_start_ms, 2_750);
             }
             other => panic!("expected timing event, got {other:?}"),
         }
@@ -4158,6 +4305,7 @@ mod tests {
             &buffered_source,
             &offset_source,
             "fired",
+            None,
             DjRuntimeRendererOutcome::legacy_overlap(DjRuntimeRendererReason::PreparedMixerMissing),
         );
 

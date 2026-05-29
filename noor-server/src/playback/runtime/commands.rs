@@ -47,6 +47,7 @@ pub enum PlaybackRuntimeCommand {
     CrossfadeStart {
         track_id: i64,
         generation: u64,
+        trigger_position_samples: u64,
     },
     TrackTerminal {
         track_id: i64,
