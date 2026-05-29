@@ -4353,27 +4353,44 @@ pub struct TrackSimilarityResult {
 /// Fixes: Stage 1 now enumerates ALL pairs per album/artist (not just MIN/MAX).
 ///        Stage 2 uses indexed temp tables so scores merge correctly.
 pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
-    // Run all stages inside a single transaction so a kill or error mid-way
-    // can't leave the table in a half-populated state (rows inserted but
-    // component scores never updated). Dropping `tx` without commit rolls back.
-    let tx = conn.unchecked_transaction()?;
-
-    tx.execute("DELETE FROM track_similarity", [])?;
+    // Do the expensive work in temporary tables so the background rebuild does
+    // not hold SQLite's single writer slot while playback is trying to update
+    // playback_state. The real table is swapped in one short transaction at
+    // the end.
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS _track_similarity_build;
+        CREATE TEMP TABLE _track_similarity_build (
+            track_a INTEGER NOT NULL,
+            track_b INTEGER NOT NULL,
+            similarity_score REAL NOT NULL DEFAULT 0,
+            co_listen_score REAL DEFAULT 0,
+            co_album_score REAL DEFAULT 0,
+            co_artist_score REAL DEFAULT 0,
+            genre_proximity REAL DEFAULT 0,
+            duration_proximity REAL DEFAULT 0,
+            era_proximity REAL DEFAULT 0,
+            computed_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (track_a, track_b),
+            CHECK (track_a < track_b)
+        );
+    ",
+    )?;
 
     // ── Stage 1: candidate pairs ─────────────────────────────────────────────
     // Each INSERT must satisfy CHECK (track_a < track_b), ensured by `b.id > a.id`.
 
-    tx.execute_batch(
+    conn.execute_batch(
         "
         -- 1a: Same-album pairs (all combinations, not just min/max)
-        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
         SELECT a.id, b.id
         FROM tracks a
         JOIN tracks b ON b.album_id = a.album_id AND b.id > a.id
         WHERE a.album_id IS NOT NULL;
 
         -- 1b: Same-artist pairs (cap at artists with <=100 tracks)
-        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
         SELECT a.id, b.id
         FROM tracks a
         JOIN tracks b ON b.artist_id = a.artist_id AND b.id > a.id
@@ -4382,7 +4399,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         );
 
         -- 1c: Shared-genre pairs (deduplicated by GROUP BY, limited to avoid explosion)
-        INSERT OR IGNORE INTO track_similarity (track_a, track_b)
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
         SELECT a.track_id, b.track_id
         FROM track_genres a
         JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
@@ -4393,7 +4410,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
     // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
 
-    tx.execute_batch(
+    conn.execute_batch(
         "
         DROP TABLE IF EXISTS _co_listen;
         CREATE TEMP TABLE _co_listen AS
@@ -4432,13 +4449,13 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     // ── Stage 3: score each component ────────────────────────────────────────
 
     // co_album: 1.0 if same album
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET co_album_score = 1.0
+        UPDATE _track_similarity_build SET co_album_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
-            WHERE a.id = track_similarity.track_a
-              AND b.id = track_similarity.track_b
+            WHERE a.id = _track_similarity_build.track_a
+              AND b.id = _track_similarity_build.track_b
               AND a.album_id IS NOT NULL
               AND a.album_id = b.album_id
         )
@@ -4447,13 +4464,13 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     )?;
 
     // co_artist: 1.0 if same artist
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET co_artist_score = 1.0
+        UPDATE _track_similarity_build SET co_artist_score = 1.0
         WHERE EXISTS (
             SELECT 1 FROM tracks a, tracks b
-            WHERE a.id = track_similarity.track_a
-              AND b.id = track_similarity.track_b
+            WHERE a.id = _track_similarity_build.track_a
+              AND b.id = _track_similarity_build.track_b
               AND a.artist_id IS NOT NULL
               AND a.artist_id = b.artist_id
         )
@@ -4462,23 +4479,23 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     )?;
 
     // genre_proximity: shared genres / max genres on any single track
-    tx.execute("
-        UPDATE track_similarity SET genre_proximity = COALESCE((
+    conn.execute("
+        UPDATE _track_similarity_build SET genre_proximity = COALESCE((
             SELECT CAST(gs.shared AS REAL) / NULLIF(
                 (SELECT MAX(c) FROM (SELECT COUNT(DISTINCT genre_id) AS c FROM track_genres GROUP BY track_id)),
                 0)
             FROM _genre_shared gs
-            WHERE gs.ta = track_similarity.track_a AND gs.tb = track_similarity.track_b
+            WHERE gs.ta = _track_similarity_build.track_a AND gs.tb = _track_similarity_build.track_b
         ), 0)
     ", [])?;
 
     // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET duration_proximity = COALESCE((
+        UPDATE _track_similarity_build SET duration_proximity = COALESCE((
             SELECT 1.0 - MIN(CAST(ABS(a.duration_ms - b.duration_ms) AS REAL) / 180000.0, 1.0)
             FROM tracks a, tracks b
-            WHERE a.id = track_similarity.track_a AND b.id = track_similarity.track_b
+            WHERE a.id = _track_similarity_build.track_a AND b.id = _track_similarity_build.track_b
               AND a.duration_ms IS NOT NULL AND b.duration_ms IS NOT NULL
         ), 0)
     ",
@@ -4486,25 +4503,25 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     )?;
 
     // co_listen: normalized co-occurrence count
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET co_listen_score = COALESCE((
+        UPDATE _track_similarity_build SET co_listen_score = COALESCE((
             SELECT cl.n / NULLIF((SELECT MAX(n) FROM _co_listen), 0)
             FROM _co_listen cl
-            WHERE cl.ta = track_similarity.track_a AND cl.tb = track_similarity.track_b
+            WHERE cl.ta = _track_similarity_build.track_a AND cl.tb = _track_similarity_build.track_b
         ), 0)
     ",
         [],
     )?;
 
     // era_proximity: 1 - |year_a - year_b| / 25, clamped 0-1. Zero when either year is unknown.
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET era_proximity = COALESCE((
+        UPDATE _track_similarity_build SET era_proximity = COALESCE((
             SELECT 1.0 - MIN(CAST(ABS(ya.year - yb.year) AS REAL) / 25.0, 1.0)
             FROM _track_year ya, _track_year yb
-            WHERE ya.track_id = track_similarity.track_a
-              AND yb.track_id = track_similarity.track_b
+            WHERE ya.track_id = _track_similarity_build.track_a
+              AND yb.track_id = _track_similarity_build.track_b
         ), 0)
     ",
         [],
@@ -4512,9 +4529,9 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
 
     // Final weighted score. era_proximity replaces some duration_proximity weight
     // because era is a stronger taste signal than song length.
-    tx.execute(
+    conn.execute(
         "
-        UPDATE track_similarity SET similarity_score =
+        UPDATE _track_similarity_build SET similarity_score =
             co_listen_score    * 0.30 +
             co_album_score     * 0.20 +
             co_artist_score    * 0.20 +
@@ -4525,7 +4542,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         [],
     )?;
 
-    tx.execute_batch(
+    conn.execute_batch(
         "
         DROP TABLE IF EXISTS _co_listen;
         DROP TABLE IF EXISTS _genre_shared;
@@ -4533,11 +4550,43 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ",
     )?;
 
-    let count: i64 = tx.query_row("SELECT COUNT(*) FROM track_similarity", [], |row| {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM _track_similarity_build", [], |row| {
         row.get(0)
     })?;
 
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM track_similarity", [])?;
+    tx.execute(
+        "
+        INSERT INTO track_similarity (
+            track_a,
+            track_b,
+            similarity_score,
+            co_listen_score,
+            co_album_score,
+            co_artist_score,
+            genre_proximity,
+            duration_proximity,
+            era_proximity,
+            computed_at
+        )
+        SELECT
+            track_a,
+            track_b,
+            similarity_score,
+            co_listen_score,
+            co_album_score,
+            co_artist_score,
+            genre_proximity,
+            duration_proximity,
+            era_proximity,
+            computed_at
+        FROM _track_similarity_build
+        ",
+        [],
+    )?;
     tx.commit()?;
+    conn.execute_batch("DROP TABLE IF EXISTS _track_similarity_build;")?;
     Ok(count as usize)
 }
 
@@ -7923,6 +7972,61 @@ mod tests {
         )
         .optional()
         .expect("query server_config")
+    }
+
+    #[test]
+    fn compute_track_similarity_swaps_from_temp_build_table() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO albums (id, title, artist_id, year) VALUES (1, 'Album', 1, 1999)",
+            [],
+        )
+        .expect("album");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms)
+             VALUES
+                (1, 'One', 1, 1, 180000),
+                (2, 'Two', 1, 1, 181000),
+                (3, 'Three', 1, 1, 220000)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO track_similarity (track_a, track_b, similarity_score)
+             VALUES (1, 2, 0.01)",
+            [],
+        )
+        .expect("stale similarity");
+
+        let count = compute_track_similarity(&conn).expect("compute similarity");
+        assert_eq!(count, 3);
+
+        let persisted_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM track_similarity", [], |row| {
+                row.get(0)
+            })
+            .expect("persisted count");
+        assert_eq!(persisted_count, 3);
+        let score: f64 = conn
+            .query_row(
+                "SELECT similarity_score FROM track_similarity WHERE track_a = 1 AND track_b = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("score");
+        assert!(score > 0.01, "rebuild should replace stale similarity rows");
+        assert!(
+            conn.query_row("SELECT COUNT(*) FROM _track_similarity_build", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+                .is_err(),
+            "temporary build table should be dropped after swap"
+        );
     }
 
     mod dj_transition_event {
