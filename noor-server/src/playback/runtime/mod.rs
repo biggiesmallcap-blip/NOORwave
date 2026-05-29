@@ -287,6 +287,23 @@ impl PlaybackRuntimeHandle {
         self.send(PlaybackRuntimeCommand::PrepareNext(job))
     }
 
+    pub fn prepare_drop_preview(&self, job: PreparedPlaybackJob) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::PrepareDropPreview(job))
+    }
+
+    pub fn arm_drop_preview(
+        &self,
+        track_id: i64,
+        generation: u64,
+        trigger_position_samples: u64,
+    ) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::ArmDropPreview {
+            track_id,
+            generation,
+            trigger_position_samples,
+        })
+    }
+
     pub fn set_dj_engine_enabled(&self, enabled: bool) -> Result<()> {
         self.send(PlaybackRuntimeCommand::SetDjEngineEnabled { enabled })
     }
@@ -472,6 +489,9 @@ struct PlaybackRuntimeLoopState {
     /// window opens. Once unpaused it gets promoted to `engine` and the old
     /// `engine` slides into `fading_out_engine`.
     next_engine: Option<PlaybackEngine>,
+    /// Temporary incoming deck for a mid-song drop preview. It is never
+    /// promoted and is discarded after the preview overlay finishes.
+    drop_preview_engine: Option<PlaybackEngine>,
     /// Engine that's still audible during the crossfade fade-out window. It
     /// keeps producing audio (with a fade-out gain ramp) until its buffer
     /// drains, at which point it self-terminates and we drop it silently -
@@ -497,6 +517,7 @@ struct PlaybackRuntimeLoopState {
     dj_lookahead: Option<RuntimeDjLookahead>,
     dj_lookahead_failure: Option<DjLookaheadFailure>,
     prepared_dj_mixer: Option<PreparedDjMixer>,
+    prepared_drop_preview_mixer: Option<PreparedDjMixer>,
     last_dj_renderer_failure: Option<DjRuntimeRendererFailure>,
 }
 
@@ -979,10 +1000,6 @@ fn build_prepared_dj_mixer(
     transition: &PreparedTransitionProgram,
     max_block_samples: usize,
 ) -> Result<PreparedDjMixer, DjRuntimeRendererReason> {
-    let active = state
-        .engine
-        .as_ref()
-        .ok_or(DjRuntimeRendererReason::ActiveDeckNotDecoded)?;
     let next = state
         .next_engine
         .as_ref()
@@ -995,6 +1012,19 @@ fn build_prepared_dj_mixer(
     ) {
         return Err(DjRuntimeRendererReason::LookaheadPairMismatch);
     }
+    build_prepared_dj_mixer_for_engine(state, transition, next, max_block_samples)
+}
+
+fn build_prepared_dj_mixer_for_engine(
+    state: &PlaybackRuntimeLoopState,
+    transition: &PreparedTransitionProgram,
+    incoming: &PlaybackEngine,
+    max_block_samples: usize,
+) -> Result<PreparedDjMixer, DjRuntimeRendererReason> {
+    let active = state
+        .engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::ActiveDeckNotDecoded)?;
     if !handoff_mixer_program(&transition.program) && !overlay_mixer_program(&transition.program) {
         return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
     }
@@ -1010,7 +1040,7 @@ fn build_prepared_dj_mixer(
         tolerance_frames,
     )?;
     let next_snapshot = decoded_deck_snapshot(
-        next,
+        incoming,
         state.device_channels,
         program.deck_b_start_frame,
         deck_b_consumed_frames.saturating_add(1),
@@ -1039,7 +1069,7 @@ fn build_prepared_dj_mixer(
         current_queue_item_id: transition.current_queue_item_id,
         next_queue_item_id: transition.next_queue_item_id,
         current_track_id: active.track_id,
-        next_track_id: next.track_id,
+        next_track_id: incoming.track_id,
     })
 }
 
@@ -1056,7 +1086,8 @@ fn handoff_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
 }
 
 fn overlay_mixer_program(program: &noor_mix::TransitionProgram) -> bool {
-    program.template == "DropTease16" && deck_b_consumed_frames(program).is_some()
+    matches!(program.template.as_str(), "DropTease16" | "DropPreview16")
+        && deck_b_consumed_frames(program).is_some()
 }
 
 fn render_prepared_mixer_to_buffer(
@@ -1253,6 +1284,72 @@ fn install_prepared_overlay_mixer_buffer(
     Ok(())
 }
 
+fn install_prepared_drop_preview_mixer_buffer(
+    state: &mut PlaybackRuntimeLoopState,
+) -> Result<(), DjRuntimeRendererReason> {
+    let prepared = state
+        .prepared_drop_preview_mixer
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
+    if prepared.program.template != "DropPreview16" || !overlay_mixer_program(&prepared.program) {
+        return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
+    }
+    if state
+        .engine
+        .as_ref()
+        .map(|engine| engine.track_id != prepared.current_track_id)
+        .unwrap_or(true)
+    {
+        return Err(DjRuntimeRendererReason::ActiveTrackChanged);
+    }
+    if state
+        .drop_preview_engine
+        .as_ref()
+        .map(|engine| engine.track_id != prepared.next_track_id)
+        .unwrap_or(true)
+    {
+        return Err(DjRuntimeRendererReason::NextTrackChanged);
+    }
+
+    let mut prepared = state
+        .prepared_drop_preview_mixer
+        .take()
+        .ok_or(DjRuntimeRendererReason::PreparedMixerMissing)?;
+    let channels = usize::from(state.device_channels.max(1));
+    let rendered = render_prepared_mixer_to_buffer(&mut prepared, channels)
+        .ok_or(DjRuntimeRendererReason::RenderBufferFailed)?;
+    let preview = state
+        .drop_preview_engine
+        .as_ref()
+        .ok_or(DjRuntimeRendererReason::NextDeckNotDecoded)?;
+    let mut guard = match preview.shared.buffer.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
+    };
+    guard.samples = rendered;
+    guard.read_pos = 0;
+    guard.started = false;
+    guard.started_notified = false;
+    guard.starved_notified = false;
+    guard.finished_notified = false;
+    guard.finished = true;
+    preview
+        .shared
+        .total_samples
+        .store(guard.samples.len() as u64, Ordering::Relaxed);
+    preview.shared.publish_buffered_samples(guard.samples.len());
+    preview.shared.crossfade_samples.store(0, Ordering::Relaxed);
+    preview
+        .shared
+        .crossfade_start_signaled
+        .store(true, Ordering::Relaxed);
+    preview
+        .shared
+        .fadein_start_samples
+        .store(u64::MAX, Ordering::Relaxed);
+    Ok(())
+}
+
 fn prepare_dj_mixer_for_pair(
     state: &mut PlaybackRuntimeLoopState,
     max_block_samples: usize,
@@ -1281,6 +1378,40 @@ fn prepare_dj_mixer_for_pair(
         Err(reason) => {
             state.prepared_dj_mixer = None;
             record_runtime_renderer_failure(state, &transition, reason);
+            Err(reason)
+        }
+    }
+}
+
+fn prepare_drop_preview_mixer(
+    state: &mut PlaybackRuntimeLoopState,
+    max_block_samples: usize,
+) -> Result<(), DjRuntimeRendererReason> {
+    if !state.dj_engine_enabled {
+        state.prepared_drop_preview_mixer = None;
+        return Err(DjRuntimeRendererReason::DjDisabled);
+    }
+    let Some((transition, incoming)) = state.drop_preview_engine.as_ref().and_then(|engine| {
+        engine
+            .job
+            .prepared_transition
+            .as_ref()
+            .map(|transition| (transition.clone(), engine))
+    }) else {
+        state.prepared_drop_preview_mixer = None;
+        return Err(DjRuntimeRendererReason::PreparedMixerMissing);
+    };
+    if transition.program.template != "DropPreview16" {
+        state.prepared_drop_preview_mixer = None;
+        return Err(DjRuntimeRendererReason::ProgramNotMixerRenderable);
+    }
+    match build_prepared_dj_mixer_for_engine(state, &transition, incoming, max_block_samples) {
+        Ok(prepared) => {
+            state.prepared_drop_preview_mixer = Some(prepared);
+            Ok(())
+        }
+        Err(reason) => {
+            state.prepared_drop_preview_mixer = None;
             Err(reason)
         }
     }
@@ -1339,6 +1470,30 @@ fn start_prepared_overlay(
     Ok(())
 }
 
+fn start_prepared_drop_preview_overlay(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    actual_start_ms: i64,
+) -> Result<(), DjRuntimeRendererReason> {
+    let Some(active) = state.engine.as_ref() else {
+        return Err(DjRuntimeRendererReason::ActiveDeckNotDecoded);
+    };
+    let active_track_id = active.track_id;
+    let active_generation = active.generation;
+
+    install_prepared_drop_preview_mixer_buffer(state)?;
+    let Some(preview) = state.drop_preview_engine.as_ref() else {
+        return Err(DjRuntimeRendererReason::NextDeckNotDecoded);
+    };
+    preview.shared.paused.store(false, Ordering::SeqCst);
+    let _ = event_tx.send(PlaybackRuntimeEvent::DropPreviewStarted {
+        track_id: active_track_id,
+        generation: active_generation,
+        actual_start_ms,
+    });
+    Ok(())
+}
+
 fn arm_active_transition_window(
     state: &mut PlaybackRuntimeLoopState,
     job: &PreparedPlaybackJob,
@@ -1380,6 +1535,30 @@ fn arm_active_transition_window(
     true
 }
 
+fn arm_drop_preview_in_state(
+    state: &PlaybackRuntimeLoopState,
+    track_id: i64,
+    generation: u64,
+    trigger_position_samples: u64,
+) -> bool {
+    let Some(active) = state
+        .engine
+        .as_ref()
+        .filter(|engine| engine.track_id == track_id && engine.generation == generation)
+    else {
+        return false;
+    };
+    active
+        .shared
+        .drop_preview_trigger_samples
+        .store(trigger_position_samples, Ordering::Relaxed);
+    active
+        .shared
+        .drop_preview_start_signaled
+        .store(false, Ordering::Relaxed);
+    true
+}
+
 fn gate_prepare_next_for_dj(
     state: &mut PlaybackRuntimeLoopState,
     job: &mut PreparedPlaybackJob,
@@ -1403,9 +1582,13 @@ fn set_dj_engine_enabled_in_state(state: &mut PlaybackRuntimeLoopState, enabled:
     state.dj_lookahead = None;
     state.dj_lookahead_failure = None;
     state.prepared_dj_mixer = None;
+    state.prepared_drop_preview_mixer = None;
     state.last_dj_renderer_failure = None;
     if let Some(engine) = state.next_engine.as_mut() {
         engine.job.prepared_transition = None;
+    }
+    if let Some(mut engine) = state.drop_preview_engine.take() {
+        engine.stop();
     }
 }
 
@@ -1455,6 +1638,7 @@ fn run_runtime_loop(
         exclusive_sink: ExclusiveRuntimeSink::new(),
         engine: None,
         next_engine: None,
+        drop_preview_engine: None,
         fading_out_engine: None,
         current_exclusive: false,
         current_sample_rate_follow: false,
@@ -1466,6 +1650,7 @@ fn run_runtime_loop(
         dj_lookahead: None,
         dj_lookahead_failure: None,
         prepared_dj_mixer: None,
+        prepared_drop_preview_mixer: None,
         last_dj_renderer_failure: None,
     };
 
@@ -1743,6 +1928,82 @@ fn run_runtime_loop(
                         }
                     }
                 }
+                PlaybackRuntimeCommand::PrepareDropPreview(job) => {
+                    if !state.dj_engine_enabled {
+                        state.prepared_drop_preview_mixer = None;
+                        if let Some(mut stale) = state.drop_preview_engine.take() {
+                            stale.stop();
+                        }
+                        return std::ops::ControlFlow::Continue(());
+                    }
+                    let has_drop_preview_program = job
+                        .prepared_transition
+                        .as_ref()
+                        .is_some_and(|transition| transition.program.template == "DropPreview16");
+                    if !has_drop_preview_program {
+                        state.prepared_drop_preview_mixer = None;
+                        if let Some(mut stale) = state.drop_preview_engine.take() {
+                            stale.stop();
+                        }
+                        return std::ops::ControlFlow::Continue(());
+                    }
+                    let already_pending = state
+                        .drop_preview_engine
+                        .as_ref()
+                        .map(|engine| {
+                            engine.track_id == job.track.id && engine.generation == job.generation
+                        })
+                        .unwrap_or(false);
+                    if !already_pending {
+                        if let Some(mut stale) = state.drop_preview_engine.take() {
+                            state.prepared_drop_preview_mixer = None;
+                            stale.stop();
+                        }
+                        let pending_position = Arc::new(AtomicU64::new(0));
+                        let engine_result = if state.current_exclusive {
+                            PlaybackEngine::start_decoder_only(
+                                &config,
+                                &command_tx,
+                                job,
+                                state.device_sample_rate,
+                                state.device_channels,
+                                Arc::clone(&volume_ctl),
+                                pending_position,
+                            )
+                        } else {
+                            PlaybackEngine::start(
+                                &config,
+                                &command_tx,
+                                &device,
+                                &output_config,
+                                output_sample_format,
+                                job,
+                                event_tx.clone(),
+                                state.device_sample_rate,
+                                state.device_channels,
+                                Arc::clone(&volume_ctl),
+                                pending_position,
+                            )
+                        };
+                        match engine_result {
+                            Ok(engine) => {
+                                engine.shared.paused.store(true, Ordering::SeqCst);
+                                state.drop_preview_engine = Some(engine);
+                                let _ = prepare_drop_preview_mixer(
+                                    &mut state,
+                                    dj_mixer_max_block_samples(&output_config),
+                                );
+                                #[cfg(target_os = "windows")]
+                                if state.current_exclusive {
+                                    refresh_exclusive_sources(&state);
+                                }
+                            }
+                            Err(err) => {
+                                warn!("Failed to pre-buffer drop preview: {err:?}");
+                            }
+                        }
+                    }
+                }
                 PlaybackRuntimeCommand::SetDjEngineEnabled { enabled } => {
                     config.dj_engine_enabled = enabled;
                     set_dj_engine_enabled_in_state(&mut state, enabled);
@@ -1845,6 +2106,51 @@ fn run_runtime_loop(
                         // If not ready yet, NextDecodeComplete handles the late path.
                     }
                 }
+                PlaybackRuntimeCommand::ArmDropPreview {
+                    track_id,
+                    generation,
+                    trigger_position_samples,
+                } => {
+                    arm_drop_preview_in_state(
+                        &state,
+                        track_id,
+                        generation,
+                        trigger_position_samples,
+                    );
+                }
+                PlaybackRuntimeCommand::DropPreviewStart {
+                    track_id,
+                    generation,
+                    trigger_position_samples,
+                } => {
+                    if state
+                        .engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation))
+                        == Some((track_id, generation))
+                    {
+                        let _ = prepare_drop_preview_mixer(
+                            &mut state,
+                            dj_mixer_max_block_samples(&output_config),
+                        );
+                        let actual_start_ms = samples_to_ms(
+                            trigger_position_samples,
+                            state.device_sample_rate,
+                            state.device_channels,
+                        );
+                        if let Err(reason) = start_prepared_drop_preview_overlay(
+                            &mut state,
+                            &event_tx,
+                            actual_start_ms,
+                        ) {
+                            debug!("Drop preview start skipped: {}", reason.as_str());
+                            state.prepared_drop_preview_mixer = None;
+                            if let Some(mut engine) = state.drop_preview_engine.take() {
+                                engine.stop();
+                            }
+                        }
+                    }
+                }
                 PlaybackRuntimeCommand::NextDecodeComplete {
                     track_id,
                     generation,
@@ -1937,6 +2243,11 @@ fn run_runtime_loop(
                         }
                     }
                     if let Some(engine) = state.fading_out_engine.as_mut() {
+                        if let Err(error) = engine.pause() {
+                            report_runtime_command_error(&event_tx, "Pause", error);
+                        }
+                    }
+                    if let Some(engine) = state.drop_preview_engine.as_mut() {
                         if let Err(error) = engine.pause() {
                             report_runtime_command_error(&event_tx, "Pause", error);
                         }
@@ -2038,6 +2349,15 @@ fn run_runtime_loop(
                             report_runtime_command_error(&event_tx, "Resume", error);
                         }
                     }
+                    if let Some(engine) = state
+                        .drop_preview_engine
+                        .as_mut()
+                        .filter(|engine| !engine.shared.paused.load(Ordering::SeqCst))
+                    {
+                        if let Err(error) = engine.resume() {
+                            report_runtime_command_error(&event_tx, "Resume", error);
+                        }
+                    }
                 }
                 PlaybackRuntimeCommand::Stop => {
                     stop_all_engines(&mut state);
@@ -2057,6 +2377,10 @@ fn run_runtime_loop(
                         .fading_out_engine
                         .as_ref()
                         .map(|e| (e.track_id, e.generation));
+                    let drop_preview = state
+                        .drop_preview_engine
+                        .as_ref()
+                        .map(|engine| (engine.track_id, engine.generation));
                     let next = state
                         .next_engine
                         .as_ref()
@@ -2066,7 +2390,14 @@ fn run_runtime_loop(
                         .as_ref()
                         .map(|engine| (engine.track_id, engine.generation));
 
-                    match terminal_engine_slot(active, next, fading, track_id, generation) {
+                    match terminal_engine_slot(
+                        active,
+                        next,
+                        fading,
+                        drop_preview,
+                        track_id,
+                        generation,
+                    ) {
                         Some(TerminalEngineSlot::FadingOut) => {
                             debug!(
                                 "Playback terminal ignored for fading engine: track_id={}, generation={}, outcome={:?}",
@@ -2085,6 +2416,16 @@ fn run_runtime_loop(
                                 emit_prepared_track_failure(&event_tx, track_id, message);
                             }
                             if let Some(mut engine) = state.next_engine.take() {
+                                engine.stop();
+                            }
+                        }
+                        Some(TerminalEngineSlot::DropPreview) => {
+                            debug!(
+                                "Playback terminal ignored for drop preview engine: track_id={}, generation={}, outcome={:?}",
+                                track_id, generation, outcome
+                            );
+                            state.prepared_drop_preview_mixer = None;
+                            if let Some(mut engine) = state.drop_preview_engine.take() {
                                 engine.stop();
                             }
                         }
@@ -2197,7 +2538,8 @@ fn run_runtime_loop(
 
                     let has_live_engines = state.engine.is_some()
                         || state.next_engine.is_some()
-                        || state.fading_out_engine.is_some();
+                        || state.fading_out_engine.is_some()
+                        || state.drop_preview_engine.is_some();
                     let desired_rate = device_swap_target_sample_rate(
                         desired_sample_rate,
                         sample_rate_follow,
@@ -2232,6 +2574,7 @@ fn run_runtime_loop(
                                 state.engine.as_mut(),
                                 state.next_engine.as_mut(),
                                 state.fading_out_engine.as_mut(),
+                                state.drop_preview_engine.as_mut(),
                             ]
                             .into_iter()
                             .flatten()
@@ -2268,6 +2611,7 @@ fn run_runtime_loop(
                                         state.engine.as_mut(),
                                         state.next_engine.as_mut(),
                                         state.fading_out_engine.as_mut(),
+                                        state.drop_preview_engine.as_mut(),
                                     ]
                                     .into_iter()
                                     .flatten()
@@ -2304,6 +2648,7 @@ fn run_runtime_loop(
                             state.engine.as_mut(),
                             state.next_engine.as_mut(),
                             state.fading_out_engine.as_mut(),
+                            state.drop_preview_engine.as_mut(),
                         ]
                         .into_iter()
                         .flatten()
@@ -2596,6 +2941,7 @@ fn switch_is_noop_for_active_job(
 
 fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
     state.prepared_dj_mixer = None;
+    state.prepared_drop_preview_mixer = None;
     if let Some(mut engine) = state.engine.take() {
         engine.stop();
     }
@@ -2607,6 +2953,9 @@ fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
         engine.stop();
     }
     if let Some(mut engine) = state.fading_out_engine.take() {
+        engine.stop();
+    }
+    if let Some(mut engine) = state.drop_preview_engine.take() {
         engine.stop();
     }
 }
@@ -2691,6 +3040,7 @@ fn exclusive_render_sources(
     active: Option<&PlaybackEngine>,
     prepared: Option<&PlaybackEngine>,
     fading: Option<&PlaybackEngine>,
+    drop_preview: Option<&PlaybackEngine>,
 ) -> Vec<ExclusiveRenderSource> {
     let mut sources = Vec::new();
     if let Some(engine) = active {
@@ -2711,6 +3061,12 @@ fn exclusive_render_sources(
             shared: Arc::clone(&engine.shared),
         });
     }
+    if let Some(engine) = drop_preview {
+        sources.push(ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Prepared,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
     sources
 }
 
@@ -2723,6 +3079,7 @@ fn refresh_exclusive_sources(state: &PlaybackRuntimeLoopState) {
             state.engine.as_ref(),
             state.next_engine.as_ref(),
             state.fading_out_engine.as_ref(),
+            state.drop_preview_engine.as_ref(),
         ));
 }
 
@@ -3049,18 +3406,22 @@ enum TerminalEngineSlot {
     Active,
     Next,
     FadingOut,
+    DropPreview,
 }
 
 fn terminal_engine_slot(
     active: Option<(i64, u64)>,
     next: Option<(i64, u64)>,
     fading: Option<(i64, u64)>,
+    drop_preview: Option<(i64, u64)>,
     track_id: i64,
     generation: u64,
 ) -> Option<TerminalEngineSlot> {
     let target = Some((track_id, generation));
     if fading == target {
         Some(TerminalEngineSlot::FadingOut)
+    } else if drop_preview == target {
+        Some(TerminalEngineSlot::DropPreview)
     } else if next == target {
         Some(TerminalEngineSlot::Next)
     } else if active == target {
@@ -4054,6 +4415,128 @@ mod tests {
     }
 
     #[test]
+    fn drop_preview_overlay_starts_without_promotion_or_crossfade_window() {
+        let mut state = test_runtime_loop_state();
+        start_dj_lookahead_in_state(
+            &mut state,
+            Some(DjMediaRef::LibraryTrack { track_id: 1 }),
+            Some(DjMediaRef::LibraryTrack { track_id: 2 }),
+            Some(11),
+            Some(12),
+            20,
+            48_000,
+        );
+
+        let active = test_engine_with_shared(1, 20);
+        active
+            .shared
+            .position_samples
+            .store(96_000, Ordering::Relaxed);
+        finish_engine_buffer(&active, &[0.1, 0.1, 0.2, 0.2]);
+
+        let mut real_next = test_engine_with_shared(2, 21);
+        real_next.shared.paused.store(true, Ordering::SeqCst);
+        real_next.job = PreparedPlaybackJob::test_fixture(2, 21)
+            .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
+        finish_engine_buffer(&real_next, &[0.3, 0.3, 0.4, 0.4]);
+
+        let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
+        transition.program.template = "DropPreview16".to_string();
+        transition.program.automation = vec![
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::A),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 0.0,
+                to: 0.0,
+                curve: noor_mix::Curve::Linear,
+            },
+            noor_mix::AutomationEvent {
+                param: noor_mix::Param::DeckGain(noor_mix::DeckId::B),
+                start_sample: 0,
+                end_sample: transition.program.resolve_at,
+                from: 0.65,
+                to: 0.65,
+                curve: noor_mix::Curve::Linear,
+            },
+        ];
+        let mut preview = test_engine_with_shared(2, 21);
+        preview.shared.paused.store(true, Ordering::SeqCst);
+        preview.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
+        finish_engine_buffer(&preview, &[0.0, 0.0, 0.4, 0.4]);
+
+        state.engine = Some(active);
+        state.next_engine = Some(real_next);
+        state.drop_preview_engine = Some(preview);
+
+        assert!(prepare_drop_preview_mixer(&mut state, 64).is_ok());
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        assert!(start_prepared_drop_preview_overlay(&mut state, &event_tx, 120_000).is_ok());
+
+        assert!(state.prepared_drop_preview_mixer.is_none());
+        assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
+        assert_eq!(
+            state.next_engine.as_ref().map(|engine| engine.track_id),
+            Some(2)
+        );
+        assert!(
+            state
+                .next_engine
+                .as_ref()
+                .expect("real next engine")
+                .shared
+                .paused
+                .load(Ordering::SeqCst)
+        );
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(active.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        let preview = state.drop_preview_engine.as_ref().expect("preview engine");
+        assert!(!preview.shared.paused.load(Ordering::SeqCst));
+        let buffer = preview.shared.buffer.lock().expect("preview buffer");
+        assert_samples_close(&buffer.samples, &[0.0, 0.0, 0.26, 0.26]);
+        match event_rx.try_recv().expect("preview event") {
+            PlaybackRuntimeEvent::DropPreviewStarted {
+                track_id,
+                generation,
+                actual_start_ms,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(generation, 20);
+                assert_eq!(actual_start_ms, 120_000);
+            }
+            other => panic!("expected preview event, got {other:?}"),
+        }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "preview must not finish outgoing"
+        );
+    }
+
+    #[test]
+    fn arming_drop_preview_sets_absolute_trigger_without_crossfade_samples() {
+        let mut state = test_runtime_loop_state();
+        let active = test_engine_with_shared(1, 20);
+        active.shared.crossfade_samples.store(0, Ordering::Relaxed);
+        state.engine = Some(active);
+
+        assert!(arm_drop_preview_in_state(&state, 1, 20, 144_000));
+
+        assert_eq!(
+            state.next_engine.as_ref().map(|engine| engine.track_id),
+            None
+        );
+        let active = state.engine.as_ref().expect("active engine");
+        assert_eq!(active.shared.crossfade_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            active
+                .shared
+                .drop_preview_trigger_samples
+                .load(Ordering::Relaxed),
+            144_000
+        );
+    }
+
+    #[test]
     fn mixer_promotion_stops_outgoing_without_legacy_fade() {
         let mut state = test_runtime_loop_state();
         start_dj_lookahead_in_state(
@@ -4832,15 +5315,19 @@ mod tests {
     #[test]
     fn terminal_engine_slot_identifies_prebuffered_track() {
         assert_eq!(
-            terminal_engine_slot(Some((1, 1)), Some((2, 1)), None, 2, 1),
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), None, None, 2, 1),
             Some(TerminalEngineSlot::Next)
         );
         assert_eq!(
-            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 3, 1),
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), None, 3, 1),
             Some(TerminalEngineSlot::FadingOut)
         );
         assert_eq!(
-            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), 4, 1),
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), Some((4, 1)), 4, 1),
+            Some(TerminalEngineSlot::DropPreview)
+        );
+        assert_eq!(
+            terminal_engine_slot(Some((1, 1)), Some((2, 1)), Some((3, 1)), None, 4, 1),
             None
         );
     }
@@ -4971,13 +5458,20 @@ mod tests {
         let active = test_engine_with_shared(10, 1);
         let prepared = test_engine_with_shared(11, 1);
         let fading = test_engine_with_shared(9, 1);
+        let drop_preview = test_engine_with_shared(12, 1);
 
-        let sources = exclusive_render_sources(Some(&active), Some(&prepared), Some(&fading));
+        let sources = exclusive_render_sources(
+            Some(&active),
+            Some(&prepared),
+            Some(&fading),
+            Some(&drop_preview),
+        );
 
-        assert_eq!(sources.len(), 3);
+        assert_eq!(sources.len(), 4);
         assert_eq!(sources[0].role, ExclusiveRenderRole::Active);
         assert_eq!(sources[1].role, ExclusiveRenderRole::Prepared);
         assert_eq!(sources[2].role, ExclusiveRenderRole::Fading);
+        assert_eq!(sources[3].role, ExclusiveRenderRole::Prepared);
     }
 
     #[test]
@@ -5133,6 +5627,7 @@ mod tests {
             exclusive_sink: ExclusiveRuntimeSink::new(),
             engine: None,
             next_engine: None,
+            drop_preview_engine: None,
             fading_out_engine: None,
             current_exclusive: false,
             current_sample_rate_follow: false,
@@ -5144,6 +5639,7 @@ mod tests {
             dj_lookahead: None,
             dj_lookahead_failure: None,
             prepared_dj_mixer: None,
+            prepared_drop_preview_mixer: None,
             last_dj_renderer_failure: None,
         }
     }

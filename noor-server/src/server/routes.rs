@@ -11437,7 +11437,8 @@ fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. })
                 | Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. })
-                | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
+                | Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. })
+                | Ok(playback_runtime::PlaybackRuntimeEvent::DropPreviewStarted { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stopped) => {
                     let mut state_guard = state.write().await;
                     state_guard
