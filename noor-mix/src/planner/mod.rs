@@ -439,6 +439,7 @@ pub fn drop_preview_16_program(
     sample_rate: u32,
     channels: u16,
     duration_ms: u32,
+    outgoing: &DjProfile,
     incoming: &DjProfile,
 ) -> Option<TransitionProgram> {
     let sample_rate = sample_rate.max(1);
@@ -447,6 +448,18 @@ pub fn drop_preview_16_program(
         (u64::from(duration_ms).saturating_mul(u64::from(sample_rate)) / 1_000).max(1);
     let swap_start = duration_samples / 2;
     let drop_frame = first_valid_preview_drop_frame(incoming, sample_rate)?;
+    let rate = drop_preview_autosync_rate(outgoing, incoming)?;
+    let mut automation = drop_preview_overlay_automation(duration_samples);
+    if (rate - 1.0).abs() > PLAYBACK_RATE_EPSILON {
+        automation.push(AutomationEvent {
+            param: Param::PlaybackRate(DeckId::B),
+            start_sample: 0,
+            end_sample: duration_samples,
+            from: rate,
+            to: rate,
+            curve: Curve::Linear,
+        });
+    }
     Some(TransitionProgram {
         tier: Tier::FullBlend,
         template: "DropPreview16".to_string(),
@@ -460,8 +473,20 @@ pub fn drop_preview_16_program(
         fade_start: swap_start,
         resolve_at: duration_samples,
         loops: vec![],
-        automation: drop_preview_overlay_automation(duration_samples),
+        automation,
     })
+}
+
+fn drop_preview_autosync_rate(outgoing: &DjProfile, incoming: &DjProfile) -> Option<f32> {
+    let outgoing_bpm = outgoing.bpm?.max(1.0);
+    let incoming_bpm = incoming.bpm?.max(1.0);
+    let comparable_incoming_bpm = scoring::nearest_tempo_family_bpm(outgoing_bpm, incoming_bpm);
+    if scoring::bpm_delta_pct(outgoing_bpm, comparable_incoming_bpm) > 3.0 {
+        return None;
+    }
+    let rate = outgoing_bpm / comparable_incoming_bpm;
+    (rate.is_finite() && (SMALL_TEMPO_NUDGE_MIN..=SMALL_TEMPO_NUDGE_MAX).contains(&rate))
+        .then_some(rate)
 }
 
 fn duration_samples(template: TransitionTemplate, policy: &Policy, bar_samples: u64) -> u64 {
@@ -1539,10 +1564,12 @@ mod tests {
 
     #[test]
     fn drop_preview_16_program_aligns_profile_drop_to_preview_midpoint() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
         let mut incoming = profile(Some(120.0), Some("8A"), 4);
         incoming.drop_seconds = vec![32.0];
 
-        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
 
         assert_eq!(program.template, "DropPreview16");
         assert_eq!(program.resolve_at, 768_000);
@@ -1553,28 +1580,33 @@ mod tests {
 
     #[test]
     fn drop_preview_16_program_prefers_manual_drop_marker() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
         let mut incoming = profile(Some(120.0), Some("8A"), 4);
         incoming.drop_seconds = vec![32.0];
         incoming.manual_drop_seconds = vec![24.0];
 
-        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
 
         assert_eq!(program.deck_b_start_frame, 768_000);
     }
 
     #[test]
     fn drop_preview_16_program_rejects_missing_drop_marker() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
         let incoming = profile(Some(120.0), Some("8A"), 4);
 
-        assert!(drop_preview_16_program(48_000, 2, 16_000, &incoming).is_none());
+        assert!(drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).is_none());
     }
 
     #[test]
     fn drop_preview_16_program_caps_preview_gain() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
         let mut incoming = profile(Some(120.0), Some("8A"), 4);
         incoming.drop_seconds = vec![32.0];
 
-        let program = drop_preview_16_program(48_000, 2, 16_000, &incoming).expect("drop preview");
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
 
         assert!(program.automation.iter().any(|event| {
             event.param == Param::DeckGain(DeckId::A) && event.from == 0.0 && event.to == 0.0
@@ -1585,6 +1617,33 @@ mod tests {
         assert!(!program.automation.iter().any(|event| {
             event.param == Param::DeckGain(DeckId::B) && (event.from == 1.0 || event.to == 1.0)
         }));
+    }
+
+    #[test]
+    fn drop_preview_16_program_autosyncs_small_tempo_delta() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(122.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        let program =
+            drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).expect("drop preview");
+        let rate = program
+            .automation
+            .iter()
+            .find(|event| event.param == Param::PlaybackRate(DeckId::B))
+            .expect("incoming playback rate automation");
+
+        assert!((rate.from - 120.0 / 122.0).abs() < 0.0001);
+        assert_eq!(rate.from, rate.to);
+    }
+
+    #[test]
+    fn drop_preview_16_program_rejects_unsyncable_tempo_delta() {
+        let outgoing = profile(Some(120.0), Some("8A"), 4);
+        let mut incoming = profile(Some(130.0), Some("8A"), 4);
+        incoming.drop_seconds = vec![32.0];
+
+        assert!(drop_preview_16_program(48_000, 2, 16_000, &outgoing, &incoming).is_none());
     }
 
     #[test]

@@ -217,6 +217,13 @@ struct DjDropPreviewStatus {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DropPreviewPlan {
+    pub(crate) planned_fire_ms: i64,
+    pub(crate) incoming_drop_ms: i64,
+    pub(crate) source: String,
+}
+
 #[derive(Debug, Serialize)]
 struct DjSafeSuggestion {
     media_ref_kind: String,
@@ -1697,6 +1704,43 @@ fn drop_preview_status(
         source: Some(source.to_string()),
         reason: None,
     })
+}
+
+pub(crate) fn drop_preview_plan_for_pair(
+    conn: &rusqlite::Connection,
+    current_ref: &DjMediaRef,
+    next_ref: &DjMediaRef,
+    current_duration_ms: Option<i64>,
+) -> anyhow::Result<Option<DropPreviewPlan>> {
+    let enabled = queries::is_dj_engine_enabled(conn)?;
+    let current = deck_status(conn, current_ref, None, false)?;
+    let next = deck_status(conn, next_ref, None, false)?;
+    let status = drop_preview_status(
+        conn,
+        enabled,
+        Some(current_ref),
+        Some(next_ref),
+        Some(&current),
+        Some(&next),
+        current_duration_ms,
+    )?;
+    Ok(
+        match (
+            status.status.as_str(),
+            status.planned_fire_ms,
+            status.incoming_drop_ms,
+            status.source,
+        ) {
+            ("armed", Some(planned_fire_ms), Some(incoming_drop_ms), Some(source)) => {
+                Some(DropPreviewPlan {
+                    planned_fire_ms,
+                    incoming_drop_ms,
+                    source,
+                })
+            }
+            _ => None,
+        },
+    )
 }
 
 fn incoming_drop_marker(next: Option<&DjDeckStatus>) -> Option<(i64, &'static str)> {
