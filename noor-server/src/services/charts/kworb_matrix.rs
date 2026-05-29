@@ -259,9 +259,17 @@ struct HtmlCell {
 }
 
 fn table_rows(input: &str) -> Vec<String> {
-    row_regex()
-        .captures_iter(input)
-        .filter_map(|capture| capture.get(1).map(|m| m.as_str().to_string()))
+    tr_start_regex()
+        .split(input)
+        .skip(1)
+        .filter_map(|part| {
+            let row = part.split("</tr>").next().unwrap_or(part);
+            if row.contains("<td") || row.contains("<th") {
+                Some(row.to_string())
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -393,9 +401,9 @@ fn split_artist_title(text: &str) -> (String, String) {
     ("Unknown artist".to_string(), text.trim().to_string())
 }
 
-fn row_regex() -> &'static Regex {
+fn tr_start_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r#"(?is)<tr[^>]*>(.*?)</tr>"#).expect("row regex"))
+    REGEX.get_or_init(|| Regex::new(r#"(?is)<tr[^>]*>"#).expect("tr start regex"))
 }
 
 fn cell_regex() -> &'static Regex {
@@ -494,6 +502,45 @@ mod tests {
         assert_eq!(
             matrix[1].cells["youtube_daily"].as_ref().unwrap().title,
             "AU YouTube"
+        );
+    }
+
+    #[test]
+    fn kworb_matrix_ingest_handles_kworb_rows_without_closing_tr_tags() {
+        let conn = Connection::open_in_memory().expect("open memory db");
+        schema::run_migrations(&conn).expect("run migrations");
+        let html = r#"
+<table>
+<thead><tr><th>Country</th><th>iTunes</th><th>Spotify</th><th>Apple Music</th><th>YouTube</th><th>Shazam</th><th>Deezer</th></tr></thead><tbody>
+<tr><td><div>Worldwide</div></td><td><div><a href="/ww/index.html">The Chemical Brothers - Go</a></div></td><td><div><a href="/spotify/country/global_daily.html">Justin Bieber - Beauty And A Beat (feat. Nicki Minaj)</a></div></td><td><div><a href="/apple_songs/index.html">Justin Bieber - Beauty and a Beat</a></div></td><td><div><a href="/youtube/index.html">ALPHA DRIVE ONE 'OMG!' MV</a></div></td><td><div><a href="/charts/shazam/ww.html">The Chemical Brothers - Go</a></div></td><td><div><a href="/charts/deezer/ww.html">Ella Langley - Choosin' Texas</a></div></td>
+<tr><td><div>United States</div></td><td><div><a href="/charts/itunes/us.html">Ella Langley - Choosin' Texas</a></div></td><td><div><a href="/spotify/country/us_daily.html">Drake - Janice STFU</a></div></td><td><div><a href="/charts/apple_s/us.html">Drake - Janice STFU</a></div></td><td><div><a href="/youtube/insights/us_daily.html">Ella Langley - Choosin' Texas</a></div></td><td><div><a href="/charts/shazam/us.html">Drake - Janice STFU</a></div></td><td><div><a href="/charts/deezer/us.html">Ella Langley - Choosin' Texas</a></div></td>
+<tr><td><div>Australia</div></td><td><div><a href="/charts/itunes/au.html">Ella Langley - Choosin' Texas</a></div></td><td><div><a href="/spotify/country/au_daily.html">Olivia Rodrigo - the cure</a></div></td><td><div><a href="/charts/apple_s/au.html">Olivia Rodrigo - the cure</a></div></td><td><div><a href="/youtube/insights/au_daily.html">HUNTR/X - Golden</a></div></td><td><div><a href="/charts/shazam/au.html">Josh Fawaz - Like a Prayer</a></div></td><td><div><a href="/charts/deezer/au.html">Sabrina Carpenter - When Did You Get Hot?</a></div></td>
+</tbody></table>
+"#;
+
+        let report =
+            ingest_kworb_matrix_html(&conn, "2026-05-29", 1234, html).expect("ingest matrix");
+
+        assert_eq!(report.entries_written, 18);
+        assert_eq!(report.snapshots_written, 18);
+        let matrix = queries::get_chart_matrix(
+            &conn,
+            &["global", "US", "AU"],
+            &["spotify_daily", "youtube_daily", "deezer_daily"],
+            "daily",
+        )
+        .expect("read matrix");
+        assert_eq!(
+            matrix[1].cells["spotify_daily"].as_ref().unwrap().title,
+            "Janice STFU"
+        );
+        assert_eq!(
+            matrix[1].cells["youtube_daily"].as_ref().unwrap().artist,
+            "Ella Langley"
+        );
+        assert_eq!(
+            matrix[2].cells["deezer_daily"].as_ref().unwrap().title,
+            "When Did You Get Hot?"
         );
     }
 

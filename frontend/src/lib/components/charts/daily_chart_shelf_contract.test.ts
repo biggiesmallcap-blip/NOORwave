@@ -28,6 +28,8 @@ describe('daily chart shelf contract', () => {
 
 	test('keeps empty and restart states visible when refresh cannot populate data', () => {
 		expect(source).toContain('No market snapshot yet');
+		expect(source).toContain('No Spotify daily list for');
+		expect(source).toContain('Global data is available above');
 		expect(source).toContain('NOOR tried to refresh the provider matrix');
 		expect(source).toContain('Daily snapshots unavailable');
 		expect(source).toContain('Restart the NOOR server');
@@ -38,5 +40,6 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('{provider.label}');
 		expect(source).toContain('row.cells[provider.source_key]');
 		expect(source).toContain('matrixHasData(next)');
+		expect(source).toContain('regionHasMatrixData(selectedRegion)');
 	});
 });

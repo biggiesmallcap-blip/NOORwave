@@ -119,10 +119,21 @@
 		return cell.resolution_status;
 	}
 
-	function matrixHasData(next: ChartMatrixResponse): boolean {
-		return next.rows.some((row) =>
+	function matrixHasData(next: ChartMatrixResponse | null): boolean {
+		return Boolean(next?.rows.some((row) =>
 			next.providers.some((provider) => Boolean(row.cells[provider.source_key])),
+		));
+	}
+
+	function regionHasMatrixData(region: string): boolean {
+		const row = matrix?.rows.find((item) => item.region === region);
+		return Boolean(
+			row && matrix?.providers.some((provider) => Boolean(row.cells[provider.source_key])),
 		);
+	}
+
+	function selectedRegionLabel(): string {
+		return REGIONS.find((region) => region.code === selectedRegion)?.label ?? selectedRegion;
 	}
 
 	function fallbackText(entry: ChartSnapshotEntry): string {
@@ -243,8 +254,14 @@
 		/>
 	{:else}
 		<EmptyState
-			title="No market snapshot yet"
-			copy="NOOR tried to refresh the provider matrix, but there is no stored chart data yet."
+			title={matrixHasData(matrix)
+				? `No Spotify daily list for ${selectedRegionLabel()}`
+				: 'No market snapshot yet'}
+			copy={matrixHasData(matrix)
+				? regionHasMatrixData(selectedRegion)
+					? 'This region has provider leaders, but no Spotify daily detail list yet.'
+					: 'This region has no provider snapshot yet. Global data is available above.'
+				: 'NOOR tried to refresh the provider matrix, but there is no stored chart data yet.'}
 		/>
 	{/if}
 </section>
